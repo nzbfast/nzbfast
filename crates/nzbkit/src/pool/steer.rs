@@ -279,6 +279,14 @@ impl Shared {
         // tail bit rides along so the supply arm can sit out a queue-dry
         // tail (F6, 27 Aug sweep).
         self.line_cap_tick(now, tail);
+        // TODO 313 item 7: and so does the surge dial, for the half of
+        // its job that this path can see. A body landing is the most
+        // likely moment for a loan to fall due - the stall it answered
+        // has just cleared - but it is NOT how the surge is armed: in
+        // the dead-air regime nothing delivers, so the raise rides the
+        // per-read timer in `session::read_one` instead. One relaxed
+        // load here when the mechanism is off, which is every install.
+        self.surge_tick(now);
         // TODO 208.2: the mean delivered body, for the share-aware
         // stall bound. Same 1/8 fold as `art_ms`; a load/store race
         // drops one sample, which moves nothing.
@@ -917,6 +925,7 @@ mod tests {
             max_source_ips: None,
             address_family: Default::default(),
             tls_hostname: None,
+            warm_reserve: None,
         }
     }
 

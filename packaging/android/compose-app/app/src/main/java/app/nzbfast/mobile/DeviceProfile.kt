@@ -13,7 +13,7 @@ import java.io.File
  *
  * The engine's own defaults are DESKTOP defaults and several of them are
  * right there and wrong here. `MemBudget::auto` takes a quarter of
- * physical RAM (nzbkit/src/mem.rs), which on a 12 GB phone is a 3 GB
+ * physical RAM (nzbkit-base/src/mem.rs), which on a 12 GB phone is a 3 GB
  * budget for a process the platform is willing to kill for being large.
  * `available_parallelism` counts every core, and on a big.LITTLE phone
  * half of them are small and all of them share one thermal envelope. And

@@ -44,6 +44,18 @@
 //! the whole of its own run, and every retry waits the same way. The
 //! account's total is unchanged, so the provider never sees a socket it
 //! did not license; what moves is who may hold the last one.
+//!
+//! **And a FOURTH party since TODO 313 item 8**, which is not a class:
+//! the standing warm reserve (`crate::warmreserve`) holds slots for
+//! sockets that are parked with nothing to do. It is counted here
+//! because a proactive dialler is the one thing on the tree that can put
+//! a socket on the wire no fleet was sized for - but it is counted as
+//! `LeaseState::spares`, OUTSIDE [`limit_for`], because the sizing rule
+//! is that active work outranks a parked spare for the same permit. So no
+//! acquire of any class is ever refused because of a spare: the spare is
+//! trimmed inside the same lock hold that admits the worker taking its
+//! slot ([`trim_spares`]), and `held + spares <= cap` is arithmetic
+//! rather than a race.
 
 use crate::sync::MutexExt;
 use std::collections::HashMap;
@@ -54,18 +66,36 @@ use tokio::sync::Notify;
 /// A counted registration in [`HostLease::waiters`] that is released on
 /// every exit from the wait: a wake, a panic, and - the one that
 /// matters - the future being dropped mid-await by a `tokio::select!`.
-struct WaiterGuard<'a>(&'a AtomicUsize);
+///
+/// TWO counters since TODO 313 item 10, not one, and both are charged
+/// and released together: every parked acquirer counts in `waiters`,
+/// which is the number a predecessor's idle workers read, and every
+/// acquirer that is NOT [`LeaseClass::Spill`] counts a second time in
+/// `prio`, which is the number a spilled lane's own acquire yields to.
+/// One guard for both so no exit path can release one and keep the
+/// other - a leaked `prio` charge would stop every spilled lane taking
+/// a permit for the daemon's life, and the lease outlives every run.
+struct WaiterGuard<'a> {
+    all: &'a AtomicUsize,
+    prio: Option<&'a AtomicUsize>,
+}
 
 impl<'a> WaiterGuard<'a> {
-    fn new(c: &'a AtomicUsize) -> Self {
-        c.fetch_add(1, Ordering::AcqRel);
-        Self(c)
+    fn new(all: &'a AtomicUsize, prio: Option<&'a AtomicUsize>) -> Self {
+        all.fetch_add(1, Ordering::AcqRel);
+        if let Some(p) = prio {
+            p.fetch_add(1, Ordering::AcqRel);
+        }
+        Self { all, prio }
     }
 }
 
 impl Drop for WaiterGuard<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.all.fetch_sub(1, Ordering::AcqRel);
+        if let Some(p) = self.prio {
+            p.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -160,6 +190,165 @@ pub enum LeaseClass {
     /// for the reserve, which is fine and bounded: both terminate, and
     /// neither can hold it past its own run.
     PostProcess,
+    /// A lane SPILLED behind a struggling head (TODO 313 item 10).
+    /// Bounded by [`HostLease::download_cap`] exactly like
+    /// [`Self::Download`] - a spill may not put a socket on the wire
+    /// the provider has not licensed, and it may not eat the
+    /// post-processing reserve either - and YIELDS to every parked
+    /// waiter of the other two classes.
+    ///
+    /// **That yield is the RECLAIM half of item 10 and it is not
+    /// decoration.** The head is ahead of the spilled lane in the
+    /// queue, so when its articles come unstuck its claim on a freed
+    /// permit has to outrank the lane's or the spill inverts queue
+    /// priority: the user's first job finishes last because the jobs
+    /// behind it kept re-taking the sockets it gave them. Ordering by
+    /// class rather than by arrival is what makes the rule hold for
+    /// permits the lane itself is about to release - a released permit
+    /// wakes every parked acquirer at once
+    /// (see [`Permit::drop`]), and without this the lane's own next
+    /// worker is as likely to win the race as the head is.
+    ///
+    /// The yield is one-directional and cannot deadlock the lane: a
+    /// spilled lane's workers hold their permits until they retire, and
+    /// `handoff_room` refuses to take a server's LAST worker, so a lane
+    /// that has started always keeps a socket to finish on. What it
+    /// loses is the right to GROW while the head is waiting, which is
+    /// the whole intent.
+    Spill,
+    /// A HEAD worker taking back a permit it gave up while parked under
+    /// a lowered [`ConnTarget`](super::ConnTarget) - the acquire at the
+    /// bottom of `session::pre_dial_gates`, and the only place this
+    /// class is ever used.
+    ///
+    /// **A class of its own rather than [`Self::Download`], and the
+    /// difference is the whole of whether a spill works at all.** The
+    /// priority rule has to be "the head is asking for its own socket
+    /// back", and "a download worker is parked here" is not that: a
+    /// fleet spawned to its own lease cap parks its LAST worker in
+    /// `acquire` for the whole run by construction, because
+    /// [`POST_PROCESS_RESERVE`] holds one permit back from it. Counting
+    /// that worker as a reclaim made every spilled lane yield forever
+    /// to a head that was not waiting for anything - measured 2 Sep
+    /// 2026 on the e2e A/B, where the lane started, took no socket for
+    /// twenty-nine seconds, and finished nothing.
+    ///
+    /// Bounded by [`HostLease::download_cap`] like the other two
+    /// download classes: this takes back what was lent, never more.
+    Reclaim,
+}
+
+/// TODO 313 items 2 and 10: the switch that lets a run lend its fleet
+/// to the QUEUE while it is still downloading.
+///
+/// One per daemon hub, shared by the struggling head and by every lane
+/// spilled behind it, and SHUT unless the daemon's spill governor has
+/// opened it for a live episode. Everything it gates is inert while it
+/// is shut, so the mechanism is off at the pool as well as off in
+/// settings - a pool built with a gate that never opens behaves exactly
+/// as every pool on the tree did before this type existed.
+///
+/// It is a gate and not a count deliberately. What may hold how many
+/// sockets is the LEASE's business and stays there; this answers only
+/// "is a spill episode live right now", which is a property of the
+/// daemon's queue rather than of any one account.
+#[derive(Debug, Default)]
+pub struct SpillGate {
+    live: AtomicBool,
+}
+
+impl SpillGate {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Open the episode. Returns whether it moved, so a caller can log
+    /// the transition and not the level.
+    pub fn open(&self) -> bool {
+        !self.live.swap(true, Ordering::AcqRel)
+    }
+
+    /// Shut it. Every gated behaviour reverts on the next turn that
+    /// asks; nothing is unwound, because nothing here is state - a head
+    /// worker that already gave its permit back re-acquires it through
+    /// the ordinary path, and a lane that already shed a socket keeps
+    /// running on the ones it has.
+    pub fn close(&self) -> bool {
+        self.live.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+}
+
+/// Which side of a spill a pool is on. Decided when the fleet is built
+/// (the daemon knows which job it is starting and why) and fixed for
+/// the run; what moves later is only whether [`SpillGate`] is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpillRole {
+    /// The struggling job the sockets are being lent BY. Its only
+    /// changed behaviour is that a worker parked under a lowered
+    /// [`ConnTarget`](super::ConnTarget) gives its lease permit back
+    /// while it is parked, so the walk-down actually reaches the
+    /// successor instead of stopping at this run's own accounting.
+    ///
+    /// A head NEVER hands a socket over through
+    /// [`Shared::claim_handoff`](super::Shared) on this account: that
+    /// exit RETIRES the worker, `alive` does not come back within a
+    /// run, and a head that retired its fleet could never reclaim it.
+    /// Parking is reversible and retiring is not, which is the whole
+    /// reason the mechanism walks a target rather than shedding.
+    Head,
+    /// A job started BEHIND a struggling head on the sockets it lent.
+    /// Takes its permits as [`LeaseClass::Spill`], and may hand a
+    /// socket back before its own queue is dry - which is the one place
+    /// the `tail_started` gate on `want_handoff` is lifted, and the
+    /// only place it may be.
+    Lane,
+}
+
+/// A pool's seat in a live spill: the shared gate, and which side of it
+/// this pool is on.
+#[derive(Clone, Debug)]
+pub struct SpillSeat {
+    pub gate: Arc<SpillGate>,
+    pub role: SpillRole,
+    /// For a [`SpillRole::Lane`], the most sockets it may build PER
+    /// SERVER ROW - the absorption figure the daemon's governor sized
+    /// it at (`min(its remaining articles, what is left of the
+    /// slice)`). 0 is no ceiling, which is what a [`SpillRole::Head`]
+    /// always carries.
+    ///
+    /// A ceiling and not a target: the fleet builder takes the smaller
+    /// of this and what it would have built anyway, so a lane on a
+    /// two-connection account is not handed eight.
+    ///
+    /// **Stated limit, per ROW rather than per fleet.** On the
+    /// single-account install this was measured on the two are the same
+    /// number. With several accounts a lane may build up to this on
+    /// each of them, which is more than the head lent on any one - and
+    /// what stops that being an overshoot is the thing that always
+    /// stopped it, [`HostLease`]: every account's permits are counted
+    /// separately and no class may exceed its own cap, so the extra
+    /// workers park in `acquire` rather than reaching a provider. The
+    /// cost is spawned slots that never dial, not sockets nobody
+    /// licensed. Sizing per row properly means carrying the head's
+    /// whole per-row walk-down here, which is a map and a schedule, and
+    /// is worth doing when a multi-account install has measured a
+    /// reason to.
+    pub sockets: usize,
+}
+
+impl SpillSeat {
+    /// Is a spill episode live AND is this pool the given side of it?
+    /// Both halves in one call so no caller can check the gate and
+    /// forget the role - the two roles enable opposite behaviours and
+    /// applying either to the wrong side is the way this mechanism
+    /// breaks.
+    pub fn open_as(&self, role: SpillRole) -> bool {
+        self.role == role && self.gate.is_open()
+    }
 }
 
 /// One server row's seat at its account's lease: the shared
@@ -216,6 +405,11 @@ pub struct HostLease {
     /// Successor workers parked in `acquire`. Read lock-free by the
     /// predecessor's idle workers on every idle turn.
     waiters: AtomicUsize,
+    /// Of those, the ones that are NOT [`LeaseClass::Spill`] - the
+    /// subset a spilled lane's own acquire must stand behind (TODO 313
+    /// item 10's reclaim rule). Charged and released by the same
+    /// [`WaiterGuard`] as `waiters`.
+    prio_waiters: AtomicUsize,
     woken: Notify,
 }
 
@@ -223,6 +417,37 @@ pub struct HostLease {
 struct LeaseState {
     cap: usize,
     held: usize,
+    /// TODO 313 item 8: slots this account is currently holding for the
+    /// STANDING WARM RESERVE - authenticated sockets parked with nothing
+    /// to do, as a surge source (`crate::warmreserve`).
+    ///
+    /// A COUNT rather than a set of [`Permit`]s, and the difference is
+    /// the whole invariant. A spare has to be revocable SYNCHRONOUSLY,
+    /// inside the same lock hold that admits the worker taking its slot,
+    /// because the sizing rule is that active work outranks a parked
+    /// spare for the same permit and `active + spares <= cap` must hold BY
+    /// CONSTRUCTION rather than after a background task notices. A
+    /// `Permit` handed to a reserve task can only be given back when
+    /// that task is next polled, which is a window in which the sum is
+    /// wrong; a count that [`trim_spares`] shrinks under the state lock
+    /// has no such window.
+    ///
+    /// It is deliberately NOT part of what any class may hold: see
+    /// [`limit_for`], which does not read it. A download is never
+    /// refused a permit because a spare is sitting on one - the spare
+    /// gets out of the way instead.
+    spares: usize,
+}
+
+/// Give back whatever the standing reserve is holding above what the
+/// account can still back: `held + spares <= cap`, always, under the
+/// state lock.
+///
+/// Called from every place `held` rises or `cap` falls. It is what makes
+/// "active work outranks a parked spare" a property of the arithmetic
+/// rather than a race between a fleet and a dialler.
+fn trim_spares(st: &mut LeaseState) {
+    st.spares = st.spares.min(st.cap.saturating_sub(st.held));
 }
 
 /// One held connection slot. Dropping it frees the slot and wakes every
@@ -260,8 +485,10 @@ impl HostLease {
             state: std::sync::Mutex::new(LeaseState {
                 cap: cap.max(1),
                 held: 0,
+                spares: 0,
             }),
             waiters: AtomicUsize::new(0),
+            prio_waiters: AtomicUsize::new(0),
             woken: Notify::new(),
         })
     }
@@ -277,6 +504,11 @@ impl HostLease {
             let mut st = self.state.lock_ok();
             let was = st.cap;
             st.cap = cap;
+            // A cap turned DOWN between two jobs cannot revoke a held
+            // permit (see above), but it can and must revoke a standing
+            // spare: the reserve is the one holder that is not doing any
+            // work, so it is the one that gives way first.
+            trim_spares(&mut st);
             was != cap
         };
         if changed {
@@ -304,14 +536,8 @@ impl HostLease {
     /// that are its own before concluding anything.
     pub async fn acquire_as(self: &Arc<Self>, class: LeaseClass) -> Permit {
         loop {
-            {
-                let mut st = self.state.lock_ok();
-                if st.held < limit_for(&st, class) {
-                    st.held += 1;
-                    return Permit {
-                        lease: self.clone(),
-                    };
-                }
+            if let Some(p) = self.try_take(class) {
+                return p;
             }
             // Registered by RAII, not by a plain decrement after the
             // await: `runlife` races this future against `run_over` in
@@ -322,7 +548,11 @@ impl HostLease {
             // the daemon's life), so the ghost made `want_handoff` true
             // forever and every later run shed its idle connections
             // down to one per server with no successor waiting.
-            let _w = WaiterGuard::new(&self.waiters);
+            let _w = WaiterGuard::new(
+                &self.waiters,
+                matches!(class, LeaseClass::Reclaim | LeaseClass::PostProcess)
+                    .then_some(&self.prio_waiters),
+            );
             // Register with the Notify BEFORE re-reading `held`/`cap`,
             // and only await after a failed re-check. Notify's memory
             // for UNREGISTERED waiters is ONE stored permit, so with
@@ -335,17 +565,38 @@ impl HostLease {
             let notified = self.woken.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            {
-                let mut st = self.state.lock_ok();
-                if st.held < limit_for(&st, class) {
-                    st.held += 1;
-                    return Permit {
-                        lease: self.clone(),
-                    };
-                }
+            if let Some(p) = self.try_take(class) {
+                return p;
             }
             notified.as_mut().await;
         }
+    }
+
+    /// One admission attempt: take a slot for `class` if the account has
+    /// one free for it right now.
+    ///
+    /// Spelled once and called from both checks in
+    /// [`Self::acquire_as`] because the SPILL class made those two
+    /// checks two statements rather than one, and a rule copied into a
+    /// re-check that then drifts is how the 27 Aug lost-wakeup got in.
+    /// The `prio_waiters` read is deliberately inside the lock hold:
+    /// a permit released between reading it and taking the slot would
+    /// otherwise let a spilled lane step in front of the head it just
+    /// woke.
+    fn try_take(self: &Arc<Self>, class: LeaseClass) -> Option<Permit> {
+        let mut st = self.state.lock_ok();
+        let yielding = class == LeaseClass::Spill && self.prio_waiters.load(Ordering::Acquire) > 0;
+        if yielding || st.held >= limit_for(&st, class) {
+            return None;
+        }
+        st.held += 1;
+        // TODO 313 item 8: the fleet just grew into the gap, so the
+        // reserve shrinks to make room. Same lock hold as the admission,
+        // so no observer ever sees `held + spares` above `cap`.
+        trim_spares(&mut st);
+        Some(Permit {
+            lease: self.clone(),
+        })
     }
 
     /// Workers currently blocked in [`HostLease::acquire_as`], of every
@@ -355,12 +606,62 @@ impl HostLease {
         self.waiters.load(Ordering::Acquire)
     }
 
+    /// Of [`Self::waiters`], those a [`LeaseClass::Spill`] acquire
+    /// stands behind: a head RECLAIMING a socket it lent, and a
+    /// post-processing side pool. Deliberately not every parked
+    /// download - see [`LeaseClass::Reclaim`]. Diagnostics and tests;
+    /// the acquire path reads the atomic under the state lock.
+    pub fn prio_waiters(&self) -> usize {
+        self.prio_waiters.load(Ordering::Acquire)
+    }
+
     /// `(held, cap)` right now - diagnostics and tests. `cap` is the
     /// ACCOUNT's number, which is what no class may exceed; what a
     /// download alone may hold is [`Self::download_cap`].
     pub fn snapshot(&self) -> (usize, usize) {
         let st = self.state.lock_ok();
         (st.held, st.cap)
+    }
+
+    /// TODO 313 item 8: ask to hold `want` slots for the standing warm
+    /// reserve, and get back how many this account can ACTUALLY spare
+    /// right now - which is the effective reserve, and is the number
+    /// that has to be reported rather than the configured one.
+    ///
+    /// A LEVEL and not an increment: it sets the holding to the granted
+    /// figure, so the caller re-asserts its ask on every turn, a
+    /// [`trim_spares`] that happened in between is simply reconciled,
+    /// and there is nothing to leak and nothing to double-count.
+    ///
+    /// Two things bound the grant, and both are the item's stated
+    /// invariants rather than a policy this type chose:
+    ///
+    /// * the gap under the account's own cap, `cap - held`, so
+    ///   `active + spares <= cap` holds by construction and the reserve
+    ///   never causes a dial past the number the user configured; and
+    /// * nobody parked in [`Self::acquire_as`]. A worker waiting for a
+    ///   permit is active work outranking a parked spare, so the answer
+    ///   while anyone is waiting is zero - the reserve does not take a
+    ///   slot out from under a fleet that is asking for one.
+    ///
+    /// On a server whose fleet already runs at max the answer is 0, and
+    /// that is correct rather than a failure: see `crate::warmreserve`
+    /// for where the shortfall is published.
+    pub fn set_spares(&self, want: usize) -> usize {
+        let mut st = self.state.lock_ok();
+        let granted = match self.waiters.load(Ordering::Acquire) > 0 {
+            true => 0,
+            false => want.min(st.cap.saturating_sub(st.held)),
+        };
+        st.spares = granted;
+        granted
+    }
+
+    /// Slots currently held by the standing warm reserve. Diagnostics,
+    /// the reserve's own reconciliation, and the tests that pin
+    /// `active + spares <= cap`.
+    pub fn spares(&self) -> usize {
+        self.state.lock_ok().spares
     }
 
     /// What [`LeaseClass::Download`] alone may hold: the cap less
@@ -391,7 +692,14 @@ fn download_cap_of(cap: usize) -> usize {
 /// division, never the total.
 fn limit_for(st: &LeaseState, class: LeaseClass) -> usize {
     match class {
-        LeaseClass::Download => download_cap_of(st.cap),
+        // A spilled lane is a download by every measure that matters
+        // here - it puts bodies on the wire on the user's account - so
+        // it is bounded by the download cap and leaves the
+        // post-processing reserve alone. What separates it from
+        // `Download` is the yield in `try_take`, not a different
+        // ceiling: a spill that could take a permit the head cannot is
+        // the priority inversion this class exists to prevent.
+        LeaseClass::Download | LeaseClass::Spill | LeaseClass::Reclaim => download_cap_of(st.cap),
         LeaseClass::PostProcess => st.cap,
     }
 }
@@ -441,6 +749,28 @@ impl ConnBudget {
                 l
             }
         }
+    }
+
+    /// The lease for `key` as it ALREADY stands, or `None` if this
+    /// account has none yet - the borrower's door, for a run that must
+    /// not redefine the account's cap.
+    ///
+    /// **[`Self::lease`] re-points the cap to the caller's own fleet
+    /// size**, which is right for the ordinary queue where each job in
+    /// turn is the account's whole download and its spawn count IS the
+    /// number in force. It is catastrophic for a job sized by
+    /// ABSORPTION (TODO 313 item 10): a spilled lane built for one
+    /// article would set the account's cap to 1, and the head's five
+    /// held permits would then keep every acquire on that account -
+    /// including the lane's own - blocked until the head finished.
+    /// Measured 2 Sep 2026 on the e2e A/B: permits went 7 -> 5 as the
+    /// head lent them, and the lane took neither for twenty-nine
+    /// seconds.
+    ///
+    /// A lane therefore BORROWS: same permits, same cap, decided by
+    /// whoever sized the fleet the cap describes.
+    pub fn lease_borrowed(&self, key: &str) -> Option<Arc<HostLease>> {
+        self.hosts.lock_ok().get(key).cloned()
     }
 
     /// Slots held across every host - the figure a connection-count
@@ -516,12 +846,36 @@ impl super::Shared {
     /// The two conditions that are about the RUN rather than about this
     /// server's fleet: a successor blocked on this host's lease, and this
     /// run past queue-dry.
+    ///
+    /// **The queue-dry half is lifted for a SPILLED LANE and for
+    /// nothing else** (TODO 313 item 2). That gate is the whole of what
+    /// makes the shipped hand-over safe - an idle worker in the tail is
+    /// genuinely spare, and lifted generally every mid-run idle turn
+    /// would start shedding - so the lift is spelled as one role of one
+    /// gate that is shut unless the daemon's spill governor has opened
+    /// an episode. A lane spilled behind a struggling head is the one
+    /// run on the tree whose idle socket is owed BACK before its own
+    /// queue is dry, because the head it borrowed from is ahead of it
+    /// in the user's queue and may want it at any moment. Two
+    /// independent things still have to be true for a socket to move
+    /// even then: somebody is actually parked on this account's lease,
+    /// and this server would still have a worker afterwards.
     fn handoff_wanted(&self, idx: usize) -> bool {
         let Some(Some(seat)) = self.leases.get(idx) else {
             return false;
         };
         seat.lease.waiters() > self.own_lease_waiters(&seat.lease)
-            && self.tail_started.lock_ok().is_some()
+            && (self.tail_started.lock_ok().is_some() || self.spill_lane_open())
+    }
+
+    /// Is this pool a lane of a LIVE spill episode? False for every
+    /// pool built without a seat (the CLI, every test that does not opt
+    /// in, and every job on an install with the setting off), false for
+    /// the head's own pool, and false while the gate is shut.
+    pub(super) fn spill_lane_open(&self) -> bool {
+        self.spill
+            .as_ref()
+            .is_some_and(|s| s.open_as(SpillRole::Lane))
     }
 
     /// This run's own workers parked on `lease` - the ones a hand-over
@@ -562,6 +916,22 @@ impl super::Shared {
         Some(LeaseParkGuard(&seat.parked))
     }
 
+    /// Bodies on `idx` parked on the account lease - the SECOND park
+    /// class, which `workers_dialling_on` (admission only) cannot see.
+    ///
+    /// Per ROW and not summed across the account like
+    /// [`Self::own_lease_waiters`], because this asks who is left on
+    /// THIS server, not who is waiting on the account. A worker cannot
+    /// be in both classes at once: `runlife::worker` clears the
+    /// admission park before it parks on the lease, so subtracting both
+    /// counts double-counts nobody.
+    fn lease_parked_on(&self, idx: usize) -> usize {
+        self.leases
+            .get(idx)
+            .and_then(|s| s.as_ref())
+            .map_or(0, |s| s.parked.load(Ordering::Acquire))
+    }
+
     /// Is there room for ONE more worker to leave this server - i.e.
     /// would someone still be here afterwards? A peek; [`Self::claim_handoff`]
     /// is the version that may be acted on.
@@ -574,9 +944,21 @@ impl super::Shared {
     /// a "leftover" that is a parked body can sit in `acquire` holding
     /// nothing while `live_mask` still counts the server and requeues
     /// only this host can serve wait for the watchdog.
+    ///
+    /// LESS THE LEASE PARK TOO (1 Sep 2026 sweep). Since
+    /// [`POST_PROCESS_RESERVE`] there are two park classes and
+    /// `workers_dialling_on` subtracts only the admission one, so a
+    /// row whose surplus worker is held in `acquire_as` by the reserve
+    /// read as having a socket-capable leftover it did not have - the
+    /// same defect finding 7 fixed, through the door the reserve added.
+    /// The leftover it keeps must be able to take a requeue, and a body
+    /// blocked on the lease can no more do that than one blocked on an
+    /// admission.
     fn handoff_room(&self, idx: usize) -> bool {
-        self.workers_dialling_on(idx)
-            .is_some_and(|d| d > self.handoff_out[idx].load(Ordering::Acquire) + 1)
+        self.workers_dialling_on(idx).is_some_and(|d| {
+            d.saturating_sub(self.lease_parked_on(idx))
+                > self.handoff_out[idx].load(Ordering::Acquire) + 1
+        })
     }
 
     /// [`Self::want_handoff`], CLAIMED: true only for a worker that may
@@ -592,9 +974,11 @@ impl super::Shared {
     /// idle loop re-asks every 25 ms, so a fleet draining past queue-dry
     /// walks itself down to exactly two and then loses both.
     ///
-    /// The room is judged against `workers_dialling_on`, not `alive`,
-    /// for [`Self::handoff_room`]'s reason: a parked body is not "kept
-    /// for requeues". `handoff_out` still serializes concurrent claims
+    /// The room is judged against `workers_dialling_on` less
+    /// [`Self::lease_parked_on`], not against `alive`, for
+    /// [`Self::handoff_room`]'s reason: a parked body is not "kept for
+    /// requeues", and since the post-processing reserve there are two
+    /// ways to be parked. `handoff_out` still serializes concurrent claims
     /// in the window between the two steps below, and the cost of it
     /// staying charged is that a large idle fleet hands over about half
     /// of itself per round rather than all but one; the alternative is
@@ -620,7 +1004,7 @@ impl super::Shared {
         if self.handoff_out[idx]
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |h| {
                 self.workers_dialling_on(idx)
-                    .is_some_and(|d| d > h + 1)
+                    .is_some_and(|d| d.saturating_sub(self.lease_parked_on(idx)) > h + 1)
                     .then_some(h + 1)
             })
             .is_err()
@@ -629,9 +1013,12 @@ impl super::Shared {
         }
         // The reservation: leave at least one socket-capable body
         // behind, judged at the same instant the departure lands.
+        // BOTH park classes are discounted here for
+        // [`Self::handoff_room`]'s reason - a body parked on the
+        // account lease holds no permit either.
         let reserved = self.alive[idx]
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |a| {
-                let parked = self.parked[idx].load(Ordering::SeqCst);
+                let parked = self.parked[idx].load(Ordering::SeqCst) + self.lease_parked_on(idx);
                 (a > parked + 1).then(|| a - 1)
             })
             .is_ok();
@@ -922,6 +1309,160 @@ mod tests {
     /// The last worker on a server may not hand its socket away, and
     /// TWO idle workers may not both conclude they are not the last.
     ///
+    /// TODO 313 item 10's RECLAIM rule, at the lease: a spilled lane
+    /// stands behind every parked waiter of the other two classes.
+    ///
+    /// This is the whole of what keeps a spill from inverting queue
+    /// priority. The head is ahead of the lane in the user's queue, so
+    /// when its articles come unstuck and its parked workers ask for
+    /// their sockets back, a permit the lane releases has to reach the
+    /// HEAD - and `Permit::drop` wakes every parked acquirer at once, so
+    /// without an ordering rule the lane's own next worker wins that
+    /// race as often as not.
+    #[tokio::test]
+    async fn a_spilled_lane_stands_behind_a_reclaiming_head() {
+        let b = ConnBudget::new();
+        // Cap 4: three for a download, one held back for the reserve.
+        let l = b.lease("h", 4);
+        assert_eq!(l.download_cap(), 3);
+        let head = l.acquire().await;
+        let lane = l.acquire_as(LeaseClass::Spill).await;
+        let lane2 = l.acquire_as(LeaseClass::Spill).await;
+        assert_eq!(
+            l.snapshot(),
+            (3, 4),
+            "a spill is bounded by the DOWNLOAD cap"
+        );
+
+        // The head reclaims: one of its parked workers asks for a slot.
+        let lh = l.clone();
+        let reclaim = tokio::spawn(async move { lh.acquire_as(LeaseClass::Reclaim).await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(l.waiters(), 1);
+        assert_eq!(
+            l.prio_waiters(),
+            1,
+            "a head RECLAIMING is a priority park - an ordinary parked \
+             download is not, or the reserve's own parked worker would \
+             block every spill for the life of the run"
+        );
+
+        // The lane wants to grow at the same moment, and may not.
+        let ls = l.clone();
+        let grow = tokio::spawn(async move { ls.acquire_as(LeaseClass::Spill).await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(l.prio_waiters(), 1, "and a lane's park is not");
+        assert!(!grow.is_finished());
+
+        // The lane gives one back. It must reach the head.
+        drop(lane);
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), reclaim)
+            .await
+            .expect("the head's claim outranks the lane's")
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            !grow.is_finished(),
+            "the lane may not take the permit it just released while the head holds it"
+        );
+
+        // With no priority waiter left the lane may grow again.
+        drop(got);
+        let grown = tokio::time::timeout(std::time::Duration::from_secs(5), grow)
+            .await
+            .expect("a lane is not starved once nothing better is waiting")
+            .unwrap();
+        drop(head);
+        drop(lane2);
+        drop(grown);
+        assert_eq!(b.held_total(), 0);
+    }
+
+    /// A spilled lane may hand a socket over BEFORE its own queue is
+    /// dry, and nothing else may. The gate is shut by default, the role
+    /// decides which side of it a pool is on, and both have to agree.
+    #[tokio::test]
+    async fn only_a_spilled_lane_hands_over_before_queue_dry() {
+        let budget = ConnBudget::new();
+        let lease = budget.lease("s", 1);
+        let gate = SpillGate::new();
+        let mut servers = one_server();
+        servers[0].1.lease = Some(lease.clone());
+        servers[0].1.spill = Some(SpillSeat {
+            gate: gate.clone(),
+            role: SpillRole::Lane,
+            sockets: 0,
+        });
+        let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
+        let (shared, _) = Shared::new(reqs, &servers);
+
+        // Somebody else parked on this account's lease - the head
+        // reclaiming, in the shape this mechanism is built for.
+        let held = lease.acquire().await;
+        let l2 = lease.clone();
+        let waiter = tokio::spawn(async move { l2.acquire().await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(lease.waiters(), 1);
+        shared.alive[0].store(2, Ordering::Relaxed);
+
+        assert!(
+            !shared.want_handoff(0),
+            "the gate is SHUT until a governor opens an episode, so this              is the shipped rule verbatim"
+        );
+        gate.open();
+        assert!(
+            shared.want_handoff(0),
+            "an open episode lifts the queue-dry gate for a lane"
+        );
+        gate.close();
+        assert!(
+            !shared.want_handoff(0),
+            "and shutting it puts the gate back"
+        );
+
+        drop(held);
+        drop(waiter.await.unwrap());
+    }
+
+    /// The same seat on the HEAD's side changes nothing here, which is
+    /// the half that keeps a reallocated head reclaimable: a head that
+    /// handed sockets over through `claim_handoff` would RETIRE those
+    /// workers, `alive` does not come back inside a run, and the fleet
+    /// could never be walked up again. A head lends by parking, never by
+    /// shedding.
+    #[tokio::test]
+    async fn a_spill_head_never_hands_over_early() {
+        let budget = ConnBudget::new();
+        let lease = budget.lease("s", 1);
+        let gate = SpillGate::new();
+        let mut servers = one_server();
+        servers[0].1.lease = Some(lease.clone());
+        servers[0].1.spill = Some(SpillSeat {
+            gate: gate.clone(),
+            role: SpillRole::Head,
+            sockets: 0,
+        });
+        let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
+        let (shared, _) = Shared::new(reqs, &servers);
+
+        let held = lease.acquire().await;
+        let l2 = lease.clone();
+        let waiter = tokio::spawn(async move { l2.acquire().await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        shared.alive[0].store(2, Ordering::Relaxed);
+        gate.open();
+        assert!(
+            !shared.want_handoff(0),
+            "an open episode gives the HEAD no new way to shed a socket"
+        );
+        // Past queue-dry it hands over exactly as it always did.
+        *shared.tail_started.lock_ok() = Some(Instant::now());
+        assert!(shared.want_handoff(0));
+
+        drop(held);
+        drop(waiter.await.unwrap());
+    }
+
     /// The old `want_handoff` answered from `alive > 1` with no claim, so
     /// on a two-worker server both idle workers read 2, both passed, and
     /// both retired - leaving the host with nobody to take a requeue,
@@ -1090,20 +1631,110 @@ mod tests {
         let successor = tokio::spawn(async move { l3.acquire().await });
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         assert_eq!(lease.waiters(), 2);
+        // The half this test is about is the SUCCESSOR half, and it is
+        // asked directly since the 1 Sep 2026 sweep: `want_handoff` is
+        // that half AND `handoff_room`, and the room half is separately
+        // false here for the reason the next assertion pins - the
+        // surplus body parked on the lease is not a leftover. Before
+        // that sweep this line read `want_handoff` and passed, which is
+        // exactly the answer that gave a row's last socket away.
         assert!(
-            shared.want_handoff(0),
+            shared.handoff_wanted(0),
             "a waiter that is not one of ours is a successor"
+        );
+
+        // 1 Sep 2026 sweep: but the reserve-parked body is not a
+        // LEFTOVER either. `alive` is 2 and one of the two is parked on
+        // the lease holding no permit, so granting this claim would
+        // leave the row represented by a body that cannot take a
+        // requeue - the shape 27 Aug finding 7 fixed for the admission
+        // park, through the door the reserve opened.
+        assert!(
+            !shared.claim_handoff(0),
+            "the reserve-parked body is not a leftover either"
+        );
+        assert_eq!(
+            shared.handoff_out[0].load(Ordering::Relaxed),
+            0,
+            "a refused claim leaves nothing charged"
+        );
+        assert_eq!(
+            shared.alive[0].load(Ordering::Relaxed),
+            2,
+            "and takes nobody out of `alive`"
         );
 
         // And the count falls back to zero when our worker gives up, so
         // a lease that outlives the run carries no charge into the next.
         drop(parked);
         assert_eq!(shared.own_lease_waiters(&lease), 0);
+
+        // With the reserve park gone both bodies can hold a socket and
+        // the same claim IS granted - so the refusal above is the
+        // subtraction and not a door that shut for good.
+        assert!(
+            shared.want_handoff(0),
+            "and the whole peek is true again once there is room"
+        );
+        assert!(
+            shared.claim_handoff(0),
+            "a row with two socket-capable bodies may hand one over"
+        );
+        assert_eq!(shared.alive[0].load(Ordering::Relaxed), 1);
+
         successor.abort();
         surplus.abort();
         let _ = successor.await;
         let _ = surplus.await;
         drop(seated);
+    }
+
+    /// TODO 313 item 8, at the lease's own level: a standing spare is
+    /// bounded by the account's gap, it never gates an acquire, and a
+    /// worker parked in `acquire` is not stepped in front of.
+    ///
+    /// The reserve's own behaviour is pinned in `crate::warmreserve`;
+    /// this is the arithmetic those tests stand on.
+    #[tokio::test]
+    async fn a_standing_spare_is_bounded_by_the_gap_and_never_gates_a_worker() {
+        let b = ConnBudget::new();
+        let l = b.lease("h", 4);
+        assert_eq!(l.set_spares(9), 4, "an idle account can spare all of it");
+        assert_eq!(l.spares(), 4);
+
+        // Never gates: `limit_for` does not read `spares`, so the fleet
+        // walks straight in and the spare gives way inside the same lock
+        // hold that admits it.
+        let mut held = Vec::new();
+        for i in 1..=3 {
+            held.push(
+                tokio::time::timeout(std::time::Duration::from_secs(5), l.acquire())
+                    .await
+                    .unwrap_or_else(|_| panic!("worker {i} blocked behind a spare")),
+            );
+            let (h, cap) = l.snapshot();
+            assert!(h + l.spares() <= cap, "held {h} + spares over cap {cap}");
+        }
+        assert_eq!(l.spares(), 1, "three working, one slot left to spare");
+
+        // A parked acquirer outranks a fresh ask: the reserve does not
+        // take a slot out from under a fleet that is waiting for one.
+        let l2 = l.clone();
+        let w = tokio::spawn(async move { l2.acquire().await });
+        for _ in 0..200 {
+            if l.waiters() > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(l.waiters(), 1);
+        assert_eq!(l.set_spares(1), 0, "a waiter outranks a new spare");
+
+        held.clear();
+        let _late = tokio::time::timeout(std::time::Duration::from_secs(5), w)
+            .await
+            .expect("the parked worker was woken")
+            .expect("join");
     }
 
     #[tokio::test]

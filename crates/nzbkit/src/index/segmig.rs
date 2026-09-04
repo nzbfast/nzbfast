@@ -355,6 +355,13 @@ impl Index {
                 )),
             ));
         }
+        let seed_schema_present = Index::nzb_seed_schema_present_on(&tx)?;
+        // Remove both generations before SQLite can retarget their SQL to
+        // `files_old`. The reinstall below remains conditional on the
+        // optional seed tables being present.
+        if seed_schema_present {
+            Index::drop_nzb_seed_file_cleanup_triggers_on(&tx)?;
+        }
         tx.execute_batch(&format!(
             "DROP TRIGGER {SEGMIG_STAGING}_mi;
              DROP TRIGGER {SEGMIG_STAGING}_mu;
@@ -363,6 +370,11 @@ impl Index {
              ALTER TABLE {SEGMIG_STAGING} RENAME TO files;
              DELETE FROM kv WHERE k IN ('{CURSOR_KEY}', '{COPIED_KEY}');"
         ))?;
+        // Keep the optional trigger reinstall and its tbl_name validation
+        // inside this swap, before files_old can be reclaimed.
+        if seed_schema_present {
+            Index::reinstall_nzb_seed_file_cleanup_triggers_on(&tx)?;
+        }
         tx.commit()?;
         // The one schema change a pooled reader's prepared statement
         // can predate: the daemon retires its read-only pool on this.
@@ -458,6 +470,10 @@ mod tests {
         let (dir, ix) = tempdb(tag);
         ix.segmig_debug_install_legacy_layout().unwrap();
         assert!(!files_has_compact_layout(&ix.db));
+        // One transaction for the whole seed: two autocommit inserts a row
+        // is two journal flushes a row, and the subject is the migration
+        // that runs AFTER this.
+        ix.db.execute_batch("BEGIN").unwrap();
         for rid in 1..=n {
             ix.db
                 .execute(
@@ -481,6 +497,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        ix.db.execute_batch("COMMIT").unwrap();
         (dir, ix)
     }
 
@@ -541,12 +558,17 @@ mod tests {
     #[test]
     fn the_rebuild_keeps_every_row_its_rowid_and_its_segments() {
         let (dir, ix) = legacy("whole", 50);
+        assert!(!ix.nzb_seed_schema_present().unwrap());
         let before = snapshot(&ix, "files");
         assert!(matches!(
             ix.segmig_state(),
             SegMigState::Copying { copied: 0, .. }
         ));
         run_to_done(&ix);
+        assert!(
+            !ix.nzb_seed_schema_present().unwrap(),
+            "a seedless rebuild must not install the optional seed catalog"
+        );
         assert!(files_has_compact_layout(&ix.db));
         assert_eq!(snapshot(&ix, "files"), before);
         // Every row is now the compact form, with nsegs stamped.

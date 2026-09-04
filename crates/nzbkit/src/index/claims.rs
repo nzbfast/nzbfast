@@ -167,7 +167,7 @@ pub enum ProvenOutcome {
 /// million rows at 64 bits see no birthday collisions worth a wider
 /// key (and every consumer requires multi-id agreement anyway).
 pub(super) fn msgid_hash(msgid: &str) -> i64 {
-    use md5::{Digest, Md5};
+    use crate::md5fast::{Digest, Md5};
     let d = Md5::digest(norm_msgid(msgid).as_bytes());
     i64::from_le_bytes(d[..8].try_into().unwrap())
 }
@@ -210,7 +210,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    use md5::{Digest, Md5};
+    use crate::md5fast::{Digest, Md5};
     let mut norm: Vec<String> = msgids
         .into_iter()
         .map(|m| norm_msgid(m.as_ref()).to_string())
@@ -251,15 +251,33 @@ pub(super) fn msgid_map_insert<'a>(
 /// reasons (a one-shot UPDATE loses the write lock to a live scanner
 /// and an unbounded loop stalls every daemon start).
 pub(super) fn msgid_map_backfill(db: &mut Connection) {
+    msgid_map_backfill_slice(db, std::time::Duration::from_secs(2));
+}
+
+/// One time-bounded slice of the retroactive fill. Returns true when
+/// the fill is COMPLETE (or cannot proceed), false while rows remain.
+///
+/// Why this is a per-lap leg and not only an open-time one (measured
+/// 2 Sep 2026, research/LIVE-INDEX-CENSUS-2026-09-02.md): the open-time
+/// call gets two seconds per daemon start, and on an index that had
+/// 31M rows before the table existed that cursor had reached files
+/// rowid 18.9M after weeks of restarts - so 19.4M releases (every row
+/// first seen 29 Jul to 3 Aug) had NO map entry, and 231 of 231
+/// indexer NZBs the seed lane grabbed that day joined nothing, not
+/// because of the quorum rule but because the ids were unlisted. The
+/// maintenance slice now loops this the way it loops the folds; the
+/// 2 s open-time call is kept so a small index still finishes at once.
+pub(super) fn msgid_map_backfill_slice(db: &mut Connection, budget: std::time::Duration) -> bool {
     let done: Option<String> = db
         .query_row("SELECT v FROM kv WHERE k='msgid_map_fill'", [], |r| {
             r.get(0)
         })
         .ok();
     if done.as_deref() == Some("1") {
-        return;
+        return true;
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + budget;
+    let mut complete = false;
     let _ = (|| -> rusqlite::Result<()> {
         loop {
             // IMMEDIATE for the same reason as every cursor walk here:
@@ -289,6 +307,7 @@ pub(super) fn msgid_map_backfill(db: &mut Connection) {
                     [],
                 )?;
                 tx.commit()?;
+                complete = true;
                 return Ok(());
             };
             for (_, rid, segs) in &rows {
@@ -309,6 +328,35 @@ pub(super) fn msgid_map_backfill(db: &mut Connection) {
             }
         }
     })();
+    complete
+}
+
+impl Index {
+    /// One budgeted slice of the retroactive `msgid_map` fill, for the
+    /// maintenance lap. True when nothing remains. See
+    /// [`msgid_map_backfill_slice`] for why the open-time call alone
+    /// never finished on a real index.
+    pub fn msgid_map_backfill_slice(&mut self, budget: std::time::Duration) -> bool {
+        msgid_map_backfill_slice(&mut self.db, budget)
+    }
+
+    /// Progress of that fill for a log line: `(files rowid cursor,
+    /// map rows)`. Both are cheap reads.
+    pub fn msgid_map_progress(&self) -> (i64, i64) {
+        let at = self
+            .db
+            .query_row("SELECT v FROM kv WHERE k='msgid_map_at'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let n = self
+            .db
+            .query_row("SELECT count(*) FROM msgid_map", [], |r| r.get(0))
+            .unwrap_or(0);
+        (at, n)
+    }
 }
 
 /// How strongly the release's CURRENT name is held, on the same scale
@@ -683,6 +731,39 @@ impl Index {
             }
         } else if agreed_with_current {
             ProvenOutcome::Confirmed
+        } else if crate::release::undoubled(&pre_title)
+            .is_some_and(|half| crate::predb::match_key(half) == wnkey)
+        {
+            // The standing name is THIS claim's own name written twice
+            // (`crate::release::undoubled`). Without this arm the
+            // corruption defends itself: a doubled name and its correct
+            // half reach `applied_strength` at the SAME tier - both are
+            // `proven:msgid-set:…`, since the doubling rides the poster's
+            // own quoted filename into every lane that reads that post's
+            // stem - so `cur < win_strength` is false, the keys disagree,
+            // and every future correct claim on the row is recorded and
+            // refused, forever. Measured 1 Sep 2026: 285 of 24,996 named
+            // releases stood exactly there.
+            //
+            // Confirmed, not Replaced: nothing is being renamed. This is
+            // the same name with its duplicate half folded off - a
+            // canonical-spelling upgrade, the reading the empty-stem arm
+            // above already takes for a claim that agrees modulo
+            // furniture.
+            //
+            // The narrowest possible arm, deliberately: it fires only
+            // when the standing name is exactly its own doubling AND the
+            // claim is precisely its half. It cannot let any other weaker
+            // or equal claim in, so the equal-or-stronger rule below is
+            // untouched.
+            self.revoke_pre_name(rid)?;
+            self.apply_pre_name(rid, &wname, &label, now)?;
+            tracing::info!(
+                target: "claims",
+                "release {rid}: applied name {pre_title:?} was {wname:?} \
+                 written twice - folded to the claim"
+            );
+            ProvenOutcome::Confirmed
         } else {
             warn!(
                 target: "claims",
@@ -898,7 +979,7 @@ impl Index {
     /// on a total miss. Two indexed questions, same answer set as the
     /// one scan: nothing is given up but the wedge.
     pub fn release_ids_by_stem(&self, posted: &str) -> rusqlite::Result<Vec<i64>> {
-        let stem = crate::extract::release_stem(posted);
+        let stem = crate::names::release_stem(posted);
         if stem.is_empty() {
             return Ok(Vec::new());
         }
@@ -930,6 +1011,88 @@ impl Index {
             }
         }
         Ok(ids)
+    }
+
+    /// One-shot repair for releases whose applied name is exactly its
+    /// own text twice: put the single half back, through the naming
+    /// seam.
+    ///
+    /// # Why a repair is needed at all
+    ///
+    /// The doubling is the POSTER's - it rides the quoted filename in
+    /// that post's own subjects (`crate::release::undoubled`) - so every
+    /// lane reading that release's stem mints the same doubled name at
+    /// the same evidence tier. `apply_named` now folds it on the way in,
+    /// but the rows written before that cannot heal on their own: a
+    /// correct claim and a doubled standing name grade EQUAL in
+    /// `applied_strength`, so the correct one is recorded and refused,
+    /// every time, forever. Measured 1 Sep 2026 on the live index: 285
+    /// of 24,996 named releases (1.14%).
+    ///
+    /// `apply_proven_name` now folds that exact pair too, but only when
+    /// a claim happens to arrive; this walks the rows that already carry
+    /// their own answer inside their own name.
+    ///
+    /// # Driving it
+    ///
+    /// Straight off `releases`, which the CDATA repair beside it
+    /// refuses to do - and it is safe HERE because `idx_rel_pre_named`
+    /// is a partial index on exactly `pre_title<>''`: ~25 K entries on a
+    /// 22 M-row table, not a table scan. There is no narrower driver -
+    /// unlike the spot repairs, this defect is not confined to one lane.
+    ///
+    /// The name is cleared and re-applied through `apply_named` rather
+    /// than UPDATEd, so `title_key`, `kind`, `junk`, the FTS row and the
+    /// watchlist all re-derive from the corrected title - and the row's
+    /// OWN `pre_source` is re-stamped, never a hardcoded label, or a
+    /// `proven:` row would be demoted to the unarbitrable `i32::MAX`
+    /// grade `applied_strength` gives anything without that prefix. One
+    /// transaction per row for the clear-and-reapply pair: as two
+    /// autocommit statements a kill between them leaves the row un-named
+    /// AND outside this pass's own predicate, so the re-run never
+    /// revisits it.
+    ///
+    /// The `stem` is deliberately LEFT ALONE, doubled and all: it is the
+    /// wire's own filename and half of a release's identity key, so
+    /// rewriting it would only make the next scan of the same unchanged
+    /// post mint a second row beside this one.
+    pub fn repair_doubled_pre_titles(&mut self, now: i64) -> rusqlite::Result<usize> {
+        if self.kv_get("doubled_pre_title_fix_v1").is_some() {
+            return Ok(0);
+        }
+        let broken: Vec<(i64, String, String)> = {
+            let mut stmt = self
+                .db
+                .prepare("SELECT id, pre_title, pre_source FROM releases WHERE pre_title<>''")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.filter_map(|r| match r {
+                Ok((id, title, label)) => {
+                    crate::release::undoubled(&title).map(|half| Ok((id, half.to_string(), label)))
+                }
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut fixed = 0usize;
+        for (rid, half, label) in &broken {
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.db,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            tx.execute("UPDATE releases SET pre_title='' WHERE id=?1", [rid])?;
+            if self.apply_named(*rid, half, label, now)? {
+                fixed += 1;
+            }
+            tx.commit()?;
+        }
+        self.kv_set("doubled_pre_title_fix_v1", "1")?;
+        Ok(fixed)
     }
 }
 
@@ -1806,6 +1969,42 @@ mod tests {
         teardown(&d, ix);
     }
 
+    /// The per-lap slice reports whether the fill is COMPLETE, so a
+    /// caller's slice loop can stop early: a zero budget still lands one
+    /// chunk and reports "more to do", and the call after the last chunk
+    /// reports done and stamps the flag. This is the contract the
+    /// maintenance lap relies on; the open-time call alone left a real
+    /// index 19.4M releases short (see `msgid_map_backfill_slice`).
+    #[test]
+    fn the_backfill_slice_says_when_it_is_finished() {
+        let d = dir("backfill_slice");
+        let mut ix = Index::open(&d.join("index.db")).unwrap();
+        let rid = seed(&mut ix, "0011223344556677bb", "bs1");
+        ix.db.execute("DELETE FROM msgid_map", []).unwrap();
+        ix.db
+            .execute(
+                "DELETE FROM kv WHERE k IN ('msgid_map_fill','msgid_map_at')",
+                [],
+            )
+            .unwrap();
+        // First slice: one chunk lands (the only row), deadline already
+        // past, so it returns before discovering the table is drained.
+        assert!(!ix.msgid_map_backfill_slice(std::time::Duration::ZERO));
+        assert_eq!(ix.find_releases_by_msgids(["bs1"]).unwrap(), vec![(rid, 1)]);
+        assert_eq!(ix.kv_get("msgid_map_fill"), None);
+        let (cursor, keys) = ix.msgid_map_progress();
+        assert!(
+            cursor > 0 && keys >= 1,
+            "progress reads the cursor and the key count"
+        );
+        // Second slice: nothing left, flag stamped, done.
+        assert!(ix.msgid_map_backfill_slice(std::time::Duration::ZERO));
+        assert_eq!(ix.kv_get("msgid_map_fill").as_deref(), Some("1"));
+        // And once done it stays a cheap no-op that still says done.
+        assert!(ix.msgid_map_backfill_slice(std::time::Duration::from_secs(1)));
+        teardown(&d, ix);
+    }
+
     // ---- H5: the apply_pn savepoint (Codex 10 Aug read-only sweep) ---
     //
     // `apply_proven_name` is a read-decide-write across several
@@ -1965,6 +2164,123 @@ mod tests {
             (before_title, before_source),
             "a failed displacement left the release without a name"
         );
+        teardown(&d, ix);
+    }
+
+    /// The doubling defect, end to end.
+    ///
+    /// The poster's own quoted filename carries the release name twice
+    /// (measured 1 Sep 2026 against the article subjects), so the stem
+    /// and every name derived from it arrive doubled. Three things have
+    /// to hold: the naming seam folds it on the way IN, a row that was
+    /// named before that heals when a correct claim arrives, and the
+    /// one-shot repair heals the rest without waiting for one.
+    #[test]
+    fn a_name_written_twice_is_folded_at_the_seam_and_cannot_hold_off_its_own_half() {
+        const HALF: &str = "A Bona Fide Killer  S01E06";
+        let doubled = format!("{HALF}{HALF}");
+        let d = dir("doubled");
+        let mut ix = Index::open(&d.join("index.db")).unwrap();
+
+        // 1. The seam. A lane handing `apply_named` the doubled name
+        //    stores one copy - no lane has to remember the rule.
+        let a = seed(&mut ix, "q8Wm2xL4vRt7pYh3n", "d1@x");
+        assert!(
+            ix.apply_named(a, &doubled, "proven:msgid-set:posted-nzb", 100)
+                .unwrap()
+        );
+        assert_eq!(named(&ix, a).0, HALF);
+
+        // 2. The arbitration. Write the pre-fix state directly - a row
+        //    named by a posted-NZB claim carrying the doubled name -
+        //    and hand it the correct half at the SAME evidence tier,
+        //    which is the tie that used to lose. `applied_strength`
+        //    grades both at `10 + MsgidSet.rank()`, so without the fold
+        //    this is "equal or stronger - recorded, not applied", every
+        //    time, forever.
+        let b = seed(&mut ix, "z3Kd9sQ1wN6bV0jT2", "d2@x");
+        ix.db
+            .execute(
+                "UPDATE releases SET pre_title=?2, pre_source='proven:msgid-set:posted-nzb'
+                  WHERE id=?1",
+                rusqlite::params![b, &doubled],
+            )
+            .unwrap();
+        let out = ix
+            .apply_proven_name(
+                b,
+                &claim(HALF, NameEvidence::MsgidSet, "spotkey", "spot"),
+                200,
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            ProvenOutcome::Confirmed,
+            "the half is the same name, not a rename"
+        );
+        let (title, source) = named(&ix, b);
+        // The claim's own spelling, which the ledger canonicalised on
+        // the way in (`sanitize_name` collapses the poster's double
+        // space) - a claim is applied as recorded, doubling or no.
+        assert_eq!(title, "A Bona Fide Killer S01E06");
+        assert_eq!(
+            source, "proven:msgid-set:spot",
+            "the winner's provenance is stamped"
+        );
+
+        // A DIFFERENT name at the same tier is still refused: the arm
+        // fires only for this claim's own doubling, nothing wider.
+        let c = seed(&mut ix, "m5Rp8tY2xB4kW7qF1", "d3@x");
+        ix.db
+            .execute(
+                "UPDATE releases SET pre_title=?2, pre_source='proven:msgid-set:posted-nzb'
+                  WHERE id=?1",
+                rusqlite::params![c, &doubled],
+            )
+            .unwrap();
+        let out = ix
+            .apply_proven_name(
+                c,
+                &claim(NAME, NameEvidence::MsgidSet, "otherkey", "spot"),
+                200,
+            )
+            .unwrap();
+        assert_eq!(out, ProvenOutcome::Conflict);
+        assert_eq!(
+            named(&ix, c).0,
+            doubled,
+            "an unrelated claim changes nothing"
+        );
+
+        // 3. The repair, which does not wait for a claim to arrive. It
+        //    keeps the row's OWN label - re-stamping a hardcoded one
+        //    would demote a `proven:` row to the unarbitrable grade -
+        //    and re-derives what the name determines, so the card
+        //    searches under the corrected title.
+        let n = ix.repair_doubled_pre_titles(300).unwrap();
+        assert_eq!(n, 1, "only the still-doubled row");
+        let (title, source) = named(&ix, c);
+        assert_eq!(title, HALF);
+        assert_eq!(source, "proven:msgid-set:posted-nzb");
+        let key: String = ix
+            .db
+            .query_row("SELECT title_key FROM releases WHERE id=?1", [c], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(key, crate::categories::classify(HALF, &ix.custom).key);
+
+        // kv-guarded: a second pass is a no-op even with a fresh row.
+        let e = seed(&mut ix, "h2Nc6vZ9dJ3xS8mL5", "d4@x");
+        ix.db
+            .execute(
+                "UPDATE releases SET pre_title=?2, pre_source='proven:msgid-set:posted-nzb'
+                  WHERE id=?1",
+                rusqlite::params![e, &doubled],
+            )
+            .unwrap();
+        assert_eq!(ix.repair_doubled_pre_titles(400).unwrap(), 0);
+        assert_eq!(named(&ix, e).0, doubled);
         teardown(&d, ix);
     }
 }

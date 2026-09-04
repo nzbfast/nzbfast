@@ -3,7 +3,7 @@
 //! `fn run` sat seven lines under the size gate's 500-line function
 //! ceiling, so the next subcommand anyone added would have reddened main
 //! (TODO 106 pattern, as `check_sweep.rs`, `fleet_knobs.rs` and
-//! `extract/names.rs`). A function ceiling, so splitting `main.rs` could
+//! `nzbkit-base/src/names.rs`). A function ceiling, so splitting `main.rs` could
 //! not have helped.
 //!
 //! Behaviour unchanged: this is the bin root's own child module,

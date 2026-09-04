@@ -675,7 +675,16 @@ impl Shared {
         // TODO 208 item 1: the line cap the run settled on and how many
         // times the in-run shed moved a target. Same rule as the taper
         // arm: absent when disarmed, so the A/B's off arm is unchanged.
-        let taper = format!("{taper}{steers}{}", self.line_cap_summary());
+        let taper = format!(
+            "{taper}{steers}{}{}",
+            self.line_cap_summary(),
+            // TODO 313 item 7: appended AFTER the fleet cap's own
+            // fragment and empty unless a surge actually happened, so
+            // the shipped `[pool]` line - which the §208 bench tables
+            // parse - is byte-identical on every run that never entered
+            // the regime, which is every run on every install today.
+            self.surge_summary(),
+        );
         match (ts, da) {
             (Some(t), Some(d)) => info!(
                 target: "pool",

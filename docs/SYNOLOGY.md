@@ -100,6 +100,12 @@ below are the same thing done by hand.
        # No PUID/PGID needed: nzbfast adopts the owner and group of the
        # folders you made above. No TZ either - times are stored as UTC
        # and shown in your browser's timezone.
+       # Takes away powers the container has by default and does not use.
+       # The five it does need are added back by name: without them it
+       # cannot hand your folders to your DSM user and will not start.
+       cap_drop: [ALL]
+       cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+       security_opt: [no-new-privileges:true]
 
      # Optional: checks nightly for a newer nzbfast image and recreates
      # the container when one ships. Needs the Docker socket; delete this

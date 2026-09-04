@@ -18,6 +18,10 @@
 //! change legitimately moves a number, move the floor in the same commit
 //! and say why - that edit is the calibration record.
 //!
+//! A floor is only as good as the population under it: see the
+//! `Calib.Filler` rows in `run_corpus` for a clause this harness
+//! asserted for a month without ever exercising it.
+//!
 //! Design reference: `research/DESIGN-predb-phase2-correlation-2026-08.md`
 //! section 5, "Calibration regression".
 
@@ -321,6 +325,33 @@ fn run_corpus(
             }
             _ => {}
         }
+
+        // A weak background pre in EVERY window: sizeless, sectionless,
+        // six days early, so it scores 3 and can never rank - it is
+        // here to be a RUNNER-UP.
+        //
+        // Without it the auto tier's margin clause was vacuous over
+        // this whole corpus, and nobody could see that from the
+        // numbers. SPACING (20 d) exceeds DELTA_MAX (14 d) by design,
+        // so a pair's window held exactly one candidate, and until
+        // 2 Sep 2026 `best - runner_up.unwrap_or(0)` read an ABSENT
+        // rival as a rival scoring zero: the margin degenerated to the
+        // raw score, which had already cleared STRONG to get this far.
+        // All 76 auto-applies this harness measured - the ones its
+        // 1.0 precision floor is computed over - passed a clause that
+        // could not fail. `predb_corr::margin_clears` refuses the empty
+        // field now, and this row is what makes the clause do work.
+        // The floors below are unchanged: recall stays 1.0 because the
+        // filler loses by 81 points.
+        lines.push(PreLine {
+            kind: PreKind::New,
+            title: format!("Calib.Filler.{i:03}"),
+            category: String::new(),
+            size: 0,
+            date: pt - 6 * 86_400,
+            source: "CALIB".into(),
+            ..Default::default()
+        });
 
         // A music pre of the same size in every fourth window: the kind
         // veto's population. It must never rank anywhere.

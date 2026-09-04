@@ -8,10 +8,10 @@
 use nzbkit::par2::Par2Set;
 use nzbkit::par2repair::{Reconstructor, recovery_slice_locators};
 
-const MAIN: &[u8] = include_bytes!("../fixtures/par2/testset.par2");
-const VOL: &[u8] = include_bytes!("../fixtures/par2/testset.vol0+4.par2");
-const ALPHA: &[u8] = include_bytes!("../fixtures/par2/alpha.bin"); // 10 KiB
-const BETA: &[u8] = include_bytes!("../fixtures/par2/beta.bin"); // 33 KiB
+const MAIN: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/testset.par2");
+const VOL: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/testset.vol0+4.par2");
+const ALPHA: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/alpha.bin"); // 10 KiB
+const BETA: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/beta.bin"); // 33 KiB
 
 /// The fixture set: block 4096, Main order [beta (9 slices), alpha (3)].
 /// Returns (block_size, per-file (data, first_slice, n_slices) in Main

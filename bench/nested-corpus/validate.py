@@ -36,9 +36,25 @@ def run(cmd, cwd):
 
 
 def is_entry_archive(name):
-    """First volume of a set, a solo rar, or a 7z - something to extract."""
+    """First volume of a set, a solo rar, a 7z, a split 7z or a zip -
+    something to extract.
+
+    THE .zip AND .7z.001 ARMS WERE MISSING UNTIL 3 SEP 2026, and the two
+    legs that need them (r5-zip, r6-7z-split) had been graded BROKEN by
+    this file since they landed - a self-test reporting that the corpus
+    was inconsistent when what was short was its own reach. Both legs
+    hand-extract clean with one 7zz call. A leg added to generate.sh
+    whose container this predicate cannot name is reported as a broken
+    FIXTURE, which is the most expensive way for this file to be wrong:
+    it accuses the thing it exists to vouch for. Widen this and
+    try_extract together whenever a new container joins the corpus.
+    """
     low = name.lower()
-    if low.endswith(".7z"):
+    if low.endswith(".7z") or low.endswith(".zip"):
+        return True
+    # A split 7z is `stem.7z.001`, `.002`, ...; only volume one is an
+    # entry, and 7zz picks up the rest of the set from the directory.
+    if re.search(r"\.7z\.0*1$", low):
         return True
     if not low.endswith(".rar"):
         return False
@@ -55,12 +71,14 @@ def try_extract(tmp, name, pws):
     """Extract one archive with unrar/7zz, trying each password. Returns
     True on success."""
     for pw in pws:
-        if name.lower().endswith(".7z"):
+        # RAR goes to unrar; everything else this file recognises - 7z,
+        # split 7z, zip - goes to 7-Zip, which reads all three.
+        if name.lower().endswith(".rar"):
+            cmd = ["unrar", "x", "-y", "-o+", "-idq", "-p" + (pw or "-"), name]
+        else:
             cmd = [SEVENZ, "x", "-y", "-bso0", "-bsp0"]
             cmd.append("-p" + (pw or ""))
             cmd.append(name)
-        else:
-            cmd = ["unrar", "x", "-y", "-o+", "-idq", "-p" + (pw or "-"), name]
         if run(cmd, tmp).returncode == 0:
             return True
     return False

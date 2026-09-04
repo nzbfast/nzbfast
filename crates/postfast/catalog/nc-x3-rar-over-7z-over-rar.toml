@@ -1,0 +1,51 @@
+# C13 + C12 + C7 + C1: three levels, alternating formats, no recovery
+# set at all.
+
+[layout]
+name = "nc-x3-rar-over-7z-over-rar"
+seed = 174
+note = """
+The nested corpus's `x3-mixed-7z-rar-store` leg: RAR over 7z over RAR
+over the payload, three levels deep with the format changing at every
+step. The corpus files it under `extreme` because a client that
+denests by looking for one signature stops at the middle level.
+
+Written as three tables read outermost first - `[container]` is the
+posted RAR, the first `[[container.inner]]` is the 7z inside it, the
+second is the RAR inside that - which is the same order the leg's own
+name spells. Each level's archive goes into the level above it under a
+name that says both its depth and its format (`movie.inner2.7z`,
+`movie.inner1.rar`), because a mixed stack's failure is exactly the one
+that needs reading: same-named archives at two depths would make it
+ambiguous.
+
+No `[recovery]` set, deliberately. This row is about the denesting
+ladder, and a set beside it would put a verify and a possible repair in
+front of the question. The corpus's own r3 leg carries the set, and
+`nc-r3-rar-volumes-over-a-7z` is that row.
+
+Nothing here reaches the client's nested-extraction cap: the cap counts
+COMPRESSING layers only (landed as `c0b1c788a`, pinned by `36381cce6`),
+and every level of this stack is stored.
+
+The end state is the payload file alone. All three levels are spent by
+the unpacks.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+
+[[container.inner]]
+kind = "7z-stored"
+
+[[container.inner]]
+kind = "rar-stored"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -420,7 +420,7 @@ async fn sab_facade_carries_sabnzbds_own_queue_and_history_shape() {
         // whose vocabulary is five words and does not include it. So
         // these arms check what the strings SAY.
         //
-        // The exact formats live in `serve/sabcompat/units.rs`, pinned
+        // The exact formats live in `sabcompat/units.rs`, pinned
         // against a transliteration of SAB's own `to_units`; what is
         // asserted HERE is the part that needs a live payload - that
         // the wire really carries those shapes, on a real row, through
@@ -939,7 +939,10 @@ async fn nzbget_jsonrpc_facade_cycle() {
             "{st}"
         );
         rpc("rate", "[0]".into());
-        // history cleanup op is exercised by HistoryDelete once done.
+        // The history hide op, over the real HTTP surface, once the
+        // download has landed there. `HistoryDelete` is NZBGet's HIDE
+        // (the erase is `HistoryFinalDelete`), which is the verb Sonarr
+        // and Radarr actually send - so this is the *arr round trip.
         for _ in 0..100 {
             let hi = rpc("history", "[]".into());
             if hi.contains(&format!("\"NZBID\":{nzbid}")) {

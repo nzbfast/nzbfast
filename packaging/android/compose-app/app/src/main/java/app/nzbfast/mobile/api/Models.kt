@@ -57,6 +57,31 @@ data class AddResult(
     val error: String?,
 )
 
+/**
+ * `mode=update_check`: the daemon's notify-only update verdict.
+ *
+ * [current] is THE DAEMON'S version, and [available] is the release
+ * manifest's version but only when the daemon judged it newer than its
+ * own - the API arm hands back nothing at all when it is not.
+ *
+ * In on-device mode those two comparisons are the same comparison: the
+ * engine in the APK is built from the crate the APK takes its versionName
+ * from, so "newer than the engine" is "newer than this app". In server
+ * mode they are not, and the app compares [available] against its own
+ * version a second time before showing anything (see
+ * [app.nzbfast.mobile.updateIsNewer]). That second compare is what stops
+ * a phone running a current APK against somebody's older daemon being
+ * told it is out of date. It cannot close the mirror-image gap - a
+ * remote daemon that is already up to date answers `available: null`, so
+ * a stale APK pointed at a current server learns nothing - and that is a
+ * deliberate limit rather than an oversight: the alternative is a new
+ * daemon field, and the daemon half of this is shipped and frozen.
+ */
+data class UpdateStatus(
+    val current: String,
+    val available: String?,
+)
+
 /** /preview/probe: the daemon's own playability verdict for one job. */
 data class ProbeResult(
     val file: String?,
@@ -366,4 +391,21 @@ object Parse {
         body.lineSequence()
             .map { it.trim() }
             .firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
+
+    /**
+     * `mode=update_check`. Null for a check that did not answer - an
+     * unreachable channel, or a manifest the daemon REFUSED (a bad
+     * signature or a failed anti-rollback ratchet, which the daemon
+     * reports as `status:false` with the reason in `error`). The caller
+     * backs off and asks again rather than treating either as "up to
+     * date", because neither of them is that.
+     */
+    fun updateCheck(body: String): UpdateStatus? {
+        val j = JSONObject(body)
+        if (!j.optBoolean("status", false)) return null
+        return UpdateStatus(
+            current = j.optString("current", ""),
+            available = j.optString("available", "").ifEmpty { null },
+        )
+    }
 }

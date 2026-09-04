@@ -1,0 +1,79 @@
+# C12 + C1 + P1: a stored ZIP with a PAR2 set beside it - the third
+# container format on this plane, and the last leg of the nested corpus
+# that no profile could express.
+
+[layout]
+name = "nc-r5-zip-store-and-par2"
+seed = 178
+note = """
+The nested corpus's `r5-zip` leg: two files in one zip written in store
+mode, with a PAR2 set over the zip. It is the second-commonest archive
+on the wire after RAR, and it was the ONE leg of fourteen still
+unexpressible after 4 Sep 2026 closed the other six gaps.
+
+What blocked it was never a key or a plane. C12 - a container format
+that is not RAR - landed with the 7z arm, and this row selects the same
+ID. It was a dependency: `nzbkit::zip` READS a zip and nothing in this
+repo wrote one, so `crate::container` had no library to hand the shape
+to, and this crate's rule is that archives come from a library and never
+from hand-assembled header bytes. A stored zip is only four record types
+and looks temptingly easy to emit by hand; an approximation would be a
+fixture that agrees with our own reader and with nothing else, which is
+the exact failure the oracle exists to catch rather than to commit.
+
+There IS a zip writer in the tree already and it is the wrong one.
+`nzbkit::zip::fixtures` says so itself: "Deliberately hand-rolled so the
+reader is tested against bytes we control completely". It is the
+reader's own test writer, so a catalog row built on it would be one
+author's writer against the same author's reader -
+`tools/gen-zip-fixtures.py`'s header names that failure in as many
+words, which is why the committed zip interop fixtures come from
+Python's `zipfile` instead.
+
+So the arm is the `zip` crate, added to `crates/postfast/Cargo.toml`
+with the price written out beside it: MIT, one genuinely new transitive
+crate with the default features off, no shipped binary (postfast is
+`publish = false` test infrastructure), and the C3 half riding a flate2
+backend the lockfile already carried. Not a `vendor/` entry, because
+`vendor/` here is for crates this repo FORKS and nothing needs changing
+in this one.
+
+Determinism is the property that had to be checked rather than assumed.
+Zip records carry a timestamp, and the crate's `default_for_write()`
+reads the clock when its `time` feature is on. The feature is off here,
+but feature unification is a workspace-wide question no single manifest
+can promise, so `crate::zip::write_archive` pins the timestamp to the
+format's own 1980-01-01 epoch explicitly and two module tests assert it
+- one on the written bytes, one on the entry field, because a
+byte-identical pair would only catch a clock read if the two runs
+straddled a two-second DOS-time tick.
+
+Two members rather than one, matching the corpus leg, and the second
+sits under a directory: a zip carries the relative path on the entry
+itself, so `sample/clip.bin` must come back out under `sample/clip.bin`
+and not flattened. That is a requirement rather than a courtesy - the
+bytes for it are on the wire.
+
+The end state is both payload files and the PAR2 index. The zip is
+spent by the unpack the way an archive always is, and a clean run never
+fetches the parity.
+"""
+
+[source]
+files = [
+    { name = "movie.bin", bytes = 20000 },
+    { name = "sample/clip.bin", bytes = 4000 },
+]
+
+[container]
+kind = "zip-stored"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

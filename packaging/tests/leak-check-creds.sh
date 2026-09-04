@@ -26,13 +26,29 @@ DENSE=$(printf '%s%s' 'Zk8qTr3v' 'Np2mX9wL')       # 3 classes, 16 chars
 DIGITY=$(printf '%s%s' 'une29' '21688')             # lower+digit, the leaked shape
 WAIVER=$(printf '%s-%s-%s' 'leakcheck' 'allow' 'synthetic')
 
+# The three helpers are staged and NOT stubbed, for the reason
+# leak-check.sh states at each: it refuses outright when one is missing,
+# because a scanner that cannot run is not a clean tree. privrefs-scan.sh
+# derives both of its lists out of publish-public.sh, so that has to be
+# the real one too - a stub would derive an empty removal set and the
+# private-reference arm would then refuse every file the export deletes.
+# FOUR scratch roots stage this script - the four leak-check-*.sh tests -
+# and they are deliberately separate. A helper added to leak-check.sh
+# tomorrow has to be staged in ALL FOUR, and the symptom of missing one is
+# every case in that file failing with the same REFUSED line. That is how
+# this one was found, on main, ten minutes after the helper landed.
 make_repo() {
   local root=$1
   mkdir -p "$root/packaging" "$root/crates/nzbkit/src" "$root/research"
   cp "$SCRIPT" "$root/packaging/leak-check.sh"
   cp "$PKG/private-patterns.txt" "$root/packaging/private-patterns.txt"
   cp "$PKG/PUBLIC_MANIFEST" "$root/packaging/PUBLIC_MANIFEST"
-  chmod +x "$root/packaging/leak-check.sh"
+  cp "$PKG/privrefs-scan.sh" "$root/packaging/privrefs-scan.sh"
+  cp "$PKG/ci-private-strip.sh" "$root/packaging/ci-private-strip.sh"
+  cp "$PKG/publish-public.sh" "$root/packaging/publish-public.sh"
+  chmod +x "$root/packaging/leak-check.sh" \
+           "$root/packaging/privrefs-scan.sh" \
+           "$root/packaging/ci-private-strip.sh"
   git -C "$root" init -q -b main
   git -C "$root" add -A >/dev/null 2>&1
   git -C "$root" -c user.name=t -c user.email=t@t commit -qm base >/dev/null 2>&1

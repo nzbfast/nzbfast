@@ -1,0 +1,45 @@
+<!-- The four destinations, for the manual, injected by build.rs.
+
+     WHY THIS IS INJECTED AND NOT WRITTEN INTO docs/MANUAL.html. The
+     manual is published THREE ways and these links only work in one of
+     them. In-app at /manual they are correct. On gh-pages, where the
+     sixteen MANUAL.<lang>.html pages are the public website, /wall is a
+     live 404. In the offline copy inside the DMG and the Windows
+     installer the page is opened over file://, where every absolute app
+     link breaks. So the source files carry only a comment marker and
+     this block is folded in for the in-app build alone; the other two
+     copies keep a comment, which renders as nothing.
+
+     That also keeps `web/i18n/manual-check.py` quiet for free: it counts
+     `a` as a HARD tag per section and would demand the same four links
+     in all fifteen translations, but comments do not count, so the
+     source census is unchanged.
+
+     The icons resolve against the sprite in ui-tokens.html, which is
+     already substituted into every manual, so nothing here re-defines
+     them. The pill CSS is NOT in ui-tokens, so it is carried here.
+     Labels come from the locale's own catalogue - the same hdr.* keys
+     the dashboard and the wall use, so no string is invented and no new
+     translation is owed. -->
+<style>
+.appnav{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0 4px}
+.appnav a{display:inline-flex;align-items:center;gap:6px;font-size:12px;
+  color:var(--dim);border:1px solid var(--line);border-radius:99px;
+  padding:4px 11px;text-decoration:none;white-space:nowrap}
+.appnav a:hover{color:var(--fg);border-color:var(--acc)}
+.appnav a.on{color:var(--fg);background:var(--surface-2)}
+.appnav svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;
+  stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+/* A printed manual is not a place to press anything. */
+@media print{.appnav{display:none}}
+</style>
+<!-- A div and not a <nav>: the manual already has a <nav> landmark (the
+     sidebar this sits in), and a second one wants an aria-label, which
+     would mean inventing a translated string and owing 27 catalogues a
+     key. Every label below is one the catalogues already carry. -->
+<div class="appnav">
+  <a href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-dash"/></svg> @DASH@</a>
+  <a href="/wall"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wall"/></svg> @WALL@</a>
+  <a href="/#settings"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg> @SETTINGS@</a>
+  <a class="on" aria-current="page" href="/manual"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-manual"/></svg> @MANUAL@</a>
+</div>

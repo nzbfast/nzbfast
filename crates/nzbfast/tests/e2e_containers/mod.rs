@@ -174,7 +174,21 @@ async fn top_level_7z_over_the_cap_trims_and_still_streams() {
     let out = fx.dir.join("out");
 
     let (log, ok) = tokio::task::spawn_blocking(move || {
-        run_get_args(&cfg, &nzb, &out, &[], &["--mem-limit", "64M"])
+        // The direct map is held off: this test is about the TRIM, and a
+        // Copy container the map takes never retains a frontier to trim.
+        // The trim still owns every container the map declines (LZMA2,
+        // encrypted, BCJ2) and the zip chase; a stored fixture is used
+        // here because a stored container is the one whose decode keeps
+        // up with arrivals, which is the precondition the trim needs.
+        // The direct map's own behaviour at this same cap is
+        // `top_level_7z_copy_maps_direct_and_never_reaches_the_cap`.
+        run_get_args(
+            &cfg,
+            &nzb,
+            &out,
+            &[("NZBFAST_NO_7Z_DIRECT", "1")],
+            &["--mem-limit", "64M"],
+        )
     })
     .await
     .unwrap();
@@ -218,6 +232,68 @@ async fn top_level_7z_over_the_cap_trims_and_still_streams() {
     }
 }
 
+/// TODO 37 step 4: the EXACT arrangement of the demote test below - a
+/// 36 MB Copy container, a 64 MB limit, `NZBFAST_NO_7Z_TRIM=1` so the
+/// chase has no way out but the held-bytes cap - and the direct map
+/// streams it anyway.
+///
+/// That pairing is the point: the two tests differ in one environment
+/// variable and nothing else, so this one cannot pass for an incidental
+/// reason. Without the map the container is buffered whole and the only
+/// exits are the trim (held off) or the cap (demote to disk, which is
+/// what the sibling asserts). With the map it is never buffered at all -
+/// each member is one contiguous range of the pack stream and its
+/// articles go straight to the output - so the cap is not approached,
+/// nothing lands on disk, and the disk post-pass never runs.
+///
+/// Stated as behaviour; the numbers are audit round 17 (1.09-1.25 s and
+/// 1.29 GB peak down to 0.62-0.63 s and 40 MB on a 1 GiB split set at
+/// 14.6 Gbps loopback).
+#[tokio::test(flavor = "multi_thread")]
+async fn top_level_7z_copy_maps_direct_and_never_reaches_the_cap() {
+    let mut fx = Fixture::new("top7zdirect");
+    let movie = incompressible(36 << 20, 46);
+    let arch = sevenz_store_container(&[("movie.mkv", &movie)]);
+    assert!(arch.len() > 36 << 20, "fixture too small: {}", arch.len());
+    fx.add_file("release.7z", &arch, 700_000);
+    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    let (log, ok) = tokio::task::spawn_blocking(move || {
+        run_get_args(
+            &cfg,
+            &nzb,
+            &out,
+            &[("NZBFAST_NO_7Z_TRIM", "1")],
+            &["--mem-limit", "64M"],
+        )
+    })
+    .await
+    .unwrap();
+    assert!(ok, "get failed:\n{log}");
+    assert!(log.contains("extracted 1 file(s) in-stream"), "{log}");
+    assert!(log.contains("7z \u{b7} one-pass"), "{log}");
+    assert!(
+        !log.contains("held-bytes cap"),
+        "the map still went through the frontier:\n{log}"
+    );
+    assert!(
+        !log.contains("7z unpack complete"),
+        "the disk post-pass ran, so something demoted:\n{log}"
+    );
+    assert_eq!(
+        std::fs::read(fx.dir.join("out/movie.mkv")).expect("extracted file"),
+        movie,
+        "extracted bytes differ"
+    );
+    assert!(
+        !fx.dir.join("out/release.7z").exists(),
+        "the archive survived the job"
+    );
+}
+
 /// The other half of the same story: whenever a trim cannot happen, the
 /// job must land exactly where it did before trimming existed - archive
 /// materialized, disk post-pass unpacks it, payload still right.
@@ -250,7 +326,11 @@ async fn top_level_7z_over_the_cap_demotes_cleanly_when_it_cannot_trim() {
             &cfg,
             &nzb,
             &out,
-            &[("NZBFAST_NO_7Z_TRIM", "1")],
+            // The direct map goes off with the trim: a Copy container
+            // it takes never retains a frontier at all, so there is no
+            // held-bytes forfeit to observe. See its sibling in
+            // `e2e_chaseresume` for the full reasoning.
+            &[("NZBFAST_NO_7Z_TRIM", "1"), ("NZBFAST_NO_7Z_DIRECT", "1")],
             &["--mem-limit", "64M"],
         )
     })
@@ -527,23 +607,72 @@ async fn store_rar_wrapped_zip_extracts_one_pass() {
     }
 }
 
-/// The same shape, damaged - the riskiest inherited seam. A chased slot
-/// cannot take a mapped repair (its bytes are in RAM, not a file par2
-/// can patch), so the ladder must materialize the zip first, repair it
-/// on disk, and let the zip step of the disk post-pass unpack it. The
-/// silent failure this pins: a chased zip missing from the materialize
-/// sweep reads back as "file missing entirely" and the repair rebuilds
-/// nothing.
+/// The same shape, damaged - the riskiest inherited seam, and it now
+/// has TWO routes through it, so both are run.
+///
+/// A CHASED slot cannot take a mapped repair (its bytes are in RAM, not
+/// a file par2 can patch), so for a container the direct map declines -
+/// here a DEFLATED entry - the ladder must materialize the zip first,
+/// repair it on disk, and let the zip step of the disk post-pass unpack
+/// it. The silent failure that arm pins: a chased zip missing from the
+/// materialize sweep reads back as "file missing entirely" and the
+/// repair rebuilds nothing.
+///
+/// A STORED entry may be DIRECT-MAPPED (`nzbkit::extract::zip_map`), and
+/// then its bytes are in the output file already and par2 patches them
+/// there: the repair goes straight into the output and no container is
+/// ever written. That is the stored-RAR route, reached by a zip for the
+/// first time, and it is strictly the better one.
+///
+/// **WHICH ROUTE A DAMAGED STORED CONTAINER TAKES IS NOT DETERMINISTIC,
+/// and this test no longer asserts it.** It did, from `cd90cb6f7` until
+/// 3 Sep 2026, and that assertion was red on CI run 33806764772 through
+/// BOTH nextest retries; measured on this fixture afterwards it loses
+/// 1-10% of runs on a loaded box, by two independent races that live in
+/// the ENGINE and not in this file
+/// (`research/MEASURED-2026-09-03-zip-mapped-damaged-container-races.md`):
+///
+///   1. the zip worker reads the central directory FIRST (it is at the
+///      tail), and the §94 B chase verify gate pins that slot's
+///      watermark at the first damaged block - 119,780 of 900,116 here -
+///      so the read parks until settle abandons the chase and the map is
+///      never decided. It is decided at all only when the chase's
+///      frontier was built before the PAR2 set claimed the slot, i.e.
+///      with no gate attached (`NZBFAST_CHASE_VERIFY_GATE=0` takes the
+///      arm 20/20);
+///   2. when the map IS taken, the self-prove PREFIX hasher can read the
+///      container back through `Extractor::read_at` in the window around
+///      the promote and get ZEROS for the whole member data area, commit
+///      that digest, and make the mapped repair decline on a whole-file
+///      MD5 that a full reread of the same bytes passes.
+///
+/// So the arms below assert what every route owes - the job succeeds,
+/// par2 could see the archive, the repair completes, the payload is
+/// byte-exact and no container is left in the output - plus the
+/// invariant of whichever route actually ran. Do NOT put the route
+/// assertion back without fixing one of the two races first: it is the
+/// engine that is non-deterministic here, not the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn damaged_top_level_zip_materializes_repairs_and_unpacks() {
     if !have_par2() {
         eprintln!("skipping: par2 not installed");
         return;
     }
-    let mut fx = Fixture::new("topzipdmg");
+    for (tag, stored) in [("mapped", true), ("chased", false)] {
+        damaged_top_level_zip_arm(tag, stored).await;
+    }
+}
+
+/// One arm of [`damaged_top_level_zip_materializes_repairs_and_unpacks`].
+async fn damaged_top_level_zip_arm(tag: &str, stored: bool) {
+    let mut fx = Fixture::new(&format!("topzipdmg-{tag}"));
     let movie = incompressible(900_000, 48);
-    let arch =
-        nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)]);
+    let spec = if stored {
+        nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)
+    } else {
+        nzbkit::zip::fixtures::Spec::deflated("movie.mkv", &movie)
+    };
+    let arch = nzbkit::zip::fixtures::zip_of(&[spec]);
     fx.add_file("release.zip", &arch, 60_000);
     assert!(fx.add_par2(30, &["release.zip"], 60_000));
     // Two mid-archive articles vanish: enough damage to need repair,
@@ -570,17 +699,56 @@ async fn damaged_top_level_zip_materializes_repairs_and_unpacks() {
     let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
         .await
         .unwrap();
-    assert!(ok, "get failed:\n{log}");
+    assert!(ok, "{tag}: get failed:\n{log}");
     assert!(
         !log.contains("file missing entirely"),
-        "par2 could not see the chased archive:\n{log}"
+        "{tag}: par2 could not see the chased archive:\n{log}"
     );
-    assert!(log.contains("materializing volumes for repair"), "{log}");
-    assert!(log.contains("repair complete"), "no repair:\n{log}");
+    let mapped_repair = log.contains("rebuilt directly into the output");
+    // The stored container is direct-mapped and its mapped repair
+    // finishes, EVERY run: race 1 decided whether the map was screened
+    // at all, race 2 whether a screened map's repair was kept, and both
+    // are fixed. The decline line is named in the message because it
+    // separates the two at a glance if one ever comes back - present
+    // means the map WAS taken and race 2 is the suspect, absent means
+    // the tail read never got off the verify gate.
+    assert_eq!(
+        stored,
+        mapped_repair,
+        "{tag}: wrong route (mapped repair declined: {}):\n{log}",
+        log.contains("mapped repair declined")
+    );
+    if stored && mapped_repair {
+        // The mapped route ran: the damaged blocks were patched in the
+        // OUTPUT, so nothing may have been materialized on the way.
+        assert!(
+            !log.contains("materializing volumes for repair"),
+            "{tag}: a mapped repair and a materialize in one run:\n{log}"
+        );
+    } else {
+        // Every other route - the chased arm by construction, the stored
+        // arm whenever either race in this test's header went the other
+        // way - materializes the container, repairs it on disk and lets
+        // the disk pass unpack it.
+        assert!(
+            log.contains("materializing volumes for repair"),
+            "{tag}: neither route ran - no mapped repair and no \
+             materialize:\n{log}"
+        );
+    }
+    // Owed by EVERY route, and the reason the arms above may branch: the
+    // container is an intermediate, so it is swept whether it was
+    // materialized for the repair or never written at all. A leftover
+    // here is the shape the materialize sweep used to miss.
+    assert!(
+        !fx.dir.join("out/release.zip").exists(),
+        "{tag}: the container was left in the output:\n{log}"
+    );
+    assert!(log.contains("repair complete"), "{tag}: no repair:\n{log}");
     assert_eq!(
         std::fs::read(fx.dir.join("out/movie.mkv")).expect("payload after repair"),
         movie,
-        "payload differs after repair + post-pass"
+        "{tag}: payload differs after repair + post-pass"
     );
 }
 

@@ -1,0 +1,57 @@
+# G5: two FileDesc packets over ONE copy of the bytes, and both files
+# have to land.
+
+[layout]
+name = "cc-n24-dedupe-two-descriptors-one-copy"
+seed = 2401
+note = """
+Expresses bench/capability-corpus leg n24-dedupe-descriptors.
+
+MultiPar's dedupe shape. A poster holding two files with identical
+content ships one copy of the bytes and two descriptors, buying a whole
+duplicate file for a couple of kilobytes: the set describes
+Copy.One.bin and Copy.Two.bin at the same length with the same content
+hashes, and exactly one of them is on the wire. A PAR2 file id is
+hashed over the NAME as well as the content, so the two descriptors are
+distinct and agree about everything else, which is the pairing the
+client has to notice.
+
+WHAT MAKES IT A REQUIREMENT AND NOT A CURIOSITY: both names must land,
+byte-exact. A client that files the posted copy under one name and
+reports the other missing has failed a post that is complete, and a
+client that fetched the bytes twice would have paid for a file the
+poster deliberately did not send.
+
+It is the same described-and-never-posted mechanism P5 uses, and a
+different requirement. A P5 placeholder is empty, so materialising it
+costs nothing and cc-n31 asserts it happens; this copy is 120,000 bytes
+that arrive exactly once, so the second file has to be WRITTEN from the
+first rather than created.
+
+The post is intact, so the run repairs nothing and the adopt guard
+refuses a run that got here from parity - the set is doing naming work
+here, not recovery work, which is exactly what a P3 row is for.
+"""
+
+[source]
+files = [
+    { name = "Copy.One.bin", bytes = 120000 },
+    { name = "Copy.Two.bin", bytes = 120000, same_as = "Copy.One.bin" },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

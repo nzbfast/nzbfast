@@ -7,57 +7,43 @@
 // reputation scoring that flagged us. nzbtray.exe has had a version
 // resource all along, so this brings the daemon in line with it.
 //
-// It has a SECOND job since R10/C9 that has nothing to do with Windows:
-// `precompress_pages` gzips the immutable embedded pages (the i18n
-// catalogues and the manuals) so the binary carries the compressed
-// member rather than 9.0 MB of plain text. That runs on every target -
-// see the note above the early return in main().
+// IT USED TO HAVE A SECOND JOB and does not any more: `precompress_pages`
+// gzipped the immutable embedded pages into OUT_DIR, and it moved to
+// `crates/nzbfast-api/build.rs` with the `include_bytes!` sites that
+// read its output (lane 3 of Option C). `env!("OUT_DIR")` names the
+// OUT_DIR of the package being compiled, so the two halves cannot be
+// apart - a member written here is unreachable from a file in another
+// crate. Everything left below is about the EXE.
 //
 // TWIN FILE: crates/nzbtray/build.rs does the same job for the tray and
 // carries the same rc_path / find_rc_exe / compile_rc_* helpers. They
 // diverged once - §172 fixed the tray for MSVC and left this one on
 // windres - and the ARM64 release job is the ONLY thing in CI that
 // catches that (see compile_rc_msvc below). Change both together.
+//
+// IT HAS A SECOND JOB AGAIN, and this one runs on EVERY target rather
+// than only Windows: `emit_layout_tests` writes one nextest test per
+// posting-layout profile in `crates/postfast/catalog/`. Its own header
+// says why the tests are generated instead of looped over, and it runs
+// BEFORE the `CARGO_CFG_WINDOWS` early return below - a step added
+// after that return would silently never run on this fleet.
 
 fn main() {
+    emit_layout_tests();
     println!("cargo:rerun-if-changed=../../packaging/icon/nzbfast.ico");
     println!("cargo:rerun-if-changed=../../packaging/windows/nzbfast.manifest");
-    // Beta serial: local deploys and tester builds carry "beta N" after
-    // the version so anyone can tell a between-releases build from the
-    // published release it grew out of. packaging/beta-serial.txt is
-    // bumped by the deploy-daemon / release-bundle workflows and RESET
-    // TO 0 by publish-release, so a release build shows a bare version.
-    // Missing file or 0 (or a public-repo build, which has no file)
-    // means "not a beta": the suffix simply never appears.
-    println!("cargo:rerun-if-changed=../../packaging/beta-serial.txt");
-    let beta =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/beta-serial.txt");
-    let beta = std::fs::read_to_string(beta)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .filter(|&n| n > 0)
-        .map(|n| n.to_string())
-        .unwrap_or_default();
-    println!("cargo:rustc-env=NZBFAST_BETA={beta}");
-
-    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    // Every target, before the Windows-only half below returns - but
-    // only when the browser-facing pages are being compiled IN. Without
-    // the `dashboard` feature (TODO 281 IO3b: the store build, and both
-    // phones) nothing includes these members, so gzipping 11.5 MB of
-    // catalogues and manuals into OUT_DIR is work whose whole output is
-    // discarded. `CARGO_FEATURE_DASHBOARD` is cargo's own spelling of the
-    // feature for a build script, and the `include_bytes!` sites that
-    // read these keys carry the SAME cfg - so a build that skips this
-    // cannot reach a missing file.
-    if std::env::var_os("CARGO_FEATURE_DASHBOARD").is_some() {
-        precompress_pages(&root, &out);
-    }
+    // THE BETA SERIAL MOVED with `precompress_pages`, to
+    // `crates/nzbfast-api/build.rs` (lane 3 of Option C). `env!` reads
+    // the environment of the package being COMPILED, and its one reader
+    // - the `beta` field of `mode=version` - is `api/system.rs`, which
+    // is in that crate now. A `cargo:rustc-env` set here would simply
+    // not be visible there.
 
     if std::env::var("CARGO_CFG_WINDOWS").is_err() {
         return;
     }
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let Ok(ico) = root.join("packaging/icon/nzbfast.ico").canonicalize() else {
         println!("cargo:warning=nzbfast.ico missing - building without an embedded icon");
         return;
@@ -116,6 +102,108 @@ END
     } else {
         compile_rc_msvc(&rc, &out);
     }
+}
+
+/// Write one `#[tokio::test]` per profile in the posting-layout
+/// catalog, each a one-line call into the shared runner.
+///
+/// ref-gate: the destination is `$OUT_DIR/layouts_gen.rs`, which no
+/// tree path names because the build writes it - the includer is
+/// `crates/nzbfast/tests/integration/layouts.rs`, and that file is
+/// where a reader should start.
+///
+/// WHY ONE TEST PER PROFILE AND NOT A LOOP OVER THE DIRECTORY. A loop
+/// inside one test gives one test NAME, so a failure says "layouts
+/// failed" and a bisect runs the whole catalog to reach the one row it
+/// cares about. Generated names make a failure self-describing, make
+/// `-E 'test(layout_n2_opaque_c0_p0)'` a single row, and keep the test
+/// file free of a case table that would walk it toward a size-gate
+/// ceiling as the catalog grows. Spec section 9.2
+/// (research/SPEC-POSTING-LAYOUT-TOOLKIT-2026-09-03.md) states the rule
+/// and says a directory loop is refused by review.
+///
+/// FAILING TO FIND IS FAILING. A catalog this cannot read, or one that
+/// yields no profile, is a build error rather than an empty file: an
+/// empty `layouts_gen.rs` is a test target that passes over nothing,
+/// which is the rubber stamp the whole toolkit exists to make
+/// impossible.
+fn emit_layout_tests() {
+    let catalog = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../postfast/catalog");
+    // The DIRECTORY, not each file: a profile ADDED tomorrow has to
+    // re-run this script, and a per-file list only re-runs when a file
+    // already known changes. Cargo watches the directory's mtime, which
+    // moves on create and on delete.
+    println!("cargo:rerun-if-changed={}", catalog.display());
+
+    let entries = std::fs::read_dir(&catalog).unwrap_or_else(|e| {
+        panic!(
+            "the layout catalog at {} is unreadable: {e}",
+            catalog.display()
+        )
+    });
+    let mut stems: Vec<String> = Vec::new();
+    for entry in entries {
+        let path = entry.expect("a readable catalog directory entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        // A profile changing its own bytes must re-run this too, or a
+        // renamed `[layout] name` leaves a stale generated file behind.
+        println!("cargo:rerun-if-changed={}", path.display());
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_else(|| panic!("{} has no usable file stem", path.display()))
+            .to_string();
+        stems.push(stem);
+    }
+    // read_dir order is unspecified, so sort rather than trust it: the
+    // generated file is an input to the build fingerprint, and a set of
+    // tests that reorders run to run rewrites it for no reason.
+    stems.sort();
+    assert!(
+        !stems.is_empty(),
+        "no .toml profiles under {} - the layouts target would pass over nothing",
+        catalog.display()
+    );
+
+    let mut out = String::from(
+        "// GENERATED by crates/nzbfast/build.rs from crates/postfast/catalog/*.toml.\n\
+         // Do not edit: add a PROFILE, not a test.\n",
+    );
+    for stem in &stems {
+        let ident = test_ident(stem);
+        // `multi_thread`, because the mock server has to keep answering
+        // while the blocking child process runs - the flavour every
+        // `run_norar` caller in `e2e.rs` already dials, for that reason.
+        out.push_str(&format!(
+            "\n#[tokio::test(flavor = \"multi_thread\")]\nasync fn {ident}() {{\n    \
+             runner::run(\"{stem}\").await;\n}}\n"
+        ));
+    }
+    let dest = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("layouts_gen.rs");
+    std::fs::write(&dest, out).unwrap_or_else(|e| panic!("writing {}: {e}", dest.display()));
+}
+
+/// `n2-opaque-c0-p0` to `layout_n2_opaque_c0_p0`.
+///
+/// Only the characters a catalog filename is allowed to carry are
+/// mapped, and anything else is REFUSED rather than smoothed away: two
+/// stems that folded onto one identifier would be a build error nobody
+/// could read, and silently dropping a character is how a profile ends
+/// up named after a different one.
+fn test_ident(stem: &str) -> String {
+    assert!(
+        !stem.is_empty() && stem.starts_with(|c: char| c.is_ascii_lowercase()),
+        "catalog profile {stem:?} must start with a lowercase ascii letter"
+    );
+    assert!(
+        stem.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'),
+        "catalog profile {stem:?} must be lowercase ascii, digits, '-' and '_' only - it \
+         becomes a rust test name"
+    );
+    format!("layout_{}", stem.replace('-', "_"))
 }
 
 /// Spell a path the way an .rc file wants it.
@@ -238,110 +326,4 @@ fn find_rc_exe() -> Option<std::path::PathBuf> {
     // order over `10.0.<build>.0` directory names is version order.
     found.sort();
     found.pop()
-}
-
-/// Compress the embedded pages that CANNOT change between builds, and
-/// compute their validators here rather than per request (R10 / Codex
-/// C9).
-///
-/// The 27 i18n catalogues and the 16 manuals are 9.0 MB of plain text
-/// in the binary's read-only data - a quarter of the whole executable -
-/// and every byte of them goes to a browser that would have taken gzip.
-/// Embedding the gzip MEMBER instead costs 2.8 MB (-69%), and the
-/// request path stops deflating a 250 KB catalogue on every fetch: the
-/// ETag lands beside it as a string constant, so a revalidation is a
-/// header compare with no page to build and nothing to hash.
-///
-/// Only pages with no per-request input may pass through here. The
-/// manuals have exactly one substitution - `__NZBFAST_UI_TOKENS__`, the
-/// shared design system - and its input is another compiled-in file, so
-/// it is folded in HERE and the manual route no longer calls
-/// `ui_themed`. The dashboard and the wall are deliberately NOT in this
-/// set: they carry daemon state (locale, indexer switches) and are
-/// cached at run time instead, keyed on those inputs.
-///
-/// The keys written here are named one by one in
-/// `crates/nzbfast/src/serve/assets.rs`, so a locale that loses its file
-/// is a compile error naming the key, not a page that quietly stops
-/// being served.
-fn precompress_pages(root: &std::path::Path, out: &std::path::Path) {
-    let tokens_at = root.join("web/ui-tokens.html");
-    println!("cargo:rerun-if-changed={}", tokens_at.display());
-    let tokens = std::fs::read_to_string(&tokens_at)
-        .unwrap_or_else(|e| panic!("{}: {e}", tokens_at.display()));
-
-    // The DIRECTORY dependency catches an added or removed locale; the
-    // per-file ones inside `emit_page` catch an edited translation.
-    for (dir, key, prefix, suffix, themed) in [
-        (root.join("web/i18n"), "i18n", "", ".json", false),
-        (root.join("docs/i18n"), "manual", "MANUAL.", ".html", true),
-    ] {
-        println!("cargo:rerun-if-changed={}", dir.display());
-        let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // Two lowercase letters and nothing else, which is what every
-            // UI locale tag is. It is also what keeps the translators'
-            // own files out: `en.reference.json` sits in web/i18n and is
-            // not a served catalogue.
-            let Some(tag) = name
-                .strip_prefix(prefix)
-                .and_then(|n| n.strip_suffix(suffix))
-                .filter(|t| t.len() == 2 && t.bytes().all(|b| b.is_ascii_lowercase()))
-            else {
-                continue;
-            };
-            let tokens = themed.then_some(tokens.as_str());
-            emit_page(&entry.path(), out, &format!("{key}-{tag}"), tokens);
-        }
-    }
-    // English is the source language: its manual is the one at the top
-    // of docs/, not a translation.
-    emit_page(
-        &root.join("docs/MANUAL.html"),
-        out,
-        "manual-en",
-        Some(&tokens),
-    );
-}
-
-/// Write one asset's gzip member and its ETag into OUT_DIR under `key`.
-fn emit_page(src: &std::path::Path, out: &std::path::Path, key: &str, tokens: Option<&str>) {
-    use std::io::Write as _;
-    println!("cargo:rerun-if-changed={}", src.display());
-    let body = std::fs::read(src).unwrap_or_else(|e| panic!("{}: {e}", src.display()));
-    let body = match tokens {
-        // The one substitution an immutable page has, folded in once
-        // here instead of once per request - `ui_themed`'s job, done at
-        // build time. A page that does not name the placeholder simply
-        // keeps its bytes.
-        Some(t) => String::from_utf8(body)
-            .unwrap_or_else(|e| panic!("{}: {e}", src.display()))
-            .replace("__NZBFAST_UI_TOKENS__", t)
-            .into_bytes(),
-        None => body,
-    };
-
-    // FNV-1a over the FINAL bytes, byte for byte the function
-    // serve/webasset.rs runs for the pages it still builds per request.
-    // The two kinds of asset therefore carry the same shape of
-    // validator, and a browser cannot tell them apart.
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in &body {
-        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
-    }
-    let etag = out.join(format!("{key}.etag"));
-    std::fs::write(&etag, format!("\"{h:016x}\""))
-        .unwrap_or_else(|e| panic!("{}: {e}", etag.display()));
-
-    // Level 9 rather than the request path's 6: this runs once per
-    // build, not once per load, so there is no reason to leave bytes on
-    // the table. flate2 stamps mtime 0, so the member is byte-identical
-    // from one build of the same input to the next - a rebuild that
-    // changes nothing must not change the ETag.
-    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(9));
-    enc.write_all(&body).expect("gzip to a Vec");
-    let gz = out.join(format!("{key}.gz"));
-    std::fs::write(&gz, enc.finish().expect("gzip trailer"))
-        .unwrap_or_else(|e| panic!("{}: {e}", gz.display()));
 }

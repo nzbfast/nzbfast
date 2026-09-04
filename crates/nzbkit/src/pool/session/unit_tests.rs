@@ -47,6 +47,7 @@ fn server(host: &str) -> ServerConfig {
         max_source_ips: None,
         address_family: Default::default(),
         tls_hostname: None,
+        warm_reserve: None,
     }
 }
 
@@ -86,6 +87,167 @@ fn dead_port() -> u16 {
     l.local_addr().expect("local addr").port()
 }
 
+/// TODO 313 item 2, and it is the plumbing the whole mechanism rests
+/// on: while a spill episode is live, a HEAD worker parked under a
+/// lowered `ConnTarget` gives its account permit back for as long as it
+/// is parked, and takes one again on the way out.
+///
+/// Without it a walk-down frees nothing anybody else can use. The
+/// worker parks holding no connection but still holding the permit, so
+/// the lease reads the account as fully subscribed and the job spilled
+/// behind this one blocks in `acquire` on a slot standing empty - the
+/// mechanism looks wired, moves no sockets, and the only symptom is a
+/// second job that never starts.
+#[tokio::test]
+async fn a_spill_head_gives_its_permit_back_while_it_is_parked() {
+    use crate::pool::handoff::{ConnBudget, SpillGate, SpillRole, SpillSeat};
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    let mut finished = sh.finished.subscribe();
+    let budget = ConnBudget::new();
+    // Cap 3, so a download may hold 2 and one is the post-processing
+    // reserve. Two workers, one admission: one runs, one parks.
+    let lease = budget.lease("acct", 3);
+    let gate = SpillGate::new();
+    // The governor has opened an episode: this head is lending.
+    gate.open();
+    let target = ConnTarget::new(1);
+    let cfg = PoolConfig {
+        live_target: Some(target.clone()),
+        lease: Some(lease.clone()),
+        spill: Some(SpillSeat {
+            gate: gate.clone(),
+            role: SpillRole::Head,
+            sockets: 0,
+        }),
+        ..Default::default()
+    };
+    // The worker that keeps its slot, holding a permit like any worker
+    // with a socket.
+    let mut held: Option<Admitted> = None;
+    let mut held_permit = Some(lease.acquire().await);
+    assert!(
+        pre_dial_gates(
+            &cfg,
+            0,
+            &mut held,
+            &mut held_permit,
+            0,
+            &mut None,
+            &mut finished,
+            &sh
+        )
+        .await
+    );
+    assert!(held.is_some() && held_permit.is_some());
+    assert_eq!(lease.snapshot(), (1, 3));
+
+    // The second worker: admitted nowhere, and holding a permit it took
+    // before the target moved under it.
+    let sh2 = sh.clone();
+    let cfg2 = cfg.clone();
+    let mut parked_finished = sh.finished.subscribe();
+    let l2 = lease.clone();
+    let parked = tokio::spawn(async move {
+        let mut admit = None;
+        let mut permit = Some(l2.acquire().await);
+        let ok = pre_dial_gates(
+            &cfg2,
+            0,
+            &mut admit,
+            &mut permit,
+            0,
+            &mut None,
+            &mut parked_finished,
+            &sh2,
+        )
+        .await;
+        // The permit itself, not a bool: dropping it inside the task
+        // would put the account back to one held before the assertion
+        // below could see the re-take.
+        (ok, admit.is_some(), permit)
+    });
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        lease.snapshot(),
+        (1, 3),
+        "the parked worker's permit is back on the account - a spilled \
+         lane can take it"
+    );
+    assert!(!parked.is_finished(), "and it is still parked");
+
+    // Reclaim: the target rises, the worker is re-admitted, and it takes
+    // a permit again before it may go anywhere near a dial.
+    target.set(2);
+    let (ok, admitted, permit) = tokio::time::timeout(Duration::from_secs(5), parked)
+        .await
+        .expect("a raised target re-admits the parked worker")
+        .unwrap();
+    assert!(ok && admitted, "re-admitted");
+    assert!(permit.is_some(), "and holding an account permit again");
+    assert_eq!(lease.snapshot(), (2, 3));
+    drop(permit);
+    let _ = sh.finished.send(true);
+}
+
+/// The same park with NO spill episode open keeps the permit, which is
+/// the shipped behaviour verbatim. One trigger, one behaviour: outside
+/// a spill nothing is waiting on the lease mid-run, so a release would
+/// change no outcome and would put a re-acquire in the path of the
+/// TODO 112 walker and the line-cap governor.
+#[tokio::test]
+async fn an_ordinary_parked_worker_keeps_its_permit() {
+    use crate::pool::handoff::{ConnBudget, SpillGate, SpillRole, SpillSeat};
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    let budget = ConnBudget::new();
+    let lease = budget.lease("acct", 3);
+    let gate = SpillGate::new();
+    let target = ConnTarget::new(1);
+    let cfg = PoolConfig {
+        live_target: Some(target.clone()),
+        lease: Some(lease.clone()),
+        // Seated, and the gate never opens - the default-off case.
+        spill: Some(SpillSeat {
+            gate,
+            role: SpillRole::Head,
+            sockets: 0,
+        }),
+        ..Default::default()
+    };
+    let held = lease.acquire().await;
+    sh.admitted[0].store(1, Ordering::SeqCst);
+    let sh2 = sh.clone();
+    let cfg2 = cfg.clone();
+    let mut f2 = sh.finished.subscribe();
+    let l2 = lease.clone();
+    let parked = tokio::spawn(async move {
+        let mut admit = None;
+        let mut permit = Some(l2.acquire().await);
+        pre_dial_gates(
+            &cfg2,
+            0,
+            &mut admit,
+            &mut permit,
+            0,
+            &mut None,
+            &mut f2,
+            &sh2,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        lease.snapshot(),
+        (2, 3),
+        "with the gate shut a parked worker holds its permit exactly as \
+         it always did"
+    );
+    let _ = sh.finished.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(5), parked).await;
+    drop(held);
+}
+
 /// The three gates every pass through `session_loop` clears before it
 /// goes near a dial. The ORDER is load-bearing (a worker that is leaving
 /// must not sit out a 30 s sleep on the way out) and so is the last
@@ -104,6 +266,7 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
         !pre_dial_gates(
             &cfg,
             0,
+            &mut None,
             &mut None,
             MAX_SESSION_ATTEMPTS,
             &mut armed,
@@ -128,7 +291,19 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
         ..Default::default()
     };
     let mut held: Option<Admitted> = None;
-    assert!(pre_dial_gates(&cfg, 0, &mut held, 0, &mut None, &mut finished, &sh).await);
+    assert!(
+        pre_dial_gates(
+            &cfg,
+            0,
+            &mut held,
+            &mut None,
+            0,
+            &mut None,
+            &mut finished,
+            &sh
+        )
+        .await
+    );
     assert!(held.is_some(), "the first worker takes the admission");
     let sh2 = sh.clone();
     let cfg2 = cfg.clone();
@@ -139,6 +314,7 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
             &cfg2,
             0,
             &mut admit,
+            &mut None,
             0,
             &mut None,
             &mut parked_finished,
@@ -164,7 +340,8 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
     let mut f3 = sh.finished.subscribe();
     let parked = tokio::spawn(async move {
         let mut admit = None;
-        pre_dial_gates(&cfg3, 0, &mut admit, 0, &mut None, &mut f3, &sh3).await && admit.is_some()
+        pre_dial_gates(&cfg3, 0, &mut admit, &mut None, 0, &mut None, &mut f3, &sh3).await
+            && admit.is_some()
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
@@ -185,7 +362,19 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
     sh.draining.store(true, Ordering::Release);
     let mut armed = Some(Duration::from_secs(30));
     let started = tokio::time::Instant::now();
-    assert!(pre_dial_gates(&cfg, 0, &mut None, 0, &mut armed, &mut finished, &sh).await);
+    assert!(
+        pre_dial_gates(
+            &cfg,
+            0,
+            &mut None,
+            &mut None,
+            0,
+            &mut armed,
+            &mut finished,
+            &sh
+        )
+        .await
+    );
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "a drain must not wait out the whole backoff"
@@ -195,7 +384,17 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
     let _ = sh.finished.send(true);
     let mut armed = Some(Duration::from_secs(30));
     assert!(
-        !pre_dial_gates(&cfg, 0, &mut None, 0, &mut armed, &mut finished, &sh).await,
+        !pre_dial_gates(
+            &cfg,
+            0,
+            &mut None,
+            &mut None,
+            0,
+            &mut armed,
+            &mut finished,
+            &sh
+        )
+        .await,
         "a finished run ends the worker inside its backoff"
     );
 }

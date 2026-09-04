@@ -12,7 +12,7 @@
 // field off it unconditionally threw a TypeError that blanked the whole
 // server list and aborted the rest of Settings with it.
 //
-// A companion Rust test (serve/assets.rs) holds the same line in CI,
+// A companion Rust test (assets.rs) holds the same line in CI,
 // where node is not assumed.
 const fs = require('fs');
 

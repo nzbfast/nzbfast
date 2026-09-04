@@ -1,0 +1,1489 @@
+//! StreamHub and SeekCtl: the read-side coordination handles the daemon's /stream path shares with the download pipeline.
+//!
+//! Split out of main.rs verbatim; behaviour unchanged.
+
+use crate::*;
+
+// The side-fetch cancel handle lived in `repair::sidefetch` until the
+// crate-split prep (step 1 of
+// research/PLAN-NZBFAST-CRATE-SPLIT-2026-09-01.md). `tail_cancel` below
+// holds one per owning job - this module IS where they live for as long
+// as they matter - so the type sitting up in the repair ladder had the
+// hub's own field type reaching a layer above it. `repair` re-exports
+// it, so every caller spells it exactly as before.
+/// A sticky cancel handle for one owner's recovery-volume side-fetches.
+///
+/// Two halves, because neither alone is a cancel wire:
+///
+/// - `QueueControl::abort` only reaches the pool the handle is attached
+///   to RIGHT NOW. A cancel arriving between two volumes, or in the
+///   window before `fetch_all_multi_ctl` attaches, is a silent no-op and
+///   the fetch runs to completion - which is the bug this exists to
+///   close, just narrower. So the latch is the durable half: once set it
+///   refuses every later side-fetch outright and keeps re-aborting the
+///   one in flight (see [`SideCancel::guard`]).
+/// - The latch alone cannot drop an in-flight read. A blackholed
+///   provider's retry ladder is minutes long; only the pool abort ends
+///   it promptly.
+///
+/// The speculative prefetch (get/workers.rs) shares its own `stop` flag
+/// through [`SideCancel::over`] rather than carrying a second mechanism.
+pub struct SideCancel {
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    /// `pub` for ONE caller: `repair::sidefetch` attaches this control
+    /// to the pool it is about to fetch through, which is the half of
+    /// the wire a latch cannot do. (`pub(crate)` until the crate-split
+    /// step 2 cut, which put that caller in another crate.)
+    pub ctl: Arc<nzbkit::pool::QueueControl>,
+}
+
+/// `new()` is the real constructor and this defers to it, rather than
+/// the other way round: the name a reader looks for on a cancel handle
+/// is `new`, and `Default` exists because a `pub fn new()` with no
+/// arguments in a library owes one (clippy's `new_without_default`).
+impl Default for SideCancel {
+    fn default() -> Self {
+        SideCancel::new()
+    }
+}
+
+impl SideCancel {
+    /// A handle with its own latch - what the daemon registers per job.
+    pub fn new() -> Self {
+        SideCancel::over(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    /// A handle over a latch the caller already owns and reads itself.
+    pub fn over(flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        SideCancel {
+            flag,
+            ctl: Arc::new(nzbkit::pool::QueueControl::default()),
+        }
+    }
+
+    /// Stop this owner's side-fetches: refuse the ones not yet started,
+    /// drop the reads of the one in flight. Idempotent.
+    pub fn cancel(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::Release);
+        self.ctl.abort();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Run one side-fetch under this handle, keeping the pool abort
+    /// live for its whole duration.
+    ///
+    /// The ticker is not laziness about a wake-up primitive: the pool a
+    /// `cancel()` needs to abort may not be attached yet when the call
+    /// arrives, so the abort has to be re-tried until the fetch returns.
+    /// Same shape, same reason as the prefetch watcher this replaces
+    /// (Codex 5 Aug M3) - 250 ms is well inside a user's patience and
+    /// costs one timer per volume.
+    pub async fn guard<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
+        let flag = self.flag.clone();
+        let ctl = self.ctl.clone();
+        let watcher = tokio::spawn(async move {
+            loop {
+                if flag.load(std::sync::atomic::Ordering::Acquire) {
+                    ctl.abort();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        });
+        let out = fut.await;
+        watcher.abort();
+        out
+    }
+}
+
+/// The UX §15 plan pair for ONE run - see [`StreamHub::fetch`].
+#[derive(Debug, Default)]
+pub struct FetchCounters {
+    pub plan: Arc<std::sync::atomic::AtomicU64>,
+    pub done: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl FetchCounters {
+    /// (accounted-for, planned, still to fetch), or None before the plan
+    /// is published.
+    pub fn left(&self) -> Option<(u64, u64, u64)> {
+        use std::sync::atomic::Ordering;
+        let plan = self.plan.load(Ordering::Relaxed);
+        if plan == 0 {
+            return None;
+        }
+        // Clamped, not trusted: the two counters are independent atomics
+        // and a reader can land between the plan store and the adds that
+        // follow it. Better a percentage that pauses at 100 than one that
+        // prints 103% or an underflowed remainder.
+        let done = self.done.load(Ordering::Relaxed).min(plan);
+        Some((done, plan, plan - done))
+    }
+}
+
+/// Which route a RESUMED run took through §94 A's admission gate
+/// (`get::plan::resume_map_admitted`), and the figures that gate weighed
+/// to decide it.
+///
+/// TODO 309, mitigation 3's open half. The two routes are the largest
+/// per-job cost difference this engine has - 1.02x payload of device I/O
+/// for the replay against 2.53x for rebuilding the volumes on disk - and
+/// nothing chooses between them but the gate, so a user never pressed
+/// anything to land on either. Until this existed the only trace was one
+/// `info!` on the `resume` target, hours earlier in a busy daemon log
+/// with nothing tying it to the job; the download report, which is the
+/// artefact somebody actually sends when a job was slow, could not
+/// answer "did this one pay 2.5x, and why".
+///
+/// Reported only where the gate had something to weigh, i.e. where the
+/// journal described bytes to replay. A fresh run has none, and neither
+/// does a resumed COMPRESSED set - its output bytes are DECODED bytes,
+/// so no fragment can be described as sitting on disk and the journal
+/// holds one record (measured: 72 bytes for a 2.1 GB `-m3` set). Absent
+/// therefore reads as "this run replayed nothing", which is what keeps a
+/// non-resumed job's report unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResumeRoute {
+    /// True: the restored spans were replayed back through the extractor
+    /// and the run finished in one pass. False: the restore materialized
+    /// volume files and the run unpacked them from disk.
+    pub mapped: bool,
+    /// `ResumeState::placement_bytes()` - every fragment of every
+    /// placement record, which is what arm 1 of the gate weighs.
+    pub restored_bytes: u64,
+    /// The raw held-span budget arm 1 weighed `restored_bytes` against.
+    pub budget_bytes: u64,
+    /// The widest single restored slot, which is what arm 2 weighs -
+    /// TODO 309(a) measured the replay's held peak tracking ONE VOLUME
+    /// and not the total, by up to 200x.
+    pub widest_slot_bytes: u64,
+    /// What a pipeline joining the process holds ledger now could seat
+    /// of the budget, which is the quantity arm 2 spends.
+    pub seatable_bytes: u64,
+}
+
+/// Live handle the daemon's streaming endpoint uses to reach the active
+/// download's output writers (M11). `get` installs its extractor here for
+/// the duration of the run.
+#[derive(Default)]
+pub struct StreamHub {
+    /// The active download's extractor, tagged with its owning nzo_id ("" for
+    /// a CLI download with no daemon owner). The tag lets a /stream request
+    /// clone the extractor and confirm ownership in ONE lock acquisition
+    /// (see [`StreamHub::extractor_for`]), so a job transition can never hand
+    /// a request another job's extractor between the owner check and the
+    /// clone.
+    pub extractor: std::sync::Mutex<Option<(String, Arc<nzbkit::extract::Extractor>)>>,
+    /// UX §15 fetch progress for the queue row, in the ONE unit the
+    /// queue's denominator is quoted in: bytes as the NZB declares them.
+    /// `fetch_plan` is what the active run is responsible for, `fetch_done`
+    /// how much of it is accounted for (arrived, already on disk from a
+    /// resume, or terminally missing). The percentage they make therefore
+    /// reaches exactly 100% at net-drain and cannot exceed it - unlike the
+    /// decoded-payload-over-encoded-minus-recovery fraction it replaced,
+    /// which stopped near 97% on clean sets and pinned at 100% with
+    /// articles still in flight on damaged ones.
+    ///
+    /// The daemon zeroes both at the Downloading transition and
+    /// `get_with_progress` publishes the plan before the first article can
+    /// land; a zero plan means "no run owns these yet" and every reader
+    /// falls back rather than dividing by it.
+    ///
+    /// One PAIR PER RUN, behind a lock, since the cross-job hand-over
+    /// (`nzbkit::pool::handoff`): job N's pipeline keeps adding its last
+    /// in-flight articles to the `done` handle it took at its start for
+    /// seconds after job N+1 has claimed the hub, so a shared counter
+    /// zeroed at the transition credited N's tail to N+1's bar. The
+    /// daemon installs a fresh pair at every transition
+    /// (`fresh_fetch_counters`); a pipeline clones the handles once
+    /// (`fetch_counters`) and never looks at the hub for them again.
+    pub fetch: std::sync::Mutex<Arc<FetchCounters>>,
+    /// Unix seconds of the YOUNGEST article in the ACTIVE run's NZB, or
+    /// 0 for "we do not know" - which is NOT the same as "posted just
+    /// now" and must never be read as it.
+    ///
+    /// The live twin of [`crate::diag::LossCauses::post_age_days`], and
+    /// deliberately the same reading: a post nobody carries YET and a
+    /// post nobody carries ANY MORE are the same picture from inside the
+    /// pool (every article 430, nothing arriving), and only the calendar
+    /// tells them apart. The failure summary has had that calendar since
+    /// 16 Aug; §129 4b's live verdict had no way to reach it, so a
+    /// download slowed to a crawl by a release that was minutes old read
+    /// exactly like one slowed by a takedown - and the user's move is
+    /// opposite in the two cases.
+    ///
+    /// Unknown when ANY file in the NZB carries no usable date, matching
+    /// what `take_census` does with a partially-dated NZB (its per-file
+    /// minimum age collapses to 0 for exactly that reason). Published by
+    /// `build_fetch_plan` beside `fetch_plan` and zeroed with it at the
+    /// Downloading transition, so no reader can pair one job's date with
+    /// another job's counters.
+    pub post_unix: std::sync::atomic::AtomicI64,
+    /// M14h dashboard feeds: in-stream verifier + per-server pool gauges
+    /// of the ACTIVE download.
+    pub verifier: std::sync::Mutex<Option<Arc<nzbkit::live::LiveVerifier>>>,
+    pub pool_live: std::sync::Mutex<Option<Arc<nzbkit::pool::LiveStats>>>,
+    /// Pool-level speed limiter (M14g), shared with every server's pool of
+    /// the active download; the daemon adjusts it live via mode=config.
+    pub rate: Arc<nzbkit::pool::RateLimit>,
+    /// M11 hot lane: number of /stream readers currently attached. The
+    /// pool reserves a slice of connections for promoted (seek) work
+    /// while this is non-zero.
+    pub stream_readers: Arc<std::sync::atomic::AtomicUsize>,
+    /// Stream request generation: bumped per /stream request. Only the
+    /// newest ALIVE reader may promote - an abandoned pre-seek reader
+    /// parked at the write frontier would otherwise keep re-promoting its
+    /// stale window, fighting the live seek's window for the hot lane
+    /// (each promote rewrites the promoted set). Tracked as a set of
+    /// live generations so a short probe that comes and goes hands
+    /// promote rights BACK to the player it briefly outranked.
+    pub stream_gen: Arc<std::sync::atomic::AtomicU64>,
+    pub stream_alive: Arc<std::sync::Mutex<std::collections::BTreeSet<u64>>>,
+    /// M11 seek re-prioritization: installed per run; the /stream layer
+    /// promotes the articles under a player's read position through it.
+    pub seek: std::sync::Mutex<Option<Arc<SeekCtl>>>,
+    /// User-cancel of the ACTIVE download: the daemon flips the flag and
+    /// aborts the pool through the control; get_with_progress bails
+    /// ("stopped by user") instead of settling/extracting partial data.
+    pub abort: std::sync::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
+    pub queue_ctl: std::sync::Mutex<Option<Arc<nzbkit::pool::QueueControl>>>,
+    /// §129: per-owning-nzo_id cancel handle for a run's recovery-volume
+    /// side-fetches, keyed exactly like `activity` below and removed at
+    /// the same place (`Daemon::park`).
+    ///
+    /// It cannot be `queue_ctl`, and that is the whole reason this map
+    /// exists: `queue_ctl` and `abort` are overwritten per job and carry
+    /// no owner tag, so they belong to whatever is DOWNLOADING now. Once
+    /// the postproc lane let a tail outlive its download slot, the job
+    /// whose repair is pulling parity is routinely not that job - and
+    /// deleting it aborted a healthy unrelated download while its own
+    /// side-fetch ran on, which is the hazard `owns_hub` was written for.
+    pub tail_cancel: std::sync::Mutex<std::collections::HashMap<String, Arc<SideCancel>>>,
+    /// Connections parked between jobs (see `nzbkit::warmpool`). Lives on
+    /// the hub because it must outlive any single download - that is the
+    /// entire point. Daemon only: a one-shot CLI `get` has no second job
+    /// to hand them to, so it keeps the old connect-and-QUIT behaviour.
+    pub warm: std::sync::OnceLock<Arc<nzbkit::warmpool::WarmPool>>,
+    /// Cross-job connection hand-over (`nzbkit::pool::handoff`): the
+    /// per-host connection leases every primary run on this hub takes
+    /// its sockets from, so job N's drain and job N+1's start never hold
+    /// more than one job's cap between them. Set once by the daemon at
+    /// boot; absent on a CLI run and on a sidecar's private hub, whose
+    /// fleet is bounded by `host_conn_caps` instead.
+    pub conn_budget: std::sync::OnceLock<Arc<nzbkit::pool::handoff::ConnBudget>>,
+    /// TODO 313 item 8: the standing warm reserve, which keeps a floor
+    /// of authenticated sessions parked on the servers configured for
+    /// one, holding lease slots for them
+    /// (`nzbkit::warmreserve::WarmReserve`).
+    ///
+    /// On the hub for the same reason `warm` and `conn_budget` are: it
+    /// has to outlive every job, and it is meaningless without the two
+    /// of them - the pool it parks into and the budget it takes its
+    /// slots from must be the SAME ones the jobs use, or it is the
+    /// second fleet the whole permit rule exists to prevent. Absent on a
+    /// CLI run and on a sidecar hub, which have neither.
+    pub warm_reserve: std::sync::OnceLock<Arc<nzbkit::warmreserve::WarmReserve>>,
+    /// The run that owns this hub publishes its hand-over signal here
+    /// (installed by the runner before the fetch spawns, read once by
+    /// the fleet builder). Latched when that run's fleet starts going
+    /// idle after queue-dry - the runner's cue to start the next job.
+    pub handoff: std::sync::Mutex<Option<Arc<nzbkit::pool::handoff::HandoffSignal>>>,
+    /// TODO 313: the seat the run about to be built takes in a queue
+    /// SPILL - the shared gate, and whether this run is the head
+    /// lending sockets or a lane spilled onto them. Installed by the
+    /// runner immediately before the fetch spawns and read once by the
+    /// fleet builder, exactly like `handoff` beside it, and for the
+    /// same reason: only the runner knows which job it is starting and
+    /// why, and only the pool can act on it.
+    ///
+    /// `None` whenever the switch is off, which is every install until
+    /// somebody turns it on.
+    pub spill: std::sync::Mutex<Option<nzbkit::pool::handoff::SpillSeat>>,
+    /// TODO 313: the live connection targets of the job currently on
+    /// the wire, one per server row, so the spill governor can walk
+    /// them down and back up again.
+    ///
+    /// **Distinct from `live_targets` above and not a duplicate of
+    /// it.** That map is the TODO 112 tuner's, keyed by row and
+    /// deliberately OUTLIVING each job so an epoch controller's belief
+    /// survives a queue boundary - and it is populated only when live
+    /// tuning is on, which is not the default. The targets a default
+    /// install actually runs on are minted per JOB inside `get::fleet`
+    /// and reachable from nowhere else, so without this the governor
+    /// could see nothing to lend on the very installs it is for.
+    ///
+    /// Replaced wholesale at each fleet build, and NOT by a spilled
+    /// lane: while an episode is live these have to stay the head's or
+    /// the governor would walk down the lane it just started and
+    /// restore the wrong run afterwards.
+    pub job_targets: std::sync::Mutex<Vec<std::sync::Arc<nzbkit::pool::ConnTarget>>>,
+    /// Hosts the daemon has ruled out for the NEXT download;
+    /// get_with_progress skips them at pool build.
+    ///
+    /// The block-account entries are per HOST but decided over that
+    /// host's ENABLED config rows as a set: a host lands here only when
+    /// every one of them is a prepaid block that is used up. One
+    /// exhausted row used to exclude the whole host, which took a
+    /// funded sibling - or an unlimited flat-rate account sharing the
+    /// hostname - out of the pool with it, and left `get::plan` bailing
+    /// "no usable servers" while Settings still showed that sibling
+    /// healthy. `serve::Daemon::block_pool_rules` is the rule; a
+    /// disabled row contributes nothing to it, because `plan` drops
+    /// disabled servers BEFORE it applies this list.
+    ///
+    /// The sidecar puts two more reasons in the same list (busy with
+    /// the active job, auth-refused), which is why `plan`'s log line
+    /// names all three rather than saying "exhausted".
+    pub excluded_hosts: std::sync::Mutex<Vec<String>>,
+    /// Per-host connection caps for THIS hub's pool build. Set only on a
+    /// prefetch sidecar's hub when it BORROWS a slice of a server that is
+    /// busy on the active job (no healthy idle server exists): the host
+    /// stays in the fleet but its pool opens at most this many
+    /// connections, so the active job keeps its budget. Exclusion stays
+    /// all-or-nothing (`excluded_hosts`); this is the bounded middle.
+    pub host_conn_caps: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+    /// §96.5: remaining prepaid bytes per host for the NEXT download's
+    /// pool build - the configured block minus what the ledger says is
+    /// already spent, only for hosts with bytes left (a host whose
+    /// every enabled account is a spent block goes in `excluded_hosts`
+    /// instead). The fleet build seeds each server's mid-run budget
+    /// from this, so a block that runs out DURING a job releases the
+    /// server there and then. Recomputed by the runner at every job
+    /// start, like `excluded_hosts`.
+    ///
+    /// TWO THINGS ABOUT A HOST WITH SEVERAL ENABLED ROWS, because
+    /// `get::fleet` copies one value here onto EVERY row on that host.
+    /// The figure is the LARGEST remaining across the host's block
+    /// rows, not whichever the config happens to list last - spend is
+    /// host-aggregated, so the host can keep serving while any account
+    /// on it still has allowance, and the maximum is the only
+    /// order-independent answer. And a host carrying any enabled
+    /// FLAT-RATE row gets NO entry at all: capping it would enforce a
+    /// limit on an unlimited account that the user never configured.
+    /// `serve::Daemon::block_pool_rules` is the rule, and states the
+    /// residue that two block rows on one host still share one
+    /// host-aggregated spend figure.
+    pub host_byte_budgets: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// TODO 112 (dark, NZBFAST_LIVE_TUNE=1): per-host live connection
+    /// targets, shared between each job's pool build and the epoch
+    /// controller in tasks.rs. On the hub rather than per job because
+    /// the controller's belief must survive job boundaries - that is
+    /// the whole point of a live tuner over the offline snapshot. A
+    /// prefetch sidecar runs on a fresh hub, so sidecars are never
+    /// live-tuned. State, never a setting: nothing here is persisted.
+    pub live_targets:
+        std::sync::Mutex<std::collections::HashMap<String, Arc<nzbkit::pool::ConnTarget>>>,
+    /// TODO 208 item 1: the link anchor in bytes/s the NEXT download's
+    /// pool build sizes its fleet from (`linkpeak.effective`: the
+    /// persisted measured peak, else the typed line speed), 0 = none.
+    /// Written by the runner at every job start beside `excluded_hosts`;
+    /// stays 0 on a CLI run and on a prefetch sidecar's fresh hub, where
+    /// the pool's own gauge does the capping within the run instead.
+    pub line_anchor_bps: std::sync::atomic::AtomicU64,
+    /// TODO 275 item 1 part 1: was `line_anchor_bps` MEASURED on this
+    /// link, or is it the line speed a user TYPED into Settings?
+    /// `linkpeak.effective` returns both and the runner used to keep
+    /// only the number. Stamped onto every server's `PoolConfig` beside
+    /// the anchor; false on a CLI run and on a sidecar's fresh hub,
+    /// where there is no anchor at all.
+    pub line_anchor_measured: std::sync::atomic::AtomicBool,
+    /// TODO 275 item 1 part 2: the per-socket carry the LAST job
+    /// measured, bytes/s, 0 = none. Written by the runner at every job
+    /// start beside `line_anchor_bps`, out of the daemon's persisted
+    /// `line_carry` store, and read by the fleet build so a job seeds
+    /// from what a socket was last seen to hold rather than from the
+    /// curve's planned 150 Mbit. Stays 0 on a CLI run and on a prefetch
+    /// sidecar's fresh hub.
+    pub line_carry_bps: std::sync::atomic::AtomicU64,
+    /// The `live_tune` setting, mirrored here by the daemon (settings
+    /// apply + restart restore) because the pool build in get/fleet.rs
+    /// reaches the hub, not the daemon. False on a CLI run and on a
+    /// prefetch sidecar's fresh hub - sidecars are never live-tuned.
+    pub live_tune: std::sync::atomic::AtomicBool,
+    /// M2c.5: may this run speculatively prefetch a recovery volume the
+    /// moment an article goes terminally Missing? The daemon enables it
+    /// per MAIN job when no quota is configured (mirrors the sidecar-
+    /// prefetch guard); defaults false so sidecar/other hub users never
+    /// side-fetch. CLI runs (no hub) are governed by the
+    /// NZBFAST_NO_SPEC_PREFETCH env instead.
+    pub spec_prefetch: std::sync::atomic::AtomicBool,
+    /// M29 availability oracle: the daemon installs a fresh sink per
+    /// job; get_with_progress hands it to every server's pool config and
+    /// stamps the job context (pool host order + group family). The
+    /// daemon drains it into the ledger at net-drain.
+    pub oracle: std::sync::Mutex<Option<Arc<nzbkit::oracle::OracleSink>>>,
+    /// M29 opt-in routing (`oracle_route`, OFF by default): when the
+    /// daemon installs a ledger snapshot here, get_with_progress DEMOTES
+    /// any enabled server whose backbone is confidently GONE for this
+    /// release's (family, age-bucket) to the bottom of the level ladder,
+    /// so the doomed round-trips on takedown'd content are paid last
+    /// rather than first. Nothing leaves the pool, so a wrong verdict
+    /// costs only latency however many backbones it writes off. See
+    /// `get::plan::demote_predicted_gone` for why removal was wrong.
+    pub route_gone: std::sync::Mutex<Option<nzbkit::oracle::Snapshot>>,
+    /// "What is the pipeline doing right now", per owning nzo_id - the
+    /// queue row's sub-line. Keyed rather than a single slot because job
+    /// N's tail (verify/repair/unpack) overlaps job N+1's fetch, and both
+    /// rows are live at once. Values are short tokens the dashboard maps
+    /// to i18n phrases ("fetching", "verifying", "repairing",
+    /// "extracting", "preflight"); the pipeline writes one at each
+    /// section transition, never per article. Entries are removed at
+    /// `Daemon::park`, so the map never outgrows the queue. A CLI run
+    /// has no hub and a prefetch sidecar writes to its own hub, which
+    /// the queue payload never reads.
+    pub activity: std::sync::Mutex<std::collections::HashMap<String, &'static str>>,
+    /// TODO 205: live DISK-unpack progress, per owning nzo_id and for
+    /// exactly the same reason `activity` is keyed that way - job N's
+    /// unpack ladder runs while job N+1 downloads, so a single slot
+    /// would be the wrong job's within seconds. The in-stream path
+    /// needs no entry here: its writers are on `extractor`, which
+    /// belongs to whatever is downloading now, and that IS the job it
+    /// is reporting for. Entries appear and vanish with the ladder's
+    /// own `unpackprog::UnpackArm`, and `Daemon::park` sweeps beside
+    /// `activity` as a backstop.
+    pub unpack: Arc<crate::unpackprog::UnpackMap>,
+    /// Bytes this run will NOT fetch because the journal already has
+    /// those articles on disk (a resume).
+    ///
+    /// Added to the shared progress counter by whoever wants "how much
+    /// of this release is on disk" - the queue row, so a resumed
+    /// download's bar continues from where it stopped instead of
+    /// restarting at 0%. Restarting flatly contradicted the "nothing is
+    /// re-downloaded" promise the failure copy makes in three places,
+    /// and had testers reporting lost journals that had worked perfectly.
+    ///
+    /// Kept BESIDE that counter rather than added into it, because the
+    /// counter is every other consumer's idea of "bytes off the wire
+    /// this run": the quota ledger bills it, history divides it by
+    /// network seconds, the resulting average feeds the stall watchdog's
+    /// `best_rate_bps` reference, and both the CLI ticker and the
+    /// daemon's rolling speed window difference it between samples. A
+    /// resume that folded 40 GB into it in one instant would answer all
+    /// of those with a rate no line has ever run at. Set once, before
+    /// the pool starts; the daemon zeroes it per job.
+    pub resume_seeded: std::sync::atomic::AtomicU64,
+    /// TODO 309: this run's [`ResumeRoute`], tagged with the nzo_id that
+    /// owns it, published by `get::get_with_progress` once the gate has
+    /// spoken. Owner-tagged for the same reason [`Self::extractor`] is:
+    /// a job transition must never hand one job's verdict to the next,
+    /// and the tail that reads this runs on the lane, after the next
+    /// job may already have claimed the hub.
+    ///
+    /// `None` while a run has not reached the gate, and left `None` by a
+    /// run with nothing to replay. The daemon clears it at every job
+    /// start (`tasks/runner.rs`), so a job that dies before the gate
+    /// cannot inherit its own previous attempt's verdict.
+    pub resume_route: std::sync::Mutex<Option<(String, ResumeRoute)>>,
+    /// M24 late attach (C1): a password set via mode=set_password AFTER
+    /// the active download started, tagged with its owning nzo_id. The
+    /// download task captures `j.password` once at the Downloading
+    /// transition, so without this cell a mid-download password reached
+    /// nothing until the job had already failed. `get_with_progress`
+    /// re-reads it at the network-drain boundary and again at the
+    /// fallback ladder, so the finish tail unlocks with it in ONE run.
+    /// Owner-tagged for the same reason `extractor` is: a job
+    /// transition must never hand this to the next download.
+    pub late_password: std::sync::Mutex<Option<(String, String)>>,
+    /// SAB-parity passwords file: the daemon mirrors the resolved
+    /// `password_file` path here so the in-stream password probe can
+    /// re-read it per invocation (the operator may add the password
+    /// WHILE the download runs). None on CLI runs and sidecar hubs.
+    pub unpack_password_file: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// §99 try-order hint: the host the active job's NZB was fetched
+    /// from (the failure-link origin), owner-tagged like
+    /// `late_password`, so the in-stream probe can put the password
+    /// last associated with that site at the head of the file's
+    /// candidates. None on CLI runs and for uploaded NZBs.
+    pub pw_assoc_site: std::sync::Mutex<Option<(String, String)>>,
+    /// The password the in-stream probe VERIFIED for this owner (from
+    /// the passwords file or a harvested sidecar). The set decrypts
+    /// one-pass, so finalize never meets an encrypted volume - this
+    /// cell is how the winner still gets recorded onto the Job
+    /// (has_password, retry reuse), keeping the file's promise that a
+    /// password that works is kept on that download.
+    pub password_found: std::sync::Mutex<Option<(String, String)>>,
+    /// Live "this download wants a password" signal, owner-tagged like
+    /// `late_password`: set when the in-stream probe ran out of
+    /// candidates for an encrypted set, cleared when one verifies (or at
+    /// job teardown). queue_json surfaces it on the owning slot so the
+    /// dashboard's "ask at once" mode can prompt mid-download.
+    pub password_wanted: std::sync::Mutex<Option<String>>,
+    /// A2 playback contract: what the byte-serving path has had to do
+    /// for the player, for the mobile clients' health overlay.
+    pub stream_stats: Arc<StreamStats>,
+    /// TODO 274 (issue #51): the ACTIVE run's per-file table, tagged
+    /// with its owning nzo_id exactly like `extractor` above and for the
+    /// same reason - the API reads it beside a job record it looked up
+    /// separately, so the tag is what stops one job's rows being
+    /// reported under another job's id across a transition.
+    ///
+    /// Reporting and promotion only. Everything in it is either an NZB
+    /// fact captured once at plan time or a handle the pipeline already
+    /// owns, so a reader takes no lock the download path waits on.
+    pub job_files: std::sync::Mutex<Option<(String, Arc<JobFiles>)>>,
+    /// TODO 274 (e): the same table for jobs whose network phase is
+    /// OVER but whose TAIL is still running, frozen at the moment the
+    /// hub was handed to the next job.
+    ///
+    /// The cell above is the ACTIVE run's and is replaced at every job
+    /// start, which is the correct lifetime for a promote target - and
+    /// the wrong one for a listing. Job N's tail overlaps job N+1's
+    /// download by design (`tasks/worker.rs`), so from the instant N+1
+    /// claims the hub, `mode=get_files` for N fell through to parsing
+    /// N's spooled `.nzb`: 88 rows reading "queued, 0 bytes of 63 MB"
+    /// for a job that had downloaded every one of them and was
+    /// repairing. Measured on the live daemon 24 Aug 2026 - all 264
+    /// polls of a 4.5-minute Repairing tail answered that way, never
+    /// once with the run's own counters.
+    ///
+    /// FROZEN and not the `Arc`, which is the whole reason this is a
+    /// second field rather than a longer lease on the first. `JobFiles`
+    /// holds a strong `SeekCtl` - every message-id of the run, plus the
+    /// extractor graph - and a strong `Arc` per `FileSlot`; keeping it
+    /// past the handover would pin all of that for the length of a tail
+    /// and, since nothing but a later job start writes here, for the
+    /// whole idle stretch after the LAST job of a queue. A
+    /// [`JobFilesFrozen`] is plain data: the same rows with the
+    /// counters read out once.
+    ///
+    /// Capped rather than pruned against the queue, because that is the
+    /// only bound that needs no second lock and no park hook. The read
+    /// side is gated on the job having a queue row AND a tail phase
+    /// (`api/queue/files.rs`), so an entry whose job is gone answers
+    /// nobody; what the cap bounds is the residue, which is a few
+    /// hundred kilobytes of rows at the sizes real posts have.
+    pub tail_files: std::sync::Mutex<Vec<(String, TailTable)>>,
+}
+
+/// How many finished runs' tables [`StreamHub::retire_job_files`] keeps.
+///
+/// Two tails run at once by default (`postproc_jobs`), and a third can
+/// exist for the moment a fourth job starts before the first two have
+/// parked, so this is that plus headroom - not a tuning knob.
+const TAIL_FILES_KEPT: usize = 4;
+
+/// The per-file surface `mode=get_files` reports and
+/// `mode=queue&name=promote_file` acts on, built once when the run
+/// publishes its control surfaces.
+///
+/// `rows` is in NZB file order and covers EVERY file the NZB declares,
+/// including the recovery volumes that were never scheduled - those
+/// carry `slot: None`, which is the honest answer for a file with no
+/// articles queued rather than a row left out of the listing.
+pub struct JobFiles {
+    pub rows: Vec<JobFileRow>,
+    /// Aligned with `SeekCtl::slot_articles`, so a row's `slot` indexes
+    /// both.
+    pub slots: Vec<Arc<crate::fileslot::FileSlot>>,
+    /// The run's article ladder plus its queue handle: promotion is
+    /// `slot_articles[slot]` handed to `QueueControl::promote_opts`.
+    pub seek: Arc<SeekCtl>,
+}
+
+/// One NZB file as the API reports it - the parts that come from the
+/// NZB and never change, with the live counters reached through `slot`.
+pub struct JobFileRow {
+    /// Opaque, stable, and NOT the name: see `job_file_id`.
+    pub id: String,
+    /// The poster's filename hint, else the subject line.
+    pub name: String,
+    /// Encoded bytes as the NZB declares them - the unit the queue's own
+    /// denominator is quoted in.
+    pub bytes: u64,
+    /// The NZB's own `date` attribute, unix seconds, 0 when absent or
+    /// unparseable. Carried so `mode=get_files` can answer SAB's `age`
+    /// field, which SAB has emitted on every file row since at least
+    /// 4.5.0 and which we had no value for at all.
+    pub date: i64,
+    pub segments: usize,
+    /// Index into `slots`, or None for an NZB-classified recovery volume
+    /// that was never given one.
+    pub slot: Option<usize>,
+}
+
+/// One [`FileSlot`](crate::fileslot::FileSlot)'s counters, read out at an
+/// instant instead of reached through the slot.
+///
+/// Every field is a plain copy of the atomic beside it, so the whole
+/// struct is one consistent-enough reading in the same sense a live
+/// caller gets: five independent atomics, and a reader can land between
+/// two of them. The API's arithmetic saturates for exactly that reason
+/// and does so identically on both sides, because both sides go through
+/// the same row builder.
+pub struct FileSlotCounts {
+    pub total_segments: usize,
+    pub remaining: usize,
+    pub missing: usize,
+    pub deferred: usize,
+    pub abandoned: usize,
+    pub errors: usize,
+    /// Recovery data by ANY route, which is what `FileSlot::is_par2`
+    /// answers - the in-stream magic sniff can set it after the slot was
+    /// built, so this must be read at freeze time and not derived from
+    /// the NZB's classification.
+    pub is_par2: bool,
+    pub sample_skipped: bool,
+}
+
+impl FileSlotCounts {
+    pub fn of(s: &crate::fileslot::FileSlot) -> Self {
+        use std::sync::atomic::Ordering;
+        Self {
+            total_segments: s.total_segments,
+            remaining: s.remaining.load(Ordering::Relaxed),
+            missing: s.missing.load(Ordering::Relaxed),
+            deferred: s.deferred.load(Ordering::Relaxed),
+            abandoned: s.abandoned.load(Ordering::Relaxed),
+            errors: s.errors.load(Ordering::Relaxed),
+            is_par2: s.is_par2(),
+            sample_skipped: s.sample_skipped,
+        }
+    }
+}
+
+/// A run's per-file table as it stood when the hub was handed on - the
+/// listing half of [`JobFiles`] with nothing live left in it.
+///
+/// No promotion half, deliberately: the articles of a job past its
+/// network phase have all been issued, so there is nothing to reorder
+/// and `promote_file` answers "not the active job" here exactly as it
+/// did before. That is also what lets this hold no `QueueControl`.
+pub struct JobFilesFrozen {
+    pub rows: Vec<JobFileRow>,
+    /// Aligned with `rows` - `None` where the row had no slot, which is
+    /// an NZB-classified recovery volume the plan never queued.
+    pub counts: Vec<Option<FileSlotCounts>>,
+}
+
+impl JobFiles {
+    /// This table with its counters read out, ready to outlive the run.
+    pub(crate) fn freeze(&self) -> JobFilesFrozen {
+        freeze_rows(&self.rows, &self.slots)
+    }
+}
+
+/// The listing half of a [`JobFiles`], copied out of the live run.
+///
+/// Free rather than a method so it can be driven from a test: a
+/// `JobFiles` cannot be built without a `SeekCtl`, and a `SeekCtl`
+/// cannot be built without an `Extractor` and the pool's queue handle -
+/// none of which this reads.
+pub fn freeze_rows(
+    rows: &[JobFileRow],
+    slots: &[Arc<crate::fileslot::FileSlot>],
+) -> JobFilesFrozen {
+    JobFilesFrozen {
+        counts: rows
+            .iter()
+            .map(|r| {
+                r.slot
+                    .and_then(|i| slots.get(i))
+                    .map(|s| FileSlotCounts::of(s))
+            })
+            .collect(),
+        rows: rows
+            .iter()
+            .map(|r| JobFileRow {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                bytes: r.bytes,
+                date: r.date,
+                segments: r.segments,
+                slot: r.slot,
+            })
+            .collect(),
+    }
+}
+
+/// One retired run's entry: the rows as the API will report them, plus -
+/// briefly - the slots they were read from.
+///
+/// The second field is what makes the FIRST one exact, and it is the
+/// only reason this is a struct. A run is retired when the NEXT job
+/// claims the hub, and on the hand-over path that is DURING its drain:
+/// measured on the live daemon 24 Aug 2026, 7 of an 88-file post's rows
+/// still read "downloading" at that instant, so the tail drawer printed
+/// seven files as in flight directly under a sentence saying nothing
+/// more was being downloaded. Keeping the slots until the run's network
+/// phase actually ends (`tasks/worker.rs` `finish`, which runs on both
+/// transition paths and only once `net_rx` has resolved) lets the rows
+/// be read again at the instant they stop moving.
+///
+/// The SLOTS and not the whole `JobFiles`: the table's `SeekCtl` is the
+/// heavy half - every message-id of the run plus the extractor graph -
+/// and nothing here needs it, so it is dropped at the retire rather
+/// than held across the drain. What is held is a vector of counter
+/// blocks the job's own pipeline is using anyway for the whole of that
+/// window, and it is dropped the moment the window closes.
+pub struct TailTable {
+    pub(crate) frozen: Arc<JobFilesFrozen>,
+    /// `Some` only between the retire and the run's network drain.
+    draining: Option<Vec<Arc<crate::fileslot::FileSlot>>>,
+}
+
+impl TailTable {
+    /// An entry with nothing left draining, for a test that wants the
+    /// settled shape without a run to take it from. Production builds
+    /// these only in [`StreamHub::retire_job_files`], which always has
+    /// slots to keep.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn settled(frozen: Arc<JobFilesFrozen>) -> Self {
+        Self {
+            frozen,
+            draining: None,
+        }
+    }
+
+    /// Read the counters again, now that they have stopped moving, and
+    /// let the slots go. Idempotent: a run settled twice, or one
+    /// retired after its drain (the plain path), keeps the reading it
+    /// already has.
+    fn settle(&mut self) {
+        if let Some(slots) = self.draining.take() {
+            self.frozen = Arc::new(freeze_rows(&self.frozen.rows, &slots));
+        }
+    }
+}
+
+/// The bookkeeping half of [`StreamHub::retire_job_files`], separated
+/// for the same reason [`freeze_rows`] is: what it has to get right -
+/// the replace and the cap - needs nothing but the vector.
+pub fn keep_tail_table(g: &mut Vec<(String, TailTable)>, owner: String, t: TailTable) {
+    // Replace rather than append on a repeat: a job whose run is
+    // retired twice (a retry that never reached its own plan publish)
+    // must not sit in here under two ids, with the reader taking
+    // whichever it happens to find first.
+    g.retain(|(tag, _)| *tag != owner);
+    g.push((owner, t));
+    // Oldest out, so the cap can never evict the tail that is running
+    // now in favour of one that has parked.
+    let over = g.len().saturating_sub(TAIL_FILES_KEPT);
+    g.drain(..over);
+}
+
+impl JobFiles {
+    /// Move every still-pending article of the file at `row` to the
+    /// front of the queue, and report how many moved.
+    ///
+    /// Best effort by construction, and that is the contract the API
+    /// promises rather than an implementation detail: `promote_opts`
+    /// reorders what is still PENDING and leaves in-flight work alone,
+    /// takes the queue mutex with a bounded try, and answers 0 rather
+    /// than waiting if it misses. A file whose articles have all been
+    /// issued therefore moves nothing, correctly.
+    ///
+    /// `engage_stream: false`, matching the extractor's offset-0 probe
+    /// rather than the player: engaging stream mode flips the whole pool
+    /// into shallow pipelines for the linger window, and a promote that
+    /// covers a whole file is not the latency-critical playhead read
+    /// that trade was measured for. Ordering is what the caller asked
+    /// for; pipeline depth is not.
+    ///
+    /// `None` when the row names a recovery volume with no slot - there
+    /// is no queued work to move, which is a different answer from
+    /// "moved nothing".
+    pub fn promote_row(&self, row: &JobFileRow) -> Option<usize> {
+        let slot = row.slot?;
+        let ids: Vec<Arc<str>> = self
+            .seek
+            .slot_articles
+            .get(slot)?
+            .0
+            .iter()
+            .map(|(_, id)| id.clone())
+            .collect();
+        Some(self.seek.ctl.promote_opts(&ids, false))
+    }
+}
+
+/// The opaque per-file handle the API hands out, as 16 lowercase hex.
+///
+/// A digest of the file's POSITION in the NZB plus its first
+/// message-id, and never the name: names in an NZB are neither unique
+/// nor stable (an obfuscated post has none worth the word), and keying
+/// a row by one is the defect `watch_fail_id` was written for - two
+/// indistinguishable rows, with iteration order deciding which one an
+/// action lands on. The position alone would not survive being read
+/// against a different NZB; the message-id alone repeats in a
+/// malformed post. Together they are unique within the job and
+/// identical whether derived from the spooled `.nzb` of a queued job or
+/// from the running plan, which is what lets a client list a job while
+/// it waits and promote once it starts.
+pub(crate) fn job_file_id(idx: usize, f: &nzbkit::nzb::NzbFile) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(idx.to_string().as_bytes());
+    h.update(b"\n");
+    h.update(
+        f.segments
+            .first()
+            .map(|s| s.message_id.as_bytes())
+            .unwrap_or_default(),
+    );
+    hex::encode(h.finalize())[..16].to_string()
+}
+
+/// The NZB-side half of a [`JobFileRow`], shared by the running job's
+/// table and the listing a QUEUED job answers straight from its spooled
+/// `.nzb` - both must produce the same id for the same file or a client
+/// that listed early cannot act later.
+pub fn job_file_row(idx: usize, f: &nzbkit::nzb::NzbFile) -> JobFileRow {
+    JobFileRow {
+        id: job_file_id(idx, f),
+        name: f.filename_hint().unwrap_or(f.subject.as_str()).to_string(),
+        bytes: f.bytes(),
+        date: f.date,
+        segments: f.segments.len() + f.dropped_segments,
+        slot: None,
+    }
+}
+
+/// Counters the /stream read path keeps so a client can show WHY
+/// playback looks the way it does (workstream A2; the hardening round
+/// that produced these numbers is research/STREAM-HARDENING-2026-08.md).
+///
+/// Process-wide rather than per job: a reader is attached to at most one
+/// job at a time and the numbers are read beside that job's own state,
+/// so a second job's history cannot be mistaken for this one's - but
+/// they are cumulative since start, so a client that wants a rate
+/// differences two polls rather than reading an absolute.
+#[derive(Default)]
+pub struct StreamStats {
+    /// Reads that had to wait for their span to land: the server-side
+    /// count of what a viewer experiences as buffering.
+    pub blocked_reads: std::sync::atomic::AtomicU64,
+    /// Bytes served as zeros because the articles under them were
+    /// terminally missing and nothing in flight carried them (the
+    /// dead-span path). Non-zero means the picture is degraded, which
+    /// no player can tell a client on its own.
+    pub zero_filled_bytes: std::sync::atomic::AtomicU64,
+}
+
+impl StreamHub {
+    /// UX §15: (accounted-for, planned, still to fetch) for the run that
+    /// owns this hub, all three in declared NZB bytes. `None` when no run
+    /// has published a plan - the gap between the daemon zeroing the pair
+    /// at the Downloading transition and the pipeline filling it, where a
+    /// caller must fall back rather than divide by a plan belonging to
+    /// nobody.
+    pub fn fetch_left(&self) -> Option<(u64, u64, u64)> {
+        self.fetch_counters().left()
+    }
+
+    /// The pair the run that owns this hub counts into. A pipeline takes
+    /// this once at its start and keeps the handles.
+    pub fn fetch_counters(&self) -> Arc<FetchCounters> {
+        self.fetch.lock_ok().clone()
+    }
+
+    /// Install a zeroed pair for the job taking the hub over and return
+    /// it. The previous owner's handles keep counting into the previous
+    /// pair, which nothing reads any more.
+    pub fn fresh_fetch_counters(&self) -> Arc<FetchCounters> {
+        let fresh = Arc::new(FetchCounters::default());
+        *self.fetch.lock_ok() = fresh.clone();
+        fresh
+    }
+
+    /// Clone the installed extractor, but only when it belongs to `want`.
+    /// `want = None` is the M11 active-download stream, which owns whatever
+    /// is installed. For `want = Some(id)` the tag must match, so the owner
+    /// check and the clone happen under ONE lock - a job transition that has
+    /// published the new owner but not yet installed its extractor (or still
+    /// has the old one installed) returns None here, so a request never
+    /// receives another job's extractor.
+    pub fn extractor_for(&self, want: Option<&str>) -> Option<Arc<nzbkit::extract::Extractor>> {
+        let g = self.extractor.lock_ok();
+        let (owner, ex) = g.as_ref()?;
+        match want {
+            Some(id) if id != owner => None,
+            _ => Some(ex.clone()),
+        }
+    }
+
+    /// TODO 274: the ACTIVE run's per-file table, when it belongs to
+    /// `owner` - same ownership rule as [`Self::extractor_for`], and the
+    /// same single-lock owner-check-and-clone, so a job transition can
+    /// never answer one job's `get_files` with another job's rows.
+    pub fn job_files_for(&self, owner: &str) -> Option<Arc<JobFiles>> {
+        let g = self.job_files.lock_ok();
+        let (tag, t) = g.as_ref()?;
+        (tag == owner).then(|| t.clone())
+    }
+
+    /// TODO 274 (e): take the active table off the hub and keep a frozen
+    /// copy for the tail of the job that owned it.
+    ///
+    /// Called where the previous job's table used to be simply dropped -
+    /// at the next job's start (`tasks/runner.rs`), which is the one
+    /// place that runs on BOTH transition paths: the cross-job
+    /// hand-over, and the plain one where the runner awaits the drain
+    /// first. The owner comes out of the cell rather than being passed
+    /// in, because the caller knows the id of the job STARTING and this
+    /// is about the one that stopped.
+    ///
+    /// The freeze taken HERE is exact on the plain path, where the
+    /// runner has already awaited the drain, and early on the hand-over
+    /// path, where the outgoing job's last in-flight articles are still
+    /// landing. `TailTable` carries the slots across that gap and
+    /// [`Self::settle_tail_files`] reads them again at the drain, which
+    /// is what makes the second case exact too; this freeze is the
+    /// value the entry holds until then, and the belt if the settle
+    /// never comes.
+    pub fn retire_job_files(&self) {
+        let Some((owner, t)) = self.job_files.lock_ok().take() else {
+            return;
+        };
+        let mut g = self.tail_files.lock_ok();
+        // Belt for the entry [`Self::settle_tail_files`] never reached -
+        // a run torn down before its drain resolved. Its slots go here
+        // rather than living to the cap's eviction.
+        for (_, e) in g.iter_mut() {
+            e.settle();
+        }
+        keep_tail_table(
+            &mut g,
+            owner,
+            TailTable {
+                frozen: Arc::new(t.freeze()),
+                draining: Some(t.slots.clone()),
+            },
+        );
+    }
+
+    /// TODO 274 (e): `owner`'s network phase has ended - read its
+    /// counters one last time and drop the slots they came from.
+    ///
+    /// Called from the runner's `finish`, which is entered only once the
+    /// run's `net_rx` has resolved and runs on both transition paths.
+    /// A no-op for a run retired AFTER its drain, which is every run on
+    /// the plain path: those were exact when they were frozen.
+    pub fn settle_tail_files(&self, owner: &str) {
+        if let Some((_, e)) = self
+            .tail_files
+            .lock_ok()
+            .iter_mut()
+            .find(|(tag, _)| tag == owner)
+        {
+            e.settle();
+        }
+    }
+
+    /// TODO 274 (e): the frozen table of a job whose tail is running,
+    /// when it belongs to `owner`.
+    ///
+    /// Same ownership rule as [`Self::job_files_for`], and the caller
+    /// must ALSO have established that the job is past its network phase
+    /// - an entry outlives its job by design (see `tail_files`), and
+    /// answering a re-queued retry from its previous run's counters
+    /// would report a job that has not started as already complete.
+    pub fn tail_files_for(&self, owner: &str) -> Option<Arc<JobFilesFrozen>> {
+        let g = self.tail_files.lock_ok();
+        g.iter()
+            .find(|(tag, _)| tag == owner)
+            .map(|(_, t)| t.frozen.clone())
+    }
+
+    /// The late-attached password, when it belongs to `owner` - same
+    /// ownership rule as [`Self::extractor_for`]. A peek, not a take:
+    /// the finish tail consults it at two points (network drain and the
+    /// fallback ladder) and both must see it; the next job never can,
+    /// because its owner tag differs and job start clears the cell.
+    pub fn late_password_for(&self, owner: &str) -> Option<String> {
+        let g = self.late_password.lock_ok();
+        let (tag, pw) = g.as_ref()?;
+        (tag == owner).then(|| pw.clone())
+    }
+
+    /// TODO 309: this job's resume route, when the cell belongs to
+    /// `owner` - same ownership rule and the same single-lock
+    /// owner-check-and-clone as [`Self::extractor_for`], so a job
+    /// transition can never answer one job's report with another job's
+    /// verdict.
+    pub fn resume_route_for(&self, owner: &str) -> Option<ResumeRoute> {
+        let g = self.resume_route.lock_ok();
+        let (tag, r) = g.as_ref()?;
+        (tag == owner).then_some(*r)
+    }
+
+    /// §99: the NZB source host for `owner`, same ownership rule - a
+    /// stale hint must never order another job's candidates.
+    pub fn pw_assoc_site_for(&self, owner: &str) -> Option<String> {
+        let g = self.pw_assoc_site.lock_ok();
+        let (tag, host) = g.as_ref()?;
+        (tag == owner).then(|| host.clone())
+    }
+
+    /// The warm connection pool, created on first use (it spawns a
+    /// keepalive tick, so it needs a runtime and cannot be built by
+    /// `Default`). `NZBFAST_WARM_POOL=0` forces it off everywhere.
+    ///
+    /// §36: this only ever runs for a server whose own `warm_pool` is
+    /// set - the caller gates it. Reaching here does NOT mean pooling is
+    /// on for the job, only that this server asked for it.
+    ///
+    /// The per-server cap is deliberately generous rather than tied to
+    /// the configured `connections`: the fleet that parks connections was
+    /// already sized by the account limit, so it cannot overshoot, while
+    /// a cap read from a config that has since SHRUNK would silently
+    /// evict live connections mid-run. Shrinking `connections` instead
+    /// resolves itself through the idle timeout.
+    pub fn warm(&self) -> Option<Arc<nzbkit::warmpool::WarmPool>> {
+        if std::env::var("NZBFAST_WARM_POOL").is_ok_and(|v| v == "0") {
+            return None;
+        }
+        Some(
+            self.warm
+                .get_or_init(|| {
+                    nzbkit::warmpool::WarmPool::new(
+                        nzbkit::warmpool::DEFAULT_MAX_IDLE,
+                        nzbkit::warmpool::MAX_PER_SERVER,
+                    )
+                })
+                .clone(),
+        )
+    }
+
+    /// TODO 313 item 8: the standing warm reserve, created on first use
+    /// like [`Self::warm`] above and for the same reason (it spawns a
+    /// tick, so it needs a runtime).
+    ///
+    /// `None` unless BOTH the warm pool and the connection budget exist:
+    /// with no pool there is nowhere to park a spare, and with no budget
+    /// there is nothing to bound the dialler, which is the one thing
+    /// this feature may never be without. `.get()` and not `warm()` for
+    /// the pool, so asking about the reserve never CONSTRUCTS a pool the
+    /// daemon had decided not to have.
+    pub fn warm_reserve(&self) -> Option<Arc<nzbkit::warmreserve::WarmReserve>> {
+        let warm = self.warm.get()?.clone();
+        let budget = self.conn_budget.get()?.clone();
+        Some(
+            self.warm_reserve
+                .get_or_init(|| nzbkit::warmreserve::WarmReserve::new(warm, budget))
+                .clone(),
+        )
+    }
+}
+
+/// M11: translates OUTPUT-file byte ranges (what a media player reads)
+/// back to pending pool articles and moves them to the queue front. Line
+/// rate ≫ any media bitrate, so a promoted 32 MB window lands in well
+/// under a second of line time - seeks feel instant.
+pub struct SeekCtl {
+    /// Per slot: (encoded cumulative start, bracketed message-id) per
+    /// segment in file order - empty for par2 slots - plus the slot's
+    /// total encoded bytes. Offsets are NZB-declared (encoded) sizes;
+    /// callers scale decoded positions proportionally, and ±2 articles of
+    /// slack absorb the yEnc-overhead estimate error.
+    ///
+    /// R9: the ids are the interned handles the fetch plan built, not a
+    /// second copy of the id set. This ladder covers EVERY data segment
+    /// in the job, so as `String` it was a full duplicate of the run's
+    /// ids - ~8-15 MB at 100k segments, allocated on every run whether
+    /// or not anything ever streamed - and every span read cloned its
+    /// slice of it again.
+    pub slot_articles: Vec<(Vec<(u64, Arc<str>)>, u64)>,
+    pub ctl: Arc<nzbkit::pool::QueueControl>,
+    pub extractor: Arc<nzbkit::extract::Extractor>,
+    /// Volume-sorted non-par2 slot indices (NZB metadata, known before a
+    /// single article lands). The last-resort span mapping: the
+    /// extractor's map needs at least each volume's parsed header, so a
+    /// span in a not-yet-classified volume (the file TAIL at play start,
+    /// racing the header probes) would otherwise map to nothing - and a
+    /// promote missing the tail displaces the tail-burst articles.
+    pub vol_slots: Vec<usize>,
+    /// Sanitized NZB filename hint → slot, non-par2 slots only. A promote
+    /// for a slot FILE that hasn't classified (the extractor's offset-0
+    /// probe, a top-level chase) maps to nothing in `map_output_range`;
+    /// resolving it against that one slot's own article ladder beats the
+    /// zero-knowledge fallback, which scales the span across the
+    /// concatenation of EVERY volume and lands in the wrong file for any
+    /// multi-slot set. Hint-keyed; the promote's name is the yEnc one
+    /// (`sanitize_out_name(slot.name)`), so an obfuscated post whose
+    /// yEnc names differ from its subject hints misses here and resolves
+    /// through `observed_by_name` instead.
+    pub slot_by_name: std::collections::HashMap<String, usize>,
+    /// Sanitized yEnc-declared name → slot, the obfuscated-post overlay
+    /// for the same lookup: garbage subjects, real yEnc names. The
+    /// decode consumers register each slot's observed name here via
+    /// [`Self::note_slot_name`] before the write that can fire the
+    /// slot's offset-0 probe, so a slot-FILE promote resolves against
+    /// the right slot's own ladder instead of the every-volume fallback.
+    pub observed_by_name: std::sync::RwLock<std::collections::HashMap<String, usize>>,
+    /// Per-slot latch for `note_slot_name` (aligned with
+    /// `slot_articles`): set (Release) only AFTER the name is in the
+    /// map, so a decoder that skips on the fast path can trust the map
+    /// is populated before its own write's probe fires.
+    pub observed: Vec<std::sync::atomic::AtomicBool>,
+}
+
+impl SeekCtl {
+    /// A live /stream reader touched us: keep the pool's stream mode
+    /// (shallow pipelines, see pool.rs) fresh so any promotion - this
+    /// read's or a later seek's - preempts instead of queueing behind
+    /// deep in-flight windows.
+    pub fn note_stream(&self) {
+        self.ctl.note_stream_active();
+    }
+
+    /// Promote the pending articles carrying output bytes of `name` (a
+    /// slot file or an extracted inner file) for every span, in span
+    /// order - promote() front-loads the queue in exactly the order
+    /// given, which is the order the player reads (playhead span first,
+    /// then the file tail). One promote per call: the stream layer keeps
+    /// the playhead window AND the still-uncovered tail (MKV Cues / MP4
+    /// moov) hot together - a playhead-only promote would displace the
+    /// tail-burst articles a player is about to ask for. `file_size`
+    /// (the caller's writer knows it) anchors the NZB-ladder fallback
+    /// for spans in volumes the extractor hasn't classified yet.
+    /// `engage_stream` passes through to the pool: streaming readers and
+    /// blocked chase workers flip it into shallow pipelines; the
+    /// extractor's non-urgent offset-0 probes only reorder the queue.
+    pub fn promote_output_spans(
+        &self,
+        name: &str,
+        file_size: u64,
+        spans: &[(u64, u64)],
+        engage_stream: bool,
+    ) -> usize {
+        let ids = self.map_span_ids(name, file_size, spans);
+        // promote() ranks by first occurrence, so cross-span duplicates
+        // are harmless.
+        self.ctl.promote_opts(&ids, engage_stream)
+    }
+
+    /// Can any byte of output span [start, start+len) of `name` still be
+    /// delivered by the fetch run attached right now?
+    ///
+    /// - `Some(true)`: something live carries it (or we cannot rule that
+    ///   out - an unmapped span and a missed lock both land here).
+    /// - `Some(false)`: the span maps to articles and NONE of them is
+    ///   pending or in flight - all terminal (430'd everywhere, out of
+    ///   retries), so nothing short of settle-side repair will ever
+    ///   cover those bytes.
+    /// - `None`: no pool attached - the run ended (or has not started);
+    ///   only repair can change the file now, and the caller decides how
+    ///   long repair deserves.
+    ///
+    /// The mapping carries the same ±article slack the promotes use, and
+    /// slack articles count as live - so a span is only ever declared
+    /// dead a little LATE, never early.
+    pub fn span_deliverable(
+        &self,
+        name: &str,
+        file_size: u64,
+        start: u64,
+        len: u64,
+    ) -> Option<bool> {
+        let ids = self.map_span_ids(name, file_size, &[(start, start + len)]);
+        if ids.is_empty() {
+            return Some(true);
+        }
+        self.ctl.any_live(&ids)
+    }
+
+    /// The pending-article ids carrying output bytes of `name` for every
+    /// span, in span order - the mapping behind [`Self::promote_output_spans`]
+    /// and [`Self::span_deliverable`].
+    pub(crate) fn map_span_ids(
+        &self,
+        name: &str,
+        file_size: u64,
+        spans: &[(u64, u64)],
+    ) -> Vec<Arc<str>> {
+        let mut ids: Vec<Arc<str>> = Vec::new();
+        for &(start, end) in spans {
+            if start >= end {
+                continue;
+            }
+            let mapped = self.extractor.map_output_range(name, start, end);
+            if mapped.is_empty() {
+                // Not an output the extractor can map. When the name is a
+                // SLOT file (offset-0 probe / top-level chase before
+                // classification), its byte space is that one slot's -
+                // resolve against its own ladder.
+                let si = self.slot_by_name.get(name).copied().or_else(|| {
+                    // Obfuscated set: the promote's name is the yEnc-
+                    // declared one and the subject hints are garbage -
+                    // fall to the names the decode consumers observed.
+                    self.observed_by_name.read_ok().get(name).copied()
+                });
+                if let Some(si) = si
+                    && let Some((arts, enc_total)) = self.slot_articles.get(si)
+                    && !arts.is_empty()
+                    && *enc_total > 0
+                    && file_size > 0
+                {
+                    let scale = |v: u64| (v as f64 / file_size as f64 * *enc_total as f64) as u64;
+                    let (es, ee) = (scale(start), scale(end.min(file_size)));
+                    let lo = arts.partition_point(|(o, _)| *o <= es).saturating_sub(2);
+                    // +3 of forward slack (one more than the
+                    // mapped path): the offset-0 probe's rotation
+                    // guess undershoots by however many articles
+                    // beat the head to the slot, never overshoots.
+                    let hi = (arts.partition_point(|(o, _)| *o < ee) + 3).min(arts.len());
+                    for (_, id) in &arts[lo..hi] {
+                        ids.push(id.clone());
+                    }
+                    continue;
+                }
+                // No volume covering this span has classified yet (its
+                // header article is still in flight - routine in the
+                // first seconds, exactly when the player probes the
+                // tail). Estimate from NZB metadata alone.
+                self.ladder_fallback(file_size, start, end, &mut ids);
+                continue; // next span
+            }
+            // map_output_range returns pieces sorted by output offset, so
+            // pushing in iteration order preserves player-read order.
+            for (slot, vs, ve, vsize) in mapped {
+                let Some((arts, enc_total)) = self.slot_articles.get(slot) else {
+                    continue;
+                };
+                if arts.is_empty() || *enc_total == 0 {
+                    continue;
+                }
+                // Decoded volume offset → encoded article ladder
+                // (proportional; yEnc overhead is uniform within a file).
+                let scale = |v: u64| {
+                    if vsize > 0 {
+                        (v as f64 / vsize as f64 * *enc_total as f64) as u64
+                    } else {
+                        v
+                    }
+                };
+                let (es, ee) = (scale(vs), scale(ve));
+                let lo = arts.partition_point(|(o, _)| *o <= es).saturating_sub(2);
+                let hi = (arts.partition_point(|(o, _)| *o < ee) + 1).min(arts.len());
+                for (_, id) in &arts[lo..hi] {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        ids
+    }
+
+    /// Register the yEnc-declared name observed for `slot`'s articles.
+    /// The decode consumers call this once per article BEFORE the
+    /// `write_verified` that can fire the slot's offset-0 probe (the
+    /// probe promotes by `sanitize_out_name(slot.name)`, i.e. exactly
+    /// this name); the latch makes the steady-state cost one atomic
+    /// load. Without it, an obfuscated multi-volume set's probe missed
+    /// the hint-keyed map and scaled its span across EVERY volume -
+    /// promoting the wrong file's articles, so each slot classified
+    /// only when its true head arrived naturally and spilled first.
+    pub fn note_slot_name(&self, slot: usize, name: &str) {
+        let Some(flag) = self.observed.get(slot) else {
+            return;
+        };
+        if flag.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let key = nzbkit::disk::sanitize_out_name(name);
+        // Skip the overlay when the hint map already resolves this name
+        // to this slot (honest posts - the overlay stays empty). First
+        // insertion wins on a cross-slot duplicate, like the hint map.
+        if self.slot_by_name.get(&key) != Some(&slot) {
+            self.observed_by_name.write_ok().entry(key).or_insert(slot);
+        }
+        flag.store(true, Ordering::Release);
+    }
+
+    /// Zero-knowledge span mapping: scale output-file offsets onto the
+    /// concatenated encoded ladders of the volume-sorted data slots (pure
+    /// NZB metadata). Coarser than the extractor's map - yEnc overhead
+    /// and volume headers skew it slightly - so take a generous ±4
+    /// articles of slack per edge.
+    pub(crate) fn ladder_fallback(
+        &self,
+        file_size: u64,
+        start: u64,
+        end: u64,
+        ids: &mut Vec<Arc<str>>,
+    ) {
+        // N6-11: saturating, not `sum()`. Every one of these totals is
+        // a running sum of poster-declared `<segment bytes>`, each of
+        // which may legally be `u64::MAX`; a plain `sum()` panics in
+        // debug and wraps in release, and a wrapped total near zero
+        // takes the `total_enc == 0` early return below - so the whole
+        // volume-set byte mapping silently stops answering.
+        let total_enc: u64 = self
+            .vol_slots
+            .iter()
+            .filter_map(|&s| self.slot_articles.get(s))
+            .map(|(_, t)| *t)
+            .fold(0u64, u64::saturating_add);
+        if file_size == 0 || total_enc == 0 {
+            return;
+        }
+        let to_enc = |v: u64| (v as f64 / file_size as f64 * total_enc as f64) as u64;
+        let (gs, ge) = (to_enc(start), to_enc(end.min(file_size)));
+        let mut base = 0u64;
+        for &si in &self.vol_slots {
+            let Some((arts, enc_total)) = self.slot_articles.get(si) else {
+                continue;
+            };
+            if *enc_total == 0 || arts.is_empty() {
+                continue;
+            }
+            // N6-11: saturating for the same reason as `total_enc`
+            // above. A wrapped `base` puts a later volume's window
+            // BELOW an earlier one's, so the `ge <= slot_lo` test
+            // skips the slot the range actually lands in and the
+            // request is served from the wrong volume's articles.
+            let (slot_lo, slot_hi) = (base, base.saturating_add(*enc_total));
+            base = base.saturating_add(*enc_total);
+            if ge <= slot_lo || gs >= slot_hi {
+                continue;
+            }
+            let (es, ee) = (gs.saturating_sub(slot_lo), (ge - slot_lo).min(*enc_total));
+            let lo = arts.partition_point(|(o, _)| *o <= es).saturating_sub(4);
+            let hi = (arts.partition_point(|(o, _)| *o < ee) + 4).min(arts.len());
+            for (_, id) in &arts[lo..hi] {
+                ids.push(id.clone());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "streamhub_tailfiles_tests.rs"]
+mod streamhub_tailfiles_tests;
+
+/// N6-11, the parser/front-door addendum's arithmetic row.
+/// The zero-knowledge span mapping concatenates every volume slot's
+/// encoded ladder, and each of those totals is a saturating running sum
+/// of poster-declared `<segment bytes>` - so a two-volume post
+/// declaring `bytes="18446744073709551615"` legally hands this function
+/// two `u64::MAX` totals.
+///
+/// RED on origin/main at 8fbe1c3bd, in three places on one path: the
+/// `total_enc` `sum()`, `base + enc_total` and `base += enc_total`. In
+/// this profile each is an `attempt to add with overflow` panic on an
+/// ordinary range request - a wedged `/stream` read, not a wrong
+/// number. Built optimized they wrap instead, and a wrapped `total_enc`
+/// near zero takes the `total_enc == 0` early return, so the mapping
+/// silently stops answering and every range falls through to whatever
+/// the caller does with an empty id list.
+#[cfg(test)]
+mod extreme_ladder_tests {
+    use super::*;
+
+    fn arts(n: usize, each: u64) -> (Vec<(u64, Arc<str>)>, u64) {
+        let mut off = 0u64;
+        let mut v = Vec::new();
+        for i in 0..n {
+            v.push((off, Arc::from(format!("<a{i}@t>").as_str())));
+            off = off.saturating_add(each);
+        }
+        (v, off)
+    }
+
+    /// The guard comes back with the ctl because the `Extractor` inside
+    /// it holds `dir`: drop it here and the tree goes while the ctl is
+    /// still live. Returning a bare `SeekCtl` and letting the directory
+    /// leak is what this used to do, and it is one `$TMPDIR` entry per
+    /// run per arity forever - see `crates/nzbfast/tests/scratch/mod.rs`.
+    fn seek(slots: Vec<(Vec<(u64, Arc<str>)>, u64)>) -> (crate::testscratch::ScratchDir, SeekCtl) {
+        let dir = crate::testscratch::ScratchDir::attach(&std::env::temp_dir().join(format!(
+            "nzbfast-ladder-{}-{}",
+            std::process::id(),
+            slots.len()
+        )));
+        let n = slots.len();
+        let ctl = SeekCtl {
+            vol_slots: (0..n).collect(),
+            observed: (0..n)
+                .map(|_| std::sync::atomic::AtomicBool::new(false))
+                .collect(),
+            slot_articles: slots,
+            ctl: Arc::new(nzbkit::pool::QueueControl::default()),
+            extractor: Arc::new(nzbkit::extract::Extractor::new(&dir, n, false)),
+            slot_by_name: Default::default(),
+            observed_by_name: std::sync::RwLock::new(Default::default()),
+        };
+        (dir, ctl)
+    }
+
+    #[test]
+    fn extreme_declared_bytes_do_not_overflow_the_volume_ladder() {
+        let (_ladder, s) = seek(vec![arts(3, u64::MAX), arts(3, u64::MAX)]);
+        // Both slot totals saturate, so the concatenation does too -
+        // that is the premise, and it is what the plain `sum()` could
+        // not survive.
+        assert_eq!(s.slot_articles[0].1, u64::MAX);
+
+        // An ordinary range request over an ordinary file size. The
+        // assertion is that it ANSWERS: a wrapped `total_enc` takes the
+        // zero early-return and leaves this empty, and the plain adds
+        // panic before reaching it.
+        let mut ids = Vec::new();
+        s.ladder_fallback(1 << 30, 0, 1 << 20, &mut ids);
+        assert!(
+            !ids.is_empty(),
+            "a saturated ladder must still map a span, not fall silent"
+        );
+
+        // A span at the far end of the file resolves too - the arm
+        // where a wrapped `base` would have put the second volume's
+        // window BELOW the first's and skipped the slot the range
+        // actually lands in.
+        let mut tail = Vec::new();
+        s.ladder_fallback(1 << 30, (1 << 30) - (1 << 20), 1 << 30, &mut tail);
+        assert!(!tail.is_empty(), "the tail of the file must map too");
+
+        // And the degenerate claim is still bounded rather than
+        // panicking: one volume alone at the ceiling.
+        let (_ladder, solo) = seek(vec![arts(2, u64::MAX)]);
+        let mut one = Vec::new();
+        solo.ladder_fallback(1 << 20, 0, 1 << 20, &mut one);
+        assert!(!one.is_empty());
+    }
+}
+
+/// TODO 309: the resume route's owner tag, which is the only thing
+/// standing between a job transition and one download's report carrying
+/// another download's verdict.
+///
+/// This cell is published EARLY - at intake, before the first article -
+/// and read LATE, on the postproc lane, so a cross-job hand-over sits
+/// squarely between the two and the tag is doing real work rather than
+/// being copied from [`StreamHub::extractor_for`] out of habit.
+#[cfg(test)]
+mod resume_route_tests {
+    use super::*;
+
+    fn route(restored: u64) -> ResumeRoute {
+        ResumeRoute {
+            mapped: true,
+            restored_bytes: restored,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_route_is_answered_to_its_owner_and_to_nobody_else() {
+        let h = StreamHub::default();
+        // Nothing published: a run that never reached the gate has no
+        // route, and that is what a fresh daemon looks like too.
+        assert_eq!(h.resume_route_for("SABnzbd_nzo_nzbfast1"), None);
+
+        *h.resume_route.lock_ok() = Some(("SABnzbd_nzo_nzbfast1".into(), route(8_000_000)));
+        assert_eq!(
+            h.resume_route_for("SABnzbd_nzo_nzbfast1")
+                .expect("its owner reads it")
+                .restored_bytes,
+            8_000_000
+        );
+        // The next job asks while the previous job's verdict is still
+        // installed - the hand-over window - and gets nothing rather
+        // than a route belonging to a download it is not.
+        assert_eq!(h.resume_route_for("SABnzbd_nzo_nzbfast2"), None);
+        // And a PREFIX of the owner is not the owner: these ids are
+        // minted off a plain counter, so `...nzbfast1` is a strict
+        // prefix of `...nzbfast10` through `19` and of `...100` up.
+        assert_eq!(h.resume_route_for("SABnzbd_nzo_nzbfast10"), None);
+    }
+}

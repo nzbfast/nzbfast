@@ -1,0 +1,173 @@
+# E6 / P3 at FILE-COUNT scale: 120 members, one set, nothing on the
+# wire carrying a name.
+
+[layout]
+name = "cc-n36-many-small-members"
+seed = 155
+note = """
+Expresses bench/capability-corpus leg n36-many-small.
+
+Every other recovery row in this catalog is one to four members, so
+each of them measures naming and verification at BYTE scale and none of
+them measures it at file-count scale. This one is 120 members of 8 KiB:
+under a megabyte of payload in total, and 120 FileDesc packets, 120
+opaque wire names and 120 renames to get right.
+
+WHAT ONLY SHOWS UP HERE. A per-file cost that is invisible over four
+members is visible over 120, and so is any rule that is quadratic in
+the member count rather than linear. So is a rename step that is
+correct for each file on its own and collides across a set once there
+are enough of them to collide. The corpus row calls it the per-file
+overhead drill and asks for all 120 under their real names with nothing
+left as a token, which is exactly what the oracle grades.
+
+The members are the same length on purpose. A set of files that differ
+in length lets a matcher separate them by length alone, and this row is
+not about that: the descriptors distinguish them and nothing else has
+to. Their bytes still differ, because [source] draws every file from
+one stream in list order.
+
+One article each, so the article count is the file count and no part
+of the row is measuring multi-part reassembly.
+"""
+
+[source]
+files = [
+    { name = "Small.Set.000.dat", bytes = 8192 },
+    { name = "Small.Set.001.dat", bytes = 8192 },
+    { name = "Small.Set.002.dat", bytes = 8192 },
+    { name = "Small.Set.003.dat", bytes = 8192 },
+    { name = "Small.Set.004.dat", bytes = 8192 },
+    { name = "Small.Set.005.dat", bytes = 8192 },
+    { name = "Small.Set.006.dat", bytes = 8192 },
+    { name = "Small.Set.007.dat", bytes = 8192 },
+    { name = "Small.Set.008.dat", bytes = 8192 },
+    { name = "Small.Set.009.dat", bytes = 8192 },
+    { name = "Small.Set.010.dat", bytes = 8192 },
+    { name = "Small.Set.011.dat", bytes = 8192 },
+    { name = "Small.Set.012.dat", bytes = 8192 },
+    { name = "Small.Set.013.dat", bytes = 8192 },
+    { name = "Small.Set.014.dat", bytes = 8192 },
+    { name = "Small.Set.015.dat", bytes = 8192 },
+    { name = "Small.Set.016.dat", bytes = 8192 },
+    { name = "Small.Set.017.dat", bytes = 8192 },
+    { name = "Small.Set.018.dat", bytes = 8192 },
+    { name = "Small.Set.019.dat", bytes = 8192 },
+    { name = "Small.Set.020.dat", bytes = 8192 },
+    { name = "Small.Set.021.dat", bytes = 8192 },
+    { name = "Small.Set.022.dat", bytes = 8192 },
+    { name = "Small.Set.023.dat", bytes = 8192 },
+    { name = "Small.Set.024.dat", bytes = 8192 },
+    { name = "Small.Set.025.dat", bytes = 8192 },
+    { name = "Small.Set.026.dat", bytes = 8192 },
+    { name = "Small.Set.027.dat", bytes = 8192 },
+    { name = "Small.Set.028.dat", bytes = 8192 },
+    { name = "Small.Set.029.dat", bytes = 8192 },
+    { name = "Small.Set.030.dat", bytes = 8192 },
+    { name = "Small.Set.031.dat", bytes = 8192 },
+    { name = "Small.Set.032.dat", bytes = 8192 },
+    { name = "Small.Set.033.dat", bytes = 8192 },
+    { name = "Small.Set.034.dat", bytes = 8192 },
+    { name = "Small.Set.035.dat", bytes = 8192 },
+    { name = "Small.Set.036.dat", bytes = 8192 },
+    { name = "Small.Set.037.dat", bytes = 8192 },
+    { name = "Small.Set.038.dat", bytes = 8192 },
+    { name = "Small.Set.039.dat", bytes = 8192 },
+    { name = "Small.Set.040.dat", bytes = 8192 },
+    { name = "Small.Set.041.dat", bytes = 8192 },
+    { name = "Small.Set.042.dat", bytes = 8192 },
+    { name = "Small.Set.043.dat", bytes = 8192 },
+    { name = "Small.Set.044.dat", bytes = 8192 },
+    { name = "Small.Set.045.dat", bytes = 8192 },
+    { name = "Small.Set.046.dat", bytes = 8192 },
+    { name = "Small.Set.047.dat", bytes = 8192 },
+    { name = "Small.Set.048.dat", bytes = 8192 },
+    { name = "Small.Set.049.dat", bytes = 8192 },
+    { name = "Small.Set.050.dat", bytes = 8192 },
+    { name = "Small.Set.051.dat", bytes = 8192 },
+    { name = "Small.Set.052.dat", bytes = 8192 },
+    { name = "Small.Set.053.dat", bytes = 8192 },
+    { name = "Small.Set.054.dat", bytes = 8192 },
+    { name = "Small.Set.055.dat", bytes = 8192 },
+    { name = "Small.Set.056.dat", bytes = 8192 },
+    { name = "Small.Set.057.dat", bytes = 8192 },
+    { name = "Small.Set.058.dat", bytes = 8192 },
+    { name = "Small.Set.059.dat", bytes = 8192 },
+    { name = "Small.Set.060.dat", bytes = 8192 },
+    { name = "Small.Set.061.dat", bytes = 8192 },
+    { name = "Small.Set.062.dat", bytes = 8192 },
+    { name = "Small.Set.063.dat", bytes = 8192 },
+    { name = "Small.Set.064.dat", bytes = 8192 },
+    { name = "Small.Set.065.dat", bytes = 8192 },
+    { name = "Small.Set.066.dat", bytes = 8192 },
+    { name = "Small.Set.067.dat", bytes = 8192 },
+    { name = "Small.Set.068.dat", bytes = 8192 },
+    { name = "Small.Set.069.dat", bytes = 8192 },
+    { name = "Small.Set.070.dat", bytes = 8192 },
+    { name = "Small.Set.071.dat", bytes = 8192 },
+    { name = "Small.Set.072.dat", bytes = 8192 },
+    { name = "Small.Set.073.dat", bytes = 8192 },
+    { name = "Small.Set.074.dat", bytes = 8192 },
+    { name = "Small.Set.075.dat", bytes = 8192 },
+    { name = "Small.Set.076.dat", bytes = 8192 },
+    { name = "Small.Set.077.dat", bytes = 8192 },
+    { name = "Small.Set.078.dat", bytes = 8192 },
+    { name = "Small.Set.079.dat", bytes = 8192 },
+    { name = "Small.Set.080.dat", bytes = 8192 },
+    { name = "Small.Set.081.dat", bytes = 8192 },
+    { name = "Small.Set.082.dat", bytes = 8192 },
+    { name = "Small.Set.083.dat", bytes = 8192 },
+    { name = "Small.Set.084.dat", bytes = 8192 },
+    { name = "Small.Set.085.dat", bytes = 8192 },
+    { name = "Small.Set.086.dat", bytes = 8192 },
+    { name = "Small.Set.087.dat", bytes = 8192 },
+    { name = "Small.Set.088.dat", bytes = 8192 },
+    { name = "Small.Set.089.dat", bytes = 8192 },
+    { name = "Small.Set.090.dat", bytes = 8192 },
+    { name = "Small.Set.091.dat", bytes = 8192 },
+    { name = "Small.Set.092.dat", bytes = 8192 },
+    { name = "Small.Set.093.dat", bytes = 8192 },
+    { name = "Small.Set.094.dat", bytes = 8192 },
+    { name = "Small.Set.095.dat", bytes = 8192 },
+    { name = "Small.Set.096.dat", bytes = 8192 },
+    { name = "Small.Set.097.dat", bytes = 8192 },
+    { name = "Small.Set.098.dat", bytes = 8192 },
+    { name = "Small.Set.099.dat", bytes = 8192 },
+    { name = "Small.Set.100.dat", bytes = 8192 },
+    { name = "Small.Set.101.dat", bytes = 8192 },
+    { name = "Small.Set.102.dat", bytes = 8192 },
+    { name = "Small.Set.103.dat", bytes = 8192 },
+    { name = "Small.Set.104.dat", bytes = 8192 },
+    { name = "Small.Set.105.dat", bytes = 8192 },
+    { name = "Small.Set.106.dat", bytes = 8192 },
+    { name = "Small.Set.107.dat", bytes = 8192 },
+    { name = "Small.Set.108.dat", bytes = 8192 },
+    { name = "Small.Set.109.dat", bytes = 8192 },
+    { name = "Small.Set.110.dat", bytes = 8192 },
+    { name = "Small.Set.111.dat", bytes = 8192 },
+    { name = "Small.Set.112.dat", bytes = 8192 },
+    { name = "Small.Set.113.dat", bytes = 8192 },
+    { name = "Small.Set.114.dat", bytes = 8192 },
+    { name = "Small.Set.115.dat", bytes = 8192 },
+    { name = "Small.Set.116.dat", bytes = 8192 },
+    { name = "Small.Set.117.dat", bytes = 8192 },
+    { name = "Small.Set.118.dat", bytes = 8192 },
+    { name = "Small.Set.119.dat", bytes = 8192 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 8192
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -1,0 +1,50 @@
+# N8: a tree name beside the flat name a flattening client would have
+# mapped it onto.
+
+[layout]
+name = "m4-n8-tree-and-flat-lookalike"
+seed = 42
+note = """
+Ports e2e_norar's a_tree_name_and_its_flat_lookalike_land_apart.
+
+sub/movie.mkv beside sub_movie.mkv, both posted under tokens and both
+named only by their FileDesc packets. Before fd455c01b the flattening
+mapped BOTH onto one on-disk name and the publish pass had to
+disambiguate them with a slot prefix; with safe trees preserved the
+pair does not collide at all - the tree name keeps its directory and
+the flat name stays flat.
+
+The row is worth having as a pair rather than as either half: a client
+that still flattens produces two claims on sub_movie.mkv, and a client
+that refused the flat name to avoid the collision would lose a file
+that was posted honestly. The oracle grades the exact tree, so both
+failures are named.
+
+The shapes that DO collide - a traversal attempt, a duplicate FileDesc
+name - are not here and are not catalog rows: their right answer is
+whatever the sanitizer does, which is a screenshot rather than a
+requirement, and they stay pinned in e2e_norar/pins.rs.
+"""
+
+[source]
+files = [
+    { name = "sub/movie.mkv", bytes = 60000 },
+    { name = "sub_movie.mkv", bytes = 70000 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 20000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

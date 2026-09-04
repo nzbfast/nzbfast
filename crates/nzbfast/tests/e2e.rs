@@ -391,6 +391,42 @@ fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
+/// Whether a `rar` on PATH can CREATE an archive, not merely start.
+///
+/// The guard this replaced ran `rar -inul` and asked whether the process
+/// started, which every `rar` answers yes to - including one that cannot
+/// write. That mattered the moment there WAS such a binary: substituting
+/// `rarfast` for `rar` (research/CLI-SUBSTITUTION-2026-09-03.md, finding
+/// G3) put a `rar` on PATH whose `a` command refused, and this test could
+/// not skip on it because the guard had already said the tool was there.
+/// So the probe is the thing the test needs: build a one-file archive in
+/// a scratch directory and check a file came out.
+fn rar_can_create() -> bool {
+    let dir = std::env::temp_dir().join(format!(
+        "nzbfast-rarprobe-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let ok = std::fs::write(dir.join("probe.txt"), b"probe\n").is_ok()
+        && std::process::Command::new("rar")
+            .current_dir(&dir)
+            .args(["a", "-y", "-m0", "-idq", "probe.rar", "probe.txt"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        && dir.join("probe.rar").is_file();
+    let _ = std::fs::remove_dir_all(&dir);
+    ok
+}
+
 fn have_par2() -> bool {
     let ok = Command::new("par2")
         .arg("-V")
@@ -2403,10 +2439,40 @@ async fn corrupt_article_detected_and_repaired() {
 /// pays verify + PAR2 repair; on (NZBFAST_CRC_RETRY=1, an alias for
 /// NZBFAST_CRC_STEER since the TODO 114 graduation moved detection to
 /// the decode consumer) each bad article is refetched from the clean
-/// server and the run finishes clean, no repair at all. Wall-clock
-/// measurement - stays ignored, run with --ignored for the numbers.
+/// server and the run finishes clean, no repair at all.
+///
+/// IT IS IGNORED FOR ITS PRINTED PRICE, NOT FOR ITS ASSERTIONS, and the
+/// distinction is the reason it is safe to run in a job (claim
+/// `payout-crc-storm-rig-no-job`, 1 Sep 2026 - before that it ran in
+/// none). Everything asserted here is FUNCTIONAL and deterministic: the
+/// off leg must take damage and pay a repair, the on leg must finish
+/// clean without one, and both must write the payload byte for byte.
+/// The two walls are `println!`ed and never asserted, so nothing in
+/// this test has a threshold that load can break - measured 10 runs for
+/// 10 at load 16-20, off 2.14-2.23 s and on 273-282 ms. Do NOT promote
+/// it into the parallel suite on the strength of that: the printed
+/// price is the point of the rig, and a price measured beside 449 other
+/// tests is not one. It runs in nightly `long-suites`' `e2e suite
+/// (ignored rigs - complexity ratios and payout, quiet box)` step,
+/// which takes the ignored population of this binary whole. Locally:
+/// `--run-ignored only --no-capture`. See
+/// research/E2E-IGNORED-PAYOUT-RIG-WIRED-2026-09-01.md.
+///
+/// The `#[ignore]` reason below is ONE LINE on purpose and this block
+/// carries the detail instead, which is a `tools/doc-gate.py` constraint
+/// rather than a style choice. Its `item_decls` decides an item is
+/// documented by stepping back over lines that START with `#[`, so the
+/// continuation lines of a multi-line attribute string hide the block
+/// above them and the item reads as UNDOCUMENTED to the absorbed arm.
+/// Measured 1 Sep 2026: a wrapped reason here made the gate report the
+/// run above `corrupt_article_detected_and_repaired` as having absorbed
+/// this test's comment, which it had not. A `//` line in the attribute
+/// window does not fix it either - the gate says so itself, it detaches
+/// the run rather than waiving the pair. The three `e2e_wave5_cost`
+/// reasons ARE wrapped and pass only because no documented sibling above
+/// them carries a hard join, so do not read those as evidence.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "wall-clock payout measurement (corrupt storm incl repair) - run with --ignored"]
+#[ignore = "wall-clock payout price on a quiet box; the assertions are functional and load-proof. Runs in nightly `long-suites`' `e2e suite (ignored rigs - complexity ratios and payout, quiet box)` step; see the block above and research/E2E-IGNORED-PAYOUT-RIG-WIRED-2026-09-01.md"]
 async fn payout_crc_retry_prices_corrupt_storm_end_to_end() {
     if !have_par2() {
         eprintln!("skipping: par2 not installed");
@@ -5141,14 +5207,8 @@ async fn mixed_set_wholly_missing_rar_is_unpacked_after_rebuild() {
         eprintln!("skipping: par2 not installed");
         return;
     }
-    if std::process::Command::new("rar")
-        .arg("-inul")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_err()
-    {
-        eprintln!("skipping: rar not installed");
+    if !rar_can_create() {
+        eprintln!("skipping: no rar that can create an archive");
         return;
     }
     let mut fx = Fixture::new("mixedrecreate");

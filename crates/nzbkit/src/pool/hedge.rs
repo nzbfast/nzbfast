@@ -165,8 +165,23 @@ impl Shared {
         }
     }
 
-    /// B3 wire-cap: charge one dispatched BODY's estimated bytes.
+    /// B3 wire-cap: charge one dispatched BODY's estimated bytes, to
+    /// this pool's own count AND to the ledger it shares with every
+    /// other pipeline on the same budget ([`WireCharge`]).
+    ///
+    /// Both, not one: the shared ledger is what the cap is compared
+    /// against, and the per-pool count is what this pool hands back if
+    /// it dies holding charges (see `Drop for Shared`). They move
+    /// together on every path, so the shared total is the sum of the
+    /// live pools' counts by construction.
     pub(super) fn charge_wire(&self) {
+        // Shared first, own count second, and the release below does
+        // the reverse: that ordering keeps the ledger at or above the
+        // sum of the live pools' counts at every instant, so a race
+        // between two dispatches can only ever throttle a shade early.
+        // The other order lets a charge slip in under a ceiling that is
+        // already full, which is the direction this exists to stop.
+        self.wire.add(EST_BODY_BYTES);
         self.inflight_body_bytes
             .fetch_add(EST_BODY_BYTES, Ordering::AcqRel);
         // Memory-floor gauge mirror (instrument-first): same estimate,
@@ -201,12 +216,23 @@ impl Shared {
                 );
                 Some(v.saturating_sub(owed))
             });
+        // Shared LAST (see `charge_wire`): give the ceiling back only
+        // once this pool has stopped counting the bytes itself.
+        self.wire.release(owed);
     }
 
     /// B3 wire-cap: true when topping up past the one-in-flight floor
     /// must pause. `cap` 0 = uncapped (default outside budgeted runs).
+    ///
+    /// Reads the SHARED ledger, not this pool's own count. `cap` comes
+    /// from [`crate::mem::MemBudget::inflight_cap`], which is one slice
+    /// of ONE process budget however many pipelines are running, and
+    /// two of them run at every queue boundary - see [`WireCharge`] for
+    /// what a per-pool comparison admitted instead. A pool nobody
+    /// handed a shared ledger owns its own, so this is unchanged for a
+    /// single-pipeline run.
     pub(super) fn wire_over_cap(&self, cap: u64) -> bool {
-        cap > 0 && self.inflight_body_bytes.load(Ordering::Acquire) >= cap
+        cap > 0 && self.wire.bytes() >= cap
     }
 
     /// The wire cap just refused a top-up: mark the graph, at most once
@@ -654,5 +680,141 @@ impl Shared {
             file: inf.file,
             ord: inf.ord,
         })
+    }
+}
+
+/// The wire-side in-flight body ledger a set of pools SHARES: the sum of
+/// every pipeline's dispatched-and-not-yet-drained BODY estimate, in
+/// bytes, for pipelines drawing on one memory budget.
+///
+/// **Why it is not per pool** (TODO 313 item 1, 2 Sep 2026).
+/// [`crate::mem::MemBudget::inflight_cap`] is a slice of the PROCESS
+/// budget and was documented as a ceiling "GLOBAL across every server
+/// pool", but the counter it was compared against lived on `Shared`,
+/// which is one per pool. Two pools run concurrently as ordinary
+/// business - the queue hand-over starts job N+1's fleet while job N is
+/// still draining (`super::handoff`), and the idle-server prefetch
+/// sidecar downloads beside the active job on its own hub - so the
+/// budget-exempt wire-side bytes could reach TWICE the intended ceiling
+/// with every pool correctly under "the" cap. That is worst exactly
+/// where the cap matters: on the small-RAM box whose budget floor
+/// (32 MB of wire bodies at `MemBudget::MIN`) is the reason the clamp
+/// exists at all.
+///
+/// The fix is one charge, not a bigger cap and not a per-pool split of
+/// the cap - a split would starve a lone pipeline, which is the common
+/// case, of the pipeline depth it is entitled to when nothing else is
+/// running.
+///
+/// **Symmetric, where the holds ledger is not.**
+/// [`crate::extract::HoldsLedger`] fixed this same doubling for held
+/// spans on the same hand-over shape, and seats its budgets by
+/// SENIORITY: the predecessor keeps its whole slice and the successor
+/// sees the remainder, because a hold can live for the whole unpack and
+/// the job on the lane must not start spilling because a job with time
+/// to spare filled the slice behind it. A wire charge is the opposite
+/// kind of quantity - it is released when the body arrives or fails,
+/// seconds later, by a worker that is already waiting on it - so
+/// first-come here self-corrects within one pipeline window, and a
+/// seniority rule would only mean the successor dials its whole fleet
+/// and then runs it at depth one.
+///
+/// **Cost.** One extra uncontended atomic add per DISPATCHED ARTICLE
+/// (~800 KB of work), beside the two the path already had - the pool's
+/// own counter and the `memgauge` mirror. Measured at 1 and at 24
+/// threads by `wire_charge_stays_off_the_hot_path`; the shared line is
+/// the same shape as `inflight_body_bytes`, which every worker in a
+/// pool has always shared.
+pub struct WireCharge {
+    bytes: AtomicU64,
+}
+
+impl WireCharge {
+    /// A fresh, independent ledger. Tests and library callers that want
+    /// isolated pools take one of these; production takes
+    /// [`process_wire_charge`].
+    pub fn new() -> Arc<WireCharge> {
+        Arc::new(WireCharge {
+            bytes: AtomicU64::new(0),
+        })
+    }
+
+    /// Bytes charged across every pool sharing this ledger.
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Acquire)
+    }
+
+    fn add(&self, n: u64) {
+        self.bytes.fetch_add(n, Ordering::AcqRel);
+    }
+
+    /// Saturating, for the same reason [`Shared::release_wire`] is: a
+    /// counter that wraps past zero reads as ~u64::MAX and pins every
+    /// worker sharing it at pipeline depth one for the rest of the run.
+    fn release(&self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        let _ = self
+            .bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                Some(v.saturating_sub(n))
+            });
+    }
+}
+
+static PROCESS_WIRE: std::sync::OnceLock<Arc<WireCharge>> = std::sync::OnceLock::new();
+
+/// Install the process-wide ledger (the daemon, once at boot, beside
+/// the holds ledger it is the sibling of). A second call keeps the
+/// first: two ledgers would be two ceilings again.
+///
+/// Installed rather than ambient, exactly as
+/// [`crate::extract::install_process_ledger`] is and for its reason: a
+/// counter every pool joined automatically would carry one in-process
+/// test's charges into the next one's admission decisions, and the
+/// single-pipeline callers that never install it - `nzbfast get`, a
+/// library user, the repair side-fetch - have nothing to share with
+/// anyway.
+pub fn install_process_wire_charge() -> Arc<WireCharge> {
+    PROCESS_WIRE.get_or_init(WireCharge::new).clone()
+}
+
+/// The installed ledger, if any. `None` everywhere but the daemon.
+///
+/// `inflight_cap` is derived from the process budget
+/// (`crate::mem::set_process_budget`), so where several pipelines draw
+/// on that budget at once the charge it gates has to span them: the
+/// daemon puts this in every fleet it builds - active job, hand-over
+/// successor, prefetch sidecar - which is what makes their SUM the
+/// quantity compared against the cap.
+pub fn process_wire_charge() -> Option<Arc<WireCharge>> {
+    PROCESS_WIRE.get().cloned()
+}
+
+impl Drop for Shared {
+    /// Hand back whatever this pool still holds on the shared ledger.
+    ///
+    /// Charge and release are symmetric on every path a worker takes,
+    /// but a worker does not always take one: `join_fleet` aborts
+    /// stragglers at `EXIT_GRACE`, and a dropped task never drains its
+    /// deque. Per pool that leaked into a counter about to be dropped
+    /// with it, so it cost nothing; on a ledger that outlives the pool
+    /// it would be permanent, and enough aborted runs would pin the
+    /// daemon at pipeline depth one until restart. The pool's own count
+    /// is exactly what it has not given back, so returning it here
+    /// closes the run's books whatever happened inside it - the
+    /// `memgauge` mirror included, which leaked the same way.
+    fn drop(&mut self) {
+        // TODO 313 item 7: the surge's books close here for the same
+        // reason. Under `live_tune` the `ConnTarget` a loan was applied
+        // to lives on the daemon hub and outlives this pool, so a
+        // ledger left non-zero would follow the run out.
+        self.surge_close_books();
+        let owed = *self.inflight_body_bytes.get_mut();
+        if owed > 0 {
+            self.wire.release(owed);
+            crate::memgauge::sub(crate::memgauge::Sub::WireEst, owed);
+        }
     }
 }

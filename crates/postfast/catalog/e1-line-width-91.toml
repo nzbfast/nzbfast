@@ -1,0 +1,36 @@
+# E1: a yEnc line width no tool in the wild uses.
+
+[layout]
+name = "e1-line-width-91"
+seed = 11
+note = """
+The yEnc header states the width it framed at, and a decoder has no
+business reading it: the payload ends where the trailer says it ends,
+whatever the lines look like on the way there. This row posts at 91
+bytes per line, which is neither of the two widths a real encoder emits
+and therefore the one width no client can be quietly special-casing.
+
+91 rather than 256 on purpose. 256 is the other STANDARD width, so a
+client that hard-coded a two-way choice would pass a 256 row and fail a
+real post from an unusual tool; a client that handles 91 handles both.
+The standard widths are not left unpinned - the encoder's unit tests
+frame at 64, 91, 256 and 998 and, at 128, assert the emitted article is
+byte-identical to nzbkit::yenc::encode's own output over a payload
+covering all 256 byte values. This row is the end-to-end half of that.
+
+Multi-part, so the width interacts with chunk boundaries rather than
+being exercised once.
+"""
+
+[source]
+files = [{ name = "Width.Case.bin", bytes = 40960 }]
+
+[encoding]
+line_width = 91
+article_bytes = 8192
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

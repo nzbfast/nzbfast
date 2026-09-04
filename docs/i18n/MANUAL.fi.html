@@ -96,6 +96,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>Käyttöohje</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -736,6 +737,28 @@ ja <code>.strm</code>-osoitin upottavat sen puolestasi; sen luonti (<code>/m3u</
 vaatii avaimen. Jo aktiivisen latauksen pelkkä tavutarjoilu pysyy avoinna, ja
 avaimettomat asennukset käyttäytyvät kuten ennenkin.</div>
 
+<p><b>Kansion tarkistaminen pitkän ajan päästä.</b> Jokainen lataus todistaa
+tarkistussumman jokaiselle noutamalleen tiedostolle, ja ne kantaneet
+<code>.par2</code>-tiedostot siivotaan lopuksi pois - kuukausia myöhemmin ei siis
+yleensä ole enää mitään, mihin kansiota voisi verrata. nzbfast säilyttää ne sen
+sijaan pienessä piilotetussa <code>.nzbfast.manifest</code>-tiedostossa tiedostojen
+vieressä. Asetukset → Lataaminen → <b>Latausten tarkistus myöhemmin</b> on paikka,
+jossa osoitat sen valmiiseen kansioon: se lukee jokaisen tiedoston, kertoo mikä ei
+enää täsmää, ja tarjoutuu korjaamaan sen. Korjaaminen on toinen, erillinen
+napsautus, ja se noutaa vain vaurioituneen osan - kaikki yhä ehjä luetaan suoraan
+levyltäsi. Saman kortin valintaruutu poistaa tarkistustiedoston käytöstä, jos et
+sitä halua, ja <code>nzbfast verify</code> komentoriviltä lukee sen myös.</p>
+
+<p>Sama <b>Latausten tarkistus myöhemmin</b> -kortti voi myös tarkistaa itse
+aikataulun mukaan: kytkin <b>Tarkista valmiit kansiot aikataulun mukaan</b>,
+pois päältä ellet kytke sitä päälle, käy silloin läpi ne valmiit kansiot,
+joissa on tarkistustiedosto, ja käynnistää korjauksen kaikelle, mikä ei enää
+täsmää, ilman että kukaan napsauttaa. Se ei koskaan käy silloin, kun lataus
+on käynnissä tai jonossa, ja koska tarkistaminen tarkoittaa kansion jokaisen
+tiedoston lukemista alusta loppuun, se maksaa levylle silloinkin, kun mikään
+ei ole rikki. Kytkimen vieressä olevat rajat määräävät, kuinka monta
+korjausta ja kuinka paljon latausta yksi tarkistus saa käynnistää.</p>
+
 <h2 id="servers">8 · Usenet-palvelimet</h2>
 <p>Asetukset → <b>Usenet-palvelimet</b> on täysi editori: lisää, muokkaa, poista, järjestä uudelleen ja ota mikä
 tahansa palvelin mukaan pooliin tai pois siitä. Jokaisella palvelimella on:</p>
@@ -842,6 +865,20 @@ nuo artikkelien tarkistussummat heti kun PAR2 kattaa tiedoston: vaurio tulee esi
 hetkeä myöhemmin, omassa lohkossaan. Kaikissa kolmessa lopullinen kierros ja kaikki
 korjaus käyttävät täyttä MD5:tä, ja ilman PAR2-tiedostoja tehty lataus säilyttää
 artikkeliensa tarkistussummat.</p>
+<p><b>Nopea lopputarkistus</b> <span class="pill live">live</span> muuttaa
+tarkistusta, joka lukee valmiit tiedostosi takaisin levyltä: latauksen lopuksi ajettavaa
+kierrosta ja komentorivin <code>nzbfast verify</code> -komentoa, jossa <code>--fast</code>
+on sama valinta. Tavallisesti jokainen tiedosto todistetaan yhdellä tiivisteellä koko
+tiedoston yli, ja se on yksi luku yhdellä ytimellä riippumatta siitä montako ydintä koneessa
+on. Tämän ollessa päällä jokainen tiedosto todistetaan PAR2-joukon lohkokohtaisilla
+tarkistussummilla, ja ne ajetaan kaikilla ytimillä yhtä aikaa. Paljon nopeampi nopealla
+paikallisella levyllä, ja vähäarvoinen verkkojaossa tai pyörivällä levyllä, jossa levy on jo
+raja. Se on pois päältä, kunnes sitä pyydät, ja tähän silloin suostut: PAR2-joukko voi
+kantaa kaksi merkintää, jotka kuvaavat eri tiedostoja, ja par2cmdline ja muut työkalut
+kutsuvat tällaista joukkoa vaurioituneeksi siinä missä nzbfast kutsuu sitä silloin ehjäksi.
+Yksikään tavallisen ohjelmiston rakentama joukko ei näytä tuolta, ensimmäisen 16 KiB:n
+tarkistus torjuu yhä jokaisen vahingossa syntyneen muodon siitä, ja korjaus todistaa
+itsensä vanhaan tapaan sanoi tämä asetus mitä tahansa.</p>
 <h3>Levy &amp; kiintiö <span class="pill live">live</span></h3>
 <p><b>Vähimmäisvapaa tila</b> (keskeytä uudet työt sen alle; oletuksena 2 Gt, 0 poistaa sen käytöstä), <b>latauskiintiö</b> per
 päivä tai kuukausi (UTC; Pakota-työt ohittavat), <b>muistiraja</b> - moottorin RAM-budjetti
@@ -1011,7 +1048,7 @@ ja seurantalista toimii niiden tilien varassa.</div>
 <tr><td>Välityspalvelin, Välityskanavat</td><td>IRC-verkko, joka kuljettaa ilmoitukset (isäntä tai isäntä:portti), ja kuunneltavat kanavat pilkuin eroteltuna. Muutos astuu voimaan seuraavalla yhteydellä: kytke syöte pois ja takaisin ottaaksesi sen heti käyttöön.</td></tr>
 <tr><td>Nimeä korrelaatiolla</td><td>Julkiset live-välitykset eivät kuljeta tiedostonimiä, joten useimpia hämärrettyjä julkaisuja ei voi yhdistää suoraan. Ilmoitus kuitenkin naulaa sen, milloin julkaisu ilmestyi ja kuinka suuri se on. Tämä vertaa ilmoitettua aikaa ja kokoa nimettömiin julkaisuihin ja ehdottaa sopivuuden löytyessä oikeaa nimeä Selaa-näkymässä. Ehdotus on merkitty ehdotukseksi, vaatii napsautuksesi eikä koskaan nimeä levyllä olevia tiedostoja uudelleen.</td></tr>
 <tr><td>Ota vahvat osumat automaattisesti käyttöön</td><td>Oletuksena pois, ja tiukka päällä ollessaan: koon on täsmättävä tarkasti, mikään muu ilmoitus ei saa sopia lähes yhtä hyvin, ja ilmoituksen on valittava tämä julkaisu takaisin käänteisessä tarkistuksessa. Käyttöön otettu nimi muuttaa vain sen, miten julkaisu näytetään, se on merkitty päätellyksi ja poistuu itsestään, jos valmistunut lataus osoittaa sen vääräksi. Kaikki heikompi jää ehdotukseksi.</td></tr>
-<tr><td>Ilmoitushistoria</td><td>Live-syöte kuulee vain käyttöönoton jälkeen tehdyt ilmoitukset. Tämä hakee noin puolen vuoden edestä vanhoja ilmoituksia julkisesta pre-tietokannasta, kohteliaasti ja kerran, jotta myös jo indeksoidut julkaisut voidaan yhdistää. Käy taustalla puolisen tuntia.</td></tr>
+<tr><td>Ilmoitushistoria</td><td>Live-syöte kuulee vain käyttöönoton jälkeen tehdyt ilmoitukset. Tämä hakee kerran tuoreimmat vanhat ilmoitukset predb.net-palvelusta, joka on julkinen pre-tietokanta, jotta myös jo indeksoidut julkaisut voidaan yhdistää. predb.net pyytää, ettei siitä rakenneta omaa tietokantaa, joten haetaan vain kunkin osion kaksi tuoreinta sivua, enintään 10 pyyntöä minuutissa. Käy taustalla muutaman minuutin.</td></tr>
 </table></div>
 
 <h3>Kirjasto, Suojaus, Käyttöliittymä</h3>
@@ -1090,6 +1127,18 @@ nzbfast tapa sitä, mutta nzbfast lakkaa lukemasta komentosarjan tulostetta
 heti kun itse komentosarja päättyy: anna taustalle jätetylle apuohjelmalle
 oma tulosteenohjaus, tai se pysäytetään heti ensimmäisellä kerralla, kun se
 yrittää tulostaa.</p>
+<p>Komentosarjat sekä valinnaiset ulkoiset apuohjelmat <code>unrar</code> ja
+<code>par2</code> ajetaan eristyksessä, jos kone tarjoaa sellaisen:
+<code>sandbox-exec</code> macOSissa, <code>bwrap</code> Linuxissa. Eristetty
+komentosarja säilyttää täyden lukuoikeuden ja täyden verkkoyhteyden, joten
+ilmoittimet ja kirjastotyökalut eivät muutu; se saa kirjoittaa vain kansioihin,
+joita nzbfast jo käyttää (latauskansio, kaikki siirtokohteet, valvottu kansio ja
+järjestelmän väliaikaiskansio). Ota <b>Rajoita, minne komentosarjat saavat
+kirjoittaa</b> pois päältä kohdassa Asetukset &rarr; Kansiot, jos komentosarjan
+täytyy kirjoittaa muualle ja se epäonnistuu virheeseen "operation not
+permitted". Jos eristystä ei ole saatavilla, kaikki toimii täsmälleen kuten
+ennenkin - lataus ei koskaan epäonnistu sen takia - ja kytkimen alla oleva rivi
+kertoo, mikä mekanismi on voimassa. Windowsille ei ole vielä yhtään.</p>
 <h3>Jonoa edeltävä komentosarja</h3>
 <p>Toinen koukku ajetaan <em>ennen</em> kuin lataus tulee jonoon
 (Asetukset → Kansiot → Jonoa edeltävä komentosarja), SABnzbdin pre-queue-sopimuksella:
@@ -1437,7 +1486,7 @@ voittaa sen silti.</div>
 <tr><td><code>nzbfast serve</code></td><td>Aja daemon (koontinäyttö + API + automaatio). <code>--open</code> avaa selaimen; <code>--apikey</code> asettaa avaimen käsin (<a href="#firstrun-key">§2</a>); <code>--bind</code> valitsee kuunteluosoitteen, oletus <code>0.0.0.0</code> (jokainen liitäntä), <code>127.0.0.1</code> vain tälle koneelle. Katso <code>--help</code> koko lippulistalle - jokaisella koontinäytön asetuksella on lipun kaksonen.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Lataa yksi NZB, täysi liukuhihna, ei daemonia. <code>--preflight</code> keskeyttää aikaisin, jos julkaisu ei voi valmistua; <code>--password</code> salatuille sarjoille.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Saatavuustuomio - COMPLETE / REPAIRABLE / IMPOSSIBLE - ilman hyötykuorman lataamista.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Varmista tiedostot hakemiston PAR2-sarjaa vasten.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Varmista tiedostot hakemiston PAR2-sarjaa vasten. Palaa settle-manifestiin, jos PAR2-tiedostot ovat poissa. Palauttaa arvon 0, kun tiedostot ovat kunnossa, ja arvon 1, kun vaurio löytyy; hakemisto, jossa ei ole mitään tarkistettavaa, palauttaa myös arvon 0 ja kertoo siitä virhetulosteessa. <code>--fast</code> todistaa jokaisen tiedoston joukon lohkokohtaisilla tarkistussummilla eikä sen koko tiedoston tiivisteellä, mikä on nopealla levyllä paljon ripeämpää ja tuo mukanaan kohdassa <a href="#settings">§9</a> kuvatun vaihtokaupan.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>Järjestelmän mittaus + monimuotoisuusraportti terminaalissa.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Skannaa ryhmät indeksiin / hae siitä ilman daemonia.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Tuo palvelimet SABnzbd-ini-tiedostosta.</td></tr>

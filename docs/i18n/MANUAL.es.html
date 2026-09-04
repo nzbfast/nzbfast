@@ -96,6 +96,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>Manual de usuario</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -744,6 +745,30 @@ y el puntero <code>.strm</code> lo incrustan por ti; emitirlo (<code>/m3u</code>
 requiere la clave. El servido simple de bytes de una descarga ya activa sigue abierto, y
 las instalaciones sin clave se comportan como siempre.</div>
 
+<p><b>Comprobar una carpeta mucho después de terminarla.</b> Cada descarga
+demuestra una suma de comprobación para cada archivo que trae, y los archivos
+<code>.par2</code> que llevaban esas sumas se limpian al acabar, así que meses
+después normalmente no queda nada con lo que comparar la carpeta. nzbfast las
+guarda en su lugar, en un pequeño archivo oculto <code>.nzbfast.manifest</code>
+junto a los datos. En Ajustes → Descargas → <b>Comprobar las descargas más
+adelante</b> le señalas una carpeta terminada: lee todos los archivos, informa de
+lo que ya no coincide y ofrece repararlo. Reparar es un segundo clic, aparte, y
+solo trae la parte dañada - todo lo que sigue intacto se lee directamente de tu
+disco. La casilla de esa misma tarjeta desactiva el archivo de comprobación si
+prefieres no tenerlo, y <code>nzbfast verify</code> en la línea de órdenes también
+lo lee.</p>
+
+<p>La misma tarjeta <b>Comprobar las descargas más adelante</b> también puede
+activarse sola con regularidad: el interruptor <b>Comprobar las carpetas
+terminadas con regularidad</b>, desactivado salvo que lo actives, recorre
+entonces las carpetas terminadas que tienen un archivo de comprobación y pone
+en marcha una reparación de todo lo que ya no coincide, sin que nadie haga
+clic. Nunca se ejecuta mientras una descarga está en marcha o esperando, y
+como comprobar significa leer cada archivo de una carpeta de principio a fin,
+eso le cuesta al disco aunque no haya nada roto. Los límites junto al
+interruptor acotan cuántas reparaciones y cuánta descarga puede iniciar una
+comprobación.</p>
+
 <h2 id="servers">8 · Servidores Usenet</h2>
 <p>Ajustes → <b>Servidores Usenet</b> es el editor completo: añadir, editar, eliminar, reordenar y meter o sacar
 del pool cualquier servidor. Cada servidor tiene:</p>
@@ -852,6 +877,21 @@ sigue verificando la suma de comprobación propia de cada artículo. <i>Ligera</
 salta además esas sumas de artículo en cuanto PAR2 cubre un archivo: el daño aparece un
 momento después, en su bloque. En las tres, la pasada final y cualquier reparación usan
 MD5 completo, y una descarga sin archivos PAR2 conserva sus sumas de artículo.</p>
+<p><b>Comprobación final rápida</b> <span class="pill live">live</span> cambia la
+comprobación que vuelve a leer del disco tus archivos terminados: la pasada final al
+terminar una descarga y <code>nzbfast verify</code> en la línea de órdenes, donde
+<code>--fast</code> es la misma elección. Normalmente cada archivo se prueba con un resumen
+sobre el archivo entero, y esa es una sola lectura en un núcleo por muchos núcleos que
+tenga la máquina. Con esto activado, cada archivo se prueba con las sumas de comprobación
+por bloque del conjunto PAR2, y esas corren en todos los núcleos a la vez. Mucho más rápido
+en un disco local veloz, y de poco valor en una carpeta de red o un disco de platos, donde
+el disco ya es el límite. Está apagada mientras no la pidas, y esto es lo que aceptas
+cuando lo haces: un conjunto PAR2 puede llevar dos registros que describen archivos
+distintos, y par2cmdline y las demás herramientas llaman dañado a un conjunto así donde
+nzbfast lo llama entonces limpio. Ningún conjunto construido por software normal se parece
+a eso, una comprobación de los primeros 16 KiB sigue rechazando cualquier versión
+accidental de esa forma, y una reparación se prueba a la manera antigua diga lo que diga
+este ajuste.</p>
 <h3>Disco y cuota <span class="pill live">en directo</span></h3>
 <p><b>Espacio libre mínimo</b> (pausa los trabajos nuevos por debajo; 2 GB de forma predeterminada, 0 lo desactiva), <b>cuota de descarga</b> por
 día o mes (UTC; los trabajos Forzar la omiten), <b>presupuesto de memoria</b> - el tope de RAM del motor
@@ -1026,7 +1066,7 @@ hayas añadido, y la lista de seguimiento trabaja con esas cuentas.</div>
 <tr><td>Servidor de retransmisión, Canales</td><td>La red IRC que lleva los anuncios (host o host:puerto) y los canales que escuchar, separados por comas. Un cambio surte efecto en la siguiente conexión: apaga y enciende el canal para aplicarlo ya.</td></tr>
 <tr><td>Nombrar por correlación</td><td>Las retransmisiones públicas en vivo no llevan nombres de archivo, así que la mayoría de las publicaciones ofuscadas no se pueden emparejar directamente. Lo que un anuncio sí fija es cuándo apareció una publicación y su tamaño. Esto compara hora y tamaño anunciados con las publicaciones sin nombre y, cuando encajan, propone el nombre real en Explorar. Una sugerencia va marcada como tal, requiere tu clic y nunca renombra archivos en disco.</td></tr>
 <tr><td>Aplicar automáticamente las coincidencias fuertes</td><td>Apagado por defecto, y estricto cuando está activo: el tamaño debe coincidir de cerca, ningún otro anuncio puede encajar casi igual de bien, y el anuncio debe volver a elegir esta publicación en la comprobación inversa. Un nombre aplicado solo cambia cómo se muestra, va marcado como inferido y se retira solo si una descarga terminada lo desmiente. Todo lo más débil sigue siendo una sugerencia.</td></tr>
-<tr><td>Historial de anuncios</td><td>El canal en vivo solo oye los anuncios posteriores a su encendido. Esto recupera unos seis meses de anuncios pasados de una base de pres pública, con cortesía y una sola vez, para que también se puedan emparejar las publicaciones ya indexadas. Corre en segundo plano media hora aproximadamente.</td></tr>
+<tr><td>Historial de anuncios</td><td>El canal en vivo solo oye los anuncios posteriores a su encendido. Esto recupera una sola vez los anuncios pasados más recientes de predb.net, una base de pres pública, para que también se puedan emparejar las publicaciones ya indexadas. predb.net pide que no se construya una base propia a partir de ella, así que solo se toman las dos páginas más recientes de cada sección, como mucho 10 peticiones por minuto. Corre en segundo plano unos minutos.</td></tr>
 </table></div>
 
 <h3>Biblioteca, Seguridad, Interfaz</h3>
@@ -1106,6 +1146,19 @@ Un script puede dejar un ayudante corriendo en segundo plano al salir y
 nzbfast no lo matará, pero nzbfast deja de leer la salida del script
 en el momento en que el propio script termina: dale a un ayudante en segundo plano su
 propia redirección de salida, o se detendrá la primera vez que intente imprimir.</p>
+<p>Los scripts, y las herramientas externas opcionales <code>unrar</code> y
+<code>par2</code>, se ejecutan dentro de un confinamiento donde la máquina
+ofrece uno: <code>sandbox-exec</code> en macOS, <code>bwrap</code> en Linux. Un
+script confinado conserva acceso completo de lectura y a la red, así que los
+notificadores y las herramientas de biblioteca no se ven afectados; solo puede
+escribir dentro de las carpetas que nzbfast ya usa (la carpeta de descargas,
+cualquier destino de traslado, la carpeta vigilada y la carpeta temporal del
+sistema). Desactiva <b>Limitar dónde pueden escribir los scripts</b> en Ajustes
+&rarr; Carpetas si un script necesita escribir en otro sitio y falla con
+"operation not permitted". Donde no hay confinamiento disponible todo se ejecuta
+igual que siempre - una descarga nunca falla por ello - y la fila de Ajustes
+debajo de ese interruptor dice qué mecanismo está en vigor. Windows aún no tiene
+ninguno.</p>
 <h3>Script previo a la cola</h3>
 <p>Un segundo gancho se ejecuta <em>antes</em> de que una descarga entre en la cola
 (Ajustes → Carpetas → Script previo a la cola), con el contrato pre-queue de SABnzbd:
@@ -1452,7 +1505,7 @@ cada arranque. Una clave que después pongas en Ajustes sigue ganándole.</div>
 <tr><td><code>nzbfast serve</code></td><td>Ejecuta el daemon (panel + API + automatización). <code>--open</code> abre el navegador; <code>--apikey</code> fija la clave a mano (<a href="#firstrun-key">§2</a>); <code>--bind</code> elige la dirección de escucha, por defecto <code>0.0.0.0</code> (todas las interfaces), <code>127.0.0.1</code> solo para esta máquina. Consulta <code>--help</code> para la lista completa de opciones - cada ajuste del panel tiene su opción gemela.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Descarga un NZB, pipeline completo, sin daemon. <code>--preflight</code> aborta pronto si la publicación no puede completarse; <code>--password</code> para conjuntos cifrados.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Veredicto de disponibilidad - COMPLETE / REPAIRABLE / IMPOSSIBLE - sin descargar la carga útil.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Verifica los archivos contra el conjunto PAR2 de un directorio.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Verifica los archivos contra el conjunto PAR2 de un directorio. Recurre al manifiesto de settle cuando los archivos PAR2 ya no están. Sale con 0 cuando los archivos están íntegros y con 1 cuando encuentra daños; un directorio sin nada que comprobar también sale con 0 y lo dice en la salida de error. <code>--fast</code> prueba cada archivo con las sumas de comprobación por bloque del conjunto en lugar de con su resumen del archivo entero, lo que es mucho más rápido en un disco veloz y trae el compromiso descrito en el <a href="#settings">§9</a>.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>El benchmark del sistema + el informe de diversidad, en el terminal.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Escanea grupos al índice / búscalo, sin el daemon.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Importa servidores desde un ini de SABnzbd.</td></tr>

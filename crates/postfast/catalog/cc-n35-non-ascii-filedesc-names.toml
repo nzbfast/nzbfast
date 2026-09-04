@@ -1,0 +1,60 @@
+# Non-ASCII real names, carried nowhere but the recovery set.
+
+[layout]
+name = "cc-n35-non-ascii-filedesc-names"
+seed = 153
+note = """
+Expresses bench/capability-corpus leg n35-unicode-names.
+
+Three members, three scripts: a Latin name with combining-capable
+accents, a CJK name, and one mixing Latin and Cyrillic. Every one of
+them lives only in a FileDesc packet, so the round trip runs the bytes
+through par2gen's name field, the client's parser and the destination
+filesystem, and any of those three can normalize, transcode or truncate
+without saying so.
+
+WHY THE NAMES ARE WRITTEN AS ESCAPES rather than as literal characters.
+A profile is a file other people edit, and a name that looks right in a
+terminal can be two different byte sequences (macOS hands back NFD for
+a name written NFC). Escapes make the bytes the reviewable thing. TOML
+basic strings decode \\uXXXX, so what reaches the generator is the
+codepoint sequence spelled here and nothing an editor decided.
+
+THIS ROW IS NOT N7, and the distinction is worth stating because the
+file name invites the mistake. N7 is `[naming] name_bytes = "raw"`:
+name BYTES that are not valid UTF-8 at all, the CP1252 shape row M4-86
+posts, and `crate::naming` refuses that plane by name as unimplemented.
+Every name here is well-formed UTF-8. What it adds over the ASCII rows
+is everything that happens to a valid non-ASCII name in transit -
+normalization, case folding, and a filesystem that may hand back a
+different byte sequence than it was given - and the corpus leg is the
+same: its three names are ordinary Unicode. So this row leaves N7 at U,
+correctly, and the report will keep saying so until that plane lands.
+
+The three lengths differ so a crossed pair cannot pass by looking
+byte-exact against the wrong descriptor.
+"""
+
+[source]
+files = [
+    { name = "Ünïcøde Film (2026).mkv", bytes = 60000 },
+    { name = "电影.名字.mkv", bytes = 70000 },
+    { name = "Français имя.bin", bytes = 50000 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 15
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 25000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

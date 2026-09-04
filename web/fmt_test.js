@@ -14,7 +14,7 @@
 // The base is the right one for release sizes and stays; the label was
 // the bug.
 //
-// A companion Rust test (serve/assets.rs) keeps the same invariant under
+// A companion Rust test (assets.rs) keeps the same invariant under
 // CI, where node is not assumed.
 const fs = require('fs');
 

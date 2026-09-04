@@ -100,7 +100,7 @@
 //! defect, not the suite's, and it was never only about tests - an
 //! embedder pointing the client at a new CA after its first connection
 //! had exactly the same silence. The cache is keyed by the CA path now
-//! (see `tls_client_config` in `crates/nzbkit/src/nntp/tls.rs`), the two
+//! (see `tls_client_config` in `crates/nzbkit-base/src/nntp/tls.rs`), the two
 //! modules take a guard from `tls_env` so that only one CA is in force
 //! at a time, and neither uses `std::env::set_var` any more - the
 //! `unsafe` on that call was justified by "the only test in this
@@ -138,10 +138,29 @@
 #[path = "../scratch/mod.rs"]
 mod scratch;
 
+// FIVE OF THESE ONLY EXIST WITH THE INDEXER, and say so here rather than
+// leaving the slim build to find out. `cargo check -p nzbkit
+// --no-default-features --all-targets` (the configuration every phone
+// build starts from) was red from the day this file was assembled until
+// 3 Sep 2026 on exactly these modules: each reaches `nzbkit::index`,
+// which `src/lib.rs` declares under `#[cfg(feature = "indexer")]`, and a
+// test module has no `required-features` of its own the way a
+// `[[test]]` target does - the gate has to sit on the `mod` line. This
+// is the ONE place the cfg belongs: widening the production `cfg` so the
+// slim binary carries the index to satisfy a test is the mistake the
+// mobile-targets note in CLAUDE.md warns about. The two examples that
+// reach the index (`indexscan_bench`, `sidecar_fold_walk`) carry the
+// same rule as `required-features = ["indexer"]` in Cargo.toml, because
+// an example IS a target. ci-private's `slim-check` job runs the nzbkit
+// slim line beside the nzbfast one so this cannot rot in silence again.
+
+#[cfg(feature = "indexer")]
 mod auto_vacuum_ingest_cost;
+#[cfg(feature = "indexer")]
 mod compact_abort_latency;
 mod fmp4_remux;
 mod fuzz_seed_corpus;
+#[cfg(feature = "indexer")]
 mod index_integrity_regressions;
 mod ladder_tail_rig;
 mod live_tune;
@@ -155,7 +174,9 @@ mod par2repair_dir;
 mod par2repair_namepath;
 mod par2repair_parity;
 mod par2repair_reference;
+#[cfg(feature = "indexer")]
 mod provider_demote_rig;
+#[cfg(feature = "indexer")]
 mod scoreboard_parity_measure;
 mod steer_rig;
 mod store_promote_cost;

@@ -1,0 +1,72 @@
+# C15 + F8 + C7 + C2 + P1: an intact post whose inner archive is
+# poisoned, with the recovery set that fixes it packed alongside.
+
+[layout]
+name = "nc-r4-inner-archive-damaged-with-its-own-parity"
+seed = 176
+note = """
+The nested corpus's `r4-inner-damaged` leg, and the corpus's own note
+says it is the shape most downloaders stop at: four clients deliver the
+damaged archive together with its complete recovery set and call the
+job done.
+
+Nothing about the POST is wrong. Every article arrives, the posted PAR2
+set verifies the volumes clean, and the unpack of the outer set
+succeeds. What comes out of it is an inner archive with 64 bytes
+poisoned, and beside it - inside the same outer archive, mentioned
+nowhere in the NZB - a complete PAR2 set over that inner archive. A
+client that treats "the outer unpack succeeded" as the end of the job
+files two files and reports success, having delivered no payload at
+all.
+
+Two gaps had to close for this row. H4 gave an inner level a recovery
+set of its own (`[[container.inner]] recovery_pct`), packed into the
+level above beside the archive it covers. H5 gave `[fault]
+corrupt_payload` an `inner_level` instead of a `file`, so a span lands
+on a LEVEL's archive rather than on a `[source]` entry - the same key
+at two depths, because both are "spoil these bytes after the recovery
+data that covers them was cut", and only the depth decides which
+recovery data and therefore where the generator does it.
+
+The ordering is the whole shape. The level's set is cut over the CLEAN
+archive, and the damage is written afterwards, over a copy that goes on
+the wire: a set cut over already-damaged bytes would describe the
+damage, agree with it, and ask the client to repair nothing.
+
+The posted parity is NOT part of the end state, and that is a real
+requirement rather than an oversight. The posted set covers the volumes
+and the volumes are intact, so a client that fetched its parity would
+be spending bandwidth on blocks nothing needs. The repair this row asks
+for is one level down, out of a set the post never announced.
+
+The span sits well past the archive header so the fault is a DATA fault
+the set repairs, rather than a header fault - which is `[fault]
+corrupt_headers` (F3) and a different plane, on a different archive,
+repaired by a different set.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 12000
+
+[[container.inner]]
+kind = "rar-stored"
+recovery_pct = 30
+
+[[fault.corrupt_payload]]
+inner_level = 0
+at = 8000
+bytes = 64
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

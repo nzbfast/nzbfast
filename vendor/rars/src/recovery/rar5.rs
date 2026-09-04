@@ -558,7 +558,6 @@ pub(crate) fn build_structural_inline_recovery_data_with_progress(
     let shard_size = usize::try_from(plan.shard_size).map_err(|_| Error::PlanOverflow)?;
     let data_shards = usize::try_from(plan.data_shards).map_err(|_| Error::PlanOverflow)?;
     let recovery_shards = usize::try_from(plan.recovery_shards).map_err(|_| Error::PlanOverflow)?;
-    let total_size = u32::try_from(plan.shard_size).map_err(|_| Error::PlanOverflow)?;
     let header_size_u32 = u32::try_from(plan.header_size).map_err(|_| Error::PlanOverflow)?;
     let data_shards_u16 = u16::try_from(plan.data_shards).map_err(|_| Error::PlanOverflow)?;
     let recovery_shards_u16 =
@@ -1757,6 +1756,59 @@ fn encode_parity_shards_with_progress(
     Ok(parity)
 }
 
+/// Folds one data shard's stripe into a batch of parity rows, in place.
+///
+/// This is [`encode_parity_shards`] taken apart so a caller can encode a
+/// code word it cannot hold: `matrix` is the rows of the encoder matrix
+/// this batch covers, `data_index` says which column `stripe` is, and
+/// `parity` accumulates across calls. The caller zeroes `parity` at the
+/// start of a stripe and folds every data shard into it before writing.
+///
+/// `len` is how much of each buffer this stripe uses, so the last stripe
+/// of a code word can be shorter than the buffers. It must be even: a
+/// stripe boundary inside a 2-byte symbol would corrupt the fold, and
+/// the writer's window is chosen even for exactly that reason.
+///
+/// The multiply tables are built per call rather than cached, which
+/// costs 512 field multiplies per row and is nothing beside folding the
+/// stripe itself. Caching them would make the working set scale with the
+/// data volume count, which is the thing the striping exists to avoid.
+pub fn fold_stripe_into_parity(
+    matrix: &[Vec<u16>],
+    data_index: usize,
+    stripe: &[u8],
+    parity: &mut [Vec<u8>],
+    len: usize,
+) -> Result<()> {
+    if matrix.len() != parity.len() {
+        return Err(Error::BadRecoveryChunk);
+    }
+    if !len.is_multiple_of(2) {
+        return Err(Error::OddShardSize);
+    }
+    if stripe.len() < len || parity.iter().any(|row| row.len() < len) {
+        return Err(Error::ShardSizeMismatch);
+    }
+    let gf = shared_gf16();
+    for (row, destination) in matrix.iter().zip(parity.iter_mut()) {
+        let Some(&coefficient) = row.get(data_index) else {
+            return Err(Error::BadRecoveryChunk);
+        };
+        if coefficient == 0 {
+            continue;
+        }
+        let table = Gf16MulTable::new(gf, coefficient);
+        for (offset, chunk) in destination[..len]
+            .chunks_mut(RECOVER_FOLD_CHUNK)
+            .enumerate()
+        {
+            let start = offset * RECOVER_FOLD_CHUNK;
+            table.fold_into(chunk, &stripe[start..start + chunk.len()]);
+        }
+    }
+    Ok(())
+}
+
 /// The original per-symbol encode, kept as the differential reference for the
 /// table-driven fold.
 #[cfg(test)]
@@ -2902,11 +2954,6 @@ mod tests {
         );
     }
 
-    /// The plan bound is derived from the format's own arithmetic, so it must
-    /// not creep down onto legitimate archives: this is the widest real plan
-    /// (group_count rounded up to even is what makes capacity exceed the
-    /// protected size at all).
-    #[test]
     /// Geometry read off real WinRAR 7.23 output (`rar a -ma5 -m0 -rr5p`).
     ///
     /// These are the numbers the format ceiling was hiding: below one group
@@ -3105,6 +3152,10 @@ mod tests {
         );
     }
 
+    /// The plan bound is derived from the format's own arithmetic, so it must
+    /// not creep down onto legitimate archives: this is the widest real plan
+    /// (group_count rounded up to even is what makes capacity exceed the
+    /// protected size at all).
     #[test]
     fn rar5_inline_recovery_plan_bound_accepts_the_widest_real_archive() {
         let prefix_len = (MAX_WINRAR602_DATA_SHARDS * 0x10000 + 1) as usize;

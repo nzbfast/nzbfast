@@ -1,0 +1,51 @@
+# C2 + C4: an encrypted split set carrying two members.
+
+[layout]
+name = "c4-encrypted-split-two-members"
+seed = 118
+note = """
+Encryption and a volume split at once, over a set that holds more than
+one file, which is the commonest real layout that also happens to be
+locked.
+
+The generator refused this shape STORED and built it COMPRESSED until
+4 Sep 2026, and that was the writers' shape rather than a rule this
+catalog chose: `Rar50VolumeWriter::encrypted_compressed_entries` takes
+a slice, while `::encrypted_stored_entry` was singular with no plural
+beside it. `::encrypted_stored_entries` closed that asymmetry, and the
+stored spelling is now its own row -
+c4-encrypted-split-stored-two-members. Read the two together: same
+encryption, same split, same member count, one compressed and one not.
+
+Both members are compressible, because a compressed selection over
+incompressible bytes is a C1 archive wearing a C3 name and the
+generator refuses that too. So this row exercises the compressor, the
+cipher and the volume split in one pass, and the client has to run all
+three backwards to reach the payload: join the volumes, derive the key,
+decode the stream.
+
+The password reaches the client through the NZB meta, as in every other
+encrypted row here - see c4-encrypted-rar5-data for why that is the
+only carrier the oracle leaves available, and why the salt is seeded.
+"""
+
+[source]
+files = [
+    { name = "split-a.bin", bytes = 20000, content = "compressible" },
+    { name = "split-b.bin", bytes = 20000, content = "compressible" },
+]
+
+[container]
+kind = "rar-compressed"
+encryption = "data"
+password = "layout-fixture-pw"
+volume_bytes = 700
+
+[nzb]
+meta_password = true
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -384,7 +384,7 @@ pub(super) async fn worker(
     // permit to dial on (`handoff::POST_PROCESS_RESERVE`). Neither class
     // may exceed the account's own cap, so this is still the one place
     // that bounds what the provider sees.
-    let _permit = match &cfg.lease {
+    let mut permit = match &cfg.lease {
         Some(l) if admitted => {
             // Counted as OUR OWN parked worker for exactly as long as
             // the lease counts it as a waiter, so a run whose last
@@ -400,7 +400,7 @@ pub(super) async fn worker(
         }
         _ => None,
     };
-    let admitted = admitted && (cfg.lease.is_none() || _permit.is_some());
+    let admitted = admitted && (cfg.lease.is_none() || permit.is_some());
     let warm_conn = match &cfg.warm {
         Some(w) if admitted => tokio::select! {
             c = w.take(server) => c,
@@ -432,6 +432,7 @@ pub(super) async fn worker(
             reconnects,
             slot,
             admit,
+            &mut permit,
             warm_conn,
         )
         .await;

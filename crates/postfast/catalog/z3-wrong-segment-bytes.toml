@@ -1,0 +1,38 @@
+# Z3: every segment's bytes attribute is an order of magnitude out.
+
+[layout]
+name = "z3-wrong-segment-bytes"
+seed = 23
+note = """
+The bytes attribute is the map's guess at how big an article is. It is
+what a client sizes a job from before a single byte arrives, so it
+feeds progress, it can feed disk-space checks and it can feed
+allocation - and it is not evidence about anything, because the article
+itself states its own length and carries its own CRC.
+
+Ten times the real size, not two percent. The realistic mistake is
+about two percent: many posting tools state the DECODED size where the
+NZB spec wants the encoded one. But two percent cannot separate "the
+client trusted the map" from "the client ignored it" in a grade that
+compares output bytes, and a row whose instrument cannot tell the two
+answers apart is not a row. An order of magnitude can.
+
+The articles the mock serves are byte-identical to the faithful row's,
+so anything that differs in the outcome is the map having been
+believed.
+"""
+
+[source]
+files = [{ name = "Misstated.bin", bytes = 49152 }]
+
+[encoding]
+article_bytes = 8192
+
+[nzb]
+segment_bytes = "wrong"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

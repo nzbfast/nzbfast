@@ -801,7 +801,7 @@ async fn restart_mid_finishing_requeues_and_completes() {
     let d = serve(&dir, build(30_000, cfg.clone(), dir.join("complete"))).await;
     let port = d.port;
     let dir3 = dir.clone();
-    let spool = dir.join(".spool").join("queue.json");
+    let spool = dir.join(".spool").join("queue.jsonl");
     // Wait for the row to enter the lane AND for that to reach the
     // durable record, then kill the daemon mid-tail. Both, because the
     // lane sets `Finishing` on the job and only then calls save_queue:
@@ -824,7 +824,7 @@ async fn restart_mid_finishing_requeues_and_completes() {
             assert!(
                 i < 199,
                 "job never reached a persisted Finishing state\n\
-                 --- queue payload ---\n{q}\n--- queue.json ---\n{saved}"
+                 --- queue payload ---\n{q}\n--- queue.jsonl ---\n{saved}"
             );
             std::thread::sleep(std::time::Duration::from_millis(100));
         }

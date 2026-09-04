@@ -1,0 +1,60 @@
+# C3: one genuinely COMPRESSED RAR5 volume.
+
+[layout]
+name = "c3-compressed-single-volume"
+seed = 103
+note = """
+The RAR half of the compressed-container plane, and the row that could
+not be written until `[source] content` existed.
+`c1-stored-single-volume` is its control arm: same container, same
+single volume, same descriptive names, and the one difference is that
+the writer here had something to shrink and did.
+
+`c3-compressed-7z` is the plane's other arm and landed the same day
+from the other direction. It is a different question, not a duplicate:
+7z records one content method for the whole archive and never falls
+back per entry, so an LZMA2 archive over incompressible bytes comes out
+LARGER than its payload and the row is about a decoder the client must
+RUN. This one is about a writer that actually shrank, which is the
+shape the RAR fallback made unreachable.
+
+Why the payload needs a key of its own. `[source]` bytes come off the
+ChaCha stream and are incompressible by construction, the RAR writers
+silently STORE a member they cannot shrink, and the generator refuses
+the result by name (`ContainerError::NothingToCompress`) rather than
+emitting a C1 archive wearing a C3 label - which would have been green
+without a byte of decompression having run. `content = "compressible"`
+is the answer: each drawn byte repeated for a drawn run of at most a
+couple of dozen, so the alphabet stays the full 256 and what the
+transform adds is repetition.
+
+It is not `[source] periodic = true` returning by another name. The
+runs are bounded far under any recovery block, so no block this payload
+makes can be constant - and the schema refuses this arm beside a
+`[recovery]` set outright, which is the half a reader can check from
+the file: par2cmdline never sees a byte of it, so the 0.8.1
+identical-block miscount that `periodic` is refused for is unreachable
+rather than argued away.
+
+Depth stays at 0 deliberately. A compressed level inside another
+compressed level cannot be written at all - the inner archive's output
+is incompressible, so the outer one stores it and the generator refuses
+- and a compressed level under a STORED one is the mixed chain that
+needs per-level container tables (gap H2 of
+research/POSTFAST-VS-NESTED-CORPUS-2026-09-03.md). This row is the
+single-level plane and nothing more.
+
+The volume is not in the end state: a successful unpack spends it.
+"""
+
+[source]
+files = [{ name = "compressed.bin", bytes = 60000, content = "compressible" }]
+
+[container]
+kind = "rar-compressed"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

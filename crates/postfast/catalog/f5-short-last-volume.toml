@@ -1,0 +1,49 @@
+# F5 over C2 plus P1: a split set whose last volume is short, and the
+# parity that puts the tail back.
+
+[layout]
+name = "f5-short-last-volume"
+seed = 81
+note = """
+Short-tail handling. A truncated final volume is one of the commonest
+real defects in a posted archive - an upload cut off, a spool that
+lost the end of a file, a poster who stopped - and it is not the same
+fault as an absent volume: the file is THERE, with the right name, and
+a reader that trusts the volume's own declared sizes walks off the end
+of it. The set has to notice the shortfall and rebuild the missing
+bytes before anything unpacks.
+
+THE ORDER IS THE ROW. The recovery set is cut over the volumes as the
+writer wrote them and the truncation happens afterwards, so the set
+describes bytes that are no longer on disk. A generator that damaged
+first would emit a set that agrees with the damage and asks the client
+to repair nothing, and the row would be green over a layout with no
+fault in it at all. `crate::fault`'s header says so in as many words,
+and a unit test beside it pins the two orderings apart.
+
+Exactly as much parity as the repair consumes: 20 % over the volume
+set is the block that the cut tail costs, so every volume the layout
+carries is one the repair must read and none of the end state is left
+to client policy.
+"""
+
+[source]
+files = [{ name = "cut.tail.bin", bytes = 90000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 40000
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+
+[encoding]
+article_bytes = 10000
+
+[fault]
+truncate_last_volume_bytes = 3000
+
+[expect]
+exits = "nonzero"
+gap = "the short tail is repaired from parity and the payload is re-extracted correctly, and the run still exits non-zero with \"the verified volumes could not be unpacked after a fallback\" - every byte the user asked for is on disk under its real name and the process reports failure"

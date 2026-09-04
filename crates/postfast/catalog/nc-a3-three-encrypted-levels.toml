@@ -1,0 +1,88 @@
+# C4 + C13 + C14 + C7 + Z2: three encrypted levels, a different
+# password at each, and each level carrying the next one's key.
+
+[layout]
+name = "nc-a3-three-encrypted-levels"
+seed = 180
+note = """
+The nested corpus's `a3-password-chain` leg, from its apocalypse tier:
+three AES levels, each shipping the next level's password as a sibling
+text file, with the outermost password posted in the clear.
+
+It was the other leg the 3 Sep round refused on purpose, and it needed
+three things that did not exist that day. The salt: both RAR
+generations drew their key from OS entropy, so no encrypted profile was
+reproducible - `rars::Entropy` and a seeded per-level source answered
+that (1f46a2011, 4a48321c9). A password PER LEVEL, which needs the
+per-level container tables gap H2 added. And a carrier for the inner
+passwords, which needs a sibling at each level (H3) whose CONTENT is
+stated rather than drawn - the `text` key.
+
+`c4-password-chain-two-levels` is this shape at two levels and carries
+the argument in full: the client already harvests password candidates
+from each level's own outputs, so a level that drops the next level's
+password in a text file beside its archive is exactly the shape that
+path exists to unlock. This row is the corpus's own depth, which is
+three, and it is a strictly harder claim - the chain has to hold twice,
+so a client that harvested once and then stopped passes the two-level
+row and fails this one.
+
+Read it from the outside in. The NZB's `<meta type="password">` carries
+the outermost password, which is the only one a downloader could use
+before opening anything. Level 2's archive holds level 1's archive and
+a text file naming level 1's password. Level 1 holds level 0's archive
+and a text file naming level 0's password. Level 0 holds the payload.
+Nothing announces the two inner passwords anywhere in the post.
+
+So a green row here is four separate claims: the client read the meta,
+it kept denesting past levels holding something besides an archive, and
+it harvested a password from a file it had itself just written - twice,
+at two different depths.
+
+Measured rather than assumed, 4 Sep 2026, and at the link the two-level
+row cannot reach: with the DEEPEST sibling's text replaced by a wrong
+password the row FAILS, and it fails in the shape this note predicts -
+the client lands the outer two levels and reports "an archive in the
+output directory could not be unpacked", leaving the payload sealed.
+Without that arm a green row here would also be green if the client had
+guessed, or if the chain had only ever been walked once.
+
+All three passwords are furniture. They travel in the clear, which is
+the point of the shape and why nothing real goes here; the corpus's own
+a3 documents its three the same way.
+
+The end state is the payload file and the three password files, which
+are ordinary text the post carries rather than recovery data anything
+spends. No `[recovery]` set: this row is about the chain, and a set
+beside it would put a verify and a possible repair in front of the
+question.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 16000 }]
+
+[container]
+kind = "rar-stored"
+encryption = "data"
+password = "outer-fixture-pw"
+siblings = [{ name = "password-level2.txt", text = "middle-fixture-pw" }]
+
+[[container.inner]]
+kind = "rar-stored"
+encryption = "data"
+password = "middle-fixture-pw"
+siblings = [{ name = "password-level1.txt", text = "inner-fixture-pw" }]
+
+[[container.inner]]
+kind = "rar-stored"
+encryption = "data"
+password = "inner-fixture-pw"
+
+[nzb]
+meta_password = true
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

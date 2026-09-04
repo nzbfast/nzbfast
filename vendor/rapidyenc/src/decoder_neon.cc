@@ -172,7 +172,22 @@ HEDLEY_ALWAYS_INLINE void do_decode_neon(const uint8_t* src, long& len, unsigned
 				if(isRaw && !searchEnd) {
 					tmpData2 = vld1q_u8(src+i + 2 + sizeof(uint8x16_t));
 				} else {
-					nextData = vld1q_u8_align(src+i + sizeof(uint8x16_t)*2, 16); // only 32-bits needed, but there doesn't appear a nice way to do this via intrinsics: https://stackoverflow.com/questions/46910799/arm-neon-intrinsics-convert-d-64-bit-register-to-low-half-of-q-128-bit-regis
+					// nzbfast local patch (2 Sep 2026): the aarch32 twin of the
+					// over-read fixed in decoder_neon64.cc. Same argument, same
+					// bound: nextData is only ever read through
+					// vextq_u8(dataB, nextData, n) with n <= 4, and lenBuffer
+					// reserves 4 bytes, so the 16-byte load went up to 12 bytes
+					// past the caller's buffer. See VENDOR.txt and
+					// research/YENC-NEON-OVERREAD-2026-09-02.md. NOTE: no box on
+					// this fleet runs aarch32, so LOCALLY this arm is only
+					// syntax-checked (clang --target=armv7a-none-eabi
+					// -fsyntax-only). It is compiled and run in CI though -
+					// nightly.yml's armv7-cross job, under qemu-user - just never
+					// under a sanitizer, so the over-read class is invisible there.
+					nextData = vreinterpretq_u8_u32(vld1q_lane_u32(
+						(const uint32_t*)(src+i + sizeof(uint8x16_t)*2),
+						vdupq_n_u32(0), 0
+					));
 					tmpData2 = vextq_u8(dataB, nextData, 2);
 				}
 #ifdef __aarch64__

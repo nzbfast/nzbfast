@@ -40,57 +40,6 @@ pub(super) fn chase_relief_env_off_value(v: Option<&str>) -> bool {
     v == Some("1")
 }
 
-/// A doubt the CALLER raises about an article whose terminal verdict it
-/// has DEFERRED, and the reason `Inner::lost_articles` is not enough on
-/// its own.
-///
-/// That flag is set from a TERMINAL fetch verdict, and
-/// [`Extractor::note_article_lost`] says in its own doc why that lands
-/// late: "verdicts typically land AFTER the pile has built (retries
-/// exhaust last)". The drop-behind trim reads the flag as its veto -
-/// "no lost article anywhere in the job: a demote waiting to happen,
-/// and a demote after a drop is a re-download" - so between the pool
-/// deciding an article is one refusal from gone and the verdict
-/// actually landing, the trim can DROP a prefix a repair will need.
-/// Measured 30 Aug 2026 and written up in
-/// `research/CHASE-TRIM-DROPS-BEFORE-VERDICT-2026-08-30.md`: under the
-/// holds backpressure park (whose arm bypasses the pace and can-finish
-/// gates by design) the pass dropped five megabytes of a PAR2-vouched
-/// prefix, `try_mapped_repair` then declined for want of backing data,
-/// and the set took the disk ladder with a re-fetch on top - the exact
-/// three-write route the row-26 chase repair exists to remove.
-///
-/// So this is the SAME veto, raised EARLIER: the pool raises it at the
-/// moment it decides a refusal is the last evidence an article needs
-/// and holds the verdict back anyway (TODO 315's late re-ask, and
-/// §129's confirming repeat for a bare refusal that would be
-/// live-unanimous with this group's bit folded in). It is deliberately
-/// NOT raised on every 430 - an article a later server answers is not
-/// doubt about the JOB - and it does not arm the stalled-chase paging
-/// pass, which does real disk I/O and wants the terminal mark.
-///
-/// STICKY and never cleared, exactly like the flag it stands in front
-/// of. A re-ask that succeeds does not give back a prefix already
-/// dropped, so a flag that could fall again would reopen the same
-/// window it closes. A clean job cannot raise it at all: nothing here
-/// happens without a 430 that has walked the whole live fleet.
-#[derive(Debug, Default)]
-pub struct LossDoubt(AtomicBool);
-
-impl LossDoubt {
-    /// Raise the doubt. Cheap enough for the pool's refusal path: one
-    /// relaxed store, no lock - which is the whole reason the flag is
-    /// handed out as an `Arc` rather than reported through a method on
-    /// the extractor, whose every entry point takes the global mutex.
-    pub fn raise(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-    /// Has any article's terminal verdict been held back?
-    pub fn raised(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
 /// One drop-behind trim spill, planned under the routing lock and
 /// WRITTEN after it drops (TODO 37 item 1, 23 Aug 2026). The prefix
 /// `[at, at+len)` of `buf` is still in RAM while this is queued - only
@@ -175,8 +124,21 @@ impl Extractor {
             // is the only place these can be latched. Sticky in the
             // compressed direction: one compressed entry makes the whole
             // layer count, whatever the rest of it stores.
+            //
+            // And STICKY IS NOT ENOUGH ON ITS OWN, because the read that
+            // matters happens earlier. Headers interleave with data and a
+            // level can hold several archives, so a stored entry (or a
+            // whole store-only volume) routes and builds the child - with
+            // the store raise on its cap - before this line runs for the
+            // compressed entry behind it. The latch flips here and the
+            // grant is taken back with it; without the revoke a layer
+            // shaped [stored first, compressed second] kept a level of
+            // cap it had not earned, and one such layer per level
+            // ladders to `NESTED_MAX_DEPTH_HARD_CEILING` instead of
+            // stopping at the configured cap.
             if bits & SH_COMPRESSED != 0 {
                 inner.saw_compressed = true;
+                self.revoke_store_raise(inner);
             }
             if bits & SH_STORE != 0 {
                 inner.saw_store = true;
@@ -274,20 +236,7 @@ impl Extractor {
                 .clone();
             let key = Self::canon_key(inner, &raw);
             inner.slots[slot].group = Some(key.clone());
-            let grp = inner.groups.entry(key.clone()).or_insert_with(|| Group {
-                slots: Vec::new(),
-                bases: HashMap::new(),
-                resolve_stamp: None,
-                arith_provisional: HashMap::new(),
-                arith_ever: false,
-                fallback: false,
-                fallback_reason: None,
-                out_names: HashMap::new(),
-                routed: HashMap::new(),
-                routed_plain: HashMap::new(),
-                chase: None,
-                zip_splits_open: Vec::new(),
-            });
+            let grp = inner.groups.entry(key.clone()).or_insert_with(Group::new);
             grp.slots.push(slot);
             if grp.fallback {
                 // Joined a group that already fell back.
@@ -1137,17 +1086,39 @@ impl Extractor {
         //   rig: 752 MB trimmed, 0 dropped, every byte of it spilled
         //   into the volume files the park exists to never write.
         let parked = !inner.park.parked.is_empty();
-        let drop = drop_ok
-            && inner.rar_drop_on
+        let healthy = inner.rar_drop_on
             && self.depth == 0
             && !inner.lost_articles.load(Ordering::Relaxed)
-            && !(inner.loss_doubt_on && inner.loss_doubt.raised())
+            && !(inner.loss_doubt_on && inner.loss_doubt.raised());
+        let set_total = || volumes.iter().map(|(b, _, _)| b.total()).sum();
+        let drop = drop_ok
+            && healthy
             && (parked
                 || (Self::rar_engine_keeping_pace(&volumes)
-                    && Self::rar_drop_can_finish(
-                        inner.budget.cap(),
-                        volumes.iter().map(|(b, _, _)| b.total()).sum(),
-                    )));
+                    && Self::rar_drop_can_finish(inner.budget.cap(), set_total())));
+        // Which gate said no, for the bench instrument: the `[mem]` line
+        // reports what the trim RELEASED and never which condition
+        // decided it, and the fixes differ (see `chasestat::TrimVeto`).
+        // The whole classification sits behind the instrument's own gate
+        // and re-asks the two predicates rather than hoisting them out
+        // of the expression above, so the shipped decision keeps its
+        // exact short-circuit order and an instrument-off build computes
+        // nothing extra at all. Only drop-eligible passes are counted -
+        // a `drop_ok=false` pass is a spill by the caller's choice, not
+        // a verdict.
+        if drop_ok && super::chasestat::on() {
+            use super::chasestat::TrimVeto;
+            let veto = if drop {
+                TrimVeto::None
+            } else if !healthy {
+                TrimVeto::Loss
+            } else if !Self::rar_engine_keeping_pace(&volumes) {
+                TrimVeto::Pace
+            } else {
+                TrimVeto::Size
+            };
+            super::chasestat::trim_pass(veto, parked);
+        }
         for (buf, slot, watermark) in volumes {
             self.rar_trim_volume(inner, slot, &buf, watermark, drop)?;
         }
@@ -1488,6 +1459,66 @@ impl Extractor {
             (inner.budget.cap() / 2) as u64
         }
     }
+    /// May the trim drop a slot's prefix even though the verifier has
+    /// not vouched for it, because NO PAR2 SET EVER WILL?
+    ///
+    /// The vouch above asks the §94 B gate whether the verifier has
+    /// ENGAGED this slot, and answers `false` two ways that mean
+    /// opposite things: "a set is live and has not reached these bytes
+    /// yet" (wait, or spill) and "no set exists" (nothing will ever read
+    /// them back). The gate handle is attached unconditionally on the
+    /// download path, so a job whose post carries no parity at all takes
+    /// the first reading for the whole run and spills every byte the
+    /// drop-behind decides to release - measured 3 Sep 2026 at
+    /// 48,149 DROP verdicts and 0 dropped, 1.6-1.8 GB of device writes
+    /// and up to 1.36 GB of peak footprint on a 1.87 GB set.
+    ///
+    /// SEPARATING THE TWO IS NOT "the NZB names no `*.par2`". Parity is
+    /// posted under obfuscated names and identified mid-download from
+    /// its own bytes, and a slot that engages AFTER a drop is exactly
+    /// the 22 Aug 2026 false-"unrepairable" the vouch exists to prevent:
+    /// the settle read-back reads a live chase's still-Pending blocks
+    /// through `read_at`, which answers `nofile` below the buffer's
+    /// base, so every such block is marked Bad and `needed` inflates on
+    /// a set with no damage at all.
+    ///
+    /// So the question is answered from the classification side, and in
+    /// two halves that are monotonic in opposite directions:
+    ///
+    /// - EVERY slot the job opened with has had its offset-0 span reach
+    ///   this extractor. That is when a "nothing is recovery data" answer
+    ///   stops being provisional: a par2 volume is identified from its
+    ///   offset-0 bytes and nowhere else, so once every head is in, every
+    ///   volume that will ever be recognised has been.
+    /// - AND the engine's hook says no par2 source exists - no slot the
+    ///   NZB classified as parity, none recognised on resume, and none
+    ///   sniffed from the wire. The engine flags a sniffed slot BEFORE
+    ///   it hands the same span to `write_impl`, so the two halves can
+    ///   never both be read across that window.
+    ///
+    /// Everything here fails SAFE. No hook (every test, the CLI's
+    /// standalone extract, a child level) is "unknown" and keeps the
+    /// vouch. A slot whose head never arrives - a missing article, a
+    /// sample-skipped file, a donated one - holds `heads_left` above
+    /// zero for the whole run and keeps the vouch too, which is the same
+    /// answer the loss veto in `rar_trim_set` already gives that job.
+    fn parity_ruled_out(inner: &mut Inner) -> bool {
+        if inner.no_parity_latched {
+            return true;
+        }
+        if inner.heads_left != 0 {
+            return false;
+        }
+        // Under the routing lock, so the hook must not reach back into
+        // this extractor. The one the engine installs reads atomics on
+        // the file slots and two captured constants; see `NoParityHook`.
+        if inner.no_parity.as_ref().is_some_and(|h| h()) {
+            inner.no_parity_latched = true;
+            super::chasestat::note_no_parity();
+        }
+        inner.no_parity_latched
+    }
+
     fn rar_trim_volume(
         &self,
         inner: &mut Inner,
@@ -1544,8 +1575,11 @@ impl Extractor {
         let vouched = match inner.verify_gate.as_ref() {
             None => true,
             Some(g) => g.engaged_mark(slot).is_some_and(|mark| mark >= cut),
-        };
+        } || Self::parity_ruled_out(inner);
         if !(drop && vouched) {
+            if drop {
+                super::chasestat::trim_vouch_spill();
+            }
             // Spill, with no disk I/O under this lock: planned here,
             // written by `flush_pending_spills` once the lock drops.
             self.queue_trim_spill(inner, slot, buf, watermark, min_release, true)?;
@@ -1748,7 +1782,7 @@ impl Extractor {
             // What `plain_span` reported for a re-fed span landing
             // plain: file offset == volume offset by definition.
             if j.refeed {
-                inner.late_placements.push(LatePlacement {
+                inner.push_late(LatePlacement {
                     slot: j.slot,
                     frag: Frag {
                         // The out_dir-RELATIVE name, never the bare one (30 Aug 2026
@@ -1947,6 +1981,7 @@ impl Extractor {
                 root.wake_pager();
             }
         };
+        let worker_t = super::chasestat::mark();
         let result = if ctl.v4 {
             rars::rar15_40::extract_volume_sequence_to_with_progress(
                 |index| Self::chase_next_volume_v4(&ctl, index, pw.as_deref()),
@@ -1983,6 +2018,7 @@ impl Extractor {
                 mark,
             )
         };
+        super::chasestat::worker_ran(worker_t);
         let mut st = ctl.shared.lock_ok();
         st.outcome = Some(result.map_err(|e| e.to_string()));
         drop(st);
@@ -2041,7 +2077,9 @@ impl Extractor {
                 if st.no_more {
                     return Ok(None);
                 }
+                let t = super::chasestat::mark();
                 st = ctl.cv.wait(st).unwrap();
+                super::chasestat::vol_park(t);
             }
         };
         let base = ctl.bases.lock_ok().get(&index).copied().unwrap_or(0);

@@ -1,11 +1,11 @@
 //! TODO 280 (issue #54): the CALL SITE, not the feature.
 //!
-//! `serve/refeed.rs` already has nine unit tests, and every one of them
+//! `refeed.rs` already has nine unit tests, and every one of them
 //! calls `Daemon::refeed_completed` by hand with a Job built in memory.
 //! They prove the judgement - the refusals, the depth cap, the sha
 //! dedupe, the paused landing. None of them proves the one thing that
 //! makes the feature reachable at all: that `finalize_completed_gen`
-//! (serve/job.rs, the `done_ok` arm) still calls it, on a real finished
+//! (job.rs, the `done_ok` arm) still calls it, on a real finished
 //! download, at a moment when the payload is where the record says.
 //!
 //! That call sits between the unpack/sweep/rename step and the
@@ -203,16 +203,15 @@ fn history_status(port: u16, name: &str) -> Option<String> {
 /// the queue synchronously precisely so a restart cannot forget it - so
 /// the file it is saved to is where it is read from.
 fn refeed_depth_of(dir: &std::path::Path, nzo: &str) -> u64 {
-    let path = dir.join(".spool").join("queue.json");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("no queue.json at {}: {e}", path.display()));
-    let v: serde_json::Value = serde_json::from_str(&text).expect("queue.json is JSON");
-    v["queue"]
-        .as_array()
-        .and_then(|q| q.iter().find(|j| j["nzo_id"] == nzo).cloned())
-        .unwrap_or_else(|| panic!("{nzo} is not in {}: {text}", path.display()))["refeed_depth"]
+    let row = crate::harness::stored_job(dir, nzo).unwrap_or_else(|| {
+        panic!(
+            "{nzo} is not in the queue store: {}",
+            crate::harness::stored_queue_text(dir)
+        )
+    });
+    row["refeed_depth"]
         .as_u64()
-        .unwrap_or_else(|| panic!("{nzo} has no refeed_depth in {}", path.display()))
+        .unwrap_or_else(|| panic!("{nzo} has no refeed_depth in the queue store"))
 }
 
 /// The whole wiring in one run: a container post downloaded by a real

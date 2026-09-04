@@ -374,15 +374,16 @@ fn a_remote_rename_and_recategorize_survive_a_restart() {
     // whether the write happened when the call was answered. out_dir is
     // the half no wire form exposes for a queued job, and the half a
     // move has already acted on.
-    let stored = std::fs::read_to_string(dir.join(".spool").join("queue.json"))
-        .expect("queue.json after the two edits");
-    let stored: serde_json::Value = serde_json::from_str(&stored).expect("queue.json parses");
-    let saved = stored["queue"]
-        .as_array()
-        .expect("queue array")
+    let stored = crate::harness::stored_queue(&dir);
+    let saved = stored
         .iter()
         .find(|j| j["name"] == "renamed-across-restart")
-        .unwrap_or_else(|| panic!("the rename never reached queue.json: {stored}"));
+        .unwrap_or_else(|| {
+            panic!(
+                "the rename never reached the queue store: {}",
+                crate::harness::stored_queue_text(&dir)
+            )
+        });
     assert_eq!(
         saved["category"].as_str(),
         Some("movies"),

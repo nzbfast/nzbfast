@@ -1,0 +1,45 @@
+# N8: the same BASENAME under two different directories, with both
+# trees living only in the FileDesc packets.
+
+[layout]
+name = "m4-n8-duplicate-basenames"
+seed = 41
+note = """
+Ports e2e_norar's duplicate_basenames_across_directories_keep_their_trees
+(Case 8 of the no-RAR family).
+
+Two files called readme.txt, one under a/ and one under b/. Both are
+posted under tokens, so the only record either directory exists is the
+FileDesc packet, and the client has to keep each one in its own tree.
+Before the relpath preservation ruling (fd455c01b) the names were
+flattened and the pair was kept apart as a_readme.txt / b_readme.txt,
+which is the shape a flattening client still produces - and which this
+row now refuses, because the oracle grades the exact output tree and a
+flattened spelling is a name the profile does not carry.
+
+The two payloads differ in length so a crossed pair cannot pass by
+looking byte-exact against the wrong descriptor.
+"""
+
+[source]
+files = [
+    { name = "a/readme.txt", bytes = 30000 },
+    { name = "b/readme.txt", bytes = 45000 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 20000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

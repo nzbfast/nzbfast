@@ -1,0 +1,56 @@
+# N6 plus E6: the part indices are shuffled and `=ypart begin=` is not.
+
+[layout]
+name = "n6-e6-reordered-part-indices"
+seed = 17
+note = """
+A LEGAL POST, not a damaged one, and that is the whole reason the row
+is interesting. Every article's `=ypart begin=`/`end=` states the true
+range its bytes occupy, its trailer states the true chunk length and
+its part CRC is the real one. Only the `part=` index is permuted. A
+decoder places bytes from `begin=` (nzbkit's own `Decoded::offset` says
+so), so a shuffled index is a robustness question and not a corruption
+one; lying about `begin=` would be a broken post rather than a layout.
+
+THE PERMUTATION ON THIS SEED, measured 4 Sep 2026 and stable because
+nothing in the generator draws from the operating system: the six
+chunks in byte order carry parts 3, 5, 4, 2, 6, 1. That is a full
+derangement, so no chunk sits where its own part number would put it,
+and a client that laid the parts down in index order would write a file
+whose every block was in the wrong place. The oracle grades byte for
+byte, so such a client fails here and cannot fail quietly.
+
+WHY THE MAP IS SORTED, and why that is what makes this row worth
+having. `crate::nzb::emit` lists segments in ascending part number,
+which under the neutral naming plane is also byte order and changes
+nothing (measured over the whole catalog on the same day: every profile
+but this one keeps its exact layout fingerprint). Under a shuffle the
+two orders come apart, and that is the point. Left in byte order, the
+map would have handed a client that simply appended segments in the
+order it read them the right answer for the wrong reason, and a green
+row would have proved nothing about `begin=` at all. Sorted, the map
+agrees with the shuffled indices and disagrees with byte order, so the
+only field left that can place the bytes is `=ypart begin=`. Measured
+the same day: with the map sorted the client still passes, so it is
+reading `begin=` rather than either index.
+
+16,384-byte articles over 96 KiB is six parts, which is enough for a
+permutation to be a permutation and small enough that the row costs a
+second. That selects E6 as well, which is why the file is named for
+both planes.
+"""
+
+[source]
+files = [{ name = "Shuffled.Parts.bin", bytes = 98304 }]
+
+[naming]
+part_order = "reordered"
+
+[encoding]
+article_bytes = 16384
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

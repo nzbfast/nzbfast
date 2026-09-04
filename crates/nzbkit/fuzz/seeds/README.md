@@ -42,7 +42,7 @@ Note either below.
   still CARRY their shape. That was written while those rows were open;
   both lanes have since landed (`dd479f9b4`, `97e4dea88`, 30 Aug 2026)
   and each row is pinned by its own deterministic regression in
-  `crates/nzbkit/src/nzb_tests.rs`. The split STAYS anyway, and for a
+  `crates/nzbkit-base/src/nzb_tests.rs`. The split STAYS anyway, and for a
   better reason than the original one: this file checks that a SEED
   still carries the shape it was committed for, and putting a second
   copy of each row's outcome assertion here would be two places to keep
@@ -169,6 +169,56 @@ Note either below.
   path. The recipe in `../README.md` used to copy all six, which is how
   a seeding step can look done and be two-thirds inert.
 
+- `yenc_decode/crash-d94c80b4149bae0e461b8c0d86d2f5757efdf9cf` (127 B,
+  3 Sep 2026) - a REPRO, and the x86 TWIN of the entry below: same class
+  (a width-aligned SIMD over-read that cannot fault and cannot change an
+  answer, which ASan aborts on), different kernel family. This one is
+  the CRC side, not the decode side. The body is a `=ybegin` header, 101
+  bytes of `0xff` and a `=yend crc32=` trailer, which is what makes the
+  target compute a CRC at all; its length is what matters, not its
+  bytes, because a CRC kernel branches on neither.
+  `AddressSanitizer: unknown-crash` inside the `vpclmul` CRC kernel,
+  which finished the buffer with an aligned 32-byte load while 1..31
+  bytes remained. The `generic` and `pclmul` kernels each ran their full
+  46 s clean in the same job, and `fuzz-arm` was green, because that
+  kernel is x86-only - run 33719528482, the FIRST scheduled run to reach
+  it, the CRC pin having landed the day before (`db85dff50`). The
+  128-bit sibling carried the identical defect at four tail sites and is
+  fixed in the same commit. Fixed in
+  `vendor/rapidyenc/src/crc_folding_256.cc` and `crc_folding.cc`; the
+  reasoning, the five sites and the honest limit (no box on this fleet
+  can execute either kernel) are in `vendor/rapidyenc/VENDOR.txt` under
+  Local patches. The value oracle is
+  `yenc_simd::tests::every_reachable_crc_kernel_matches_the_oracle`,
+  which already sweeps every tail residue at four alignments with each
+  case at the end of its own heap block.
+
+- `yenc_decode/crash-8937f3763d1ff20d1926829b1448067ae62341c2` (261 B,
+  2 Sep 2026) - a REPRO, and the first entry here that is a repro for a
+  memory-safety fault rather than a wrong answer. It is a one-byte
+  mutation of `seed_small.bin` below, and the mutation is not what
+  matters: `seed_small.bin` ITSELF trips the same fault, so the target
+  aborted inside `ReadAndExecuteSeedCorpora` before libFuzzer had
+  mutated anything. Under `NZBFAST_FUZZ_YENC_KERNEL=neon` (which is
+  also what an UNPINNED run selects on any Apple silicon box) both
+  files hit `AddressSanitizer: heap-buffer-overflow, READ of size 16`,
+  10 bytes past the end of the article body, inside
+  `RapidYenc::do_decode_neon<true, true>`. rapidyenc's two ARM decode
+  kernels loaded a whole 16-byte vector for a 4-byte lookahead that
+  `_do_decode_simd`'s `lenBuffer` reserves exactly 4 bytes for; the x86
+  kernels load exactly 4, which is why the ubuntu smoke run was green
+  over these same seeds. Fixed in `vendor/rapidyenc/src/decoder_neon64.cc`
+  and `decoder_neon.cc` the same day (see `../../../../vendor/rapidyenc/VENDOR.txt`
+  and `research/YENC-NEON-OVERREAD-2026-09-02.md`).
+
+  Read the pairing rule above with care here: a plain `cargo test` over
+  these bytes CANNOT catch this class. The fault is an aligned read
+  inside the same 64-byte block, so it can never fault on real hardware
+  and never changes an answer - AddressSanitizer is the only detector,
+  and ASan reaches this C++ only in a `cargo fuzz` build (2 Sep 2026,
+  `e0dedc105`). So the gate for this regression is an ARM box running
+  this target, not a unit test, and today no CI runner is one.
+
 - `yenc_decode/` - a SEED CORPUS, 11 files / 44 KB, added 27 Aug 2026
   (post-v1.2.4 overnight campaign) to close the exact gap the 25 Jul
   entry above describes in passing: `corpus/` is gitignored, so the
@@ -222,3 +272,48 @@ Note either below.
   `nzbkit::tar::Reader` before being committed (the four real ones read
   clean end to end; the two sparse ones correctly return the
   `Unsupported` refusal) so none of them is dead weight in the corpus.
+
+- `par2_verify_diff/` - two REPROS, 183 bytes between them, and the
+  first entries this target has had. Its seeds are CHOICE STREAMS, not
+  PAR2 files: the target reads the bytes as a series of small picks
+  (block size, declared length, which payload lands on disk, which claim
+  the FileDesc MD5 states, how long the IFSC list is and what it
+  describes), so handing one to a parser proves nothing. Both are also
+  small enough not to move `max_len`, which is the measured trap the
+  `nzb_parse` entry above records.
+
+  - `crash-3bf05aa41303eb270ccae2a12c280f1f1c70c9fc` (172 bytes) - found
+    2 Sep 2026 by the first long campaign on this target, 2h43m and
+    30.7M executions in (`46bd58e51`;
+    `research/PAR2-VERIFY-DIFF-CAMPAIGN-2026-09-02.md`). An IFSC entry
+    with an ALL-ZERO MD5 beside the tail slice's exact CRC32 - the
+    `BlockCheck::UNPROVEN` placeholder shape, which vouches for no bytes
+    whatever its CRC32 field says. NOT a production bug: every CRC-only
+    site in the tree goes through `crc_matches`, and the audit is in the
+    campaign record. The defect was the target's own oracle, which
+    modelled one half of the rule. libFuzzer got here by SOLVING the
+    CRC32 comparison with its CMP instrumentation (the mutation line
+    carries the four CRC bytes as a dictionary entry), which is exactly
+    the kind of input a 60 s burst does not build. The ordinary-test
+    twin is
+    `par2repair::unit_tests::a_zero_md5_ifsc_entry_never_reads_as_present_even_with_the_right_crc`,
+    which pins the rule at both places `verify_pass1` decides a slice -
+    a whole block and the zero-padded tail.
+  - `crash-b046c9bc493b4d08dafdf9083153a38466cccad1` (11 bytes) - the
+    `md5_stopped` contract regression fuzz-smoke found in run
+    33678333481, nine hours after `7f195ff27` caused it, resolved by
+    `ad597c06d` (the contract is "not proven", the target was reading a
+    withheld verdict as a decided one). Committed here on 3 Sep because
+    it had been sitting in a gitignored `artifacts/` directory on one
+    box ever since - the CI artifact expires in 90 days and nothing else
+    in the repo held those eleven bytes. The ordinary-test twin is
+    `par2repair::unit_tests::filedesc_md5_over_bytes_the_ifsc_denies_is_unproven_not_damaged`.
+
+  There is deliberately NO seed CORPUS here beside them, and the reason
+  is measured rather than assumed: unlike `rar_recovery_scan` this
+  target has no checksum or magic in front of it, so a cold 60 s run
+  reaches cov 699 of the ~730 edges that exist (INITED 182), where the
+  30.7M-execution campaign's warm corpus ended at 728. A committed
+  corpus would buy a few dozen edges and carry ~360 derived blobs to do
+  it. What length buys on this target is the feature space, and no
+  corpus shortens that.

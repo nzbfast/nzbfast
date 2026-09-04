@@ -1,0 +1,46 @@
+# G3 at four parts: the join recipe as a poster would actually ship it.
+
+[layout]
+name = "cc-n33-four-raw-quarters-named-by-the-join"
+seed = 3301
+note = """
+Expresses bench/capability-corpus leg n33-join-quarters, which the
+corpus files as a RECIPE rather than an adversarial row: it is the
+cheapest way to ship a large file in pieces that a client can put back
+together.
+
+cc-n19-raw-split-join-named-by-the-set poses the join at two parts;
+this is the same shape at four, and the count is the point. With two
+halves a client could get lucky - the first block of the member is the
+first block of the first half, so a matcher that only ever tries offset
+zero still lands one of them. With four quarters, three of the four
+wire files begin at an offset the member does not, so nothing but a
+scan that looks at every block-aligned position finds them, and getting
+one wrong loses a quarter of the file.
+
+No archive bytes, no unpack pass, one PAR2 set describing only the
+joined file. 262,144 bytes in four is a 65,536-byte boundary against a
+32,768-byte block, so every block of the join sits whole inside one
+quarter and the assembly costs no parity.
+"""
+
+[source]
+files = [{ name = "Joined.Quarters.mkv", bytes = 262144, split = 4 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 32768
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 32768
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

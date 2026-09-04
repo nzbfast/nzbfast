@@ -1,0 +1,37 @@
+# C1: one stored RAR5 volume.
+
+[layout]
+name = "c1-stored-single-volume"
+seed = 101
+note = """
+The simplest container there is, and the control arm for every other C
+row: one stored RAR5 archive, one volume, descriptive names, no
+recovery set, no faults. If this row fails, no other container row's
+failure means anything yet.
+
+It carries a second payload file under a directory, because an archive
+is the FIRST plane in this catalog that carries a tree at all. With no
+container the same two files must come back flat (n1-c0-p0-baseline
+pins that, and says why); here the archive holds the relative path, so
+the directory is part of the end state rather than something that was
+posted nowhere.
+
+The volume itself is not in the end state: a successful unpack spends
+it and the client deletes it, so a .rar left in the output tree is a
+failed unpack rather than a shape.
+"""
+
+[source]
+files = [
+    { name = "container.bin", bytes = 32768 },
+    { name = "sample/container-sample.bin", bytes = 8192 },
+]
+
+[container]
+kind = "rar-stored"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -41,7 +41,7 @@ Smart Folders):
 - **base** - the explicit answer to the finalize_names coupling, see
   below. `movie` | `tv` | `none`; default `none`.
 
-Types live in `crates/nzbkit/src/categories.rs`
+Types live in `crates/nzbkit-base/src/categories.rs`
 (`CustomCategory`, `BaseBehavior`, `classify`, `apply_custom`,
 `base_of`, `validate`, `slugify`, `config_hash`). `release::Kind` gained
 a `Custom(String)` variant carrying the slug; `parse_release` itself

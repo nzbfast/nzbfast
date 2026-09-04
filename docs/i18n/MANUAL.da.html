@@ -96,6 +96,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>Brugermanual</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -732,6 +733,28 @@ og <code>.strm</code>-pegepinden indlejrer den for dig; at udstede den (<code>/m
 kræver nøglen. Ren byte-servering af en allerede aktiv download er fortsat åben, og
 nøglefri installationer opfører sig som før.</div>
 
+<p><b>At tjekke en mappe længe efter.</b> Hver download beviser en tjeksum for
+hver fil, den henter, og de <code>.par2</code>-filer, der bar de tjeksummer, bliver
+ryddet op til sidst - måneder senere er der derfor normalt intet tilbage at
+sammenligne mappen med. nzbfast gemmer dem i stedet i en lille skjult
+<code>.nzbfast.manifest</code> ved siden af filerne. Under Indstillinger →
+Download → <b>Tjek downloads senere</b> peger du den mod en færdig mappe: den læser
+hver fil, melder, hvad der ikke længere passer, og tilbyder at reparere det. At
+reparere er et andet, separat klik, og den henter kun den beskadigede del - alt,
+der stadig er helt, læses direkte fra din disk. Fluebenet i samme kort slår
+tjekfilen fra, hvis du helst er fri, og <code>nzbfast verify</code> på
+kommandolinjen læser den også.</p>
+
+<p>Det samme kort <b>Tjek downloads senere</b> kan også køre sig selv efter
+en plan: kontakten <b>Tjek færdige mapper efter en plan</b>, slået fra,
+medmindre du slår den til, går så igennem de færdige mapper, der har en
+tjekfil, og starter en reparation af alt, hvad der ikke længere passer, uden
+at nogen klikker. Den kører aldrig, mens en download er i gang eller venter,
+og fordi at tjekke betyder at læse hver fil i en mappe fra ende til anden,
+koster det disken, selv når intet er i stykker. Grænser ved siden af
+kontakten sætter loft over, hvor mange reparationer og hvor meget download
+et tjek må starte.</p>
+
 <h2 id="servers">8 · Usenet-servere</h2>
 <p>Indstillinger → <b>Usenet-servere</b> er den fulde editor: tilføje, redigere, fjerne, omarrangere og tage enhver
 server ind i eller ud af puljen. Hver server har:</p>
@@ -836,6 +859,19 @@ hver artikels egen kontrolsum. <i>Let</i> springer desuden de artikelkontrolsumm
 så snart PAR2 dækker en fil: skaden dukker så op et øjeblik senere, ved sin blok. I alle
 tre bruger den afsluttende runde og enhver reparation fuld MD5, og et download uden
 PAR2-filer beholder sine artikelkontrolsummer.</p>
+<p><b>Hurtigt sluttjek</b> <span class="pill live">live</span> ændrer det tjek der
+læser dine færdige filer tilbage fra disken: den afsluttende runde ved slutningen af en
+download og <code>nzbfast verify</code> på kommandolinjen, hvor <code>--fast</code> er det
+samme valg. Normalt bevises hver fil af ét aftryk over hele filen, og det er én læsning på
+én kerne uanset hvor mange kerner maskinen har. Med dette slået til bevises hver fil i
+stedet af PAR2-sættets kontroltal pr. blok, og de kører på alle kerner på én gang. Meget
+hurtigere på en hurtig lokal disk, og af ringe værdi på et netværksdrev eller en roterende
+disk, hvor disken allerede er grænsen. Det er slået fra, indtil du beder om det, og dette
+er hvad du så siger ja til: et PAR2-sæt kan bære to poster der beskriver forskellige filer,
+og par2cmdline og de andre værktøjer kalder sådan et sæt beskadiget, hvor nzbfast så kalder
+det rent. Intet sæt bygget af normal software ser sådan ud, et tjek af de første 16 KiB
+afviser stadig enhver utilsigtet udgave af den form, og en reparation beviser sig selv på
+den gamle måde uanset hvad denne indstilling siger.</p>
 <h3>Disk &amp; kvote <span class="pill live">live</span></h3>
 <p><b>Minimum fri plads</b> (sæt nye jobs på pause under den; 2 GB som standard, 0 slår det fra), <b>downloadkvote</b> pr.
 dag eller måned (UTC; Tving-jobs omgår den), <b>hukommelsesgrænse</b> - motorens RAM-budget
@@ -1003,7 +1039,7 @@ overvågningslisten arbejder på de konti i stedet.</div>
 <tr><td>Relæserver, Relækanaler</td><td>IRC-nettet, der bærer annonceringerne (vært eller vært:port), og kanalerne at lytte med i, kommasepareret. En ændring træder i kraft ved næste forbindelse: slå feedet fra og til igen for at anvende den straks.</td></tr>
 <tr><td>Navngiv ved korrelation</td><td>De offentlige direkte relæer bærer ingen filnavne, så de fleste sløre indlæg kan ikke parres direkte. Hvad en annoncering derimod fastslår, er hvornår en udgivelse dukkede op, og hvor stor den er. Dette sammenligner annonceret tid og størrelse med navnløse indlæg og foreslår, når de passer, det rigtige navn under Gennemse. Et forslag er markeret som et forslag, kræver dit klik og omdøber aldrig filer på disken.</td></tr>
 <tr><td>Anvend stærke match automatisk</td><td>Slået fra som standard, og streng når den er til: størrelsen skal passe tæt, ingen anden annoncering må passe næsten lige så godt, og annonceringen skal vælge dette indlæg tilbage ved kontrollen den anden vej. Et anvendt navn ændrer kun, hvordan udgivelsen vises, er markeret som udledt og trækker sig selv tilbage, hvis en færdig download modbeviser det. Alt svagere forbliver et forslag.</td></tr>
-<tr><td>Annonceringshistorik</td><td>Det direkte feed hører kun annonceringer fra efter det blev slået til. Dette henter cirka seks måneders tidligere annonceringer fra en offentlig pre-database, høfligt og én gang, så også allerede indekserede indlæg kan parres. Kører en halv times tid i baggrunden.</td></tr>
+<tr><td>Annonceringshistorik</td><td>Det direkte feed hører kun annonceringer fra efter det blev slået til. Dette henter én gang de nyeste tidligere annonceringer fra predb.net, en offentlig pre-database, så også allerede indekserede indlæg kan parres. predb.net beder om, at man ikke bygger sin egen database ud af den, så der hentes kun de to nyeste sider fra hver sektion, højst 10 forespørgsler i minuttet. Kører et par minutter i baggrunden.</td></tr>
 </table></div>
 
 <h3>Bibliotek, Sikkerhed, Grænseflade</h3>
@@ -1083,6 +1119,18 @@ Et script må gerne efterlade en hjælper kørende i baggrunden, når det slutte
 nzbfast dræber den ikke, men nzbfast holder op med at læse scriptets output,
 i det øjeblik scriptet selv er færdigt: giv en baggrundshjælper sin egen
 output-omdirigering, ellers bliver den standset, første gang den prøver at skrive.</p>
+<p>Scripts, og de valgfrie eksterne hjælpeprogrammer <code>unrar</code> og
+<code>par2</code>, køres inde i en indeslutning, hvor maskinen tilbyder en:
+<code>sandbox-exec</code> på macOS, <code>bwrap</code> på Linux. Et indesluttet
+script beholder fuld læseadgang og fuld netværksadgang, så notifikationer og
+biblioteksværktøjer er upåvirkede; det må kun skrive i de mapper, nzbfast
+allerede bruger (downloadmappen, ethvert flyttemål, den overvågede mappe og
+systemets midlertidige mappe). Slå <b>Begræns hvor scripts må skrive</b> fra
+under Indstillinger &rarr; Mapper, hvis et script skal skrive et andet sted og
+fejler med "operation not permitted". Hvor ingen indeslutning er tilgængelig,
+kører alt præcis som det altid har gjort - en download fejler aldrig på grund af
+det - og linjen under den kontakt siger, hvilken mekanisme der er i kraft.
+Windows har ingen endnu.</p>
 <h3>Præ-kø-script</h3>
 <p>En anden krog kører, <em>før</em> en download kommer i køen
 (Indstillinger → Mapper → Præ-kø-script), med SABnzbds præ-kø-kontrakt:
@@ -1425,7 +1473,7 @@ nøgle, du senere sætter under Indstillinger, vinder stadig over den.</div>
 <tr><td><code>nzbfast serve</code></td><td>Kør daemonen (dashboard + API + automatisering). <code>--open</code> åbner browseren; <code>--apikey</code> sætter nøglen i hånden (<a href="#firstrun-key">§2</a>); <code>--bind</code> vælger lytteadressen, standard <code>0.0.0.0</code> (hver grænseflade), <code>127.0.0.1</code> for kun denne maskine. Se <code>--help</code> for hele flag-listen; hver dashboard-indstilling har en flag-tvilling.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Hent én NZB, fuld pipeline, ingen daemon. <code>--preflight</code> afbryder tidligt, hvis posten ikke kan fuldføres; <code>--password</code> til krypterede sæt.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Tilgængeligheds-dom - COMPLETE / REPAIRABLE / IMPOSSIBLE - uden at hente payload.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Verificér filer mod PAR2-sættet i en mappe.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Verificér filer mod PAR2-sættet i en mappe. Falder tilbage på settle-manifestet, når PAR2-filerne er væk. Afslutter med 0, når filerne er i orden, og med 1, når der findes skade; en mappe uden noget at tjekke afslutter også med 0 og siger det på fejludgangen. <code>--fast</code> beviser hver fil ud fra sættets kontroltal pr. blok i stedet for dets aftryk over hele filen, hvilket er meget hurtigere på en hurtig disk og bærer den afvejning der er beskrevet i <a href="#settings">§9</a>.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>System-benchmarken + diversitetsrapporten, i terminalen.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Scan grupper ind i indekset / søg i det, uden daemonen.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Importér servere fra en SABnzbd-ini.</td></tr>

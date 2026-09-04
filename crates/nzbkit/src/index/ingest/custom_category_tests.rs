@@ -164,7 +164,7 @@ fn reclassify_custom_reconciles_stored_rows() {
     teardown(&dir, ix);
 }
 
-/// `Index::open`'s quality_v9 backfill re-parses every stem, and it
+/// `Index::open`'s quality_v10 backfill re-parses every stem, and it
 /// runs BEFORE `set_custom` by construction - the constructor
 /// hardcodes an empty category list, so the pass cannot see the
 /// user's categories however the caller is written. Left unguarded it
@@ -203,7 +203,7 @@ fn the_quality_backfill_leaves_custom_classifications_alone() {
         // did, or the key was bumped to pick up a new column.
         ix.db
             .execute(
-                "DELETE FROM kv WHERE k IN ('quality_v9','quality_v9_cursor')",
+                "DELETE FROM kv WHERE k IN ('quality_v10','quality_v10_cursor')",
                 [],
             )
             .unwrap();
@@ -326,5 +326,98 @@ fn an_interrupted_reclassify_stamp_does_not_declare_the_work_done() {
         })
         .unwrap();
     assert_eq!(rows.len(), 2);
+    teardown(&dir, ix);
+}
+
+/// The mirror of the test above, and the other half of the same rule:
+/// `reclassify_custom` WRITES kind/title_key/junk, so anything the
+/// ingest chain applies and this pass does not gets UNDONE the first
+/// time a user edits a category.
+///
+/// The group prior and the dashed-episode read (2 Sep 2026) are exactly
+/// that. Before this, one category edit refiled every audiobook,
+/// magazine and dashed-episode row those two had rescued back to an
+/// evidence-free movie at junk 60 - hidden by the wall's default - and
+/// nothing healed them again: the new fingerprint is stamped with no
+/// cursor, so every later call reads "already finished" and returns
+/// Ok(0). The user's edit had nothing to do with these rows.
+///
+/// The F1 row is the control that the pass still does its own job, and
+/// the Bleach row is the one that proves the episode read survives too.
+#[test]
+fn reclassify_keeps_the_group_recovered_lanes() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-catgrp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("index.db");
+    let mut ix = Index::open(&path).unwrap();
+    ix.ingest(
+        "alt.binaries.mp3.audiobooks",
+        &[entry(
+            "\"Perry Rhodan 3390 - Die Stunde der Deponentin (Ungekuerzt)\" yEnc (1/1)",
+            "p@x",
+            "ab1",
+            231 << 20,
+        )],
+        100,
+    )
+    .unwrap();
+    ix.ingest(
+        "alt.binaries.multimedia.anime.highspeed",
+        &[entry(
+            "\"Bleach - 187 - Ichigo Rages! The Assassin's Secret.mkv\" yEnc (1/1)",
+            "p@x",
+            "bl1",
+            400 << 20,
+        )],
+        100,
+    )
+    .unwrap();
+    ix.ingest(
+        "alt.test",
+        &[entry(
+            "\"Formula1.2026.Round11.Hungary.Qualifying.F1TV.WEB-DL.1080p-MWR.mkv\" yEnc (1/1)",
+            "p@x",
+            "f1",
+            900 << 20,
+        )],
+        100,
+    )
+    .unwrap();
+
+    let lanes = |ix: &Index| -> Vec<(String, String, i64)> {
+        let mut stmt = ix
+            .db
+            .prepare("SELECT kind, title_key, junk FROM releases ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let before = lanes(&ix);
+    assert_eq!(
+        (before[0].0.as_str(), before[1].0.as_str()),
+        ("book", "tv"),
+        "ingest should already have used the group; the rest of this test is void otherwise"
+    );
+
+    // The user adds a category that has nothing to do with any of them.
+    ix.set_custom(f1_cats());
+    assert_eq!(ix.reclassify_custom().unwrap(), 1, "only the F1 row moves");
+
+    let after = lanes(&ix);
+    assert_eq!(
+        (&after[0], &after[1]),
+        (&before[0], &before[1]),
+        "a category edit must not un-file the group-recovered rows"
+    );
+    assert!(
+        after[0].2 < 50 && after[1].2 < 50,
+        "and they must still be visible: junk {} and {}",
+        after[0].2,
+        after[1].2
+    );
+    assert_eq!(after[2].0, "formula-1", "the pass still did its own job");
     teardown(&dir, ix);
 }

@@ -1,0 +1,60 @@
+# G4: an .sfv is the ONLY name source in the post. No PAR2 anywhere.
+
+[layout]
+name = "cc-n21-sfv-sidecar-is-the-only-name-source"
+seed = 2101
+note = """
+Expresses bench/capability-corpus leg n21-sfv-sidecar, and it is the
+first catalog row to select the companion plane at all (gap G4 of
+research/POSTFAST-VS-CAPABILITY-CORPUS-2026-09-03.md).
+
+An `.sfv` maps real names to CRC32s. It protects nothing and can repair
+no byte, so it is not a recovery set - what it carries is the half of a
+PAR2 set an obfuscated post actually depends on, and it does it for a
+few hundred bytes against even a manifest-only set's kilobytes. That is
+why the field ships it, and this row is the post that has nothing else:
+two payload files under tokens, one sidecar, no PAR2 at all.
+
+WHAT MAKES IT A REAL REQUIREMENT AND NOT A NICETY. Without the sidecar
+being read, both files land under their posted hashes and the run still
+exits zero - bytes intact, names lost, and nothing anywhere reporting
+it. That is exactly what this engine did until the `sfv-naming` settle
+tier landed on 30 Aug 2026. So the row asserts the names, and a client
+that keeps the hashes fails it on the name list.
+
+The sidecar is posted under its own name while the payload is not, and
+that is the plane's rule rather than this row's convenience: the payload
+rides under tokens precisely BECAUSE the sidecar says what everything
+is, so a token-named sidecar is a name source nothing can find. (The
+client's own tier reads sidecars by content as well as by extension,
+which is a different and harder row and needs a naming key this plane
+does not have yet.)
+
+The sidecar is part of the expected tree. It is text under an ordinary
+extension rather than packet-shaped bytes under a token, so the leftover
+sweep that removes an opaque `.par2` never looks at it - and removing
+the file carrying every real name in the post would be removing the
+poster's own record of what was sent.
+"""
+
+[source]
+files = [
+    { name = "Real.Track.One.flac", bytes = 60000 },
+    { name = "Real.Track.Two.flac", bytes = 45000 },
+]
+
+[naming]
+wire = "opaque"
+
+[companion]
+sfv = true
+sfv_name = "album-set.sfv"
+
+[encoding]
+article_bytes = 20000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

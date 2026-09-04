@@ -54,9 +54,84 @@ RestartSec=5
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/nzbfast /etc/nzbfast
+
+# ProtectHome is read-only rather than true, and that is a decision rather
+# than a slip. `true` hides /home, /root and /run/user outright, which means
+# a post-processing script living in the user's home directory cannot be
+# read, let alone run, and a library filer cannot see a media tree under
+# /home. Both of those are things the manual promises a confined script can
+# do ("keeps full read access ... it may write only inside the folders
+# nzbfast already uses"), so `true` made the packaged unit contradict the
+# shipped behaviour of the subprocess confinement in
+# `crates/nzbfast-core/src/sandbox.rs`. `read-only` is the systemd spelling
+# of exactly the policy that module applies to a script: reads yes, writes
+# no. The daemon keeps nothing under /home either way (config is in
+# /etc/nzbfast, state in /var/lib/nzbfast), unix file permissions still
+# apply on top of this, and the highest-risk children are not affected:
+# `unrar` and `par2` run under the strict tool policy, whose bwrap sandbox
+# re-denies every read outside the system prefixes and the job directory.
+# If you would rather have the stronger setting, `ProtectHome=true` is safe
+# so long as no script and no move-to destination lives under /home.
+ProtectHome=read-only
+
+# --- Hardening delta, TODO 314 stage 0 item 4 -------------------------
+# From `research/SANDBOX-SCOPING-2026-08.md` section 3.3. Every line below
+# was booted, not just written: the whole set was installed on an
+# Ubuntu 24.04 host with systemd 255 and a real download was run through
+# it. `systemd-analyze security nzbfast.service` reports the score.
+#
+# The daemon needs no capability at all once systemd has set its uid.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Nothing here is a JIT, so W^X costs nothing and removes the shellcode
+# step from any exploit of the one memory-unsafe component we ship (the
+# rapidyenc SIMD kernels). Verified rather than assumed: a grep for
+# PROT_EXEC / MAP_JIT / mprotect over `crates/` and `vendor/rars/src`
+# returns nothing, and the RAR VM in `vendor/rars/src/codec/rarvm.rs` is an
+# interpreter over a plain byte vector.
+MemoryDenyWriteExecute=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectProc=invisible
+PrivateDevices=true
+SystemCallArchitectures=native
+
+# THREE directives in that list are AMENDED rather than taken verbatim,
+# because the study's shape for them silently disables the subprocess
+# confinement that landed the same week (TODO 314 stage 1). That module
+# runs `unrar`, `par2` and your own scripts inside `bwrap`, and it PROBES
+# its mechanism at startup: a bwrap that cannot run is not an error you
+# see, it is a health row quietly reading "none available". Measured on the
+# box named above, each of these three took the probe from pass to fail:
+#
+#   RestrictNamespaces=true
+#       "bwrap: No permissions to create new namespace". bwrap needs a user
+#       and a mount namespace to exist at all. The allow-list below names
+#       exactly the five it uses, which still denies cgroup and pid.
+#   RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+#       "bwrap: loopback: Failed to create NETLINK_ROUTE socket". Bringing
+#       up loopback inside the child's own network namespace is what needs
+#       AF_NETLINK. Adding it still denies AF_PACKET, AF_BLUETOOTH,
+#       AF_VSOCK and the rest.
+#   SystemCallFilter=@system-service, and ~@privileged on top of it
+#       Killed by SIGSYS. @system-service does not carry @mount, so bwrap
+#       loses pivot_root; and with SystemCallErrorNumber=EPERM to make it
+#       speak, ~@privileged reports "bwrap: capset failed". A denied
+#       syscall cannot be re-allowed by naming it, so @privileged comes
+#       off the deny list; @resources and @obsolete stay, and the allow
+#       list is doing most of that work already.
+RestrictNamespaces=user mnt ipc uts net
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service @mount
+SystemCallFilter=~@resources @obsolete
 
 [Install]
 WantedBy=multi-user.target

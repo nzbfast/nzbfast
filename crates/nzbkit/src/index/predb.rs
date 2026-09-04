@@ -192,7 +192,7 @@ impl Index {
             let fnstem = if l.filename.is_empty() {
                 String::new()
             } else {
-                crate::extract::release_stem(&l.filename).to_ascii_lowercase()
+                crate::names::release_stem(&l.filename).to_ascii_lowercase()
             };
             let fnkey = crate::predb::match_key(&fnstem);
             if !fnkey.is_empty() {
@@ -610,20 +610,31 @@ impl Index {
         now: i64,
     ) -> rusqlite::Result<bool> {
         let title = title.trim();
+        // A name that is exactly its own text twice is collapsed to one
+        // copy HERE, at the seam, so no lane has to remember the rule.
+        // The doubling is the poster's, in the quoted filename its
+        // subjects carry, so it reaches the claims layer already inside
+        // every name derived from that post's stem - see
+        // `crate::release::undoubled`, which is also what the standing
+        // name is judged by in `apply_proven_name` and what the one-shot
+        // repair re-applies through.
+        let title = crate::release::undoubled(title).unwrap_or(title);
         if title.is_empty() {
             return Ok(false);
         }
-        let Some((bytes, nexe, complete, stem)): Option<(i64, i64, bool, String)> = self
-            .db
-            .prepare_cached(&format!(
-                "SELECT total_bytes,
+        let Some((bytes, nexe, complete, stem, grp)): Option<(i64, i64, bool, String, String)> =
+            self.db
+                .prepare_cached(&format!(
+                    "SELECT total_bytes,
                         (SELECT COALESCE(SUM({EXE_FILE_SQL}),0) FROM files
                           WHERE release_id=releases.id),
-                        complete, stem
+                        complete, stem, grp
                    FROM releases WHERE id=?1 AND pre_title=''"
-            ))?
-            .query_row([rid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-            .optional()?
+                ))?
+                .query_row([rid], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .optional()?
         else {
             return Ok(false);
         };
@@ -631,6 +642,24 @@ impl Index {
         // A spot or pre title names the work and drops the file's own
         // format marker, which for a book is the ONLY evidence there is.
         crate::release::recover_media_kind(&mut p, title, &stem);
+        // ...and the GROUP half of the same chain, `grp` selected above
+        // for it. This is the seam's own invariant, stated in the next
+        // comment and broken without these two lines: a spot title on a
+        // row in an audiobook group parses to an evidence-free movie at
+        // junk 60, and ingest would have made it a book at 0. Worse
+        // than a cosmetic difference, because the seam is one-way -
+        // `pre_title=''` is in the WHERE, so a row it has named is
+        // never re-judged here again.
+        //
+        // The episode read takes the same `stem_obfuscated` gate ingest
+        // asks it behind, on the RAW stem, so the two answers cannot
+        // diverge: a row reaching this seam usually has an obfuscated
+        // stem (that is why it needed a name), and both sites then
+        // decline the read together.
+        crate::release::recover_kind_from_group(&mut p, &grp, &stem);
+        if !crate::index::stem_obfuscated(&stem, &p) {
+            crate::release::recover_episode_from_group(&mut p, &grp, title);
+        }
         // Same column set the ingest path writes, from the same parse -
         // a release named here must be indistinguishable from one that
         // was named at ingest, or the wall would file the two copies of
@@ -970,7 +999,7 @@ impl Index {
     /// suggestion, and auto-apply when every gate agrees. Returns what
     /// happened.
     fn corr_consider(&mut self, rid: i64, auto: bool, now: i64) -> rusqlite::Result<CorrOutcome> {
-        use crate::predb_corr::{FLOOR, MARGIN};
+        use crate::predb_corr::{FLOOR, margin_clears};
         // A row a human or an oracle has ruled on is settled: rejected
         // must never nag again (in ANY form - suggestion or auto),
         // applied/confirmed have nothing left to decide, and revoked
@@ -998,7 +1027,14 @@ impl Index {
             return Ok(CorrOutcome::Nothing);
         }
         let delta = facts.first_posted - best.pre.pt;
-        let runner_up = cands.get(1).map(|c| c.score.total).unwrap_or(0);
+        // `None` = the window held NO second candidate. Kept as an
+        // Option all the way to the gate: the stored column has always
+        // used 0 for "no rival", but 0 is also a score the arithmetic
+        // will happily subtract, and reading the sentinel as a score is
+        // what made a lone candidate unbeatable. See
+        // `predb_corr::margin_clears`.
+        let runner_up = cands.get(1).map(|c| c.score.total);
+        let runner_up_col = i64::from(runner_up.unwrap_or(0));
         // Store/refresh the suggestion - but never touch a row a human
         // or an oracle has already ruled on ('rejected' must not nag,
         // 'applied'/'confirmed' must not wander).
@@ -1021,7 +1057,7 @@ impl Index {
                 best.score.total,
                 delta,
                 best.score.ratio_milli as i64,
-                runner_up,
+                runner_up_col,
                 now
             ],
         )?;
@@ -1034,10 +1070,13 @@ impl Index {
         // candidate window fails closed too: the runner-up and sibling
         // clauses below are proofs about a MAXIMUM over the whole
         // window, and a truncated sample cannot give them (Codex sweep
-        // 3 Aug M1).
+        // 3 Aug M1). The SPARSE end of the same range fails closed as
+        // well, and did not until 2 Sep 2026: a window holding ONE
+        // candidate gave the margin clause nothing to compare against,
+        // so it passed every time. See `predb_corr::margin_clears`.
         if saturated
             || !best.score.strong()
-            || best.score.total - runner_up <= MARGIN
+            || !margin_clears(best.score.total, runner_up)
             || best.pre.nuked
             || best.pre.has_fn
         {
@@ -1103,7 +1142,7 @@ impl Index {
                         best.score.total,
                         delta,
                         best.score.ratio_milli as i64,
-                        runner_up,
+                        runner_up_col,
                         now
                     ],
                 )?;
@@ -1284,6 +1323,29 @@ impl Index {
         Ok((suggested, applied))
     }
 
+    /// `best_other` stays `None` when no OTHER release in the window
+    /// scores at all, and unlike the release-side margin that empty
+    /// case is deliberately NOT refused. The two sides are not
+    /// symmetric in what they risk, and this is the difference,
+    /// written down so the next reader does not re-open it (2 Sep
+    /// 2026):
+    ///
+    /// - The release side asks "which pre is this post?", and the true
+    ///   answer is routinely absent from predb entirely. With one
+    ///   candidate there is no discriminating evidence at all - only
+    ///   "the single pre we happen to hold agrees on size and time".
+    ///   That case is refused; `predb_corr::margin_clears` carries the
+    ///   argument and the measurement.
+    /// - This side asks the narrower "does the pre prefer someone
+    ///   else?". It is an asymmetry check layered on top, and
+    ///   `corr_consider` is its ONLY caller, downstream of the
+    ///   release-side clause. So an empty field here is only ever
+    ///   reached after a real field over there was beaten by more than
+    ///   MARGIN on a tight sized match. The vacuous answer never
+    ///   stands on its own.
+    ///
+    /// If the release-side clause is ever relaxed, this reasoning
+    /// expires with it and the empty case here must be refused too.
     fn corr_mutual_best(&self, pre: &CorrPreRow, rid: i64) -> rusqlite::Result<bool> {
         let ids = self.corr_forward_ids(pre)?;
         // The window filled: somewhere past the cap there may be a
@@ -1293,7 +1355,7 @@ impl Index {
             return Ok(false);
         }
         let mut ours = None;
-        let mut best_other = 0i32;
+        let mut best_other: Option<i32> = None;
         for id in ids {
             let Some(f) = self.corr_release_facts(id)? else {
                 continue;
@@ -1304,11 +1366,14 @@ impl Index {
             if id == rid {
                 ours = Some(s.total);
             } else {
-                best_other = best_other.max(s.total);
+                best_other = Some(best_other.map_or(s.total, |b| b.max(s.total)));
             }
         }
         let Some(ours) = ours else { return Ok(false) };
-        Ok(ours - best_other > crate::predb_corr::MARGIN)
+        // The empty case reads as a pass, on purpose - see the doc
+        // comment above. Spelt out rather than routed through
+        // `margin_clears`, which refuses it.
+        Ok(ours - best_other.unwrap_or(0) > crate::predb_corr::MARGIN)
     }
 
     /// Release-driven correlation backlog: walks already-indexed
@@ -1598,15 +1663,19 @@ impl Index {
     /// Take a correlation-applied name back off: pre_title clears (the
     /// pre_fts UPDATE trigger removes the search entry) and everything
     /// the name determined is re-derived from the stem, exactly the way
-    /// ingest would. Exists ONLY for corr-applied rows; exact-leg names
-    /// are relay facts and are not touched by correlation code.
+    /// ingest would - which means through ingest's recovery chain and
+    /// not a bare `classify`, or the undo lands the row on a different
+    /// lane from the one it wore before it was ever named. Exists ONLY
+    /// for corr-applied rows; exact-leg names are relay facts and are
+    /// not touched by correlation code.
     pub fn revoke_pre_name(&mut self, rid: i64) -> rusqlite::Result<bool> {
         let row = self
             .db
             .prepare_cached(&format!(
                 "SELECT stem, total_bytes,
                         (SELECT COALESCE(SUM({EXE_FILE_SQL}),0) FROM files
-                          WHERE release_id=releases.id)
+                          WHERE release_id=releases.id),
+                        grp
                    FROM releases WHERE id=?1 AND pre_title<>''"
             ))?
             .query_row([rid], |r| {
@@ -1614,13 +1683,39 @@ impl Index {
                     r.get::<_, String>(0)?,
                     r.get::<_, i64>(1)?,
                     r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })
             .optional()?;
-        let Some((stem, bytes, nexe)) = row else {
+        let Some((stem, bytes, nexe, grp)) = row else {
             return Ok(false);
         };
-        let p = crate::categories::classify(&stem, &self.custom);
+        let mut p = crate::categories::classify(&stem, &self.custom);
+        // Ingest's recovery chain, `grp` selected above for it. Without
+        // these the undo is not an undo: a row ingest had put on the
+        // Books lane through its GROUP comes back an evidence-free
+        // movie at junk 60, which the wall's default `junk < 50` hides
+        // - so revoking a name can make a row less visible than it was
+        // before anybody named it. The auto lane cannot walk this,
+        // because `corr_naming_population` admits only obfuscated stems
+        // and both group rules decline those; the HUMAN picker
+        // (`pre_assign`) is deliberately ungated and can name any row
+        // at all, and `pre_reject` revokes what it applied.
+        //
+        // `recover_media_kind` is a structural no-op here - it returns
+        // on its first line when the fed name and the stem are the same
+        // string, and the stem is both here - and is called for the
+        // shape, so every site that rewrites these columns reads
+        // alike.
+        crate::release::recover_media_kind(&mut p, &stem, &stem);
+        crate::release::recover_kind_from_group(&mut p, &grp, &stem);
+        // The gate is taken BEFORE the episode pass, the way ingest
+        // asks it: `stem_obfuscated`'s second arm is guarded on
+        // `p.season.is_none()`, so asking it afterwards would judge the
+        // blob by the season the pass had just written.
+        if !crate::index::stem_obfuscated(&stem, &p) {
+            crate::release::recover_episode_from_group(&mut p, &grp, &stem);
+        }
         let n = self.db.execute(
             "UPDATE releases
                 SET pre_title='', pre_source='',
@@ -1721,7 +1816,7 @@ impl Index {
         oracle_name: &str,
         now: i64,
     ) -> rusqlite::Result<Option<bool>> {
-        let stem = crate::extract::release_stem(posted).to_ascii_lowercase();
+        let stem = crate::names::release_stem(posted).to_ascii_lowercase();
         let oracle_key = crate::predb::match_key(oracle_name);
         if stem.is_empty() || oracle_key.is_empty() {
             return Ok(None);

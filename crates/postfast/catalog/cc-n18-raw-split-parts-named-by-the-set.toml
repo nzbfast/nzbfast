@@ -1,0 +1,57 @@
+# G3, the parts direction: raw .001/.002 wire files, a set that names
+# the PARTS, and a client that joins them.
+
+[layout]
+name = "cc-n18-raw-split-parts-named-by-the-set"
+seed = 1801
+note = """
+Expresses bench/capability-corpus leg n18-raw-splits, and it is one of
+the first two rows to select the split plane (gap G3 of
+research/POSTFAST-VS-CAPABILITY-CORPUS-2026-09-03.md).
+
+Lighter than any archive: a file cut into two contiguous byte halves and
+posted as two wire files, with no rar bytes and no unpack pass anywhere
+in the post. The recovery set describes the PARTS, as
+Rawsplit.mkv.001 and Rawsplit.mkv.002, which is a set cut over the
+parts exactly as a splitter left them on disk.
+
+THE ROW IS THE SECOND STEP, not the first. Renaming the two wire files
+from their FileDesc packets is the easy half and every P3 row already
+asks for it; what this one asks is that a client which has just named
+`something.001` and `something.002` goes on to JOIN them, and ends with
+one file called Rawsplit.mkv. A client that stops after the rename has
+two correctly-named files and a payload the user cannot play.
+
+cc-n19-raw-split-join-named-by-the-set is the same cut with the set on
+the other side, and the pair is what makes the plane's two directions
+legible: same parts on the wire, same file at the end, and the only
+difference is which side of the cut the descriptors describe.
+
+THE PARTS ARE BLOCK-ALIGNED: 131,072 bytes cut in two is a 65,536-byte
+boundary and the block is 32,768, so every block of the joined file sits
+whole inside one part. That is what lets a block-harvesting client
+assemble the join with no recovery spend, and it is a property of the
+NUMBERS rather than of the plane - an unaligned cut is a harder row and
+a different one.
+"""
+
+[source]
+files = [{ name = "Rawsplit.mkv", bytes = 131072, split = 2, split_names = "parts" }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 32768
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 32768
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

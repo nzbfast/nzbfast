@@ -96,6 +96,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>Manual de utilizare</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -738,6 +739,29 @@ parcate prin <code>/stream/&lt;id&gt;</code> necesită un token per job
 necesită cheia. Servirea simplă de octeți a unei descărcări deja active rămâne deschisă, iar
 instalările fără cheie se comportă ca înainte.</div>
 
+<p><b>Verificarea unui dosar mult mai târziu.</b> Fiecare descărcare dovedește o
+sumă de control pentru fiecare fișier adus, iar fișierele <code>.par2</code> care
+purtau acele sume sunt curățate la final - așa că luni mai târziu de obicei nu mai
+rămâne nimic cu care să compari dosarul. nzbfast le păstrează în schimb, într-un mic
+fișier ascuns <code>.nzbfast.manifest</code> lângă date. La Setări → Descărcare →
+<b>Verificarea descărcărilor mai târziu</b> îi arăți un dosar terminat: citește
+fiecare fișier, raportează ce nu mai corespunde și se oferă să repare. Repararea
+este un al doilea clic, separat, și aduce doar partea stricată - tot ce este încă
+intact se citește direct de pe discul tău. Bifa de pe același card oprește fișierul
+de verificare dacă preferi să nu îl ai, iar <code>nzbfast verify</code> în linia de
+comandă îl citește și el.</p>
+
+<p>Același card <b>Verificarea descărcărilor mai târziu</b> se poate porni și
+singur după un program: comutatorul <b>Verifică dosarele terminate după un
+program</b>, oprit până când îl pornești, parcurge atunci dosarele terminate
+care au un fișier de verificare și pornește o reparație pentru tot ce nu mai
+corespunde, fără ca nimeni să dea clic. Nu rulează niciodată cât timp o
+descărcare este în curs sau așteaptă, iar pentru că a verifica înseamnă să
+citești fiecare fișier dintr-un dosar de la un capăt la altul, asta costă
+discul chiar și atunci când nimic nu e stricat. Limitele de lângă comutator
+plafonează câte reparații și cât de multă descărcare poate porni o
+verificare.</p>
+
 <h2 id="servers">8 · Servere Usenet</h2>
 <p>Setări → <b>Servere Usenet</b> este editorul complet: adăugare, editare, ștergere, reordonare și includerea
 sau excluderea oricărui server din pool. Fiecare server are:</p>
@@ -845,6 +869,20 @@ plus peste acele sume ale articolelor de îndată ce PAR2 acoperă un fișier: d
 atunci o clipă mai târziu, la blocul ei. În toate trei, trecerea finală și orice
 reparație folosesc MD5 complet, iar o descărcare fără fișiere PAR2 își păstrează sumele
 articolelor.</p>
+<p><b>Verificare finală rapidă</b> <span class="pill live">live</span> schimbă
+verificarea care îți recitește fișierele terminate de pe disc: trecerea finală de la
+sfârșitul unei descărcări și <code>nzbfast verify</code> din linia de comandă, unde
+<code>--fast</code> este aceeași alegere. În mod obișnuit fiecare fișier este dovedit de o
+singură amprentă peste tot fișierul, iar aceasta este o singură citire pe un singur nucleu
+oricâte nuclee ar avea mașina. Cu aceasta pornită, fiecare fișier este dovedit de sumele de
+control pe blocuri ale setului PAR2, iar acelea rulează pe toate nucleele deodată. Mult mai
+rapid pe un disc local iute și de puțină valoare pe un dosar de rețea sau pe un disc cu
+platane, unde discul este oricum limita. Este oprită până când o ceri, iar iată la ce
+consimți atunci: un set PAR2 poate purta două înregistrări care descriu fișiere diferite,
+iar par2cmdline și celelalte unelte numesc deteriorat un asemenea set acolo unde nzbfast îl
+numește atunci curat. Niciun set construit de software obișnuit nu arată așa, o verificare
+a primilor 16 KiB respinge în continuare orice versiune accidentală a acelei forme, iar o
+reparație se dovedește pe calea veche orice ar spune această setare.</p>
 <h3>Disc și cotă <span class="pill live">live</span></h3>
 <p><b>Spațiu liber minim</b> (pune în pauză joburile noi sub el; 2 GB implicit, 0 îl dezactivează), <b>cotă de descărcare</b> pe
 zi sau lună (UTC; joburile Forțate ignoră), <b>limită de memorie</b> - bugetul de RAM al motorului
@@ -1016,7 +1054,7 @@ conturi.</div>
 <tr><td>Server de retransmisie, Canale</td><td>Rețeaua IRC care poartă anunțurile (gazdă sau gazdă:port) și canalele de ascultat, separate prin virgulă. O schimbare are efect la următoarea conectare: oprește și repornește fluxul ca s-o aplici imediat.</td></tr>
 <tr><td>Denumire prin corelare</td><td>Retransmisiile publice în direct nu poartă nume de fișiere, așa că majoritatea postărilor ofuscate nu pot fi legate direct. Ce fixează totuși un anunț este momentul apariției unei lansări și cât de mare este. Aceasta compară ora și dimensiunea anunțate cu postările fără nume și, când se potrivesc, sugerează numele adevărat în Răsfoire. O sugestie este marcată ca atare, cere clicul tău și nu redenumește niciodată fișiere pe disc.</td></tr>
 <tr><td>Aplică automat potrivirile puternice</td><td>Oprit implicit, și strict când e pornit: dimensiunea trebuie să se potrivească strâns, niciun alt anunț nu are voie să se potrivească aproape la fel de bine, iar anunțul trebuie să aleagă înapoi această postare la verificarea în sens invers. Un nume aplicat schimbă doar felul în care e afișată lansarea, e marcat ca dedus și se retrage singur dacă o descărcare încheiată îl contrazice. Tot ce e mai slab rămâne sugestie.</td></tr>
-<tr><td>Istoric de anunțuri</td><td>Fluxul în direct aude doar anunțurile de după pornire. Aceasta aduce cam șase luni de anunțuri vechi dintr-o bază publică de pre-uri, politicos și o singură dată, ca să poată fi legate și postările deja indexate. Rulează în fundal cam o jumătate de oră.</td></tr>
+<tr><td>Istoric de anunțuri</td><td>Fluxul în direct aude doar anunțurile de după pornire. Aceasta aduce o singură dată cele mai recente anunțuri vechi de la predb.net, o bază publică de pre-uri, ca să poată fi legate și postările deja indexate. predb.net cere să nu se construiască o bază proprie din el, așa că se iau doar cele mai noi două pagini din fiecare secțiune, cel mult 10 cereri pe minut. Rulează în fundal câteva minute.</td></tr>
 </table></div>
 
 <h3>Bibliotecă, Securitate, Interfață</h3>
@@ -1097,6 +1135,18 @@ omorî, dar nzbfast chiar încetează să citească ieșirea scriptului în clip
 care scriptul însuși se termină: dă-i unui ajutor trecut în fundal propria
 redirecționare a ieșirii, altfel va fi oprit prima dată când încearcă să
 afișeze ceva.</p>
+<p>Scripturile, precum și utilitarele externe opționale <code>unrar</code> și
+<code>par2</code>, rulează într-o izolare acolo unde mașina oferă una:
+<code>sandbox-exec</code> pe macOS, <code>bwrap</code> pe Linux. Un script izolat
+păstrează acces complet la citire și la rețea, deci notificatoarele și uneltele
+de bibliotecă nu sunt afectate; poate scrie doar în folderele pe care nzbfast le
+folosește oricum (folderul de descărcare, orice destinație de mutare, folderul
+supravegheat și folderul temporar al sistemului). Dezactivează <b>Limitează unde
+pot scrie scripturile</b> din Setări &rarr; Foldere dacă un script trebuie să
+scrie în altă parte și eșuează cu "operation not permitted". Acolo unde nu
+există izolare disponibilă totul rulează exact ca până acum - o descărcare nu
+eșuează niciodată din acest motiv - iar rândul de sub acel comutator spune ce
+mecanism este în vigoare. Windows nu are încă niciunul.</p>
 <h3>Script pre-coadă</h3>
 <p>Un al doilea hook rulează <em>înainte</em> ca o descărcare să intre în coadă
 (Setări → Foldere → Script pre-coadă), cu contractul pre-coadă al SABnzbd:
@@ -1446,7 +1496,7 @@ tot are prioritate față de ea.</div>
 <tr><td><code>nzbfast serve</code></td><td>Rulează daemonul (panou + API + automatizare). <code>--open</code> deschide browserul; <code>--apikey</code> setează cheia manual (<a href="#firstrun-key">§2</a>); <code>--bind</code> alege adresa de ascultare, implicit <code>0.0.0.0</code> (fiecare interfață), <code>127.0.0.1</code> doar pentru această mașină. Vezi <code>--help</code> pentru lista completă de flaguri - fiecare setare din panou are un flag geamăn.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Descarcă un NZB, pipeline complet, fără daemon. <code>--preflight</code> abandonează devreme dacă postarea nu se poate finaliza; <code>--password</code> pentru seturi criptate.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Verdict de disponibilitate - COMPLETE / REPAIRABLE / IMPOSSIBLE - fără a descărca payload-ul.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Verifică fișierele în raport cu setul PAR2 dintr-un director.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Verifică fișierele în raport cu setul PAR2 dintr-un director. Revine la manifestul settle când fișierele PAR2 lipsesc. Iese cu 0 când fișierele sunt în regulă și cu 1 când găsește deteriorări; un director fără nimic de verificat iese tot cu 0 și o spune la ieșirea de eroare. <code>--fast</code> dovedește fiecare fișier prin sumele de control pe blocuri ale setului în locul amprentei peste tot fișierul, ceea ce este mult mai rapid pe un disc iute și aduce compromisul descris la <a href="#settings">§9</a>.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>Benchmark-ul de sistem + raportul de diversitate, în terminal.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Scanează grupurile în index / caută în el, fără daemon.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Importă servere dintr-un ini SABnzbd.</td></tr>

@@ -1549,8 +1549,10 @@ fn read_u32s(
     let (n, at) = entry_count(src, body, end, 4, wait)?;
     let raw = read_vec(src, at, n * 4, wait)?;
     Ok(raw
-        .chunks_exact(4)
-        .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_be_bytes(*c))
         .collect())
 }
 
@@ -1563,8 +1565,10 @@ fn read_u64s(
     let (n, at) = entry_count(src, body, end, 8, wait)?;
     let raw = read_vec(src, at, n * 8, wait)?;
     Ok(raw
-        .chunks_exact(8)
-        .map(|c| u64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_be_bytes(*c))
         .collect())
 }
 
@@ -1577,7 +1581,9 @@ fn read_pairs(
     let (n, at) = entry_count(src, body, end, 8, wait)?;
     let raw = read_vec(src, at, n * 8, wait)?;
     Ok(raw
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|c| {
             (
                 u32::from_be_bytes([c[0], c[1], c[2], c[3]]),
@@ -1597,7 +1603,9 @@ fn read_pairs3(
     let (n, at) = entry_count(src, body, end, 12, wait)?;
     let raw = read_vec(src, at, n * 12, wait)?;
     Ok(raw
-        .chunks_exact(12)
+        .as_chunks::<12>()
+        .0
+        .iter()
         .map(|c| {
             (
                 u32::from_be_bytes([c[0], c[1], c[2], c[3]]),
@@ -1628,8 +1636,10 @@ fn read_stsz(
     let n = count.min(can_hold).min(MAX_TABLE_ENTRIES);
     let raw = read_vec(src, body + 12, n * 4, wait)?;
     t.stsz = Stsz::Table(
-        raw.chunks_exact(4)
-            .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+        raw.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_be_bytes(*c))
             .collect(),
     );
     Ok(())

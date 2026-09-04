@@ -32,7 +32,7 @@ use std::time::Instant;
 // ---------------------------------------------------------------- rig I/O
 
 /// The ordered parts of one 7z container as a single seekable byte-space.
-/// Copied from `crates/nzbfast/src/rarfix/sevenz.rs` - see the module doc.
+/// Copied from `crates/nzbfast-unpack/src/rarfix/sevenz.rs` - see the module doc.
 struct SplitParts {
     files: Vec<(std::fs::File, u64, u64)>,
     total: u64,

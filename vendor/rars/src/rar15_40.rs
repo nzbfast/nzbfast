@@ -11,6 +11,7 @@ use crate::features::FeatureSet;
 use crate::io_util::{align16 as checked_align16, read_exact_at, read_u16, read_u32};
 pub(crate) use crate::source::ArchiveSource;
 use crate::version::ArchiveFamily;
+use crate::write_entropy::Entropy;
 use crate::ArchiveVersion;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -27,10 +28,12 @@ pub use extract::{
 use extract::{DecoderSession, DecryptingReader};
 pub use write::{
     write_compressed_archive, write_compressed_archive_with_comment,
-    write_compressed_archive_with_comment_and_progress, write_compressed_volumes,
-    write_compressed_volumes_with_progress, write_rar29_compressed_archive_with_filter_policy,
+    write_compressed_archive_with_comment_and_progress, write_compressed_volume_set,
+    write_compressed_volumes, write_compressed_volumes_with_progress,
+    write_rar29_compressed_archive_with_filter_policy,
     write_rar29_compressed_archive_with_filter_policy_and_progress, write_stored_archive,
-    write_stored_archive_with_comment, write_stored_volumes, FilterKind, FilterPolicy, FilterSpec,
+    write_stored_archive_with_comment, write_stored_volume_set, write_stored_volumes, FilterKind,
+    FilterPolicy, FilterSpec,
 };
 
 const MARK_HEAD: u8 = 0x72;
@@ -51,6 +54,11 @@ const UO_HEAD: u16 = 0x0101;
 const SIZEOF_UOWNERHEAD: usize = 18;
 
 const LONG_BLOCK: u16 = 0x8000;
+/// A block a reader may skip whole when it does not know the type. Set
+/// on the recovery-record NEWSUB, exactly as `rar` sets it, so a reader
+/// that has never heard of `RR` steps over it rather than refusing the
+/// archive.
+const SKIP_IF_UNKNOWN: u16 = 0x4000;
 const MHD_VOLUME: u16 = 0x0001;
 const MHD_COMMENT: u16 = 0x0002;
 const MHD_SOLID: u16 = 0x0008;
@@ -60,6 +68,12 @@ const MHD_PASSWORD: u16 = 0x0080;
 const MHD_FIRSTVOLUME: u16 = 0x0100;
 const MHD_ENCRYPTVER: u16 = 0x0200;
 
+/// End-of-archive flag: another volume of this set follows.
+///
+/// A reader that reaches an `ENDARC` without it treats the set as
+/// finished, which is how a multi-member volume set loses every member
+/// after the first (see `write::finish_volume`).
+const EARC_NEXT_VOLUME: u16 = 0x0001;
 const FHD_SPLIT_BEFORE: u16 = 0x0001;
 const FHD_SPLIT_AFTER: u16 = 0x0002;
 const FHD_PASSWORD: u16 = 0x0004;
@@ -203,6 +217,51 @@ pub enum NewSubKind {
     Unknown(Vec<u8>),
 }
 
+/// How the volumes of a set are NAMED on disk.
+///
+/// The writer never sees a file name - it returns one byte vector per
+/// volume and the caller decides what to call each one - so the naming
+/// convention cannot be inferred here and has to be declared. It matters
+/// because a reference reader finds the next volume by computing its
+/// NAME, and `MHD_NEWNUMBERING` in the main header is what tells it
+/// which rule to compute with.
+///
+/// Measured against `unrar` 7.23 on 4 Sep 2026, with the real RAR 3.00
+/// sets in `tests/fixtures/rar15_40/rar300/` as the reference for what
+/// `rar` itself writes (`multivol_oldnaming_*` clears the bit on every
+/// volume, `multivol_newnaming_*` sets it on every volume, and the two
+/// sets differ by nothing else but their header CRCs and a two-second
+/// file time):
+///
+/// | volumes named | bit clear | bit set |
+/// |---|---|---|
+/// | `set.rar`, `set.r00`, ... | extracts | extracts |
+/// | `set.part01.rar`, ... | **refuses** | extracts |
+/// | `set.001`, `set.002`, ... | extracts | extracts |
+///
+/// The refusal is `Cannot find volume set.part01.r00` - unrar swaps the
+/// EXTENSION of the first volume's name, so `set.part01` reads as the
+/// stem - followed by a checksum error on the member it had to
+/// truncate. It exits 6.
+///
+/// So the bit is REQUIRED for `.partNN.rar` and merely tolerated
+/// elsewhere; leaving it clear under that naming produces a set only a
+/// reader that is told the volume list can follow.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VolumeNumbering {
+    /// `set.rar`, `set.r00`, `set.r01`, ... `MHD_NEWNUMBERING` clear.
+    ///
+    /// The default, because it is what every volume this writer has ever
+    /// emitted claims, and changing what an existing caller writes is
+    /// not this type's job.
+    #[default]
+    Classic,
+    /// `set.part01.rar`, `set.part02.rar`, ... `MHD_NEWNUMBERING` set on
+    /// EVERY volume of the set, which is what `rar` does.
+    NewStyle,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WriterOptions {
@@ -210,6 +269,21 @@ pub struct WriterOptions {
     pub features: FeatureSet,
     pub compression_level: Option<u8>,
     pub dictionary_size: Option<usize>,
+    /// Where the encryption salt comes from. [`Entropy::Os`] by
+    /// default; see [`Entropy::Seeded`] before changing it.
+    pub entropy: Entropy,
+    /// What the caller will NAME the volumes, which decides
+    /// `MHD_NEWNUMBERING`. Read by the four volume writers
+    /// ([`write_stored_volumes`], [`write_compressed_volumes`],
+    /// [`write_stored_volume_set`], [`write_compressed_volume_set`])
+    /// and by nothing else - a single-archive write has no volumes to
+    /// number and ignores it.
+    pub volume_numbering: VolumeNumbering,
+    /// Percent of the archive to spend on an embedded ("Protect+")
+    /// recovery record, or `None` for no record. Requires
+    /// `features.recovery_record`; see
+    /// [`WriterOptions::with_recovery_percent`].
+    pub recovery_percent: Option<u32>,
 }
 
 impl WriterOptions {
@@ -219,7 +293,29 @@ impl WriterOptions {
             features,
             compression_level: None,
             dictionary_size: None,
+            entropy: Entropy::Os,
+            volume_numbering: VolumeNumbering::Classic,
+            recovery_percent: None,
         }
+    }
+
+    /// Chooses where the writer draws its encryption salt.
+    ///
+    /// Leave it alone for a real archive. [`Entropy::Seeded`] is for
+    /// reproducible test generation and weakens what it feeds.
+    pub const fn with_entropy(mut self, entropy: Entropy) -> Self {
+        self.entropy = entropy;
+        self
+    }
+
+    /// Declares what the caller will name the volumes.
+    ///
+    /// Must AGREE with the names the caller then writes: see
+    /// [`VolumeNumbering`] for the measured table of what a reference
+    /// reader does with each pairing.
+    pub const fn with_volume_numbering(mut self, numbering: VolumeNumbering) -> Self {
+        self.volume_numbering = numbering;
+        self
     }
 
     pub const fn with_compression_level(mut self, level: u8) -> Self {
@@ -231,6 +327,19 @@ impl WriterOptions {
         self.dictionary_size = Some(size);
         self
     }
+
+    /// Asks for an embedded recovery record of `percent` of the archive.
+    ///
+    /// This is only half the request: `features.recovery_record` has to
+    /// be on as well, and the writer refuses the pair when it cannot
+    /// build one (a RAR 1.5 or 2.0 target, a header-encrypted archive, a
+    /// volume set). Setting the percent alone writes no record - the
+    /// feature flag is what the validators compare against, and a
+    /// percent with the flag off is refused rather than ignored.
+    pub const fn with_recovery_percent(mut self, percent: u32) -> Self {
+        self.recovery_percent = Some(percent);
+        self
+    }
 }
 
 impl Default for WriterOptions {
@@ -240,6 +349,9 @@ impl Default for WriterOptions {
             features: FeatureSet::store_only(),
             compression_level: None,
             dictionary_size: None,
+            entropy: Entropy::Os,
+            volume_numbering: VolumeNumbering::Classic,
+            recovery_percent: None,
         }
     }
 }
@@ -3635,6 +3747,9 @@ mod tests {
                 features,
                 compression_level: None,
                 dictionary_size: None,
+                entropy: Entropy::Os,
+                volume_numbering: VolumeNumbering::Classic,
+                recovery_percent: None,
             },
         )
         .unwrap();

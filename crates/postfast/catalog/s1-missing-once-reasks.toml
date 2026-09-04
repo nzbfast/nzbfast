@@ -1,0 +1,33 @@
+# S1: a refusal that was never true - 430 on the first ask, the article
+# on the second.
+
+[layout]
+name = "s1-missing-once-reasks"
+seed = 71
+note = """
+The shape nothing on the wire can tell apart from a permanent absence,
+which is the entire difficulty. A 430 says "no such article" and means
+it - except on a cold-storage backbone over a slow route, where a
+measured 17 GB slice lost 250 of 23,103 segments to refusals that all
+carried an echoed message-id, and a re-run nine minutes later on the
+same account lost 19. A client that takes the first 430 as final files
+a post short; one that re-asks everything forever doubles the cost of
+every genuinely dead post.
+
+NO RECOVERY SET, deliberately. With parity beside it the row would
+pass on the repair and prove nothing about the re-ask. Here the second
+ask is the only route to a complete download, so the end state cannot
+be reached any other way.
+
+Two articles rather than one, so a client that happens to retry the
+first request of a session is not enough to pass it.
+"""
+
+[source]
+files = [{ name = "asked.twice.bin", bytes = 240000 }]
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+missing_once_pct = 17.0

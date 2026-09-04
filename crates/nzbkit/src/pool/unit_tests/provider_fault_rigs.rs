@@ -412,6 +412,7 @@ async fn a_mute_parked_connection_does_not_hold_a_finished_run() {
         max_source_ips: None,
         address_family: Default::default(),
         tls_hostname: None,
+        warm_reserve: None,
     };
 
     let mut articles = std::collections::HashMap::new();

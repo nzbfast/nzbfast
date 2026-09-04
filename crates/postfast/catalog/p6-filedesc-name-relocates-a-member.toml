@@ -1,0 +1,74 @@
+# P6: a FileDesc name that contradicts a perfectly good wire name, and
+# moves the member into a directory the post never announced.
+
+[layout]
+name = "p6-filedesc-name-relocates-a-member"
+seed = 10
+note = """
+The hostile-name plane, in the one shape this oracle is allowed to
+grade. `crate::recovery::check_expressible` refuses every hostile name
+whose right answer is the sanitizer's - a traversal, an absolute path,
+a control byte, a reserved DOS device name, a duplicate - because the
+oracle grades an exact output tree and writing today's sanitized
+spelling into a profile would turn it into a requirement. Those shapes
+are pinned as exact strings by `hostile_filedesc_names_land_sanitized`
+in `crates/nzbfast/tests/e2e_norar/mod.rs` instead. What is left, and
+what this row is, is a legal CONTAINED relative path.
+
+THE CONTEST IS THE ROW. The wire announces `Relocated.By.The.Set.bin`
+and it is a perfectly good name: descriptive, in the subject and in the
+yEnc header, and a client that simply used it would have a correct file
+under a correct name. The recovery set's FileDesc packet says something
+else, `moved/here.bin`, and the set wins - its claim is an MD5 pair over
+bytes it can rebuild, and honouring FileDesc paths is what lets a
+directory tree survive a post at all (p3-filedesc-tree is the same
+ruling where nothing contests it). So the member ends up in a
+subdirectory nothing else in the post mentions.
+
+That is the shape a poisoned or mis-cut set turns up in, which is why
+containment is the half that matters: a legal relative path must be
+kept, and the paths that would escape must not be, and the two rules
+have to hold at once.
+
+THE SECOND MEMBER IS THE CONTROL ARM, inside the same post. Entries are
+positional over the covered members, so with one entry only the first
+member is patched; `Stays.Where.The.Wire.Says.bin` is covered by the
+same set, described by the same packets, and keeps the name the wire
+gave it. A client that reacted to a set carrying a rewritten descriptor
+by re-deriving every name from it would land the payload correctly and
+fail here.
+
+MEASURED, 4 Sep 2026, rather than read off a green light: the
+expectation this profile derives is exactly ["moved/here.bin",
+"Stays.Where.The.Wire.Says.bin"], probed by handing `[expect] arrives`
+a name the layout does not carry and reading back the list the
+generator says would have been right. So the passing run really did
+create the subdirectory and really did leave the second member alone.
+
+`[source]` names are long on purpose. A patched name has to FIT the
+region the creator's own name occupied in the packet, and the refusal
+prints both numbers when it does not.
+
+20 % redundancy and no damage anywhere, so this is a clean run: the
+`.par2` index arrives and the parity volumes do not.
+"""
+
+[source]
+files = [
+  { name = "Relocated.By.The.Set.bin", bytes = 24000 },
+  { name = "Stays.Where.The.Wire.Says.bin", bytes = 18000 },
+]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+hostile_names = ["moved/here.bin"]
+
+[encoding]
+article_bytes = 12000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

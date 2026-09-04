@@ -30,7 +30,7 @@ pub(super) const HOLDS_CAP_FLOOR: usize = 8 << 20;
 /// is read implicitly by the repair paths, `rar_read_options` and the
 /// LZMA gauge, so it LOOKS like the way to size a pipeline - but the
 /// extractor took its cap only from `set_holds_cap`, which lives on the
-/// download path alone (`crates/nzbfast/src/get/vrig.rs`). The TODO 209
+/// download path alone (`crates/nzbfast-engine/src/get/vrig.rs`). The TODO 209
 /// dict-window rig pinned 256 MiB, built a bare `Extractor::new`, and
 /// actually chased against 2 GiB; the unbounded container buffering that
 /// produced was written up as an untracked allocation wanting a new
@@ -993,7 +993,7 @@ impl Extractor {
     /// Bounded at [`PROBE0_MAX`] promotes per slot, because a promote
     /// must not fight the M11 stream reader, whose newest-alive
     /// generation re-promotes its rolling window every few MB
-    /// (`LiveRangeReader`, in nzbfast's serve/stream.rs) and so always
+    /// (`LiveRangeReader`, in nzbfast's crates/nzbfast-daemon/src/stream.rs) and so always
     /// ends up in front. A handful of monotonically-improving re-issues
     /// keeps that property; a per-article promote would not. Honest
     /// ladders pay nothing: their arrivals climb, so the minimum never

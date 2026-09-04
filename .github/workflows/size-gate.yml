@@ -332,7 +332,7 @@
 # 2026: a29a8e4cc's two contenders were tests of two OTHER modules,
 # joined to the static only by a `pub` door, so a per-unit scan could not
 # have seen the very incident that motivated the gate. All 43 doors on
-# this tree were read; the one live family is `serve/tests_jobs.rs`
+# this tree were read; the one live family is `tests_jobs.rs`
 # reaching smart.rs's trash flags, correct today and never checked
 # before. Contention is scored per CRATE, because `cargo test -p X` is
 # one process per crate and pooling them manufactures a population that
@@ -342,7 +342,7 @@
 # along with the string literals and losing the mem sampler unit.
 # Twenty-six is `tools/shot-version-gate.py`, added 24 Aug 2026, and it
 # is this family's first subject that is an IMAGE. Every dashboard
-# capture in `website/assets/` renders the running version in its header
+# capture in `website/assets/` rendered the running version in its header
 # pill, and nothing held those images to the crate version: all four
 # versioned shots went two releases stale AT ONCE, reading `v1.1.4 beta
 # 4` while crates/nzbfast/Cargo.toml was at 1.2.2, and it was caught only
@@ -350,7 +350,7 @@
 # re-shot in three separate passes on the same day (349e339e1, 1096d1adf
 # and 63c54b775). tools/check-site-version.sh is the precedent and the
 # reason the gap was glaring - it already holds the version STRINGS on
-# the sixteen download pages to Cargo.toml, and this is the same defect
+# the sixteen download pages to Cargo.toml, and this was the same defect
 # one medium over, worse in one way: a stale download button 404s
 # loudly, while a stale capture quietly shows an old product to every
 # visitor and to everyone installing the PWA, since two of these images
@@ -359,13 +359,24 @@
 # CAUGHT IT, which is the argument: `website/` is not in PUBLIC_MANIFEST,
 # so `packaging/leak-check.sh --all` prints `0 public file(s) clean`
 # without having scanned it - a phrase that reads exactly like a pass -
-# and nothing in this repo can read a PNG. It cannot read one either, and
-# its header says so plainly rather than overclaiming: what it holds to
-# Cargo.toml is a human's assertion, in website/SCREENSHOTS.manifest,
-# that an image was shot at a version, so a record bumped without
-# re-shooting defeats it and no arm can tell. That still converts "nobody
-# ever looks" into "a release bump asks the question", which is the step
-# that was missing for two releases. Here rather than on main alone for
+# and nothing in this repo can read a PNG.
+#   IT NO LONGER READS Cargo.toml AT ALL, since 1 Sep 2026, and the name
+# is kept only because renaming it would move a ci-verdict roster entry,
+# two workflows, a preflight glob and a release skill at once. Holding the
+# captures to the crate version reddened all four on EVERY release,
+# including one that moved no pixel, and the only honest way to clear that
+# red was a ~30-minute rig run; it was red on main from the 1.3.1 bump.
+# The version was taken OUT of the captures instead. The shoot scripts
+# hide the `#ver` element, so the images carry no version, and the
+# manifest now declares a `ui-revision` that a HUMAN bumps when the
+# dashboard changes materially - which is the only thing that asks for a
+# re-shoot. A staleness WARNING (90 days, never a failure, emitted as a
+# `::warning` annotation so it is visible in a green job) is the backstop.
+# It still cannot read a PNG and its header says so plainly rather than
+# overclaiming: what it holds is a human's assertion, so a record bumped
+# without re-shooting defeats it and no arm can tell. The trade is
+# deliberate and written down there - the old rule was noisy and always
+# true, this one is quiet and can be forgotten. Here rather than on main alone for
 # the reason every entry above gives, with a twist: the lane that bumps
 # the version is the one lane that can still choose to re-shoot before
 # the release goes out. MOST OF ITS ROSTER IS WAIVED, which makes the
@@ -518,9 +529,9 @@
 #     their four English bases. None of the four gates needed anything
 #     added here beyond its own script, and neither did the fifth: the
 #     screenshot version gate reads `website/assets/` and
-#     `website/SCREENSHOTS.manifest`, both under `website/**`, and
-#     `crates/nzbfast/Cargo.toml`, already covered by `crates/**` at the
-#     top of this list. Do not narrow any of these entries
+#     `website/SCREENSHOTS.manifest`, both under `website/**`. It read
+#     `crates/nzbfast/Cargo.toml` too until 1 Sep 2026 and no longer reads
+#     any crate file. Do not narrow any of these entries
 #     on the overflow gate's behalf without re-reading this line:
 #     `website/**` alone now carries FIVE, and narrowing it would leave
 #     the anonymity arm wired to a trigger a leaked city name cannot
@@ -633,6 +644,9 @@ on:
     paths:
       - 'crates/**'
       - 'vendor/**'
+      # test-target-gate reads the root manifest's default-members list;
+      # nothing else in this filter reaches the repo root.
+      - 'Cargo.toml'
       - '**/*.rs'
       - 'website/**'
       - 'docs/MANUAL.html'
@@ -676,6 +690,8 @@ on:
       - 'tools/harness-gate.py'
       - 'tools/index-lock-gate.py'
       - 'tools/rate-format-gate.py'
+      - 'tools/nav-destinations-gate.py'
+      - 'web/ui-manualnav.html'
       - 'macapp/**'
       - 'tools/payload-id-gate.py'
       - 'tools/bg-token-gate.py'
@@ -749,6 +765,7 @@ on:
       - 'web/i18n/nav-regen.py'
       - '.claude/tools/memory-gate.py'
       - '.claude/tools/hooks-gate.py'
+      - '.claude/tools/checkout-drift-hook.py'
       - '.github/workflows/size-gate.yml'
       # For the `packaging-tests-roster` job below, whose subject is
       # every workflow in this directory: deleting a `run:` step from
@@ -758,75 +775,56 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# Every job below is the same shape, deliberately spelled out thirty-nine
-# times rather than as a matrix, so each step's `run:` line is the bare
-# script exactly as ci-private runs it and the two can never disagree
-# about what passes - true of twenty-eight of the thirty-nine. The memory
-# and hooks gates have no ci-private line to match, see "Eighteen" above,
-# and neither does the clippy-doc gate, which is wired here alone - this
-# file runs on main's pushes too, so nothing is lost by that. The
-# wco-drag gate is the fourth, wired here alone for the same reason and
-# left out of this sentence when it landed. The
-# ci-verdict roster job is the fifth and the only one that DELIBERATELY
-# differs: ci-private runs `--selftest && <the gate>`, this runs the
-# selftest ALONE, because the gate half is a statement about main's state
-# and would red the next lane. See "Twenty-three" above - that asymmetry
-# is the design, not drift, so do not "fix" it by appending the gate.
-# The screens-derived gate is the sixth, wired here alone for the same reason
-# again - this file runs on main's pushes too, so nothing is lost by it,
-# and its subject is a picture a lane can only fix while it still has the
-# mac in front of it. The icons-derived gate is the seventh, wired
-# here alone for that same reason one more time: its regenerate-and-compare
-# half needs qlmanage, so the lane holding the mac is the only lane that
-# can act on a hit at all. The downstream icon gate is the eighth, wired
-# here alone for exactly that reason again - its own mac half is `--check`
-# on two generators that need sips. The wait-recheck gate is the ninth
-# and the api-contract gate the tenth, both wired here alone at
-# landing for the same reason as the clippy-doc one. The selftest roster
-# is the eleventh and last, wired here alone for that reason once more -
-# this file runs on main's pushes too, so nothing is lost by it, and the
-# lane that adds an unwired selftest is the one lane that can be told.
-# The arithmetic above counts them all.
+# CONSOLIDATED 31 Aug 2026 (research/DEV-TOOLCHAIN-REVIEW-2026-08-31.md):
+# the gates below ran as ONE JOB EACH - 64 jobs by the end - which cost
+# ~20-30 s of runner setup per job to run a one-second script, roughly
+# thirty runner-minutes of pure setup on every push, at ~300 pushes a
+# day. They are now grouped by family (rust, web, site-i18n, bench,
+# roster), the shape `packaging-gates` and `tool-selftests` had already
+# proven: a STEP still reports its own verdict and names itself when it
+# fails, which is the property one-job-per-gate was really buying, and
+# every step's `run:` line is still the bare script exactly as
+# ci-private runs it, so the roster gates (selftest-roster,
+# packaging-tests-roster, claude-clippy-gate) read the wiring unchanged
+# and `tools/preflight.py` still derives its local roster from this
+# file. Each old job's comment block rides above its step, unchanged.
 #
-# THE FORTIETH JOB, `packaging-gates`, IS ONE OF TWO EXCEPTIONS to
-# the paragraph above, and it says why at its own site rather than here. In
-# short: its subject is twelve shell scripts rather than one python gate,
-# they total about eleven seconds between them, and six of them need an
-# interpreter the ubuntu image does not ship - so they share one runner
-# as twelve STEPS. A step still reports its own verdict and names itself
-# when it fails, which is the property one-job-per-gate is really buying.
-# Its `run:` lines are the bare scripts exactly as pr-check.yml spells
-# the five it shares, so that rule holds unchanged.
+# WHAT A GROUP MUST NOT DO is share state between steps: every step here
+# is a read-only scan of the checkout, so ordering inside a group is
+# free. Every grouped step carries `if: !cancelled()` so a red gate does
+# NOT mask the verdicts of the gates grouped after it - a persistent red
+# (a stale screenshot waiting on the mac rig, say) would otherwise
+# silence half a family for days - while the job still reds if any step
+# did. A gate that needs a DIFFERENT checkout keeps its own job:
+# `claims-drop-gate` is the one such (fetch-depth 0 + blob:none, because
+# its subject is commit-vs-parent history a depth-1 clone cannot see).
+# A new gate joins the family group its subject belongs to, or earns its
+# own job by needing something the group's checkout cannot give it.
 #
-# `tool-selftests`, the last job in this file, is the SECOND exception
-# and is the same shape for the same reason: ten `--selftest` arms
-# that nothing anywhere ran, about twenty seconds between them, one
-# runner, one step each. It stops there for a reason worth keeping - a
-# step that is a bare `<script> --selftest` is exactly what a session
-# would type, so `tools/selftest-roster.py` can read it back and say
-# which arms are covered.
+# The ci-verdict roster step DELIBERATELY differs from ci-private:
+# ci-private runs `--selftest && <the gate>`, this file runs the
+# selftest ALONE, because the gate half is a statement about main's
+# state and would red the next lane. That asymmetry is the design, not
+# drift - do not "fix" it by appending the gate.
 #
 # Concurrency is on the JOB, not the workflow, which is ci-private.yml's
 # hard-won lesson written down: a workflow-level group cancels every job
-# in the run, so one slow leg kills the fast one. With forty-two jobs that
-# is no longer hypothetical - a per-job group means the overflow gate's
-# selftest can never take the lock gate's verdict down with it.
-#
-# Same rule as `check` otherwise: superseding is what you want on a
-# topic branch, and main must always reach a verdict rather than be
-# cancelled by the next push.
+# in the run, so one slow leg kills the fast one. Same rule as `check`
+# otherwise: superseding is what you want on a topic branch, and main
+# must always reach a verdict rather than be cancelled by the next push.
 jobs:
-  size-gate:
-    # Private repo only. The public repo has pr-check.yml; the cost
-    # rationale for that split lives there.
+  rust-gates:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     concurrency:
-      group: size-gate-${{ github.ref }}
+      group: rust-gates-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- size-gate -----------------------------------------------
+      # Private repo only. The public repo has pr-check.yml; the cost
+      # rationale for that split lives there.
       # `--selftest` first, same reason as the lock gate below: this
       # gate's `#[cfg(test)]` scope resolver ended a BRACE-LESS item only
       # on braces, so it ran on to the next `{` and scored the production
@@ -834,131 +832,885 @@ jobs:
       # `Daemon::enqueue` at 575 lines. The selftest pins the brace-less
       # shape so nobody simplifies the resolver back.
       - name: size gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/size-gate.py --selftest && tools/size-gate.py
-  lock-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: lock-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- lock-gate -----------------------------------------------
       - name: lock gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/lock-gate.py --selftest && tools/lock-gate.py
-  waiver-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: waiver-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- waiver-gate ---------------------------------------------
       # `--selftest` first: this gate exempts two shapes (`cfg_attr(..,
       # allow(..))` and `#[expect]`) by NOT matching them, so a slipped
       # anchor turns it into a gate that passes everything quietly. The
       # selftest asserts the exempt fixtures really are exempt and the
       # noted ones really are seen and judged justified.
       - name: lint waiver gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/waiver-gate.py --selftest && tools/waiver-gate.py
-  doc-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: doc-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- doc-gate ------------------------------------------------
       - name: doc gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/doc-gate.py --selftest && tools/doc-gate.py
-  ref-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: ref-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- ref-gate ------------------------------------------------
       - name: ref gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/ref-gate.py --selftest && tools/ref-gate.py
-  overflow-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: overflow-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- overflow-gate -------------------------------------------
       - name: overflow gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/overflow-gate.py --selftest && tools/overflow-gate.py
-  bench2j-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: bench2j-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: bench driver generator gate
-        run: tools/bench2j-gate.py
-  leg-warn-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: leg-warn-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: LEG-line WARN gate
-        run: tools/leg-warn-gate.py --selftest && tools/leg-warn-gate.py
-  par2-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: par2-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- par2-gate -----------------------------------------------
       - name: par2 guard gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/par2-gate.py --selftest && tools/par2-gate.py
-  provenance-gate:
+      # ---- win-portability-gate ------------------------------------
+      # The one gate here whose subject is a platform nobody in this fleet
+      # builds on: unix-only symbols in code Windows also compiles. Four
+      # fix commits over two days of red windows-build / windows-clippy,
+      # 21-23 Aug 2026. `--selftest` first, same reason as the gates above
+      # - the exemption logic is the whole gate, and a refactor that
+      # over-exempts still prints a green line.
+      - name: windows portability gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/win-portability-gate.py --selftest && tools/win-portability-gate.py
+      # ---- harness-gate --------------------------------------------
+      # `--selftest` first, and here it is the whole gate: the three needle
+      # shapes are what separate this from a bare word grep that passes
+      # everything (`.text(` has 2 hits in that tree where the word `text`
+      # has 62). The selftest pins that a bare-word needle DOES match a
+      # fixture the call-shaped one does not, so nobody widens it back.
+      - name: harness dead-item gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/harness-gate.py --selftest && tools/harness-gate.py
+      # ---- index-lock-gate -----------------------------------------
+      # TODO 166: no HTTP worker may park unbounded on the index write
+      # mutex. Here rather than only in ci-private because this one fires
+      # on ordinary handler work - the sixteenth site was a Clear button -
+      # and a new site should be red on the AUTHOR's push, not on the next
+      # lane's. `--selftest` first: the gate's whole value is firing on a
+      # NEW site, and a scanner that quietly stops matching reports a clean
+      # tree forever, which is what nav-regen's dead picker arm did for
+      # months.
+      - name: index lock gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/index-lock-gate.py --selftest && tools/index-lock-gate.py
+      # ---- payload-id-gate -----------------------------------------
+      # `payload.contains(&nzo_id)` over a SAB response is not "is this job
+      # in the queue": mode=queue's whyslow block names the LAST job's own
+      # nzo_id, so it reads TRUE against an empty queue, and the ids are
+      # minted off a counter so ...nzbfast1 is a strict prefix of
+      # ...nzbfast10. 03e328222 swept all 54 sites BY HAND after a flake and
+      # nothing checked the 55th. Here rather than only in ci-private
+      # because these suites are hand-copied descendants of each other, so
+      # the next one is a copy of whatever is next door - a new site should
+      # be red on the AUTHOR's push. `--selftest` first: what this gate
+      # protects against is a regex that has quietly stopped matching, and
+      # that reads as a clean tree forever.
+      - name: payload id gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/payload-id-gate.py --selftest && tools/payload-id-gate.py
+      # ---- test-global-gate ----------------------------------------
+      # A `#[test]` that writes a process-global and asserts on what it says
+      # is reading its neighbours' writes whenever they land on different
+      # threads of ONE process - and nextest cannot see that, because it
+      # gives every test its own process. a676367fb measured 73 failures in
+      # 200 runs on three tests that had been latent since they were
+      # written. Here rather than only in ci-private because the modules
+      # this covers serialize by CONVENTION: a new test copies the one above
+      # it, and one that copies without the guard must be red on the
+      # AUTHOR's push, not on whoever next runs the unit binary by hand.
+      # `--selftest` first - what this protects against is an arm that has
+      # quietly stopped matching, which reads as a clean tree forever.
+      - name: test global gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/test-global-gate.py --selftest && tools/test-global-gate.py
+      # ---- wait-recheck-gate ---------------------------------------
+      # A state guard released inside a wait loop that then falls through
+      # to an unbounded `Condvar::wait` without re-checking what ends the
+      # wait: the abort lands in the released window, notifies an empty
+      # condvar, and the reader parks forever. Measured 23 Aug 2026 as a
+      # 4,666-second wedge of the zip nested-budget test - which nextest
+      # RETRIED and reported as "6101 passed (1 flaky)", exit 0. Here
+      # rather than only in ci-private for exactly that reason: this class
+      # cannot be relied on to show up as a red test at all, so the push
+      # that introduces it is the only moment anyone will look. A grep for
+      # `drop(st)` would never have found it either - the incident's
+      # release is the guard MOVED into a helper that hands a fresh one
+      # back. `--selftest` first, and it is the gate: the arms are
+      # regexes over a five-loop population, and one that quietly stops
+      # matching reports a clean tree forever, which is what nav-regen's
+      # dead picker arm did for months.
+      - name: wait recheck gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/wait-recheck-gate.py --selftest && tools/wait-recheck-gate.py
+      # ---- chunk-narrow-gate ---------------------------------------
+      # A u64 byte span narrowed to `usize` BEFORE it is bounded by a
+      # buffer - `(remaining as usize).min(buf.len())`. `usize` is 32 bits
+      # on the shipped armv7-unknown-linux-musleabihf target, so a span of
+      # exactly 4 GiB narrows to ZERO and the caller takes nothing: no
+      # progress at all in a decrementing loop, and Ok(0) in a reader,
+      # which every consumer in this tree reads as a clean end of file.
+      # Not an alignment coincidence - the last short read takes
+      # `remaining % 2^32` and lands the cursor exactly on the multiple,
+      # so the trigger is any span of 4 GiB or more, every time.
+      # Here rather than only in ci-private for the reason no test job can
+      # cover it: on a 64-bit host the hazardous spelling is BIT-IDENTICAL
+      # to the safe one, so nothing this fleet runs can see the class, and
+      # the push that introduces it is the only moment anyone will look.
+      # `adb3681e9` converted nineteen sites; this holds the twentieth.
+      # `--selftest` first, and it is the gate: the arms are a hand-written
+      # left-walk over 777 casts, and one that quietly stops matching
+      # reports a clean tree forever, which is what nav-regen's dead picker
+      # arm did for months. It needs no new `paths:` entry - `**/*.rs` and
+      # `**/*.py` above already reach every file it reads.
+      - name: chunk narrow gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/chunk-narrow-gate.py --selftest && tools/chunk-narrow-gate.py
+      # ---- metrics-roster-gate -------------------------------------
+      # Holds `crates/nzbfast-api/src/metrics.rs` (the `/metrics`
+      # Prometheus renderer) to `crates/nzbfast/tests/daemon_metrics/
+      # mod.rs` (the test that pins every family by name and TYPE):
+      # a family declared but never pinned, a pin left behind by a
+      # rename, or a gauge/counter flip on either side, are each a
+      # REFUSAL. A metric name is a published contract - someone's
+      # Grafana panel is written against the string - and none of that
+      # has a symptom anywhere else in this repo: no compile error, no
+      # clippy lint, the daemon still starts.
+      # Here rather than relying on the test alone for the reason no
+      # other job covers it: `daemon_metrics` is a module of the `daemon`
+      # integration binary, one of the eight heavy-tests targets this
+      # repo's own CI sweep line excludes by name
+      # (`not binary(daemon)`), gated behind the `heavy-tests` feature so
+      # an ordinary `cargo test` never compiles it. A rename would sit
+      # unnoticed until someone runs that suite by hand or nightly's
+      # `long-suites` gets to it. This is build-free and runs on every
+      # branch push, so the same rename is caught on the author's own
+      # push instead.
+      # `--selftest` first, and it is the gate rather than the house
+      # habit: 20 cases, each pinned by the message it must name, plus
+      # three mutations driven against the REAL files (a renamed family,
+      # a type flip, a deleted pin) that all redden. It needs no new
+      # `paths:` entry - `**/*.rs` and `**/*.py` above already reach
+      # every file it reads.
+      - name: metrics roster gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/metrics-roster-gate.py --selftest && tools/metrics-roster-gate.py
+      # ---- cpu-workers-gate ----------------------------------------
+      # A CPU worker pool sized from `available_parallelism` rather than
+      # from `nzbkit::mem::cpu_workers`, which is the one place an outside
+      # caller can cap one (`NZBFAST_CPU_WORKERS`, TODO 281 AN4).
+      # Here rather than only in ci-private for the reason no test job can
+      # cover it: the uncapped spelling is CORRECT on every box this fleet
+      # owns, and the only symptom is a phone running hot on one pool out
+      # of sixteen - and nothing here compiles for a phone, let alone
+      # measures one. These pools are hand-copied siblings, so the next one
+      # is a copy of one of them: fine if it copies the helper, silently
+      # wrong if it copies the standard library call.
+      # `--selftest` first, and it is the gate rather than the house habit:
+      # a scanner that has quietly stopped matching reports a clean tree
+      # forever, which is what nav-regen's dead picker arm did for months.
+      # It needs no new `paths:` entry beyond its own file - `**/*.rs`
+      # above already reaches every source it reads.
+      - name: cpu workers gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/cpu-workers-gate.py --selftest && tools/cpu-workers-gate.py
+      # ---- host-config-gate ----------------------------------------
+      # A test that hands the daemon a config path it never wrote.
+      # `Config::load` answers a MISSING file by finding a SABnzbd
+      # install's ini under `$HOME`, this fleet has SABnzbd from the
+      # competitive benchmarking and a runner does not, so the same test
+      # gives opposite answers decided by the box. It went red on main
+      # twice in two days on two different doors (f63b6a3af, e0f94fc60),
+      # the second time taking linux-tests, unit-one-process and
+      # windows-unit down for ninety minutes, and it is INVISIBLE on every
+      # machine here - which is why this belongs on the author's own push
+      # rather than only in ci-private. `--selftest` first and it is the
+      # gate rather than the habit: the arms are a hand-written lexer over
+      # a 3,100-function test tree, and one that quietly stops matching
+      # reports a clean tree forever - nav-regen's picker arm did exactly
+      # that for months. It prints how many test functions, doors and
+      # consumers it REACHED, so an inert scan shows a zero, not a green.
+      - name: host config gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/host-config-gate.py --selftest && tools/host-config-gate.py
+      # ---- cfg-safety-gate -----------------------------------------
+      # An `unsafe` block whose only SAFETY note sits above a
+      # cfg-EXCLUSIVE sibling arm. On the platform that arm is gated for,
+      # the sibling AND its comment are both gone and
+      # `undocumented_unsafe_blocks` fires on the block below - and every
+      # clippy run on this fleet is host-native, where the LINUX arm is
+      # the one that vanishes. `cargo clippy --target
+      # x86_64-unknown-linux-gnu` does not work from the dev Mac at all
+      # (md5-asm and libsqlite3-sys want a C cross-toolchain and no
+      # `brew install` supplies one), so unlike the Windows case in
+      # CLAUDE.md's SIXTEENTH entry there is no local run that sees it.
+      # Measured: main went red on this FIVE times in eighty-four minutes
+      # on 26 Aug 2026, the middle three being the SAME defect fixed by
+      # three lanes independently inside ten minutes - because a red on
+      # main is a broadcast, so every lane that looks races every other
+      # lane that looks. Belongs on the author's own push for exactly
+      # that reason. `--selftest` first and it is the gate rather than the
+      # habit: the arms are a hand-written Rust lexer plus a two-level
+      # walk-back, and one that quietly stops matching reports a clean
+      # tree forever - nav-regen's picker arm did that for months. It
+      # prints how many files, unsafe sites, cfg attributes and statement
+      # lifts it REACHED, so an inert scan shows a zero, not a green. It
+      # reads the crate MANIFESTS as well as the sources, to derive its
+      # roster and to see a waiver, and `**/*.rs` does not reach those -
+      # hence the two `Cargo.toml` lines in the filter above. Without
+      # them a deleted waiver, or a crate dropping out of the lint table,
+      # is a change this job never runs on.
+      - name: cfg safety gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/cfg-safety-gate.py --selftest && tools/cfg-safety-gate.py
+      # ---- cfg-symbol-gate -----------------------------------------
+      # A reference to an item defined under one `#[cfg(target_os = ..)]`
+      # from a site that does not share it. It compiles perfectly on the
+      # box it was written on and is `E0425` on every other target, so
+      # every host-native gate on this fleet is green on a tree that
+      # reddens four CI jobs. That is what `d49f5ab32` did on 28 Aug 2026
+      # with `4 * super::TRASH_DEADLINE` inside a `#[cfg(test)]` fn -
+      # `cfg(test)` compiles on every target, which is why it is not an
+      # exemption here. Neither neighbour covers it: `cfg-safety-gate` is
+      # about the SAFETY comment above a cfg arm, and
+      # `win-portability-gate` only scans `libc::` and `std::os::unix`,
+      # so it was green on the tree that was red.
+      # Belongs on the AUTHOR's own push rather than on main, and the
+      # reason is coordination rather than compile time: that one defect
+      # minted FIVE separate red claims across lanes and two were still
+      # open hours later, because a red on main is a broadcast and every
+      # lane that looks races every other lane that looks.
+      # `--selftest` first and it is the gate rather than the habit - the
+      # arms are a hand-written Rust lexer, a per-target three-valued cfg
+      # evaluator and a four-arm name resolver, and one that quietly
+      # stops matching reports a clean tree forever. It prints how many
+      # files, item definitions, cfg-exclusive definitions, candidate
+      # references and RESOLVED references it reached and REFUSES below a
+      # floor on each, so an inert scan shows a zero and not a green.
+      - name: cfg symbol gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/cfg-symbol-gate.py --selftest && tools/cfg-symbol-gate.py
+      # ---- ffi-cutout-gate -----------------------------------------
+      # `default-features = false` on the `nzbfast` dependency in
+      # crates/nzbfast-ffi/Cargo.toml is the WHOLE mechanism that keeps
+      # the iOS store staticlib's ~10.5 MB of dashboard pages out (TODO
+      # 281 IO3b). Cargo resolves features PER INVOCATION, so it holds
+      # only while that crate is built ALONE - a `--workspace` build, or
+      # one naming `-p nzbfast` beside it, unifies with the bin crate's
+      # `default` and hands the pages back with nothing to say so.
+      # packaging/ios/build-ffi.sh's cargo line is the other half of the
+      # mechanism, `-p nzbfast-ffi` alone. Both were guarded by nothing
+      # but a comment. Two arms: the manifest (either TOML shape for the
+      # dependency, refusing `true` or an omitted key), and every cargo
+      # line in the build script naming nzbfast-ffi (refusing
+      # `--workspace` or a second `-p`, checked through a simple literal
+      # shell variable too). `--features nzbfast/dashboard` in
+      # build-harness.sh and build-apk.sh's WebView kit are out of scope
+      # on purpose - neither is a release path, and this gate never
+      # opens either file. Build-free, well under a second, no new
+      # `paths:` entry - `crates/**/Cargo.toml` and `packaging/**` above
+      # are already triggers.
+      - name: ios ffi dashboard compile-out gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/ffi-cutout-gate.py --selftest && tools/ffi-cutout-gate.py
+      # ---- ceiling-claim-gate --------------------------------------
+      # A comment that says a function or file IS at a size-gate ceiling,
+      # about one that is not. A §106 split leaves the note behind: a
+      # hoisted helper explains why it is a free function rather than
+      # inline, and the reason is nearly always "its caller is at the size
+      # gate's ceiling, so there is nowhere to put another line". That
+      # sentence is PRESENT TENSE and is false the moment the caller is
+      # split, which is the one event guaranteed to follow it - the commit
+      # that writes it is usually the commit that falsifies it. SIX were
+      # written by one split commit on 31 Aug 2026 and already false when
+      # it landed (`try_mapped_repair` 469 -> 316, `run_set_repair`
+      # 464 -> 335, `fetch_and_repair` 475 -> 379), and two more were
+      # fixed by hand inside `a2529f9ee`. Nothing checked any of them.
+      # THE COST is not a typo. The note is the input to a decision: a
+      # lane reading "this function is at the ceiling" prices a hoist it
+      # may not need. And the opposite failure is worse - a lane checks,
+      # finds the claim false, and DELETES the comment, taking the
+      # recorded reason for the factoring with it. So FIX A HIT BY
+      # CORRECTING THE TENSE AND THE NUMBER, never by deleting the note.
+      # TENSE IS THE WHOLE DESIGN. A PAST-tense claim is HISTORY, was true
+      # when written, and must stay green forever; a gate that reddened on
+      # those would demand the deletion of the very notes it defends. Only
+      # present-tense claims are judged - 17 of 59 on the swept tree.
+      # THE BAR IS 5% OF THE TARGET'S OWN LIMIT (`file_limit`/`fn_limit`,
+      # so a BASELINED target is judged against its baseline), derived from
+      # the tree rather than picked: it reproduces both hand-made verdicts
+      # in the handoff that commissioned this (`settle_with_set` at 472 of
+      # 500 is 28 free, over a 25-line bar), every numeric present claim
+      # that reads as true sits between 0.5% and 4.6% of its limit, and
+      # every phrasing lanes HEDGE sits at 4.8% or worse.
+      # THE MEASUREMENT IS SIZE-GATE'S OWN - `strip_noise` and `functions`
+      # are imported, not re-derived, so this gate and the gate that
+      # reddens main cannot disagree about what a function is.
+      # AN UNRESOLVABLE SUBJECT REFUSES rather than guesses, and both cheap
+      # guesses are wrong on the real tree: `smart/feature.rs` says "for
+      # the reason `sample.rs` next door gives: that file sits at its TODO
+      # 106 size ceiling", where the LAST name is `sample.rs` and the
+      # subject is `smart.rs`, while `serve/hunt.rs` says "lives in
+      # `serve/daemon.rs`, which is on its size-gate ceiling", where the
+      # FIRST name is `enqueue_as` and the subject is the last. Fix a
+      # refusal by NAMING the subject, which makes the note checkable.
+      # `--selftest` FIRST and it is the gate rather than the house habit:
+      # this is a hand-written Rust comment lexer, and one that quietly
+      # stops matching reports a clean tree forever. 71 cases pinning the
+      # counts reached as well as the verdicts, plus six mutations driven
+      # against the REAL files that all bite (the incident reverted, a
+      # demonstrative subject restored, a stale number, a true claim
+      # repointed, a wrong stated ceiling, a brand-new false note) against
+      # two controls - a reflow and a waiver - that correctly stay green.
+      # It needs no new `paths:` entry: `**/*.rs` and `**/*.py` above
+      # already reach every file it reads. Build-free, about ten seconds,
+      # six of which is size-gate's own `collect()`.
+      - name: ceiling claim gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/ceiling-claim-gate.py --selftest && tools/ceiling-claim-gate.py
+      # ---- par2-rule-gate ------------------------------------------
+      # Refuses a SECOND copy of the `.par2` file-classification rule.
+      # `nzbkit::nzb::classify_subject` is the rule; `NzbFile::kind` and
+      # `faultplan::role_of` are doors onto it - and `role_of` was a
+      # HAND-COPIED TWIN of `kind` for months, which is why N6-04's
+      # decoy-quote defect and N6-05's quoted-`.par2`-with-a-tail defect
+      # were each live in TWO places. Both were silent: a
+      # `"label.vol000+50.par2" - "Movie.mkv"` post classified as a
+      # recovery volume, and a non-bootstrap volume gets NO SLOT, so the
+      # payload named right there in the manifest was never fetched,
+      # nothing was ever missing, and the job finished green.
+      # The twin was folded away on 30 Aug 2026 and NOTHING held it
+      # there - and the tree was not in fact at one copy: this gate's
+      # first run found `check::multiple_par2_sets` restating the
+      # terminal rule verbatim, under a comment saying "The two have to
+      # agree", which is precisely how `role_of` began.
+      # Three arms, each seeing a copy the other two cannot: the
+      # two-clause remainder test wherever it lands, a `.par2` test on a
+      # name that resolves one hop to a SUBJECT, and any `-> FileKind`
+      # door outside nzb.rs that stops delegating. Plus a home arm, for
+      # the FOURTEENTH CLAUDE.md entry's reason - a rule narrowed back at
+      # its one home restores the defect at every call site at once with
+      # no call-site diff anywhere to show it.
+      # `--selftest` first, and it is the gate rather than the house
+      # habit: 35 cases, each pinning the counts it reached as well as
+      # its verdict, plus 31 mutations of the arms each verified to
+      # redden it against two controls that correctly do not, and six
+      # driven against the REAL files (the second copy restored, a new
+      # subject test, the twin put back two ways, the rule made private,
+      # the `isolated` gate dropped) that all bite. It needs no new
+      # `paths:` entry - `**/*.rs` and `**/*.py` above already reach
+      # every file it reads. Build-free, well under a second.
+      - name: par2 rule gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/par2-rule-gate.py --selftest && tools/par2-rule-gate.py
+      # ---- extractor-anchor-gate -----------------------------------
+      # A root `Arc<Extractor>` that is fed spans must be ANCHORED.
+      # `Extractor::anchor` records the chain root's own `Arc` weakly and
+      # every attach arm - `try_attach_zip`, `try_attach_sevenz`,
+      # `try_attach_tar`, `try_attach_chase` - opens with
+      # `self_weak.upgrade().is_none() => return Ok(false)`, BEFORE any
+      # name or magic test. So a root that never anchors takes NO chase
+      # at depth 0: the container materializes byte-exactly for the disk
+      # post-pass, and that is EXACTLY what a passing test looks like.
+      # It bit a lane on 30 Aug 2026 - a fresh probe harness for matrix
+      # rows M4-75/M4-90 omitted `anchor()` and reported THREE OF FOUR
+      # container arms SAFE; with `anchor()` added the 7z arm flipped to
+      # destroying the named file. The lane nearly published the opposite
+      # of the truth about a data-destroying path and nothing anywhere
+      # would have said so - not rustc, not clippy, and not the suite,
+      # whose whole job here is to tell a chase that held from one that
+      # never ran.
+      # The rule is COARSE on purpose and that is measured: the sharper
+      # "flag a test that feeds container MAGIC" rule needs a resolver
+      # from a payload expression back to a fixture producer, which reads
+      # as a clean tree forever the day it stops resolving, and it MISSES
+      # the shape that actually bit (`polyglot_tests.rs::route` is a
+      # harness taking `body: &[u8]`, so the container bytes are the
+      # CALLER's). Over the 31 Aug 2026 tree the coarse rule costs ZERO
+      # waivers across 123 population sites, so it is both cheaper and
+      # wider.
+      # BEING FED IS NOT REQUIRED, and that is what reaches PRODUCTION:
+      # `get/vrig.rs::build_rig` builds the product's one and only root
+      # and writes into it NOWHERE, since the spans arrive on worker
+      # threads. An earlier cut of this gate filtered population on "this
+      # function writes into it" and stayed GREEN when that site's
+      # `anchor()` was deleted. Two mechanical exemptions replace the
+      # filter - `enabled=false` and a ZERO-slot root - at no waiver cost.
+      # THE CONSTRUCTOR SET IS DERIVED TOO. The first cut matched
+      # `Extractor::new` alone and production builds through
+      # `Extractor::with_resume`, so both production sites and ten
+      # Arc-wrapped test sites were invisible: 138 root constructions, not
+      # 128. An Arc-wrapped `Extractor::<name>(` the deriver did not
+      # produce is a REFUSAL naming the site - the arm no count floor can
+      # stand in for, since renaming that return type leaves four other
+      # names derived and ten sites silently unjudged.
+      # The anchoring DOORS are derived, never listed, and the third door
+      # already exists: `set_promote_hook` and `set_park_hook` both call
+      # `self.anchor()`, and an audit crediting only the first misjudges
+      # any test that installs only a park hook.
+      # `--selftest` FIRST and it is the gate rather than the house
+      # habit: this is a hand-written Rust lexer over a 3,000-function
+      # test tree, and one that quietly stops matching reports a clean
+      # tree forever. 81 cases, each pinning the counts it reached as
+      # well as its verdict, plus 39 mutations of the arms each verified
+      # to redden it against two controls that correctly do not, and
+      # seven driven against the REAL files - the incident's own fixture
+      # un-anchored, a real anchor moved after its feed, `set_promote_hook`
+      # stopping anchoring, an attach arm losing its guard, `anchor` made
+      # private, a NEW unanchored tar chase test, an nzbfast fixture
+      # un-anchored, production's own root un-anchored, and `with_resume`
+      # stripped of its constructor status - that all bite, against a doc
+      # reword that stays green. It needs no new `paths:` entry: `**/*.rs` and `**/*.py`
+      # above already reach every file it reads. Build-free, well under a
+      # second.
+      - name: extractor anchor gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/extractor-anchor-gate.py --selftest && tools/extractor-anchor-gate.py
+      # ---- teardown-order-gate -------------------------------------
+      # A `ScratchDir` owns its directory and nothing else may remove it.
+      # `scratch::ScratchDir::attach(&dir)` recreates that directory empty
+      # and removes it again on drop, and because the guard is bound FIRST
+      # it drops LAST - after the daemon declared under it. A second
+      # `let _ = std::fs::remove_dir_all(&dir);` in the test body is dead
+      # code, and in a daemon suite dead is the wrong word:
+      # `harness::spawn_one` writes the daemon's log INTO that directory
+      # and `DaemonLog::check_now` reads it as the child is reaped, so a
+      # teardown that ran first leaves BOTH the failure tail and
+      # `adoptguard::refuse_a_solve_that_solved_nothing` reading nothing.
+      # `research/PAYLOAD-TRAP-GATE-DECISION-2026-08-31.md` refused this
+      # gate in writing - "a rule about style until somebody shows it
+      # regrowing" - and set its own condition. It regrew THREE times in
+      # about two hours inside that same lane, each from another lane's
+      # merge, and the only thing that named them needs a daemon, the
+      # external `par2` binary and a twelve-minute serialized suite that
+      # the per-push nextest sweep excludes BY NAME. This is build-free.
+      # The rule is the REDUNDANCY and not the danger, measured rather
+      # than preferred: the danger width needs every piece of the same
+      # dataflow PLUS a model of drop order to refuse a strict subset, and
+      # what it leaves standing is the template the next lane copies - the
+      # seven `watch_dedupe.rs` sites that `drop(r)` first are safe, and a
+      # copy that omits the `drop(r)` is the defect.
+      # Ownership is derived five ways, four of them shapes that were LIVE
+      # on the tree: the ARGUMENT of `attach` (the common case - the
+      # removed name is `dir` while the guard is `_scratch`), its BINDING,
+      # a same-file helper whose return type NAMES `ScratchDir` (matched
+      # as a substring and by TUPLE POSITION - `watch_dedupe::scratch`
+      # returns `(ScratchDir, PathBuf, String)`), a `.clone()` alias to a
+      # fixpoint, and a STRUCT FIELD traced through the struct's own
+      # constructor. A `.join(..)` of a guarded path is never a hit; six
+      # such sites are live and all six are correct.
+      # Measured: today 839 files / 1,932 removals / 882 guarded paths /
+      # ZERO hits and ZERO waivers, after 119 sites were swept in the
+      # commit that landed it - nineteen before its landing merge, and one
+      # HUNDRED in that merge itself, where `0613e613a`'s leak-plugging
+      # pass had given the fourteen biggest `$TMPDIR` leak sites a
+      # `ScratchDir` guard and left every manual removal in place, because
+      # nothing anywhere could see them. Replayed at `923949e38^` it names
+      # 256; at `c85dd4e5a^` and `c29bf7fa4^` it names the three regrown
+      # sites BY NAME and goes silent on each fix.
+      # FIXING A HIT CAN STRAND THE BINDING: where the guard exists only
+      # to be removed (`let (d, ar) = open_bytes(..)`, 31 times in
+      # `zip_tests.rs`) rename it `_d`, and NEVER a bare `_` - an
+      # underscore-PREFIXED binding still drops at the end of its scope,
+      # a bare `_` pattern drops the guard immediately and takes the
+      # directory out from under the test.
+      # FIX A HIT by DELETING the line. Never by deleting the `ScratchDir`
+      # so the removal becomes load-bearing, and never by loosening an arm
+      # so a shape it cannot read counts as absent. A removal that is
+      # genuinely not redundant says so at the site with
+      # `teardown-order-gate: <reason>`, scoped to the statement.
+      # It needs no new `paths:` entry: `**/*.rs` and `**/*.py` above
+      # already reach every file it reads.
+      - name: teardown order gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/teardown-order-gate.py --selftest && tools/teardown-order-gate.py
+      # ---- spawn-chokepoint-gate -----------------------------------
+      # A `.spawn()` in the nzbfast test tree that is not the one inside
+      # `harness::spawn_under_test`. That call is where `harness::leash`
+      # sets `NZBFAST_PARENT_WATCH` to the test process's pid, and
+      # `crates/nzbfast/src/parentwatch.rs` at the other end polls its own
+      # parent id and exits the moment that pid stops being its parent. A
+      # launcher that spawns directly gets none of it and its daemons leak.
+      # On 2 Sep 2026 the dev Mac was carrying 70 leaked `nzbfast serve`
+      # processes, all started 30 Aug around 22:40 from three worktrees,
+      # listening on 127.0.0.1 for three days and sharing provider accounts
+      # and CPU with every lane that ran after; 69 were killed and the cause
+      # fixed in `f4e5b0c57`. `KillOnDrop` cannot cover it - the test process
+      # took SIGKILL, so no destructor anywhere ran - which is why the child
+      # watches and why the handing-over is a chokepoint. Nothing enforced
+      # that chokepoint until this gate, and the 30 Aug leak set already
+      # included daemons from a PRIVATE launcher in
+      # `integration/settings_catalogue.rs`.
+      # THE ARM IS EVERY `.spawn()`, not every spawn of the binary, and that
+      # is measured rather than preferred. A program-resolving arm needs
+      # dataflow, and every place the dataflow fails reads as a clean tree:
+      # `integration/tls.rs` builds its command in `tls_cmd` and spawns it in
+      # `spawn_daemon`, and 234 of the 247 launcher sites bind the command to
+      # a name and reach the terminal call many lines later. The blanket arm
+      # has no shape to hide in and costs nothing - the whole 148-file corpus
+      # holds exactly ONE zero-argument `.spawn()`, the sanctioned one, and
+      # every other program these tests launch (par2 58 sites, rar 5, hdiutil
+      # 3, zip, lsof, one computed sampler) is WAITED. Zero hits, zero
+      # waivers. `.output()`/`.status()` are counted and NOT judged: they
+      # block, nothing in the 30 Aug census came from one, their sanctioned
+      # wrapper `output_under_test` routes through `spawn_under_test` anyway
+      # (arm 3 pins that), and judging them would ship this gate with a
+      # baseline or twenty rewritten call sites for a class that has never
+      # leaked.
+      # Three more arms exist because the site arm alone can go blind:
+      # SCOPE refuses `CARGO_BIN_EXE_nzbfast` named outside the corpus, HOME
+      # refuses a `spawn_under_test` that stopped being pub or stopped
+      # calling `leash`, and PREMISE refuses a `parentwatch` that is gone or
+      # a `main` that no longer arms it. Each of those would leave this gate
+      # printing a green line over a fix that had been silently removed.
+      # FIX A HIT by routing the call through
+      # `crate::harness::spawn_under_test(&mut cmd)`, which also hands the
+      # caller the cargo-uplift ENOENT grace. Never by widening the exception
+      # to a second function, never by moving the launcher out of the corpus,
+      # and never by loosening the arm so a spelling it cannot read counts as
+      # absent. A spawn that genuinely must not be leashed says so at the site
+      # with `spawn-chokepoint-gate: <reason>`, scoped to the statement.
+      # It needs no new `paths:` entry: `**/*.rs` and `**/*.py` above already
+      # reach every file it reads.
+      - name: spawn chokepoint gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/spawn-chokepoint-gate.py --selftest && tools/spawn-chokepoint-gate.py
+      # ---- sandbox-seam-gate ---------------------------------------
+      # A `Command::new` in production Rust that does not go through
+      # `nzbfast_core::sandbox::command`. That seam is TODO 314 stage 1: the
+      # one place a child running code we did not write gets a policy, and
+      # its own module doc says a fourth subprocess added tomorrow inherits
+      # that policy "by construction rather than by somebody remembering".
+      # Nothing enforced the construction until this gate - verified on
+      # origin/main 2 Sep 2026, no gate and no workflow named the seam at
+      # all. `spawn-chokepoint-gate` above sounds as though it would and does
+      # not: it is about the TEST tree and leaked test daemons.
+      # THE ARM IS THE CONSTRUCTOR, not the spawn: the policy is chosen where
+      # the `Command` is BUILT, often three functions from where it runs, and
+      # a program-resolving arm would be defeated by shapes this tree already
+      # uses (`rarfix.rs` builds and spawns in different functions).
+      # POPULATION measured 2 Sep 2026: five foreign-code sites, every one
+      # routed, and thirteen hard-coded OS commands waived at their
+      # statements (the OS opener x4, `hostname`, the browser launch, the
+      # power action, the self re-exec, the tray, the network probes, the
+      # `chaos-serve` fixture builder x2, and `script.rs`'s deliberate
+      # `script_confined`-off escape hatch). It landed green with no site
+      # edited: this is insurance, not a defect fix.
+      # Three more arms exist because the site arm alone can go blind: HOME
+      # refuses a `sandbox::command` that stopped being pub, stopped taking a
+      # `Policy` or stopped consulting `detect()`; ROUTES refuses a foreign
+      # site that keeps routing but DOWNGRADES `Policy::tool` to
+      # `Policy::script`, which arm 1 cannot see; and the floors refuse a
+      # crate that has left view, the way the 2 Sep crate split moved both
+      # external-tool call sites into `nzbfast-unpack`.
+      # FIX A HIT by routing through `sandbox::command(prog, &Policy::tool(
+      # label, dir))`, or `serve::script::confined_command` for a user
+      # script. Never by loosening an arm so a shape it cannot read counts as
+      # absent, and never by deleting a neighbouring waiver so the survivors
+      # agree. A spawn that genuinely does not belong behind the seam says
+      # why at the site with `sandbox-seam-gate: <reason>`, scoped to the
+      # statement - a reason the next reader can disagree with.
+      # It needs no new `paths:` entry: `**/*.rs` and `**/*.py` above already
+      # reach every file it reads.
+      - name: sandbox seam gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/sandbox-seam-gate.py --selftest && tools/sandbox-seam-gate.py
+      # ---- membudget-ceiling-gate ----------------------------------
+      # A literal above the 32-bit address-space ceiling, handed to
+      # `MemBudget::with_total` / `from_user_limit` / `limit_clamp` outside
+      # a `#[cfg(target_pointer_width)]` arm and not derived from
+      # `MemBudget::max_total()`. `armv7-cross` sat red in nightly for ten
+      # days (28-31 Aug 2026) on this exact class TWICE - a test asserting
+      # a 4 GiB or 2 GB outcome that only holds where `with_total`'s 1 GiB
+      # clamp does not bind, which is every box in CI except the 32-bit
+      # one. The product was correct both times; only the fixture assumed
+      # an address space armv7 does not have.
+      # POPULATION measured 31 Aug 2026: eight literal-above-ceiling sites
+      # in two files, seven inside a `#[cfg(target_pointer_width)]` arm
+      # (either the call itself or the bare `#[cfg(...)] assert_eq!(...)`
+      # statement it is part of). The eighth,
+      # `serve/requeue.rs`'s `with_total(4u64 << 30)`, is carried the way
+      # `5dd24e2fc`'s own fix argues for - `with_total` clamps any input
+      # safely, and the pointer-width split lives in the two cfg-gated
+      # asserts that read the clamped result two statements down, which
+      # this scanner cannot see - so it carries an explicit
+      # `// membudget-ceiling-gate: <reason>` waiver instead.
+      # THE CFG CHECK REUSES `tools/cfg-symbol-gate.py`'s `strip()`/
+      # `walk()` rather than re-deriving a second lexer - the same
+      # pending-attribute, paren-and-bracket-depth rule that lets a bare
+      # `#[cfg(...)] assert_eq!(...)` count as guarded with no braces at
+      # all, and that already closed the exact `;` inside `[u64; 4]` hole
+      # the doc-gate and win-portability-gate families had to learn
+      # separately.
+      # THE MAX-TOTAL CHECK IS STATEMENT-SCOPED ON PURPOSE: the fixed
+      # `2_000_000_000` bug derives its expectation from `max_total()` in
+      # the SAME statement as the call, and a function-scope version of
+      # this check was tried and rejected - the ORIGINAL buggy line sat in
+      # the very same test function as an already cfg-guarded
+      # `limit_clamp(10 << 30)`, so a function-wide escape would have
+      # exempted the bug it exists to catch.
+      # NO DATAFLOW TRACING: a value reached through a loop variable, a
+      # `let`-bound name, or a struct field is outside this gate's
+      # population by design - both fixture bugs used the literal directly
+      # or one statement of indirection away, which is what a narrow
+      # expression scanner can read without becoming a second Rust parser.
+      # FAILING TO FIND IS FAILING: a missing `mem.rs`, a missing or
+      # non-numeric `ADDRESS_SPACE_CEIL`, any of the three doors absent or
+      # declared more than once, zero `.rs` files, an unbalanced file, or
+      # zero qualified calls reached at all - each a refusal naming the
+      # cause. The clean run prints how many files, qualified calls, and
+      # above-ceiling literals it reached.
+      # VERIFIED against the pre-fix tree (`5dd24e2fc^`): it names both
+      # MemBudget-related fixture defects by file and line
+      # (`limit_clamp(2_000_000_000)` in mem.rs, the unguarded
+      # `with_total(4u64 << 30)` in requeue.rs before the assertions were
+      # cfg-split) and nothing else - it does NOT catch
+      # `block_pricing_divides_before_it_narrows`, which involves no
+      # `MemBudget` call at all, so it is two of the three fixture
+      # mistakes that held `armv7-cross` red.
+      # FIX A HIT by moving the literal into a `#[cfg(target_pointer_width
+      # = "32")]` / `#[cfg(not(...))]` pair, or by deriving the expected
+      # outcome from `MemBudget::max_total()` in the same statement -
+      # never by deleting the assertion, and never by widening the cfg or
+      # max-total arms to swallow a shape they cannot verify. A site that
+      # genuinely needs neither says so with
+      # `// membudget-ceiling-gate: <reason>` on its own line or in the
+      # comment block directly above it, scoped to the statement.
+      # `--selftest` first: 23 cases, including both fixture shapes above
+      # and the seven real cfg-guard forms, each pinning the message or
+      # count it must reach. Build-free, well under a second, and it
+      # needs no new `paths:` entry - `**/*.rs` and `**/*.py` above
+      # already reach every file it reads.
+      - name: membudget ceiling gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/membudget-ceiling-gate.py --selftest && tools/membudget-ceiling-gate.py
+      # ---- zip-fixture-gate ----------------------------------------
+      # A committed zip interop fixture must still be what it was.
+      # `crates/nzbkit-base/tests/fixtures/zip` holds nine binary archives the
+      # hand-rolled `nzbkit::zip` reader is tested against and that
+      # fuzz-smoke.yml copies wholesale into the `zip_parse` corpus. Seven
+      # are written by tools/gen-zip-fixtures.py and two are hand-made, and
+      # until 31 Aug 2026 NOTHING verified any of them: no digest manifest,
+      # no `--check`, no CI job, and `grep -rln gen-zip-fixtures .github/
+      # tools/` returned the generator itself.
+      # THE INCIDENT: a blanket `for g in tools/*.py; do python3 $g; done`
+      # sweep ran the GENERATOR, which is not a gate, and rewrote six of
+      # them. `git status` said `Bin 595 -> 595 bytes` six times, because
+      # every file comes back the SAME SIZE, so nothing looked regenerated
+      # and the sweep was two commands from staging another lane's
+      # rewritten fixtures into an unrelated push.
+      # A REGENERATE-AND-COMPARE `--check` CANNOT BE THE ANSWER, and that
+      # was measured rather than assumed: on 7-Zip 26.02 with every
+      # timestamp option off over a fixed-mtime input, the AES output still
+      # differs in 419 bytes and the ZipCrypto output in 405, and in both
+      # the first differing byte is the first byte of the encrypted entry
+      # DATA - the salt and the encryption header, random BY SPECIFICATION.
+      # Both external writers are also SKIPPED WITH A WARNING when off
+      # PATH, so a regenerate-and-compare here would be a green line about
+      # files it never produced.
+      # SO THE MANIFEST CARRIES TWO KINDS OF CLAIM and keeping them apart
+      # is the design. The sha256 is written by `--record` for the files a
+      # run actually wrote, so the ordinary path keeps it true for free,
+      # and it is what names the incident. Everything after it is a FROZEN
+      # JUDGEMENT about what the fixture MEANS - entry names, methods,
+      # encryption scheme, CRC and size, directory entries, the comment,
+      # the zip64 record's shape, any prepended stub - hand-written by
+      # somebody who read the tests, and `--record` never touches it.
+      # Without that half the digest is trivially satisfied by
+      # re-recording, which is the one edit every gate in this family
+      # states as its own limit; here it can be CLOSED, because unlike a
+      # PNG's pixels the meaning of a zip container is recoverable from
+      # its bytes. An Info-ZIP that started emitting a SATURATED end
+      # record would otherwise leave `zip64_unsaturated.zip` silently no
+      # longer the thing its name, its generator's own assertion and its
+      # test all say it is.
+      # The compressed size is deliberately NOT recorded - it pins the
+      # compressor's version rather than what the fixture is for - and the
+      # payload is pinned by crc= and usize= instead.
+      # Writing the manifest found one thing on its first run: `zip64.zip`
+      # carries no zip64 structures at all (`allowZip64=True` permits them,
+      # it does not request them), so it is recorded `zip64=none` and the
+      # generator now says so. That is left for the zip suite's owner
+      # rather than changed in passing.
+      # Measured: 9 fixtures, 9 records, 12 entry lines, 7 generated, 9
+      # reached by a test, ZERO hits and ZERO waivers. Verified against the
+      # REAL files nine ways - the incident replayed (all six named), a
+      # hand-patched byte, a deleted record, an unrecorded new fixture, a
+      # frozen field and a frozen entry line edited by hand, a GENERATES
+      # row dropped - against two controls that correctly stay green, plus
+      # 40 mutations of the arms each verified to redden `--selftest`.
+      # HITS LEAD AND THE FLOORS ONLY SPEAK WHEN THERE ARE NONE, because
+      # every floor sits AT today's population, so an ordinary deletion
+      # breaches one as well as tripping the arm that names it and
+      # reporting the floor first hands the reader "this scanner has
+      # stopped matching" about a scanner that is working perfectly.
+      # FIX A HIT by rerunning the generator and `--record`ing what it
+      # wrote, or - if the change was accidental - by restoring the named
+      # files from HEAD BY NAME, never the whole directory (safe-git rule
+      # 12: that command discards every uncommitted change in the path it
+      # is given, and this checkout is shared). NEVER by editing a digest on its
+      # own, which is the one edit the digest arm cannot see, never by
+      # rewriting a frozen field so the survivors agree, and never by
+      # loosening an arm so a shape it cannot read counts as absent.
+      # Build-free, about a second and a half, and no new `paths:` entry -
+      # `crates/**` and `**/*.py` above already reach every file it reads.
+      - name: zip fixture gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/zip-fixture-gate.py --selftest && tools/zip-fixture-gate.py
+  bench-gates:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     concurrency:
-      group: provenance-gate-${{ github.ref }}
+      group: bench-gates-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- bench2j-gate --------------------------------------------
+      - name: bench driver generator gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/bench2j-gate.py
+      # ---- leg-warn-gate -------------------------------------------
+      - name: LEG-line WARN gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/leg-warn-gate.py --selftest && tools/leg-warn-gate.py
+      # ---- provenance-gate -----------------------------------------
       - name: driver provenance gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/provenance-gate.py --selftest && tools/provenance-gate.py
-  iface-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: iface-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- iface-gate ----------------------------------------------
       - name: iface threshold gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/iface-excess-gate.py --selftest && tools/iface-excess-gate.py
-  stall-mark-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: stall-mark-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- stall-mark-gate -----------------------------------------
       # The rig library's per-leg scans scope themselves on a byte offset
       # recorded before the leg. That is right for a client log that
       # APPENDS and wrong for one the driver TRUNCATES, which is what
@@ -980,16 +1732,13 @@ jobs:
       # private repo only, same reason as the iface gate: that path is
       # private vocabulary and this file ships to the public repo.
       - name: stall mark identity gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/stall-mark-gate.py --selftest && tools/stall-mark-gate.py
-  pool-select-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: pool-select-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- pool-select-gate ----------------------------------------
       # A leg log is not guaranteed to hold exactly one `[pool] run` line
       # - the download pool emits one and so does every auxiliary pool the
       # job starts (par2 side-fetch, repair, sidecar), so a leg that ran
@@ -1013,16 +1762,13 @@ jobs:
       # and `**/*.zsh` are already triggers above and are exactly the
       # files it reads.
       - name: pool line selection gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/pool-select-gate.py --selftest && tools/pool-select-gate.py
-  fleet-census-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: fleet-census-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- fleet-census-gate ---------------------------------------
       # A bench driver that pins a fleet and stamps per-leg records must
       # also record the fleet the WIRE held. Measured 28 Aug 2026: a
       # stored conntune knee of 32 sat under fleet rungs of 50/77/100,
@@ -1042,16 +1788,43 @@ jobs:
       # and `**/*.zsh` are already triggers above and are exactly the
       # files it reads.
       - name: fleet census gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/fleet-census-gate.py --selftest && tools/fleet-census-gate.py
-  stale-heading-gate:
+      # ---- rig-selftest-paths --------------------------------------
+      # The PORTABLE half of the rig selftest's wiring. That selftest runs
+      # on a macOS runner in rig-selftest.yml, behind a NARROW native path
+      # filter - it cannot ride this workflow's filter, which is a union
+      # covering `**/*.rs`, `**/*.py`, `**/*.sh` and `*.md`, because that
+      # would spin a macOS runner on very nearly every push. A narrow
+      # filter is a LIST, and a list is a gate that cannot see the
+      # fifteenth file. This arm derives the file set from the selftest
+      # ITSELF and refuses a name no pattern there matches, so a driver
+      # the selftest starts replaying reddens on the AUTHOR's push instead
+      # of leaving that job quietly un-triggered by the file it now reads.
+      # Build-free, and `--selftest` first for the reason every gate here
+      # runs its own: a matcher that has stopped matching reads as a clean
+      # tree forever.
+      - name: rig selftest trigger roster
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/rig-selftest-gate.py --selftest && tools/rig-selftest-gate.py --paths
+  roster-gates:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     concurrency:
-      group: stale-heading-gate-${{ github.ref }}
+      group: roster-gates-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- stale-heading-gate --------------------------------------
       # A backlog HEADING that still describes finished work as open is
       # what a work-selection pass reads, and it costs a whole duplicated
       # session rather than a typo: a lane reads it, takes the item, and
@@ -1077,37 +1850,423 @@ jobs:
       # entry: `*.md` and `**/*.py` above are already triggers and are
       # exactly the files it reads.
       - name: stale backlog heading gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/stale-heading-gate.py --selftest && tools/stale-heading-gate.py
-  ffi-cutout-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: ffi-cutout-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # `default-features = false` on the `nzbfast` dependency in
-      # crates/nzbfast-ffi/Cargo.toml is the WHOLE mechanism that keeps
-      # the iOS store staticlib's ~10.5 MB of dashboard pages out (TODO
-      # 281 IO3b). Cargo resolves features PER INVOCATION, so it holds
-      # only while that crate is built ALONE - a `--workspace` build, or
-      # one naming `-p nzbfast` beside it, unifies with the bin crate's
-      # `default` and hands the pages back with nothing to say so.
-      # packaging/ios/build-ffi.sh's cargo line is the other half of the
-      # mechanism, `-p nzbfast-ffi` alone. Both were guarded by nothing
-      # but a comment. Two arms: the manifest (either TOML shape for the
-      # dependency, refusing `true` or an omitted key), and every cargo
-      # line in the build script naming nzbfast-ffi (refusing
-      # `--workspace` or a second `-p`, checked through a simple literal
-      # shell variable too). `--features nzbfast/dashboard` in
-      # build-harness.sh and build-apk.sh's WebView kit are out of scope
-      # on purpose - neither is a release path, and this gate never
-      # opens either file. Build-free, well under a second, no new
-      # `paths:` entry - `crates/**/Cargo.toml` and `packaging/**` above
-      # are already triggers.
-      - name: ios ffi dashboard compile-out gate
-        run: tools/ffi-cutout-gate.py --selftest && tools/ffi-cutout-gate.py
+      # ---- modgraph ------------------------------------------------
+      # The nzbfast bin's top-level module graph, production files only:
+      # no cycles, and no edge from a lower layer of the crate-split
+      # plan to a higher one. Nothing else in the tree can see this -
+      # cargo compiles a cyclic module graph forever, because modules
+      # are not compilation units, so a back edge is invisible until
+      # somebody tries to lift a crate out and finds two halves that
+      # each need the other. Measured on the pre-split tree: 38 cycles
+      # and 18 layer violations, every back edge one to five references
+      # to a helper or a plain type.
+      # The layer table in the script IS the partition a later step
+      # cuts on, so a module added to main.rs with no entry there is a
+      # REFUSAL rather than a quiet pass - the assignment is a decision
+      # somebody makes, not a default. Build-free, about a second, and
+      # no new `paths:` entry: `**/*.rs` and `**/*.py` above are
+      # already triggers and are exactly the files it reads.
+      - name: module graph gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/modgraph.py --selftest && tools/modgraph.py --check
+      # ---- modgraph, the serve arm ---------------------------------
+      # The same question one level down: serve's own 82 second-level
+      # units, held to the daemon/api/tasks/wiring partition Option C
+      # cuts on (research/PLAN-NZBFAST-CRATE-SPLIT-2026-09-01.md). It
+      # was written with `--check` DELIBERATELY UNWIRED, because the
+      # partition was a proposal the tree did not yet satisfy - twelve
+      # cross-layer edges, and eight more the arm could not see. Serve
+      # split lane 1b broke all twenty and wired it here in the commit
+      # that broke the last one, which is what that note asked for.
+      # A cross-layer edge is invisible to everything else in the tree
+      # for the same reason the crate arm's cycles are: modules are not
+      # compilation units, so `api` calling into `tasks` compiles
+      # forever and is found only when somebody tries to cut the two
+      # apart. Build-free, about a second, and it needs no new `paths:`
+      # entry either.
+      - name: module graph gate (serve)
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/modgraph.py --serve --check
+      # ---- modgraph, the nzbkit arm --------------------------------
+      # The same question in the crate BELOW the bin, and the one that
+      # is the serial head of every build path in the workspace: after
+      # the serve split finished, `cargo check -p nzbfast --all-targets
+      # --features heavy-tests --timings` puts nzbkit's check unit at
+      # 5.81 s starting at 0.16 s, so nothing else compiles for the
+      # first six seconds of a 21.9 s line. This arm holds nzbkit's 61
+      # top-level modules to the base/extract/pool/media/index partition
+      # (research/PLAN-NZBFAST-CRATE-SPLIT-2026-09-01.md, the nzbkit
+      # lane 1 note), and it went in HERE in the commit that broke the
+      # last cross-crate edge - which is the rule the serve arm's own
+      # entry above records, and which is why that one was written
+      # unwired for a lane and a half.
+      # A cross-crate edge is invisible to everything else in the tree
+      # for the same reason the other two arms' are: modules are not
+      # compilation units, so `config` reaching up into `pool` for a
+      # constant compiles forever and is found only when somebody tries
+      # to cut the two apart. Build-free, about fifteen seconds (it also
+      # reads every other crate's `nzbkit::` references, which is the
+      # surface a facade has to preserve), and no new `paths:` entry.
+      - name: module graph gate (nzbkit)
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/modgraph.py --nzbkit --check
+      # ---- flatpak-pin-gate ----------------------------------------
+      # The offline half of the Flatpak release pin: the yaml's
+      # `url`+`sha256`, the metainfo's newest <release> and the README
+      # install example are one version, and it is not ahead of
+      # Cargo.toml. A pin BEHIND Cargo.toml passes on purpose - that is
+      # the normal state between the bump commit and publish-release step
+      # 4d, whose `--live` mode is the other half and is not a CI job.
+      # `python3` in front, unlike the twelve bare paths above, because
+      # the line is byte-identical to ci-private's - the rule at the top
+      # of this file is that the two can never disagree about what
+      # passes, and an invocation this file spells its own way is the
+      # first way they start to.
+      - name: flatpak pin gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: python3 tools/flatpak-pin-gate.py --selftest && python3 tools/flatpak-pin-gate.py
+      # ---- one-process-roster --------------------------------------
+      # ci-private's `unit-one-process` carries no list - it reads the
+      # nextest archive's inventory and runs EVERY first-party lib/bin unit
+      # binary. nightly's `one-process-loaded`, the only job in the repo
+      # that runs that shape under LOAD, named its binary by hand and ran
+      # ONE of four. That is how
+      # `pool::fault_rigs::the_line_peak_reads_the_line_with_the_fleet_dialled_together`
+      # (nzbkit LIB) went red twice in 400 main runs on 23-24 Aug 2026 with
+      # the loaded job running the nzbfast BIN root, and was found by a
+      # human instead. This holds that matrix to the manifests: every
+      # derived target is a leg or a `one-process-uncovered:` line with a
+      # reason, and a renamed job, an empty matrix or a leg naming nothing
+      # is a REFUSAL rather than a pass. Here rather than in ci-private
+      # because the lane that adds the crate is the one lane that can be
+      # told - a nightly-only signal lands on whoever pushes next. Build
+      # free, about a tenth of a second.
+      - name: one process roster
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: |
+          tools/one-process-roster.py --selftest
+          tools/one-process-roster.py
+      # ---- test-target-gate ----------------------------------------
+      # Every separate test target in a default-member crate links its
+      # own executable on every push, and linking is the dominant cost
+      # of CI's Windows leg (~10 min over what was 19 binaries, the lld
+      # memo's measurement). Three rounds of folds and heavy-gating took
+      # the per-push set 54 -> 14 (9ef264fc6, ff50596b3, 2988c6f44 +
+      # 720cd9032), and TODO 235 proved the reduction rots by default:
+      # five new top-level targets crept in within days of the first
+      # fold, each paying a link it had just removed. This holds a NEW
+      # target to being heavy-gated (`required-features`), the
+      # `integration` fold destination, or excused at the site by a
+      # `test-target-gate: <reason>` line naming the process-wide
+      # property that needs its own binary - the five standing waivers
+      # (rate_floor, the two cap_default pins, striped_repair_memory,
+      # nzbfast_framing) are the worked examples, and
+      # research/TEST-BINARY-FOLD-AUDIT-2026-09-01.md carries every
+      # verdict. Build-free (tomllib over the manifests plus file
+      # headers), about a tenth of a second. `Cargo.toml` was added to
+      # `paths:` above for it - the root manifest's default-members list
+      # is the one file it reads that nothing else triggered on.
+      - name: test target gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/test-target-gate.py --selftest && tools/test-target-gate.py
+      # ---- shot-version-gate ---------------------------------------
+      # Every dashboard capture in website/assets/ rendered the running
+      # version in its header pill, and nothing held those images to the
+      # crate version - all four went two releases stale at once, and a
+      # person reading a number off an image is what caught it. No other
+      # gate could see it - website/ is outside PUBLIC_MANIFEST, so
+      # leak-check reports `0 public file(s) clean` without scanning it,
+      # and nothing here can read a PNG.
+      #   Since 1 Sep 2026 the captures carry NO version (the shoot rig
+      # hides `#ver`) and this holds them to a `ui-revision` a human bumps
+      # on a material UI change, plus a 90-day staleness warning that
+      # never fails. The name is historical; it reads no crate version.
+      # That removed a ~30-minute re-shoot from every release, including
+      # releases that moved no pixel. It still cannot read a PNG: it holds
+      # a human's assertion in website/SCREENSHOTS.manifest, which its
+      # header states plainly rather than overclaiming.
+      # `--selftest` first, and it is the gate: the run prints how many
+      # assets it REACHED and how many corpus files the reference arm
+      # read, and both zeros are refusals.
+      - name: screenshot version gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/shot-version-gate.py --selftest && tools/shot-version-gate.py
+      # ---- screens-derived-gate ------------------------------------
+      # The install dialog's two screenshots are GENERATED from the same
+      # captures the job above holds to the crate version, and nothing
+      # verified the committed copies were still what the generator would
+      # produce. `sips` is macOS-only, so this arm holds the source sha256
+      # the generator recorded, plus every dimension and ratio arm - which
+      # need no image tooling and catch the failure no digest can see: a
+      # file whose dimensions stop matching its `sizes` string is dropped
+      # from the dialog by Chromium SILENTLY. The regenerate-and-compare
+      # half is `make-screenshots.sh --check`, on a mac, before a release.
+      - name: install screenshot derivation gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/screens-derived-gate.py --selftest && tools/screens-derived-gate.py
+      # ---- icons-derived-gate --------------------------------------
+      # Every raster mark the product shows is GENERATED off the three SVG
+      # masters in packaging/icon/, and nothing verified the committed
+      # copies were still what the generators produce - web/icons/** was
+      # not even a trigger for this workflow. qlmanage and sips are
+      # macOS-only, so this arm holds the master sha256 the generators
+      # recorded, plus every dimension, declaration and roster arm - which
+      # need no image tooling and catch what no digest can: a `sizes` that
+      # stops matching its file is ignored by Chromium SILENTLY, and it is
+      # declared in THREE places per file here (the manifest and a
+      # `sizes=` on both pages), while a `purpose` swap renders correctly
+      # everywhere except the Android launcher it puts an inset tile on.
+      # The regenerate-and-compare half is `--check` on each of the three
+      # generators, on a mac, before a release.
+      - name: icon derivation gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/icons-derived-gate.py --selftest && tools/icons-derived-gate.py
+      # ---- icon-downstream-gate ------------------------------------
+      # packaging/icon/icon-1024.png is a SOURCE as well as an output: four
+      # committed rasters are downscaled from it, the Flathub icon and the
+      # three QTS App Center icons, and nothing checked they were still what
+      # their generators produce. The gate above covers the FIRST generation
+      # and names these as out of scope because an edited master cannot go
+      # unreported there - which leaves the forgotten DOWNSCALE, where that
+      # gate is green and correct and these four carry the previous mark.
+      # sips is macOS-only, so this arm holds the recorded master digest
+      # plus the arms no digest reaches: the hicolor install size, the
+      # qbuild copy list, and the grey icon's PIXELS, whose documented
+      # failure is a file of the right size and the wrong colour.
+      - name: downstream icon gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/icon-downstream-gate.py --selftest && tools/icon-downstream-gate.py
+      # ---- memory-gate ---------------------------------------------
+      # `--selftest` exercises audit()/report() in-process, same as every
+      # gate above. The executable check and the direct `--hook` call are
+      # the arm neither that nor any prior CI run has ever exercised - see
+      # "Eighteen" at the top of this file for the demonstrated failure a
+      # bare selftest cannot see: the settings.json wrapper silences a
+      # broken script down to exit 0.
+      - name: memory gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: test -x .claude/tools/memory-gate.py && .claude/tools/memory-gate.py --selftest && .claude/tools/memory-gate.py --hook
+      # ---- hooks-gate ----------------------------------------------
+      # Same two arms as the memory gate above.
+      - name: hooks gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: test -x .claude/tools/hooks-gate.py && .claude/tools/hooks-gate.py --selftest && .claude/tools/hooks-gate.py --hook
+      # ---- checkout-drift-hook -------------------------------------
+      # `--selftest` only: the `--hook` arm fetches origin and may
+      # fast-forward `main`, which on a runner's detached checkout is a
+      # statement about nothing. The twelve cases build throwaway repos
+      # (a bare origin with HEAD pinned to `main`, a shared-checkout
+      # clone and a second clone advancing it) and drive every arm: the
+      # first-parent count against a merge topology, the fast-forward,
+      # the untouched unrelated dirty file, the refusal on an overlapping
+      # one with the landed-leftover verdict, the topic branch, the
+      # diverged main, the merge in progress and the failed fetch.
+      - name: checkout drift hook
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: test -x .claude/tools/checkout-drift-hook.py && .claude/tools/checkout-drift-hook.py --selftest
+      # ---- claude-clippy-gate --------------------------------------
+      # CLAUDE.md documents the clippy gate twice and ci-private runs it
+      # twice, and until 24 Aug 2026 nothing held the four in step - see
+      # "Twenty-two" at the top of this file for the day main was red
+      # with every documented gate green. `--selftest` first, and here it
+      # is the gate rather than the house habit: what this protects
+      # against is an extractor that has quietly stopped matching, which
+      # reads as a clean tree forever. Every arm is driven by a fixture
+      # that must go red, including the two shapes that must NOT be - both
+      # sides moved together in one commit, and a pure rewrap of the
+      # CLAUDE.md copy.
+      - name: clippy doc gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/claude-clippy-gate.py --selftest && tools/claude-clippy-gate.py
+      # ---- ci-verdict-roster ---------------------------------------
+      # `--selftest` ONLY, and that is the whole design of this job
+      # rather than an economy. `tools/ci-verdict.py` with no argument
+      # is a statement about MAIN'S state - it walks the Actions API for
+      # the newest real conclusion per job - so running it here would
+      # red whichever lane pushed next for something they did not cause
+      # and cannot fix, which is how a gate gets muted. That placement
+      # decision is argued at the `ci-verdict` job in ci-private.yml and
+      # it has not changed.
+      #
+      # The selftest is a different thing entirely: pure frozen JSON
+      # plus ONE file read, no network and no `gh` auth, about 0.2 s.
+      # Case 16 of it holds the script's roster against ci-private.yml's
+      # job list in BOTH directions - a job the tool neither judges nor
+      # excuses is a refusal naming it, and so is a rostered job that has
+      # vanished from the file. That refusal is the thing worth having on
+      # the AUTHOR's push: whoever ADDS a job to ci-private.yml is the
+      # one person who knows whether its red belongs on main's tip, and
+      # on main alone they learn it from the next lane's run instead.
+      # Same argument the flatpak pin gate's tree mode was moved here on.
+      #
+      # It needs no new `paths:` entry: `**/*.py` and
+      # `.github/workflows/ci-private.yml` are both already triggers
+      # above, which is exactly the pair of files that can break it.
+      - name: ci verdict roster
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: python3 tools/ci-verdict.py --selftest
+      # ---- packaging-tests-roster ----------------------------------
+      # The roster arm for the `packaging-gates` job at the foot of this
+      # file. That job was added because five of these scripts were steps
+      # in pr-check.yml and nowhere else - a public-repo pull-request gate,
+      # so on this repo they had never run, and two of them had been
+      # reporting a WRONG VERDICT since the day they landed - while seven
+      # more ran in no workflow at all. Nothing held that roster to
+      # anything, so the twentieth script added tomorrow would be unwired,
+      # silent, and read as covered. A list is a gate that cannot see the
+      # eleventh family, which is the same argument the roster arms in
+      # nav-regen.py, shot-version-gate.py and one-process-roster.py each
+      # make in their own directory.
+      #
+      # It RESOLVES a `run:` step rather than grepping for a mention: a
+      # grep finds these paths inside COMMENTS, which is a second way to
+      # read as covered while being uncovered and is how
+      # packaging/tests/linux-install.sh read as wired. And a step that
+      # cannot fire on this repository is not coverage either, which is
+      # what keeps pr-check.yml alone from satisfying a script.
+      #
+      # Here rather than only in ci-private because the lane that adds the
+      # script is the one lane that can be told. Build free, about a tenth
+      # of a second.
+      - name: packaging tests roster
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: |
+          tools/packaging-tests-roster.py --selftest
+          tools/packaging-tests-roster.py
+      # ---- selftest-roster -----------------------------------------
+      # THE LAST TWO JOBS IN THIS FILE, and they are one change: a roster over
+      # every `--selftest` arm in the repo, plus the job that runs the eleven
+      # arms that roster found nothing running.
+      #
+      # WHY A SELFTEST THAT NOTHING RUNS IS THE DEFECT. Every gate in this
+      # file carries a `--selftest` because of the one failure a gate cannot
+      # report about itself: a matcher that has quietly stopped matching,
+      # which reads as a clean tree forever. Two demonstrated instances are
+      # written up at the top of this file's siblings - nav-regen.py's picker
+      # arm sat dead for months while reporting every picker current, and
+      # site-crosslink.py printed OK on BOTH arms at exit 0 with its one regex
+      # broken to `hrefZZZ="`. So the selftest is the load-bearing half, and a
+      # selftest nobody runs is that same defect one level up.
+      #
+      # MEASURED 25 Aug 2026 at origin/main: 47 tracked `*.py` declare a
+      # `--selftest` arm and ELEVEN had nothing running one. `tools/claims.py`
+      # is the one with the most riding on it - it is the cross-machine LOCK
+      # that stops two boxes building the same thing, its resolver was
+      # rewritten that day in `5205dd2bf`, and its selftest went from 39 cases
+      # to 62 in that same commit, all of it run only when a human typed it.
+      #
+      # THE ROSTER RESOLVES COMMAND POSITION, which is a sharper rule than the
+      # `packaging-tests-roster` job above needs and is why it exists: every
+      # appearance of `tools/pollution-bisect.py` in any workflow here is
+      # inside an `echo "::error ...` advice string telling a human what to
+      # run. It is not commented out, it is QUOTED - so a scan that strips
+      # comments and then searches the text certifies it as wired. Being
+      # NAMED is not being run, and running the TOOL is not running its
+      # SELFTEST; both are asked separately.
+      # This gate is in its OWN population - it declares a `--selftest` -
+      # so the step below is what keeps it honest, and its selftest pins
+      # that against the real tree rather than leaving it to be noticed.
+      - name: selftest roster
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/selftest-roster.py --selftest && tools/selftest-roster.py
+      # ---- wedge-gate ----------------------------------------------
+      # The CONFIG arm only - the junit arm needs a test run and lives in
+      # the test jobs themselves, which is where it can redden the shard
+      # that saw the wedge. This half holds the ceiling machinery in
+      # .config/nextest.toml live: `[profile.ci]` must still carry a
+      # `terminate-after` (without it NOTHING in the workspace has a
+      # ceiling and the junit arm is inert), every `slow-timeout` table
+      # must carry one or say at its site why not, and a key nextest does
+      # not define inside such a table is refused - because nextest treats
+      # `terminate-aftr = 5` as a WARNING, so the ceiling vanishes in
+      # silence. Here as well as in ci-private because this workflow fires
+      # on branch pushes: a lane that takes the cover off should learn it
+      # on its own push, not leave a silent hole for whoever wedges next.
+      # `--selftest` first, and it is the gate rather than the house habit:
+      # the handoff that commissioned this recorded the junit discriminator
+      # as `message="test timeout"` when it is `type=`, so a version
+      # written from it would have passed every run while matching nothing.
+      - name: wedge gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/wedge-gate.py --selftest && tools/wedge-gate.py
   shell-selftests:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -1159,119 +2318,51 @@ jobs:
       # at the keystore check before it can reach cargo, gradle, the NDK
       # or a JDK. None of that is on a runner and none of it needs to be.
       # Verified under real dash locally, per the trap above.
+      #
+      # packaging/ci-private-strip.sh is the fifth, added 2 Sep 2026 with
+      # the script itself (TODO 323). It owns the rules that take the
+      # private trees out of the exported ci-private.yml, and both callers
+      # - the publisher and the pre-commit leak scan - execute it rather
+      # than restating it, so a rule that stopped matching would take the
+      # pre-commit arm silently blind AND break publishing. Its selftest
+      # pins both directions: a prose citation refused, and the
+      # load-bearing classifier literals ACCEPTED, which is the arm that
+      # decides whether the check survives contact. `#!/bin/sh`, hermetic,
+      # under a second, and verified under real dash locally per the trap
+      # above.
+      #
+      # packaging/privrefs-scan.sh is the sixth, and it is the OTHER half
+      # of the same file. publish-public.sh carries two refusals about the
+      # private tree; ci-private-strip.sh closed the first, and this one
+      # closes the second - the scan of the finished export for a file
+      # that reaches back into research/. It derives both the regex and
+      # the export's removal set out of publish-public.sh, so a derivation
+      # that stopped matching would either take the pre-commit arm blind
+      # or start refusing the four files the export deliberately deletes.
+      # Its selftest pins that pair, and then drives the REAL
+      # packaging/leak-check.sh in a throwaway root for both directions:
+      # a citation from crates/, docs/ and web/ refused, and every removed
+      # file - pesto_fixtures.rs included, which `is_exempt` does NOT
+      # cover - accepted with its real bytes. `#!/bin/sh`, hermetic, ~1 s,
+      # verified under real dash locally per the trap above.
       - name: shell selftests
         run: |
           .claude/tools/bench-accounts.sh --selftest
           packaging/freebsd/smoke.sh --self-test
           tools/publish-site.sh --self-test
           packaging/android/build-release-apk.sh --self-test
-  rig-selftest-paths:
+          packaging/ci-private-strip.sh --selftest
+          packaging/privrefs-scan.sh --selftest
+  web-gates:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     concurrency:
-      group: rig-selftest-paths-${{ github.ref }}
+      group: web-gates-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The PORTABLE half of the rig selftest's wiring. That selftest runs
-      # on a macOS runner in rig-selftest.yml, behind a NARROW native path
-      # filter - it cannot ride this workflow's filter, which is a union
-      # covering `**/*.rs`, `**/*.py`, `**/*.sh` and `*.md`, because that
-      # would spin a macOS runner on very nearly every push. A narrow
-      # filter is a LIST, and a list is a gate that cannot see the
-      # fifteenth file. This arm derives the file set from the selftest
-      # ITSELF and refuses a name no pattern there matches, so a driver
-      # the selftest starts replaying reddens on the AUTHOR's push instead
-      # of leaving that job quietly un-triggered by the file it now reads.
-      # Build-free, and `--selftest` first for the reason every gate here
-      # runs its own: a matcher that has stopped matching reads as a clean
-      # tree forever.
-      - name: rig selftest trigger roster
-        run: tools/rig-selftest-gate.py --selftest && tools/rig-selftest-gate.py --paths
-  win-portability-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: win-portability-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The one gate here whose subject is a platform nobody in this fleet
-      # builds on: unix-only symbols in code Windows also compiles. Four
-      # fix commits over two days of red windows-build / windows-clippy,
-      # 21-23 Aug 2026. `--selftest` first, same reason as the gates above
-      # - the exemption logic is the whole gate, and a refactor that
-      # over-exempts still prints a green line.
-      - name: windows portability gate
-        run: tools/win-portability-gate.py --selftest && tools/win-portability-gate.py
-  flatpak-pin-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: flatpak-pin-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The offline half of the Flatpak release pin: the yaml's
-      # `url`+`sha256`, the metainfo's newest <release> and the README
-      # install example are one version, and it is not ahead of
-      # Cargo.toml. A pin BEHIND Cargo.toml passes on purpose - that is
-      # the normal state between the bump commit and publish-release step
-      # 4d, whose `--live` mode is the other half and is not a CI job.
-      # `python3` in front, unlike the twelve bare paths above, because
-      # the line is byte-identical to ci-private's - the rule at the top
-      # of this file is that the two can never disagree about what
-      # passes, and an invocation this file spells its own way is the
-      # first way they start to.
-      - name: flatpak pin gate
-        run: python3 tools/flatpak-pin-gate.py --selftest && python3 tools/flatpak-pin-gate.py
-  harness-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: harness-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # `--selftest` first, and here it is the whole gate: the three needle
-      # shapes are what separate this from a bare word grep that passes
-      # everything (`.text(` has 2 hits in that tree where the word `text`
-      # has 62). The selftest pins that a bare-word needle DOES match a
-      # fixture the call-shaped one does not, so nobody widens it back.
-      - name: harness dead-item gate
-        run: tools/harness-gate.py --selftest && tools/harness-gate.py
-  index-lock-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: index-lock-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # TODO 166: no HTTP worker may park unbounded on the index write
-      # mutex. Here rather than only in ci-private because this one fires
-      # on ordinary handler work - the sixteenth site was a Clear button -
-      # and a new site should be red on the AUTHOR's push, not on the next
-      # lane's. `--selftest` first: the gate's whole value is firing on a
-      # NEW site, and a scanner that quietly stops matching reports a clean
-      # tree forever, which is what nav-regen's dead picker arm did for
-      # months.
-      - name: index lock gate
-        run: tools/index-lock-gate.py --selftest && tools/index-lock-gate.py
-  rate-format-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: rate-format-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- rate-format-gate ----------------------------------------
       # The one rule that turns a rate into a string is written three
       # times - the dashboard's `rateParts`, the Windows tray's
       # `fmt_rate`, the mac menu bar's `rateText` - because neither
@@ -1292,302 +2383,28 @@ jobs:
       # exactly as well as `"%.2f GB/s"`. So this stays the only thing in
       # CI that can catch a Swift-side unit mistake.
       - name: rate format gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/rate-format-gate.py --selftest && tools/rate-format-gate.py
-  payload-id-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: payload-id-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # `payload.contains(&nzo_id)` over a SAB response is not "is this job
-      # in the queue": mode=queue's whyslow block names the LAST job's own
-      # nzo_id, so it reads TRUE against an empty queue, and the ids are
-      # minted off a counter so ...nzbfast1 is a strict prefix of
-      # ...nzbfast10. 03e328222 swept all 54 sites BY HAND after a flake and
-      # nothing checked the 55th. Here rather than only in ci-private
-      # because these suites are hand-copied descendants of each other, so
-      # the next one is a copy of whatever is next door - a new site should
-      # be red on the AUTHOR's push. `--selftest` first: what this gate
-      # protects against is a regex that has quietly stopped matching, and
-      # that reads as a clean tree forever.
-      - name: payload id gate
-        run: tools/payload-id-gate.py --selftest && tools/payload-id-gate.py
-  test-global-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: test-global-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A `#[test]` that writes a process-global and asserts on what it says
-      # is reading its neighbours' writes whenever they land on different
-      # threads of ONE process - and nextest cannot see that, because it
-      # gives every test its own process. a676367fb measured 73 failures in
-      # 200 runs on three tests that had been latent since they were
-      # written. Here rather than only in ci-private because the modules
-      # this covers serialize by CONVENTION: a new test copies the one above
-      # it, and one that copies without the guard must be red on the
-      # AUTHOR's push, not on whoever next runs `--bin nzbfast` by hand.
-      # `--selftest` first - what this protects against is an arm that has
-      # quietly stopped matching, which reads as a clean tree forever.
-      - name: test global gate
-        run: tools/test-global-gate.py --selftest && tools/test-global-gate.py
-  wait-recheck-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: wait-recheck-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A state guard released inside a wait loop that then falls through
-      # to an unbounded `Condvar::wait` without re-checking what ends the
-      # wait: the abort lands in the released window, notifies an empty
-      # condvar, and the reader parks forever. Measured 23 Aug 2026 as a
-      # 4,666-second wedge of the zip nested-budget test - which nextest
-      # RETRIED and reported as "6101 passed (1 flaky)", exit 0. Here
-      # rather than only in ci-private for exactly that reason: this class
-      # cannot be relied on to show up as a red test at all, so the push
-      # that introduces it is the only moment anyone will look. A grep for
-      # `drop(st)` would never have found it either - the incident's
-      # release is the guard MOVED into a helper that hands a fresh one
-      # back. `--selftest` first, and it is the gate: the arms are
-      # regexes over a five-loop population, and one that quietly stops
-      # matching reports a clean tree forever, which is what nav-regen's
-      # dead picker arm did for months.
-      - name: wait recheck gate
-        run: tools/wait-recheck-gate.py --selftest && tools/wait-recheck-gate.py
-  chunk-narrow-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: chunk-narrow-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A u64 byte span narrowed to `usize` BEFORE it is bounded by a
-      # buffer - `(remaining as usize).min(buf.len())`. `usize` is 32 bits
-      # on the shipped armv7-unknown-linux-musleabihf target, so a span of
-      # exactly 4 GiB narrows to ZERO and the caller takes nothing: no
-      # progress at all in a decrementing loop, and Ok(0) in a reader,
-      # which every consumer in this tree reads as a clean end of file.
-      # Not an alignment coincidence - the last short read takes
-      # `remaining % 2^32` and lands the cursor exactly on the multiple,
-      # so the trigger is any span of 4 GiB or more, every time.
-      # Here rather than only in ci-private for the reason no test job can
-      # cover it: on a 64-bit host the hazardous spelling is BIT-IDENTICAL
-      # to the safe one, so nothing this fleet runs can see the class, and
-      # the push that introduces it is the only moment anyone will look.
-      # `adb3681e9` converted nineteen sites; this holds the twentieth.
-      # `--selftest` first, and it is the gate: the arms are a hand-written
-      # left-walk over 777 casts, and one that quietly stops matching
-      # reports a clean tree forever, which is what nav-regen's dead picker
-      # arm did for months. It needs no new `paths:` entry - `**/*.rs` and
-      # `**/*.py` above already reach every file it reads.
-      - name: chunk narrow gate
-        run: tools/chunk-narrow-gate.py --selftest && tools/chunk-narrow-gate.py
-  metrics-roster-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: metrics-roster-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Holds `crates/nzbfast/src/serve/metrics.rs` (the `/metrics`
-      # Prometheus renderer) to `crates/nzbfast/tests/daemon_metrics/
-      # mod.rs` (the test that pins every family by name and TYPE):
-      # a family declared but never pinned, a pin left behind by a
-      # rename, or a gauge/counter flip on either side, are each a
-      # REFUSAL. A metric name is a published contract - someone's
-      # Grafana panel is written against the string - and none of that
-      # has a symptom anywhere else in this repo: no compile error, no
-      # clippy lint, the daemon still starts.
-      # Here rather than relying on the test alone for the reason no
-      # other job covers it: `daemon_metrics` is a module of the `daemon`
-      # integration binary, one of the eight heavy-tests targets this
-      # repo's own CI sweep line excludes by name
-      # (`not binary(daemon)`), gated behind the `heavy-tests` feature so
-      # an ordinary `cargo test` never compiles it. A rename would sit
-      # unnoticed until someone runs that suite by hand or nightly's
-      # `long-suites` gets to it. This is build-free and runs on every
-      # branch push, so the same rename is caught on the author's own
-      # push instead.
-      # `--selftest` first, and it is the gate rather than the house
-      # habit: 20 cases, each pinned by the message it must name, plus
-      # three mutations driven against the REAL files (a renamed family,
-      # a type flip, a deleted pin) that all redden. It needs no new
-      # `paths:` entry - `**/*.rs` and `**/*.py` above already reach
-      # every file it reads.
-      - name: metrics roster gate
-        run: tools/metrics-roster-gate.py --selftest && tools/metrics-roster-gate.py
-  cpu-workers-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: cpu-workers-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A CPU worker pool sized from `available_parallelism` rather than
-      # from `nzbkit::mem::cpu_workers`, which is the one place an outside
-      # caller can cap one (`NZBFAST_CPU_WORKERS`, TODO 281 AN4).
-      # Here rather than only in ci-private for the reason no test job can
-      # cover it: the uncapped spelling is CORRECT on every box this fleet
-      # owns, and the only symptom is a phone running hot on one pool out
-      # of sixteen - and nothing here compiles for a phone, let alone
-      # measures one. These pools are hand-copied siblings, so the next one
-      # is a copy of one of them: fine if it copies the helper, silently
-      # wrong if it copies the standard library call.
-      # `--selftest` first, and it is the gate rather than the house habit:
-      # a scanner that has quietly stopped matching reports a clean tree
-      # forever, which is what nav-regen's dead picker arm did for months.
-      # It needs no new `paths:` entry beyond its own file - `**/*.rs`
-      # above already reaches every source it reads.
-      - name: cpu workers gate
-        run: tools/cpu-workers-gate.py --selftest && tools/cpu-workers-gate.py
-  host-config-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: host-config-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A test that hands the daemon a config path it never wrote.
-      # `Config::load` answers a MISSING file by finding a SABnzbd
-      # install's ini under `$HOME`, this fleet has SABnzbd from the
-      # competitive benchmarking and a runner does not, so the same test
-      # gives opposite answers decided by the box. It went red on main
-      # twice in two days on two different doors (f63b6a3af, e0f94fc60),
-      # the second time taking linux-tests, unit-one-process and
-      # windows-unit down for ninety minutes, and it is INVISIBLE on every
-      # machine here - which is why this belongs on the author's own push
-      # rather than only in ci-private. `--selftest` first and it is the
-      # gate rather than the habit: the arms are a hand-written lexer over
-      # a 3,100-function test tree, and one that quietly stops matching
-      # reports a clean tree forever - nav-regen's picker arm did exactly
-      # that for months. It prints how many test functions, doors and
-      # consumers it REACHED, so an inert scan shows a zero, not a green.
-      - name: host config gate
-        run: tools/host-config-gate.py --selftest && tools/host-config-gate.py
-  cfg-safety-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: cfg-safety-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # An `unsafe` block whose only SAFETY note sits above a
-      # cfg-EXCLUSIVE sibling arm. On the platform that arm is gated for,
-      # the sibling AND its comment are both gone and
-      # `undocumented_unsafe_blocks` fires on the block below - and every
-      # clippy run on this fleet is host-native, where the LINUX arm is
-      # the one that vanishes. `cargo clippy --target
-      # x86_64-unknown-linux-gnu` does not work from the dev Mac at all
-      # (md5-asm and libsqlite3-sys want a C cross-toolchain and no
-      # `brew install` supplies one), so unlike the Windows case in
-      # CLAUDE.md's SIXTEENTH entry there is no local run that sees it.
-      # Measured: main went red on this FIVE times in eighty-four minutes
-      # on 26 Aug 2026, the middle three being the SAME defect fixed by
-      # three lanes independently inside ten minutes - because a red on
-      # main is a broadcast, so every lane that looks races every other
-      # lane that looks. Belongs on the author's own push for exactly
-      # that reason. `--selftest` first and it is the gate rather than the
-      # habit: the arms are a hand-written Rust lexer plus a two-level
-      # walk-back, and one that quietly stops matching reports a clean
-      # tree forever - nav-regen's picker arm did that for months. It
-      # prints how many files, unsafe sites, cfg attributes and statement
-      # lifts it REACHED, so an inert scan shows a zero, not a green. It
-      # reads the crate MANIFESTS as well as the sources, to derive its
-      # roster and to see a waiver, and `**/*.rs` does not reach those -
-      # hence the two `Cargo.toml` lines in the filter above. Without
-      # them a deleted waiver, or a crate dropping out of the lint table,
-      # is a change this job never runs on.
-      - name: cfg safety gate
-        run: tools/cfg-safety-gate.py --selftest && tools/cfg-safety-gate.py
-  cfg-symbol-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: cfg-symbol-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A reference to an item defined under one `#[cfg(target_os = ..)]`
-      # from a site that does not share it. It compiles perfectly on the
-      # box it was written on and is `E0425` on every other target, so
-      # every host-native gate on this fleet is green on a tree that
-      # reddens four CI jobs. That is what `d49f5ab32` did on 28 Aug 2026
-      # with `4 * super::TRASH_DEADLINE` inside a `#[cfg(test)]` fn -
-      # `cfg(test)` compiles on every target, which is why it is not an
-      # exemption here. Neither neighbour covers it: `cfg-safety-gate` is
-      # about the SAFETY comment above a cfg arm, and
-      # `win-portability-gate` only scans `libc::` and `std::os::unix`,
-      # so it was green on the tree that was red.
-      # Belongs on the AUTHOR's own push rather than on main, and the
-      # reason is coordination rather than compile time: that one defect
-      # minted FIVE separate red claims across lanes and two were still
-      # open hours later, because a red on main is a broadcast and every
-      # lane that looks races every other lane that looks.
-      # `--selftest` first and it is the gate rather than the habit - the
-      # arms are a hand-written Rust lexer, a per-target three-valued cfg
-      # evaluator and a four-arm name resolver, and one that quietly
-      # stops matching reports a clean tree forever. It prints how many
-      # files, item definitions, cfg-exclusive definitions, candidate
-      # references and RESOLVED references it reached and REFUSES below a
-      # floor on each, so an inert scan shows a zero and not a green.
-      - name: cfg symbol gate
-        run: tools/cfg-symbol-gate.py --selftest && tools/cfg-symbol-gate.py
-  wedge-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: wedge-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The CONFIG arm only - the junit arm needs a test run and lives in
-      # the test jobs themselves, which is where it can redden the shard
-      # that saw the wedge. This half holds the ceiling machinery in
-      # .config/nextest.toml live: `[profile.ci]` must still carry a
-      # `terminate-after` (without it NOTHING in the workspace has a
-      # ceiling and the junit arm is inert), every `slow-timeout` table
-      # must carry one or say at its site why not, and a key nextest does
-      # not define inside such a table is refused - because nextest treats
-      # `terminate-aftr = 5` as a WARNING, so the ceiling vanishes in
-      # silence. Here as well as in ci-private because this workflow fires
-      # on branch pushes: a lane that takes the cover off should learn it
-      # on its own push, not leave a silent hole for whoever wedges next.
-      # `--selftest` first, and it is the gate rather than the house habit:
-      # the handoff that commissioned this recorded the junit discriminator
-      # as `message="test timeout"` when it is `type=`, so a version
-      # written from it would have passed every run while matching nothing.
-      - name: wedge gate
-        run: tools/wedge-gate.py --selftest && tools/wedge-gate.py
-  bg-token-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: bg-token-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- nav-destinations-gate -----------------------------------
+      # The same shape as the gate directly above, for the product's
+      # NAVIGATION rather than its speed formatter: `dashboard / wall /
+      # settings / manual` is written out THREE times - the dashboard's
+      # header, the wall's bar, and web/ui-manualnav.html, which build.rs
+      # folds into the sixteen manuals - with no shared code, because
+      # none of the three surfaces can call into the others.
+      # rate-format-gate's own history is why this exists rather than a
+      # comment: that rule was written twice, a doc comment said not to
+      # add a third, and a third landed SEVEN MINUTES later. A drift here
+      # is a nav that changes shape as you move through the app, which is
+      # the exact defect the shared nav was introduced to end.
+      - name: nav destinations gate
+        if: ${{ !cancelled() }}
+        run: tools/nav-destinations-gate.py --selftest && tools/nav-destinations-gate.py
+      # ---- bg-token-gate -------------------------------------------
       # `--bg` is defined in web/ui-tokens.html and its VALUES are copied
       # into five sites that cannot read a custom property: the two pages'
       # media-scoped <meta name="theme-color"> pairs, THEME_BG in the
@@ -1604,16 +2421,13 @@ jobs:
       # against `#000000`, and one that quietly stops matching reports a
       # clean tree forever - nav-regen's dead picker arm, above, for months.
       - name: bg token gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/bg-token-gate.py --selftest && tools/bg-token-gate.py
-  wco-drag-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: wco-drag-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- wco-drag-gate -------------------------------------------
       # Two pages declare their top bar to be the installed window's drag
       # handle, because a Chromium PWA in window-controls-overlay mode has
       # no other one. A drag region SWALLOWS THE PRESS, so every control
@@ -1630,16 +2444,13 @@ jobs:
       # reached, so a scanner that has quietly stopped matching shows a
       # zero instead of the clean tree it would otherwise report forever.
       - name: wco drag gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/wco-drag-gate.py --selftest && tools/wco-drag-gate.py
-  event-arm-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: event-arm-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- event-arm-gate ------------------------------------------
       # `handleLifeEvents` in web/dashboard.html dispatches on `e.kind`
       # through an if/else-if chain with NO fallthrough arm, so a kind it
       # does not name is DROPPED IN SILENCE - the daemon-side emit test
@@ -1655,16 +2466,13 @@ jobs:
       # fixture reached, so a scanner that has quietly stopped matching
       # shows a zero instead of the clean tree it would report forever.
       - name: event arm gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/event-arm-gate.py --selftest && tools/event-arm-gate.py
-  js-scope-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: js-scope-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- js-scope-gate -------------------------------------------
       # A call, in the dashboard's inline JavaScript, to a name that is
       # declared only inside some OTHER function: a guaranteed
       # ReferenceError the moment that line runs. `saveInterests` shipped
@@ -1685,16 +2493,13 @@ jobs:
       # that quietly stops matching reports a clean page forever, which is
       # what nav-regen's dead picker arm did for months.
       - name: js scope gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/js-scope-gate.py --selftest && tools/js-scope-gate.py
-  checkjs-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    concurrency:
-      group: checkjs-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- checkjs-gate --------------------------------------------
       # The ONE step in this workflow that installs anything, and it is a
       # single package pinned to an exact version with an integrity hash.
       # No `actions/setup-node`: the runner's preinstalled node is a HOST
@@ -1705,6 +2510,11 @@ jobs:
       # pin exists to stop. The i18n-gate job's `node web/i18n/extract.js`
       # is the precedent for using node in a build-free gate at all.
       - name: install the pinned compiler
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: npm ci --no-audit --no-fund
       # `tsc --checkJs` over the inline JavaScript of web/dashboard.html and
       # web/wall.html, in place - no bundler, no modules, no build step, and
@@ -1730,16 +2540,13 @@ jobs:
       # invocation and refuses the whole run if the same binary, flags and
       # prelude stop reporting a name declared nowhere.
       - name: checkjs gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/checkjs-gate.py --selftest && tools/checkjs-gate.py
-  journeys-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: journeys-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- journeys-gate -------------------------------------------
       # journeys/README.md's "House rules for adding one" and a comment at
       # the head of journeys/tests/complete.spec.ts write down three rules
       # for the browser-journey suite that exists to catch what the source
@@ -1755,16 +2562,13 @@ jobs:
       # has quietly stopped matching reports a clean suite forever, which
       # is what nav-regen's dead picker arm did for months.
       - name: journeys house-rules gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/journeys-gate.py --selftest && tools/journeys-gate.py
-  api-contract-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: api-contract-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- api-contract-gate ---------------------------------------
       # web/dashboard.html's api() answers EVERY failure as a resolved
       # {status:false,error} object - right for its ~60 read callers, and
       # the reason a bare `await api(...)` on a WRITE cannot tell a refusal
@@ -1787,136 +2591,22 @@ jobs:
       # the person it worked. Three such sites were live on main, and the
       # hand measurement that commissioned the arm found two of the three.
       - name: api contract gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: tools/api-contract-gate.py --selftest && tools/api-contract-gate.py
-  one-process-roster:
+  site-i18n-gates:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     concurrency:
-      group: one-process-roster-${{ github.ref }}
+      group: site-i18n-gates-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # ci-private's `unit-one-process` carries no list - it reads the
-      # nextest archive's inventory and runs EVERY first-party lib/bin unit
-      # binary. nightly's `one-process-loaded`, the only job in the repo
-      # that runs that shape under LOAD, named its binary by hand and ran
-      # ONE of four. That is how
-      # `pool::fault_rigs::the_line_peak_reads_the_line_with_the_fleet_dialled_together`
-      # (nzbkit LIB) went red twice in 400 main runs on 23-24 Aug 2026 with
-      # the loaded job running the nzbfast BIN root, and was found by a
-      # human instead. This holds that matrix to the manifests: every
-      # derived target is a leg or a `one-process-uncovered:` line with a
-      # reason, and a renamed job, an empty matrix or a leg naming nothing
-      # is a REFUSAL rather than a pass. Here rather than in ci-private
-      # because the lane that adds the crate is the one lane that can be
-      # told - a nightly-only signal lands on whoever pushes next. Build
-      # free, about a tenth of a second.
-      - name: one process roster
-        run: |
-          tools/one-process-roster.py --selftest
-          tools/one-process-roster.py
-  shot-version-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: shot-version-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Every dashboard capture in website/assets/ renders the running
-      # version in its header pill, and nothing held those images to the
-      # crate version - all four went two releases stale at once, and a
-      # person reading a number off an image is what caught it. The
-      # sibling of ci-private's site-version-gate, one medium over, and
-      # worse in one way: a stale download button 404s loudly, a stale
-      # capture just shows an old product to everyone who visits. No other
-      # gate could see it - website/ is outside PUBLIC_MANIFEST, so
-      # leak-check reports `0 public file(s) clean` without scanning it,
-      # and nothing here can read a PNG. It cannot either: it holds a
-      # human's assertion in website/SCREENSHOTS.manifest to Cargo.toml,
-      # which its header states plainly rather than overclaiming.
-      # `--selftest` first, and it is the gate: the run prints how many
-      # assets it REACHED and how many corpus files the reference arm
-      # read, and both zeros are refusals.
-      - name: screenshot version gate
-        run: tools/shot-version-gate.py --selftest && tools/shot-version-gate.py
-  screens-derived-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: screens-derived-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The install dialog's two screenshots are GENERATED from the same
-      # captures the job above holds to the crate version, and nothing
-      # verified the committed copies were still what the generator would
-      # produce. `sips` is macOS-only, so this arm holds the source sha256
-      # the generator recorded, plus every dimension and ratio arm - which
-      # need no image tooling and catch the failure no digest can see: a
-      # file whose dimensions stop matching its `sizes` string is dropped
-      # from the dialog by Chromium SILENTLY. The regenerate-and-compare
-      # half is `make-screenshots.sh --check`, on a mac, before a release.
-      - name: install screenshot derivation gate
-        run: tools/screens-derived-gate.py --selftest && tools/screens-derived-gate.py
-  icons-derived-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: icons-derived-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Every raster mark the product shows is GENERATED off the three SVG
-      # masters in packaging/icon/, and nothing verified the committed
-      # copies were still what the generators produce - web/icons/** was
-      # not even a trigger for this workflow. qlmanage and sips are
-      # macOS-only, so this arm holds the master sha256 the generators
-      # recorded, plus every dimension, declaration and roster arm - which
-      # need no image tooling and catch what no digest can: a `sizes` that
-      # stops matching its file is ignored by Chromium SILENTLY, and it is
-      # declared in THREE places per file here (the manifest and a
-      # `sizes=` on both pages), while a `purpose` swap renders correctly
-      # everywhere except the Android launcher it puts an inset tile on.
-      # The regenerate-and-compare half is `--check` on each of the three
-      # generators, on a mac, before a release.
-      - name: icon derivation gate
-        run: tools/icons-derived-gate.py --selftest && tools/icons-derived-gate.py
-  icon-downstream-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: icon-downstream-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # packaging/icon/icon-1024.png is a SOURCE as well as an output: four
-      # committed rasters are downscaled from it, the Flathub icon and the
-      # three QTS App Center icons, and nothing checked they were still what
-      # their generators produce. The gate above covers the FIRST generation
-      # and names these as out of scope because an edited master cannot go
-      # unreported there - which leaves the forgotten DOWNSCALE, where that
-      # gate is green and correct and these four carry the previous mark.
-      # sips is macOS-only, so this arm holds the recorded master digest
-      # plus the arms no digest reaches: the hicolor install size, the
-      # qbuild copy list, and the grey icon's PIXELS, whose documented
-      # failure is a file of the right size and the wrong colour.
-      - name: downstream icon gate
-        run: tools/icon-downstream-gate.py --selftest && tools/icon-downstream-gate.py
-  manual-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: manual-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- manual-gate ---------------------------------------------
       # Structural parity of the 15 translated manuals against
       # docs/MANUAL.html: an 18-tag census whole-file AND per section,
       # identical id sets, byte-identical `<code>`. The sibling of
@@ -1931,16 +2621,13 @@ jobs:
       # red. `python3` in front rather than the bare path, to stay
       # byte-identical to the line ci-private's `i18n-gate` runs.
       - name: manual parity gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: python3 web/i18n/manual-check.py --selftest && python3 web/i18n/manual-check.py
-  site-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: site-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- site-gate -----------------------------------------------
       # The third script in web/i18n/ and the last one that had nothing
       # turning it red. Two dimensions: structural parity of the 150
       # localized site pages against their English bases (id sets, a tag
@@ -1956,16 +2643,13 @@ jobs:
       # rather than the bare path, to stay byte-identical to the line
       # ci-private's `i18n-gate` runs.
       - name: site parity gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: python3 web/i18n/site-check.py --selftest && python3 web/i18n/site-check.py
-  crosslink-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: crosslink-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- crosslink-gate ------------------------------------------
       # The first of the two gates here whose subject is GENERATED and
       # committed: site-crosslink.py rewrites the cross-page links on the
       # 150 localized pages so a visitor stays in-language, and nothing
@@ -1991,16 +2675,13 @@ jobs:
       # correctly yields zero matches on all 150 pages; the selftest
       # proves the transform is alive against synthetic pages instead.
       - name: cross-link staleness gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: python3 web/i18n/site-crosslink.py --selftest && python3 web/i18n/site-crosslink.py --check
-  nav-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: nav-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---- nav-gate ------------------------------------------------
       # The second generator in web/i18n/, and the second gate here whose
       # subject is GENERATED and committed: nav-regen.py writes the
       # language picker and the hreflang alternates on the 64 pages of the
@@ -2016,127 +2697,12 @@ jobs:
       # none: the script is run against its own committed output, a fixed
       # point with no judgement to get wrong.
       - name: nav staleness gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
         run: python3 web/i18n/nav-regen.py --check
-  memory-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: memory-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # `--selftest` exercises audit()/report() in-process, same as every
-      # gate above. The executable check and the direct `--hook` call are
-      # the arm neither that nor any prior CI run has ever exercised - see
-      # "Eighteen" at the top of this file for the demonstrated failure a
-      # bare selftest cannot see: the settings.json wrapper silences a
-      # broken script down to exit 0.
-      - name: memory gate
-        run: test -x .claude/tools/memory-gate.py && .claude/tools/memory-gate.py --selftest && .claude/tools/memory-gate.py --hook
-  hooks-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: hooks-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Same two arms as the memory gate above.
-      - name: hooks gate
-        run: test -x .claude/tools/hooks-gate.py && .claude/tools/hooks-gate.py --selftest && .claude/tools/hooks-gate.py --hook
-  claude-clippy-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: claude-clippy-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # CLAUDE.md documents the clippy gate twice and ci-private runs it
-      # twice, and until 24 Aug 2026 nothing held the four in step - see
-      # "Twenty-two" at the top of this file for the day main was red
-      # with every documented gate green. `--selftest` first, and here it
-      # is the gate rather than the house habit: what this protects
-      # against is an extractor that has quietly stopped matching, which
-      # reads as a clean tree forever. Every arm is driven by a fixture
-      # that must go red, including the two shapes that must NOT be - both
-      # sides moved together in one commit, and a pure rewrap of the
-      # CLAUDE.md copy.
-      - name: clippy doc gate
-        run: tools/claude-clippy-gate.py --selftest && tools/claude-clippy-gate.py
-
-  ci-verdict-roster:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: ci-verdict-roster-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # `--selftest` ONLY, and that is the whole design of this job
-      # rather than an economy. `tools/ci-verdict.py` with no argument
-      # is a statement about MAIN'S state - it walks the Actions API for
-      # the newest real conclusion per job - so running it here would
-      # red whichever lane pushed next for something they did not cause
-      # and cannot fix, which is how a gate gets muted. That placement
-      # decision is argued at the `ci-verdict` job in ci-private.yml and
-      # it has not changed.
-      #
-      # The selftest is a different thing entirely: pure frozen JSON
-      # plus ONE file read, no network and no `gh` auth, about 0.2 s.
-      # Case 16 of it holds the script's roster against ci-private.yml's
-      # job list in BOTH directions - a job the tool neither judges nor
-      # excuses is a refusal naming it, and so is a rostered job that has
-      # vanished from the file. That refusal is the thing worth having on
-      # the AUTHOR's push: whoever ADDS a job to ci-private.yml is the
-      # one person who knows whether its red belongs on main's tip, and
-      # on main alone they learn it from the next lane's run instead.
-      # Same argument the flatpak pin gate's tree mode was moved here on.
-      #
-      # It needs no new `paths:` entry: `**/*.py` and
-      # `.github/workflows/ci-private.yml` are both already triggers
-      # above, which is exactly the pair of files that can break it.
-      - name: ci verdict roster
-        run: python3 tools/ci-verdict.py --selftest
-  packaging-tests-roster:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: packaging-tests-roster-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The roster arm for the `packaging-gates` job at the foot of this
-      # file. That job was added because five of these scripts were steps
-      # in pr-check.yml and nowhere else - a public-repo pull-request gate,
-      # so on this repo they had never run, and two of them had been
-      # reporting a WRONG VERDICT since the day they landed - while seven
-      # more ran in no workflow at all. Nothing held that roster to
-      # anything, so the twentieth script added tomorrow would be unwired,
-      # silent, and read as covered. A list is a gate that cannot see the
-      # eleventh family, which is the same argument the roster arms in
-      # nav-regen.py, shot-version-gate.py and one-process-roster.py each
-      # make in their own directory.
-      #
-      # It RESOLVES a `run:` step rather than grepping for a mention: a
-      # grep finds these paths inside COMMENTS, which is a second way to
-      # read as covered while being uncovered and is how
-      # packaging/tests/linux-install.sh read as wired. And a step that
-      # cannot fire on this repository is not coverage either, which is
-      # what keeps pr-check.yml alone from satisfying a script.
-      #
-      # Here rather than only in ci-private because the lane that adds the
-      # script is the one lane that can be told. Build free, about a tenth
-      # of a second.
-      - name: packaging tests roster
-        run: |
-          tools/packaging-tests-roster.py --selftest
-          tools/packaging-tests-roster.py
   # The build-free PACKAGING gates, and the first job in this file whose
   # subject is not a python gate over the source tree.
   #
@@ -2303,49 +2869,6 @@ jobs:
       # guard above. Six seconds, the slowest of the twelve.
       - name: release asset pattern scanner
         run: packaging/tests/scan-release-assets-patterns.sh
-  # THE LAST TWO JOBS IN THIS FILE, and they are one change: a roster over
-  # every `--selftest` arm in the repo, plus the job that runs the eleven
-  # arms that roster found nothing running.
-  #
-  # WHY A SELFTEST THAT NOTHING RUNS IS THE DEFECT. Every gate in this
-  # file carries a `--selftest` because of the one failure a gate cannot
-  # report about itself: a matcher that has quietly stopped matching,
-  # which reads as a clean tree forever. Two demonstrated instances are
-  # written up at the top of this file's siblings - nav-regen.py's picker
-  # arm sat dead for months while reporting every picker current, and
-  # site-crosslink.py printed OK on BOTH arms at exit 0 with its one regex
-  # broken to `hrefZZZ="`. So the selftest is the load-bearing half, and a
-  # selftest nobody runs is that same defect one level up.
-  #
-  # MEASURED 25 Aug 2026 at origin/main: 47 tracked `*.py` declare a
-  # `--selftest` arm and ELEVEN had nothing running one. `tools/claims.py`
-  # is the one with the most riding on it - it is the cross-machine LOCK
-  # that stops two boxes building the same thing, its resolver was
-  # rewritten that day in `5205dd2bf`, and its selftest went from 39 cases
-  # to 62 in that same commit, all of it run only when a human typed it.
-  #
-  # THE ROSTER RESOLVES COMMAND POSITION, which is a sharper rule than the
-  # `packaging-tests-roster` job above needs and is why it exists: every
-  # appearance of `tools/pollution-bisect.py` in any workflow here is
-  # inside an `echo "::error ...` advice string telling a human what to
-  # run. It is not commented out, it is QUOTED - so a scan that strips
-  # comments and then searches the text certifies it as wired. Being
-  # NAMED is not being run, and running the TOOL is not running its
-  # SELFTEST; both are asked separately.
-  selftest-roster:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: selftest-roster-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # This gate is in its OWN population - it declares a `--selftest` -
-      # so the step below is what keeps it honest, and its selftest pins
-      # that against the real tree rather than leaving it to be noticed.
-      - name: selftest roster
-        run: tools/selftest-roster.py --selftest && tools/selftest-roster.py
   # The eleven arms the roster found nothing running. One job with eleven
   # steps rather than eleven jobs, for exactly the reason `packaging-gates`
   # gives at its own site: they total about twenty seconds between them
@@ -2398,6 +2921,40 @@ jobs:
       # for this arm rather than nearly true.
       - name: claims ledger
         run: tools/claims.py --selftest
+      # The local pre-push orchestrator: derives its gate roster from THIS
+      # workflow (tools/workflow_scan.py), scopes gates to the changed set,
+      # parallelises them, and caches green selftests by script hash. Its
+      # selftest pins the derivation, the scoping and the cargo-command
+      # read-out of ci-private.yml; a derivation that quietly stopped
+      # parsing would otherwise read as a very fast clean run forever.
+      # research/DEV-TOOLCHAIN-REVIEW-2026-08-31.md is the review that
+      # commissioned it.
+      - name: preflight orchestrator
+        run: tools/preflight.py --selftest
+      # The live-index regrouper's identity gate
+      # (research/LIVE-INDEX-REGROUP-PROTOTYPE-2026-09-01.md). It is a
+      # prototype and touches no shipped code, but its selftest is the
+      # one thing holding `proto/entropy.py` to
+      # `nzbkit::release::{bare_stem,looks_obfuscated}` - a mirror, and
+      # mirrors drift. It also pins the defect the shadow score caught:
+      # `looks_obfuscated` alone calls a ONE-CHARACTER stem obfuscated,
+      # so the regrouper was dropping the poster from the identity key
+      # for `)`. Pure python, no database, no network, ~0.1 s.
+      - name: live-index regrouper identity gate
+        run: proto/regroup.py --selftest
+      # The four-way naming benchmark's reporting arithmetic
+      # (research/namebench/, research/NAMEBENCH-2026-09-01.md). Four
+      # independent indexer versions are about to quote precision, yield
+      # and cost out of one instrument, so the arithmetic underneath those
+      # numbers is worth a step: the arm pins that a perfect namer reads
+      # 100%, an always-wrong one 0%, an abstainer divides by nothing, and
+      # that the cost ledger's `suspicious()` cross-check - measured
+      # sockets minus declared calls - still subtracts. Pure python, no
+      # database, no network, ~0.1 s. Its `freeze.py` sibling is waived at
+      # its own site: that arm checks the redaction ALLOWLIST against the
+      # LIVE index schema, which no runner here has.
+      - name: naming benchmark reporting
+        run: research/namebench/run.py --selftest
       # Names the POLLUTER in a cross-test pollution failure. NOTE: its
       # "real libtest" pin - that `--exact` takes many filters and that
       # libtest sorts the filtered set by name - needs rustc, and this
@@ -2540,249 +3097,6 @@ jobs:
       # --selftest here does not touch that pair.
       - name: bench2j gate argv guard
         run: tools/bench2j-gate.py --selftest
-  par2-rule-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: par2-rule-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Refuses a SECOND copy of the `.par2` file-classification rule.
-      # `nzbkit::nzb::classify_subject` is the rule; `NzbFile::kind` and
-      # `faultplan::role_of` are doors onto it - and `role_of` was a
-      # HAND-COPIED TWIN of `kind` for months, which is why N6-04's
-      # decoy-quote defect and N6-05's quoted-`.par2`-with-a-tail defect
-      # were each live in TWO places. Both were silent: a
-      # `"label.vol000+50.par2" - "Movie.mkv"` post classified as a
-      # recovery volume, and a non-bootstrap volume gets NO SLOT, so the
-      # payload named right there in the manifest was never fetched,
-      # nothing was ever missing, and the job finished green.
-      # The twin was folded away on 30 Aug 2026 and NOTHING held it
-      # there - and the tree was not in fact at one copy: this gate's
-      # first run found `check::multiple_par2_sets` restating the
-      # terminal rule verbatim, under a comment saying "The two have to
-      # agree", which is precisely how `role_of` began.
-      # Three arms, each seeing a copy the other two cannot: the
-      # two-clause remainder test wherever it lands, a `.par2` test on a
-      # name that resolves one hop to a SUBJECT, and any `-> FileKind`
-      # door outside nzb.rs that stops delegating. Plus a home arm, for
-      # the FOURTEENTH CLAUDE.md entry's reason - a rule narrowed back at
-      # its one home restores the defect at every call site at once with
-      # no call-site diff anywhere to show it.
-      # `--selftest` first, and it is the gate rather than the house
-      # habit: 35 cases, each pinning the counts it reached as well as
-      # its verdict, plus 31 mutations of the arms each verified to
-      # redden it against two controls that correctly do not, and six
-      # driven against the REAL files (the second copy restored, a new
-      # subject test, the twin put back two ways, the rule made private,
-      # the `isolated` gate dropped) that all bite. It needs no new
-      # `paths:` entry - `**/*.rs` and `**/*.py` above already reach
-      # every file it reads. Build-free, well under a second.
-      - name: par2 rule gate
-        run: tools/par2-rule-gate.py --selftest && tools/par2-rule-gate.py
-
-  extractor-anchor-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: extractor-anchor-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A root `Arc<Extractor>` that is fed spans must be ANCHORED.
-      # `Extractor::anchor` records the chain root's own `Arc` weakly and
-      # every attach arm - `try_attach_zip`, `try_attach_sevenz`,
-      # `try_attach_tar`, `try_attach_chase` - opens with
-      # `self_weak.upgrade().is_none() => return Ok(false)`, BEFORE any
-      # name or magic test. So a root that never anchors takes NO chase
-      # at depth 0: the container materializes byte-exactly for the disk
-      # post-pass, and that is EXACTLY what a passing test looks like.
-      # It bit a lane on 30 Aug 2026 - a fresh probe harness for matrix
-      # rows M4-75/M4-90 omitted `anchor()` and reported THREE OF FOUR
-      # container arms SAFE; with `anchor()` added the 7z arm flipped to
-      # destroying the named file. The lane nearly published the opposite
-      # of the truth about a data-destroying path and nothing anywhere
-      # would have said so - not rustc, not clippy, and not the suite,
-      # whose whole job here is to tell a chase that held from one that
-      # never ran.
-      # The rule is COARSE on purpose and that is measured: the sharper
-      # "flag a test that feeds container MAGIC" rule needs a resolver
-      # from a payload expression back to a fixture producer, which reads
-      # as a clean tree forever the day it stops resolving, and it MISSES
-      # the shape that actually bit (`polyglot_tests.rs::route` is a
-      # harness taking `body: &[u8]`, so the container bytes are the
-      # CALLER's). Over the 31 Aug 2026 tree the coarse rule costs ZERO
-      # waivers across 123 population sites, so it is both cheaper and
-      # wider.
-      # BEING FED IS NOT REQUIRED, and that is what reaches PRODUCTION:
-      # `get/vrig.rs::build_rig` builds the product's one and only root
-      # and writes into it NOWHERE, since the spans arrive on worker
-      # threads. An earlier cut of this gate filtered population on "this
-      # function writes into it" and stayed GREEN when that site's
-      # `anchor()` was deleted. Two mechanical exemptions replace the
-      # filter - `enabled=false` and a ZERO-slot root - at no waiver cost.
-      # THE CONSTRUCTOR SET IS DERIVED TOO. The first cut matched
-      # `Extractor::new` alone and production builds through
-      # `Extractor::with_resume`, so both production sites and ten
-      # Arc-wrapped test sites were invisible: 138 root constructions, not
-      # 128. An Arc-wrapped `Extractor::<name>(` the deriver did not
-      # produce is a REFUSAL naming the site - the arm no count floor can
-      # stand in for, since renaming that return type leaves four other
-      # names derived and ten sites silently unjudged.
-      # The anchoring DOORS are derived, never listed, and the third door
-      # already exists: `set_promote_hook` and `set_park_hook` both call
-      # `self.anchor()`, and an audit crediting only the first misjudges
-      # any test that installs only a park hook.
-      # `--selftest` FIRST and it is the gate rather than the house
-      # habit: this is a hand-written Rust lexer over a 3,000-function
-      # test tree, and one that quietly stops matching reports a clean
-      # tree forever. 81 cases, each pinning the counts it reached as
-      # well as its verdict, plus 39 mutations of the arms each verified
-      # to redden it against two controls that correctly do not, and
-      # seven driven against the REAL files - the incident's own fixture
-      # un-anchored, a real anchor moved after its feed, `set_promote_hook`
-      # stopping anchoring, an attach arm losing its guard, `anchor` made
-      # private, a NEW unanchored tar chase test, an nzbfast fixture
-      # un-anchored, production's own root un-anchored, and `with_resume`
-      # stripped of its constructor status - that all bite, against a doc
-      # reword that stays green. It needs no new `paths:` entry: `**/*.rs` and `**/*.py`
-      # above already reach every file it reads. Build-free, well under a
-      # second.
-      - name: extractor anchor gate
-        run: tools/extractor-anchor-gate.py --selftest && tools/extractor-anchor-gate.py
-
-  teardown-order-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: teardown-order-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A `ScratchDir` owns its directory and nothing else may remove it.
-      # `scratch::ScratchDir::attach(&dir)` recreates that directory empty
-      # and removes it again on drop, and because the guard is bound FIRST
-      # it drops LAST - after the daemon declared under it. A second
-      # `let _ = std::fs::remove_dir_all(&dir);` in the test body is dead
-      # code, and in a daemon suite dead is the wrong word:
-      # `harness::spawn_one` writes the daemon's log INTO that directory
-      # and `DaemonLog::check_now` reads it as the child is reaped, so a
-      # teardown that ran first leaves BOTH the failure tail and
-      # `adoptguard::refuse_a_solve_that_solved_nothing` reading nothing.
-      # `research/PAYLOAD-TRAP-GATE-DECISION-2026-08-31.md` refused this
-      # gate in writing - "a rule about style until somebody shows it
-      # regrowing" - and set its own condition. It regrew THREE times in
-      # about two hours inside that same lane, each from another lane's
-      # merge, and the only thing that named them needs a daemon, the
-      # external `par2` binary and a twelve-minute serialized suite that
-      # the per-push nextest sweep excludes BY NAME. This is build-free.
-      # The rule is the REDUNDANCY and not the danger, measured rather
-      # than preferred: the danger width needs every piece of the same
-      # dataflow PLUS a model of drop order to refuse a strict subset, and
-      # what it leaves standing is the template the next lane copies - the
-      # seven `watch_dedupe.rs` sites that `drop(r)` first are safe, and a
-      # copy that omits the `drop(r)` is the defect.
-      # Ownership is derived five ways, four of them shapes that were LIVE
-      # on the tree: the ARGUMENT of `attach` (the common case - the
-      # removed name is `dir` while the guard is `_scratch`), its BINDING,
-      # a same-file helper whose return type NAMES `ScratchDir` (matched
-      # as a substring and by TUPLE POSITION - `watch_dedupe::scratch`
-      # returns `(ScratchDir, PathBuf, String)`), a `.clone()` alias to a
-      # fixpoint, and a STRUCT FIELD traced through the struct's own
-      # constructor. A `.join(..)` of a guarded path is never a hit; six
-      # such sites are live and all six are correct.
-      # Measured: today 839 files / 1,932 removals / 882 guarded paths /
-      # ZERO hits and ZERO waivers, after 119 sites were swept in the
-      # commit that landed it - nineteen before its landing merge, and one
-      # HUNDRED in that merge itself, where `0613e613a`'s leak-plugging
-      # pass had given the fourteen biggest `$TMPDIR` leak sites a
-      # `ScratchDir` guard and left every manual removal in place, because
-      # nothing anywhere could see them. Replayed at `923949e38^` it names
-      # 256; at `c85dd4e5a^` and `c29bf7fa4^` it names the three regrown
-      # sites BY NAME and goes silent on each fix.
-      # FIXING A HIT CAN STRAND THE BINDING: where the guard exists only
-      # to be removed (`let (d, ar) = open_bytes(..)`, 31 times in
-      # `zip_tests.rs`) rename it `_d`, and NEVER a bare `_` - an
-      # underscore-PREFIXED binding still drops at the end of its scope,
-      # a bare `_` pattern drops the guard immediately and takes the
-      # directory out from under the test.
-      # FIX A HIT by DELETING the line. Never by deleting the `ScratchDir`
-      # so the removal becomes load-bearing, and never by loosening an arm
-      # so a shape it cannot read counts as absent. A removal that is
-      # genuinely not redundant says so at the site with
-      # `teardown-order-gate: <reason>`, scoped to the statement.
-      # It needs no new `paths:` entry: `**/*.rs` and `**/*.py` above
-      # already reach every file it reads.
-      - name: teardown order gate
-        run: tools/teardown-order-gate.py --selftest && tools/teardown-order-gate.py
-
-  ceiling-claim-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: ceiling-claim-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A comment that says a function or file IS at a size-gate ceiling,
-      # about one that is not. A §106 split leaves the note behind: a
-      # hoisted helper explains why it is a free function rather than
-      # inline, and the reason is nearly always "its caller is at the size
-      # gate's ceiling, so there is nowhere to put another line". That
-      # sentence is PRESENT TENSE and is false the moment the caller is
-      # split, which is the one event guaranteed to follow it - the commit
-      # that writes it is usually the commit that falsifies it. SIX were
-      # written by one split commit on 31 Aug 2026 and already false when
-      # it landed (`try_mapped_repair` 469 -> 316, `run_set_repair`
-      # 464 -> 335, `fetch_and_repair` 475 -> 379), and two more were
-      # fixed by hand inside `a2529f9ee`. Nothing checked any of them.
-      # THE COST is not a typo. The note is the input to a decision: a
-      # lane reading "this function is at the ceiling" prices a hoist it
-      # may not need. And the opposite failure is worse - a lane checks,
-      # finds the claim false, and DELETES the comment, taking the
-      # recorded reason for the factoring with it. So FIX A HIT BY
-      # CORRECTING THE TENSE AND THE NUMBER, never by deleting the note.
-      # TENSE IS THE WHOLE DESIGN. A PAST-tense claim is HISTORY, was true
-      # when written, and must stay green forever; a gate that reddened on
-      # those would demand the deletion of the very notes it defends. Only
-      # present-tense claims are judged - 17 of 59 on the swept tree.
-      # THE BAR IS 5% OF THE TARGET'S OWN LIMIT (`file_limit`/`fn_limit`,
-      # so a BASELINED target is judged against its baseline), derived from
-      # the tree rather than picked: it reproduces both hand-made verdicts
-      # in the handoff that commissioned this (`settle_with_set` at 472 of
-      # 500 is 28 free, over a 25-line bar), every numeric present claim
-      # that reads as true sits between 0.5% and 4.6% of its limit, and
-      # every phrasing lanes HEDGE sits at 4.8% or worse.
-      # THE MEASUREMENT IS SIZE-GATE'S OWN - `strip_noise` and `functions`
-      # are imported, not re-derived, so this gate and the gate that
-      # reddens main cannot disagree about what a function is.
-      # AN UNRESOLVABLE SUBJECT REFUSES rather than guesses, and both cheap
-      # guesses are wrong on the real tree: `smart/feature.rs` says "for
-      # the reason `sample.rs` next door gives: that file sits at its TODO
-      # 106 size ceiling", where the LAST name is `sample.rs` and the
-      # subject is `smart.rs`, while `serve/hunt.rs` says "lives in
-      # `serve/daemon.rs`, which is on its size-gate ceiling", where the
-      # FIRST name is `enqueue_as` and the subject is the last. Fix a
-      # refusal by NAMING the subject, which makes the note checkable.
-      # `--selftest` FIRST and it is the gate rather than the house habit:
-      # this is a hand-written Rust comment lexer, and one that quietly
-      # stops matching reports a clean tree forever. 71 cases pinning the
-      # counts reached as well as the verdicts, plus six mutations driven
-      # against the REAL files that all bite (the incident reverted, a
-      # demonstrative subject restored, a stale number, a true claim
-      # repointed, a wrong stated ceiling, a brand-new false note) against
-      # two controls - a reflow and a waiver - that correctly stay green.
-      # It needs no new `paths:` entry: `**/*.rs` and `**/*.py` above
-      # already reach every file it reads. Build-free, about ten seconds,
-      # six of which is size-gate's own `collect()`.
-      - name: ceiling claim gate
-        run: tools/ceiling-claim-gate.py --selftest && tools/ceiling-claim-gate.py
-
   claims-drop-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -2860,161 +3174,3 @@ jobs:
       # narrowing the window.
       - name: claims ledger drop gate (this push)
         run: tools/claims-drop-gate.py --push-range "${{ github.event.before }}" "${{ github.sha }}"
-
-  membudget-ceiling-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: membudget-ceiling-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A literal above the 32-bit address-space ceiling, handed to
-      # `MemBudget::with_total` / `from_user_limit` / `limit_clamp` outside
-      # a `#[cfg(target_pointer_width)]` arm and not derived from
-      # `MemBudget::max_total()`. `armv7-cross` sat red in nightly for ten
-      # days (28-31 Aug 2026) on this exact class TWICE - a test asserting
-      # a 4 GiB or 2 GB outcome that only holds where `with_total`'s 1 GiB
-      # clamp does not bind, which is every box in CI except the 32-bit
-      # one. The product was correct both times; only the fixture assumed
-      # an address space armv7 does not have.
-      # POPULATION measured 31 Aug 2026: eight literal-above-ceiling sites
-      # in two files, seven inside a `#[cfg(target_pointer_width)]` arm
-      # (either the call itself or the bare `#[cfg(...)] assert_eq!(...)`
-      # statement it is part of). The eighth,
-      # `serve/requeue.rs`'s `with_total(4u64 << 30)`, is carried the way
-      # `5dd24e2fc`'s own fix argues for - `with_total` clamps any input
-      # safely, and the pointer-width split lives in the two cfg-gated
-      # asserts that read the clamped result two statements down, which
-      # this scanner cannot see - so it carries an explicit
-      # `// membudget-ceiling-gate: <reason>` waiver instead.
-      # THE CFG CHECK REUSES `tools/cfg-symbol-gate.py`'s `strip()`/
-      # `walk()` rather than re-deriving a second lexer - the same
-      # pending-attribute, paren-and-bracket-depth rule that lets a bare
-      # `#[cfg(...)] assert_eq!(...)` count as guarded with no braces at
-      # all, and that already closed the exact `;` inside `[u64; 4]` hole
-      # the doc-gate and win-portability-gate families had to learn
-      # separately.
-      # THE MAX-TOTAL CHECK IS STATEMENT-SCOPED ON PURPOSE: the fixed
-      # `2_000_000_000` bug derives its expectation from `max_total()` in
-      # the SAME statement as the call, and a function-scope version of
-      # this check was tried and rejected - the ORIGINAL buggy line sat in
-      # the very same test function as an already cfg-guarded
-      # `limit_clamp(10 << 30)`, so a function-wide escape would have
-      # exempted the bug it exists to catch.
-      # NO DATAFLOW TRACING: a value reached through a loop variable, a
-      # `let`-bound name, or a struct field is outside this gate's
-      # population by design - both fixture bugs used the literal directly
-      # or one statement of indirection away, which is what a narrow
-      # expression scanner can read without becoming a second Rust parser.
-      # FAILING TO FIND IS FAILING: a missing `mem.rs`, a missing or
-      # non-numeric `ADDRESS_SPACE_CEIL`, any of the three doors absent or
-      # declared more than once, zero `.rs` files, an unbalanced file, or
-      # zero qualified calls reached at all - each a refusal naming the
-      # cause. The clean run prints how many files, qualified calls, and
-      # above-ceiling literals it reached.
-      # VERIFIED against the pre-fix tree (`5dd24e2fc^`): it names both
-      # MemBudget-related fixture defects by file and line
-      # (`limit_clamp(2_000_000_000)` in mem.rs, the unguarded
-      # `with_total(4u64 << 30)` in requeue.rs before the assertions were
-      # cfg-split) and nothing else - it does NOT catch
-      # `block_pricing_divides_before_it_narrows`, which involves no
-      # `MemBudget` call at all, so it is two of the three fixture
-      # mistakes that held `armv7-cross` red.
-      # FIX A HIT by moving the literal into a `#[cfg(target_pointer_width
-      # = "32")]` / `#[cfg(not(...))]` pair, or by deriving the expected
-      # outcome from `MemBudget::max_total()` in the same statement -
-      # never by deleting the assertion, and never by widening the cfg or
-      # max-total arms to swallow a shape they cannot verify. A site that
-      # genuinely needs neither says so with
-      # `// membudget-ceiling-gate: <reason>` on its own line or in the
-      # comment block directly above it, scoped to the statement.
-      # `--selftest` first: 23 cases, including both fixture shapes above
-      # and the seven real cfg-guard forms, each pinning the message or
-      # count it must reach. Build-free, well under a second, and it
-      # needs no new `paths:` entry - `**/*.rs` and `**/*.py` above
-      # already reach every file it reads.
-      - name: membudget ceiling gate
-        run: tools/membudget-ceiling-gate.py --selftest && tools/membudget-ceiling-gate.py
-
-  zip-fixture-gate:
-    if: github.repository != 'nzbfast/nzbfast'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: zip-fixture-gate-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A committed zip interop fixture must still be what it was.
-      # `crates/nzbkit/tests/fixtures/zip` holds nine binary archives the
-      # hand-rolled `nzbkit::zip` reader is tested against and that
-      # fuzz-smoke.yml copies wholesale into the `zip_parse` corpus. Seven
-      # are written by tools/gen-zip-fixtures.py and two are hand-made, and
-      # until 31 Aug 2026 NOTHING verified any of them: no digest manifest,
-      # no `--check`, no CI job, and `grep -rln gen-zip-fixtures .github/
-      # tools/` returned the generator itself.
-      # THE INCIDENT: a blanket `for g in tools/*.py; do python3 $g; done`
-      # sweep ran the GENERATOR, which is not a gate, and rewrote six of
-      # them. `git status` said `Bin 595 -> 595 bytes` six times, because
-      # every file comes back the SAME SIZE, so nothing looked regenerated
-      # and the sweep was two commands from staging another lane's
-      # rewritten fixtures into an unrelated push.
-      # A REGENERATE-AND-COMPARE `--check` CANNOT BE THE ANSWER, and that
-      # was measured rather than assumed: on 7-Zip 26.02 with every
-      # timestamp option off over a fixed-mtime input, the AES output still
-      # differs in 419 bytes and the ZipCrypto output in 405, and in both
-      # the first differing byte is the first byte of the encrypted entry
-      # DATA - the salt and the encryption header, random BY SPECIFICATION.
-      # Both external writers are also SKIPPED WITH A WARNING when off
-      # PATH, so a regenerate-and-compare here would be a green line about
-      # files it never produced.
-      # SO THE MANIFEST CARRIES TWO KINDS OF CLAIM and keeping them apart
-      # is the design. The sha256 is written by `--record` for the files a
-      # run actually wrote, so the ordinary path keeps it true for free,
-      # and it is what names the incident. Everything after it is a FROZEN
-      # JUDGEMENT about what the fixture MEANS - entry names, methods,
-      # encryption scheme, CRC and size, directory entries, the comment,
-      # the zip64 record's shape, any prepended stub - hand-written by
-      # somebody who read the tests, and `--record` never touches it.
-      # Without that half the digest is trivially satisfied by
-      # re-recording, which is the one edit every gate in this family
-      # states as its own limit; here it can be CLOSED, because unlike a
-      # PNG's pixels the meaning of a zip container is recoverable from
-      # its bytes. An Info-ZIP that started emitting a SATURATED end
-      # record would otherwise leave `zip64_unsaturated.zip` silently no
-      # longer the thing its name, its generator's own assertion and its
-      # test all say it is.
-      # The compressed size is deliberately NOT recorded - it pins the
-      # compressor's version rather than what the fixture is for - and the
-      # payload is pinned by crc= and usize= instead.
-      # Writing the manifest found one thing on its first run: `zip64.zip`
-      # carries no zip64 structures at all (`allowZip64=True` permits them,
-      # it does not request them), so it is recorded `zip64=none` and the
-      # generator now says so. That is left for the zip suite's owner
-      # rather than changed in passing.
-      # Measured: 9 fixtures, 9 records, 12 entry lines, 7 generated, 9
-      # reached by a test, ZERO hits and ZERO waivers. Verified against the
-      # REAL files nine ways - the incident replayed (all six named), a
-      # hand-patched byte, a deleted record, an unrecorded new fixture, a
-      # frozen field and a frozen entry line edited by hand, a GENERATES
-      # row dropped - against two controls that correctly stay green, plus
-      # 40 mutations of the arms each verified to redden `--selftest`.
-      # HITS LEAD AND THE FLOORS ONLY SPEAK WHEN THERE ARE NONE, because
-      # every floor sits AT today's population, so an ordinary deletion
-      # breaches one as well as tripping the arm that names it and
-      # reporting the floor first hands the reader "this scanner has
-      # stopped matching" about a scanner that is working perfectly.
-      # FIX A HIT by rerunning the generator and `--record`ing what it
-      # wrote, or - if the change was accidental - by restoring the named
-      # files from HEAD BY NAME, never the whole directory (safe-git rule
-      # 12: that command discards every uncommitted change in the path it
-      # is given, and this checkout is shared). NEVER by editing a digest on its
-      # own, which is the one edit the digest arm cannot see, never by
-      # rewriting a frozen field so the survivors agree, and never by
-      # loosening an arm so a shape it cannot read counts as absent.
-      # Build-free, about a second and a half, and no new `paths:` entry -
-      # `crates/**` and `**/*.py` above already reach every file it reads.
-      - name: zip fixture gate
-        run: tools/zip-fixture-gate.py --selftest && tools/zip-fixture-gate.py

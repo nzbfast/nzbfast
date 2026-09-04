@@ -1,0 +1,53 @@
+# C2 on the OTHER container generation: a split RAR4 set.
+
+[layout]
+name = "c2-rar4-stored-split"
+seed = 142
+note = """
+The same three-volume stored split as c2-c11-stored-split-partnn,
+written by the RAR4 writer instead of the RAR5 one. It is a different
+header format, a different volume-continuation flag and a different
+parser on the client side, and every other C row in this catalog is
+RAR5 - so without this one a RAR4 regression would show up nowhere
+here.
+
+RAR4 is still what a large share of posted releases carry, and it is
+the generation the client's oldest paths serve. What RAR4 CANNOT do in
+this toolkit is C10: the rar15_40 writers validate against a feature
+set with recovery_record off and refuse anything else, so a rar4
+profile selecting recovery_record_pct is refused by name rather than
+quietly emitting an archive without the record.
+
+This row is also the one that carried the MHD_NEWNUMBERING gap for as
+long as it has existed. It takes the default volume_style, partNN, and
+the RAR4 volume writers had no way to say so: the main header always
+declared the classic numbering, and unrar 7.23 handed legacy.part01.rar
+swaps its EXTENSION, looks for legacy.part01.r00, prints Cannot find
+volume and reports a checksum error on the member it had to truncate.
+Nothing here noticed, because our own client joins volumes from the NZB
+rather than from the archive headers, so the row was green over a set
+no reference reader could open. Closed 4 Sep 2026 by
+WriterOptions::volume_numbering in the fork at ~/Claude/rars and
+hand-ported into vendor/rars; container::rar4_volume_numbering derives
+it from the same fields the names are spelled from, and this row now
+extracts under unrar 7.23 at exit 0. Its bytes moved by exactly three
+per volume when it did: the flag word's low byte and the header CRC
+over it.
+"""
+
+[source]
+files = [{ name = "legacy.bin", bytes = 30000 }]
+
+[container]
+kind = "rar-stored"
+version = "rar4"
+volume_bytes = 10000
+
+[encoding]
+article_bytes = 4000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

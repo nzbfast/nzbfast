@@ -1,0 +1,50 @@
+[package]
+name = "nzbfast-engine"
+version = "1.4.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The nzbfast bin's download engine: the one-pass fetch, decode, settle and tail pipeline"
+
+[lints]
+workspace = true
+
+# One layer ABOVE nzbfast-unpack and above nzbfast-core, and it must not
+# name `nzbfast-meta` (a sibling of unpack, and nothing here reaches it -
+# `get` never touches wall, newznab, rss or scan) nor `nzbfast`, which is
+# what keeps the bin the only thing above this. `tools/modgraph.py
+# --check` is what holds the rule from the source side (an edge from a
+# `get` module into meta or the bin is a refusal there); the absence of a
+# dependency line here is what holds it from the cargo side.
+[dependencies]
+nzbkit = { path = "../nzbkit", default-features = false }
+nzbfast-core = { path = "../nzbfast-core" }
+# The extraction, repair and filing layer. The settle pass drives it
+# directly (`repair` alone is 55 of this crate's production references)
+# and the tail hands finished files to `smart`.
+nzbfast-unpack = { path = "../nzbfast-unpack" }
+anyhow = "1"
+# The whole pipeline is tokio tasks: the fetch fleet, the chase workers,
+# the settle pass and the tail all run on the shared runtime.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+serde_json = "1.0.150"
+# 0.10 to MATCH nzbkit, the same pin the bin and the layers below carry:
+# the download path hashes with md-5 0.10 and a second implementation
+# would be a different measurement.
+md-5 = "0.10"
+crc32fast = "1.5.0"
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+
+[dev-dependencies]
+# The layer below with ITS test seams switched on, the same arrangement
+# nzbfast-unpack and nzbfast-meta use and for the same reason:
+# `identity::may_call_out` and `netfetch::deny_test_callout` (CLAUDE.md
+# invariant 5a) read `cfg!(feature = "test-support")`, because
+# `cfg!(test)` is a property of ONE crate's build and this crate's tests
+# compile nzbfast-core as a plain dependency.
+nzbfast-core = { path = "../nzbfast-core", features = ["test-support"] }
+# `dropped`'s log-shape test builds a subscriber over a `MakeWriter` of
+# its own to read back the lines the drop path emits. Same `fmt` +
+# `registry` feature set the bin declares, and dev-only: nothing in this
+# crate's production code installs a subscriber.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry"] }

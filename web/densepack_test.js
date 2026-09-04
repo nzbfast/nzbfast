@@ -12,7 +12,7 @@
 // Move up / Move down presses left behind, because reordering rewrites
 // the order list and never the pins.
 //
-// A companion Rust test (serve/assets.rs) holds the same line in CI,
+// A companion Rust test (assets.rs) holds the same line in CI,
 // where node is not assumed.
 const fs = require('fs');
 

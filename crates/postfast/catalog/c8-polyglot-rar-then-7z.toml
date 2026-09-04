@@ -1,0 +1,127 @@
+# C8 + C9 + C1: one file that is honestly two archives.
+
+[layout]
+name = "c8-polyglot-rar-then-7z"
+seed = 108
+note = """
+A launcher stub, then a complete RAR5 archive holding the payload, then
+a complete 7z archive holding `second-archive.bin`. Every byte of it is
+structurally valid twice over: read as a RAR self-extractor it is the
+payload, read as a 7z self-extractor it is the other member. Nothing
+here is malformed and nothing is a decoy - both archives open, and the
+client has to decide which one the file IS.
+
+WHY THIS PAIRING AND NOT ANOTHER. The engine reads RAR4, RAR5, 7z and
+zip, so there are three pairings on offer and only one of them is a
+disambiguation the client actually performs.
+
+RAR4 against RAR5 is not one at all: `nzbkit::sfx::sfx_payload_at` folds
+both signatures onto a single `SfxFamily::Rar`, so the two generations
+are one candidate said twice and the earliest match wins for the same
+reason it would have won alone. The container plane refuses that shape
+by name.
+
+RAR (or 7z) against ZIP is the HARDEST pairing and the one this catalog
+cannot build. A zip is located from its TAIL - `nzbkit::zip` walks back
+from the end-of-central-directory record, because a forward scan for a
+zip signature claims ordinary programs - so a RAR/zip polyglot hands the
+client two independent locators with no position to compare between
+them, and forces a preference rule where this row only needs an ordering
+rule. It is also unwritable here: nothing in this repo emits a zip (spec
+7.B calls that out as C12's missing half), and hand-assembling one in
+`crate::container` is the approximation that module refuses by name,
+since a fixture that agrees with our own reader and with nothing else is
+what the oracle exists to catch rather than to commit.
+
+That leaves RAR against 7z, which both writers here produce and which
+the client weighs against each other in exactly one place.
+
+WHY THERE IS A STUB. `sfx_payload_at` is the ONLY code in the engine
+that compares two container signatures. Everywhere else the format is
+settled by the byte at offset 0 (`extract::routing`'s sniff) or by the
+name (`archive_sniff_eligible_name`), and a first signature sitting at
+offset 0 is answered before a second candidate is ever looked for. So
+C9 is not decoration on this row, it is what makes the plane exist. The
+generator refuses `polyglot` without `leading_bytes` for that reason.
+
+THE END STATE, WHICH IS THE PART THAT IS A JUDGEMENT.
+
+**The client must produce what RUNNING the self-extractor would
+produce**, which is the archive its stub launches: the EARLIEST
+confirmed one. So this row ends with the payload alone, and
+`second-archive.bin` must be absent.
+
+Three reasons, in the order they carry weight.
+
+1. A later confirmed signature is far more often INSIDE the earlier
+   archive than a peer of it. A stored RAR carrying a `.7z` member puts
+   a valid, confirmable 7z signature at a later offset of the same file,
+   and that is C7 and C13, the commonest nesting this catalog builds. A
+   rule that took the LATER signature, or that preferred a format, would
+   open such a set at the wrong level: it would deliver the inner
+   member and throw away the level that held it, with its siblings (C14)
+   and its own packed recovery set (C15) going with it. Position is the
+   rule that gets the nested case right, and the nested case is most of
+   the population.
+2. For a self-extractor the offset order is the format's own authority.
+   The stub runs what is appended immediately behind it; anything past
+   that is either inside that payload or trailing, and `nzbkit::sfx`
+   already records one benign trailer of exactly that kind (a signed
+   self-extractor's certificate table is appended AFTER the payload).
+3. A format preference is the one rule that cannot be right, because it
+   makes the answer depend on which two formats happened to collide
+   rather than on the file.
+
+The honest limit, stated rather than hidden: earliest-confirmed is a
+POSITIONAL rule and it is right for the population, not for every file.
+Two genuinely independent archives concatenated by a poster are
+ambiguous and no rule recovers what was meant. What makes the positional
+answer safe anyway is that the loser's bytes were never named by the
+post: the NZB names one file, the user asked for one file, and they get
+what double-clicking it would have given them.
+
+WHAT WOULD ALSO MAKE THIS ROW GREEN, and where each is ruled out.
+
+ * The client prefers RAR whatever the order. `c8-polyglot-7z-then-rar`
+   is the mirror of this row and is the control: same two formats, same
+   stub, opposite order, and its end state is the 7z's member. A format
+   preference answers both rows with the same family; a positional rule
+   answers them differently. Both rows are needed and neither means much
+   alone.
+ * The second archive was never really an archive, so the client had one
+   candidate and nothing to decide. `sfx_payload_at` CONFIRMS a match
+   (a parseable header behind the magic) and steps over one it cannot,
+   so an unconfirmable tail would reduce this row to C9.
+   `container::tests::c8_is_two_confirmed_archives_and_the_client_settles_on_the_earlier`
+   asserts the tail is confirmed at its own offset AND opens to its own
+   member, in both orderings.
+ * The two readings deliver the same tree, so the grade cannot tell them
+   apart. They cannot: the second archive carries a member of its own
+   name and the row is graded on its EXACT tree, so a client that took
+   the later signature ends with `second-archive.bin` and no payload.
+
+MEASURED RATHER THAN ARGUED, 4 Sep 2026. `sfx_payload_at` was patched to
+return the LAST confirmed match instead of the first, and the suite run
+over C8 and C9 together: both C8 rows went red, each ending with
+`second-archive.bin` and neither payload, and `c9-leading-bytes-sfx-stub`
+stayed green - which is the control that says the sensitivity belongs to
+the polyglot and not to having touched the scan at all (C9 carries one
+archive, so its last match IS its first). The patch was reverted. The
+client's rule today is the rule these rows require, so nothing here
+pins a gap; what the experiment buys is that the row would notice if it
+stopped being.
+"""
+
+[source]
+files = [{ name = "twoways.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+leading_bytes = 4096
+polyglot = "7z"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

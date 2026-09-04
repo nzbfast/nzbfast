@@ -87,6 +87,18 @@ class NzbfastClient(private val baseUrl: String, private val apiKey: String) {
 
     fun serversConfigured(): Boolean = Parse.serversConfigured(api("mode=get_config"))
 
+    /**
+     * Force an update check now. NOTIFY ONLY: the daemon fetches its
+     * signed release manifest and reports a version, and nothing on
+     * either side downloads or installs anything. Null when the check
+     * did not answer - see [Parse.updateCheck].
+     *
+     * Called at most once a day from the foreground, never polled: this
+     * is the one call in the client that makes the daemon reach out to
+     * the internet, and the answer changes a few times a year.
+     */
+    fun updateCheck(): UpdateStatus? = Parse.updateCheck(api("mode=update_check"))
+
     /** Probe playability; 404 while nothing is downloadable yet. */
     fun probe(nzoId: String): ProbeResult? = try {
         Parse.probe(Http.get("$baseUrl/preview/probe/${Http.encode(nzoId)}", apiKey = apiKey))

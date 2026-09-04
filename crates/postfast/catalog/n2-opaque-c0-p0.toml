@@ -1,0 +1,50 @@
+# N2 over the neutral rest: opaque wire names, no container, no
+# recovery set. The baseline's diff is one table.
+
+[layout]
+name = "n2-opaque-c0-p0"
+seed = 2
+note = """
+The no-container obfuscation floor, and the row that states what a
+client can and cannot be asked for when a post carries no real name
+anywhere. One random token per file, the SAME token in the subject and
+in the yEnc name= line, which is the commoner shape in the wild and the
+one the no-RAR deobfuscation matrix sweeps.
+
+With no container and no recovery set there is no out-of-band carrier
+at all, so the real names were posted nowhere and no client on earth
+could recover them: the expectation is the TOKEN, and that is a
+requirement rather than a gap. The rows where a real name IS recoverable
+from an opaque post are the recovery plane's (P2 and P3), and this row
+is their control arm: it separates "the client read the name out of the
+recovery set" from "the client guessed something that happened to look
+right".
+
+Two files, the second under a directory, so the row also pins that the
+directory does not come back either. Small payload with small articles,
+because every profile here runs on every push.
+"""
+
+[source]
+files = [
+    { name = "opaque.bin", bytes = 262144 },
+    { name = "sample/opaque-sample.bin", bytes = 65536 },
+]
+
+[naming]
+wire = "opaque"
+
+[encoding]
+# 64 KiB articles rather than the default 768,000, so the payload can
+# stay small and the post still be multi-part. E6 is the article-size
+# parameter, not a variation on the emitted shape.
+article_bytes = 65536
+
+[expect]
+complete = true
+
+[expect.ladder]
+# No claim. Which rung identification reaches on a nameless post is
+# exactly what the census measures; guessing one here would be a claim
+# nothing measured.
+reaches = ""

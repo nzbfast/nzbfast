@@ -44,6 +44,7 @@ fn server(host: &str, level: u32) -> ServerConfig {
         max_source_ips: None,
         address_family: Default::default(),
         tls_hostname: None,
+        warm_reserve: None,
     }
 }
 

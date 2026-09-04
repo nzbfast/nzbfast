@@ -1,0 +1,65 @@
+# C5 + C2 on RAR4: a header-encrypted split set that is NOT stored.
+
+[layout]
+name = "c5-rar4-header-encrypted-split"
+seed = 187
+note = """
+Header encryption, compression and a volume split at once, on the RAR4
+generation. The file names are inside the encrypted headers, so a client
+that cannot derive the key cannot even list the set - and the payload is
+compressed as well as encrypted, so it has to run three things
+backwards to reach the bytes: join the volumes, derive the key, decode
+the stream.
+
+This shape was refused by name until 4 Sep 2026, and the refusal was
+WRONG rather than conservative. It said
+`rar15_40::write::write_header_encrypted_split_volumes` is reached only
+from `write_stored_volumes`, so a header-encrypted RAR4 volume set was
+stored-only. `write_compressed_volumes_impl` reaches it too and always
+has; nothing on either side of the vendor line tested that path, which
+is how the wrong reading survived a year of the writer being correct.
+The lesson is in the shape of the fix: the refusal was deleted and two
+tests were written, one on the single-member entry point and one on the
+plural.
+
+Both members are compressible, because a compressed selection over
+incompressible bytes is a C1 archive wearing a C3 name and the
+generator refuses that too.
+
+`volume_bytes` is deliberately large enough to give only TWO volumes,
+and that is a cost decision rather than a shape one. RAR 3.x header
+encryption derives a key per encrypted block with 262,144 SHA-1 rounds,
+and every file header and end-of-archive block in a volume set carries
+its own salt: at 700 bytes per volume this row was twelve volumes, ~24
+derivations and 57 seconds of oracle time, against about 16 at two
+volumes. The straddling member is still here - the second one crosses
+the cut - and the three-member straddle that a plural writer has to get
+right is c2-rar4-split-set-of-three-files, which costs a second.
+
+The password reaches the client through the NZB meta, as in every other
+encrypted row here - see c4-encrypted-rar5-data for why that is the
+only carrier the oracle leaves available, and why the salt is seeded.
+"""
+
+[source]
+files = [
+    { name = "hdr-split-a.bin", bytes = 20000, content = "compressible" },
+    { name = "hdr-split-b.bin", bytes = 20000, content = "compressible" },
+]
+
+[container]
+kind = "rar-compressed"
+version = "rar4"
+encryption = "header"
+password = "layout-fixture-pw"
+volume_bytes = 5000
+volume_style = "r00"
+
+[nzb]
+meta_password = true
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

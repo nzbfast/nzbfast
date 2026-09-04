@@ -1,0 +1,53 @@
+# G3, the join direction: raw halves on the wire, and a set that
+# describes only the JOINED file.
+
+[layout]
+name = "cc-n19-raw-split-join-named-by-the-set"
+seed = 1901
+note = """
+Expresses bench/capability-corpus leg n19-split-join.
+
+The MultiPar join shape, and the sharper of the plane's two directions.
+The wire carries two obfuscated halves and the recovery set describes
+ONE member: the whole joined file, at its full length, with block hashes
+over the whole of it. Nothing in the post says that the two wire files
+are ranges of that member - the client has to find it, which it can,
+because every block of the described file exists in the post at a
+block-aligned offset inside one half or the other.
+
+So the correct outcome costs NO recovery spend at all: a client with a
+sliding block scan harvests both halves and assembles the member from
+blocks it already has. A client without one sees a described member that
+matches no wire file, two unclaimed files that match no descriptor, and
+a job it cannot finish.
+
+Paired with cc-n18-raw-split-parts-named-by-the-set, which is the same
+cut with the set on the other side. Same parts on the wire, same file at
+the end; the whole difference is which side of the cut is described,
+which is why one plane carries both and one key selects between them.
+
+131,072 bytes cut in two is a 65,536-byte boundary against a
+32,768-byte block, so the alignment the harvest depends on is arithmetic
+rather than luck.
+"""
+
+[source]
+files = [{ name = "Joined.Feature.mkv", bytes = 131072, split = 2 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 32768
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 32768
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

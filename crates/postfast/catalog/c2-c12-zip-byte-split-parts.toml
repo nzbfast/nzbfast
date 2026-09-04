@@ -1,0 +1,67 @@
+# C2 + C12 + C1 + P1: a byte-split zip set - `.zip.001` onwards - with a
+# PAR2 set over the parts.
+
+[layout]
+name = "c2-c12-zip-byte-split-parts"
+seed = 181
+note = """
+Not a corpus leg: `r5-zip` is a single volume, and this row exists
+because the zip arm that closed it ALSO emits a split set, and an arm
+nothing grades is a claim rather than a fact. The 4 Sep 2026 round that
+built this plane found twelve of its thirteen defects in the checking
+machinery rather than in the generator, and the commonest shape was an
+assertion that covered less than it read as covering.
+
+A zip has TWO multi-part grammars and only one of them is emitted here.
+
+**Byte-split**, this row: the finished archive cut into fixed-size
+pieces named `.zip.001`, `.002`, ... `nzbkit::zip::Parts` opens the
+ordered files as one contiguous logical byte space and reads the
+container out of it, so concatenating the parts gives the archive back
+byte for byte. That makes the cut the format's own definition rather
+than this crate assembling a container by hand - the same argument a
+split 7z rests on, and the same function performs it. So `volume_bytes`
+means bytes of ARCHIVE per part on this kind, where on a rar kind it
+means payload bytes per volume.
+
+**WinZip-spanned**, not emitted: `.z01`, `.z02`, ... with the trailing
+`.zip` holding the central directory and therefore sorting LAST.
+`nzbkit::zip` reads that too, but it needs a spanning marker ahead of
+the first local header and a per-entry disk number in the central
+directory, and the zip crate's writer emits neither. Hand-assembling
+one would be a fixture that agrees with our own reader and with nothing
+else. There is no key that selects it, deliberately - a key nobody can
+select is worse than none - so the `volume_style` refusal names it,
+which is where an author asking for a different volume spelling would
+look.
+
+Two selections are refused beside this one. `volume_style` is C11 and a
+RAR plane. `volume_names = "opaque"` asks for a set nothing can
+reassemble, and a zip is worse off than a 7z here: the central
+directory sits at the END of the archive, so part one carries an index
+of nothing and every later part is raw bytes with no signature to sort
+on, while `nzbkit::zip`'s bare-numeric arm only admits a `.001` set
+whose FIRST part carries the magic.
+
+The end state is the payload file and the PAR2 index. Four parts go in
+and one file comes out, so a client that treated a part as a container
+of its own, or failed to order them, would land something other than
+`movie.bin`.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 24000 }]
+
+[container]
+kind = "zip-stored"
+volume_bytes = 8000
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

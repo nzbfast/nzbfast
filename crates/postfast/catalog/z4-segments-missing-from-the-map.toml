@@ -1,0 +1,52 @@
+# Z4: articles that were posted, and that the map does not mention.
+
+[layout]
+name = "z4-segments-missing-from-the-map"
+seed = 24
+note = """
+advF and advL in the adversarial corpus are both this shape: a post
+built correctly and then edited, with segments deleted from the NZB
+after the fact. It is what a re-generated or hand-pruned map produces,
+and it is NOT the same as a missing article - the server still has
+every one of them. The client simply has no id to ask for.
+
+So the hole is in the map and the fix has to come from the recovery
+set, which is why one is selected. Nothing else in the post can supply
+those bytes: the client cannot invent a message-id it was never given.
+
+Two rules the generator holds to, both of them load-bearing rather
+than tidy. Part 1 of every file survives, because a file whose whole
+map went missing is not a file with a hole - it is a file that is not
+in the post, which is a different row. And no .par2 segment is ever
+dropped: holing the recovery set is the fault plane's F4, and doing it
+here would disarm the exact thing the row needs in order to have an
+answer.
+
+The parity is cut to the block. One 8192-byte article goes missing
+from the map at this seed, which is two 4096-byte PAR2 blocks, and the
+set carries exactly two recovery blocks in two volumes - so the repair
+MUST fetch both, and "every volume arrives" is forced by arithmetic
+rather than observed from a client policy. With spare parity the
+client picks which volumes to pull, and a row naming particular volume
+files would be pinning that choice by accident and would go red the
+day it improved. See expects_repair in crates/postfast/src/layout.rs.
+"""
+
+[source]
+files = [{ name = "Pruned.Feature.mkv", bytes = 65536 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 12
+
+[encoding]
+article_bytes = 8192
+
+[nzb]
+drop_segments_pct = 20.0
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

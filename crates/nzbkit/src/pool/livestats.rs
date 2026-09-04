@@ -62,14 +62,96 @@ pub struct LiveStats {
     /// three ticks from fixing itself. A TYPED one never grows, so it
     /// binds at whatever number it holds.
     pub line_cap_auto: std::sync::atomic::AtomicBool,
+    /// TODO 275 item 7: the ceiling the in-run governor may walk this
+    /// fleet's cap to (`linecap::supply_ceiling`), in sockets.
+    /// `LINE_CAP_MAX_FLEET` for every install whose line anchor was
+    /// typed or absent, and the second ceiling - bounded by the
+    /// account's own grant - for one that MEASURED its line.
+    ///
+    /// Published so the "why is this slow?" surface asks the same
+    /// question the governor answers. `fleet_bound` convicts an
+    /// automatic cap only when it can no longer fix itself, and it used
+    /// to spell that as `cap < LINE_CAP_MAX_FLEET`; with a second
+    /// ceiling in the system that constant is no longer the bar for
+    /// every install, and a verdict written against it would name a cap
+    /// that is three ticks from raising itself.
+    ///
+    /// **Republished every governor tick, and it was not always.** It
+    /// shipped as a plain value seeded at build - "both inputs are
+    /// fixed when the fleet is built" - and that was true of the two
+    /// inputs `supply_ceiling` reads. It stopped being true the same
+    /// day, when TODO 275 item 7 gave the governor an arm that stands
+    /// the second ceiling back down to `linecap::LINE_CAP_MAX_FLEET`
+    /// for a run in which a provider has refused us for capacity. A
+    /// gauge frozen at build then read 100 while the governor was
+    /// pinned at 50 for the rest of the run, and `fleet_bound` -
+    /// reading exactly this field - declined to convict a cap that was
+    /// never going to fix itself.
+    ///
+    /// **What is mirrored here is the DURABLE half of the tick's
+    /// ceiling and deliberately not all of it.** The refusal arm is a
+    /// latch that is never cleared, so a ceiling it lowered stays
+    /// lowered and the "can this cap still fix itself" question has one
+    /// answer for the rest of the run. Item 10's held-span arm lowers
+    /// the same ceiling on a full holds ledger and is UNLATCHED on
+    /// purpose - a full ledger is a passing condition and the ceiling
+    /// comes back when it drains - so mirroring it here would flap this
+    /// gauge and convict a cap that really is three ticks from raising
+    /// itself, which is the original defect wearing the other hat. See
+    /// `Shared::line_cap_tick`, where the two are split.
+    pub line_cap_ceiling: AtomicUsize,
+    /// TODO 275 item 7: has a provider on this fleet refused us for
+    /// capacity at any point this run? Latched, never cleared, and
+    /// false until a fleet-cap tick has run at all (the rule off, or
+    /// no live target, returns before this).
+    ///
+    /// It is what `line_cap_ceiling` above cannot say on its own. A
+    /// ceiling of 50 on an account granting 50 and a ceiling of 50 on
+    /// an account granting 100 that refused us are the same number and
+    /// two different facts, and only one of them is worth telling a
+    /// reader about. Shipped as its own fact rather than re-derived at
+    /// the surface from the grant and the anchor, because
+    /// [`super::linecap::supply_ceiling`] is the one place those two
+    /// are read together and a second spelling of the stand-down rule
+    /// is the defect this repo repeats most.
+    ///
+    /// **Published for a TYPED cap as well as an automatic one**, which
+    /// is why `Shared::line_cap_tick` writes it above the governor's
+    /// arm rather than inside. A typed cap has no ceiling for a refusal
+    /// to stand down, so `line_cap_ceiling` keeps what it was seeded
+    /// with there - but `whyslow` convicts a typed cap MORE readily (it
+    /// never grows, so the "can it still fix itself" test is skipped
+    /// for it), and the remedy it then offers is the same one this
+    /// receipt exists to withhold.
+    ///
+    /// **Run-level and not per-server, for the reason the cap itself
+    /// is.** The arm asks `any`: one refusing account stands the whole
+    /// fleet down, because the ceiling sizes a whole-fleet socket
+    /// budget it cannot aim at the servers that are not refusing. A
+    /// per-server flag here would invite a reader to think the cap was
+    /// aimed at that host.
+    ///
+    /// **Shape-agnostic, which is the point.** `ServerLive::note_cap`
+    /// is skipped for a source-address refusal on purpose (Codex sweep
+    /// 5, M9: the sessions held at a `481 max simultaneous IP
+    /// addresses reached` are an incidental count, not the account's
+    /// connection ceiling, and "lower your connection count" is not the
+    /// remedy), and `ServerLive::refusal` is cleared the moment a
+    /// session is granted. So before this field one of the two capacity
+    /// shapes left no trace any surface could read, while both stood
+    /// the ceiling down. This says only what the ceiling arm itself
+    /// asks - this account said no, for capacity, at some point - and
+    /// nothing about a connection count.
+    pub line_cap_refused: std::sync::atomic::AtomicBool,
     /// TODO 312 item 7: the STALE auto-tune knee holding this fleet
     /// under its own ceiling, `None` when none is
     /// ([`super::linecap::seed_knee`]).
     ///
-    /// A PLAIN field and not a gauge, unlike the three above it, and
+    /// A PLAIN field and not a gauge, unlike every field above it, and
     /// the difference is real rather than an oversight: the cap is
-    /// walked by the in-run governor, so a surface has to read what it
-    /// holds NOW, while a knee is applied when the fleet is BUILT and
+    /// walked by the in-run governor and so, since TODO 275 item 7, is
+    /// its ceiling - a surface has to read what those hold NOW, while a
+    /// knee is applied when the fleet is BUILT and
     /// nothing in the run moves it. An atomic for a value that cannot
     /// change is an invitation to a writer, and a knee that moved
     /// mid-run would be describing a fleet that had already been
@@ -542,7 +624,12 @@ impl LiveStats {
             race: Default::default(),
             line_cap_fleet: AtomicUsize::new(super::linecap::seed_cap(servers)),
             line_cap_configured: AtomicUsize::new(super::linecap::seed_uncapped(servers)),
+            line_cap_ceiling: AtomicUsize::new(super::linecap::supply_ceiling(
+                super::linecap::seed_anchor_measured(servers),
+                super::linecap::seed_uncapped(servers),
+            )),
             line_cap_auto: std::sync::atomic::AtomicBool::new(super::linecap::seed_auto(servers)),
+            line_cap_refused: std::sync::atomic::AtomicBool::new(false),
             line_cap_knee: super::linecap::seed_knee(servers),
             line_carry_bps: AtomicU64::new(0),
         })

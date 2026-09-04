@@ -58,7 +58,7 @@ cd "$(dirname "$0")/../.."
 # A row added here needs a matching entry wherever the icon is declared -
 # web/site.webmanifest for an install icon, a <link rel="icon"> in
 # web/dashboard.html and web/wall.html for a browser one - and an arm in
-# crates/nzbfast/src/serve/assets.rs to serve it. The gate refuses the tree
+# crates/nzbfast-api/src/assets.rs to serve it. The gate refuses the tree
 # until it has them.
 DERIVATIONS="
 packaging/icon/icon-small.svg     web/icons/favicon-16.png            16

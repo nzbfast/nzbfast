@@ -94,7 +94,7 @@ impl DecodeTables {
             .any(|&length| length != 0 && length != 4);
         Ok(Self {
             main: HuffmanTable::from_lengths(&lengths.main)?,
-            distance: HuffmanTable::from_lengths(&lengths.distance)?,
+            distance: HuffmanTable::from_distance_lengths(&lengths.distance)?,
             align: HuffmanTable::from_lengths(&lengths.align)?,
             length: HuffmanTable::from_lengths(&lengths.length)?,
             align_mode,
@@ -1436,21 +1436,38 @@ fn length_slot_for_match(length: usize) -> Result<(usize, usize)> {
     Err(Error::InvalidData("RAR 5 match length is too long"))
 }
 
+/// The inverse of `slot_to_distance`: the slot whose window contains
+/// `distance`, and the extra bits within it.
+///
+/// The window is computed in `u64` for the same reason `distance_wide` is:
+/// the top slot's base is `(3 << 31) + 1`, half again past 2^32, and its
+/// `max` is 2^33 exactly, so on a 32-bit target both the base and the
+/// `base + (1 << bit_count) - 1` above it overflow a `usize` - and they do
+/// so for slots the loop must EVALUATE on its way to the small one that
+/// actually matches. `distance` is a `usize`
+/// and cannot exceed either bound, so widening the window rather than the
+/// needle is enough, and the subtraction below is then in range by
+/// construction.
 fn distance_slot_for_match(distance: usize, distance_size: usize) -> Result<(usize, usize)> {
     if distance == 0 {
         return Err(Error::InvalidData("RAR 5 match distance is zero"));
     }
+    let needle = distance as u64;
     for slot in 0..distance_size {
         let bit_count = distance_slot_bit_count(slot)?;
-        let base = slot_to_distance(slot, 0)?;
+        let base = if slot < 4 {
+            slot as u64 + 1
+        } else {
+            distance_wide(slot, bit_count as u8, 0)
+        };
         let max = base
             + if bit_count == 0 {
                 0
             } else {
-                (1usize << bit_count) - 1
+                (1u64 << bit_count) - 1
             };
-        if distance >= base && distance <= max {
-            return Ok((slot, distance - base));
+        if needle >= base && needle <= max {
+            return Ok((slot, (needle - base) as usize));
         }
     }
     Err(Error::InvalidData("RAR 5 match distance is too large"))
@@ -1743,25 +1760,34 @@ impl Unpack50Decoder {
             while bits.position() < block_header.payload_bits && output.len() < output_size {
                 // Literal burst on the LUT fast path (the buffered mirror of
                 // StreamingOutput::literal_burst): decode LUT-hit literals in
-                // a tight loop, falling back to the full dispatch below at the
-                // first non-literal or non-LUT symbol. This is the hot path
-                // for incompressible spans, where nearly every symbol is a
-                // literal with a short code.
+                // a tight loop. A LUT-hit control symbol is consumed and handed
+                // straight to the dispatch below, avoiding a second peek and
+                // LUT lookup for every common match; a non-LUT symbol falls
+                // back to the canonical decoder. This is the hot path for
+                // incompressible spans and the entry to every short-code match.
+                let mut burst_control = None;
                 while output.len() < output_size && bits.position() < block_header.payload_bits {
-                    let Some(peek) = bits.peek15() else {
-                        break;
-                    };
-                    let entry = tables.main.lut[usize::from(peek >> (15 - HUFF_LUT_BITS))];
-                    if entry == 0 || (entry >> 8) > 255 {
+                    let entry = tables.main.peek_lut_entry(&mut bits);
+                    if !lut_entry_is_literal(entry) {
+                        if entry != HUFF_LUT_MISS {
+                            bits.consume((entry & HUFF_LUT_LENGTH_MASK) as u8);
+                            burst_control = Some(lut_entry_symbol(entry));
+                        }
                         break;
                     }
-                    bits.consume((entry & 0xff) as u8);
+                    bits.consume((entry & HUFF_LUT_LENGTH_MASK) as u8);
                     output.push((entry >> 8) as u8);
                 }
-                if bits.position() >= block_header.payload_bits || output.len() >= output_size {
+                if output.len() >= output_size
+                    || (burst_control.is_none()
+                        && bits.position() >= block_header.payload_bits)
+                {
                     break;
                 }
-                let symbol = tables.main.decode(&mut bits)?;
+                let symbol = match burst_control {
+                    Some(symbol) => symbol,
+                    None => tables.main.decode(&mut bits)?,
+                };
                 match symbol {
                     0..=255 => output.push(symbol as u8),
                     256 if mode.uses_lz() => {
@@ -1804,7 +1830,12 @@ impl Unpack50Decoder {
                         let length_slot = symbol - 262;
                         let length_extra = bits.read_bits(length_slot_extra_bits(length_slot)?)?;
                         let mut length = slot_to_length(length_slot, length_extra)?;
+                        #[cfg(feature = "parallel")]
+                        let (distance_slot, distance_bit_count) =
+                            tables.distance.decode_distance_hot(&mut bits)?;
+                        #[cfg(not(feature = "parallel"))]
                         let distance_slot = tables.distance.decode(&mut bits)?;
+                        #[cfg(not(feature = "parallel"))]
                         let distance_bit_count = distance_slot_bit_count(distance_slot)?;
                         let distance_extra = if distance_bit_count >= 4 && tables.align_mode {
                             let high = bits.read_bits((distance_bit_count - 4) as u8)?;
@@ -1907,7 +1938,7 @@ impl Unpack50Decoder {
         // Gated to non-solid members <= flat_limit; everything else (solid,
         // over-limit, non-parallel builds) keeps the streaming-MT/serial path.
         #[cfg(feature = "parallel")]
-        if self.use_flat_mode(output_size, solid, flat_limit) {
+        if self.use_flat_mode(flat_plan_bytes(0, output_size, history_limit), output_size, solid, flat_limit) {
             debug_assert!(
                 self.history_window_len() == 0,
                 "flat mode is gated to non-solid members, which carry no history"
@@ -2059,7 +2090,7 @@ impl Unpack50Decoder {
         // so taking this path would silently drop it and reject any match
         // reaching into it - the streaming path below honors it.
         if self.history_zero_prefix == 0
-            && (total_output_size as u64).saturating_add(self.history_window_len() as u64)
+            && flat_plan_bytes(self.history_window_len(), total_output_size, history_limit) as u64
                 <= flat_limit
         {
             let mut flat = FlatOutput::new_seeded(
@@ -2191,6 +2222,33 @@ impl Unpack50Decoder {
         output_limit: usize,
         dictionary_size: usize,
     ) -> Result<()> {
+        // The common match - short, a stride or more back, sourced from
+        // this member's own output, under the limits - is appended as
+        // fixed 16-byte words and trimmed, so it is a handful of inlined
+        // stores rather than a `memmove` libcall: on a 1,600-file -m3 set
+        // those calls were 24% of the decoder's CPU (members under the
+        // parallel threshold decode here, one per member-pool worker;
+        // research/RAR-PERF-AUDIT-2026-09-02.md, round 6). Reading each
+        // word after the previous one landed keeps the overlapped-match
+        // semantics exact for distance >= 16. Every guard below is false
+        // for a match this accepts, so the two paths agree.
+        let start = output.len();
+        if length <= 64
+            && distance >= 16
+            && distance <= start
+            && distance <= dictionary_size
+            && start + length <= output_limit
+        {
+            let mut src = start - distance;
+            let end = start + length;
+            while output.len() < end {
+                let word: [u8; 16] = output[src..src + 16].try_into().expect("16-byte word");
+                output.extend_from_slice(&word);
+                src += 16;
+            }
+            output.truncate(end);
+            return Ok(());
+        }
         if distance > dictionary_size {
             return Err(Error::InvalidData(
                 "RAR 5 match distance exceeds dictionary",
@@ -2314,8 +2372,9 @@ struct StreamingOutput {
     filter_scratch: Vec<u8>,
     /// The delta filter's working buffer, kept alongside `filter_scratch`
     /// so a member full of delta blocks allocates once rather than once
-    /// per block. Never read outside `apply_filter_to_range`.
-    /// (nzbfast-local change, 20 Aug 2026 - see vendor/rars/VENDORING.md.)
+    /// per block. Never read outside the filter-apply helpers.
+    /// (nzbfast-local change, 20 Aug and 3 Sep 2026 - see
+    /// vendor/rars/VENDORING.md.)
     delta_scratch: Vec<u8>,
     next_flush_check: usize,
 }
@@ -2546,18 +2605,18 @@ impl StreamingOutput {
     }
 
     /// Decode a run of LUT-hit literals in a tight loop, storing straight
-    /// into the ring. Stops (without consuming) at the first non-literal or
-    /// non-LUT symbol, at the payload/output boundary, or when a flush is
-    /// due — the caller's full dispatch handles whatever comes next. This is
-    /// the hot path for incompressible spans, where nearly every symbol is
-    /// a literal with an 8-10 bit code.
+    /// into the ring. A LUT-hit control symbol is consumed and returned to the
+    /// caller, so its full dispatch does not repeat the same peek and LUT load;
+    /// a non-LUT symbol is left untouched for canonical decoding. Stops at the
+    /// payload/output boundary or when a flush is due. This is the hot path for
+    /// incompressible spans and the entry to every short-code match.
     fn literal_burst<E>(
         &mut self,
         table: &HuffmanTable,
         bits: &mut BitReader<'_>,
         payload_bits: usize,
         sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
-    ) -> std::result::Result<(), StreamDecodeError<E>> {
+    ) -> std::result::Result<Option<usize>, StreamDecodeError<E>> {
         loop {
             let flush_room = self.next_flush_check.saturating_sub(self.head);
             let out_room = self.output_limit.saturating_sub(self.written);
@@ -2567,25 +2626,25 @@ impl StreamingOutput {
             }
             let mut remaining = flush_room.min(out_room);
             if remaining == 0 {
-                return Ok(());
+                return Ok(None);
             }
             self.reserve(self.head + remaining);
             let mut zero_acc = true;
             while remaining != 0 {
                 if bits.position() >= payload_bits {
                     self.all_zero &= zero_acc;
-                    return Ok(());
+                    return Ok(None);
                 }
-                let Some(peek) = bits.peek15() else {
+                let entry = table.peek_lut_entry(bits);
+                if !lut_entry_is_literal(entry) {
                     self.all_zero &= zero_acc;
-                    return Ok(());
-                };
-                let entry = table.lut[usize::from(peek >> (15 - HUFF_LUT_BITS))];
-                if entry == 0 || (entry >> 8) > 255 {
-                    self.all_zero &= zero_acc;
-                    return Ok(());
+                    if entry != HUFF_LUT_MISS {
+                        bits.consume((entry & HUFF_LUT_LENGTH_MASK) as u8);
+                        return Ok(Some(lut_entry_symbol(entry)));
+                    }
+                    return Ok(None);
                 }
-                bits.consume((entry & 0xff) as u8);
+                bits.consume((entry & HUFF_LUT_LENGTH_MASK) as u8);
                 let byte = (entry >> 8) as u8;
                 self.ring[self.head & self.mask] = byte;
                 self.head += 1;
@@ -2939,7 +2998,7 @@ impl StreamingOutput {
                 // `filter.start` is a group position in a chain; the filter
                 // wants the offset inside its own member, pinned at
                 // declaration by `add_filter`.
-                apply_filter_to_range(
+                apply_filter_to_vec(
                     &mut self.filter_scratch,
                     &held.filter,
                     held.filter.file_start,
@@ -3024,11 +3083,16 @@ fn decode_block_serial<E>(
     sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
 ) -> std::result::Result<(), StreamDecodeError<E>> {
     while bits.position() < payload_bits && output.written() < output_size {
-        output.literal_burst(&tables.main, bits, payload_bits, sink)?;
-        if bits.position() >= payload_bits || output.written() >= output_size {
+        let burst_control = output.literal_burst(&tables.main, bits, payload_bits, sink)?;
+        if output.written() >= output_size
+            || (burst_control.is_none() && bits.position() >= payload_bits)
+        {
             break;
         }
-        let symbol = tables.main.decode(bits)?;
+        let symbol = match burst_control {
+            Some(symbol) => symbol,
+            None => tables.main.decode(bits)?,
+        };
         match symbol {
             0..=255 => output.push(symbol as u8, sink)?,
             256 => {
@@ -3060,7 +3124,12 @@ fn decode_block_serial<E>(
                 let length_slot = symbol - 262;
                 let length_extra = bits.read_bits(length_slot_extra_bits(length_slot)?)?;
                 let mut length = slot_to_length(length_slot, length_extra)?;
+                #[cfg(feature = "parallel")]
+                let (distance_slot, distance_bit_count) =
+                    tables.distance.decode_distance_hot(bits)?;
+                #[cfg(not(feature = "parallel"))]
                 let distance_slot = tables.distance.decode(bits)?;
+                #[cfg(not(feature = "parallel"))]
                 let distance_bit_count = distance_slot_bit_count(distance_slot)?;
                 let distance_extra = if distance_bit_count >= 4 && tables.align_mode {
                     let high = bits.read_bits((distance_bit_count - 4) as u8)?;
@@ -3101,8 +3170,18 @@ fn decode_block_serial<E>(
 // errors deferred and swallowed unless the member genuinely needs them.
 // ---------------------------------------------------------------------------
 
+/// Hard ceiling on tape workers; the execution policy's `max_workers`
+/// (2 on a constrained host, 8 otherwise) caps BELOW this, never above it,
+/// so this must not sit under what the policy would grant. It was 4 from
+/// the first MT commit, and "4 -> 8 measured zero" held only while the
+/// ring chain scanned inline on the apply thread: with the scan on its own
+/// thread the apply thread waited on tapes 17% of the time at 4 workers,
+/// and 8 took a 1 GiB -m3 member from 1.44 s to 1.32 s on a 20-core M1
+/// Ultra (12 was no better; +15 MB peak RSS). Worst-case tape memory is
+/// bounded per worker by `TAPE_OPS_CAP` / `TAPE_LITS_CAP`
+/// (research/RAR-PERF-AUDIT-2026-09-02.md).
 #[cfg(feature = "parallel")]
-const MT_MAX_WORKERS: usize = 4;
+const MT_MAX_WORKERS: usize = 8;
 /// Members below this size decode serially: thread spinup and tape overhead
 /// only pay for themselves on bulk decodes.
 #[cfg(all(feature = "parallel", not(test)))]
@@ -3125,6 +3204,11 @@ const TAPE_OPS_CAP: usize = 1 << 10;
 const TAPE_LITS_CAP: usize = 4 << 20;
 #[cfg(all(feature = "parallel", test))]
 const TAPE_LITS_CAP: usize = 16 << 10;
+/// A hostile block can grow a tape bundle far beyond useful steady-state
+/// sizes. The channel retains at most one 4 MiB bundle per worker (32 MiB at
+/// the eight-worker ceiling), while normal smaller blocks remain reusable.
+#[cfg(feature = "parallel")]
+const TAPE_RECYCLE_BYTES_MAX: usize = 4 << 20;
 
 #[cfg(feature = "parallel")]
 // `MT_MIN_OUTPUT` is cfg-dependent and deliberately 0 under `test`, so the
@@ -3142,19 +3226,110 @@ fn mt_worker_count(output_size: usize) -> usize {
         .min(MT_MAX_WORKERS)
 }
 
+/// Tape op kinds. `TapeOp` is a plain struct rather than a Rust enum, so
+/// the kind is a field; see the type's comment for why.
+#[cfg(feature = "parallel")]
+mod tape_kind {
+    /// Emit the next `length` bytes from the tape's literal buffer.
+    pub(super) const LITS: u32 = 0;
+    /// Fully resolved match (symbol 262..).
+    pub(super) const MATCH: u32 = 1;
+    /// Repeat-distance match (symbols 258..=261); `distance` carries the rep
+    /// INDEX (0..=3), resolved against the live rep state at apply.
+    pub(super) const REP: u32 = 2;
+    /// Symbol 257: reuse the last distance and length (no-op when none yet).
+    pub(super) const REP_LAST: u32 = 3;
+    /// Symbol 256: filter declaration; the payload is the next entry of
+    /// `BlockTape::filters` and its start offset resolves at apply.
+    pub(super) const FILTER: u32 = 4;
+}
+
+/// One op on a worker's tape: 8 bytes, both fields naturally aligned.
+///
+/// This was a Rust enum until 3 Sep 2026, and the enum shape was the single
+/// most expensive thing in the tape worker. Its widest variant was
+/// `Filter(RawFilter)`, the worker built each op inside a
+/// `Result<Option<TapeOp>>`, and the compiler assembled and then re-read
+/// that aggregate with OVERLAPPING unaligned stack moves - a 4-byte store
+/// at `0x20(%rsp)` followed by a 4-byte load at `0x21(%rsp)`, which no
+/// store buffer can forward. A `perf` profile of the -m3 leg on an EPYC put
+/// **38% of the whole worker** on the two instructions that consumed those
+/// reloads (research/RAR-PERF-AUDIT-2026-09-02.md, round 13). Keeping the
+/// filter payload out of band (`BlockTape::filters`, one entry per FILTER
+/// op, in order) is what lets every op be this flat, and takes the op from
+/// 16 bytes to 8 as well (round 6 had taken it 24 -> 16).
+///
+/// `kind_length` packs the kind into the top `TAPE_KIND_SHIFT` bits and the
+/// length below it. Both are bounded by the format, not by hope: a length
+/// slot is under `LENGTH_TABLE_SIZE` (44) in every RAR 5 and RAR 7 table, so
+/// `slot_to_length` yields at most 4,097 plus a bonus of 3, and a literal
+/// run is capped at `TAPE_LITS_CAP`. `min` is belt and braces so a
+/// malformed stream can never carry a length into the kind bits.
+///
+/// `distance`: a distance the window can hold is under the 1 GiB stream
+/// window limit; a stream distance past `u32::MAX` (a RAR 7
+/// giant-dictionary archive, which the window limit refuses anyway)
+/// saturates and errors as "exceeds dictionary". For a `REP` op it carries
+/// the rep INDEX instead.
 #[cfg(feature = "parallel")]
 #[derive(Debug, Clone, Copy)]
-enum TapeOp {
-    /// Emit the next `n` bytes from the tape's literal buffer.
-    Lits(u32),
-    /// Fully resolved match (symbol 262..).
-    Match { distance: usize, length: usize },
-    /// Repeat-distance match (symbols 258..=261); distance resolved at apply.
-    Rep { index: u8, length: usize },
-    /// Symbol 257: reuse the last distance and length (no-op when none yet).
-    RepLast,
-    /// Symbol 256: filter declaration; start offset resolved at apply.
-    Filter(RawFilter),
+#[repr(C)]
+struct TapeOp {
+    kind_length: u32,
+    distance: u32,
+}
+
+/// Bit position of the kind inside `TapeOp::kind_length`.
+#[cfg(feature = "parallel")]
+const TAPE_KIND_SHIFT: u32 = 29;
+#[cfg(feature = "parallel")]
+const TAPE_LENGTH_MASK: u32 = (1 << TAPE_KIND_SHIFT) - 1;
+
+#[cfg(feature = "parallel")]
+impl TapeOp {
+    #[inline]
+    fn new(kind: u32, length: u32, distance: u32) -> Self {
+        debug_assert!(length <= TAPE_LENGTH_MASK);
+        Self {
+            kind_length: (kind << TAPE_KIND_SHIFT) | length.min(TAPE_LENGTH_MASK),
+            distance,
+        }
+    }
+
+    #[inline]
+    fn kind(self) -> u32 {
+        self.kind_length >> TAPE_KIND_SHIFT
+    }
+
+    #[inline]
+    fn length(self) -> usize {
+        (self.kind_length & TAPE_LENGTH_MASK) as usize
+    }
+
+    #[inline]
+    fn lits(count: u32) -> Self {
+        Self::new(tape_kind::LITS, count, 0)
+    }
+
+    #[inline]
+    fn match_at(distance: u32, length: u32) -> Self {
+        Self::new(tape_kind::MATCH, length, distance)
+    }
+
+    #[inline]
+    fn rep(index: u32, length: u32) -> Self {
+        Self::new(tape_kind::REP, length, index)
+    }
+
+    #[inline]
+    fn rep_last() -> Self {
+        Self::new(tape_kind::REP_LAST, 0, 0)
+    }
+
+    #[inline]
+    fn filter() -> Self {
+        Self::new(tape_kind::FILTER, 0, 0)
+    }
 }
 
 /// Huffman table set whose LUT construction is deferred to the first worker
@@ -3194,16 +3369,55 @@ impl LazyDecodeTables {
         }
     }
 
-    fn get(&self) -> Result<std::sync::Arc<DecodeTables>> {
-        self.built
-            .get_or_init(|| {
-                let lengths = self
-                    .lengths
-                    .as_ref()
-                    .expect("unbuilt lazy tables always carry lengths");
-                DecodeTables::from_lengths(lengths).map(std::sync::Arc::new)
-            })
-            .clone()
+    fn get(&self) -> Result<&std::sync::Arc<DecodeTables>> {
+        match self.built.get_or_init(|| {
+            let lengths = self
+                .lengths
+                .as_ref()
+                .expect("unbuilt lazy tables always carry lengths");
+            DecodeTables::from_lengths(lengths).map(std::sync::Arc::new)
+        }) {
+            Ok(tables) => Ok(tables),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[derive(Default)]
+/// Allocation bundle returned from ordered apply to the scanner. Keeping the
+/// packed ops and out-of-band filter payloads with the other tape vectors lets
+/// one block reuse the complete allocation set without allocator traffic in
+/// the worker queues. (nzbfast-local change, 3 Sep 2026; see VENDORING.md.)
+struct TapeBuffers {
+    payload: Vec<u8>,
+    lits: Vec<u8>,
+    ops: Vec<TapeOp>,
+    filters: Vec<RawFilter>,
+}
+
+#[cfg(feature = "parallel")]
+impl TapeBuffers {
+    fn retained_bytes(&self) -> usize {
+        self.payload
+            .capacity()
+            .saturating_add(self.lits.capacity())
+            .saturating_add(
+                self.ops
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<TapeOp>()),
+            )
+            .saturating_add(
+                self.filters
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<RawFilter>()),
+            )
+    }
+
+    fn recycle(self, tx: &std::sync::mpsc::SyncSender<Self>) {
+        if self.retained_bytes() <= TAPE_RECYCLE_BYTES_MAX {
+            let _ = tx.try_send(self);
+        }
     }
 }
 
@@ -3211,7 +3425,7 @@ impl LazyDecodeTables {
 struct TapeJob {
     seq: usize,
     tables: std::sync::Arc<LazyDecodeTables>,
-    payload: Vec<u8>,
+    buffers: TapeBuffers,
     start_bit: usize,
     payload_bits: usize,
 }
@@ -3224,6 +3438,9 @@ struct BlockTape {
     payload_bits: usize,
     lits: Vec<u8>,
     ops: Vec<TapeOp>,
+    /// Filter payloads, one per `tape_kind::FILTER` op, in tape order (the
+    /// op itself is flat - see `TapeOp`).
+    filters: Vec<RawFilter>,
     /// Bit position where the worker parked (tape caps hit); the apply stage
     /// resumes this block with the serial decoder from here.
     resume_bit: Option<usize>,
@@ -3234,35 +3451,63 @@ struct BlockTape {
     tail_error: Option<Error>,
 }
 
+#[cfg(feature = "parallel")]
+impl BlockTape {
+    fn take_buffers(&mut self) -> TapeBuffers {
+        TapeBuffers {
+            payload: std::mem::take(&mut self.payload),
+            lits: std::mem::take(&mut self.lits),
+            ops: std::mem::take(&mut self.ops),
+            filters: std::mem::take(&mut self.filters),
+        }
+    }
+}
+
 /// Huffman-decode one block's symbol stream into an op tape (worker side;
 /// no window, no rep state, no sink).
 #[cfg(feature = "parallel")]
 fn decode_block_tape(job: TapeJob) -> BlockTape {
+    let TapeJob {
+        seq,
+        tables: lazy_tables,
+        buffers,
+        start_bit,
+        payload_bits,
+    } = job;
+    let TapeBuffers {
+        payload,
+        mut lits,
+        mut ops,
+        mut filters,
+    } = buffers;
+    lits.clear();
+    ops.clear();
+    filters.clear();
+
     // First use of a table set builds it here, off the scanner's critical
     // path. A build failure yields an empty tape carrying the error: the
     // ordered apply raises it only if the member still needs output when it
     // reaches this block - the serial decoder would have built (and failed)
     // these tables at exactly that point in the stream, and never at all if
     // the output completed first.
-    let tables = match job.tables.get() {
+    let tables = match lazy_tables.get() {
         Ok(tables) => tables,
         Err(error) => {
             return BlockTape {
-                seq: job.seq,
-                tables: job.tables,
-                payload: job.payload,
-                payload_bits: job.payload_bits,
-                lits: Vec::new(),
-                ops: Vec::new(),
+                seq,
+                tables: lazy_tables,
+                payload,
+                payload_bits,
+                lits,
+                ops,
+                filters,
                 resume_bit: None,
                 tail_error: Some(error),
             }
         }
     };
-    let tables = &*tables;
-    let mut bits = BitReader::new_at(&job.payload, job.start_bit);
-    let mut lits: Vec<u8> = Vec::new();
-    let mut ops: Vec<TapeOp> = Vec::new();
+    let tables = &**tables;
+    let mut bits = BitReader::new_at(&payload, start_bit);
     let mut lit_run: u32 = 0;
     let mut resume_bit = None;
     let mut tail_error = None;
@@ -3270,13 +3515,13 @@ fn decode_block_tape(job: TapeJob) -> BlockTape {
     macro_rules! flush_lits {
         () => {
             if lit_run != 0 {
-                ops.push(TapeOp::Lits(lit_run));
+                ops.push(TapeOp::lits(lit_run));
                 lit_run = 0;
             }
         };
     }
 
-    'blocks: while bits.position() < job.payload_bits {
+    'blocks: while bits.position() < payload_bits {
         if ops.len() >= TAPE_OPS_CAP || lits.len() >= TAPE_LITS_CAP {
             flush_lits!();
             resume_bit = Some(bits.position());
@@ -3284,99 +3529,202 @@ fn decode_block_tape(job: TapeJob) -> BlockTape {
         }
         // Literal burst on the LUT fast path (the mirror of
         // StreamingOutput::literal_burst, decoding into the tape buffer).
+        // Consume and retain a LUT-hit control so the packed-op decoder below
+        // does not repeat its peek and LUT lookup; a long-code miss stays
+        // untouched for canonical decoding.
         let burst_limit = lits.len() + (64 << 10);
+        let mut burst_control = None;
         while lits.len() < burst_limit {
-            if bits.position() >= job.payload_bits {
+            if bits.position() >= payload_bits {
                 flush_lits!();
                 break 'blocks;
             }
-            let Some(peek) = bits.peek15() else {
-                break;
-            };
-            let entry = tables.main.lut[usize::from(peek >> (15 - HUFF_LUT_BITS))];
-            if entry == 0 || (entry >> 8) > 255 {
+            let entry = tables.main.peek_lut_entry(&mut bits);
+            if !lut_entry_is_literal(entry) {
+                if entry != HUFF_LUT_MISS {
+                    bits.consume((entry & HUFF_LUT_LENGTH_MASK) as u8);
+                    burst_control = Some(lut_entry_symbol(entry));
+                }
                 break;
             }
-            bits.consume((entry & 0xff) as u8);
+            bits.consume((entry & HUFF_LUT_LENGTH_MASK) as u8);
             lits.push((entry >> 8) as u8);
             lit_run += 1;
         }
         if lits.len() >= burst_limit {
             continue;
         }
-        let symbol = match tables.main.decode(&mut bits) {
-            Ok(symbol) => symbol,
+        let symbol = match burst_control {
+            Some(symbol) => symbol,
+            None => match tables.main.decode(&mut bits) {
+                Ok(symbol) => symbol,
+                Err(error) => {
+                    flush_lits!();
+                    tail_error = Some(error);
+                    break;
+                }
+            },
+        };
+        if symbol < 256 {
+            // Literal that missed the LUT (long code): decoded via the
+            // canonical fallback inside decode().
+            lits.push(symbol as u8);
+            lit_run += 1;
+            continue;
+        }
+        // The op is decoded into a flat local and pushed here rather than
+        // returned out of a `Result<Option<TapeOp>>` closure: that aggregate
+        // is what the compiler was assembling and re-reading with
+        // overlapping unaligned stack moves (see `TapeOp`).
+        let op = match decode_tape_op(symbol, tables, &mut bits, &mut filters) {
+            Ok(op) => op,
             Err(error) => {
                 flush_lits!();
                 tail_error = Some(error);
                 break;
             }
         };
-        let step = (|| -> Result<Option<TapeOp>> {
-            Ok(match symbol {
-                0..=255 => None,
-                256 => Some(TapeOp::Filter(read_filter_raw(&mut bits)?)),
-                257 => Some(TapeOp::RepLast),
-                258..=261 => {
-                    let length_slot = tables.length.decode(&mut bits)?;
-                    let length_extra = bits.read_bits(length_slot_extra_bits(length_slot)?)?;
-                    let length = slot_to_length(length_slot, length_extra)?;
-                    Some(TapeOp::Rep {
-                        index: (symbol - 258) as u8,
-                        length,
-                    })
-                }
-                262.. => {
-                    let length_slot = symbol - 262;
-                    let length_extra = bits.read_bits(length_slot_extra_bits(length_slot)?)?;
-                    let mut length = slot_to_length(length_slot, length_extra)?;
-                    let distance_slot = tables.distance.decode(&mut bits)?;
-                    let distance_bit_count = distance_slot_bit_count(distance_slot)?;
-                    let distance_extra = if distance_bit_count >= 4 && tables.align_mode {
-                        let high = bits.read_bits((distance_bit_count - 4) as u8)?;
-                        let low = tables.align.decode(&mut bits)? as u32;
-                        (high << 4) | low
-                    } else {
-                        bits.read_bits(distance_bit_count as u8)?
-                    };
-                    let distance = slot_to_distance(distance_slot, distance_extra)?;
-                    length += length_bonus(distance);
-                    Some(TapeOp::Match { distance, length })
-                }
-            })
-        })();
-        match step {
-            Ok(None) => {
-                // Literal that missed the LUT (long code): decoded via the
-                // canonical fallback inside decode().
-                lits.push(symbol as u8);
-                lit_run += 1;
-            }
-            Ok(Some(op)) => {
-                flush_lits!();
-                ops.push(op);
-            }
-            Err(error) => {
-                flush_lits!();
-                tail_error = Some(error);
-                break;
-            }
-        }
+        flush_lits!();
+        ops.push(op);
     }
     if lit_run != 0 {
-        ops.push(TapeOp::Lits(lit_run));
+        ops.push(TapeOp::lits(lit_run));
     }
 
     BlockTape {
-        seq: job.seq,
-        tables: job.tables,
-        payload: job.payload,
-        payload_bits: job.payload_bits,
+        seq,
+        tables: lazy_tables,
+        payload,
+        payload_bits,
         lits,
         ops,
+        filters,
         resume_bit,
         tail_error,
     }
+}
+
+/// Decode one non-literal symbol's operands into a tape op (worker side).
+///
+/// `symbol` is 256 or above; literals never reach here. A filter's payload
+/// is appended to `filters` and the op itself carries only the kind, which
+/// keeps `TapeOp` flat - see its comment.
+#[cfg(feature = "parallel")]
+#[inline]
+fn decode_tape_op(
+    symbol: usize,
+    tables: &DecodeTables,
+    bits: &mut BitReader<'_>,
+    filters: &mut Vec<RawFilter>,
+) -> Result<TapeOp> {
+    match symbol {
+        256 => {
+            filters.push(read_filter_raw(bits)?);
+            Ok(TapeOp::filter())
+        }
+        257 => Ok(TapeOp::rep_last()),
+        258..=261 => {
+            let length_slot = tables.length.decode(bits)?;
+            let length = read_slot_length(length_slot, bits)?;
+            Ok(TapeOp::rep((symbol - 258) as u32, length))
+        }
+        _ => {
+            let length_slot = symbol - 262;
+            let length = read_slot_length(length_slot, bits)?;
+            let (distance_slot, distance_bit_count) =
+                tables.distance.decode_distance_hot(bits)?;
+            let distance_extra = if distance_bit_count >= 4 && tables.align_mode {
+                let high = bits.read_bits(distance_bit_count - 4)?;
+                let low = tables.align.decode(bits)? as u32;
+                (high << 4) | low
+            } else {
+                bits.read_bits(distance_bit_count)?
+            };
+            let distance = slot_distance_value(distance_slot, distance_bit_count, distance_extra);
+            Ok(TapeOp::match_at(
+                u32::try_from(distance).unwrap_or(u32::MAX),
+                length + length_bonus(distance) as u32,
+            ))
+        }
+    }
+}
+
+/// Extra-bit count for every length slot, and the corresponding low
+/// `4 | (slot & 3)` base. The slot is a symbol of a `LENGTH_TABLE_SIZE`
+/// table (or `symbol - 262` off a `MAIN_TABLE_SIZE` one, which is the same
+/// range), so the whole ladder is 44 entries wide in RAR 5 and RAR 7 alike.
+#[cfg(feature = "parallel")]
+static LENGTH_SLOT_EXTRA_BITS: [u8; LENGTH_TABLE_SIZE] = build_length_slot_extra_bits();
+
+#[cfg(feature = "parallel")]
+const fn build_length_slot_extra_bits() -> [u8; LENGTH_TABLE_SIZE] {
+    let mut table = [0u8; LENGTH_TABLE_SIZE];
+    let mut slot = 8;
+    while slot < LENGTH_TABLE_SIZE {
+        table[slot] = ((slot >> 2) - 1) as u8;
+        slot += 1;
+    }
+    table
+}
+
+/// Read one length slot's extra bits and form the length, in one pass.
+///
+/// `length_slot_extra_bits` + `slot_to_length` recomputed `(slot >> 2) - 1`
+/// and its range check twice per match and re-checked an `extra_bits` value
+/// that `read_bits` had just produced with exactly that width, so it could
+/// not be out of range (round 13). The table lookup is the range check.
+#[cfg(feature = "parallel")]
+#[inline]
+fn read_slot_length(slot: usize, bits: &mut BitReader<'_>) -> Result<u32> {
+    let Some(&extra_bits) = LENGTH_SLOT_EXTRA_BITS.get(slot) else {
+        return Err(Error::InvalidData("RAR 5 length slot is too large"));
+    };
+    let extra = bits.read_bits(extra_bits)?;
+    if slot < 8 {
+        return Ok(slot as u32 + 2);
+    }
+    Ok((((4 | (slot as u32 & 3)) << extra_bits) | extra) + 2)
+}
+
+/// Extra-bit count for every distance slot, `u8::MAX` where the slot is out
+/// of the format's range (RAR 7 tables reach slot 79, whose count exceeds
+/// the 31 a distance may use).
+#[cfg(feature = "parallel")]
+static DISTANCE_SLOT_BITS: [u8; DISTANCE_TABLE_SIZE_70] = build_distance_slot_bits();
+
+#[cfg(feature = "parallel")]
+const fn build_distance_slot_bits() -> [u8; DISTANCE_TABLE_SIZE_70] {
+    let mut table = [0u8; DISTANCE_TABLE_SIZE_70];
+    let mut slot = 4;
+    while slot < DISTANCE_TABLE_SIZE_70 {
+        let bits = (slot - 2) >> 1;
+        table[slot] = if bits > 31 { u8::MAX } else { bits as u8 };
+        slot += 1;
+    }
+    table
+}
+
+/// `distance_slot_bit_count` as a table lookup; see `read_slot_length`.
+#[cfg(feature = "parallel")]
+#[inline]
+fn slot_distance_bits(slot: usize) -> Result<u8> {
+    match DISTANCE_SLOT_BITS.get(slot) {
+        Some(&bits) if bits != u8::MAX => Ok(bits),
+        _ => Err(Error::InvalidData("RAR 5 distance slot is too large")),
+    }
+}
+
+/// `slot_to_distance` with the slot's bit count already in hand and the
+/// range check already made by `slot_distance_bits`. `extra` came out of a
+/// `read_bits` of exactly `bit_count` bits, so it cannot exceed the slot -
+/// the check the public function repeats is unreachable from here.
+#[cfg(feature = "parallel")]
+#[inline]
+fn slot_distance_value(slot: usize, bit_count: u8, extra: u32) -> usize {
+    if slot < 4 {
+        return slot + 1;
+    }
+    distance_from_parts(slot, bit_count, extra)
 }
 
 #[cfg(feature = "parallel")]
@@ -3392,19 +3740,33 @@ impl Unpack50Decoder {
     /// serial decoder's stops and errors exactly (see module comment).
     fn apply_tape<E>(
         &mut self,
-        tape: BlockTape,
+        tape: &mut BlockTape,
         output: &mut StreamingOutput,
         output_size: usize,
         sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
     ) -> std::result::Result<TapeApplied, StreamDecodeError<E>> {
         let mut lit_pos = 0usize;
+        let mut filter_pos = 0usize;
         for op in &tape.ops {
             if output.written() >= output_size {
                 return Ok(TapeApplied::OutputDone);
             }
-            match *op {
-                TapeOp::Lits(count) => {
-                    let count = count as usize;
+            let kind = op.kind();
+            // nzbfast-local change (2026-09-03): MATCH accounts for about
+            // 86% of real RAR 5 tape ops. Keep its predicted dispatch out of
+            // the less-common-kind switch while preserving the serial
+            // decoder's state-update and error order below.
+            if kind == tape_kind::MATCH {
+                let (distance, length) = (op.distance as usize, op.length());
+                self.reps.rotate_right(1);
+                self.reps[0] = distance;
+                self.last_length = length;
+                output.copy_match(distance, length, sink)?;
+                continue;
+            }
+            match kind {
+                tape_kind::LITS => {
+                    let count = op.length();
                     // The worker may have decoded past the member's end (it
                     // cannot see the running total); the serial decoder stops
                     // exactly at the limit, so clamp rather than error.
@@ -3415,13 +3777,14 @@ impl Unpack50Decoder {
                         return Ok(TapeApplied::OutputDone);
                     }
                 }
-                TapeOp::RepLast => {
+                tape_kind::REP_LAST => {
                     if self.last_length != 0 {
                         output.copy_match(self.reps[0], self.last_length, sink)?;
                     }
                 }
-                TapeOp::Rep { index, length } => {
-                    let index = usize::from(index);
+                tape_kind::REP => {
+                    let length = op.length();
+                    let index = op.distance as usize;
                     let distance = self.reps[index];
                     if distance == 0 {
                         return Err(Error::InvalidData(
@@ -3434,13 +3797,10 @@ impl Unpack50Decoder {
                     self.last_length = length;
                     output.copy_match(distance, length, sink)?;
                 }
-                TapeOp::Match { distance, length } => {
-                    self.reps.rotate_right(1);
-                    self.reps[0] = distance;
-                    self.last_length = length;
-                    output.copy_match(distance, length, sink)?;
-                }
-                TapeOp::Filter(raw) => {
+                _ => {
+                    // tape_kind::FILTER; the worker emits no other kind.
+                    let raw = tape.filters[filter_pos];
+                    filter_pos += 1;
                     output.add_filter(raw.resolve(output.written())?)?;
                 }
             }
@@ -3456,7 +3816,7 @@ impl Unpack50Decoder {
             let tables = tape.tables.get()?;
             let mut bits = BitReader::new_at(&tape.payload, resume_bit);
             decode_block_serial(
-                &tables,
+                tables,
                 &mut bits,
                 tape.payload_bits,
                 &mut self.reps,
@@ -3470,7 +3830,7 @@ impl Unpack50Decoder {
             }
             return Ok(TapeApplied::BlockDone);
         }
-        if let Some(error) = tape.tail_error {
+        if let Some(error) = tape.tail_error.take() {
             return Err(error.into());
         }
         Ok(TapeApplied::BlockDone)
@@ -3506,8 +3866,8 @@ impl Unpack50Decoder {
     /// chain; single-member callers pass a closure returning `None`.
     fn run_blocks_chain<'a, E>(
         &mut self,
-        mut input: Box<dyn Read + Send + 'a>,
-        next_input: &mut dyn FnMut() -> Option<Box<dyn Read + Send + 'a>>,
+        input: Box<dyn Read + Send + 'a>,
+        next_input: &mut (dyn FnMut() -> Option<Box<dyn Read + Send + 'a>> + Send),
         algorithm_version: u8,
         output_size: usize,
         output: &mut StreamingOutput,
@@ -3518,9 +3878,11 @@ impl Unpack50Decoder {
         use std::sync::Arc;
 
         let workers = self.capped_workers(output_size).max(2);
-        let max_in_flight = workers * 3;
 
         let (result_tx, result_rx) = mpsc::sync_channel::<BlockTape>(workers * 2);
+        // Recycling is opportunistic and bounded. Neither scanner progress
+        // nor early output/error shutdown depends on a buffer being returned.
+        let (recycle_tx, recycle_rx) = mpsc::sync_channel::<TapeBuffers>(workers);
         let mut job_txs: Vec<mpsc::SyncSender<TapeJob>> = Vec::with_capacity(workers);
         let mut handles = Vec::with_capacity(workers);
         for _ in 0..workers {
@@ -3537,153 +3899,145 @@ impl Unpack50Decoder {
         }
         drop(result_tx);
 
-        let mut scan_tables = self
+        let scan_tables = self
             .tables
             .clone()
             .map(|tables| Arc::new(LazyDecodeTables::prebuilt(tables)));
         let mut applied_tables: Option<Arc<LazyDecodeTables>> = None;
-        let mut reorder: BTreeMap<usize, BlockTape> = BTreeMap::new();
-        let mut held: Option<TapeJob> = None;
-        let mut dispatched = 0usize; // blocks read off the input
-        let mut applied = 0usize; // next tape sequence to apply
-        let mut rr = 0usize;
-        let mut scan_done = false;
-        let mut scan_error: Option<Error> = None;
-        let mut output_done = false;
 
         let worker_exited =
             || StreamDecodeError::Decode(Error::InvalidData("RAR 5 parallel decode worker exited"));
 
-        let result = 'pipeline: loop {
-            // Top up workers while capacity remains: place the parked job
-            // first, then read fresh blocks off the input.
-            while !output_done && dispatched - applied < max_in_flight {
-                let job = if let Some(job) = held.take() {
-                    job
-                } else if scan_done || scan_error.is_some() {
-                    break;
-                } else {
-                    let mut payload = Vec::new();
-                    match read_compressed_block_into(&mut input, &mut payload) {
+        // The scan (block reads off the packed stream, table-length parses,
+        // job dispatch) runs on its own thread, exactly as the flat chain's
+        // does. Until 2 Sep 2026 the ring chain scanned INLINE on the apply
+        // thread, between tapes: on a 1 GiB -m3 member on an M1 Ultra the
+        // apply thread was 92% busy and the scan was 11% of it, while the
+        // workers idled at ~19% each - the apply thread is the wall, and
+        // every read syscall and table parse on it was wall. Moving the
+        // scan off it took the leg from 1.51 s to 1.33 s, the whole of the
+        // gap to the flat path, with none of the flat path's whole-member
+        // buffer (research/RAR-PERF-AUDIT-2026-09-02.md).
+        let (scan_outcome, apply_result, applied, output_done) = std::thread::scope(|scope| {
+            let scan = scope.spawn(move || {
+                let mut input = input;
+                let mut tables = scan_tables;
+                let mut dispatched = 0usize;
+                let mut scan_done = false;
+                let mut scan_error: Option<Error> = None;
+                let mut rr = 0usize;
+                'scan: while !scan_done {
+                    let mut buffers = recycle_rx.try_recv().unwrap_or_default();
+                    let header = match read_compressed_block_into(&mut input, &mut buffers.payload) {
+                        Ok(header) => header,
                         Err(error) => {
                             scan_error = Some(error);
                             break;
                         }
-                        Ok(header) => {
-                        let mut start_bit = 0;
-                        if header.has_tables {
-                            // Parse the lengths here (they position the
-                            // symbol start); the LUT build itself is lazy -
-                            // the first worker that needs the set pays it.
-                            match read_table_lengths(&payload, algorithm_version) {
-                                Ok((lengths, table_bits)) => {
-                                    scan_tables =
-                                        Some(Arc::new(LazyDecodeTables::new(lengths)));
-                                    start_bit = table_bits;
-                                }
-                                Err(error) => {
-                                    scan_error = Some(error);
-                                    break;
-                                }
+                    };
+                    let mut start_bit = 0;
+                    if header.has_tables {
+                        // Parse the lengths here (they position the symbol
+                        // start); the LUT build itself is lazy - the first
+                        // worker that needs the set pays it.
+                        match read_table_lengths(&buffers.payload, algorithm_version) {
+                            Ok((lengths, table_bits)) => {
+                                tables = Some(Arc::new(LazyDecodeTables::new(lengths)));
+                                start_bit = table_bits;
                             }
-                        }
-                        let Some(tables) = scan_tables.clone() else {
-                            scan_error =
-                                Some(Error::InvalidData("RAR 5 block reuses missing tables"));
-                            break;
-                        };
-                            let seq = dispatched;
-                            dispatched += 1;
-                            if header.is_last {
-                                // End of this member's block stream: a chain
-                                // continues with the next member's reader,
-                                // a single member is done scanning.
-                                match next_input() {
-                                    Some(next) => input = next,
-                                    None => scan_done = true,
-                                }
-                            }
-                            TapeJob {
-                                seq,
-                                tables,
-                                payload,
-                                start_bit,
-                                payload_bits: header.payload_bits,
+                            Err(error) => {
+                                scan_error = Some(error);
+                                break;
                             }
                         }
                     }
-                };
-                // Hand the job to any worker with queue space.
-                let mut job = Some(job);
-                for probe in 0..job_txs.len() {
-                    let target = (rr + probe) % job_txs.len();
-                    match job_txs[target].try_send(job.take().unwrap()) {
-                        Ok(()) => {
-                            rr = (target + 1) % job_txs.len();
-                            break;
+                    let Some(job_tables) = tables.clone() else {
+                        scan_error = Some(Error::InvalidData("RAR 5 block reuses missing tables"));
+                        break;
+                    };
+                    if header.is_last {
+                        // End of this member's block stream: a chain
+                        // continues with the next member's reader, a single
+                        // member is done scanning.
+                        match next_input() {
+                            Some(next) => input = next,
+                            None => scan_done = true,
                         }
-                        Err(mpsc::TrySendError::Full(back)) => job = Some(back),
-                        Err(mpsc::TrySendError::Disconnected(_)) => {
-                            break 'pipeline Err(worker_exited());
+                    }
+                    let mut job = Some(TapeJob {
+                        seq: dispatched,
+                        tables: job_tables,
+                        buffers,
+                        start_bit,
+                        payload_bits: header.payload_bits,
+                    });
+                    dispatched += 1;
+                    // Hand the job to any worker with queue space; when every
+                    // queue is full, a blocking send on the next-in-line
+                    // worker is the backpressure stall. A disconnected queue
+                    // means the apply side stopped early (output done or
+                    // error) - stop quietly; the apply side owns the error.
+                    for probe in 0..job_txs.len() {
+                        let target = (rr + probe) % job_txs.len();
+                        match job_txs[target].try_send(job.take().unwrap()) {
+                            Ok(()) => {
+                                rr = (target + 1) % job_txs.len();
+                                break;
+                            }
+                            Err(mpsc::TrySendError::Full(back)) => job = Some(back),
+                            Err(mpsc::TrySendError::Disconnected(_)) => break 'scan,
+                        }
+                    }
+                    if let Some(job) = job.take() {
+                        match job_txs[rr].send(job) {
+                            Ok(()) => rr = (rr + 1) % job_txs.len(),
+                            Err(_) => break 'scan,
                         }
                     }
                 }
-                if let Some(back) = job {
-                    // Every queue is full; park the job until a result drains.
-                    held = Some(back);
-                    break;
-                }
-            }
+                // Dropping the queues lets workers drain and exit; the result
+                // channel closes once the last tape is delivered.
+                drop(job_txs);
+                (dispatched, scan_done, scan_error)
+            });
 
-            // Apply whatever is ready, in order.
-            while !output_done {
-                let Some(tape) = reorder.remove(&applied) else {
-                    break;
+            // Apply, on this thread: pull tapes as they complete, reorder,
+            // apply in archive order.
+            let mut reorder: BTreeMap<usize, BlockTape> = BTreeMap::new();
+            let mut applied = 0usize;
+            let mut output_done = false;
+            let apply_result: std::result::Result<(), StreamDecodeError<E>> = 'apply: loop {
+                let Ok(tape) = result_rx.recv() else {
+                    // Channel closed: every dispatched tape has been delivered.
+                    break Ok(());
                 };
-                applied += 1;
-                applied_tables = Some(tape.tables.clone());
-                match self.apply_tape(tape, output, output_size, sink) {
-                    Ok(TapeApplied::BlockDone) => {}
-                    Ok(TapeApplied::OutputDone) => output_done = true,
-                    Err(error) => break 'pipeline Err(error),
+                reorder.insert(tape.seq, tape);
+                while !output_done {
+                    let Some(mut tape) = reorder.remove(&applied) else {
+                        break;
+                    };
+                    applied += 1;
+                    applied_tables = Some(tape.tables.clone());
+                    let result = self.apply_tape(&mut tape, output, output_size, sink);
+                    tape.take_buffers().recycle(&recycle_tx);
+                    match result {
+                        Ok(TapeApplied::BlockDone) => {}
+                        Ok(TapeApplied::OutputDone) => output_done = true,
+                        Err(error) => break 'apply Err(error),
+                    }
                 }
-            }
-            if output_done {
-                break Ok(());
-            }
-
-            let in_flight = dispatched - applied;
-            if in_flight == 0 {
-                if let Some(error) = scan_error.take() {
-                    // The stream ran dry mid-member: the serial decoder would
-                    // have hit this same error at this same output position.
-                    break Err(error.into());
-                }
-                if scan_done {
-                    // is_last applied without filling the output; the caller
-                    // turns the shortfall into NeedMoreInput.
+                if output_done {
                     break Ok(());
                 }
-                continue;
-            }
-            let waiting_in_workers =
-                in_flight - usize::from(held.is_some()) - reorder.len();
-            if waiting_in_workers == 0 {
-                // The only outstanding work is parked here (job queues were
-                // full a moment ago, or tapes are already in the reorder
-                // buffer) - loop back to place/apply it.
-                continue;
-            }
-            match result_rx.recv() {
-                Ok(tape) => {
-                    reorder.insert(tape.seq, tape);
-                }
-                Err(_) => break Err(worker_exited()),
-            }
-        };
+            };
+            // On an early stop (output done or apply error), dropping the
+            // receiver unblocks workers stuck sending; their job queues then
+            // disconnect and the scan thread stops quietly.
+            drop(result_rx);
+            let scan_outcome = scan.join().expect("RAR 5 ring scan thread panicked");
+            (scan_outcome, apply_result, applied, output_done)
+        });
 
-        drop(job_txs);
-        drop(result_rx);
         for handle in handles {
             let _ = handle.join();
         }
@@ -3694,17 +4048,40 @@ impl Unpack50Decoder {
         // normally already built; an all-literal empty tape may build here.
         // If the last applied tape carried a failed build the decode errored,
         // so there is no state worth carrying.
-        if let Some(tables) = applied_tables.and_then(|lazy| lazy.get().ok()) {
-            self.tables = Some(tables);
+        if let Some(lazy) = applied_tables {
+            if let Ok(tables) = lazy.get() {
+                self.tables = Some(std::sync::Arc::clone(tables));
+            }
         }
-        result
+
+        apply_result?;
+        if output_done {
+            // Reached the member size: read-ahead scan errors are work the
+            // serial decoder would never have done - swallow them.
+            return Ok(());
+        }
+        let (dispatched, scan_done, scan_error) = scan_outcome;
+        if let Some(error) = scan_error {
+            // The stream ran dry mid-member: the serial decoder would have
+            // hit this same error at this same output position.
+            return Err(error.into());
+        }
+        let _ = scan_done;
+        if applied < dispatched {
+            // Every dispatched job yields exactly one tape unless its worker
+            // died; the channel closed early.
+            return Err(worker_exited());
+        }
+        // is_last applied without filling the output; the caller turns the
+        // shortfall into NeedMoreInput.
+        Ok(())
     }
 
     /// Whether this member takes the flat-apply path: non-solid, worth the MT
     /// pipeline, and small enough to hold whole in a member-sized buffer.
     /// Solid members, members over `flat_limit`, and non-parallel builds (this
     /// method only exists under the feature) keep the streaming-ring path.
-    fn use_flat_mode(&self, output_size: usize, solid: bool, flat_limit: u64) -> bool {
+    fn use_flat_mode(&self, plan_bytes: usize, output_size: usize, solid: bool, flat_limit: u64) -> bool {
         if solid {
             return false;
         }
@@ -3712,7 +4089,7 @@ impl Unpack50Decoder {
         if self.test_force_flat {
             return true;
         }
-        self.capped_workers(output_size) >= 2 && output_size as u64 <= flat_limit
+        self.capped_workers(output_size) >= 2 && plan_bytes as u64 <= flat_limit
     }
 
     /// Flat-buffer analogue of `apply_tape`: identical op semantics, deferred
@@ -3725,76 +4102,294 @@ impl Unpack50Decoder {
     /// through `self`; caps bound each continuation so memory holds one tape.
     fn apply_tape_flat<E>(
         &mut self,
-        tape: BlockTape,
+        tape: &mut BlockTape,
         output: &mut FlatOutput,
         output_size: usize,
         sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
     ) -> std::result::Result<TapeApplied, StreamDecodeError<E>> {
-        let mut tape = tape;
         loop {
             let mut lit_pos = 0usize;
+            let mut filter_pos = 0usize;
+            // nzbfast-local change, 3 Sep 2026 - the rep shift register and
+            // the last length run in LOCALS for the op walk, written back on
+            // every exit; see VENDORING.md. Held in `self` they were two
+            // loads and three stores of the decoder struct per MATCH, and
+            // the store-to-load forwarding made them a loop-carried memory
+            // dependency on the pipeline's wall thread. Every exit below
+            // stores them back, so the decoder's carried state after a
+            // block - which the differential suite compares against the
+            // buffered decoder, error paths included - is unchanged.
+            let mut reps = self.reps;
+            let mut last_length = self.last_length;
+            // nzbfast-local change, 3 Sep 2026 - and so does the write
+            // cursor, with the output buffer MOVED OUT of `output` for the
+            // walk; see VENDORING.md. Behind `&mut FlatOutput` every op
+            // reloaded the buffer pointer, the buffer length, the position,
+            // the two folded bounds and the emit watermark, and stored the
+            // position back, because the walk contains calls that take the
+            // same `&mut`. `output.buf` is EMPTY while the walk runs; every
+            // fallback below puts it back (`sync_out`) before calling
+            // anything that reads it and takes it again (`sync_in`)
+            // afterwards, on the error path too, so the post-walk
+            // `sync_out` always has the buffer to give back.
+            let mut buf = std::mem::take(&mut output.buf);
+            let mut pos = output.pos;
+            let mut fast_end = output.fast_end;
+            let mut limit_pos = output.limit_pos;
+            let mut next_emit_check = output.next_emit_check;
+            // Set once at construction; no slide or emit touches it.
+            let fast_distance_max = output.fast_distance_max;
+            macro_rules! sync_out {
+                () => {{
+                    output.buf = std::mem::take(&mut buf);
+                    output.pos = pos;
+                    output.next_emit_check = next_emit_check;
+                }};
+            }
+            macro_rules! sync_in {
+                () => {{
+                    buf = std::mem::take(&mut output.buf);
+                    pos = output.pos;
+                    fast_end = output.fast_end;
+                    limit_pos = output.limit_pos;
+                    next_emit_check = output.next_emit_check;
+                }};
+            }
+            // The shared short-match stride copy, on the locals: `false`
+            // means the op goes to `copy_match_slow`, which owns every
+            // error and its order.
+            macro_rules! fast_copy {
+                ($distance:expr, $length:expr) => {{
+                    let length = $length;
+                    if flat_stride_copy(&mut buf, pos, $distance, length, fast_end, fast_distance_max)
+                    {
+                        pos += length;
+                        true
+                    } else {
+                        false
+                    }
+                }};
+            }
+            // `maybe_emit` on the locals: the emit itself needs the whole
+            // `FlatOutput` (pending filters, the sink), so it syncs.
+            macro_rules! maybe_emit {
+                () => {{
+                    if pos >= next_emit_check {
+                        sync_out!();
+                        let emitted = output.emit_ready(sink);
+                        output.next_emit_check = output.pos + FLAT_EMIT_THRESHOLD;
+                        sync_in!();
+                        emitted
+                    } else {
+                        Ok(())
+                    }
+                }};
+            }
+            // nzbfast-local change, 3 Sep 2026 - a literal run with sixteen
+            // bytes of tape BEHIND it is copied as one fixed 16-byte word
+            // whatever its true length, which is what makes the dominant
+            // one-to-three-byte run branchless; see VENDORING.md. Only the
+            // last run of a block falls short of that and takes the ladder.
+            let lits_len = tape.lits.len();
+            let mut outcome: std::result::Result<Option<TapeApplied>, StreamDecodeError<E>> =
+                Ok(None);
             for op in &tape.ops {
-                if output.written() >= output_size {
-                    return Ok(TapeApplied::OutputDone);
+                if pos >= limit_pos {
+                    outcome = Ok(Some(TapeApplied::OutputDone));
+                    break;
                 }
-                match *op {
-                    TapeOp::Lits(count) => {
-                        let count = count as usize;
+                let kind = op.kind();
+                // Keep the common fully-resolved match on one predicted
+                // branch; see the streaming-ring counterpart above.
+                if kind == tape_kind::MATCH {
+                    let (distance, length) = (op.distance as usize, op.length());
+                    // `rotate_right(1)` then overwriting slot 0, spelled out:
+                    // the rotated-in slot 3 value is discarded by the store
+                    // that follows it.
+                    reps[3] = reps[2];
+                    reps[2] = reps[1];
+                    reps[1] = reps[0];
+                    reps[0] = distance;
+                    last_length = length;
+                    let step = if fast_copy!(distance, length) {
+                        maybe_emit!()
+                    } else {
+                        sync_out!();
+                        let slow = output.copy_match_slow(distance, length, sink);
+                        sync_in!();
+                        slow
+                    };
+                    if let Err(error) = step {
+                        outcome = Err(error);
+                        break;
+                    }
+                    continue;
+                }
+                match kind {
+                    tape_kind::LITS => {
+                        let count = op.length();
                         // Worker may overshoot the member end; clamp like the
                         // serial decoder rather than error (trap 1).
-                        let take = count.min(output_size - output.written());
-                        output.push_bytes(&tape.lits[lit_pos..lit_pos + take], sink)?;
+                        // `limit_pos - pos` IS `output_size - written()`:
+                        // both are `output_end - origin - pos`.
+                        let take = count.min(limit_pos - pos);
+                        // `fast_end` folds the buffer end and the output
+                        // limit with the ladder's slack, so a run under it
+                        // can neither slide nor exceed the limit - which is
+                        // every check `push_bytes` would run.
+                        let step = if take <= 16 && pos + 16 <= fast_end && lit_pos + 16 <= lits_len
+                        {
+                            // The over-copy past `pos + take` is the stride
+                            // copier's argument: `fast_end` guarantees the
+                            // slack (`pos + 16 <= fast_end` and `fast_end +
+                            // 16 <= buf.len()`), the scribbled bytes sit at
+                            // or beyond the new `pos`, every later write
+                            // lands exactly at `pos` and overwrites them
+                            // before `pos` moves past, matches only read
+                            // below `pos`, and the emit gate never releases
+                            // bytes at or above `pos`. Nothing over-READS:
+                            // the third term is what guarantees the word is
+                            // inside the tape's own literal vector.
+                            let word: [u8; 16] = tape.lits[lit_pos..lit_pos + 16]
+                                .try_into()
+                                .expect("16-byte literal word");
+                            buf[pos..pos + 16].copy_from_slice(&word);
+                            pos += take;
+                            maybe_emit!()
+                        } else if take <= LITERAL_INLINE_MAX && pos + take <= fast_end {
+                            flat_literal_ladder(&mut buf, pos, &tape.lits[lit_pos..lit_pos + take]);
+                            pos += take;
+                            maybe_emit!()
+                        } else {
+                            sync_out!();
+                            let pushed =
+                                output.push_bytes(&tape.lits[lit_pos..lit_pos + take], sink);
+                            sync_in!();
+                            pushed
+                        };
+                        if let Err(error) = step {
+                            outcome = Err(error);
+                            break;
+                        }
                         lit_pos += count;
                         if take < count {
-                            return Ok(TapeApplied::OutputDone);
+                            outcome = Ok(Some(TapeApplied::OutputDone));
+                            break;
                         }
                     }
-                    TapeOp::RepLast => {
-                        if self.last_length != 0 {
-                            output.copy_match(self.reps[0], self.last_length, sink)?;
+                    tape_kind::REP_LAST => {
+                        if last_length != 0 {
+                            let step = if fast_copy!(reps[0], last_length) {
+                                maybe_emit!()
+                            } else {
+                                sync_out!();
+                                let slow = output.copy_match_slow(reps[0], last_length, sink);
+                                sync_in!();
+                                slow
+                            };
+                            if let Err(error) = step {
+                                outcome = Err(error);
+                                break;
+                            }
                         }
                     }
-                    TapeOp::Rep { index, length } => {
-                        let index = usize::from(index);
-                        let distance = self.reps[index];
+                    tape_kind::REP => {
+                        let length = op.length();
+                        let index = op.distance as usize;
+                        // Slot-indexed rather than slice-indexed: a `&mut
+                        // reps[..=index]` takes the array's ADDRESS, which
+                        // pins the whole shift register in memory for the
+                        // MATCH path above (measured: four stores and three
+                        // reloads per match survived the hoist). Only
+                        // symbols 258..=261 reach here, so the index is
+                        // 0..=3 by construction.
+                        debug_assert!(index < 4, "rep index comes from symbol 258..=261");
+                        let distance = match index {
+                            0 => reps[0],
+                            1 => reps[1],
+                            2 => reps[2],
+                            _ => reps[3],
+                        };
                         if distance == 0 {
-                            return Err(Error::InvalidData(
+                            outcome = Err(Error::InvalidData(
                                 "RAR 5 repeat distance is not initialized",
                             )
                             .into());
+                            break;
                         }
-                        self.reps[..=index].rotate_right(1);
-                        self.reps[0] = distance;
-                        self.last_length = length;
-                        output.copy_match(distance, length, sink)?;
+                        // `reps[..=index].rotate_right(1)` then slot 0 = the
+                        // hoisted distance, spelled out per index: the value
+                        // rotated into slot 0 is the one being overwritten.
+                        match index {
+                            0 => {}
+                            1 => reps[1] = reps[0],
+                            2 => {
+                                reps[2] = reps[1];
+                                reps[1] = reps[0];
+                            }
+                            _ => {
+                                reps[3] = reps[2];
+                                reps[2] = reps[1];
+                                reps[1] = reps[0];
+                            }
+                        }
+                        reps[0] = distance;
+                        last_length = length;
+                        let step = if fast_copy!(distance, length) {
+                            maybe_emit!()
+                        } else {
+                            sync_out!();
+                            let slow = output.copy_match_slow(distance, length, sink);
+                            sync_in!();
+                            slow
+                        };
+                        if let Err(error) = step {
+                            outcome = Err(error);
+                            break;
+                        }
                     }
-                    TapeOp::Match { distance, length } => {
-                        self.reps.rotate_right(1);
-                        self.reps[0] = distance;
-                        self.last_length = length;
-                        output.copy_match(distance, length, sink)?;
-                    }
-                    TapeOp::Filter(raw) => {
-                        // Filter starts resolve at apply time (trap 4).
-                        output.add_filter(raw.resolve(output.written())?)?;
+                    _ => {
+                        // tape_kind::FILTER; filter starts resolve at apply
+                        // time (trap 4).
+                        let raw = tape.filters[filter_pos];
+                        filter_pos += 1;
+                        sync_out!();
+                        let declared = raw
+                            .resolve(output.written())
+                            .map_err(StreamDecodeError::from)
+                            .and_then(|pending| output.add_filter(pending));
+                        sync_in!();
+                        if let Err(error) = declared {
+                            outcome = Err(error);
+                            break;
+                        }
                     }
                 }
             }
-            if output.written() >= output_size {
+            sync_out!();
+            self.reps = reps;
+            self.last_length = last_length;
+            if let Some(done) = outcome? {
+                return Ok(done);
+            }
+            if output.output_complete(output_size) {
                 return Ok(TapeApplied::OutputDone);
             }
             if let Some(resume_bit) = tape.resume_bit {
+                let seq = tape.seq;
+                let tables = tape.tables.clone();
+                let payload_bits = tape.payload_bits;
                 let job = TapeJob {
-                    seq: tape.seq,
-                    tables: tape.tables.clone(),
-                    payload: std::mem::take(&mut tape.payload),
+                    seq,
+                    tables,
+                    buffers: tape.take_buffers(),
                     start_bit: resume_bit,
-                    payload_bits: tape.payload_bits,
+                    payload_bits,
                 };
-                tape = decode_block_tape(job);
+                *tape = decode_block_tape(job);
                 continue;
             }
-            if let Some(error) = tape.tail_error {
+            if let Some(error) = tape.tail_error.take() {
                 return Err(error.into());
             }
             return Ok(TapeApplied::BlockDone);
@@ -3850,6 +4445,9 @@ impl Unpack50Decoder {
         let workers = self.capped_workers(output_size).max(2);
 
         let (result_tx, result_rx) = mpsc::sync_channel::<BlockTape>(workers * 2);
+        // Recycling is opportunistic and bounded. Neither scanner progress
+        // nor early output/error shutdown depends on a buffer being returned.
+        let (recycle_tx, recycle_rx) = mpsc::sync_channel::<TapeBuffers>(workers);
         let mut job_txs: Vec<mpsc::SyncSender<TapeJob>> = Vec::with_capacity(workers);
         let mut handles = Vec::with_capacity(workers);
         for _ in 0..workers {
@@ -3890,8 +4488,8 @@ impl Unpack50Decoder {
                 let mut scan_error: Option<Error> = None;
                 let mut rr = 0usize;
                 'scan: while !scan_done {
-                    let mut payload = Vec::new();
-                    let header = match read_compressed_block_into(&mut input, &mut payload) {
+                    let mut buffers = recycle_rx.try_recv().unwrap_or_default();
+                    let header = match read_compressed_block_into(&mut input, &mut buffers.payload) {
                         Ok(header) => header,
                         Err(error) => {
                             scan_error = Some(error);
@@ -3901,7 +4499,7 @@ impl Unpack50Decoder {
                     let mut start_bit = 0;
                     if header.has_tables {
                         // Parse only; the LUT build is lazy on the workers.
-                        match read_table_lengths(&payload, algorithm_version) {
+                        match read_table_lengths(&buffers.payload, algorithm_version) {
                             Ok((lengths, table_bits)) => {
                                 tables = Some(Arc::new(LazyDecodeTables::new(lengths)));
                                 start_bit = table_bits;
@@ -3927,7 +4525,7 @@ impl Unpack50Decoder {
                     let mut job = Some(TapeJob {
                         seq: dispatched,
                         tables: job_tables,
-                        payload,
+                        buffers,
                         start_bit,
                         payload_bits: header.payload_bits,
                     });
@@ -3969,12 +4567,14 @@ impl Unpack50Decoder {
                 };
                 reorder.insert(tape.seq, tape);
                 while !output_done {
-                    let Some(tape) = reorder.remove(&applied) else {
+                    let Some(mut tape) = reorder.remove(&applied) else {
                         break;
                     };
                     applied += 1;
                     applied_tables = Some(tape.tables.clone());
-                    match self.apply_tape_flat(tape, output, output_size, sink) {
+                    let result = self.apply_tape_flat(&mut tape, output, output_size, sink);
+                    tape.take_buffers().recycle(&recycle_tx);
+                    match result {
                         Ok(TapeApplied::BlockDone) => {}
                         Ok(TapeApplied::OutputDone) => output_done = true,
                         Err(error) => break 'apply Err(error),
@@ -3999,8 +4599,10 @@ impl Unpack50Decoder {
         // Leave the decoder's table state as the serial path would: the
         // tables of the last block actually applied (trap 3). See the ring
         // pipeline for why a failed build is not carried.
-        if let Some(tables) = applied_tables.and_then(|lazy| lazy.get().ok()) {
-            self.tables = Some(tables);
+        if let Some(lazy) = applied_tables {
+            if let Ok(tables) = lazy.get() {
+                self.tables = Some(std::sync::Arc::clone(tables));
+            }
         }
 
         apply_result?;
@@ -4059,12 +4661,178 @@ struct FlatOutput {
     delta_scratch: Vec<u8>,
     /// Emit is attempted once per `FLAT_EMIT_THRESHOLD` of new bytes.
     next_emit_check: usize,
+    /// Logical bytes slid out of the front of `buf` so far: physical index
+    /// `p` is group-logical `p + origin`. Zero until the first slide; a
+    /// buffer sized to the whole output never slides.
+    origin: usize,
+    /// Logical end of the output (seed + output size): the bound every
+    /// output-limit check compares against, since `buf.len()` is no longer
+    /// that bound.
+    output_end: usize,
+    /// Physical bound the short-match fast path may write up to, with its
+    /// 16-byte over-copy: `min(buf.len(), output_end - origin) - 16`.
+    /// Recomputed on every slide.
+    fast_end: usize,
+    /// Largest distance the fast path accepts: the smaller of the
+    /// dictionary and the window limit, so one compare stands in for the
+    /// two ordered checks of the slow path (which still runs, and errors
+    /// in the documented order, for anything the fast path declines).
+    fast_distance_max: usize,
+    /// Physical write position at which this group's declared output is
+    /// complete: `output_end - origin`. The apply walk tests it once per
+    /// TAPE OP, and reading it out of `written()` was three loads, an add
+    /// and a subtract every time. Recomputed on every slide, beside
+    /// `fast_end`. (nzbfast-local change, 3 Sep 2026; see VENDORING.md.)
+    limit_pos: usize,
 }
 
 /// Emit granularity: keep the writer-thread pipe fed in ~1 MB batches while
 /// decode continues, matching the streaming path's flush cadence.
 #[cfg(feature = "parallel")]
 const FLAT_EMIT_THRESHOLD: usize = 1 << 20;
+
+/// Longest literal run `push_bytes` copies with the inline power-of-two
+/// ladder instead of `copy_from_slice`'s `memcpy` libcall. Fifteen is the
+/// widest length the four-step ladder covers exactly, and it is far past
+/// the measured distribution: 99.0-99.2% of runs on the census -m3 shapes
+/// are at most fifteen bytes. (nzbfast-local change, 3 Sep 2026; see
+/// VENDORING.md.)
+#[cfg(feature = "parallel")]
+const LITERAL_INLINE_MAX: usize = 15;
+
+/// Least slack past the retained window in a SLIDING flat buffer, so the
+/// memmove that slides the window to the front runs at most once per this
+/// many output bytes (and once per dictionary of output when the dictionary
+/// is larger, which bounds the cost at one byte moved per byte emitted).
+/// Tests shrink it so the differential suite crosses slides constantly.
+#[cfg(not(test))]
+const FLAT_SLACK_MIN: usize = 64 << 20;
+#[cfg(test)]
+const FLAT_SLACK_MIN: usize = 4096;
+
+/// Bytes a flat plan allocates for a member of `output_size` (plus a
+/// carried `seed`) with a reachable window of `history_limit`: the whole
+/// member when that is smaller, else a window of `history_limit` plus
+/// slack. Until 2 Sep 2026 the flat buffer WAS the member, so every member
+/// over the policy's flat cap (512 MiB, i.e. every multi-GB video) took
+/// the ring path, measured 7% slower per byte on the apply thread and
+/// carrying a 2x-dictionary ring; sliding makes the plan's size a
+/// function of the dictionary, not the member
+/// (research/RAR-PERF-AUDIT-2026-09-02.md, round 3). Not feature-gated:
+/// the admission gate in rar50/extract.rs prices the plan in every build.
+pub(crate) fn flat_plan_bytes(seed: usize, output_size: usize, history_limit: usize) -> usize {
+    let window = history_limit.saturating_add(history_limit.max(FLAT_SLACK_MIN));
+    seed.saturating_add(output_size.min(window))
+}
+
+/// Append a SHORT literal run at `pos` with constant-length copies. A run
+/// ends at the next match and matches are 86% of tape ops, so runs are
+/// overwhelmingly tiny: on the census -m3 shapes 67.8-69.4% of runs are a
+/// single byte and 97.1-97.7% are three bytes or fewer, while the long
+/// incompressible runs that carry most of the literal BYTES are a rounding
+/// error in COUNT. `copy_from_slice` on a runtime length is a `memcpy`
+/// libcall whatever that length is, and a `sample` of the 4 GiB fixture put
+/// 9.6% of the apply thread - the pipeline's wall - at the return address
+/// of exactly that call. Every copy below has a constant length, so it
+/// lowers to inline load/store pairs; past `LITERAL_INLINE_MAX` the caller
+/// keeps the libcall, which is the right shape for a long run.
+///
+/// Caller guarantees `bytes.len() <= LITERAL_INLINE_MAX` and that
+/// `buf[pos..pos + bytes.len()]` is in bounds. (nzbfast-local change,
+/// 3 Sep 2026; see VENDORING.md.)
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn flat_literal_ladder(buf: &mut [u8], pos: usize, bytes: &[u8]) {
+    let count = bytes.len();
+    debug_assert!(count <= LITERAL_INLINE_MAX);
+    if count == 1 {
+        buf[pos] = bytes[0];
+        return;
+    }
+    let mut src = bytes;
+    let mut at = pos;
+    if count & 8 != 0 {
+        let (head, rest) = src.split_at(8);
+        buf[at..at + 8].copy_from_slice(head);
+        src = rest;
+        at += 8;
+    }
+    if count & 4 != 0 {
+        let (head, rest) = src.split_at(4);
+        buf[at..at + 4].copy_from_slice(head);
+        src = rest;
+        at += 4;
+    }
+    if count & 2 != 0 {
+        let (head, rest) = src.split_at(2);
+        buf[at..at + 2].copy_from_slice(head);
+        src = rest;
+        at += 2;
+    }
+    if count & 1 != 0 {
+        buf[at] = src[0];
+    }
+}
+
+/// The common flat match: short, distance at least a stride, inside the
+/// window, well inside the buffer - ONE predicate and an at-most-four
+/// 16-byte stride copy. Returns whether it handled the match; `false`
+/// means the caller must hand it to `FlatOutput::copy_match_slow`, which
+/// owns every error and its documented order (dictionary, then
+/// window-limit, then window, then output). On the apply thread of a -m3
+/// member - the pipeline's wall - the guard ladder the slow path runs was
+/// 55% of the thread before this predicate existed
+/// (research/RAR-PERF-AUDIT-2026-09-02.md, round 4): `fast_end` folds the
+/// buffer end, the output limit and the over-copy into one bound,
+/// `fast_distance_max` folds the dictionary and window-limit checks, and
+/// `distance <= pos` is the window check, so every guard the slow path
+/// errors on is false here and the two paths cannot disagree on a valid
+/// stream.
+///
+/// Taking the buffer and the bounds as arguments rather than reading them
+/// off `&mut FlatOutput` is what lets the op walk keep them in registers
+/// across a whole tape; the same call from `FlatOutput::copy_match` keeps
+/// the unit tests on exactly this code. (nzbfast-local change, 3 Sep 2026;
+/// see VENDORING.md.)
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn flat_stride_copy(
+    buf: &mut [u8],
+    pos: usize,
+    distance: usize,
+    length: usize,
+    fast_end: usize,
+    fast_distance_max: usize,
+) -> bool {
+    if length <= 64
+        && distance >= 16
+        && distance <= fast_distance_max
+        && distance <= pos
+        && pos + length <= fast_end
+    {
+        // Decoded match lengths are at least two. The unconditional first
+        // stride is also sound for the zero-length internal edge case: it
+        // only scribbles at `pos`, which later output overwrites before it
+        // can be emitted, and `fast_end` guarantees the 16-byte slack. The
+        // fast-path ceiling fixes the stride count at four; spelling them
+        // out keeps the common path free of a loop backedge. Reading each
+        // word after the previous one landed keeps the overlapped-match
+        // semantics exact for distance >= 16.
+        let src = pos - distance;
+        buf.copy_within(src..src + 16, pos);
+        if length > 16 {
+            buf.copy_within(src + 16..src + 32, pos + 16);
+            if length > 32 {
+                buf.copy_within(src + 32..src + 48, pos + 32);
+                if length > 48 {
+                    buf.copy_within(src + 48..src + 64, pos + 48);
+                }
+            }
+        }
+        return true;
+    }
+    false
+}
 
 #[cfg(feature = "parallel")]
 impl FlatOutput {
@@ -4084,7 +4852,8 @@ impl FlatOutput {
         dictionary_size: usize,
         history_limit: usize,
     ) -> Self {
-        let mut buf = vec![0u8; seed.len() + output_size];
+        let mut buf = vec![0u8; flat_plan_bytes(seed.len(), output_size, history_limit)];
+        let buf_len = buf.len();
         buf[..seed.len()].copy_from_slice(seed);
         Self {
             buf,
@@ -4098,6 +4867,11 @@ impl FlatOutput {
             filter_scratch: Vec::new(),
             delta_scratch: Vec::new(),
             next_emit_check: seed.len() + FLAT_EMIT_THRESHOLD,
+            origin: 0,
+            output_end: seed.len() + output_size,
+            fast_end: buf_len.min(seed.len() + output_size).saturating_sub(16),
+            fast_distance_max: dictionary_size.min(history_limit),
+            limit_pos: seed.len() + output_size,
         }
     }
 
@@ -4115,7 +4889,59 @@ impl FlatOutput {
     /// this; `pos` stays physical.
     #[inline]
     fn written(&self) -> usize {
-        self.pos - self.base
+        self.origin + self.pos - self.base
+    }
+
+    /// Whether this group's declared output is complete - `written() >=
+    /// output_size`, answered against the precomputed physical bound. The
+    /// flat plan is always built with the same `output_size` the apply walk
+    /// is given (both callers pass one value to `FlatOutput::new*` and to
+    /// `run_blocks_flat*`), which is what makes `output_end == base +
+    /// output_size` and this test equivalent; the debug assertion pins it,
+    /// and the differential suite drives both a full member and three
+    /// smaller prefixes. (nzbfast-local change, 3 Sep 2026; see
+    /// VENDORING.md.)
+    #[inline(always)]
+    fn output_complete(&self, output_size: usize) -> bool {
+        debug_assert_eq!(
+            self.output_end,
+            self.base + output_size,
+            "flat plan and apply walk disagree on the output size"
+        );
+        self.pos >= self.limit_pos
+    }
+
+    /// Make room for `needed` bytes at `pos`, sliding the buffer when the
+    /// member does not fit whole. Everything below `emitted` that is also
+    /// older than `history_limit` is dropped off the front; the retained
+    /// window moves to `buf[0..]` and every physical position (pos,
+    /// emitted, pending filter starts, the emit watermark) shifts with it,
+    /// `origin` absorbing the shift so logical positions are unchanged. A
+    /// pending filter holding back more than the slack leaves nothing to
+    /// slide, which is the same condition the streaming path answers with
+    /// `FilteredMember`: the member falls back to the buffered decoder.
+    #[cold]
+    fn make_room<E>(
+        &mut self,
+        needed: usize,
+        sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), StreamDecodeError<E>> {
+        self.emit_ready(sink)?;
+        let shift = self.emitted.min(self.pos.saturating_sub(self.history_limit));
+        if shift == 0 || self.pos - shift + needed > self.buf.len() {
+            return Err(StreamDecodeError::FilteredMember);
+        }
+        self.buf.copy_within(shift..self.pos, 0);
+        self.pos -= shift;
+        self.emitted -= shift;
+        self.origin += shift;
+        self.next_emit_check = self.next_emit_check.saturating_sub(shift);
+        self.limit_pos = self.output_end.saturating_sub(self.origin);
+        self.fast_end = self.buf.len().min(self.limit_pos).saturating_sub(16);
+        for held in &mut self.pending_filters {
+            held.start -= shift;
+        }
+        Ok(())
     }
 
     /// Append a literal run: one straight copy into `buf`, then attempt an
@@ -4128,24 +4954,68 @@ impl FlatOutput {
         bytes: &[u8],
         sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
     ) -> std::result::Result<(), StreamDecodeError<E>> {
-        if self
-            .pos
-            .checked_add(bytes.len())
-            .is_none_or(|end| end > self.buf.len())
-        {
-            return Err(Error::InvalidData("RAR 5 match exceeds output limit").into());
+        // `fast_end` already folds the output limit and the buffer end
+        // (see `copy_match`); a run that fits under it needs no other check.
+        if self.pos + bytes.len() > self.fast_end {
+            if self
+                .written()
+                .checked_add(bytes.len())
+                .is_none_or(|end| end + self.base > self.output_end)
+            {
+                return Err(Error::InvalidData("RAR 5 match exceeds output limit").into());
+            }
+            if self.pos + bytes.len() > self.buf.len() {
+                self.make_room(bytes.len(), sink)?;
+            }
         }
-        self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
-        self.pos += bytes.len();
+        // The TINY run - which is nearly all of them - is a handful of
+        // inline stores rather than a `memcpy` libcall; see
+        // `flat_literal_ladder`. (nzbfast-local change, 3 Sep 2026; see
+        // VENDORING.md.)
+        let pos = self.pos;
+        let count = bytes.len();
+        if count <= LITERAL_INLINE_MAX {
+            flat_literal_ladder(&mut self.buf, pos, bytes);
+        } else {
+            self.buf[pos..pos + count].copy_from_slice(bytes);
+        }
+        self.pos = pos + count;
         self.maybe_emit(sink)
     }
 
-    /// Copy a back-reference forward inside `buf`. Window is the buffer prefix
-    /// itself, so there is no masking and no history head; error checks and
-    /// their order match `StreamingOutput::copy_match` for differential
-    /// equality (dictionary, then window-limit, then window, then output).
-    #[inline]
+    /// Copy a back-reference forward inside `buf`, over the whole
+    /// `FlatOutput`. Production's op walk drives `flat_stride_copy` and
+    /// `copy_match_slow` directly on its hoisted locals; this is the
+    /// unhoisted spelling of the same two steps, kept as the ORACLE the
+    /// exhaustive short-match and slow-path unit tests drive. The stride
+    /// copy itself is not duplicated here - both spellings call the one
+    /// helper - and the walk is covered end to end by the flat/buffered
+    /// differential suite. (nzbfast-local change, 3 Sep 2026; see
+    /// VENDORING.md.)
+    #[cfg(test)]
+    #[inline(always)]
     fn copy_match<E>(
+        &mut self,
+        distance: usize,
+        length: usize,
+        sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), StreamDecodeError<E>> {
+        if flat_stride_copy(
+            &mut self.buf,
+            self.pos,
+            distance,
+            length,
+            self.fast_end,
+            self.fast_distance_max,
+        ) {
+            self.pos += length;
+            return self.maybe_emit(sink);
+        }
+        self.copy_match_slow(distance, length, sink)
+    }
+
+    #[inline(never)]
+    fn copy_match_slow<E>(
         &mut self,
         distance: usize,
         length: usize,
@@ -4165,11 +5035,14 @@ impl FlatOutput {
             return Err(Error::InvalidData("RAR 5 match distance exceeds window").into());
         }
         if self
-            .pos
+            .written()
             .checked_add(length)
-            .is_none_or(|end| end > self.buf.len())
+            .is_none_or(|end| end + self.base > self.output_end)
         {
             return Err(Error::InvalidData("RAR 5 match exceeds output limit").into());
+        }
+        if self.pos + length > self.buf.len() {
+            self.make_room(length, sink)?;
         }
         if distance == 1 {
             let byte = self.buf[self.pos - 1];
@@ -4266,6 +5139,7 @@ impl FlatOutput {
         filter.start = filter
             .start
             .checked_add(self.base)
+            .and_then(|start| start.checked_sub(self.origin))
             .ok_or(Error::InvalidData("RAR 5 filter range overflows"))?;
         if let Some(back) = self.pending_filters.back() {
             let back_end = back.start.saturating_add(back.length);
@@ -4346,7 +5220,7 @@ impl FlatOutput {
                 // serial walk. `add_filter` pinned that origin at
                 // declaration; slice with the physical index, translate
                 // with the member-local one.
-                apply_filter_to_range(
+                apply_filter_to_vec(
                     &mut self.filter_scratch,
                     &held,
                     held.file_start,
@@ -4383,8 +5257,8 @@ impl FlatOutput {
     /// later solid member, mirroring the buffered path's history block. `buf`
     /// is unfiltered, so a straight tail copy is correct.
     fn into_history(self, history_limit: usize) -> Vec<u8> {
-        let keep = self.buf.len().min(history_limit);
-        self.buf[self.buf.len() - keep..].to_vec()
+        let keep = self.pos.min(history_limit);
+        self.buf[self.pos - keep..self.pos].to_vec()
     }
 }
 
@@ -4632,6 +5506,29 @@ fn apply_filter_to_range(
     Ok(())
 }
 
+/// Apply one filter to an owned streaming scratch buffer. Delta decoding
+/// necessarily writes to disjoint storage because it reads channel-major and
+/// writes interleaved. Both streaming outputs already keep two reusable
+/// vectors, so swap the decoded vector into place instead of copying the whole
+/// filter range back. (nzbfast-local change, 3 Sep 2026 - see VENDORING.md.)
+fn apply_filter_to_vec(
+    data: &mut Vec<u8>,
+    filter: &PendingFilter,
+    file_start: usize,
+    scratch: &mut Vec<u8>,
+) -> Result<()> {
+    match filter.filter_type {
+        FilterType::Delta => {
+            filters::delta_decode_into(data, filter.channels, rar50_delta_messages(), scratch)?;
+            std::mem::swap(data, scratch);
+        }
+        FilterType::E8 => e8e9_decode(data, file_start as u32, false),
+        FilterType::E8E9 => e8e9_decode(data, file_start as u32, true),
+        FilterType::Arm => arm_decode(data, file_start as u32),
+    }
+    Ok(())
+}
+
 fn rar50_delta_messages() -> DeltaErrorMessages {
     DeltaErrorMessages {
         invalid_channels: "RAR 5 DELTA filter channel count is invalid",
@@ -4784,6 +5681,42 @@ pub fn distance_slot_bit_count(slot: usize) -> Result<usize> {
     }
 }
 
+/// The distance ladder itself: `((2 | slot & 1) << bit_count | extra) + 1`,
+/// computed in `u64` and SATURATED into `usize`. Both distance decoders go
+/// through here so they cannot disagree.
+///
+/// THE INTERMEDIATE IS WIDER THAN `usize` ON PURPOSE. A RAR 5 distance slot
+/// carries up to 31 extra bits, so the largest value this ladder produces is
+/// `(3 << 31) | (2^31 - 1)` plus one = 2^33 - thirty-four bits, which does
+/// not fit a 32-bit `usize` and does not fit a `u32` either (hence the
+/// `u32::try_from(distance)` the tape path already does on the way out).
+/// Computed in `usize` it wrapped on a 32-bit target and then panicked on
+/// the `+ 1`: `attempt to add with overflow`, nightly armv7-cross run
+/// 33737735769, which compiles with `overflow-checks` on for exactly this
+/// class. In release it would have wrapped silently to a small distance and
+/// mis-decoded the match instead, which is the worse half.
+///
+/// Saturating rather than returning an error keeps this infallible and keeps
+/// the two callers byte-identical, and it is the right answer rather than a
+/// convenient one: `usize::MAX` cannot be inside any dictionary a 32-bit
+/// target can allocate, so `copy_match` rejects it as "RAR 5 match distance
+/// exceeds dictionary" - which is precisely what an archive needing a >4 GiB
+/// window IS on a 32-bit machine. On a 64-bit target nothing saturates and
+/// every answer is unchanged.
+#[inline]
+fn distance_from_parts(slot: usize, bit_count: u8, extra: u32) -> usize {
+    usize::try_from(distance_wide(slot, bit_count, extra)).unwrap_or(usize::MAX)
+}
+
+/// The ladder before it is narrowed - the one place the expression is
+/// written. `distance_slot_for_match` walks it in the encoding direction
+/// and must stay on the same width, or the two halves disagree about
+/// which slot a distance belongs to on a 32-bit target.
+#[inline]
+fn distance_wide(slot: usize, bit_count: u8, extra: u32) -> u64 {
+    (((2u64 | (slot as u64 & 1)) << bit_count) | extra as u64) + 1
+}
+
 pub fn slot_to_distance(slot: usize, extra_bits: u32) -> Result<usize> {
     if slot < 4 {
         return Ok(slot + 1);
@@ -4797,31 +5730,94 @@ pub fn slot_to_distance(slot: usize, extra_bits: u32) -> Result<usize> {
     if extra_bits > max_extra {
         return Err(Error::InvalidData("RAR 5 distance extra bits exceed slot"));
     }
-    Ok((((2 | (slot & 1)) << bit_count) | extra_bits as usize) + 1)
+    Ok(distance_from_parts(slot, bit_count as u8, extra_bits))
 }
 
 #[derive(Debug, Clone)]
 pub struct HuffmanTable {
-    symbols: Vec<HuffmanSymbol>,
+    // nzbfast-local change, 2 Sep 2026 - re-apply the compact canonical
+    // symbol vector after the next rars re-sync; see VENDORING.md.
+    // Symbol ids in canonical-code order. Code and length are implicit in
+    // `first_code`, `first_index`, and `counts`; keeping them beside every
+    // symbol made each entry 16 bytes on 64-bit targets.
+    symbols: Vec<u16>,
     first_code: [u16; 16],
     first_index: [usize; 16],
     counts: [u16; 16],
     // Primary decode LUT: top LUT_BITS of the bitstream -> (symbol << 8) | code_len.
-    // Entry 0 means "code longer than LUT_BITS or invalid" -> canonical fallback.
+    // Bit 31 marks literal entries; bits 24..=30 can hold distance metadata;
+    // a miss is exactly HUFF_LUT_MISS.
     lut: Vec<u32>,
 }
 
-const HUFF_LUT_BITS: usize = 12;
+// nzbfast-local change, 3 Sep 2026 - nine bits keep the primary decode table
+// in 2 KiB per role while the rare wider codes use the outlined canonical
+// fallback. See VENDORING.md.
+const HUFF_LUT_BITS: usize = 9;
 
-#[derive(Debug, Clone)]
-struct HuffmanSymbol {
-    code: u16,
-    len: u8,
-    symbol: usize,
+// Symbol ids occupy bits 8..=23 and code lengths the low byte. Marking every
+// literal in the otherwise-unused top bit turns the burst's per-symbol
+// `wrapping_sub` + shift + branch into one bit-test branch while preserving
+// zero as the generic decoder's cheap miss sentinel. Masked symbol extraction
+// still lowers to one bitfield instruction. (nzbfast-local change, 3 Sep 2026;
+// see VENDORING.md.)
+const HUFF_LUT_LITERAL_BIT: u32 = 1 << 31;
+const HUFF_LUT_LENGTH_MASK: u32 = 0xff;
+const HUFF_LUT_MISS: u32 = 0;
+
+// A distance-only LUT build caches its validated extra-bit count in bits
+// 24..=28 and marks an invalid slot in bit 30. The shared symbol extractor
+// masks both away. (nzbfast-local change, 3 Sep 2026; see VENDORING.md.)
+#[cfg(feature = "parallel")]
+const HUFF_LUT_DISTANCE_BITS_SHIFT: u32 = 24;
+#[cfg(feature = "parallel")]
+const HUFF_LUT_DISTANCE_BITS_MASK: u32 = 0x1f;
+#[cfg(feature = "parallel")]
+const HUFF_LUT_DISTANCE_INVALID_BIT: u32 = 1 << 30;
+
+/// Literal entries set bit 31; controls and the miss sentinel leave it clear.
+/// RAR control symbols begin at 256. Every other table's symbols are below
+/// that boundary and carry the bit too, but the shared canonical decoder masks
+/// it during symbol extraction and otherwise ignores it.
+#[inline(always)]
+fn lut_entry_is_literal(entry: u32) -> bool {
+    entry & HUFF_LUT_LITERAL_BIT != 0
+}
+
+#[inline(always)]
+fn lut_entry_symbol(entry: u32) -> usize {
+    ((entry >> 8) & u32::from(u16::MAX)) as usize
+}
+
+#[cfg(feature = "parallel")]
+#[inline]
+fn distance_lut_metadata(slot: u16) -> u32 {
+    let slot = u32::from(slot);
+    let bit_count = if slot < 4 { 0 } else { (slot - 2) >> 1 };
+    if bit_count > 31 {
+        HUFF_LUT_DISTANCE_INVALID_BIT
+    } else {
+        bit_count << HUFF_LUT_DISTANCE_BITS_SHIFT
+    }
 }
 
 impl HuffmanTable {
+    fn from_distance_lengths(lengths: &[u8]) -> Result<Self> {
+        #[cfg(feature = "parallel")]
+        {
+            Self::from_lengths_impl::<true>(lengths)
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            Self::from_lengths_impl::<false>(lengths)
+        }
+    }
+
     pub fn from_lengths(lengths: &[u8]) -> Result<Self> {
+        Self::from_lengths_impl::<false>(lengths)
+    }
+
+    fn from_lengths_impl<const DISTANCE_LUT: bool>(lengths: &[u8]) -> Result<Self> {
         let mut count = [0u16; 16];
         for &length in lengths {
             if length > 15 {
@@ -4849,27 +5845,34 @@ impl HuffmanTable {
             index += usize::from(count[length]);
         }
 
-        let mut symbols = Vec::new();
+        let mut symbols = vec![0u16; index];
+        let mut next_index = first_index;
+        let mut lut = vec![HUFF_LUT_MISS; 1 << HUFF_LUT_BITS];
         for (symbol, &length) in lengths.iter().enumerate() {
             if length == 0 {
                 continue;
             }
-            let code = next_code[length as usize];
-            next_code[length as usize] += 1;
-            symbols.push(HuffmanSymbol {
-                code,
-                len: length,
-                symbol,
-            });
-        }
-        symbols.sort_by_key(|item| (item.len, item.code, item.symbol));
-        let mut lut = vec![0u32; 1 << HUFF_LUT_BITS];
-        for item in &symbols {
-            let len = usize::from(item.len);
+            let symbol = u16::try_from(symbol)
+                .map_err(|_| Error::InvalidData("RAR 5 Huffman symbol is too large"))?;
+            let len = usize::from(length);
+            let code = next_code[len];
+            next_code[len] += 1;
+            symbols[next_index[len]] = symbol;
+            next_index[len] += 1;
             if len <= HUFF_LUT_BITS {
                 let shift = HUFF_LUT_BITS - len;
-                let start = usize::from(item.code) << shift;
-                let entry = ((item.symbol as u32) << 8) | u32::from(item.len);
+                let start = usize::from(code) << shift;
+                let class = if symbol < 256 { HUFF_LUT_LITERAL_BIT } else { 0 };
+                #[cfg(feature = "parallel")]
+                let metadata = if DISTANCE_LUT {
+                    distance_lut_metadata(symbol)
+                } else {
+                    0
+                };
+                #[cfg(not(feature = "parallel"))]
+                let metadata = 0;
+                let entry =
+                    (u32::from(symbol) << 8) | class | metadata | u32::from(length);
                 lut[start..start + (1 << shift)].fill(entry);
             }
         }
@@ -4886,14 +5889,67 @@ impl HuffmanTable {
         self.symbols.is_empty()
     }
 
+    /// Return the primary-LUT entry, or `HUFF_LUT_MISS` when fewer than 15
+    /// bits remain or this code needs the canonical long-code fallback. The
+    /// entry is not consumed here: keeping literal-vs-other classification in
+    /// the burst preserves its single hot-path range branch, while the cold
+    /// edge can consume and hand a short-code control straight to dispatch.
+    #[inline(always)]
+    fn peek_lut_entry(&self, bits: &mut BitReader<'_>) -> u32 {
+        let Some(peek) = bits.peek15() else {
+            return HUFF_LUT_MISS;
+        };
+        self.lut[usize::from(peek >> (15 - HUFF_LUT_BITS))]
+    }
+
+    #[inline]
     fn decode(&self, bits: &mut BitReader<'_>) -> Result<usize> {
         if let Some(peek) = bits.peek15() {
             let entry = self.lut[usize::from(peek >> (15 - HUFF_LUT_BITS))];
-            if entry != 0 {
-                bits.consume((entry & 0xff) as u8);
-                return Ok((entry >> 8) as usize);
+            if entry != HUFF_LUT_MISS {
+                bits.consume((entry & HUFF_LUT_LENGTH_MASK) as u8);
+                return Ok(lut_entry_symbol(entry));
             }
-            // Codes longer than the LUT (13..=15 bits).
+            return self.decode_long(peek, bits);
+        }
+        self.decode_slow(bits)
+    }
+
+    /// The distance table is consulted for every fully-resolved match in the
+    /// parallel tape worker and in the parallel build's buffered/serial paths.
+    /// Keep its common LUT-hit path in those callers while leaving unrelated
+    /// decode sites outlined. (nzbfast-local change, 3 Sep 2026; see
+    /// VENDORING.md.)
+    #[cfg(feature = "parallel")]
+    #[inline(always)]
+    fn decode_distance_hot(&self, bits: &mut BitReader<'_>) -> Result<(usize, u8)> {
+        if let Some(peek) = bits.peek15() {
+            let entry = self.lut[usize::from(peek >> (15 - HUFF_LUT_BITS))];
+            if entry != HUFF_LUT_MISS {
+                bits.consume((entry & HUFF_LUT_LENGTH_MASK) as u8);
+                if entry & HUFF_LUT_DISTANCE_INVALID_BIT != 0 {
+                    return Err(Error::InvalidData("RAR 5 distance slot is too large"));
+                }
+                let bit_count =
+                    ((entry >> HUFF_LUT_DISTANCE_BITS_SHIFT) & HUFF_LUT_DISTANCE_BITS_MASK) as u8;
+                return Ok((lut_entry_symbol(entry), bit_count));
+            }
+            let slot = self.decode_long(peek, bits)?;
+            return Ok((slot, slot_distance_bits(slot)?));
+        }
+        let slot = self.decode_slow(bits)?;
+        Ok((slot, slot_distance_bits(slot)?))
+    }
+
+    /// Codes longer than the primary LUT use a canonical walk, kept out of
+    /// line so the LUT hit above stays small enough to inline at every call
+    /// site (a `perf` profile on an
+    /// EPYC read this function as a CALL at 17% of a small-file set's CPU;
+    /// research/RAR-PERF-AUDIT-2026-09-02.md, round 7).
+    #[inline(never)]
+    fn decode_long(&self, peek: u16, bits: &mut BitReader<'_>) -> Result<usize> {
+        {
+            // Codes longer than the primary LUT.
             for len in (HUFF_LUT_BITS + 1)..=15 {
                 let count = self.counts[len];
                 if count != 0 {
@@ -4902,13 +5958,12 @@ impl HuffmanTable {
                     if offset < count {
                         bits.consume(len as u8);
                         let index = self.first_index[len] + usize::from(offset);
-                        return Ok(self.symbols[index].symbol);
+                        return Ok(usize::from(self.symbols[index]));
                     }
                 }
             }
             return Err(Error::InvalidData("RAR 5 invalid Huffman code"));
         }
-        self.decode_slow(bits)
     }
 
     // Bit-by-bit canonical walk, used only near the end of input where a
@@ -4926,7 +5981,7 @@ impl HuffmanTable {
                 let offset = code.wrapping_sub(first);
                 if offset < count {
                     let index = self.first_index[len] + usize::from(offset);
-                    return Ok(self.symbols[index].symbol);
+                    return Ok(usize::from(self.symbols[index]));
                 }
             }
         }
@@ -4934,11 +5989,22 @@ impl HuffmanTable {
     }
 
     fn code_for_symbol(&self, symbol: usize) -> Result<(u16, u8)> {
-        self.symbols
+        let Some(index) = self
+            .symbols
             .iter()
-            .find(|item| item.symbol == symbol)
-            .map(|item| (item.code, item.len))
-            .ok_or(Error::InvalidData("RAR 5 missing Huffman symbol"))
+            .position(|&item| usize::from(item) == symbol)
+        else {
+            return Err(Error::InvalidData("RAR 5 missing Huffman symbol"));
+        };
+        for len in 1..=15 {
+            let start = self.first_index[len];
+            let end = start + usize::from(self.counts[len]);
+            if index < end {
+                debug_assert!(index >= start);
+                return Ok((self.first_code[len] + (index - start) as u16, len as u8));
+            }
+        }
+        unreachable!("canonical symbol index belongs to one length bucket")
     }
 }
 
@@ -5007,19 +6073,37 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// Consume up to 32 cached bits.
+    ///
+    /// Keep the cache-hit path in the caller: match decoding invokes this for
+    /// every length and distance operand, and returning `Result<u32>` through
+    /// an out-of-line call otherwise also materializes its indirect ABI result
+    /// on every hit. Refill and error handling stay outlined so forcing the
+    /// common path inline does not duplicate the byte-tail refill ladder at
+    /// every call site. (nzbfast-local change, 3 Sep 2026; see VENDORING.md.)
+    #[inline(always)]
     fn read_bits(&mut self, count: u8) -> Result<u32> {
-        if count > 32 {
-            return Err(Error::InvalidData("RAR 5 bit read is too wide"));
-        }
+        let count = u32::from(count);
         if count == 0 {
             return Ok(0);
         }
-        let count = u32::from(count);
+        if count > 32 || self.cache_bits < count {
+            return self.read_bits_refilled(count);
+        }
+        let value = (self.cache >> (64 - count)) as u32;
+        self.cache <<= count;
+        self.cache_bits -= count;
+        Ok(value)
+    }
+
+    #[inline(never)]
+    fn read_bits_refilled(&mut self, count: u32) -> Result<u32> {
+        if count > 32 {
+            return Err(Error::InvalidData("RAR 5 bit read is too wide"));
+        }
+        self.refill();
         if self.cache_bits < count {
-            self.refill();
-            if self.cache_bits < count {
-                return Err(Error::NeedMoreInput);
-            }
+            return Err(Error::NeedMoreInput);
         }
         let value = (self.cache >> (64 - count)) as u32;
         self.cache <<= count;
@@ -5254,6 +6338,191 @@ fn write_level_lengths(writer: &mut BitWriter, lengths: &[u8; LEVEL_TABLE_SIZE])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tape op's SHAPE is the optimisation, so it is worth an
+    /// assertion rather than a comment. Before 3 Sep 2026 `TapeOp` was an
+    /// enum whose widest variant carried a `RawFilter`, and the compiler
+    /// assembled and re-read that aggregate with overlapping unaligned
+    /// stack moves: a `perf` profile on an EPYC put 38% of the whole tape
+    /// worker on the two instructions that consumed those store-forwarding
+    /// stalls (research/RAR-PERF-AUDIT-2026-09-02.md, round 13). Giving
+    /// the op a payload-carrying field again brings that back, quietly.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn tape_op_is_a_flat_eight_byte_pod_and_round_trips_its_fields() {
+        assert_eq!(std::mem::size_of::<TapeOp>(), 8);
+        assert_eq!(std::mem::align_of::<TapeOp>(), 4);
+
+        let lits = TapeOp::lits(TAPE_LITS_CAP as u32);
+        assert_eq!(lits.kind(), tape_kind::LITS);
+        assert_eq!(lits.length(), TAPE_LITS_CAP);
+
+        // The widest match the format can express: length slot 43 with all
+        // nine extra bits set, plus the distance bonus, at a distance the
+        // 1 GiB window limit still allows.
+        let widest_length = slot_to_length(LENGTH_TABLE_SIZE - 1, (1 << 9) - 1).unwrap() + 3;
+        let matched = TapeOp::match_at(u32::MAX, widest_length as u32);
+        assert_eq!(matched.kind(), tape_kind::MATCH);
+        assert_eq!(matched.length(), widest_length);
+        assert_eq!(matched.distance, u32::MAX);
+
+        for index in 0..4u32 {
+            let rep = TapeOp::rep(index, 7);
+            assert_eq!(rep.kind(), tape_kind::REP);
+            assert_eq!(rep.length(), 7);
+            assert_eq!(rep.distance, index);
+        }
+        assert_eq!(TapeOp::rep_last().kind(), tape_kind::REP_LAST);
+        assert_eq!(TapeOp::filter().kind(), tape_kind::FILTER);
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn lazy_decode_tables_borrows_the_cached_tables() {
+        let lengths = TableLengths {
+            main: vec![1, 1],
+            distance: vec![1, 1],
+            align: vec![4; ALIGN_TABLE_SIZE],
+            length: vec![1, 1],
+        };
+        let tables = std::sync::Arc::new(DecodeTables::from_lengths(&lengths).unwrap());
+        let lazy = LazyDecodeTables::prebuilt(std::sync::Arc::clone(&tables));
+        assert_eq!(std::sync::Arc::strong_count(&tables), 2);
+
+        for _ in 0..4 {
+            let borrowed = lazy.get().unwrap();
+            assert!(std::sync::Arc::ptr_eq(borrowed, &tables));
+            assert_eq!(
+                std::sync::Arc::strong_count(&tables),
+                2,
+                "a block-table lookup must not clone the nested Arc"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn block_tape_returns_all_vector_capacities_for_reuse() {
+        let lengths = TableLengths {
+            main: vec![1, 1],
+            distance: vec![1, 1],
+            align: vec![4; ALIGN_TABLE_SIZE],
+            length: vec![1, 1],
+        };
+        let tables = std::sync::Arc::new(LazyDecodeTables::prebuilt(std::sync::Arc::new(
+            DecodeTables::from_lengths(&lengths).unwrap(),
+        )));
+
+        let mut payload = Vec::with_capacity(31);
+        payload.extend_from_slice(&[0xaa, 0xbb]);
+        let mut lits = Vec::with_capacity(23);
+        lits.push(0xcc);
+        let mut ops = Vec::with_capacity(17);
+        ops.push(TapeOp::lits(1));
+        let filters = Vec::with_capacity(11);
+        let capacities = (
+            payload.capacity(),
+            lits.capacity(),
+            ops.capacity(),
+            filters.capacity(),
+        );
+
+        let mut tape = BlockTape {
+            seq: 0,
+            tables,
+            payload,
+            payload_bits: 16,
+            lits,
+            ops,
+            filters,
+            resume_bit: None,
+            tail_error: None,
+        };
+        let buffers = tape.take_buffers();
+
+        assert_eq!(
+            (
+                buffers.payload.capacity(),
+                buffers.lits.capacity(),
+                buffers.ops.capacity(),
+                buffers.filters.capacity(),
+            ),
+            capacities
+        );
+        assert_eq!(buffers.payload, [0xaa, 0xbb]);
+        assert_eq!(buffers.lits, [0xcc]);
+        assert_eq!(buffers.ops.len(), 1);
+        assert_eq!(tape.payload.capacity(), 0);
+        assert_eq!(tape.lits.capacity(), 0);
+        assert_eq!(tape.ops.capacity(), 0);
+        assert_eq!(tape.filters.capacity(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn tape_recycling_drops_oversized_capacity_bundles() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let small = TapeBuffers {
+            payload: Vec::with_capacity(1024),
+            ..TapeBuffers::default()
+        };
+        let small_capacity = small.payload.capacity();
+        small.recycle(&tx);
+        assert_eq!(rx.try_recv().unwrap().payload.capacity(), small_capacity);
+
+        let oversized = TapeBuffers {
+            payload: Vec::with_capacity(TAPE_RECYCLE_BYTES_MAX + 1),
+            ..TapeBuffers::default()
+        };
+        oversized.recycle(&tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    /// The worker's slot ladder is two static tables now; they must agree
+    /// with the functions the serial decoder and the encoder still use over
+    /// every slot either table can produce (round 13).
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn worker_slot_tables_match_the_shared_slot_functions() {
+        for slot in 0..LENGTH_TABLE_SIZE {
+            assert_eq!(
+                LENGTH_SLOT_EXTRA_BITS[slot],
+                length_slot_extra_bits(slot).unwrap(),
+                "length slot {slot}"
+            );
+            let extra = (1u32 << LENGTH_SLOT_EXTRA_BITS[slot]) - 1;
+            assert_eq!(
+                slot_to_length(slot, extra).unwrap(),
+                if slot < 8 {
+                    slot + 2
+                } else {
+                    (((4 | (slot & 3)) << LENGTH_SLOT_EXTRA_BITS[slot]) | extra as usize) + 2
+                },
+                "length slot {slot}"
+            );
+        }
+        for slot in 0..DISTANCE_TABLE_SIZE_70 {
+            match distance_slot_bit_count(slot) {
+                Ok(bits) => {
+                    assert_eq!(slot_distance_bits(slot).unwrap(), bits as u8, "slot {slot}");
+                    let extra = if bits >= 32 {
+                        u32::MAX
+                    } else {
+                        (1u32 << bits) - 1
+                    };
+                    assert_eq!(
+                        slot_distance_value(slot, bits as u8, extra),
+                        slot_to_distance(slot, extra).unwrap(),
+                        "slot {slot}"
+                    );
+                }
+                Err(_) => assert!(slot_distance_bits(slot).is_err(), "slot {slot}"),
+            }
+        }
+    }
 
     fn checksum(flags: u8, size_bytes: &[u8]) -> u8 {
         size_bytes
@@ -5493,11 +6762,249 @@ mod tests {
     }
 
     #[test]
+    fn primary_lut_handoff_consumes_literals_and_controls_once() {
+        let mut lengths = vec![0; MAIN_TABLE_SIZE];
+        lengths[b'A' as usize] = 1;
+        lengths[262] = 1;
+        let table = HuffmanTable::from_lengths(&lengths).unwrap();
+        let literal_entry = table.lut[0];
+        assert!(lut_entry_is_literal(literal_entry));
+        assert_eq!(lut_entry_symbol(literal_entry), b'A' as usize);
+        assert_eq!(literal_entry & HUFF_LUT_LENGTH_MASK, 1);
+        let control_entry = table.lut[1 << (HUFF_LUT_BITS - 1)];
+        assert_ne!(control_entry, HUFF_LUT_MISS);
+        assert!(!lut_entry_is_literal(control_entry));
+        assert_eq!(lut_entry_symbol(control_entry), 262);
+        assert_eq!(control_entry & HUFF_LUT_LENGTH_MASK, 1);
+        // Canonical codes: A=0, match control 262=1.
+        let mut bits = BitReader::new(&[0b0100_0000, 0]);
+        let mut output = StreamingOutput::new(Vec::new(), 0, 2, 1024, 1024);
+        let mut sink = |_chunk: DecodedChunk<'_>| Ok::<_, std::convert::Infallible>(());
+
+        let control = output
+            .literal_burst(&table, &mut bits, 2, &mut sink)
+            .unwrap();
+        assert_eq!(control, Some(262));
+        assert_eq!(output.written(), 1);
+        assert_eq!(output.ring[0], b'A');
+        assert_eq!(bits.position(), 2, "the control code is consumed at handoff");
+
+        let long_len = (HUFF_LUT_BITS + 1) as u8;
+        let long = HuffmanTable::from_lengths(&[long_len, long_len]).unwrap();
+        let mut long_bits = BitReader::new(&[0, 0]);
+        let mut output = StreamingOutput::new(Vec::new(), 0, 1, 1024, 1024);
+        assert_eq!(
+            output
+                .literal_burst(&long, &mut long_bits, usize::from(long_len), &mut sink)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            long_bits.position(),
+            0,
+            "a LUT miss remains untouched for canonical decoding"
+        );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn distance_lut_hits_carry_validated_extra_bits_without_leaking_metadata() {
+        let mut distance = vec![0; DISTANCE_TABLE_SIZE_70];
+        distance[0] = 1;
+        distance[10] = 1;
+        let tables = DecodeTables::from_lengths(&TableLengths {
+            main: vec![1, 1],
+            distance,
+            align: vec![4; ALIGN_TABLE_SIZE],
+            length: vec![1, 1],
+        })
+        .unwrap();
+        // Canonical codes: distance slots 0 and 10 are encoded as 0 and 1.
+        // Both entries also carry the generic LUT's below-256 marker.
+        let encoded = [0b0100_0000, 0];
+        let mut hot = BitReader::new(&encoded);
+        assert_eq!(
+            tables.distance.decode_distance_hot(&mut hot).unwrap(),
+            (0, 0)
+        );
+        assert_eq!(
+            tables.distance.decode_distance_hot(&mut hot).unwrap(),
+            (10, 4)
+        );
+        assert_eq!(hot.position(), 2);
+
+        let mut generic = BitReader::new(&encoded);
+        assert_eq!(tables.distance.decode(&mut generic).unwrap(), 0);
+        assert_eq!(tables.distance.decode(&mut generic).unwrap(), 10);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn distance_lut_metadata_preserves_short_and_long_invalid_slot_errors() {
+        let mut short_distance = vec![0; DISTANCE_TABLE_SIZE_70];
+        short_distance[65] = 1;
+        short_distance[66] = 1;
+        let short = DecodeTables::from_lengths(&TableLengths {
+            main: vec![1, 1],
+            distance: short_distance,
+            align: vec![4; ALIGN_TABLE_SIZE],
+            length: vec![1, 1],
+        })
+        .unwrap();
+        let mut max_bits = BitReader::new(&[0, 0]);
+        assert_eq!(
+            short
+                .distance
+                .decode_distance_hot(&mut max_bits)
+                .unwrap(),
+            (65, 31)
+        );
+        let mut short_bits = BitReader::new(&[0b1000_0000, 0]);
+        assert!(matches!(
+            short.distance.decode_distance_hot(&mut short_bits),
+            Err(Error::InvalidData("RAR 5 distance slot is too large"))
+        ));
+        assert_eq!(
+            short_bits.position(),
+            1,
+            "the rejected short code is consumed"
+        );
+
+        let mut long_distance = vec![0; DISTANCE_TABLE_SIZE_70];
+        long_distance[66] = (HUFF_LUT_BITS + 1) as u8;
+        let long = DecodeTables::from_lengths(&TableLengths {
+            main: vec![1, 1],
+            distance: long_distance,
+            align: vec![4; ALIGN_TABLE_SIZE],
+            length: vec![1, 1],
+        })
+        .unwrap();
+        let mut long_bits = BitReader::new(&[0, 0]);
+        assert!(matches!(
+            long.distance.decode_distance_hot(&mut long_bits),
+            Err(Error::InvalidData("RAR 5 distance slot is too large"))
+        ));
+        assert_eq!(
+            long_bits.position(),
+            HUFF_LUT_BITS + 1,
+            "the rejected long code still takes canonical fallback"
+        );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn distance_hot_decode_preserves_valid_long_codes_and_short_input_tails() {
+        let mut long_distance = vec![0; DISTANCE_TABLE_SIZE_70];
+        long_distance[10] = (HUFF_LUT_BITS + 1) as u8;
+        long_distance[11] = (HUFF_LUT_BITS + 1) as u8;
+        let long = HuffmanTable::from_distance_lengths(&long_distance).unwrap();
+        let mut long_bits = BitReader::new(&[0, 0]);
+        assert_eq!(long.decode_distance_hot(&mut long_bits).unwrap(), (10, 4));
+        assert_eq!(long_bits.position(), HUFF_LUT_BITS + 1);
+
+        let mut tail_distance = vec![0; DISTANCE_TABLE_SIZE_70];
+        tail_distance[0] = 1;
+        tail_distance[10] = 1;
+        let tail = HuffmanTable::from_distance_lengths(&tail_distance).unwrap();
+        let mut tail_bits = BitReader::new(&[0b1000_0000]);
+        assert_eq!(tail.decode_distance_hot(&mut tail_bits).unwrap(), (10, 4));
+        assert_eq!(tail_bits.position(), 1);
+    }
+
+    #[test]
     fn rejects_oversubscribed_rar50_huffman_tables() {
         assert!(matches!(
             HuffmanTable::from_lengths(&[1, 1, 1]),
             Err(Error::InvalidData("RAR 5 oversubscribed Huffman table"))
         ));
+    }
+
+    #[test]
+    fn compact_huffman_symbols_preserve_canonical_codes_and_encoder_lookup() {
+        // Complete tree with the symbols deliberately scattered: 0, 10,
+        // 110, 1110, 1111. Symbols sharing a length stay in numeric order,
+        // as required by RAR's canonical code assignment.
+        let mut lengths = vec![0; MAIN_TABLE_SIZE];
+        lengths[1] = 1;
+        lengths[2] = 2;
+        lengths[128] = 3;
+        lengths[250] = 4;
+        lengths[MAIN_TABLE_SIZE - 1] = 4;
+        let table = HuffmanTable::from_lengths(&lengths).unwrap();
+
+        assert_eq!(table.symbols, [1, 2, 128, 250, 305]);
+        let expected = [
+            (1, 0, 1),
+            (2, 0b10, 2),
+            (128, 0b110, 3),
+            (250, 0b1110, 4),
+            (305, 0b1111, 4),
+        ];
+        let mut writer = BitWriter::new();
+        for &(symbol, code, len) in &expected {
+            assert_eq!(table.code_for_symbol(symbol).unwrap(), (code, len));
+            writer.write_bits(usize::from(code), usize::from(len));
+        }
+        assert_eq!(
+            table.code_for_symbol(0),
+            Err(Error::InvalidData("RAR 5 missing Huffman symbol"))
+        );
+
+        let encoded = writer.finish();
+        let mut reader = BitReader::new(&encoded);
+        for &(symbol, _, _) in &expected {
+            assert_eq!(table.decode(&mut reader).unwrap(), symbol);
+        }
+    }
+
+    #[test]
+    fn compact_huffman_symbols_cover_rar7_table_boundary() {
+        let mut lengths = vec![0; MAIN_TABLE_SIZE];
+        lengths[MAIN_TABLE_SIZE - 1] = 1;
+        lengths[0] = 1;
+        let table = HuffmanTable::from_lengths(&lengths).unwrap();
+
+        // MAIN_TABLE_SIZE is shared by RAR5 and RAR7 and contains their
+        // largest symbol id. Keep that boundary representable by the compact
+        // u16 storage and prove both canonical endpoints decode.
+        assert_eq!(table.symbols, [0, (MAIN_TABLE_SIZE - 1) as u16]);
+        assert_eq!(table.code_for_symbol(0).unwrap(), (0, 1));
+        assert_eq!(
+            table.code_for_symbol(MAIN_TABLE_SIZE - 1).unwrap(),
+            (1, 1)
+        );
+        let mut reader = BitReader::new(&[0b0100_0000]);
+        assert_eq!(table.decode(&mut reader).unwrap(), 0);
+        assert_eq!(table.decode(&mut reader).unwrap(), MAIN_TABLE_SIZE - 1);
+    }
+
+    #[test]
+    fn compact_huffman_symbols_reject_ids_that_would_truncate() {
+        let mut lengths = vec![0; usize::from(u16::MAX) + 2];
+        lengths[0] = 1;
+        lengths[usize::from(u16::MAX) + 1] = 1;
+
+        assert!(matches!(
+            HuffmanTable::from_lengths(&lengths),
+            Err(Error::InvalidData("RAR 5 Huffman symbol is too large"))
+        ));
+    }
+
+    #[test]
+    fn codes_beyond_the_primary_huffman_lut_use_the_canonical_fallback() {
+        let table = HuffmanTable::from_lengths(&[10, 10]).unwrap();
+        assert_eq!(
+            table.lut[0],
+            HUFF_LUT_MISS,
+            "10-bit codes must not populate the LUT"
+        );
+
+        let mut first = BitReader::new(&[0x00, 0x00]);
+        assert_eq!(table.decode(&mut first).unwrap(), 0);
+
+        // Canonical code 1 at width 10 is nine zero bits followed by one.
+        let mut second = BitReader::new(&[0x00, 0x40]);
+        assert_eq!(table.decode(&mut second).unwrap(), 1);
     }
 
     #[test]
@@ -5929,6 +7436,76 @@ mod tests {
                 128 * 1024,
                 false,
                 0, // flat_limit 0: keep this test on the streaming path
+                |chunk| {
+                    match chunk {
+                        DecodedChunk::Bytes(bytes) => streamed.extend_from_slice(bytes),
+                        DecodedChunk::Repeated { byte, len } => {
+                            streamed.resize(streamed.len() + len, byte)
+                        }
+                    }
+                    Ok::<_, std::convert::Infallible>(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(streamed, data);
+    }
+
+    #[test]
+    fn streaming_decode_swaps_delta_scratch_into_output() {
+        let data: Vec<u8> = (0..4099)
+            .map(|index| (index * 29 + index / 7) as u8)
+            .collect();
+        let input =
+            encode_lz_member_with_filter(&data, Rar50FilterKind::Delta { channels: 5 }).unwrap();
+        let mut reader = input.as_slice();
+        let mut decoder = Unpack50Decoder::new();
+        let mut streamed = Vec::new();
+
+        decoder
+            .decode_member_from_reader_with_dictionary_to_sink(
+                &mut reader,
+                0,
+                data.len(),
+                128 * 1024,
+                false,
+                0, // flat_limit 0: exercise StreamingOutput's swap path
+                |chunk| {
+                    match chunk {
+                        DecodedChunk::Bytes(bytes) => streamed.extend_from_slice(bytes),
+                        DecodedChunk::Repeated { byte, len } => {
+                            streamed.resize(streamed.len() + len, byte)
+                        }
+                    }
+                    Ok::<_, std::convert::Infallible>(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(streamed, data);
+    }
+
+    #[test]
+    fn streaming_decode_swaps_between_chained_delta_filters() {
+        let data: Vec<u8> = (0..4099)
+            .map(|index| (index * 41 + index / 11) as u8)
+            .collect();
+        let delta = Rar50FilterSpec::new(Rar50FilterKind::Delta { channels: 5 });
+        let input = Unpack50Encoder::new()
+            .encode_member_with_filters(&data, 0, &[delta.clone(), delta])
+            .unwrap();
+        let mut reader = input.as_slice();
+        let mut decoder = Unpack50Decoder::new();
+        let mut streamed = Vec::new();
+
+        decoder
+            .decode_member_from_reader_with_dictionary_to_sink(
+                &mut reader,
+                0,
+                data.len(),
+                128 * 1024,
+                false,
+                0,
                 |chunk| {
                     match chunk {
                         DecodedChunk::Bytes(bytes) => streamed.extend_from_slice(bytes),
@@ -6956,6 +8533,81 @@ mod tests {
         assert_eq!(slot_to_distance(10, 15).unwrap(), 48);
     }
 
+    /// The TOP of the distance ladder, where the value is wider than the
+    /// target's `usize` on a 32-bit build.
+    ///
+    /// Slot 65 carries 31 extra bits, so its largest distance is
+    /// `(3 << 31) | (2^31 - 1)` plus one = 2^33: thirty-four bits, which
+    /// no 32-bit `usize` holds. Computing the ladder in `usize` therefore
+    /// wrapped and panicked on the `+ 1` under the nightly armv7-cross
+    /// job's `overflow-checks` (run 33737735769) - and in a release build
+    /// would have wrapped SILENTLY to a tiny distance and mis-decoded the
+    /// match. `distance_from_parts` computes in `u64` and saturates.
+    ///
+    /// Written to hold on BOTH widths deliberately, because this box is
+    /// 64-bit and the target that broke is not: the exact answer where it
+    /// is representable, `usize::MAX` where it is not, and on every slot
+    /// the guarantee that matters either way - the value never wrapped
+    /// DOWN below the slot's own base.
+    #[test]
+    fn the_widest_distance_slots_do_not_wrap_a_32_bit_usize() {
+        let widest: u64 = 1u64 << 33;
+        assert_eq!(
+            slot_to_distance(65, (1u32 << 31) - 1).unwrap() as u64,
+            widest.min(usize::MAX as u64),
+            "the widest RAR 5 distance is 2^33, saturated where usize is narrower"
+        );
+
+        for slot in 0..DISTANCE_TABLE_SIZE_70 {
+            let Ok(bit_count) = distance_slot_bit_count(slot) else {
+                continue;
+            };
+            let extra = if bit_count == 0 {
+                0
+            } else {
+                (1u32 << bit_count) - 1
+            };
+            let got = slot_to_distance(slot, extra).unwrap();
+            let base = 1u64 << bit_count;
+            assert!(
+                got as u64 >= base.min(usize::MAX as u64),
+                "distance slot {slot} wrapped below its own base ({got} < 2^{bit_count})"
+            );
+        }
+
+        // ...and the encoding half stays on the SAME width as the decoding
+        // half. `distance_slot_for_match` walks the ladder upward and must
+        // evaluate the window of every slot below the one that matches, so
+        // a `usize` there would overflow on the way past the top slots even
+        // for a small distance. Every value the forward ladder can actually
+        // represent on this target must map back to the slot and extra bits
+        // it came from; the ones it cannot represent here are skipped, since
+        // the forward half saturates them on purpose.
+        for slot in 0..DISTANCE_TABLE_SIZE_70 {
+            let Ok(bit_count) = distance_slot_bit_count(slot) else {
+                continue;
+            };
+            let top = if bit_count == 0 {
+                0
+            } else {
+                (1u32 << bit_count) - 1
+            };
+            for extra in [0, top] {
+                if slot >= 4
+                    && usize::try_from(distance_wide(slot, bit_count as u8, extra)).is_err()
+                {
+                    continue;
+                }
+                let d = slot_to_distance(slot, extra).unwrap();
+                assert_eq!(
+                    distance_slot_for_match(d, DISTANCE_TABLE_SIZE_70).unwrap(),
+                    (slot, extra as usize),
+                    "distance {d} did not map back to slot {slot} extra {extra}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn bit_reader_accepts_large_rar5_distance_extras() {
         let mut bits = BitReader::new(&[0xff, 0x00, 0xaa, 0x55]);
@@ -6966,6 +8618,17 @@ mod tests {
             Err(Error::NeedMoreInput),
             "32-bit reads must not leave a partial cursor state"
         );
+
+        // The forced-inline cache-hit arm must still reject an invalid width
+        // even when a preceding peek has filled the cache far past it.
+        let mut overwide = BitReader::new(&[0; 8]);
+        assert_eq!(overwide.peek15(), Some(0));
+        assert_eq!(overwide.position(), 0);
+        assert_eq!(
+            overwide.read_bits(33),
+            Err(Error::InvalidData("RAR 5 bit read is too wide"))
+        );
+        assert_eq!(overwide.position(), 0, "an invalid read is non-consuming");
     }
 
     #[test]
@@ -7281,6 +8944,91 @@ mod tests {
             assert_eq!(
                 mt_decoder.last_length, reference.last_length,
                 "{name}: last_length diverged"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn parallel_cap_one_streaming_decode_matches_buffered_for_match_members() {
+        // `mt_workers_cap(1)` plus `flat_limit = 0` deterministically selects
+        // decode_block_serial even in a parallel build. Use a dense-match
+        // member under both RAR 5 algorithm table shapes so that path and the
+        // buffered reference both consume real distance codes.
+        let phrase = b"RAR5 serial distance metadata: abcdefghijklmnopqrstuvwxyz 0123456789\n";
+        let data_len = 512 << 10;
+        let mut data = Vec::with_capacity(data_len);
+        while data.len() < data_len {
+            data.extend_from_slice(phrase);
+        }
+        data.truncate(data_len);
+
+        for algorithm_version in [0, 1] {
+            let encoded =
+                encode_lz_member_with_options(&data, algorithm_version, EncodeOptions::new(4))
+                    .unwrap();
+            let block = parse_compressed_block(&encoded).unwrap();
+            let (lengths, _) =
+                read_table_lengths(&encoded[block.payload], algorithm_version).unwrap();
+            assert!(
+                lengths.main[262..].iter().any(|&length| length != 0),
+                "algorithm {algorithm_version}: fixture must contain a new match"
+            );
+            assert!(
+                lengths.distance.iter().any(|&length| length != 0),
+                "algorithm {algorithm_version}: fixture must contain a distance code"
+            );
+
+            let mut buffered = Unpack50Decoder::new();
+            let buffered_out = buffered
+                .decode_member(
+                    &encoded,
+                    algorithm_version,
+                    data.len(),
+                    false,
+                    DecodeMode::Lz,
+                )
+                .unwrap();
+            assert_eq!(
+                buffered_out, data,
+                "algorithm {algorithm_version}: buffered"
+            );
+
+            let mut serial = Unpack50Decoder::new();
+            serial.set_mt_workers_cap(1);
+            let mut cursor = std::io::Cursor::new(&encoded);
+            let mut serial_out = Vec::with_capacity(data.len());
+            serial
+                .decode_member_from_reader_with_dictionary_to_sink(
+                    &mut cursor,
+                    algorithm_version,
+                    data.len(),
+                    DEFAULT_DICTIONARY_SIZE,
+                    false,
+                    0,
+                    |chunk| {
+                        match chunk {
+                            DecodedChunk::Bytes(bytes) => serial_out.extend_from_slice(bytes),
+                            DecodedChunk::Repeated { byte, len } => {
+                                serial_out.extend(std::iter::repeat_n(byte, len));
+                            }
+                        }
+                        Ok::<(), std::convert::Infallible>(())
+                    },
+                )
+                .unwrap();
+
+            assert_eq!(
+                serial_out, buffered_out,
+                "algorithm {algorithm_version}: serial sink output"
+            );
+            assert_eq!(
+                serial.reps, buffered.reps,
+                "algorithm {algorithm_version}: rep state"
+            );
+            assert_eq!(
+                serial.last_length, buffered.last_length,
+                "algorithm {algorithm_version}: last-length state"
             );
         }
     }
@@ -7746,6 +9494,58 @@ mod tests {
 
     #[test]
     #[cfg(feature = "parallel")]
+    fn flat_short_match_fast_path_covers_every_length_bucket() {
+        let prefix: Vec<u8> = (0..128u8).map(|byte| byte.wrapping_mul(37)).collect();
+        for distance in [16, 17, 31, 64, 127] {
+            for length in 0..=64 {
+                let mut output = FlatOutput::new(prefix.len() + 80, 256, 256);
+                let mut sink = |_chunk: DecodedChunk<'_>| {
+                    Ok::<_, std::convert::Infallible>(())
+                };
+                output.push_bytes(&prefix, &mut sink).unwrap();
+                output.copy_match(distance, length, &mut sink).unwrap();
+
+                let mut expected = prefix.clone();
+                reference_extend(&mut expected, distance, length);
+                assert_eq!(
+                    &output.buf[..output.pos],
+                    expected,
+                    "distance {distance}, length {length}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn flat_push_bytes_covers_every_literal_ladder_length() {
+        // Every length the power-of-two ladder can see, and the first few
+        // past it that keep the libcall, appended at a non-zero position so
+        // each arm's offset arithmetic is exercised.
+        for prefix in [0usize, 1, 7] {
+            for count in 0..=20usize {
+                let mut output = FlatOutput::new(prefix + count + 80, 256, 256);
+                let mut sink =
+                    |_chunk: DecodedChunk<'_>| Ok::<_, std::convert::Infallible>(());
+                let head: Vec<u8> = (0..prefix as u8).map(|b| b.wrapping_add(200)).collect();
+                let bytes: Vec<u8> = (0..count as u8)
+                    .map(|b| b.wrapping_mul(31).wrapping_add(7))
+                    .collect();
+                output.push_bytes(&head, &mut sink).unwrap();
+                output.push_bytes(&bytes, &mut sink).unwrap();
+                let mut expected = head.clone();
+                expected.extend_from_slice(&bytes);
+                assert_eq!(
+                    &output.buf[..output.pos],
+                    expected,
+                    "prefix {prefix}, literal run of {count}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
     fn flat_decode_matches_reference_across_shapes() {
         // The tiny cfg(test) tape caps force the park-and-resume boundary
         // constantly, so this exercises `apply_tape_flat`'s re-decode
@@ -7869,6 +9669,106 @@ mod tests {
         assert_eq!(flat_out, expected);
         assert_eq!(flat_decoder.reps, reference.reps);
         assert_eq!(flat_decoder.last_length, reference.last_length);
+    }
+
+    /// Flat decode with an explicit dictionary, so a member many times the
+    /// window forces the sliding path (the test build's slack is 4 KiB).
+    #[cfg(feature = "parallel")]
+    fn flat_sink_decode_with_dictionary(
+        encoded: &[u8],
+        output_size: usize,
+        dictionary: usize,
+        decoder: &mut Unpack50Decoder,
+    ) -> std::result::Result<Vec<u8>, StreamDecodeError<std::convert::Infallible>> {
+        decoder.test_force_flat = true;
+        let mut cursor = std::io::Cursor::new(encoded);
+        let mut out = Vec::new();
+        decoder.decode_member_from_reader_with_dictionary_to_sink(
+            &mut cursor,
+            0,
+            output_size,
+            dictionary,
+            false,
+            u64::MAX,
+            |chunk| {
+                match chunk {
+                    DecodedChunk::Bytes(bytes) => out.extend_from_slice(bytes),
+                    DecodedChunk::Repeated { byte, len } => {
+                        out.extend(std::iter::repeat(byte).take(len))
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        Ok(out)
+    }
+
+    /// A member 24x its dictionary: matches at 32 KiB reach back within a
+    /// 128 KiB window, the flat plan is 256 KiB in the test build, so the
+    /// buffer slides ~20 times. Output must equal the serial decoder's and
+    /// the plan must stay a function of the dictionary, not the member.
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn flat_decode_slides_a_member_larger_than_its_plan() {
+        let dictionary = 128 << 10;
+        let mut lcg = 0x9E3779B97F4A7C15u64;
+        let mut block = Vec::with_capacity(32 << 10);
+        while block.len() < 32 << 10 {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            block.extend_from_slice(&lcg.to_le_bytes());
+        }
+        let mut data = Vec::with_capacity(3 << 20);
+        for i in 0..96usize {
+            let mut copy = block.clone();
+            // Perturb a few bytes so the encoder emits matches, not one
+            // giant repeat, and every block still differs from the last.
+            let len = copy.len();
+            for j in 0..4 {
+                copy[(i * 977 + j * 3331) % len] ^= (i as u8).wrapping_add(j as u8);
+            }
+            data.extend_from_slice(&copy);
+        }
+        assert_eq!(flat_plan_bytes(0, data.len(), dictionary), 2 * dictionary);
+        let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(4)).unwrap();
+        let mut reference = Unpack50Decoder::new();
+        reference.set_window_limit(dictionary);
+        let expected = reference
+            .decode_member_with_dictionary(&encoded, 0, data.len(), dictionary, false, DecodeMode::Lz)
+            .unwrap();
+        assert_eq!(expected, data, "reference disagrees with the encoder");
+        let mut flat_decoder = Unpack50Decoder::new();
+        let flat_out = flat_sink_decode_with_dictionary(&encoded, data.len(), dictionary, &mut flat_decoder)
+            .expect("sliding flat decode");
+        assert_eq!(flat_out, expected);
+        assert_eq!(flat_decoder.reps, reference.reps);
+    }
+
+    /// Filters across a sliding buffer: a filter that fits the slack is
+    /// held, applied and emitted as the buffer slides under it (the encoder
+    /// declares one per block, so this is the shape that reaches us); one
+    /// holding back more than the slack leaves nothing to drop and reports
+    /// `FilteredMember` (the caller takes the buffered decoder), exactly
+    /// the streaming path's answer. Either way, never a wrong byte.
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn flat_decode_filters_across_slides_or_refuses() {
+        let dictionary = 128 << 10;
+        let mut data = vec![0u8; 1 << 20];
+        data[0] = 0xe8;
+        for (i, byte) in data.iter_mut().enumerate().skip(5) {
+            *byte = (i % 251) as u8;
+        }
+        let encoded = encode_lz_member_with_filter(&data, Rar50FilterKind::E8).unwrap();
+        let mut flat_decoder = Unpack50Decoder::new();
+        let mut reference = Unpack50Decoder::new();
+        let expected = reference
+            .decode_member_with_dictionary(&encoded, 0, data.len(), dictionary, false, DecodeMode::Lz)
+            .unwrap();
+        match flat_sink_decode_with_dictionary(&encoded, data.len(), dictionary, &mut flat_decoder) {
+            Err(StreamDecodeError::FilteredMember) => {}
+            Ok(out) => assert_eq!(out, expected, "filtered output diverged across slides"),
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! budget whose auto floor is one dictionary's worth).
 //!
 //! Not settled by reading, per the section. Run with:
-//!   cargo test -p nzbkit --test lzma_dict_window_rss -- --ignored --nocapture
+//!   cargo test -p nzbkit --features heavy-tests --test lzma_dict_window_rss -- --ignored --nocapture
 //! The two tests are `#[ignore]` because each allocates >1 GiB and takes
 //! seconds; they are the committed reproducer, not a per-push regression
 //! (the remedy carries its own fast test).

@@ -124,6 +124,71 @@ fn main() {
         );
     }
 
+    // The back-substitution race: the dense m x m product against the
+    // transform solve, at the same shapes, on one binary. This is the
+    // measurement `forney::BACKSUB_MIN_MISSING` rests on (audit section
+    // 20), so it prints setup and solve apart - the dense arm's setup
+    // BUILDS the m x m inverse and the transform arm's does not, and
+    // both are wall a repair pays.
+    //
+    // NZBFAST_BACKSUB_M (comma list) and NZBFAST_BACKSUB_BLOCK (bytes)
+    // drive it; it holds three m x block buffers plus the dense arm's
+    // m^2 inverse, so at the 8192 cap and the 64 KiB default that is
+    // ~1.7 GB. Shrink the block on a small box - it scales both arms
+    // alike. NZBFAST_BACKSUB_M=0 skips the sweep entirely.
+    let bs_block: usize = std::env::var("NZBFAST_BACKSUB_BLOCK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64 << 10);
+    let bs_m: Vec<usize> = std::env::var("NZBFAST_BACKSUB_M")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![512, 1024, 1500, 2048, 3000, 6000, 8192]);
+    if bs_m.iter().any(|&m| m > 0) {
+        let bw = bs_block / 2;
+        println!(
+            "\nback-substitution: block {} KiB · dense m x m vs transform solve",
+            bs_block >> 10
+        );
+        println!(
+            "{:>8}  {:>9} {:>9}  {:>9} {:>9}  {:>9}  {:>8}",
+            "missing", "dense set", "dense", "forney set", "forney", "solve x", "checksum"
+        );
+        for &m in bs_m.iter().filter(|&&m| m > 0) {
+            let ks = nzbkit::par2repair::input_base_logs(m).expect("within the PAR2 limit");
+            let syn: Vec<Vec<u16>> = (0..m)
+                .map(|_| {
+                    (0..bw)
+                        .map(|_| (xorshift(&mut state) >> 32) as u16)
+                        .collect()
+                })
+                .collect();
+            let arm = |forney: bool| {
+                let (mut set, mut sol) = (f64::MAX, f64::MAX);
+                let mut checksum = 0u16;
+                for _ in 0..3 {
+                    let (a, b, sum) = nzbkit::par2repair::bench_backsub(&ks, 7, &syn, forney);
+                    std::hint::black_box(sum);
+                    set = set.min(a);
+                    sol = sol.min(b);
+                    checksum = sum;
+                }
+                (set, sol, checksum)
+            };
+            let (ds, dv, dense_sum) = arm(false);
+            let (fs, fv, forney_sum) = arm(true);
+            assert_eq!(dense_sum, forney_sum, "dense and Forney outputs differ");
+            println!(
+                "{m:>8}  {:>8.1}ms {:>8.1}ms  {:>8.1}ms {:>8.1}ms  {:>8.2}x  {dense_sum:04x}",
+                ds * 1e3,
+                dv * 1e3,
+                fs * 1e3,
+                fv * 1e3,
+                dv / fv
+            );
+        }
+    }
+
     // Scalar-path guard: matrix inversion timing (Vandermonde +
     // Gauss-Jordan), so a fold-table A/B can prove the scalar solve
     // untouched. Best of 3, like the fold rows.

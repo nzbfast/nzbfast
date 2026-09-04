@@ -18,14 +18,20 @@ use rusqlite::{Connection, OptionalExtension};
 /// without taking a direct rusqlite dependency.
 pub use rusqlite::InterruptHandle;
 
-use crate::extract::release_stem;
+use crate::names::release_stem;
 use crate::nntp::OverEntry;
 
 mod aggregates;
+mod albumfold;
+#[cfg(test)]
+mod albumfold_tests;
 mod browse;
 mod cards;
 mod claims;
 mod deadline;
+mod deobf;
+#[cfg(test)]
+mod deobf_tests;
 mod encrypted;
 mod evict;
 mod fold;
@@ -46,9 +52,16 @@ mod retry;
 mod schema;
 mod scoreboard;
 mod searchlog;
+mod seed;
+mod seed_collection;
+#[cfg(test)]
+mod seed_tests;
 pub mod segcodec;
 mod segmig;
 mod session;
+mod sessionfold;
+#[cfg(test)]
+mod sessionfold_tests;
 mod spots;
 mod summaries;
 #[cfg(test)]
@@ -58,6 +71,23 @@ mod titles;
 pub use browse::*;
 pub use cards::*;
 pub use claims::{MSGID_KEYS_PER_FILE, NameClaim, NameEvidence, ProvenOutcome, msgid_set_key};
+pub use deobf::{
+    CatalogRow, CollectionKey, HUNT_MIN_SLACK, HUNT_SIZE_SLACK_DIV, HUNT_TIGHT_WINDOW,
+    HUNT_TIME_WINDOW, HitRank, HuntQuery, IndexerJoin, NameFromNzbError, coarsen_age_days,
+    coarsen_size_mb, group_by_leftover, group_by_session, hunt_cascade_for_dark,
+    hunt_cascade_with_poster, hunt_catalog, hunt_catalog_mapped_then_filter,
+    hunt_catalog_newznab_then_size, hunt_for_dark, hunt_from_dark, hunt_from_dark_with_poster,
+    hunt_next_episode, hunt_next_episode_sized, hunt_until_named, hunt_until_named_queries,
+    hunt_until_quota, hunt_wanted, joins_named, leftover_as_query, leftover_boosts,
+    leftover_hex_prefix, leftover_hex_prefix_with_window, leftover_hex_suffix,
+    leftover_hex_suffix_with_window, leftover_hex8_suffix, leftover_hex8_suffix_with_window,
+    leftover_is_a_title, leftover_posted_lcp, leftover_posted_lcs, leftover_stem,
+    leftover_stem_with_window, leftover_token, leftover_with_tight_window, leftover_with_window,
+    rank_hits, rank_hits_exact_then_poster, rank_hits_exact_then_rare_then_poster,
+    rank_hits_lcp_then_rare_then_poster, rank_hits_lcs_then_rare_then_poster,
+    rank_hits_newest_then_poster, rank_hits_prefer_poster, rank_hits_rare_title,
+    rank_hits_rare_title_then_poster, rank_hits_with_leftover,
+};
 pub use encrypted::{ENC_CLASS, EncKind};
 pub use evict::*;
 pub use ingest::*;
@@ -69,6 +99,8 @@ pub use query::{FilenameFallback, filename_fallback_stats, reset_filename_fallba
 pub use schema::WAL_SIZE_LIMIT;
 pub use scoreboard::*;
 pub use searchlog::*;
+pub use seed::*;
+pub use seed_collection::*;
 pub use segcodec::{Seg, SegList, SegRaw};
 pub use segmig::*;
 pub use session::{SessionLink, SessionSibling, TitleSibling};

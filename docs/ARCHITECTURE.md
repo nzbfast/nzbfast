@@ -4,7 +4,7 @@ How an NZB becomes extracted output. Engine code lives in `crates/nzbkit`, the C
 daemon in `crates/nzbfast`. Paths below are relative to `crates/` unless they start with
 `vendor/`.
 
-## 1. NZB parse (`nzbkit/src/nzb.rs`)
+## 1. NZB parse (`nzbkit-base/src/nzb.rs`)
 
 An NZB is XML: files, each with newsgroups and a list of segments (message-ID, byte
 count, part number). The parser keeps the model deliberately close to the wire format;
@@ -26,7 +26,7 @@ failures retry (bounded); a 430 "no such article" is authoritative for that serv
 Every connection sends QUIT on the way out. Raw article bytes leave the pool on an mpsc
 channel as `FetchOutcome`s.
 
-## 3. Decode in place (`nzbkit/src/yenc.rs`, `yenc_simd.rs`)
+## 3. Decode in place (`nzbkit-base/src/yenc.rs`, `yenc_simd.rs`)
 
 Dedicated decode threads (capped at core count) drain that channel in batches. Each
 article goes through `yenc_simd::decode_into_integrity`: rapidyenc (vendored FFI) does
@@ -35,7 +35,7 @@ PMULL/CRC-instruction kernels. `yenc.rs` is the scalar correctness oracle the SI
 is differentially tested against. Once live verify has matched a slot to a PAR2 file,
 the redundant article CRC is skipped and the PAR2 block CRC catches corruption instead.
 
-## 4. Disk and memory (`nzbkit/src/disk.rs`, `mem.rs`)
+## 4. Disk and memory (`nzbkit-base/src/disk.rs`, `mem.rs`)
 
 One output file per NZB file, preallocated to its yEnc-declared size; every decoded
 article `pwrite`s at its final offset from whichever decode thread holds it. There is no
@@ -44,7 +44,7 @@ tier (extractor holds, verifier partials, the body-buffer pool); each tier has a
 path to disk, so a 190 GB job on an 8 GB NAS degrades to more I/O rather than swapping.
 Default budget: a quarter of RAM, clamped to [256 MB, 16 GB], cgroup-aware in containers.
 
-## 5. Verify and repair (`nzbkit/src/live.rs`, `par2.rs`, `par2repair.rs`, `gf16.rs`, `par2ntt.rs`)
+## 5. Verify and repair (`nzbkit-base/src/live.rs`, `par2.rs`, `par2repair.rs`, `gf16.rs`, `par2ntt.rs`)
 
 The PAR2 main packet is scheduled first. `live.rs` hashes decoded article buffers
 against the PAR2 block checksums while the download runs, so verification finishes with

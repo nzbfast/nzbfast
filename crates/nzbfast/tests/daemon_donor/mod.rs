@@ -883,13 +883,56 @@ async fn a_store_rar_release_is_reached_by_the_article_fill_once_its_volume_is_a
     // after that line - and if the fill ever learns to feed the
     // extractor directly, this is the assertion to move rather than
     // the one to delete.
-    let mat = lg
+    //
+    // The SUCCESSOR's materialize, anchored off the line below rather
+    // than off `lg.find`. **This log holds BOTH jobs**, and the
+    // predecessor is this same shape - a mapped RAR volume, ten blocks
+    // of damage, one recovery block - so it materializes too, hundreds
+    // of lines earlier. `lg.find` therefore returned the PREDECESSOR's
+    // materialize, which is before everything the successor ever logs,
+    // and `mat < ask` was very nearly vacuous: it could not have failed
+    // however late the successor's own materialize ran. Found 1 Sep
+    // 2026 by the assertion below tripping over it (the unexamined line
+    // reads AFTER a materialize that belongs to the other job), and
+    // fixed here rather than left, because a weak assertion in a test
+    // whose whole subject is ORDERING is the kind that reads as cover
+    // and is not.
+    let unlooked = lg
+        .find("damaged block(s) in 1 file(s) unexamined")
+        .unwrap_or_else(|| {
+            panic!("the first entry point walked past a mapped slot in silence:\n{lg}")
+        });
+    let mat = lg[unlooked..]
         .find("materializing volumes for repair")
+        .map(|i| i + unlooked)
         .unwrap_or_else(|| panic!("the volume was never materialized:\n{lg}"));
     assert!(
         mat < ask && ask < borrow,
         "the borrow did not happen on a materialized volume \
          (materialize {mat}, ask {ask}, borrow {borrow}):\n{lg}"
+    );
+    // ...and the FIRST entry point said out loud that it was walking
+    // past this damage, BEFORE that materialize. That line is the only
+    // thing in the tree that can distinguish "the pass looked and found
+    // nothing" from "the pass never looked", and this shape - a mapped
+    // RAR volume, which is most real releases - is exactly the one
+    // where the two used to be indistinguishable. Pinned HERE because
+    // this is the one existing fixture that produces a mapped slot with
+    // damage; the unit rig next door
+    // (`dupefill_scope_tests::the_unexamined_tally_counts_only_the_mapped_skip`)
+    // builds its Extractor disabled and can only pin the zero arm.
+    //
+    // The COUNT is asserted in the string and is not incidental: ten
+    // blocks is the successor's whole damage, so this says the first
+    // entry point walked past ALL of it - which is what makes the
+    // second entry point load-bearing on this shape rather than a
+    // belt-and-braces second look.
+    assert!(
+        unlooked < mat,
+        "the unexamined-damage line came after the successor's own \
+         materialize, so it is the second entry point reporting a failed \
+         materialize rather than the first reporting the mapped skip \
+         (unlooked {unlooked}, materialize {mat}):\n{lg}"
     );
     // And no recovery block was spent closing those holes: the fill
     // ran BEFORE the disk repair, which then found the set already

@@ -562,6 +562,23 @@ async fn a_set_whose_file_the_post_offered_and_lost_whole_is_still_rebuilt() {
     );
 }
 
+/// The fill tiers' refusal delay for the ordinary give-up test above,
+/// and it is NOT [`FILL_REFUSAL_MS`]: the two arms race different
+/// things, so they buy their margin at different prices.
+///
+/// The starvation arm waits a fixed 10 s grace and needs a head start
+/// far past it. The ordinary give-up races a parity FETCH that takes
+/// about a second on the loopback mock, and the losing runs measured on
+/// 3 Sep 2026 were a handful of 700 ms prefetch ticks short - so
+/// `2 * FILL_TIERS * 1200` = 7.2 s of head start is already several
+/// times the shortfall. The delay is a CEILING ON THE RUN as well as a
+/// margin, because the tiers' in-flight refusals are still drained
+/// after the give-up has abandoned the walkers: at FILL_REFUSAL_MS the
+/// test measured 42.8 s against 6 s before the tiers, and at 1200 ms it
+/// measures 17.4 s. Raise it if this ever flakes again; do not
+/// raise it for symmetry with the constant below.
+const GIVEUP_FILL_REFUSAL_MS: u64 = 1_200;
+
 /// TODO 311 follow-on B: the §146 tail give-up across EVERY adopted set,
 /// end to end.
 ///
@@ -581,11 +598,39 @@ async fn a_set_whose_file_the_post_offered_and_lost_whole_is_still_rebuilt() {
 /// exits 0, so the outcome alone cannot tell the two apart. What the
 /// outcome IS good for is the safety half - both tracks byte-exact says
 /// no article was abandoned off a sibling set's parity, which is the one
-/// permanent loss this widening must never take.
+/// permanent loss this widening must never take. That half is asserted
+/// FIRST; see the note at it.
 ///
-/// Four servers and a slow refusal give the census a wide window: each
+/// THE MECHANISM ASSERTION WAS A RACE UNTIL 3 SEP 2026, and the fix is
+/// the fill tiers below rather than anything about the assertion. Four
+/// primaries at a 700 ms refusal is a head start of only a second or
+/// two, and what has to happen inside it is a FETCH: the give-up prices
+/// each set's lone walker at a 260-block ceiling and needs 2x on hand,
+/// so the spec prefetch has to land ~520 blocks per set before the
+/// walkers go terminal on their own. Lose that race and the run still
+/// finishes clean - both sets adopted, native mapped repair, byte-exact
+/// output - by the ordinary ladder, which is why this is a flaky
+/// ASSERTION and never was a product defect. The losing run's own words,
+/// captured 3 Sep 2026:
+///
+/// ```text
+/// [repair] tail give-up held back: 2 walker(s), 0 outside every recovery set;
+///          set 0: 1 walker(s) against a 260-block ceiling; ... - walking the ladder instead
+/// [repair] 1 article(s) terminally missing and 1040 recovery block(s) wanted ...
+/// ```
+///
+/// MEASURED, 25 runs each at `--retries 0` on the shared dev box (load
+/// average ~20, twelve lanes): **2 failed of 25 (8.0%)** before, **0 of
+/// 25** after (load ~45-72), and 0 of 36 more at 12-way concurrency.
+/// The 8.0% reproduces the RC lane's 8.3% (2/24) from 31 Aug 2026
+/// exactly - `research/RC-VERIFICATION-2026-08-31.md`. Wall cost of the
+/// tiers is nil on a run that gives up, because the ladder never reaches
+/// them.
+///
+/// Four primaries and a slow refusal give the census a wide window: each
 /// un-echoed 430 buys a confirming repeat, so a refused article is asked
-/// up to eight times before it goes terminal.
+/// up to eight times before it goes terminal. The tiers multiply that
+/// window; they do not replace it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_tail_give_up_reaches_every_set_in_a_per_file_post() {
     if !have_par2() {
@@ -629,8 +674,32 @@ async fn the_tail_give_up_reaches_every_set_in_a_per_file_post() {
     for _ in 0..4 {
         srvs.push(MockServer::start(fx.articles.clone(), chaos()).await);
     }
-    let refs: Vec<&MockServer> = srvs.iter().collect();
-    let cfg = fx.write_config(&refs);
+    // The FILL TIERS, the same lever the starvation sibling below
+    // already runs on and for the same reason - see [`FILL_TIERS`].
+    // Three more servers that do not have the two refused articles
+    // either, one per level, refusing far more slowly than the
+    // primaries. Nothing is ever fetched from them: a level-N server is
+    // asked only once every live lower-level server has missed, and the
+    // give-up abandons both walkers long before the ladder gets there.
+    let mut fills = Vec::new();
+    for _ in 0..FILL_TIERS {
+        fills.push(
+            MockServer::start(
+                fx.articles.clone(),
+                Chaos {
+                    missing: missing.clone(),
+                    missing_delay_ms: GIVEUP_FILL_REFUSAL_MS,
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+    }
+    let mut tiers: Vec<(&MockServer, u32)> = srvs.iter().map(|s| (s, 0u32)).collect();
+    for (i, f) in fills.iter().enumerate() {
+        tiers.push((f, i as u32 + 1));
+    }
+    let cfg = write_config_levels(&fx, &tiers);
     let nzb = fx.write_nzb();
     let out = fx.dir.join("out");
     let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
@@ -641,14 +710,17 @@ async fn the_tail_give_up_reaches_every_set_in_a_per_file_post() {
         log.contains("[par2] set live: 2 sets"),
         "both sets must be adopted before the give-up has anything to widen over:\n{log}"
     );
-    assert!(
-        log.contains("tail give-up:"),
-        "the give-up never fired on a two-set post whose every walker its own \
-         set's parity covers - which is what taking one representative set cost:\n{log}"
-    );
-    // The safety half. A give-up that abandoned an article off the WRONG
-    // set's parity leaves a hole repair cannot fill; byte-exact is the
-    // only thing that says it did not.
+    // The safety half, and it is asserted BEFORE the mechanism on
+    // purpose (3 Sep 2026). It used to sit after, so on every attempt
+    // the give-up lost its race the one assertion that speaks for the
+    // USER - the bytes - was never reached, and 2 of 25 runs reported a
+    // mechanism flake while saying nothing at all about the output. An
+    // outcome assertion that a mechanism assertion can shadow is an
+    // outcome assertion the suite does not really have.
+    //
+    // A give-up that abandoned an article off the WRONG set's parity
+    // leaves a hole repair cannot fill; byte-exact is the only thing
+    // that says it did not.
     for (name, data) in &tracks {
         let got = std::fs::read(fx.dir.join("out").join(name)).unwrap_or_default();
         assert!(
@@ -659,10 +731,23 @@ async fn the_tail_give_up_reaches_every_set_in_a_per_file_post() {
             data.len()
         );
     }
+    assert!(
+        log.contains("tail give-up:"),
+        "the give-up never fired on a two-set post whose every walker its own \
+         set's parity covers - which is what taking one representative set cost:\n{log}"
+    );
 }
 
-/// How many fill tiers the starvation test stacks, and how slowly each
-/// refuses. See that test's doc comment: an article must be refused by
+/// How many fill tiers the two give-up tests stack, and how slowly each
+/// refuses. TWO callers since 3 Sep 2026 - the starvation test below and
+/// `the_tail_give_up_reaches_every_set_in_a_per_file_post` above, which
+/// had the same class of flake (8.0%) from the same cause and took the
+/// same lever. The arithmetic that follows is the STARVATION arm's,
+/// because that is where the margin is tightest; the ordinary give-up
+/// above races a parity FETCH rather than a fixed grace, and a head
+/// start measured in tens of seconds swamps it either way.
+///
+/// See that test's doc comment: an article must be refused by
 /// every tier IN TURN before it can go terminal, so the head start
 /// these buy the give-up arm is `2 * FILL_TIERS * FILL_REFUSAL_MS` (an
 /// un-echoed 430 buys a confirming repeat, hence the 2), against the
@@ -749,6 +834,16 @@ fn write_config_levels(fx: &Fixture, servers: &[(&MockServer, u32)]) -> PathBuf 
 /// LOST race costing about `30 * FILL_REFUSAL_MS`, so a regression
 /// still fails on the assertion below instead of running past a
 /// per-test ceiling and reporting a timeout.
+///
+/// RE-MEASURED 3 SEP 2026, and the tiers still hold: 25 runs at
+/// `--retries 0`, **0 failures**, taken deliberately at load average
+/// ~86 on the shared dev box rather than on an idle one. The ~11%
+/// first-attempt loss this row is remembered for is a PRE-TIER figure
+/// (it is quoted from that state in
+/// `research/RC-VERIFICATION-2026-08-31.md` and in the claim bodies
+/// around it); nothing in the tree records the post-fix rate, so anyone
+/// reading the old number as current would re-derive a fix that landed,
+/// and this paragraph is that number.
 ///
 /// Measured the same day and the same way: the drain goes from 59.3 s
 /// to 212.3 s against an unmoved 28.3 s arm, so 2.1x becomes 7.5x. Over
@@ -2128,4 +2223,107 @@ async fn a_deferred_set_whose_definition_did_not_land_says_so() {
         "4 000 bytes of a recovery volume is not parity, so this job \
          has nothing to repair with and must not green\n{log}"
     );
+}
+
+/// Finding 11 of the 28 Aug 2026 read-only sweep, pinned CLOSED: one
+/// file described by two sets under DIFFERENT names costs the parity of
+/// neither.
+///
+/// The shape is #63's album post. A release-wide set names
+/// `track01.bin` and `track02.bin`; a per-file set names the second
+/// file's bytes `9f3c.mp3`, which is also the yEnc name they are posted
+/// under, so the arriving slot claims the PER-FILE descriptor by exact
+/// name and the album's `track02.bin` is left unclaimed.
+/// `LiveVerifier::unclaimed_files` dedupes leftovers by NAME alone, so
+/// that descriptor reads as wholly absent - and the sweep predicted the
+/// album set would then be charged its full block count and go shopping
+/// for volumes to recreate bytes already on disk.
+///
+/// It does not, and this is what says so: `land_duplicate_filedescs`
+/// (F10, `ba191acfa`, hardened by W4-14 `ae59eabeb` and X5-07
+/// `b4e0cf264`) groups the still-missing descriptors by `(length, MD5)`,
+/// finds the verified sibling, proves a staged clone of it once and
+/// lands the alias from that - so `track02.bin` is satisfied by a copy,
+/// and the album set fetches parity for its OWN 125 damaged blocks and
+/// nothing else. Those three commits landed two and three days AFTER
+/// the sweep wrote the finding.
+///
+/// WHAT MUST NOT BE DONE ABOUT IT, because the finding proposes exactly
+/// that: withholding the leftover at `unclaimed_files` when some slot
+/// already holds a descriptor of the same identity. Measured 31 Aug
+/// 2026 - it takes the X5-07 dedupe rows in `e2e_emptydesc` red, since a
+/// dedupe post's whole point is that the second name IS a file the user
+/// asked for. The leftover has to stay on the missing list; landing it
+/// from the sibling is what stops it costing parity.
+///
+/// The damage is deliberately in the file NOTHING aliases. It is what
+/// makes the charge readable: 125 blocks is track01's own loss, and a
+/// run that charged the unclaimed alias too would need a second volume
+/// fetch for the 1,000 blocks of a file already on disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_album_set_pays_no_parity_for_a_member_a_per_file_set_delivered() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("multiset-albumalias");
+    let one = payloads::unique_payload(400_000, 61);
+    let two = payloads::unique_payload(400_000, 62);
+    fx.add_file("track01.bin", &one, 50_000);
+    // Posted ONCE, under the per-file set's name for it.
+    fx.add_file_renamed_by_par2("track02.bin", "9f3c.mp3", &two, 50_000);
+    std::fs::write(fx.dir.join("9f3c.mp3"), &two).unwrap();
+    assert!(fx.add_par2(20, &["track01.bin", "track02.bin"], 50_000));
+    assert!(add_par2_per_file_named(
+        &mut fx,
+        20,
+        &["9f3c.mp3"],
+        Some(&["perfile"]),
+        50_000
+    ));
+    let corrupt: std::collections::HashSet<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.contains("track01_bin") && k.ends_with("-3@mock>"))
+        .cloned()
+        .collect();
+    assert_eq!(corrupt.len(), 1, "exactly one article to damage");
+    let chaos = Chaos {
+        corrupt,
+        ..Default::default()
+    };
+    let srv = MockServer::start(fx.articles.clone(), chaos).await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+    let (log, ok) = tokio::task::spawn_blocking({
+        let out = out.clone();
+        move || run_get(&cfg, &nzb, &out, &[])
+    })
+    .await
+    .unwrap();
+    assert!(ok, "{log}");
+    assert!(
+        log.contains("duplicate descriptor satisfied by copying 9f3c.mp3"),
+        "the album's leftover must be landed from the sibling's bytes, \
+         not rebuilt from parity:\n{log}"
+    );
+    // The whole finding in one line: what the repair was asked to buy.
+    // track02.bin is 1,000 blocks of this set, so a run that charged it
+    // could not print this.
+    assert!(
+        log.contains("[repair] need 125 block(s)"),
+        "only track01's own damage may be charged:\n{log}"
+    );
+    assert!(
+        log.contains("repair complete"),
+        "the album set repairs its own damage:\n{log}"
+    );
+    for name in ["track01.bin", "track02.bin", "9f3c.mp3"] {
+        let p = out.join(name);
+        assert!(p.is_file(), "{name} must be in the output tree:\n{log}");
+    }
+    assert_eq!(std::fs::read(out.join("track01.bin")).unwrap(), one);
+    assert_eq!(std::fs::read(out.join("track02.bin")).unwrap(), two);
+    assert_eq!(std::fs::read(out.join("9f3c.mp3")).unwrap(), two);
 }

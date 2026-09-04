@@ -1,0 +1,37 @@
+# C2 + C11: a stored RAR5 set split into three .partNN volumes.
+
+[layout]
+name = "c2-c11-stored-split-partnn"
+seed = 102
+note = """
+Volume JOIN, and the .partNN spelling of volume ORDER. Three volumes,
+so the row needs a real join rather than the two-volume case that a
+first-and-last rule would also pass.
+
+The payload is ONE file, deliberately: the RAR volume writers that
+split a member across volumes take a single entry
+(Rar50VolumeWriter::stored_entry and the rar15_40 pair), and the
+generator refuses a multi-file split stored set by name rather than
+emitting some other shape. A split set holding several files is the
+RAR5 COMPRESSED writer's shape, which is C3's row.
+
+Small article bytes so each volume is several articles: a volume that
+arrives in one article proves nothing about the order the pieces of a
+volume are put back in.
+"""
+
+[source]
+files = [{ name = "split.bin", bytes = 30000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 10000
+
+[encoding]
+article_bytes = 4000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

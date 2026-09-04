@@ -334,6 +334,7 @@ async fn flap_breaker_clamps_a_flapping_server_to_one_keeper() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig::default(),
         )
@@ -404,6 +405,7 @@ async fn flap_keeper_target_follows_observed_cap() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig {
                 connections: 8,
@@ -2366,4 +2368,121 @@ async fn a_zero_based_post_re_earns_the_same_verdict_once_per_file() {
         "{steers} steers over {total} articles - a file shorter than the \
          adjudication window should pay for very nearly all of itself: {notes:?}"
     );
+}
+
+/// Hot-path cost of the shared wire ledger (TODO 313 item 1).
+///
+/// The gate this measures runs once per pipeline top-up, so per
+/// DISPATCHED ARTICLE - roughly 800 KB of network, decode and disk work
+/// each. The fix adds one atomic add and one `fetch_update` beside the
+/// two counters the path already had (the pool's own counter and the
+/// `memgauge` mirror), and moves the gate's load from the pool's
+/// counter to the shared one. The `before` arm here is that old
+/// sequence written out, because the shipped `charge_wire` now does
+/// both halves whether or not a ledger is shared - a pool with no
+/// ledger owns a private one - so comparing shared against private
+/// would compare a path with itself.
+///
+/// The contended arm runs 24 threads on ONE `Shared`, which is the
+/// shape a fleet produces: every worker has always hammered this one
+/// cacheline. It is a ceiling rather than a forecast - 24 threads doing
+/// nothing but charging is a rate no fleet reaches, since a real
+/// worker's next charge waits on an article.
+///
+/// Rig discipline (memory topic `nzbfast-n13-steer-settle-fusion-nogo`):
+/// run it IDLE and read the per-op figure, never the wall clock.
+/// Ignored, and no CI job runs it: a threshold on an atomic increment
+/// would measure whatever else the box is doing.
+///
+/// Measured 2 Sep 2026, M5 Max, debug, best of three interleaved rounds
+/// per arm, four runs, on a box carrying other lanes' builds (load ~13,
+/// so these are an upper bound; the four runs agreed to under 1.5 ns):
+///
+/// | threads | before      | after       | delta |
+/// |---------|-------------|-------------|-------|
+/// | 1       | ~21 ns/op   | ~33 ns/op   | +11   |
+/// | 24      | ~148 ns/op  | ~169 ns/op  | +21   |
+///
+/// A dispatched article carries ~800 KB, which is ~6.5 ms of a 1 Gbit
+/// line, so +21 ns at the contended ceiling is about three millionths
+/// of one percent of what it admits. The doubled ceiling it buys back
+/// is 32 MB on the budget floor.
+#[test]
+#[ignore = "hot-path price check (~5 s) - run IDLE with --ignored"]
+fn wire_charge_stays_off_the_hot_path() {
+    // Both arms move the process-global memory gauges (`memgauge::CUR`
+    // and `PEAK`) millions of times, so take the module's serializer
+    // FIRST - it drops last, after everything this test touches - or a
+    // gauge test running beside it reads this rig's charges as its own.
+    let _serial = crate::memgauge::one_gauge_test_at_a_time();
+    const OPS: u64 = 200_000;
+    // A cap nothing reaches, spelled as a real number rather than
+    // u64::MAX so the gate's comparison is the one the pool makes.
+    const NEVER: u64 = 1 << 62;
+    // The pre-fix sequence, verbatim: one counter, the gauge mirror,
+    // and a gate that reads the pool's own bytes.
+    let before = |sh: &Arc<Shared>| {
+        std::hint::black_box(sh.inflight_body_bytes.load(Ordering::Acquire) >= NEVER);
+        sh.inflight_body_bytes
+            .fetch_add(EST_BODY_BYTES, Ordering::AcqRel);
+        crate::memgauge::add(crate::memgauge::Sub::WireEst, EST_BODY_BYTES);
+        crate::memgauge::sub(crate::memgauge::Sub::WireEst, EST_BODY_BYTES);
+        let _ = sh
+            .inflight_body_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                Some(v.saturating_sub(EST_BODY_BYTES))
+            });
+    };
+    let after = |sh: &Arc<Shared>| {
+        std::hint::black_box(sh.wire_over_cap(NEVER));
+        sh.charge_wire();
+        sh.release_wire(1);
+    };
+    let bench = |threads: usize, shipped: bool| -> f64 {
+        let srv = crate::pool::inline_tests::one_server()[0].0.clone();
+        let cfg = PoolConfig {
+            inflight_cap: NEVER,
+            wire_charge: Some(WireCharge::new()),
+            ..PoolConfig::default()
+        };
+        let (sh, _) = Shared::new(vec![ArticleReq::fresh("<r@x>")], &[(srv, cfg)]);
+        // Warm up before the clock starts: first touch of a fresh
+        // cacheline and the thread spawns themselves are noise the
+        // measurement must not carry.
+        for _ in 0..10_000 {
+            after(&sh);
+        }
+        let start = Instant::now();
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                let sh = sh.clone();
+                let (before, after) = (&before, &after);
+                s.spawn(move || {
+                    for _ in 0..OPS {
+                        if shipped {
+                            after(&sh);
+                        } else {
+                            before(&sh);
+                        }
+                    }
+                });
+            }
+        });
+        start.elapsed().as_nanos() as f64 / (OPS as usize * threads) as f64
+    };
+    // Three interleaved rounds, best of each arm: a box that is not
+    // truly idle shows up as a slow round, and the minimum is the one
+    // figure a stray build cannot inflate.
+    for threads in [1, 24] {
+        let (mut old, mut new) = (f64::MAX, f64::MAX);
+        for _ in 0..3 {
+            old = old.min(bench(threads, false));
+            new = new.min(bench(threads, true));
+        }
+        println!(
+            "wire charge, {threads} thread(s): before {old:.1} ns/op, \
+             after {new:.1} ns/op, delta {:.1} ns",
+            new - old
+        );
+    }
 }

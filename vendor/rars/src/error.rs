@@ -233,6 +233,26 @@ impl std::error::Error for Error {
 }
 
 impl Error {
+    /// Whether this error is "the bytes ran out", rather than "the bytes
+    /// are wrong".
+    ///
+    /// A truncated archive fails in two shapes that a caller reading a
+    /// tolerant tail treats alike: the parse's own [`Error::TooShort`],
+    /// and an `UnexpectedEof` from a file or source read that ran past
+    /// the last byte. A bad CRC or a malformed field is neither, and
+    /// stays a refusal on every policy - which is why this is a test on
+    /// the two short-read shapes and not on "did anything fail".
+    pub fn is_short_read(&self) -> bool {
+        match self {
+            Self::TooShort => true,
+            Self::Io(source) => source.kind == std::io::ErrorKind::UnexpectedEof,
+            Self::AtArchiveOffset { source, .. } | Self::AtEntry { source, .. } => {
+                source.is_short_read()
+            }
+            _ => false,
+        }
+    }
+
     pub fn at_archive_offset(self, offset: usize) -> Self {
         Self::AtArchiveOffset {
             offset,

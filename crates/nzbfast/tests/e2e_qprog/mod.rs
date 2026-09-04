@@ -27,9 +27,9 @@
 //! queue for its whole run - measured here at 16.7 s against a 1.0 s
 //! control, `set aside never`. The fix is an early post-is-gone arm
 //! gated on run-cumulative evidence rather than on elapsed time
-//! (`serve/tasks/stall.rs::gone_evidence`), with a PARTIAL twin for the
+//! (`tasks/stall.rs::gone_evidence`), with a PARTIAL twin for the
 //! takedown that lands some bytes first
-//! (`serve/tasks/stall.rs::partial_gone_defer`);
+//! (`tasks/stall.rs::partial_gone_defer`);
 //! [`a_dead_head_is_set_aside_at_shipped_thresholds`] and
 //! [`a_partial_head_is_set_aside_at_shipped_thresholds`] are the only
 //! tests anywhere that pin them AT THE SHIPPED THRESHOLDS, and
@@ -60,8 +60,8 @@
 //! `serve/outage.rs::outages_in`.
 //!
 //! **Why the daemon and not `run_get`.** Every mechanism in question is
-//! the daemon's - `pick_job`'s ordering key in `serve/daemon.rs`, the
-//! five mid-flight demotion arms in `serve/tasks/stall.rs`, and the
+//! the daemon's - `pick_job`'s ordering key in `crates/nzbfast-daemon/src/daemon.rs`, the
+//! five mid-flight demotion arms in `tasks/stall.rs`, and the
 //! idle-server sidecar beside them. The CLI has no queue at all, which
 //! is why the existing matrix could not have asked this question
 //! however it was written.
@@ -104,6 +104,12 @@ use super::e2e_faults::{
 use super::harness::serve;
 use super::{Fixture, have_par2, unix_now};
 use crate::payloads;
+
+// TODO 313 items 2-5 and 10: the queue spill's own end-to-end A/B. A
+// sibling module rather than more of this file - it shares the daemon
+// helpers above and nothing else, and this file is already the largest
+// e2e module in the tree.
+mod spill;
 
 /// Healthy jobs queued BEHIND the broken head.
 ///
@@ -201,7 +207,7 @@ impl Arm {
 /// the row that answers what any of this costs a real user, and it is
 /// cheap to run precisely because of what it measures: at 45 s of
 /// warmup and a 30 s window, the demotion arms in
-/// `serve/tasks/stall.rs` that still take an elapsed-time gate cannot
+/// `tasks/stall.rs` that still take an elapsed-time gate cannot
 /// be reached before about 69 s of one job (`warmup`, then a window at
 /// least 80% full), and the WINDOWED post-is-gone arm additionally
 /// wants 64 refusals answered inside one window with not a byte
@@ -271,7 +277,55 @@ struct Row {
     fleetwide: Option<&'static str>,
 }
 
-/// A daemon request, headers stripped.
+/// The body [`qprog_http`] read, de-chunked when `head` says
+/// `Transfer-Encoding: chunked`.
+///
+/// tiny_http switches to chunked once a response passes its threshold,
+/// and every prior version of the caller-side helper (`spill.rs`'s
+/// `qspill_json`, moved here) handed back the raw chunked wire text -
+/// `<hexlen>\r\n{json}...` - which every `serde_json::from_str` on it
+/// failed to parse. A history page crosses that threshold at about
+/// EIGHTEEN rows. Measured 2 Sep 2026: a 24-job queue read as seventeen
+/// jobs finished and then a dead queue for the rest of the budget, with
+/// the daemon's own log showing all twenty-four completing normally - a
+/// rig fault indistinguishable from a wedged queue at the only place
+/// anybody looks.
+///
+/// The decision is read from the HEADER rather than guessed from the
+/// body's shape, because `qprog_http` also serves `qprog_upload`'s POST
+/// responses and non-JSON bodies: a heuristic that misread a plain body
+/// as chunked would corrupt every caller, which is worse than the fault
+/// this exists to fix.
+fn qprog_dechunk(head: &str, body: &str) -> String {
+    let chunked = head.lines().any(|l| {
+        let l = l.to_ascii_lowercase();
+        let l = l.trim_start();
+        l.starts_with("transfer-encoding:") && l.contains("chunked")
+    });
+    if !chunked {
+        return body.to_string();
+    }
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some((len, tail)) = rest.split_once("\r\n") {
+        let Ok(n) = usize::from_str_radix(len.trim(), 16) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        // Byte indices, because a chunk length is a byte count. `get`
+        // rather than a slice so a chunk that lands mid-codepoint gives
+        // up instead of panicking.
+        let Some(chunk) = tail.get(..n) else { break };
+        out.push_str(chunk);
+        let Some(next) = tail.get(n + 2..) else { break };
+        rest = next;
+    }
+    out
+}
+
+/// A daemon request, headers read and stripped.
 ///
 /// A local copy rather than a shared helper, and that is the state of
 /// the house rather than a shortcut: `daemon.rs`, `queue_soak.rs` and
@@ -279,7 +333,9 @@ struct Row {
 /// `harness/mod.rs` is a change to six suites with nothing to do with
 /// this round. A refused connection is retried; an answer that started
 /// arriving is returned as it arrived, because a truncated response
-/// must never be retried away.
+/// must never be retried away. The body is de-chunked through
+/// [`qprog_dechunk`] before it is handed back, so every caller sees the
+/// body it asked for whether or not tiny_http chunked it.
 fn qprog_http(port: u16, req: &str, body: Option<(&str, &[u8])>) -> String {
     let mut last = String::new();
     for _ in 0..40 {
@@ -310,10 +366,10 @@ fn qprog_http(port: u16, req: &str, body: Option<(&str, &[u8])>) -> String {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        last = out
-            .split_once("\r\n\r\n")
-            .map(|(_, b)| b.to_string())
-            .unwrap_or(out);
+        last = match out.split_once("\r\n\r\n") {
+            Some((head, b)) => qprog_dechunk(head, b),
+            None => out,
+        };
         return last;
     }
     last
@@ -699,7 +755,7 @@ fn broken_for(shape: &str, arm: Arm, wd: Watchdog) -> Option<Broken> {
         // in tens of seconds rather than in one.
         //
         // They are also the only rows that can reach the mid-flight
-        // demotions at all. `serve/tasks/stall.rs` gates three of its
+        // demotions at all. `tasks/stall.rs` gates three of its
         // four arms on `now - t0 >= warmup` AND a full window of
         // samples, and the fourth on two watchdog ticks of confirmed
         // evidence, so a job that ends in a second is gone before the
@@ -737,7 +793,7 @@ fn broken_for(shape: &str, arm: Arm, wd: Watchdog) -> Option<Broken> {
         // The 14 Aug 2026 incident, reduced: two 21-day-old releases
         // whose every article was taken down held the queue for ten
         // minutes each at 0.0 MB/s while other jobs waited. That is the
-        // case `serve/tasks/stall.rs`'s post-is-gone arm was written
+        // case `tasks/stall.rs`'s post-is-gone arm was written
         // for, and this is the only row in this module that can reach
         // it - 1200 articles, every one refused.
         "S5-dead-post-at-scale" => {
@@ -762,7 +818,7 @@ fn broken_for(shape: &str, arm: Arm, wd: Watchdog) -> Option<Broken> {
         // set aside, and the mid-flight demotion's whole claim is that
         // it is cheap because "the journal keeps everything already
         // landed, so the eventual rerun fetches only what is still
-        // missing" (`serve/daemon_park.rs`). `S5` cannot test that: it
+        // missing" (`daemon_park.rs`). `S5` cannot test that: it
         // lands zero bytes, so a rerun that refetched everything and one
         // that resumed perfectly are the same run.
         //
@@ -808,7 +864,7 @@ fn broken_for(shape: &str, arm: Arm, wd: Watchdog) -> Option<Broken> {
         // and the one demotion arm round A's F7 measured as having no
         // end-to-end coverage of ANY kind: grepping
         // `has had no usable connection for` over `crates/` finds it
-        // only at its definition in `serve/tasks/stall.rs`, and until
+        // only at its definition in `tasks/stall.rs`, and until
         // this row nothing anywhere set `NZBFAST_SERVER_DOWN_SECS`
         // either. The other two windowed arms have regressions in
         // `crates/nzbfast/tests/daemon.rs`; this is the arm that stops
@@ -834,7 +890,7 @@ fn broken_for(shape: &str, arm: Arm, wd: Watchdog) -> Option<Broken> {
         //   job the watchdog is watching.
         //
         // That last one is not a detail. A head that hands over stops
-        // being `d.active_dl` (`serve/tasks/worker.rs`), and no
+        // being `d.active_dl` (`tasks/worker.rs`), and no
         // mid-flight demotion arm watches a job that has handed over,
         // correctly - its successor is already downloading, so it is no
         // longer what the queue is waiting on.
@@ -884,7 +940,7 @@ fn broken_for(shape: &str, arm: Arm, wd: Watchdog) -> Option<Broken> {
         // Round A's finding F12 measured that arm the way F7 measured
         // the outage one: grepping `came back missing and not a byte
         // arrived` over `crates/` found it at its own definition in
-        // `serve/tasks/stall.rs`, in `demotion_arm` below, and in a
+        // `tasks/stall.rs`, in `demotion_arm` below, and in a
         // unit test asserting the three sentences do not collide -
         // nowhere asserting it FIRES. Mutating it off outright
         // (`if false && total == 0 && ...`) left
@@ -1009,10 +1065,10 @@ fn broken_for(shape: &str, arm: Arm, wd: Watchdog) -> Option<Broken> {
         // which is exactly what leaves it demotable. Here the live
         // server DOES answer: it refuses everything, the dispatchable
         // work runs out, and the runner hands over
-        // (`serve/tasks/worker.rs`) while the head still holds articles
+        // (`tasks/worker.rs`) while the head still holds articles
         // that only the unreachable server could ever have served. A
         // job that has handed over is nobody's to demote by design, so
-        // no arm in `serve/tasks/stall.rs` can speak for it - and the
+        // no arm in `tasks/stall.rs` can speak for it - and the
         // runner then parks on that head's network drain before it will
         // settle ANY successor, which is why peer0 downloaded its bytes
         // and still never reached a terminal row.
@@ -1070,7 +1126,7 @@ fn broken_for(shape: &str, arm: Arm, wd: Watchdog) -> Option<Broken> {
     })
 }
 
-/// Which of the mid-flight demotion arms in `serve/tasks/stall.rs`
+/// Which of the mid-flight demotion arms in `tasks/stall.rs`
 /// wrote this `[defer]` line.
 ///
 /// FIVE since TODO 306: post-is-gone has an EARLY twin that reads the
@@ -1578,7 +1634,7 @@ async fn queue_progress_at_shipped_thresholds() {
 ///
 /// Round A measured this exact row holding three healthy jobs for its
 /// entire 16.7 s run with `set aside never`, against a 1.0 s control,
-/// because `serve/tasks/stall.rs` could not reach any demotion arm
+/// because `tasks/stall.rs` could not reach any demotion arm
 /// inside ~69 s (45 s of warmup, then a rolling window at least 80%
 /// full). The early post-is-gone arm reads the RUN instead - not a byte
 /// has ever arrived, every server has itself answered a refusal, and
@@ -1746,7 +1802,7 @@ async fn queue_progress_at_scale() {
 /// to end for the first time.
 ///
 /// Round A's finding F7 measured this as the one arm in
-/// `serve/tasks/stall.rs` with no coverage of any kind. Its reason text
+/// `tasks/stall.rs` with no coverage of any kind. Its reason text
 /// appears nowhere in `crates/` but at its own definition, no test
 /// anywhere drove a server that grants no connection while another job
 /// waited, and nothing set `NZBFAST_SERVER_DOWN_SECS`, which is the
@@ -2029,4 +2085,45 @@ async fn a_draining_head_behind_a_dead_provider_is_set_aside_and_the_queue_drain
          fingerprint: first={first:?} head={head:?} defers={:?}",
         r.defers
     );
+}
+
+#[cfg(test)]
+mod qprog_dechunk_tests {
+    use super::qprog_dechunk;
+
+    /// A plain, non-chunked body must pass through unchanged - the
+    /// dispatch is header-driven, and a body that merely looks like a
+    /// chunk stream (starts with hex digits) must never be touched.
+    #[test]
+    fn plain_body_passes_through() {
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json";
+        let body = "{\"a\":1}";
+        assert_eq!(qprog_dechunk(head, body), body);
+    }
+
+    /// A chunked body, multiple chunks and the trailing zero-chunk, is
+    /// reassembled into the JSON it carried.
+    #[test]
+    fn chunked_body_is_reassembled() {
+        let head =
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json";
+        let json = "{\"history\":{\"slots\":[]}}";
+        let (first, second) = json.split_at(6);
+        let body = format!(
+            "{:x}\r\n{first}\r\n{:x}\r\n{second}\r\n0\r\n\r\n",
+            first.len(),
+            second.len()
+        );
+        assert_eq!(qprog_dechunk(head, &body), json);
+        assert!(serde_json::from_str::<serde_json::Value>(&qprog_dechunk(head, &body)).is_ok());
+    }
+
+    /// The header check is case-insensitive and tolerant of the other
+    /// headers tiny_http sends alongside it.
+    #[test]
+    fn header_match_is_case_insensitive() {
+        let head = "HTTP/1.1 200 OK\r\ntransfer-encoding: Chunked\r\nServer: tiny_http";
+        let body = "5\r\nhello\r\n0\r\n\r\n";
+        assert_eq!(qprog_dechunk(head, body), "hello");
+    }
 }

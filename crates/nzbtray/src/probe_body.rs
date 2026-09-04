@@ -916,7 +916,7 @@ pub enum LimitPick {
     Abs(u64),
     /// `auto_speed=0`, then `speedlimit=<percent>`. A BARE number of
     /// 100 or less is the daemon's percentage convention, not a byte
-    /// count (`set_speedlimit` in serve/settings_setters.rs), which is
+    /// count (`set_speedlimit` in settings_setters.rs), which is
     /// why this arm exists rather than resolving the percentage here:
     /// the daemon anchors it against the line speed it holds, so the
     /// menu cannot pick a stale one.
@@ -990,7 +990,7 @@ pub fn limit_menu(q: &Value, bits: bool) -> Vec<LimitRow> {
         return Vec::new();
     };
     // A STRING on the wire, as SAB sends every rate (see
-    // `speedlimit_abs` in serve/sabcompat.rs) - but mode=status once
+    // `speedlimit_abs` in sabcompat.rs) - but mode=status once
     // sent the same field as a number, so both are read.
     let abs = q
         .get("speedlimit_abs")

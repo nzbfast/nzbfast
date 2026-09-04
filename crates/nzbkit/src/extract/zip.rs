@@ -263,6 +263,7 @@ impl Extractor {
             worker: Mutex::new(None),
             sink_slots: Mutex::new(Vec::new()),
             outcome: Mutex::new(None),
+            direct: Mutex::new(None),
         });
         // Front-load the directory window: EOCD scan window (22 + 64 KiB
         // comment) + Zip64 locator/record, rounded up so a typical
@@ -278,6 +279,19 @@ impl Extractor {
             inner.slots[slot].container_fmt = ChaseFormat::SevenZ;
             return Ok(false);
         }
+        // The join above QUEUED the tail promote (we hold the routing
+        // lock; the walk takes locks up the chain), and the worker
+        // spawned here can promote the entry local headers the moment it
+        // has read the directory. So when every container byte is
+        // already held at attach - a reverse-arrival feed - the worker
+        // can reach the hook before the writer's off-lock flush does,
+        // and the two promotes land in either order. That is benign: the
+        // worker only gets that far if the tail is already in the set,
+        // so the promote it overtook is asking for articles that have
+        // arrived. Ordering is a guarantee only while the tail has NOT
+        // arrived, which is the case that matters, and the case
+        // `zip_nested_tail_promote_reaches_the_hook_and_maps_to_the_outer`
+        // pins. Do not add a barrier here for the other one.
         self.zip_spawn_worker(inner, &ctl)?;
         Ok(true)
     }
@@ -455,12 +469,65 @@ impl Extractor {
         }
         // Ascending local offsets = the order the articles arrive in.
         files.sort_by_key(|e| e.local_offset());
+        // The ZIP DIRECT MAP, at the seam between the directory parse
+        // and the first payload read: if every entry is a plain stored
+        // one, the whole container is handed to the stored-member
+        // routing path and this worker is finished. See
+        // `extract::zip_map` for the argument and for every shape that
+        // declines; a decline simply keeps streaming, below.
+        //
+        // AHEAD of `arm_trim`, and that ORDER is load-bearing - it is
+        // the bug the 7z lane hit after landing (cda702811). Arming the
+        // trim first opens a window between the arm and the promote's
+        // lock in which the routing thread can read `trim_ok` and spill
+        // a part's consumed prefix into that part's own file; a
+        // container promoted after such a spill has bytes the re-feed
+        // will not find, and a truncated archive on disk that nothing
+        // deletes (`sevenz_finish` drops slot files only for members
+        // still in `SevenZ` mode, and a promoted set has none). Deciding
+        // the map first means `trim_ok` is never true for a container
+        // that goes this way, so the window does not exist rather than
+        // being narrow.
+        if zip_map::screen(&files) {
+            let Some(ex) = me.upgrade() else {
+                return Err("extractor dropped".to_string());
+            };
+            // Everything from here up is already front-loaded: the
+            // tail window, widened by the promote above when the
+            // directory started below it.
+            let promoted_from = window_start.min(cd);
+            let offsets = zip_map::resolve_offsets(
+                &ex,
+                ctl,
+                &QuietZipSource(&src),
+                &files,
+                promoted_from,
+                total,
+            )?;
+            if let Some(members) = zip_map::plan(&files, &offsets, cd, total)
+                && ex
+                    .direct_promote(ctl, members, ChaseFormat::Zip)
+                    .map_err(|e| e.to_string())?
+            {
+                return Ok(());
+            }
+        }
         // Drop-behind is decided HERE, between the parse and the first
         // payload read (see arm_trim for why the order matters). Zip has
         // no BCJ2 analogue - a directory-driven read never revisits
         // bytes behind the frontier - so the trim is always safe to arm.
         ctl.arm_trim(false);
-        let mut buf = vec![0u8; 64 * 1024];
+        // 1 MiB. Round 16 measured 64 KiB -> 1 MiB on the DISK path
+        // (sys 0.28 -> 0.19 s per GiB on APFS) and deliberately left
+        // this copy alone, because the one-pass leg had never been
+        // measured and a wider buffer against a FRONTIER has a latency
+        // and an RSS cost the disk path does not. Round 33 measured it
+        // here, interleaved on two binaries over the m1 loopback rig:
+        // AES-256 store 1.26 -> 1.10 s (3/3), deflate 2.04 -> 2.01
+        // (2/2), ZipCrypto 10.50 -> 10.33 (2/2), and peak RSS unchanged
+        // on all three - the frontier dominates the peak, so a megabyte
+        // of read buffer does not show in it.
+        let mut buf = vec![0u8; 1024 * 1024];
         for e in files {
             let data_at = zip::entry_data_offset(&src, e).map_err(|err| err.to_string())?;
             let end = data_at
@@ -1010,29 +1077,55 @@ mod tests {
     /// Damaged-before-posting: a stored CRC that does not match the
     /// bytes demotes rather than publishing them - the same "never
     /// report success over damaged output" rule as everywhere else.
+    ///
+    /// TWO paths reach it, and both are asserted because which one runs
+    /// depends on whether the direct map took the container. A DEFLATED
+    /// entry keeps the worker, which compares the CRC it computed as it
+    /// streamed and demotes with its own wording under the zip marker. A
+    /// STORED entry is direct-mapped, so no worker ever reads it: the
+    /// entry's stored CRC rides on its last mapped piece and the
+    /// settle-time composition gate is what refuses it, in the shared
+    /// wording every stored member uses (see
+    /// `extract::zip_map::tests::a_corrupt_member_fails_the_composed_crc`).
     #[test]
     fn zip_top_level_bad_crc_demotes() {
         let data = payload(50_000, 137);
-        let arch = crate::zip::fixtures::zip_of(&[crate::zip::fixtures::Spec {
+        // Compressible, so the deflate arm does not also trip the
+        // "packed and unpacked sizes disagree" refusal on random bytes.
+        let soft: Vec<u8> = (0..50_000u32).map(|i| (i / 331 % 251) as u8).collect();
+        let worker = crate::zip::fixtures::zip_of(&[crate::zip::fixtures::Spec {
+            crc_override: Some(0xDEAD_BEEF),
+            ..crate::zip::fixtures::Spec::deflated("a.bin", &soft)
+        }]);
+        let mapped = crate::zip::fixtures::zip_of(&[crate::zip::fixtures::Spec {
             crc_override: Some(0xDEAD_BEEF),
             ..crate::zip::fixtures::Spec::stored("a.bin", &data)
         }]);
-        let dir = tmpdir("zip-top-crc");
-        let ex = Arc::new(Extractor::new(&dir, 1, true));
-        ex.anchor();
-        feed(&ex, 0, "release.zip", &arch, 7000, 59);
-        let rep = ex.finish().unwrap();
-        assert!(
-            rep.fallbacks
-                .iter()
-                .any(|(_, w)| w.starts_with(ZIP_DISK_FALLBACK_PREFIX)
-                    && w.contains("failed its stored CRC")),
-            "{:?}",
-            rep.fallbacks
-        );
-        assert_eq!(std::fs::read(dir.join("release.zip")).unwrap(), arch);
-        assert!(!dir.join("a.bin").exists(), "partial zip output survived");
-        std::fs::remove_dir_all(&dir).unwrap();
+        for (tag, arch, marked) in [("deflate", worker, true), ("stored", mapped, false)] {
+            let dir = tmpdir(&format!("zip-top-crc-{tag}"));
+            let ex = Arc::new(Extractor::new(&dir, 1, true));
+            ex.anchor();
+            feed(&ex, 0, "release.zip", &arch, 7000, 59);
+            let rep = ex.finish().unwrap();
+            assert!(
+                rep.fallbacks.iter().any(|(_, w)| {
+                    w.contains("failed its stored CRC")
+                        && w.starts_with(ZIP_DISK_FALLBACK_PREFIX) == marked
+                }),
+                "{tag}: {:?}",
+                rep.fallbacks
+            );
+            assert_eq!(
+                std::fs::read(dir.join("release.zip")).unwrap(),
+                arch,
+                "{tag}"
+            );
+            assert!(
+                !dir.join("a.bin").exists(),
+                "{tag}: partial zip output survived"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     /// Phase 0's naming rules hold at the streaming layer: a `.cbz` (a
@@ -1713,7 +1806,10 @@ mod tests {
     /// name, and the root's output-range map resolves that same range to
     /// outer volume pieces (the composition promote_output_spans runs
     /// on) - whether the tail arrives last naturally or is promoted
-    /// ahead.
+    /// ahead. The forward arm additionally pins the ORDER of the tail
+    /// and local-header promotes, which is a guarantee only while the
+    /// tail has yet to arrive; the reverse arm states why it is not one
+    /// there.
     #[test]
     fn zip_nested_tail_promote_reaches_the_hook_and_maps_to_the_outer() {
         let a = payload(300_000, 167);
@@ -1754,14 +1850,55 @@ mod tests {
             // Offset-0 probes (root slot and held child slots alike) may
             // fire; they always lead with the (0, 1) span, which no tail
             // range does. The tail is URGENT (the worker blocks on the
-            // directory read).
+            // directory read), and so is the LOCAL HEADER promote the
+            // direct map raises behind it: this fixture is one stored
+            // entry, so the map screens in and asks for the 30 fixed
+            // bytes at its local offset before it can place the member
+            // (see `extract::zip_map::resolve_offsets`). Both calls are
+            // the wiring under test; see below for which arm pins their
+            // ORDER and why the other one must not.
             let mut got = calls.lock().unwrap().clone();
             got.retain(|(_, _, sp, _)| sp.first() != Some(&(0, 1)));
-            assert_eq!(
-                got,
-                vec![("inner.zip".to_string(), zlen, vec![tail], true)],
-                "order {t}"
-            );
+            let tail_call = ("inner.zip".to_string(), zlen, vec![tail], true);
+            let hdr_call = ("inner.zip".to_string(), zlen, vec![(0, 30)], true);
+            if *forward {
+                // Natural arrival, and the ONE ordering guarantee this
+                // wiring makes: the tail promote is queued at attach and
+                // flushed by the WRITING thread as soon as it drops the
+                // routing lock, while the local-header promote comes off
+                // the chase WORKER, which cannot raise it until it has
+                // read the central directory - and that read blocks in
+                // `find_central_directory` until the writer feeds the
+                // tail bytes, many articles later. No scheduling can
+                // reorder those two. Verified by injecting a 200 ms
+                // sleep between the lock drop and `flush_pending_promote`
+                // in `Extractor::write_span`: this arm still holds, and
+                // only the reverse arm below flips.
+                assert_eq!(got, vec![tail_call, hdr_call], "order {t}");
+            } else {
+                // Reverse arrival, where the order is a RACE and
+                // pinning it flaked a 32-bit cross build under an
+                // emulator: the same two calls, swapped, on one attempt
+                // and not on a re-run of the same commit. Every
+                // container byte is already held when offset 0 finally
+                // classifies, so the worker `zip_attach` spawns under
+                // the routing lock can read the directory and promote
+                // immediately, while the tail promote is still sitting
+                // in `pending_promote` waiting for that lock to drop.
+                // Either thread can reach the hook first.
+                //
+                // That inversion is benign BY CONSTRUCTION and must not
+                // be "fixed" at the site: the worker can only read the
+                // directory if the tail bytes are already in the set,
+                // which means the tail promote it overtook is asking
+                // for articles that have already arrived. The order can
+                // only flip in the case where the tail promote is a
+                // no-op for the downloader. So assert the two calls,
+                // not their sequence.
+                assert_eq!(got.len(), 2, "order {t}: {got:?}");
+                assert!(got.contains(&tail_call), "order {t}: {got:?}");
+                assert!(got.contains(&hdr_call), "order {t}: {got:?}");
+            }
             // The main.rs half of the wiring: the hook's (name, range)
             // resolves through map_output_range to outer volume pieces.
             let pieces = ex.map_output_range("inner.zip", tail.0, tail.1);

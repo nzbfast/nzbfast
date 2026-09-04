@@ -43,9 +43,45 @@ Needs nightly + `cargo install cargo-fuzz`.
   gates on `looks_like` and the daemon then runs `parse`, so a
   disagreement is a link the UI accepts and the API refuses.
 - `par2_parse`   - `Par2Set::parse`, single- and split-input framing.
+- `par2_verify_diff` - the only target that fuzzes a VERDICT rather than
+  a parser (TODO 133.3). It generates FileDesc / IFSC / on-disk-bytes
+  triples from independent sources - so an internally INCONSISTENT set is
+  an ordinary case, not a rare one - and asserts
+  `verify_pass1(threads=1) == verify_pass1(threads=8) == md5_matches(..)`
+  plus an oracle computed in the target from the bytes it wrote, so all
+  three agreeing wrongly still fails. This is the generalisation of H7,
+  which `par2_parse` could never have found: that input was not
+  malformed, both packets parsed fine, and the bug was in which of the
+  two claims answered the verdict. It relies on `--cfg fuzzing`, which
+  cargo-fuzz sets for every crate in its build and which lowers
+  `par2repair`'s pool gate from 8 MiB to 8 KiB - without it the parallel
+  branch is unreachable at these file sizes.
 - `rar_extract`  - `ArchiveReader::read_with_options` + `extract_to`
   (the RAR13/15-40/50 decompressor). Window and output are bounded so a
   decompression bomb can't OOM/hang the run.
+- `rar_map`      - `VolumeMapper`, the first thing every downloaded RAR
+  volume touches. It is fed article spans in ARBITRARY ORDER while the
+  download is still in flight, and every offset it produces - a piece's
+  `data_off`, its `data_len`, the parse cursor's next stop - is
+  arithmetic over attacker-declared header fields that the extractor
+  turns straight into `pwrite` destinations, so this is the parser where
+  a bad bound becomes a write, not just a bad read. Hunts panics,
+  non-termination and unbounded growth (the cursor must strictly
+  advance; a declared data area must not run past the volume; the RAR4
+  name decoder must not amplify a 38-byte field into kilobytes of
+  `String`) across three entry points at very different speeds: the
+  mapper itself at full speed (no key schedule runs on this path), and
+  the RAR4 `-hp` encrypted and plaintext header framing through
+  dedicated entry points, since going through the mapper would run the
+  KDF's 0x40000 SHA-1 rounds on every input.
+- `rar_name_probe` - `nameprobe::rar_head` + `pick_rar_media_name` (RAR
+  volume-head naming, TODO 131 rung 5). The layer ABOVE `rar_map`: that
+  one covers the mapper's offset arithmetic, this one the blocker
+  mapping and the name/key sanitising. Worth its own target because an
+  `EncryptedHeader` verdict writes the TERMINAL `header_encrypted`
+  classification - a volume that talks the parser into that answer
+  retires a release from byte probing. Seeds: real `.rar` files
+  verbatim (no selector byte, unlike `rar_map`).
 - `mediaprobe`   - the container probe behind the preview-and-verify
   panel (`mediaprobe::probe` over MKV/WebM, MP4 and AVI). It reads a file
   that is still ARRIVING, before PAR2 has verified anything, so every
@@ -62,6 +98,87 @@ Needs nightly + `cargo install cargo-fuzz`.
   AUTOMATICALLY once extraction fails, so a panic or hang here is
   reachable by downloading a file. Asserts the ranges the scan reports
   stay inside the input, since callers read parity straight from them.
+- `sevenz_name_probe` - `nameprobe::sevenz_tail_names` (7z end-header
+  naming, TODO 131 B3). Run with `-rss_limit_mb=4096
+  -malloc_limit_mb=128`: a legit probe peaks at a few MiB, and the low
+  ceiling on the single allocation (not process RSS) is what makes a
+  header decompression bomb (kEncodedHeader declaring a huge decoded
+  size) trip instead of hiding under 4 GiB. 128 MiB is set just above
+  the largest allocation the gates permit
+  (`SEVENZ_PPMD_MEM_MAX` = 64 MiB). Seeds:
+  `cp ../tests/fixtures/sevenz/* corpus/sevenz_name_probe/`.
+- `sevenz_disk_gate` - `nameprobe::sevenz_disk_declared_bomb` (the
+  whole-container declared-size gate: start geometry incl. the
+  zeroed-start recovery-scan refusal, packed-header caps, an in-process
+  LZMA/LZMA2 packed-header decode, and content-block dictionary/PPMd
+  accounting - bug-sweep H1+H2, 14 Aug 2026). Run with the same
+  `-rss_limit_mb=4096 -malloc_limit_mb=128` reasoning as
+  `sevenz_name_probe`: the gate's own legal allocations top out around
+  2 MiB (header window + bounded packed-header decode), so a big single
+  allocation is a finding. Seeds: same fixtures dir.
+- `remux`        - the fMP4 remuxer behind the in-page preview player. A
+  harder target than `mediaprobe`: the probe reads a header and stops,
+  this walks sample tables and block lacing, exactly the structures
+  where one number describes another - a lace count that says how many
+  sizes follow, a chunk table that says where payload begins, a declared
+  size that says how far a frame extends - and every one of them arrives
+  off Usenet before PAR2 has verified a byte. Asserts four properties
+  beyond "does not crash": determinism, that every walk terminates,
+  bounded allocation (nothing is sized by a declared length alone), and
+  arrival-order independence - the same bytes served whole and served
+  with a hole produce identical output up to the hole, which is the
+  property the live-preview feature rests on. Run with
+  `-rss_limit_mb=512`; seeds share `mediaprobe`'s generated fixtures.
+- `audio_tags`   - the audio tag reader (issue #55). Every byte it
+  parses is a filename an anonymous poster chose, and the value it
+  returns is put on a file, so both the walk and the strings it yields
+  are attacker controlled. Drives two surfaces: the input as a whole
+  file (almost everything rejects at the magic gate, which is kept
+  because that gate IS the first piece of armor), and the input wearing
+  each supported magic, so the fuzzer reaches the metadata walks - block
+  lengths, frame sizes, box sizes and the comment grammar - instead of
+  being turned away at the door.
+- `mkv_parse`    - the Matroska header probe on arbitrary bytes.
+  Untrusted, completed downloads are opened to read duration and
+  dimensions before renaming and sample-sweep decisions.
+- `pesto_msgid`  - the pesto uploader-family adapter (TODO 131, red-team
+  5a). Message-ids come straight off OVER headers from anonymous posters
+  and are parsed for every scanned article, so the grammar parser is the
+  hot untrusted surface; the FileDesc gate consumes lengths and hashes
+  read out of attacker-authored PAR2 bodies. The PAR2 packet walk itself
+  is already covered by `par2_parse`.
+- `tar_parse`    - the tar container parser on arbitrary bytes.
+  `nzbkit::tar::Reader` is the ONLY entry point that walks a posted
+  `.tar` - the in-stream chase and the disk post-pass arm both drive it
+  directly with no second copy of the grammar, so this target's coverage
+  is theirs too. Exercises both the classification sniff
+  (`looks_like_tar`, which a `.tar`-or-extensionless posted file is
+  routed through first) and the header/data walk: checksums in both
+  signed and unsigned form, octal and GNU base-256 sizes, the typeflag
+  table, the `prefix` join, GNU long-name members and pax extended
+  headers.
+- `zip_parse`    - the zip container parser on arbitrary bytes. A posted
+  zip is untrusted input that drives file creation, so both halves are
+  exercised: reading the central directory, and decoding every entry it
+  claims (sizes, offsets and the deflate stream itself all come from the
+  attacker). The reader works over a real file because it preads by
+  offset, so the target writes the input to a temp path per run.
+- `zip_stream`   - the zip parser as the in-stream CHASE drives it, over
+  an in-memory source. `zip_parse` already covers the disk reader, and
+  the two share one `Source`-generic parser - but not one call order:
+  the chase resolves an entry's crypto framing by reading ABOVE the body
+  it is about to stream, wraps a bounded range reader rather than a
+  file, and drains the source explicitly so a WinZip-AE HMAC is reached
+  even when the deflate decoder stopped at its own stream end. Covers
+  the encrypted path deliberately - encrypted entries stream in-stream
+  now, and since the depth guard came off a zip chases at every nesting
+  level, so these bytes can arrive from inside another attacker-supplied
+  archive with nothing upstream having vetted them.
+- `url_authority_diff` - `nzbkit::urlauth` (`url_host`/`url_netloc`, the
+  M12 origin-bound fetch comparison) differentially against the `url`
+  crate - the parser ureq dials with. Seed the corpus with real URLs
+  first: "http://" is a 7-byte magic that coverage feedback alone is
+  slow to discover.
 
 ## Run
 
@@ -231,3 +348,39 @@ observed (peak 1046 MB and 1106 MB).
 Corroborated by the two 7z targets' own final-stats block:
 `sevenz_name_probe` added 15,513 new corpus units over the run (cov
 still climbing at the 4h mark), `sevenz_disk_gate` added 4,887.
+
+2-3 Sep 2026 - `par2_verify_diff` and `par2_parse`, against
+**`46bd58e51`**, and the first campaign here to run libFuzzer's FORK
+mode (`-fork=5` / `-fork=2`). That is what makes a campaign possible on
+`par2_verify_diff` at all: it writes its payload to disk every case, so
+one process does 417-720 exec/s whatever the wall clock, and five give
+~3,100/s. **165,678,477 executions, ONE crash**, and the crash was the
+target's own oracle rather than the verify path - the write-up, the
+audit behind that verdict and two measurements that revise how this
+target should be scheduled are in
+`research/PAR2-VERIFY-DIFF-CAMPAIGN-2026-09-02.md`.
+
+| target | executions | wall | exec/s | final cov / ft | corpus |
+|---|---|---|---|---|---|
+| `par2_verify_diff` (as shipped) | 30,658,465 | 9,774 s | 3,137 | 728 / 2,867 | 311 -> 363 files |
+| `par2_verify_diff` (oracle fixed) | 37,415,437 | 10,851 s | 3,448 | 732 / 2,889 | 363 -> 375 files / 1.5 MB |
+| `par2_parse` | 97,604,575 | 14,425 s | 6,766 | 571 / 2,104 | 2 -> 170 files |
+
+The crash came 2h43m and 30.6M executions in, and libFuzzer got there
+by SOLVING a CRC32 comparison with its CMP instrumentation - the kind
+of input no 60 s burst builds. Both repros are committed under
+`seeds/par2_verify_diff/`. Fork mode's supervisor prints no
+`-print_final_stats=1` block of its own, which is a second reason the
+peak-RSS column is missing here as well as in the 27 Aug entry above;
+the one job that did report (the crashing one) peaked at 226 MB against
+a 4,096 MB ceiling.
+
+Two things worth carrying forward. This target's `md5_unfinished`
+branch is taken on 25.5% of executions, so length converts into it
+directly rather than needing a generator change. And its edge space
+saturates from COLD in under a minute - cov 699 of the ~730 that exist,
+from an EMPTY corpus, in 60 s - so corpus FILE COUNT says nothing about
+how saturated it is, and there is deliberately no derived seed corpus
+committed for it (`seeds/README.md` has the numbers). `par2_parse` has
+now had two 4 h campaigns a week apart, 64.1M on 27 Aug and 97.6M here,
+with nothing to show either time.

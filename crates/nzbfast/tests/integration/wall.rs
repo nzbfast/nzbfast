@@ -247,6 +247,127 @@ fn settle_index(port: u16, key: &str) {
     }
 }
 
+/// One JSON API read, with a `busy` answer WAITED OUT rather than read
+/// as an empty one.
+///
+/// THE BUG THIS EXISTS TO STOP, which is a silent one. Every index-
+/// reading mode - `wall2`, `index_browse`, `index_search`, `index_get`,
+/// `make_nzb` - answers a read it could not serve with HTTP **200** and
+/// `{"status":false,"busy":true,"error":...}`, carrying NO `cards` or
+/// `results` field. The house shape for reading one of those was
+/// `json[..]["cards"].as_array().cloned().unwrap_or_default()`, which
+/// turns exactly that answer into an EMPTY VEC. The assertion then
+/// fails somewhere else entirely - `.expect("movie card")` - naming
+/// nothing about the index having been busy, which is why one of these
+/// costs a session rather than a minute.
+///
+/// The daemon's own `m_wall2` says the same thing from the other side:
+/// "a saturated read pool is not an empty wall, and drawing one as the
+/// other is how a busy index comes to be reported as a broken one".
+/// These tests were doing precisely what the production code is
+/// carefully written not to do.
+///
+/// WHY [`settle_index`] IS NOT ALREADY ENOUGH, and this is the half
+/// that makes it a flake rather than a hard red. `settle_index` waits
+/// out the daemon's STARTUP index open and then returns on the first
+/// probe that is not busy. It says nothing about any LATER read, and
+/// three separate seams can make one busy at any instant:
+/// `Saturated` (all four of `INDEX_READ_CONNS` in use and none free
+/// within `INDEX_READ_WAIT`, which is 100 ms), `SchemaChanged` (a
+/// writer changed the schema under the reader - the daemon's own first
+/// `ANALYZE` creating `sqlite_stat1` is one, and it lands AFTER the
+/// settle), and `TooSlow`. All three widen under box load, which is
+/// why `wall_groups_dedupes_and_serves` failed once inside a full
+/// 6,639-test sweep on 2 Sep 2026 and passed alone, on three
+/// consecutive `binary(integration)` runs, and on a repeat of the
+/// sweep.
+///
+/// So the wait belongs at the READ, not once at the top of the test.
+/// `busy` is the daemon's "ask again in a moment" and this asks again;
+/// past the budget it fails carrying the daemon's own `error` text, so
+/// the non-transient `TooSlow` reads as itself rather than as a missing
+/// card. Modes that report `"busy": false` on success (the stats
+/// readouts) pass straight through.
+fn api_json(port: u16, q: &str) -> serde_json::Value {
+    api_settled(q, || http_get(port, q))
+}
+
+/// One JSON API WRITE, with a `busy` refusal waited out the same way.
+///
+/// THE SECOND HALF OF THE SAME FLAKE, and the half [`api_json`] could
+/// not reach. The read helpers landed on 2 Sep 2026 and
+/// `wall_groups_dedupes_and_serves` went on failing under load - six of
+/// six concurrent `binary(integration)` sweeps on 3 Sep, four of them
+/// TRY 2 FAIL, so nextest reported "flaky" rather than red. The
+/// surviving failures were never reads (line numbers are the pre-fix
+/// file's, kept as evidence rather than as pointers):
+///
+///     wall.rs:559   mode=wall_art     left: Bool(false)  right: true
+///     wall.rs:1741  mode=wall_art     left: (false, "the index is busy - try again in a moment")
+///                                    right: (false, "unknown title key")
+///
+/// `Daemon::index_write_checked` waits `HTTP_INDEX_WAIT` (5 s) for the
+/// write mutex and then answers a refusal rather than parking an HTTP
+/// worker on it - TODO 166, the same bargain the read side makes over
+/// its own 2 s. On a box carrying several concurrent sweeps the
+/// daemon's own startup index work still holds that mutex when the
+/// upload arrives, so a poster upload is honestly refused and the row
+/// is not stamped.
+///
+/// The second line above is why the flag matters more than the text.
+/// A refused write and an unknown title key were the SAME shape -
+/// `{"status": false, "error": <prose>}` - so nothing but the message
+/// string separated "the moment was wrong" from "your key was wrong".
+/// `IndexBusy::refusal` now sends `busy` on every refusal, read and
+/// write alike, and this waits on that flag rather than on prose.
+///
+/// Retrying a refused write is safe by construction and is what the
+/// user would do: `index_write_checked`'s `Err` means the mutex was
+/// never taken, so the edit did not happen.
+fn api_post(port: u16, q: &str, content_type: &str, body: &[u8]) -> serde_json::Value {
+    api_settled(q, || http_post(port, q, content_type, body))
+}
+
+/// The one copy of "a busy answer is not this call's answer" - ask
+/// again until the index will speak, or fail carrying what it said.
+///
+/// `send` rather than a URL because the two callers differ only in the
+/// verb, and a second copy of this loop is how the write half came to
+/// be missing one.
+fn api_settled(what: &str, send: impl Fn() -> (u16, String)) -> serde_json::Value {
+    let started = std::time::Instant::now();
+    loop {
+        let (code, body) = send();
+        assert_eq!(code, 200, "{what}: {body}");
+        let v: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|e| panic!("{what}: {e}\n{body}"));
+        if v["busy"] != true {
+            return v;
+        }
+        assert!(
+            started.elapsed() < SETTLE_BUDGET,
+            "the index was still busy after {SETTLE_BUDGET:?}: {what}\n{body}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// The array under `field` in an API answer, refusing an answer that
+/// does not carry the field at all.
+///
+/// FAILING TO FIND IS FAILING: `unwrap_or_default()` here is what made
+/// a busy read indistinguishable from an empty index, and [`api_json`]
+/// only removes the busy half of that. A 200 with neither `busy` nor
+/// the field is a shape nobody has seen, and it must say so here rather
+/// than twenty lines later as a missing row.
+fn api_rows(port: u16, q: &str, field: &str) -> Vec<serde_json::Value> {
+    let v = api_json(port, q);
+    v[field]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("{q}: no `{field}` array in {v}"))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn wall_groups_dedupes_and_serves() {
     let dir = std::env::temp_dir().join(format!("nzbfast-wall-{}", std::process::id()));
@@ -365,14 +486,7 @@ async fn wall_groups_dedupes_and_serves() {
         // (matched=0). The seed's tiny sizes score as junk, so the curated
         // view hides them all - the junk gate working - and all=1 reveals
         // the real grouping.
-        let cards_of = |q: &str| -> Vec<serde_json::Value> {
-            let (code, body) = http_get(port, q);
-            assert_eq!(code, 200, "{body}");
-            serde_json::from_str::<serde_json::Value>(&body).unwrap()["cards"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-        };
+        let cards_of = |q: &str| -> Vec<serde_json::Value> { api_rows(port, q, "cards") };
         let by_title = |cs: &[serde_json::Value], t: &str| -> Option<serde_json::Value> {
             cs.iter().find(|c| c["title"] == t).cloned()
         };
@@ -407,11 +521,7 @@ async fn wall_groups_dedupes_and_serves() {
                 "/api?mode=index_browse&all=1&title_key={}&apikey=sekrit",
                 enc(key.as_str().unwrap())
             );
-            let (_c, body) = http_get(port, &q);
-            serde_json::from_str::<serde_json::Value>(&body).unwrap()["results"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
+            api_rows(port, &q, "results")
         };
         let sev_rows = sheet(&sev["key"]);
         assert_eq!(sev_rows.len(), 3, "three Severance releases: {sev_rows:?}");
@@ -436,12 +546,11 @@ async fn wall_groups_dedupes_and_serves() {
         // this" affordance on a row, so it has to mean exactly "dark and
         // unnamed" - a readable release must never be offered a probe it
         // has no use for.
-        let (code, body) = http_get(port, "/api?mode=index_browse&all=1&apikey=sekrit");
-        assert_eq!(code, 200, "{body}");
-        let rows = serde_json::from_str::<serde_json::Value>(&body).unwrap()["results"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let rows = api_rows(
+            port,
+            "/api?mode=index_browse&all=1&apikey=sekrit",
+            "results",
+        );
         let nameable = |needle: &str| -> bool {
             rows.iter()
                 .find(|r| r["name"].as_str().is_some_and(|n| n.contains(needle)))
@@ -460,31 +569,25 @@ async fn wall_groups_dedupes_and_serves() {
         // 24C: wall2&key= is a card-scoped fetch - the Releases
         // surface's hover preview and group-by-title rows pull ONE
         // title's card (total agrees, no page scan).
-        let (code, body) = http_get(
+        let v = api_json(
             port,
             &format!(
                 "/api?mode=wall2&matched=0&all=1&key={}&apikey=sekrit",
                 enc(sev["key"].as_str().unwrap())
             ),
         );
-        assert_eq!(code, 200, "{body}");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["total"], 1, "{body}");
-        assert_eq!(v["cards"][0]["title"], "Severance", "{body}");
-        assert_eq!(v["cards"][0]["n"], 3, "{body}");
+        assert_eq!(v["total"], 1, "{v}");
+        assert_eq!(v["cards"][0]["title"], "Severance", "{v}");
+        assert_eq!(v["cards"][0]["n"], 3, "{v}");
         // ...and the new browse sorts parse and page (ordering itself is
         // unit-tested against distinct values in nzbkit::index).
         for sort in ["files", "seen", "kind"] {
-            let (code, body) = http_get(
+            let rows = api_rows(
                 port,
                 &format!("/api?mode=index_browse&all=1&sort={sort}&apikey=sekrit"),
+                "results",
             );
-            assert_eq!(code, 200, "{body}");
-            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-            assert!(
-                v["results"].as_array().is_some_and(|r| !r.is_empty()),
-                "sort={sort}: {body}"
-            );
+            assert!(!rows.is_empty(), "sort={sort}: {rows:?}");
         }
 
         // M21 custom artwork: upload a poster for The Matrix; it lands
@@ -492,18 +595,13 @@ async fn wall_groups_dedupes_and_serves() {
         // row is stamped checked so the enricher leaves it alone.
         let key = "m%3Athe%20matrix%3A1999";
         let png = b"\x89PNG\r\n\x1a\nfake-poster-bytes";
-        let (code, body) = http_post(
+        let v = api_post(
             port,
             &format!("/api?mode=wall_art&key={key}&apikey=sekrit"),
             "multipart/form-data; boundary=artb",
             &multipart("artb", "p.png", png),
         );
-        assert_eq!(code, 200, "{body}");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
-            true,
-            "{body}"
-        );
+        assert_eq!(v["status"], true, "{v}");
         // After the upload the movie card is "matched" (has art), so it
         // shows in the default matched-only view (all=1 bypasses the
         // size-junk gate); its poster_full links the cache-busted image.
@@ -518,23 +616,21 @@ async fn wall_groups_dedupes_and_serves() {
         assert_eq!(code, 200);
         assert!(art.contains("fake-poster-bytes"));
         // Non-image bytes are refused before touching the cache.
-        let (_, body) = http_post(
+        let v = api_post(
             port,
             &format!("/api?mode=wall_art&key={key}&apikey=sekrit"),
             "multipart/form-data; boundary=artb",
             &multipart("artb", "evil.html", b"<html>not art</html>"),
         );
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["status"], false, "{body}");
+        assert_eq!(v["status"], false, "{v}");
         // Unknown title keys are refused.
-        let (_, body) = http_post(
+        let v = api_post(
             port,
             "/api?mode=wall_art&key=m%3Anope%3A1900&apikey=sekrit",
             "multipart/form-data; boundary=artb",
             &multipart("artb", "p.png", png),
         );
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["status"], false, "{body}");
+        assert_eq!(v["status"], false, "{v}");
 
         // A replaced poster must replace what the GRID loads, which is
         // the lazily cached `/art/thumb_<name>` derivative and not the
@@ -553,18 +649,13 @@ async fn wall_groups_dedupes_and_serves() {
                      \x03\x01\x00\x36\x74\x11\x40\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\
                      \x60\x82";
         let upload = |bytes: &[u8]| {
-            let (code, body) = http_post(
+            let v = api_post(
                 port,
                 &format!("/api?mode=wall_art&key={key}&apikey=sekrit"),
                 "multipart/form-data; boundary=artb",
                 &multipart("artb", "p.png", bytes),
             );
-            assert_eq!(code, 200, "{body}");
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
-                true,
-                "{body}"
-            );
+            assert_eq!(v["status"], true, "{v}");
         };
         let thumb = || http_get(port, "/art/thumb_m_the_matrix_1999.jpg");
         upload(red);
@@ -585,7 +676,7 @@ async fn wall_groups_dedupes_and_serves() {
         // index writes: the rename and the picked series' metadata must
         // arrive together, and the art of the series this card just
         // stopped being must not.
-        let (code, body) = http_post(
+        let v = api_post(
             port,
             "/api?mode=wall_fix&apikey=sekrit",
             "application/json",
@@ -593,12 +684,7 @@ async fn wall_groups_dedupes_and_serves() {
                  "year":2003,"meta":{"id":604,"overview":"Neo returns.","rating":7.2,
                  "genres":"Action","imdb":"tt0234215","air_date":"2003-05-15"}}"#,
         );
-        assert_eq!(code, 200, "{body}");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
-            true,
-            "{body}"
-        );
+        assert_eq!(v["status"], true, "{v}");
         let fixed = cards_of("/api?mode=wall2&all=1&matched=0&apikey=sekrit");
         let m = by_title(&fixed, "The Matrix Reloaded").expect("the renamed card");
         assert_eq!(
@@ -629,11 +715,9 @@ async fn wall_groups_dedupes_and_serves() {
         // and answers in the shape the caller reads. It also must not
         // wipe art the way `value=all` does - these rows have no card
         // to lose, so nothing is deleted.
-        let (code, body) = http_get(port, "/api?mode=wall_refresh&value=blanked&apikey=sekrit");
-        assert_eq!(code, 200, "{body}");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["status"], true, "{body}");
-        assert!(v["reset"].is_number() && v["done"].is_boolean(), "{body}");
+        let v = api_json(port, "/api?mode=wall_refresh&value=blanked&apikey=sekrit");
+        assert_eq!(v["status"], true, "{v}");
+        assert!(v["reset"].is_number() && v["done"].is_boolean(), "{v}");
         // ...and an unrecognised target still says what the three
         // legal ones are.
         let (_, body) = http_get(port, "/api?mode=wall_refresh&apikey=sekrit");
@@ -831,8 +915,17 @@ async fn watchlist_grabs_for_a_user_category() {
             let (_, h) = http_get(port, "/api?mode=history&apikey=sekrit");
             format!("{q}{h}")
         };
+        // A POLL DEADLINE, not a measurement: the loop exits the
+        // instant both grabs are there, so its only job is to bound a
+        // hang, and the assertions below are what decide the verdict.
+        // 10 s (100 x 100 ms) was too tight for a loaded box - seen
+        // once as a TRY 1 FAIL, recovering on the retry, in six
+        // concurrent `binary(integration)` sweeps at box load ~150 on
+        // 3 Sep 2026, with an EMPTY queue and history and no `busy`
+        // anywhere: the watchlist scan simply had not run yet. 30 s
+        // costs a passing run nothing.
         let mut seen = String::new();
-        for _ in 0..100 {
+        for _ in 0..300 {
             seen = grabbed();
             if seen.contains("Hungary.Qualifying") && seen.contains("Hungary.Race") {
                 break;
@@ -981,11 +1074,7 @@ async fn wall_arrivals_and_expanded_rows_answer_the_page_honestly() {
     let port = d.port;
 
     tokio::task::spawn_blocking(move || {
-        let json = |q: &str| -> serde_json::Value {
-            let (code, body) = http_get(port, q);
-            assert_eq!(code, 200, "{body}");
-            serde_json::from_str(&body).unwrap_or_else(|e| panic!("{q}: {e}\n{body}"))
-        };
+        let json = |q: &str| -> serde_json::Value { api_json(port, q) };
         // Before anything is asserted: the daemon's own startup index
         // open may still hold the write mutex, and every read below
         // (including wall_tip's flattened one) needs the settled index.
@@ -1134,11 +1223,7 @@ async fn a_grab_names_the_job_from_the_index_however_deep_the_row_is() {
     let port = d.port;
 
     tokio::task::spawn_blocking(move || {
-        let json = |q: &str| -> serde_json::Value {
-            let (code, body) = http_get(port, q);
-            assert_eq!(code, 200, "{body}");
-            serde_json::from_str(&body).unwrap_or_else(|e| panic!("{q}: {e}\n{body}"))
-        };
+        let json = |q: &str| -> serde_json::Value { api_json(port, q) };
         // Before anything is asserted: the daemon's own startup index
         // open may still hold the write mutex, and this test demands
         // the real rows on the first search page.
@@ -1307,11 +1392,7 @@ async fn session_siblings_surface_on_the_sheet_and_grab() {
     let port = d.port;
 
     tokio::task::spawn_blocking(move || {
-        let json = |q: &str| -> serde_json::Value {
-            let (code, body) = http_get(port, q);
-            assert_eq!(code, 200, "{body}");
-            serde_json::from_str(&body).unwrap_or_else(|e| panic!("{q}: {e}\n{body}"))
-        };
+        let json = |q: &str| -> serde_json::Value { api_json(port, q) };
         // Before anything is asserted: the daemon's own startup index
         // open may still hold the write mutex, and this test demands
         // the seeded show on the first search page.
@@ -1462,10 +1543,11 @@ async fn a_wall_poll_seeds_its_page_without_disturbing_enriched_rows() {
         settle_index(port, "&apikey=sekrit");
 
         let poll = || {
-            let (code, body) = http_get(port, "/api?mode=wall2&matched=0&all=1&apikey=sekrit");
-            assert_eq!(code, 200, "{body}");
-            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-            let cards = v["cards"].as_array().cloned().unwrap_or_default();
+            let body = api_json(port, "/api?mode=wall2&matched=0&all=1&apikey=sekrit");
+            let cards = body["cards"]
+                .as_array()
+                .cloned()
+                .unwrap_or_else(|| panic!("no `cards` array in {body}"));
             assert!(
                 cards.iter().any(|c| c["title"] == "The Matrix"),
                 "the poll answers with its cards: {body}"
@@ -1617,12 +1699,11 @@ async fn wall_art_and_refresh_seed_the_row_they_act_on() {
 
         // Release rows, not cards: index_browse hands back each row's
         // wall-card key and writes nothing to `titles`.
-        let (code, body) = http_get(port, "/api?mode=index_browse&all=1&apikey=sekrit");
-        assert_eq!(code, 200, "{body}");
-        let rows = serde_json::from_str::<serde_json::Value>(&body).unwrap()["results"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let rows = api_rows(
+            port,
+            "/api?mode=index_browse&all=1&apikey=sekrit",
+            "results",
+        );
         let key_of = |needle: &str| -> String {
             rows.iter()
                 .find(|r| r["name"].as_str().is_some_and(|n| n.contains(needle)))
@@ -1635,7 +1716,7 @@ async fn wall_art_and_refresh_seed_the_row_they_act_on() {
 
         // A poster for a card that has never been on screen.
         let png = b"\x89PNG\r\n\x1a\nfake-poster-bytes";
-        let (code, body) = http_post(
+        let v = api_post(
             port,
             &format!(
                 "/api?mode=wall_art&key={}&apikey=sekrit",
@@ -1644,11 +1725,9 @@ async fn wall_art_and_refresh_seed_the_row_they_act_on() {
             "multipart/form-data; boundary=artb",
             &multipart("artb", "p.png", png),
         );
-        assert_eq!(code, 200, "{body}");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
-            true,
-            "an unpolled card is not an unknown title: {body}"
+            v["status"], true,
+            "an unpolled card is not an unknown title: {v}"
         );
         // ...and the art cache holds it, so the seed reached the row the
         // fill then named.
@@ -1659,44 +1738,40 @@ async fn wall_art_and_refresh_seed_the_row_they_act_on() {
         // Refresh: same shape, and a freshly seeded row IS the
         // post-reset state, so the endpoint reports the reset it asked
         // for rather than refusing the key.
-        let (code, body) = http_get(
+        let v = api_json(
             port,
             &format!(
                 "/api?mode=wall_refresh&value={}&apikey=sekrit",
                 urlencoding(&tv)
             ),
         );
-        assert_eq!(code, 200, "{body}");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
-            true,
-            "an unpolled card is not an unknown title: {body}"
+            v["status"], true,
+            "an unpolled card is not an unknown title: {v}"
         );
 
         // A key naming no releases is a bad key, on both endpoints. This
         // is the half seeding must not swallow - "unknown title key" has
         // to keep meaning something.
-        let (_, body) = http_post(
+        let v = api_post(
             port,
             "/api?mode=wall_art&key=m%3Anope%3A1900&apikey=sekrit",
             "multipart/form-data; boundary=artb",
             &multipart("artb", "p.png", png),
         );
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             (v["status"].as_bool(), v["error"].as_str()),
             (Some(false), Some("unknown title key")),
-            "{body}"
+            "{v}"
         );
-        let (_, body) = http_get(
+        let v = api_json(
             port,
             "/api?mode=wall_refresh&value=m%3Anope%3A1900&apikey=sekrit",
         );
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             (v["status"].as_bool(), v["error"].as_str()),
             (Some(false), Some("unknown title key")),
-            "{body}"
+            "{v}"
         );
         (movie, tv)
     })
@@ -1746,4 +1821,134 @@ fn urlencoding(v: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// THE SHAPE [`api_json`] AND [`api_rows`] ARE WRITTEN AGAINST: a wall
+/// read the index could not answer is HTTP 200 with `busy` and NO
+/// `cards` field - never an empty wall.
+///
+/// This is the production side of the flake those two helpers exist to
+/// stop. `wall_groups_dedupes_and_serves` failed once inside a full
+/// 6,639-test sweep on 2 Sep 2026 and passed alone, on three
+/// consecutive `binary(integration)` runs, and on a repeat of the
+/// sweep. Its read helper was
+/// `json[..]["cards"].as_array().cloned().unwrap_or_default()`, which
+/// reads the answer below as a wall with no cards on it, so the test
+/// died twenty lines later on `.expect("movie card")` - a message that
+/// names nothing about the index having been busy.
+///
+/// All three assertions are load-bearing, and each pins a different way
+/// the helpers could silently stop working:
+///
+/// - **200.** A test that only checks the status code learns nothing
+///   here, which is why `api_json`'s `assert_eq!(code, 200)` cannot be
+///   the busy check.
+/// - **`busy` is `true`.** The flag `api_json` waits on. Modes that
+///   report `"busy": false` on success must keep doing so, or every
+///   read through these helpers would spin for `SETTLE_BUDGET`.
+/// - **No `cards` array at all.** This is the one that made the bug
+///   silent. If the daemon ever answered `"cards": []` alongside
+///   `busy`, `as_array()` would succeed and `api_rows`' refusal would
+///   go back to being unreachable.
+///
+/// The pool is saturated from INSIDE, with the NZBFAST_DEBUG_HOOKS-gated
+/// `mode=debug_index_read_busy` - the same lever
+/// `newznab::a_read_the_index_could_not_answer_is_an_error_not_an_empty_feed`
+/// takes, and the only one that can refuse a read THIS handler makes
+/// rather than a read some other request makes.
+///
+/// What is deliberately NOT pinned here is `api_rows` panicking on a
+/// busy answer. The injector arms one way - `arm_debug_read_budget`
+/// clamps to zero, so nothing can disarm it - so reaching that panic
+/// costs a full `SETTLE_BUDGET` of wall clock, 60 s, to assert what the
+/// three lines below already establish.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_wall_read_is_not_an_empty_wall() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-wallbusy-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        ix.ingest(
+            "alt.binaries.teevee",
+            &[over(
+                1,
+                "\"The.Matrix.1999.2160p.BluRay.REMUX-GRP.rar\" yEnc (1/1)",
+                "<b1@x>",
+                5000,
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+    }
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    index_enabled(&cfg);
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            // The read-pool fault injector below is gated on this.
+            .env("NZBFAST_DEBUG_HOOKS", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--index-db")
+            .arg(&db);
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        settle_index(port, "&apikey=sekrit");
+
+        // The control arm, and the priming the injector needs: the
+        // answer has to come off the read POOL, which only happens once
+        // a read-write open has run the migrations. Arming before that
+        // would refuse nothing.
+        let cards = api_rows(
+            port,
+            "/api?mode=wall2&matched=0&all=1&apikey=sekrit",
+            "cards",
+        );
+        assert!(
+            cards.iter().any(|c| c["title"] == "The Matrix"),
+            "the seeded card is served before anything is armed: {cards:?}"
+        );
+
+        // Every pooled read from here on reports the pool busy.
+        let (_, armed) = http_get(
+            port,
+            "/api?output=json&mode=debug_index_read_busy&value=0&apikey=sekrit",
+        );
+        assert!(armed.contains("\"armed\":0"), "hook armed: {armed}");
+
+        let (code, body) = http_get(port, "/api?mode=wall2&matched=0&all=1&apikey=sekrit");
+        assert_eq!(code, 200, "a busy read still rides HTTP 200: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["busy"], true, "a refused read says so: {body}");
+        assert!(
+            v["cards"].as_array().is_none(),
+            "a busy answer must carry NO cards array - an empty one is \
+             indistinguishable from a wall with nothing on it, which is \
+             the bug `api_rows` exists to refuse: {body}"
+        );
+    })
+    .await
+    .unwrap();
 }

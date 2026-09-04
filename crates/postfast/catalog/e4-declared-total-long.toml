@@ -1,0 +1,66 @@
+# E4: the =ybegin size declares twice the bytes the post ships, over a
+# file the recovery set covers.
+
+[layout]
+name = "e4-declared-total-long"
+seed = 14
+note = """
+Ports the half of Codex sweep 2 (3 Aug, M2) that its own test calls
+"the regression that matters more than the fix". Every part here is
+self-consistent - its =ypart range is true, its trailer states the real
+chunk length and the real CRC - and only the file-level total lies,
+which is Fixture::add_file_declaring's shape. The decoder deliberately
+does not reject on a misstated total, because real posters misstate
+them.
+
+What the completion census does with that is the row. Sweep M7 added a
+census that reconciles the writer's covered intervals against the
+declared range, so a post shipping less than it declared stops
+completing green with a hole in it. M2 then made that census PER SLOT
+rather than per job: a file the recovery set covers sits it out,
+because the set speaks for those bytes and knows the real length. So
+the correct end state here is a completed job and a byte-exact payload
+- the covered file must not be accused of a shortfall its own set
+disproves - and a client that ran the census over it anyway would fail
+this row on the exit status.
+
+TWO END STATES THIS ROW CANNOT REACH, and both are measured rather
+than assumed, so nobody rediscovers them by writing the profile:
+
+  * The SAME lie with no set covering the file ends at
+    Overstated.bin.nzbfast-partial beside a .nzbfast.journal, with the
+    job correctly refusing ("every article arrived but 0.1 MB of the
+    declared 0.1 MB was never written"). That is the right behaviour
+    and the oracle cannot state it: [expect] derives the output tree
+    from the source list, so a partial under a different name is not
+    a tree any profile can declare.
+
+  * declared_size = "short" over an uncovered file completes GREEN and
+    TRUNCATES the payload to the declared half - 16384 bytes of a
+    32768-byte file, every discarded byte having arrived under a valid
+    part CRC. Measured 3 Sep 2026 while building this row. The client
+    is consistent with settle's own rule that a declared length wins
+    (e2e_norar's lying_yenc_size_lands_at_the_filedesc_length), but
+    there the length comes from a FileDesc packet cross-checked by an
+    MD5 pair, and here it comes from the one yEnc field the decoder
+    already treats as untrusted, in the opposite direction to the
+    refusal above. Worth a look; not this chip's to rule on, and not
+    pinnable here for the same reason as the first.
+"""
+
+[source]
+files = [{ name = "Overstated.bin", bytes = 32768 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+
+[encoding]
+declared_size = "long"
+article_bytes = 8192
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -30,12 +30,18 @@ fn a_sized_fast_pair_suggests_then_auto_applies() {
     // est_content = 5e9 / 1.03 = 4.854e9; announce 4.9e9 -> ratio
     // 0.9906, the top band. Group and section agree on video.
     ix.predb_store(
-        &[tpre(
-            "Some.Film.2026.1080p.WEB.H264-GRP",
-            "X264-HD",
-            4_900_000_000,
-            1000,
-        )],
+        &[
+            tpre(
+                "Some.Film.2026.1080p.WEB.H264-GRP",
+                "X264-HD",
+                4_900_000_000,
+                1000,
+            ),
+            // The field the margin clause is measured against. Without
+            // it there is no runner-up and the clause is vacuous - see
+            // `bgpre`.
+            bgpre("c1", 100),
+        ],
         1000,
     )
     .unwrap();
@@ -145,6 +151,9 @@ fn the_applied_verdict_names_the_pre_that_was_applied() {
             // A decoy in another section entirely: never a candidate
             // for this release, but a valid predb row to point at.
             tpre("Other.Album.2026-GRP", "MP3", 100_000_000, 500),
+            // ... and a candidate that IS one, so the margin clause
+            // has a runner-up to beat (see `bgpre`).
+            bgpre("av1", 100),
         ],
         1000,
     )
@@ -283,6 +292,74 @@ fn a_crowded_window_blocks_auto() {
     assert_eq!(applied, 0, "a crowded window must never auto-apply");
     assert_eq!(suggested, 1);
     teardown(&d, ix);
+}
+
+/// The other end of the crowding range: a window holding exactly ONE
+/// candidate must not auto-apply either.
+///
+/// Until 2 Sep 2026 it always did. `runner_up` was
+/// `cands.get(1).map(..).unwrap_or(0)`, so an ABSENT rival read as a
+/// rival scoring zero, `best - runner_up` degenerated to the raw
+/// score, and the score had already cleared STRONG (80) to reach the
+/// clause - a lone candidate was unbeatable by exactly the test meant
+/// to catch it. The Python naming prototype carries the same
+/// arithmetic and `research/NAMECORR-PRECISION-2026-09-01.md`
+/// measured 45-91% of its firings riding it, against 0% precision.
+///
+/// Two arms, identical but for one weak background pre, because the
+/// assertion "it does not auto-apply" is worthless on its own - a
+/// corpus that fails some OTHER clause would satisfy it too. Arm B is
+/// the control: add a runner-up the true pre beats by 58 and the same
+/// pair applies.
+#[test]
+fn a_lone_candidate_window_never_auto_applies() {
+    let build = |tag: &str, field: bool| {
+        let d = dir(tag);
+        let mut ix = Index::open(&d.join("index.db")).unwrap();
+        let mut lines = vec![tpre(
+            "Lonely.Film.2026.1080p.WEB.H264-GRP",
+            "X264-HD",
+            4_900_000_000,
+            1000,
+        )];
+        if field {
+            lines.push(bgpre("lone", 100));
+        }
+        ix.predb_store(&lines, 1000).unwrap();
+        ix.ingest(
+            "alt.binaries.x264",
+            &[overd(
+                r#""lL3nN8xX2zZ.part01.rar" yEnc (1/1)"#,
+                "lo1",
+                5_000_000_000,
+                4600,
+            )],
+            5000,
+        )
+        .unwrap();
+        let (_, suggested, applied) = ix.predb_corr_backlog(100, 0, true, 5000).unwrap();
+        let runner: i64 = ix
+            .db
+            .query_row("SELECT runner_up FROM pre_corr", [], |r| r.get(0))
+            .unwrap();
+        let named = ix.search("", 10).unwrap()[0].pre_title.clone();
+        teardown(&d, ix);
+        (suggested, applied, runner, named)
+    };
+
+    // Arm A: nothing else in the window at all.
+    let (suggested, applied, runner, named) = build("corr-lone", false);
+    assert_eq!(runner, 0, "the corpus really is a one-candidate window");
+    assert_eq!(applied, 0, "a lone candidate must never auto-apply");
+    assert_eq!(suggested, 1, "it is still a suggestion - that is the tier");
+    assert_eq!(named, "", "and the release keeps its stem");
+
+    // Arm B, the control: the same pair, plus a rival to beat.
+    let (suggested, applied, runner, named) = build("corr-lone-ctl", true);
+    assert!(runner > 0, "arm B has a real runner-up");
+    assert_eq!(suggested, 0);
+    assert_eq!(applied, 1, "with a field to beat, the same pair applies");
+    assert_eq!(named, "Lonely.Film.2026.1080p.WEB.H264-GRP");
 }
 
 /// A sizeless pre can suggest but can never auto-apply, whatever
@@ -487,12 +564,15 @@ fn revoke_undoes_and_reject_never_nags() {
     let d = dir("corr-revoke");
     let mut ix = Index::open(&d.join("index.db")).unwrap();
     ix.predb_store(
-        &[tpre(
-            "Named.Film.2026.1080p.WEB.H264-GRP",
-            "X264-HD",
-            4_900_000_000,
-            1000,
-        )],
+        &[
+            tpre(
+                "Named.Film.2026.1080p.WEB.H264-GRP",
+                "X264-HD",
+                4_900_000_000,
+                1000,
+            ),
+            bgpre("rv1", 100),
+        ],
         1000,
     )
     .unwrap();
@@ -618,12 +698,18 @@ fn catchup_covers_a_seed_import_once_per_generation() {
     // The seed lands AFTER the release is indexed - the exact
     // shape the live legs cannot reach.
     ix.predb_seed_store(
-        &[tpre(
-            "Caught.Up.2026.1080p.WEB.H264-GRP",
-            "X264-HD",
-            4_900_000_000,
-            1000,
-        )],
+        &[
+            tpre(
+                "Caught.Up.2026.1080p.WEB.H264-GRP",
+                "X264-HD",
+                4_900_000_000,
+                1000,
+            ),
+            // Sizeless, so the catch-up walk (SIZED pres only) never
+            // takes it as a driver - it is here to be the release
+            // window's runner-up. See `bgpre`.
+            bgpre("cu9", 100),
+        ],
         "seed:predb.net",
         6000,
     )
@@ -711,12 +797,15 @@ fn an_oracle_settles_a_correlation_both_ways() {
     let d = dir("corr-verdict");
     let mut ix = Index::open(&d.join("index.db")).unwrap();
     ix.predb_store(
-        &[tpre(
-            "Oracle.Film.2026.1080p.WEB.H264-GRP",
-            "X264-HD",
-            4_900_000_000,
-            1000,
-        )],
+        &[
+            tpre(
+                "Oracle.Film.2026.1080p.WEB.H264-GRP",
+                "X264-HD",
+                4_900_000_000,
+                1000,
+            ),
+            bgpre("ov1", 100),
+        ],
         1000,
     )
     .unwrap();
@@ -768,12 +857,15 @@ fn an_oracle_settles_a_correlation_both_ways() {
     let d2 = dir("corr-verdict2");
     let mut ix2 = Index::open(&d2.join("index.db")).unwrap();
     ix2.predb_store(
-        &[tpre(
-            "Wrong.Guess.2026.1080p.WEB.H264-GRP",
-            "X264-HD",
-            4_900_000_000,
-            1000,
-        )],
+        &[
+            tpre(
+                "Wrong.Guess.2026.1080p.WEB.H264-GRP",
+                "X264-HD",
+                4_900_000_000,
+                1000,
+            ),
+            bgpre("ov2", 100),
+        ],
         1000,
     )
     .unwrap();
@@ -879,12 +971,15 @@ fn split_fragments_merge_and_then_correlate() {
     // re-walks - and the merged size now matches a seeded pre that
     // no half-GB fragment ever could.
     ix.predb_seed_store(
-        &[tpre(
-            "Whole.Set.2026.1080p.WEB.H264-GRP",
-            "X264-HD",
-            4_900_000_000,
-            1000,
-        )],
+        &[
+            tpre(
+                "Whole.Set.2026.1080p.WEB.H264-GRP",
+                "X264-HD",
+                4_900_000_000,
+                1000,
+            ),
+            bgpre("ws1", 100),
+        ],
         "seed:predb.net",
         6000,
     )
@@ -1142,6 +1237,37 @@ fn readable_or_short_stems_never_shatter_fold() {
         .query_row("SELECT COUNT(*) FROM releases", [], |r| r.get(0))
         .unwrap();
     assert_eq!(before, after);
+    teardown(&d, ix);
+}
+
+/// The floor's other side: a 15-character random stem - the teevee
+/// family's common shape, structurally excluded while the floor sat at
+/// 16 - folds now that the measured floor is 12
+/// (research/SHATTER-FOLD-STARVATION-2026-09-01.md).
+#[test]
+fn a_fifteen_char_random_stem_is_inside_the_fold_floor() {
+    let d = dir("shatter-floor12");
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    for p in 1..=2u32 {
+        ix.ingest(
+            "alt.binaries.teevee",
+            &[over(
+                &format!(r#""LgXNckle2TSyKUA" yEnc ({p}/2)"#),
+                &format!("q{p}@h.tld"),
+                &format!("s{p}"),
+                700_000,
+            )],
+            5_000,
+        )
+        .unwrap();
+    }
+    let before: i64 = ix
+        .db
+        .query_row("SELECT COUNT(*) FROM releases", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(before, 2, "two shattered rows, one per poster");
+    let (g, n, _) = ix.shatter_fold(6_000, WALK).unwrap();
+    assert_eq!((g, n), (1, 1), "the 15-char stem folds");
     teardown(&d, ix);
 }
 
@@ -1404,6 +1530,184 @@ fn par2_sidecar_folds_into_its_container() {
     teardown(&d, ix);
 }
 
+/// The junk-only half of the same rule (`session_fold_members`'
+/// shape): a pass that recomputes `junk` on an existing row scores it
+/// against a KIND, so it owes ingest's recoveries even when it never
+/// writes the kind column. The par2 sidecar fold rewrites the
+/// container's score off a fresh parse of the stem it keeps.
+///
+/// The shape here is the one this pass actually meets: an obfuscated
+/// `.7z` container in a BOOK group. The recovery declines it - the
+/// stem wears a plain extension, which the group rule refuses on
+/// purpose - so the fold's answer is the fall-through lane, and that
+/// is exactly what ingest would have said about the same stem. What
+/// this pins is the rule, not a rescue: the container is a junk-70
+/// obfuscated row either way, hidden on every wall at any lane.
+#[test]
+fn a_par2_sidecar_fold_scores_the_way_ingest_scores_it() {
+    let d = dir("sidecar-fold-kind");
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    let grp = "alt.binaries.audiobooks";
+    let cstem = "Deliver.Us.From.Evil.gUSbVwIDqhrR.7z";
+    let row =
+        |stem: &str, posted: i64, nfiles: usize, each: i64, namer: &dyn Fn(usize) -> String| {
+            let mut p = crate::categories::classify(stem, &ix.custom);
+            crate::release::recover_media_kind(&mut p, stem, stem);
+            crate::release::recover_kind_from_group(&mut p, grp, stem);
+            let junk = junk_score(stem, &p, (each * nfiles as i64) as u64, false);
+            assert!(junk >= 70, "{stem} must be in this pass's band");
+            ix.db
+                .execute(
+                    "INSERT INTO releases(stem, poster, grp, total_bytes, files, complete,
+                                      has_par2, first_posted, first_seen, kind, junk,
+                                      title_key)
+                 VALUES(?1, 'p@x', ?2, ?3, ?4, 1, 0, ?5, 5000, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        stem,
+                        grp,
+                        each * nfiles as i64,
+                        nfiles as i64,
+                        posted,
+                        kind_str(&p.kind),
+                        junk,
+                        p.key
+                    ],
+                )
+                .unwrap();
+            let rid = ix.db.last_insert_rowid();
+            for i in 0..nfiles {
+                ix.db
+                    .execute(
+                        "INSERT INTO files(release_id, filename, total_parts, bytes)
+                     VALUES(?1, ?2, 1, ?3)",
+                        rusqlite::params![rid, namer(i), each],
+                    )
+                    .unwrap();
+            }
+            rid
+        };
+    row(cstem, 4700, 3, 1_000_000_000, &|i| {
+        format!("{}.{:03}", "Deliver.Us.From.Evil.gUSbVwIDqhrR.7z", i + 1)
+    });
+    row(
+        "Deliver.Us.From.Evil.gUSbVwIDqhrR",
+        4650,
+        2,
+        100_000_000,
+        &|i| format!("Deliver.Us.From.Evil.gUSbVwIDqhrR.vol{i:02}+02.par2"),
+    );
+    assert!(ix.split_merge(6000, WALK).unwrap().2);
+    assert_eq!(ix.par2_sidecar_fold(WALK).unwrap(), (1, 2, true));
+
+    let (stem, kind, junk, bytes, nexe): (String, String, i64, i64, i64) = ix
+        .db
+        .query_row(
+            "SELECT stem, kind, junk, total_bytes, nfiles_exe FROM releases",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(stem, cstem, "the container stem is kept");
+    let mut want = crate::categories::classify(&stem, &ix.custom);
+    crate::release::recover_media_kind(&mut want, &stem, &stem);
+    crate::release::recover_kind_from_group(&mut want, grp, &stem);
+    if !crate::index::ingest::stem_obfuscated(&stem, &want) {
+        crate::release::recover_episode_from_group(&mut want, grp, &stem);
+    }
+    assert_eq!(
+        junk,
+        junk_score(&stem, &want, bytes as u64, nexe > 0),
+        "the fold scored junk against a kind ingest would not have used"
+    );
+    assert_eq!(
+        kind, "movie",
+        "the fold writes no kind; the row keeps its own"
+    );
+    assert!(junk >= 70, "an obfuscated container stays dark either way");
+    teardown(&d, ix);
+}
+
+/// The same for the shatter fold, on the shape it actually meets: a
+/// whole-stem blob, posted into a BOOK group, shattered across four
+/// posters.
+///
+/// The recovery cannot fire on this population and the reason is worth
+/// having pinned. The walk skips every candidate `stem_is_a_name`
+/// accepts, so its members are exactly the stems `looks_obfuscated`
+/// damns - which is `stem_obfuscated`'s own first arm. That has two
+/// consequences at once: such a stem parses to `Kind::Other`, which
+/// both group rules decline on purpose ("an obfuscated stem must not
+/// become a book with a hash for a title"), and the 70 it scores is
+/// kind-INDEPENDENT, so no recovered lane could move the number even
+/// if one fired. Widen the walk's filter or its band, or add a kind
+/// branch at or above 70 to `junk_score`, and this reds here instead
+/// of on a wall that has quietly hidden a row.
+#[test]
+fn a_folded_shatter_is_scored_the_way_ingest_scores_it() {
+    let d = dir("shatter-fold-kind");
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    let grp = "alt.binaries.audiobooks";
+    let stem = "LgXNckle2TSyKUA";
+    assert!(
+        !crate::release::stem_is_a_name(stem),
+        "the walk skips anything that already shows a name"
+    );
+    for p in 1u32..=4 {
+        ix.ingest(
+            grp,
+            &[over(
+                &format!(r#""{stem}" yEnc ({p}/4)"#),
+                &format!("r{p}@h{p}.tld"),
+                &format!("m{p}"),
+                700_000,
+            )],
+            5_000 + p as i64,
+        )
+        .unwrap();
+    }
+    let (rows, kind, junk): (i64, String, i64) = ix
+        .db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM releases), kind, junk FROM releases LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(rows, 4, "the shattered shape really was built");
+    assert_eq!(
+        kind, "other",
+        "precondition: a blob stem parses to Other, which both group \
+         rules decline by design"
+    );
+    assert!(junk >= 70, "and the blob pins the score dark: {junk}");
+
+    let (groups, folded, _) = ix.shatter_fold(6_000, WALK).unwrap();
+    assert_eq!((groups, folded), (1, 3));
+
+    let (kind, junk, bytes): (String, i64, i64) = ix
+        .db
+        .query_row("SELECT kind, junk, total_bytes FROM releases", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap();
+    let mut want = crate::categories::classify(stem, &ix.custom);
+    crate::release::recover_media_kind(&mut want, stem, stem);
+    crate::release::recover_kind_from_group(&mut want, grp, stem);
+    if !crate::index::ingest::stem_obfuscated(stem, &want) {
+        crate::release::recover_episode_from_group(&mut want, grp, stem);
+    }
+    assert_eq!(
+        kind, "other",
+        "the fold writes no kind; the row keeps ingest's"
+    );
+    assert_eq!(
+        junk,
+        junk_score(stem, &want, bytes as u64, false),
+        "the fold scored junk against a kind ingest would not have used"
+    );
+    teardown(&d, ix);
+}
+
 /// Codex sweep 3 Aug M3: folding deletes the bare twin row, and
 /// when that twin held the table's MAXIMUM id, SQLite hands the
 /// same id to the next insert. A cursor parked on the deleted id
@@ -1635,6 +1939,81 @@ fn a_late_twin_still_folds_after_the_walk_parked() {
     teardown(&d, ix);
 }
 
+/// Revoking a name must put the row back on the lane its own INGEST
+/// gave it, not on the one a bare `classify` reads.
+///
+/// The undo re-derives every column from the stem, and until 2 Sep 2026
+/// it did that with `categories::classify` alone - none of the three
+/// recoveries ingest runs. An audiobook stem carries no format marker
+/// and no video evidence, so it falls through to an evidence-free
+/// movie at junk 60, which the wall's default `junk < 50` hides. That
+/// makes the undo strictly destructive: the row is less visible after
+/// a name is taken off than it was before anybody put one on.
+///
+/// The human picker is what makes this reachable. `pre_assign` is
+/// deliberately ungated ("the human IS the gate"), so it can name a
+/// perfectly readable row; the auto lane cannot, because
+/// `corr_naming_population` admits only obfuscated stems and both
+/// group rules decline those.
+#[test]
+fn revoking_a_name_restores_the_lane_ingest_gave_the_row() {
+    let d = dir("corr-revoke-lane");
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    ix.predb_seed_store(
+        &[tpre(
+            "Some.Wrong.Guess.2026.1080p.WEB.H264-GRP",
+            "X264-HD",
+            0,
+            1000,
+        )],
+        "seed:predb.net",
+        5000,
+    )
+    .unwrap();
+    // A readable audiobook post: no extension, no technical marker,
+    // in a group `group_media_kind` speaks for.
+    ix.ingest(
+        "alt.binaries.audiobooks",
+        &[overd(
+            r#""David Baldacci - Deliver Us From Evil" yEnc (1/1)"#,
+            "ab1",
+            700_000_000,
+            4600,
+        )],
+        5000,
+    )
+    .unwrap();
+    let rid = ix.search("", 10).unwrap()[0].id;
+    let lane = |ix: &Index| -> (String, i64) {
+        ix.db
+            .query_row("SELECT kind, junk FROM releases WHERE id=?1", [rid], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .unwrap()
+    };
+    let at_ingest = lane(&ix);
+    assert_eq!(
+        at_ingest,
+        ("book".into(), 0),
+        "precondition: ingest's group recovery puts this on the Books lane"
+    );
+
+    let pid: i64 = ix
+        .db
+        .query_row("SELECT id FROM predb", [], |r| r.get(0))
+        .unwrap();
+    assert!(ix.pre_assign(rid, pid, 6000).unwrap());
+    assert!(ix.revoke_pre_name(rid).unwrap());
+
+    assert_eq!(
+        lane(&ix),
+        at_ingest,
+        "the undo must be an undo: same lane and same score the row \
+         wore before it was ever named"
+    );
+    teardown(&d, ix);
+}
+
 /// pre_assign is the human path: no gates, but full provenance.
 #[test]
 fn manual_assign_carries_manual_provenance() {
@@ -1671,5 +2050,76 @@ fn manual_assign_carries_manual_provenance() {
     let r = &ix.search("", 10).unwrap()[0];
     assert_eq!(r.pre_title, "Picked.Film.2026.1080p.WEB.H264-GRP");
     assert_eq!(r.pre_source, "predb/manual+corr:seed:predb.net");
+    teardown(&d, ix);
+}
+
+/// The session fold is the correlation's missing precondition, end to
+/// end: five dark complete single files from one session poster are
+/// each VETOED on ratio (one 150 MB volume against a 728 MB pre), the
+/// fold merges them into one release carrying the true total, its
+/// first lap bumps `predb_seed_gen` so the backlog cursor reopens, and
+/// the very next walk suggests the pre for the folded row.
+#[test]
+fn a_folded_session_correlates_by_its_true_size() {
+    let d = dir("sess-fold-corr");
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    ix.predb_store(
+        &[tpre(
+            "Some.Show.S01E01.1080p.WEB.H264-GRP",
+            "TV-WEB",
+            728_000_000,
+            1000,
+        )],
+        1000,
+    )
+    .unwrap();
+    // wire total = 5 files x 3 parts x 50 MB = 750 MB;
+    // est_content = 750/1.03 = 728.2 MB against the 728 MB pre.
+    let stems = [
+        "q7kx9zzp0aa41bb2cc31",
+        "m3vd8tty1dd52ee3ff42",
+        "z9qa2rrw2gg63hh4ii53",
+        "b5nc4uui3jj74kk5ll64",
+        "x1pe6oos4mm85nn6oo75",
+    ];
+    for (i, stem) in stems.iter().enumerate() {
+        for p in 1..=3u32 {
+            ix.ingest(
+                "alt.binaries.tv",
+                &[overd(
+                    &format!("\"{stem}\" yEnc ({p}/3)"),
+                    &format!("{stem}-{p}"),
+                    50_000_000,
+                    4_600 + i as i64 * 30,
+                )],
+                4_700,
+            )
+            .unwrap();
+        }
+    }
+    let (examined, suggested, _) = ix.predb_corr_backlog(100, 0, false, 5_000).unwrap();
+    assert_eq!(
+        (examined, suggested),
+        (5, 0),
+        "five lone volumes: examined, and every one vetoed on ratio"
+    );
+    // now = 30_000 puts the session past the fold's settle margin.
+    let (sessions, folded, done) = ix.session_fold(30_000, WALK).unwrap();
+    assert_eq!((sessions, folded), (1, 4));
+    assert!(done);
+    let (examined, suggested, applied) = ix.predb_corr_backlog(100, 0, false, 5_000).unwrap();
+    assert_eq!(
+        (examined, suggested, applied),
+        (1, 1, 0),
+        "the gen bump reopened the walk, and the true size clears the band"
+    );
+    let rid: i64 = ix
+        .db
+        .query_row("SELECT id FROM releases", [], |r| r.get(0))
+        .unwrap();
+    let hints = ix.pre_hints(&[rid]).unwrap();
+    assert_eq!(hints.len(), 1);
+    assert_eq!(hints[0].1, "Some.Show.S01E01.1080p.WEB.H264-GRP");
+    assert_eq!(hints[0].5, "suggested", "suggest-only, per the house rules");
     teardown(&d, ix);
 }

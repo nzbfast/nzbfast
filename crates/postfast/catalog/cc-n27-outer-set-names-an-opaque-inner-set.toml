@@ -1,0 +1,69 @@
+# G6: nothing announced in the post describes the payload. A small
+# OUTER set names the inner set, and the inner set names the payload.
+
+[layout]
+name = "cc-n27-outer-set-names-an-opaque-inner-set"
+seed = 2701
+note = """
+Expresses bench/capability-corpus leg n27-par2-of-par2.
+
+THE CHAIN. The payload rides under a token and so does its recovery set,
+so a client that only reads names has nothing in the post that describes
+the payload at all. What it does have is a small outer PAR2 set under
+ordinary `.par2` names, whose members are the INNER set's files under
+their real names. Outer, then inner, then payload: three links, and the
+first is the only one announced.
+
+TWO ROUTES MUST REACH ONE ANSWER, which is the row rather than the
+chain. A name-driven client walks the links. A client that recognises
+PAR2 packets by CONTENT skips the whole thing, because the inner set's
+token-named files are packet-shaped and it can read their descriptors
+without ever being told they exist. Both have to land the payload under
+Chained.Payload.mkv, and neither is allowed to stop halfway.
+
+WHAT LANDS, and this half was written wrong first and corrected by the
+run. An OUTER set changes what the inner set IS: its members are the
+inner files, so the inner files are the outer set's payload rather than
+the payload's parity. Three things follow, and all three are in the
+expected tree. They land under their REAL `.par2` names, because the
+outer set describes them and the post therefore carries those names.
+They are not swept, because the sweep takes packet-shaped bytes under a
+TOKEN and a named `.par2` is ordinary announced furniture. And EVERY one
+of them arrives, both parity volumes included - a volume is eager-skipped
+when it is parity for the payload and a clean run never needs it, and
+these are the outer set's own members, which a client that skipped them
+could not verify at all.
+
+The row was first written expecting the inner set to be swept, and the
+run kept all three files under their real names. That was the client
+being right and the generator's rule being too coarse; the corpus could
+not have said so, because it grades a closed world with an allow list
+and permits the inner files under either spelling.
+
+The outer set is built over the inner set's files EXACTLY as posted, so
+it describes the bytes a client will actually receive - which is also
+why an outer set beside `hostile_names` is refused: that patch rewrites
+FileDesc packets in the inner files after the outer set was cut over
+them, and the outer set would report the whole inner set damaged.
+"""
+
+[source]
+files = [{ name = "Chained.Payload.mkv", bytes = 120000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+names = "opaque"
+outer = true
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

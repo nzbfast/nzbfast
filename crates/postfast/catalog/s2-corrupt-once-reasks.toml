@@ -1,0 +1,39 @@
+# S2: a body that fails on the first ask, a peer that has a good copy,
+# and no parity anywhere.
+
+[layout]
+name = "s2-corrupt-once-reasks"
+seed = 72
+note = """
+Two real faults share one symptom and only one of them can be fixed by
+asking somebody else. A damaged article in the spool answers the same
+bad bytes forever; a broken cache node behind a load balancer answers a
+fraction of requests badly, and a copy from anywhere else is fine.
+Nothing in this repo could model the second at all until 31 Aug 2026.
+
+WHAT MAKES THE ROW PASS is the consumer steer, and it needs a PEER:
+`crc_steer` defaults to on only when the fleet has a same-level server
+to steer to, so the second server here is not decoration, it is the
+whole mechanism. Its terminal twin is s2-corrupt-once-terminal-gap,
+which is this row with the peer taken away, and reading the two
+together is the only way to see that the recovery is the steer's and
+not the client's patience.
+
+NO RECOVERY SET, deliberately. With parity beside it the row passes on
+the repair and says nothing about whether the bad copy was ever
+replaced. Here the peer is the only route to the payload.
+
+The mechanism and the measurement:
+research/CORRUPT-BODY-NO-SECOND-ASK-2026-08-31.md.
+"""
+
+[source]
+files = [{ name = "cached.badly.bin", bytes = 240000 }]
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+corrupt_once_pct = 17.0
+
+[[serve.second]]

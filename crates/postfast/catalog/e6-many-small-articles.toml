@@ -1,0 +1,30 @@
+# E6: a payload cut into many small articles.
+
+[layout]
+name = "e6-many-small-articles"
+seed = 16
+note = """
+The article size is the one encoding selection that changes nothing
+about the emitted SHAPE and everything about the post's arithmetic:
+how many requests the pipeline makes, how many parts a slot has to
+account for, and how much per-article bookkeeping the completion census
+does. advH in the adversarial corpus is the same idea from the other
+direction (120 tiny files rather than one file in many parts).
+
+2048-byte articles over 96 KiB is 48 of them, which is enough that a
+per-article accounting mistake shows up and few enough that the row
+still costs a second. The payload stays small because every profile
+here runs on every push.
+"""
+
+[source]
+files = [{ name = "Many.Parts.bin", bytes = 98304 }]
+
+[encoding]
+article_bytes = 2048
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

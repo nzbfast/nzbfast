@@ -21,24 +21,6 @@ use super::*;
 /// configured apikey must match, and an install with ONLY an nzbkey
 /// (the lockout state) opens nothing. Players are unaffected - they
 /// carry the per-job `?t=` stream token, which is checked separately.
-/// Percent-encode one query VALUE for a URL the daemon generates.
-/// Generated hex keys pass through unchanged; a user-chosen key holding
-/// `&`, `+`, `%` or `#` sent raw changes the parsed query and breaks
-/// every link that carries it (Codex sweep 10 Aug L1). Everything
-/// outside the RFC 3986 unreserved set is encoded.
-pub(super) fn query_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            use std::fmt::Write as _;
-            let _ = write!(out, "%{b:02X}");
-        }
-    }
-    out
-}
-
 fn full_key_ok(given: Option<&str>, apikey: &Option<String>, nzbkey: &Option<String>) -> bool {
     match (apikey, nzbkey) {
         (None, None) => true,
@@ -1205,7 +1187,18 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                     .and_then(|f| f.strip_suffix(".json"))
                 {
                     match i18n_catalog(lang) {
-                        Some(cat) => respond_static(req, cat, "application/json"),
+                        // DEV-ONLY: a catalogue read from disk cannot go
+                        // through `respond_static`, whose ETag was
+                        // computed by build.rs over the EMBEDDED bytes -
+                        // it would pin the old strings behind a stale
+                        // validator, which is the one failure this
+                        // override must not have. `respond_page` hashes
+                        // what it is about to send. Reached only for a
+                        // tag this match has already recognised.
+                        Some(cat) => match devweb::i18n_json(lang) {
+                            Some(disk) => respond_page(req, disk, "application/json"),
+                            None => respond_static(req, cat, "application/json"),
+                        },
                         // English is the source language: it lives inline
                         // in the pages, so its catalogue is the empty
                         // object and is not worth a gzip member.
@@ -1225,8 +1218,17 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                 // manifest without our session, and they carry nothing private.
                 #[cfg(feature = "dashboard")]
                 if let Some((body, mime)) = web_icon(path) {
+                    // These carry no validator at all, only a freshness
+                    // window - so under the dev override a re-exported
+                    // icon or an edited manifest would sit in the
+                    // browser cache for a day. Dev mode says no-cache
+                    // instead; every ordinary run keeps the day.
+                    let cache = match devweb::dev_web_dir().is_some() {
+                        true => "no-cache",
+                        false => "max-age=86400",
+                    };
                     let _ = req.respond(
-                        tiny_http::Response::from_data(body)
+                        tiny_http::Response::from_data(body.into_owned())
                             .with_header(
                                 tiny_http::Header::from_bytes(
                                     &b"Content-Type"[..],
@@ -1240,7 +1242,7 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                             .with_header(
                                 tiny_http::Header::from_bytes(
                                     &b"Cache-Control"[..],
-                                    &b"max-age=86400"[..],
+                                    cache.as_bytes(),
                                 )
                                 .unwrap(),
                             ),

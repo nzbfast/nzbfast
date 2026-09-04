@@ -53,9 +53,21 @@
 //! 99 Mbit fleet 50 / 35 / 25 all wall 544-547 s. The columns that
 //! separated in that round separated at 360, not at 50. So the WORST a
 //! wrong reading can do is put the fleet on a rung the slow-line ladder
-//! already cleared, which is why no measured-only plumbing is bolted
-//! under this and why the ceiling must not be raised past the rung that
-//! round measured.
+//! already cleared - **for an install whose line reading might be a
+//! lie, which is the only kind this paragraph was ever about.**
+//!
+//! **That is why the ceiling is now TWO numbers** (TODO 275 item 7,
+//! decided 2 Sep 2026). The bound above holds a TYPED or absent anchor
+//! at [`LINE_CAP_MAX_FLEET`] exactly as it always did, and nothing
+//! about such an install moves. An anchor the daemon MEASURED is not a
+//! claim but a rate this link was seen to carry, so the argument does
+//! not apply to it: [`supply_ceiling`] lets that fleet reach
+//! [`LINE_CAP_SUPPLY_MAX_FLEET`], bounded by the account's own grant,
+//! and only through the in-run governor. The sentence this replaces
+//! read "the ceiling must not be raised past the rung that round
+//! measured", which was true of what could be told apart at the time it
+//! was written and became answerable when the provenance arrived (item
+//! 1 part 1, 28 Aug 2026).
 //!
 //! **The line rate used to BE the rule** - `fleet = line Mbit x 0.5`,
 //! standing down entirely from 720 Mbit up - **and the floor rounds
@@ -197,6 +209,163 @@ pub const LINE_CAP_DEFAULT_FLEET: usize = 25;
 /// nothing but cost.
 pub const LINE_CAP_MAX_FLEET: usize = 50;
 
+/// TODO 275 item 7: the SECOND ceiling, in sockets - the most the
+/// supply arm may ever ask for, and only ever on an anchor the daemon
+/// MEASURED rather than one a user typed. Decided 2 Sep 2026.
+///
+/// **[`LINE_CAP_MAX_FLEET`] does not move.** It stays the ceiling for
+/// every install with a typed line, an absent line, or sockets carrying
+/// what the curve plans for, which is every install any TODO 208 round
+/// measured. This one is reachable only through [`supply_ceiling`], and
+/// only by the in-run governor: the SEED still clamps at 50
+/// ([`fleet_for_carry`]), so a job opens where it always did and the
+/// governor walks it up under its own hysteresis.
+///
+/// **It is a BACKSTOP and not the operative ceiling.** What normally
+/// binds first is the account's own grant, which [`supply_ceiling`]
+/// takes the `min` with - the fleet can never ask a provider for more
+/// than it sells, and that needed no new constant. This number bounds
+/// the band above the grant, where nothing has been measured at all.
+///
+/// **Why 100 and not the arithmetic.** `line / measured carry` is 77
+/// for GH #62's reporter and 145 for the same line at the carry
+/// whyslow's probe reads, and neither is evidence about an engine.
+/// What IS measured is three published rounds. A 27 Aug 2026 ladder on
+/// a 10 GbE line against ONE cold provider, over five DISJOINT slices of
+/// one release so no rung could warm another's articles: per-socket
+/// carry 9.95 / 10.32 / 9.97 / 9.54 Mbps at fleets 25 / 50 / 77 / 100 -
+/// flat over a 4x range - with peak throughput linear to 77 and 96% of
+/// linear at 100. A 28 Aug replication over a SECOND long-haul route
+/// from another continent: 20.5 / 22.1 / 21.8 / 22.3 Mbps at 25 / 32 /
+/// 50 / 77. And a 28 Aug SHAPED rung that measures THIS ENGINE rather
+/// than any provider, every socket held at 5 Mbit by a per-flow pipe:
+/// throughput is 99.7% of linear to 100 sockets, so nothing in here
+/// bottlenecks before the sockets do.
+/// 100 is the TOP of that measured band on both routes, and it is where
+/// both routes met the account itself: the first took one `481 ...
+/// exceeded maximum number of connections per user` at its grant of
+/// 100, and the second route's 100 rung bounced off the same limit and
+/// fell to 18.6 Mbps a socket at 55% saturation against 88% at 77. That is a fact about
+/// an account, which is why the grant is what binds and this is only
+/// the edge of the evidence. Above it §208's 360-socket rung is the
+/// only measurement there is and it is bad (299-491 stall kills, 312 MB
+/// of duplicate wire, 800 MB of RSS), so nothing may walk into that
+/// band on arithmetic.
+///
+/// The cost of the extra parked slots is measured too and is why this
+/// was affordable at all: a parked slot is a tokio task holding no
+/// socket at ~6.3 KB of RSS, so 50 -> 100 is ~0.3 MB a job and at most
+/// one extra I/O shard (`research/LINECAP-SLOW-CARRY-2026-08-27.md`
+/// section 2).
+pub const LINE_CAP_SUPPLY_MAX_FLEET: usize = 100;
+
+/// TODO 275 item 7: the ceiling the supply arm may clamp to on THIS
+/// fleet - [`LINE_CAP_MAX_FLEET`] unless the line anchor was MEASURED,
+/// and never more than the fleet's own `grant`.
+///
+/// `anchor_measured` is `PoolConfig::line_anchor_measured` ALL-folded
+/// (`LineCap::anchor_measured`, TODO 275 item 1 part 1), and it is the
+/// whole safety case. [`fleet_for_supply`]'s fourth property is that
+/// the worst a wrong line reading can do is put the fleet on a rung
+/// §208 Round A measured as free at 99 Mbit; that property is what
+/// licenses running the arm on a number a user typed into Settings, and
+/// it stops being true the moment the ceiling moves. So the ceiling
+/// moves only where the reading is not a claim: a MEASURED anchor is a
+/// rate this link was SEEN to carry, so `line / carry` cannot ask for
+/// sockets to fill a line that was never there. A typed 10 Gbps on a
+/// 100 Mbit line - the configuration the rules cannot otherwise
+/// distinguish - keeps today's ceiling exactly.
+///
+/// `grant` is [`seed_uncapped`]: what this fleet would dial with the
+/// cap taking nothing out, each account's own `connections` and any
+/// host cap already applied, and a PINNED server contributing 0 because
+/// the cap takes nothing from one. **0 means "no claim" and never "no
+/// sockets"** - a rig, a CLI pool, an all-pinned fleet - and it holds
+/// the ceiling at exactly [`LINE_CAP_MAX_FLEET`], which is today's
+/// behaviour and the right answer for a fleet that never said what it
+/// was allowed.
+///
+/// Monotone in both arguments and never below [`LINE_CAP_MAX_FLEET`],
+/// so no reading and no configuration can make this stricter than what
+/// shipped.
+///
+/// **The stated limit, and it is the population this reaches.**
+/// `linkpeak::Core::effective` says "measured" only when the measured
+/// peak is at least the typed line speed (or no line was typed at all),
+/// and a peak is an achieved rate - so a fleet the cap is holding down
+/// measures its own cap and reads back as "line". The installs this
+/// ceiling reaches are therefore the ones that have BEEN faster than
+/// they are now: a box with no line speed typed, or one whose peak
+/// beat what its owner typed. That is exactly the regime §275 was filed
+/// from - a daemon recording `line peak 314.8 MB/s` in the same half
+/// hour as a sole-provider job walled at ~0.35 Gbps - and it is NOT
+/// GH #62's five-server reporter, whose anchor reads "line". That
+/// install keeps 50, which is what item 7 decided.
+pub fn supply_ceiling(anchor_measured: bool, grant: usize) -> usize {
+    if !anchor_measured {
+        return LINE_CAP_MAX_FLEET;
+    }
+    LINE_CAP_SUPPLY_MAX_FLEET.min(grant).max(LINE_CAP_MAX_FLEET)
+}
+
+/// TODO 275 item 10: how full the extractor's held-span ledger may be,
+/// in percent of its cap, before the fleet stops growing PAST
+/// [`LINE_CAP_MAX_FLEET`].
+///
+/// **The measurement this exists for** (2 Sep 2026, a 10 GbE line
+/// against one cold provider, both fleet-100 legs of item 7's round).
+/// A fleet buys a REORDER WINDOW, and a sequential consumer has to hold
+/// everything that arrives out of order until the piece in front of it
+/// lands. Cold per-article latency variance is what fills that window,
+/// and doubling the fleet roughly squares the spread between the
+/// fastest and slowest article in flight - so the buffer grows much
+/// faster than the fleet does. At 100 sockets the ledger PINS at its
+/// cap, the run is saturated 6-7% of the time, and the job takes 3.31x
+/// longer per GB than the same job at 50, whose holds reach a quarter
+/// of the cap and whose rate is flat for 40 GB. The same slice at 100
+/// sockets on WARM content fills the whole line with 43 MB of holds, so
+/// this is a property of the ROUTE and not of the fleet size alone.
+///
+/// **Why the ceiling is not simply lower.** That same round measured
+/// fixed fleet 100 beating fixed fleet 50 by 21% on short cold jobs, so
+/// the sockets are worth having; what was missing is the arm noticing
+/// when they have stopped being worth having. And the population item 7
+/// was decided for - GH #62's ~10 Mbps a socket - would want ~1 Gbps at
+/// 100 sockets and would very likely never fill this buffer at all, so
+/// a blanket lowering would take the win away from the install the
+/// ceiling was built for in order to fix a regime it was not.
+///
+/// **Why 50 and not a measured number.** There is no ladder here, only
+/// two points: a quarter of the cap at a fleet that was healthy, and
+/// the whole cap at one that was not. This sits between them, nearer
+/// the healthy one. Both error directions are bounded and they are not
+/// symmetric, which is what makes an unmeasured midpoint acceptable:
+/// too STRICT costs an install the item 7 win and returns it to exactly
+/// the behaviour that shipped before, while too LOOSE costs 3.31x. The
+/// gate is also re-asked every tick rather than latched, so strictness
+/// is never permanent - when the ledger drains, the ceiling comes back.
+pub const LINE_CAP_HOLDS_PCT: u64 = 50;
+
+/// TODO 275 item 10: may this fleet grow past [`LINE_CAP_MAX_FLEET`]
+/// right now, given how full the consumer's held-span ledger is?
+///
+/// `holds_bytes` is the live gauge and `holds_cap` the ceiling
+/// (`PoolConfig::holds_cap`). A cap of 0 is NO CLAIM - a rig, a caller
+/// that stamped no budget - and reads as "yes", which is the behaviour
+/// that shipped with item 7 and the only answer that cannot invent a
+/// constraint out of a missing number.
+///
+/// It is a whole-PROCESS question on both sides, deliberately: the
+/// ledger and its cap are process-wide, so two concurrent jobs share
+/// the pressure, and a fleet that grew on the strength of its own share
+/// alone would be sizing against a budget it does not have to itself.
+pub fn holds_allow_growth(holds_bytes: u64, holds_cap: u64) -> bool {
+    if holds_cap == 0 {
+        return true;
+    }
+    holds_bytes.saturating_mul(100) < holds_cap.saturating_mul(LINE_CAP_HOLDS_PCT)
+}
+
 /// The line rate one socket is PLANNED to carry, in bytes/s (150 Mbit),
 /// which is what turns a reading into a fleet size in
 /// [`fleet_for_line`].
@@ -322,12 +491,19 @@ pub fn fleet_for_line(line_bps: u64) -> usize {
 ///   because on such a line the gate shuts long before.
 /// * **It is clamped into the SAME window as the curve**, so it is
 ///   monotone, never falls, and the worst a wrong reading can do is put
-///   the fleet on [`LINE_CAP_MAX_FLEET`] - the rung §208 Round A ran at
-///   99 Mbit, where fleet 50 / 35 / 25 all walled 544-547 s. That bound
-///   is what makes plumbing measured-vs-typed anchor provenance
-///   unnecessary here: an install that TYPED 10 Gbps on a 100 Mbit line
-///   holds this gate open for ever and still only ever reaches a rung
-///   that was measured free.
+///   the fleet on `ceiling` - which for every install whose anchor was
+///   not MEASURED is [`LINE_CAP_MAX_FLEET`], the rung §208 Round A ran
+///   at 99 Mbit, where fleet 50 / 35 / 25 all walled 544-547 s. That
+///   bound is what makes plumbing measured-vs-typed anchor provenance
+///   unnecessary FOR A TYPED ANCHOR: an install that TYPED 10 Gbps on a
+///   100 Mbit line holds this gate open for ever and still only ever
+///   reaches a rung that was measured free.
+///
+/// `ceiling` is [`supply_ceiling`] and must come from there rather than
+/// from any caller's own arithmetic - it is the one place the measured
+/// anchor and the account's grant are read together, and a second
+/// spelling of it is how the second ceiling would reach an install that
+/// never proved its line (TODO 275 item 7).
 ///
 /// **The ceiling is the half of this that is still owed a leg**, and it
 /// is why the reporter above is improved rather than finished: 25 -> 50
@@ -341,21 +517,27 @@ pub fn fleet_for_line(line_bps: u64) -> usize {
 /// - and it costs ~6.3 KB of RSS and no socket at all, so moving this
 /// constant 50 -> 100 is ~0.3 MB a job and at most one extra shard.
 ///
-/// What holds it is the fourth property above: this ceiling IS the
+/// What held it was the fourth property above: that ceiling IS the
 /// bound on a line reading that was TYPED rather than measured, which
 /// is the only thing making it safe to run this arm on an anchor whose
 /// provenance the pool never sees. An install that typed 10 Gbps on a
 /// 100 Mbit line holds the supply gate open for ever and reaches
-/// whatever this constant is, and §208 measured that regime's far end
-/// as 299-491 stall kills, 312 MB of duplicate wire and 800 MB of RSS.
-/// So this is a PROVENANCE question, and since 28 Aug 2026 the word IS
-/// carried down here - `PoolConfig::line_anchor_measured`, folded onto
-/// `LineCap::anchor_measured` (§275 item 1 part 1). That closes the
-/// PREREQUISITE and nothing else: raising this constant for a measured
-/// anchor is part 3, it is a judgement about what every install spends,
-/// and it is deliberately not taken here. §275 item 1 has the proposal
-/// and the ladder that would size the second ceiling.
-pub fn fleet_for_supply(line_bps: u64, now_bps: u64, dialling: usize, fleet: usize) -> usize {
+/// whatever the ceiling is, and §208 measured that regime's far end as
+/// 299-491 stall kills, 312 MB of duplicate wire and 800 MB of RSS.
+/// So it is a PROVENANCE question, the word has been carried down here
+/// since 28 Aug 2026 (`PoolConfig::line_anchor_measured`, folded onto
+/// `LineCap::anchor_measured`, §275 item 1 part 1), and on 2 Sep 2026
+/// the decision that rests on it was taken: [`supply_ceiling`] hands
+/// this arm a SECOND ceiling when the anchor was measured, bounded by
+/// the account's own grant. `LINE_CAP_MAX_FLEET` did not move and is
+/// still what a typed or absent anchor gets.
+pub fn fleet_for_supply(
+    line_bps: u64,
+    now_bps: u64,
+    dialling: usize,
+    fleet: usize,
+    ceiling: usize,
+) -> usize {
     if line_bps == 0 || now_bps == 0 || dialling == 0 || fleet == 0 {
         return fleet;
     }
@@ -368,7 +550,12 @@ pub fn fleet_for_supply(line_bps: u64, now_bps: u64, dialling: usize, fleet: usi
     if per_socket == 0 || per_socket >= LINE_CAP_SOCKET_BPS {
         return fleet;
     }
-    sockets_for_carry(line_bps, per_socket).clamp(fleet, LINE_CAP_MAX_FLEET)
+    // `ceiling.max(fleet)` and not a bare `clamp(fleet, ceiling)`: a
+    // caller already above the ceiling - a rig, a typed fleet - must
+    // read as NO OPINION and get its own number back, where `clamp`
+    // with min > max panics. The arm never lowers a fleet anywhere else
+    // and must not acquire the ability here.
+    sockets_for_carry(line_bps, per_socket).clamp(fleet, ceiling.max(fleet))
 }
 
 /// TODO 312 item 3: how many sockets this line needs at a MEASURED
@@ -433,10 +620,15 @@ pub fn sockets_for_carry(line_bps: u64, per_socket_bps: u64) -> usize {
 /// `fleet..=`[`LINE_CAP_MAX_FLEET`] - so a seed can no more exceed
 /// today's ceiling than a raise can.
 ///
-/// **The ceiling is emphatically NOT raised here.** That is TODO 275
-/// item 1 part 3, it needs the provenance now carried by
-/// `PoolConfig::line_anchor_measured`, and it is a decision about what
-/// every install spends rather than a consequence of this function.
+/// **The ceiling is emphatically NOT raised here**, and that stayed
+/// true when the second ceiling shipped on 2 Sep 2026 (TODO 275 item
+/// 7). A SEED reaching it would open a job at 100 sockets on the
+/// strength of a carry banked by a job that may have run against a
+/// different provider set - `linecarry.rs`'s module doc records
+/// that the banked value has no ageing and is fleet-wide, which is
+/// bounded and self-correcting inside this window and would not be at
+/// the wider one. The governor walks there instead, one hysteresis
+/// streak at a time, off THIS run's own gauge.
 pub fn fleet_for_carry(line_bps: u64, carry_bps: u64, fleet: usize) -> usize {
     if carry_bps == 0 || fleet == 0 {
         return fleet;
@@ -452,6 +644,17 @@ pub fn fleet_for_carry(line_bps: u64, carry_bps: u64, fleet: usize) -> usize {
         carry_bps.saturating_mul(fleet as u64),
         fleet,
         fleet,
+        // TODO 275 item 7: the SEED keeps the first ceiling, and that is
+        // a decision rather than a plumbing gap. The second ceiling is
+        // reachable only by the in-run governor, so a raise past 50 is
+        // always gradual (`LINE_CAP_RAISE_TICKS` of agreement per rung)
+        // and always backed by THIS run's own gauge - where a seed would
+        // open at 100 on the strength of a number banked by a job that
+        // ran against a different provider set. `linecarry.rs`'s
+        // module doc records that the banked carry has no ageing and is
+        // fleet-wide, which is bounded and self-correcting inside
+        // today's window and would not be at the wider one.
+        LINE_CAP_MAX_FLEET,
     )
 }
 
@@ -473,14 +676,22 @@ pub fn fleet_for_carry(line_bps: u64, carry_bps: u64, fleet: usize) -> usize {
 ///
 /// A reading that jumps two rungs at once applies both once the count
 /// is served: the count is about the reading being real, not about
-/// walking the fleet up one socket at a time, and the ceiling is three
-/// rungs above the floor in total.
+/// walking the fleet up one socket at a time, and the first ceiling is
+/// three rungs above the floor in total.
+///
+/// `ceiling` is [`supply_ceiling`] - [`LINE_CAP_MAX_FLEET`] for every
+/// install whose anchor was typed or absent, and TODO 275 item 7's
+/// second ceiling for one that measured its line. It bounds the SUPPLY
+/// candidate only; [`fleet_for_line`] has its own clamp and is
+/// untouched by it, so a raise past the first ceiling can only ever be
+/// one this run's own gauge asked for.
 pub fn fleet_step(
     fleet: usize,
     streak: u32,
     line_bps: u64,
     now_bps: u64,
     dialling: usize,
+    ceiling: usize,
 ) -> (usize, u32) {
     // TODO 275 item 1: two candidates, and the bigger wins. The curve
     // asks what the LINE needs assuming a planned carry; the supply arm
@@ -488,7 +699,9 @@ pub fn fleet_step(
     // opinion at all unless the line is provably under-used. Both are
     // monotone and both clamp into the same window, so the max of them
     // is too - `now_bps == 0` is exactly the old behaviour.
-    let want = fleet_for_line(line_bps).max(fleet_for_supply(line_bps, now_bps, dialling, fleet));
+    let want = fleet_for_line(line_bps).max(fleet_for_supply(
+        line_bps, now_bps, dialling, fleet, ceiling,
+    ));
     if want <= fleet {
         return (fleet, 0);
     }
@@ -515,6 +728,25 @@ pub fn server_share(fleet: usize, n_servers: usize) -> usize {
     fleet.div_ceil(n_servers.max(1)).max(1)
 }
 
+/// TODO 313 item 7: one server's target with a temporary surge loan on
+/// top of it, held to the same spawn ceiling.
+///
+/// The ONE spelling of that sum. Both writers to a `ConnTarget` - the
+/// in-run governor's apply loop and [`Shared::surge_apply`] - call it,
+/// so a surged target reads as each one's own value to the other. Two
+/// spellings of it would be exactly the "two writers, two numbers"
+/// fight that made a raise outside `ConnTarget` unsafe in the first
+/// place.
+///
+/// The clamp is applied AFTER the addition and to the sum, never to the
+/// base alone: `min(base, ceiling) + lent` would hand back
+/// `ceiling + lent` on a server whose share already exceeds its spawn
+/// count, and a target above the spawned fleet wakes nothing - so the
+/// number would be a fiction the shed arms then read as real.
+pub(super) fn surge_want(base: usize, lent: usize, ceiling: usize) -> usize {
+    (base + lent).min(ceiling)
+}
+
 /// TODO 312 item 2: the fleet a MEASURED per-socket carry implies for
 /// this line - **for REPORT ONLY, and nothing in this module calls it**.
 ///
@@ -523,7 +755,7 @@ pub fn server_share(fleet: usize, n_servers: usize) -> usize {
 /// banked; both then clamp the answer into the window the knee sweep
 /// measured, because both SPEND it. This one asks it of a carry a user
 /// deliberately went and measured with the per-server carry probe
-/// (`serve/api/servers.rs`), and does NOT clamp - which is the whole
+/// (`api/servers.rs`), and does NOT clamp - which is the whole
 /// difference between the three and the only reason a third exists.
 /// A user on a slow-per-connection route needs to see how far past
 /// [`LINE_CAP_MAX_FLEET`] their line would want to go, and a clamped
@@ -538,11 +770,10 @@ pub fn server_share(fleet: usize, n_servers: usize) -> usize {
 ///
 /// **Report only** is a property of the CALLERS and cannot be enforced
 /// here, so it is stated at both ends: no fleet, cap, share or ceiling
-/// may be derived from this. Wiring a measured carry into what the pool
-/// SPENDS is TODO 275 item 1 part 3 - a judgement about what every
-/// install spends, and not a consequence of this function - so see
-/// [`fleet_for_supply`]'s own closing note on why the ceiling is a
-/// provenance question rather than a cost one.
+/// may be derived from this. What the pool SPENDS goes through
+/// [`fleet_for_supply`]'s gates and [`supply_ceiling`]'s clamp, which
+/// is where TODO 275 item 7's decision lives; this function is the
+/// UNCLAMPED rung a panel needs and is deliberately not that.
 ///
 /// **The one thing it adds over [`sockets_for_carry`]**, which is
 /// otherwise the same rung and is where the arithmetic actually lives:
@@ -576,7 +807,9 @@ pub fn fleet_implied_by_carry(line_bps: u64, carry_bps: u64) -> usize {
 /// The in-run governor and shed's state on `Shared`: the SEED fleet cap
 /// (0 = off) and whether it is the curve's own number rather than a
 /// typed one, the anchor that arms the shed and whether that anchor was
-/// MEASURED rather than typed (TODO 275 item 1 part 1), the per-server
+/// MEASURED rather than typed (TODO 275 item 1 part 1) with the account
+/// grant that bounds the ceiling that word unlocks (item 7), the
+/// per-server
 /// live targets it may move with their spawn ceilings (None = pinned or
 /// no target), the last value IT set per server (usize::MAX = never - a
 /// target holding another value was moved by someone else and is only
@@ -592,6 +825,15 @@ pub(super) struct LineCap {
     auto: bool,
     pub(super) anchor_bps: u64,
     pub(super) anchor_measured: bool,
+    /// What this fleet would dial with the cap taking nothing out
+    /// ([`seed_uncapped`]), which is the account grant TODO 275 item 7's
+    /// second ceiling is bounded by. 0 = no claim, which holds the
+    /// ceiling at [`LINE_CAP_MAX_FLEET`].
+    grant: usize,
+    /// TODO 275 item 10: the consumer's held-span ceiling in bytes
+    /// (`PoolConfig::holds_cap`), against which the live gauge is read
+    /// each tick. 0 = no claim, and the growth gate is inert.
+    holds_cap: u64,
     targets: Vec<Option<(Arc<ConnTarget>, usize)>>,
     set: Vec<AtomicUsize>,
     at: AtomicU64,
@@ -628,8 +870,13 @@ impl LineCap {
                 .map(|(_, c)| c.line_anchor_bps)
                 .max()
                 .unwrap_or(0),
-            anchor_measured: !servers.is_empty()
-                && servers.iter().all(|(_, c)| c.line_anchor_measured),
+            anchor_measured: seed_anchor_measured(servers),
+            grant: seed_uncapped(servers),
+            // MAX-folded like the cap and the anchor: it is a
+            // whole-process budget, so every server carries the same
+            // number and a fleet that stamped none contributes no
+            // claim rather than a zero that would gate everyone.
+            holds_cap: servers.iter().map(|(_, c)| c.holds_cap).max().unwrap_or(0),
             targets: servers
                 .iter()
                 .map(|(_, c)| c.live_target.clone().map(|t| (t, c.connections)))
@@ -646,6 +893,25 @@ impl LineCap {
             raises: AtomicU64::new(0),
         }
     }
+}
+
+/// Whether the line anchor this fleet sized from was MEASURED rather
+/// than typed into Settings (TODO 275 item 1 part 1).
+///
+/// ALL-folded: it is a claim about the LINE, one link carries the whole
+/// fleet, and a claim about evidence is worth what its weakest member is
+/// worth. An empty fleet is not measured - `all` over nothing is
+/// vacuously true, which would make "no servers at all" the strongest
+/// evidence in the system.
+///
+/// Split out of [`LineCap::new`] on 2 Sep 2026 for [`seed_cap`]'s exact
+/// reason: TODO 275 item 7 made this word decide a CEILING, and
+/// `LiveStats` has to publish the same ceiling the governor is walking
+/// under or the "why is this slow?" surface convicts a cap that is three
+/// ticks from raising itself. Two spellings of one fold is this repo's
+/// most repeated defect.
+pub(super) fn seed_anchor_measured(servers: &[(ServerConfig, PoolConfig)]) -> bool {
+    !servers.is_empty() && servers.iter().all(|(_, c)| c.line_anchor_measured)
 }
 
 /// The SEED fleet cap this pool was built with, 0 = the rule is off.
@@ -693,7 +959,7 @@ pub(super) fn seed_uncapped(servers: &[(ServerConfig, PoolConfig)]) -> usize {
 /// THE JUDGEMENT IS THE PRODUCER'S AND NEVER THIS CRATE'S, which is the
 /// one thing to read before touching either of the two folds below.
 /// `conntune` owns what a knee is, when one applies, and when it has
-/// gone stale (`crates/nzbfast/src/conntune.rs`); nothing in nzbkit has
+/// gone stale (`crates/nzbfast-core/src/conntune.rs`); nothing in nzbkit has
 /// a view of any of it. What arrives here is already the answer - a
 /// knee that applies, that is past its re-probe appointment, and that
 /// is really lowering what this server would otherwise dial - so
@@ -748,7 +1014,7 @@ pub struct FleetKnee {
 /// different kind of fold and deliberately so. Neither a sum nor a max
 /// means anything as an AGE, and a fleet has to name ONE server or the
 /// reader has nowhere to go. The stalest is the right one because
-/// staleness is the verdict's own bar (`serve/whyslow.rs`'s
+/// staleness is the verdict's own bar (`whyslow.rs`'s
 /// `knee_bound`): the server it names must be the one that most clearly
 /// fails that bar, and a costlier but FRESHER knee is a measurement we
 /// still stand by. Ties keep the first in fleet order, so the answer is
@@ -850,6 +1116,26 @@ impl Shared {
         // second gets past it, so the governor's two atomics are read
         // and written by one thread at a time.
         let mut cap = lc.cur.load(Ordering::Relaxed);
+        // TODO 275 item 7, the residue handoff's OWED 4: has any account
+        // on this fleet refused us for capacity this run? Read ONCE and
+        // ABOVE the auto arm, because it is two things at once. It is
+        // the ceiling arm's input below, and it is a receipt the "why is
+        // this slow?" panel needs on a TYPED cap as well - there no
+        // ceiling arm runs at all, and the panel still convicts the
+        // budget and still offers to raise it, on an account that has
+        // already said no.
+        //
+        // `swap` rather than a plain store, because the return is the
+        // EDGE: the stand-down's one log line is emitted once rather
+        // than once a second. A fleet with no `LiveStats` keeps the arm
+        // and loses both, which is the trade every gauge on this path
+        // makes. Nothing publishes on a run with the cap rule off,
+        // either - this whole function returned above.
+        let refused = self.auth.iter().any(|a| a.capacity_refused());
+        let first_refusal = match &self.live {
+            Some(l) => refused && !l.line_cap_refused.swap(true, Ordering::Relaxed),
+            None => false,
+        };
         if lc.auto {
             // A trained peak is what the fleet has been SEEN to move;
             // the anchor is what a previous job saw. Both are lower
@@ -894,12 +1180,107 @@ impl Shared {
                 l.line_carry_bps
                     .fetch_max(now_bps / dialling as u64, Ordering::Relaxed);
             }
+            // TODO 275 item 7: the ceiling this fleet may walk to.
+            // `LINE_CAP_MAX_FLEET` for every install whose anchor was
+            // typed or absent - which is every install any TODO 208
+            // round measured - and the second ceiling, bounded by the
+            // account's own grant, for one that measured its line.
+            // Recomputed each tick rather than banked: it is two fields
+            // that never move, so this costs nothing, and a banked copy
+            // is a second place for the ceiling to be wrong.
+            // TODO 275 item 7: and a provider that has REFUSED us for
+            // capacity this run takes the second ceiling back off the
+            // table. A raise past the first ceiling is the one this
+            // engine has no measurement above, and an account that has
+            // said in words that it will not grant more has already
+            // answered the question the arm is about to re-ask with
+            // twenty more sockets. It stops the CLIMB and never shrinks
+            // the fleet: the cap never falls within a run (`fleet_step`),
+            // because a reading is a lower bound on the line and so is
+            // evidence for growing and none at all for shrinking, and a
+            // ceiling that could shrink a fleet would let one refusal
+            // oscillate it for the rest of the job. Cheap - one relaxed
+            // load per server, once a second - and it is fleet-wide
+            // because the cap is: one refusing account is enough,
+            // because the arm sizes a whole-fleet budget it cannot aim
+            // at the servers that are not refusing.
+            //
+            // TODO 275 item 10 is the third condition on the same line,
+            // and it is the one that is asked EVERY TICK rather than
+            // latched. The fleet buys a reorder window and the
+            // sequential consumer has to buffer it; on a cold route
+            // that window fills the held-span ledger long before the
+            // sockets stop being useful, and past its cap the consumer
+            // head-of-line blocks (3.31x per GB, measured). So a fleet
+            // may not GROW past the first ceiling while the ledger is
+            // full - the same reasoning as the F6 queue-dry guard
+            // above, one layer further down the pipeline: a reading
+            // taken while the CONSUMER is the bottleneck is not supply
+            // evidence about the line. Unlatched on purpose, unlike the
+            // refusal: a full ledger is a passing condition and the
+            // ceiling comes back when it drains, where a provider's
+            // refusal is a durable fact about an account.
+            //
+            // THE TWO ARMS ARE SPLIT rather than folded into one
+            // condition, and the split is what the gauge below needs.
+            // `durable` is the ceiling this run is going to keep - the
+            // refusal arm's answer holds for the rest of it - while
+            // `ceiling` is the one in force THIS TICK, which the holds
+            // arm may be lowering for a few seconds. The governor wants
+            // the second; a surface asking "can this cap still fix
+            // itself" wants the first, and handing it the second would
+            // have it convict a cap that is three ticks from raising
+            // itself.
+            let durable = match refused {
+                true => LINE_CAP_MAX_FLEET,
+                false => supply_ceiling(lc.anchor_measured, lc.grant),
+            };
+            let ceiling = match holds_allow_growth(
+                crate::memgauge::cur(crate::memgauge::Sub::Holds),
+                lc.holds_cap,
+            ) {
+                true => durable,
+                false => LINE_CAP_MAX_FLEET,
+            };
+            // TODO 275 item 7, the residue handoff's OWED 4: PUBLISH the
+            // stand-down. `LiveStats::line_cap_ceiling` was seeded at
+            // fleet build and never written again, which was right for
+            // the whole day the ceiling was two fixed inputs and wrong
+            // from the moment this arm made it a per-tick quantity - a
+            // gauge reading 100 over a governor pinned at 50 tells
+            // `whyslow::fleet_bound` the cap is about to fix itself,
+            // and it is not.
+            //
+            // Written EVERY tick and not only on a move, because the
+            // whole failure this repairs is a stand-down that PREVENTS
+            // a raise: there is no move to hang it off. One relaxed
+            // store a second, on a path that already does exactly this
+            // for `line_carry_bps`.
+            //
+            // The DURABLE ceiling and never `ceiling`, for the reason
+            // the split above states. The latch that explains it was
+            // published above, where a typed cap can reach it too.
+            if let Some(l) = &self.live {
+                l.line_cap_ceiling.store(durable, Ordering::Relaxed);
+            }
+            // And SAY it once, here rather than at the latch, because
+            // this sentence is about the ceiling and a typed cap has no
+            // ceiling for a refusal to take away.
+            if first_refusal {
+                info!(
+                    "line cap: a provider refused this account for capacity; \
+                     holding the fleet ceiling at {LINE_CAP_MAX_FLEET} \
+                     (the account's grant of {} is off the table for this run)",
+                    lc.grant
+                );
+            }
             let (want, streak) = fleet_step(
                 cap,
                 lc.streak.load(Ordering::Relaxed) as u32,
                 line,
                 now_bps,
                 dialling,
+                ceiling,
             );
             lc.streak.store(streak as usize, Ordering::Relaxed);
             if want != cap {
@@ -918,22 +1299,39 @@ impl Shared {
                 // TODO 275 item 1 part 1: the anchor's provenance is on
                 // the record here, and this is the one place a person
                 // reading a log can see WHICH of the two regimes a
-                // raise happened in. It is reported and nothing more:
-                // no rule branches on it, because the decision it
-                // exists for (a higher ceiling a measured anchor alone
-                // may reach) is not this lane's to take. Appended after
+                // raise happened in. It was reported and nothing more
+                // until 2 Sep 2026, when the decision it exists for was
+                // taken twenty lines above: `supply_ceiling` hands this
+                // arm a SECOND ceiling on a measured anchor (TODO 275
+                // item 7). So the word is what explains the ceiling
+                // this same line goes on to report, and a reader who
+                // took it for decoration would have the rule backwards.
+                // Appended after
                 // the existing parenthetical on purpose - the rig's
                 // fleet guard parses the SEED line's head positionally
                 // and this line not at all, and the head of this one
                 // still opens exactly as it did.
                 info!(
-                    "line cap: fleet {cap} -> {want} ({:.0} Mbit line seen; seed fleet {}; {} anchor)",
+                    "line cap: fleet {cap} -> {want} ({:.0} Mbit line seen; seed fleet {}; \
+                     {} anchor{})",
                     line as f64 * 8.0 / 1e6,
                     lc.cap,
                     if lc.anchor_measured {
                         "measured"
                     } else {
                         "typed"
+                    },
+                    // TODO 275 item 7: say when the raise is running
+                    // under the SECOND ceiling, and say what bounded it.
+                    // A reader diagnosing this regime needs to know
+                    // whether 100 or the account's own grant is the
+                    // number in the way, because only one of the two is
+                    // theirs to change. Silent at the first ceiling, so
+                    // every install that is not in this regime keeps the
+                    // line it had.
+                    match ceiling > LINE_CAP_MAX_FLEET {
+                        false => String::new(),
+                        true => format!("; ceiling {ceiling} of the account's {}", lc.grant),
                     },
                 );
                 cap = want;
@@ -959,7 +1357,14 @@ impl Shared {
             let Some((target, ceiling)) = slot else {
                 continue;
             };
-            let want = share.min(*ceiling);
+            // TODO 313 item 7: the surge's loan is part of the number
+            // this governor puts on the wire, not a raise made behind
+            // its back. Adding it HERE is the whole of why two writers
+            // can share one `ConnTarget` without fighting: the shed arm
+            // below sees `cur == want` on a surged target and leaves it,
+            // where a raise made outside would read as somebody else's
+            // value and be shed within the second.
+            let want = surge_want(share.min(*ceiling), self.surge.lent_on(si), *ceiling);
             let mine = lc.set[si].load(Ordering::Relaxed);
             // One atomic decide-and-set (F-24): the read, the rule and
             // the write run under the watch's lock, so a §112 walker
@@ -1005,6 +1410,73 @@ impl Shared {
         }
     }
 
+    /// TODO 313 item 7: re-apply ONE server's live target with the
+    /// surge's current loan folded in, and answer with the number now
+    /// in force (`None` = nothing moved).
+    ///
+    /// This is the surge's only way to the wire, and it is deliberately
+    /// the SAME apply the governor above makes rather than a second
+    /// one: `want` comes from [`surge_want`] in both places, and the
+    /// value written is recorded in `lc.set[si]` exactly as the
+    /// governor records its own, so the next `line_cap_tick` reads a
+    /// surged target as OURS and neither raises past it nor sheds it
+    /// away. A raise made around `ConnTarget` would be invisible to the
+    /// §208/§277 shed arms - §9d constraint 3, and the memory topic
+    /// `nzbfast-linecap-achieved-rate-is-not-a-line` is what that
+    /// invisibility costs.
+    ///
+    /// **Three stand-downs, and each one is a refusal to guess.**
+    ///
+    /// * **No target, no surge.** A pinned server, a single-connection
+    ///   server and an install with the fleet cap off all run without
+    ///   one, and a target is the only thing that can hand a socket
+    ///   back without retiring the worker holding it. Item 5's fifth
+    ///   stand-down for the queue spill is the same rule for the same
+    ///   reason.
+    /// * **The rule off (`cap == 0`), no surge.** With no seed cap
+    ///   there is no per-server share to add a loan to:
+    ///   `server_share(0, n)` is 1 by its own floor, so a surge that
+    ///   used it as a base would COLLAPSE a live-tuned fleet to one
+    ///   socket plus the loan. The only other owner of such a target is
+    ///   the §112 walker, whose number is not ours to build on.
+    /// * **A target somebody else is driving, no surge.** The `ours`
+    ///   test is the governor's own, and it is what stops a surge
+    ///   laundering the walker's value into the governor's bookkeeping
+    ///   - which would let the next tick raise from a number the
+    ///   governor never chose.
+    pub(super) fn surge_apply(&self, si: usize) -> Option<usize> {
+        let lc = &self.line_cap;
+        if lc.cap == 0 {
+            return None;
+        }
+        let (target, ceiling) = lc.targets.get(si)?.as_ref()?;
+        // The cap in FORCE - `fleet` once the governor has applied one,
+        // the seed until then - so the surge and the governor divide
+        // the same number across the same servers.
+        let cap = match lc.fleet.load(Ordering::Relaxed) {
+            0 => lc.cap,
+            f => f,
+        };
+        let base = server_share(cap, lc.targets.len()).min(*ceiling);
+        let want = surge_want(base, self.surge.lent_on(si), *ceiling);
+        let mine = lc.set[si].load(Ordering::Relaxed);
+        let seeded = server_share(lc.cap, lc.targets.len()).min(*ceiling);
+        let moved = target.update(|cur| {
+            let ours = cur == mine || (mine == usize::MAX && cur == seeded);
+            (ours && cur != want).then_some(want)
+        });
+        if !moved {
+            return None;
+        }
+        lc.set[si].store(want, Ordering::Relaxed);
+        if let Some(l) = &self.live
+            && let Some(sl) = l.servers.get(si)
+        {
+            sl.budget.store(want, Ordering::Relaxed);
+        }
+        Some(want)
+    }
+
     /// The ledger's fragment for the `[pool]` line: empty unless the
     /// rule was armed AND the shed or the governor ran, so short runs,
     /// anchorless runs that never grew and capped-off A/B arms keep
@@ -1044,6 +1516,16 @@ mod tests {
     fn mbit(m: u64) -> u64 {
         m * 1_000_000 / 8
     }
+
+    /// The per-socket carry the TODO 275 ladders measured on a cold
+    /// giganews route, in bytes/s: ~10 Mbps, flat from fleet 25 to 100
+    /// on a 10 GbE line (27 Aug 2026) and reproduced at 18-22 Mbps over
+    /// a second long-haul route the next day. On a gigabit line it implies exactly
+    /// 100 sockets, which is what makes it the right fixture for the
+    /// second ceiling: the arm is self-limiting, so a faster carry
+    /// stops the fleet below 50 for reasons that have nothing to do
+    /// with any ceiling.
+    const COLD_CARRY_BPS: u64 = 1_250_000;
 
     #[test]
     fn a_fleet_is_still_whatever_number_it_is_handed() {
@@ -1115,15 +1597,15 @@ mod tests {
         // consecutive ticks, and one slower reading puts the count back
         // to nothing.
         let fast = mbit(9_000);
-        let (f, s) = fleet_step(LINE_CAP_DEFAULT_FLEET, 0, fast, 0, 0);
+        let (f, s) = fleet_step(LINE_CAP_DEFAULT_FLEET, 0, fast, 0, 0, LINE_CAP_MAX_FLEET);
         assert_eq!((f, s), (LINE_CAP_DEFAULT_FLEET, 1));
-        let (f, s) = fleet_step(f, s, fast, 0, 0);
+        let (f, s) = fleet_step(f, s, fast, 0, 0, LINE_CAP_MAX_FLEET);
         assert_eq!((f, s), (LINE_CAP_DEFAULT_FLEET, 2));
         // The burst stops one tick short and the count is lost.
-        let (f, s) = fleet_step(f, s, mbit(400), 0, 0);
+        let (f, s) = fleet_step(f, s, mbit(400), 0, 0, LINE_CAP_MAX_FLEET);
         assert_eq!((f, s), (LINE_CAP_DEFAULT_FLEET, 0));
         // So it has to start again from the beginning.
-        let (f, s) = fleet_step(f, s, fast, 0, 0);
+        let (f, s) = fleet_step(f, s, fast, 0, 0, LINE_CAP_MAX_FLEET);
         assert_eq!((f, s), (LINE_CAP_DEFAULT_FLEET, 1));
     }
 
@@ -1132,13 +1614,13 @@ mod tests {
         let fast = mbit(9_000);
         let mut st = (LINE_CAP_DEFAULT_FLEET, 0);
         for _ in 0..LINE_CAP_RAISE_TICKS {
-            st = fleet_step(st.0, st.1, fast, 0, 0);
+            st = fleet_step(st.0, st.1, fast, 0, 0, LINE_CAP_MAX_FLEET);
         }
         assert_eq!(st, (LINE_CAP_MAX_FLEET, 0));
         // At the ceiling nothing further can accumulate, so a fleet
         // that has arrived cannot keep re-announcing itself.
         for _ in 0..10 {
-            st = fleet_step(st.0, st.1, fast, 0, 0);
+            st = fleet_step(st.0, st.1, fast, 0, 0, LINE_CAP_MAX_FLEET);
             assert_eq!(st, (LINE_CAP_MAX_FLEET, 0));
         }
     }
@@ -1166,7 +1648,13 @@ mod tests {
         // The arm that SPENDS still clamps, and that is the half this
         // number must never be plumbed into.
         assert_eq!(
-            fleet_for_supply(line, mbit(35), 5, LINE_CAP_DEFAULT_FLEET),
+            fleet_for_supply(
+                line,
+                mbit(35),
+                5,
+                LINE_CAP_DEFAULT_FLEET,
+                LINE_CAP_MAX_FLEET
+            ),
             LINE_CAP_MAX_FLEET
         );
     }
@@ -1245,11 +1733,11 @@ mod tests {
         // which is also what stops the governor oscillating.
         let mut st = (LINE_CAP_DEFAULT_FLEET, 0);
         for _ in 0..LINE_CAP_RAISE_TICKS {
-            st = fleet_step(st.0, st.1, mbit(9_000), 0, 0);
+            st = fleet_step(st.0, st.1, mbit(9_000), 0, 0, LINE_CAP_MAX_FLEET);
         }
         assert_eq!(st.0, LINE_CAP_MAX_FLEET);
         for r in [mbit(500), 0, mbit(20), mbit(3_000)] {
-            st = fleet_step(st.0, st.1, r, 0, 0);
+            st = fleet_step(st.0, st.1, r, 0, 0, LINE_CAP_MAX_FLEET);
             assert_eq!(st, (LINE_CAP_MAX_FLEET, 0), "a {r} B/s reading moved it");
         }
     }
@@ -1266,7 +1754,7 @@ mod tests {
         assert_eq!(base, fleet_for_line(mbit(5_300)));
         let mut st = (base, 0);
         for m in [5_300, 5_990, 5_500, 5_900, 6_000] {
-            st = fleet_step(st.0, st.1, mbit(m), 0, 0);
+            st = fleet_step(st.0, st.1, mbit(m), 0, 0, LINE_CAP_MAX_FLEET);
             assert_eq!(st, (base, 0), "{m} Mbit started a raise");
         }
     }
@@ -1277,7 +1765,7 @@ mod tests {
         // one socket at a time - the whole window is three rungs wide.
         let mut st = (LINE_CAP_DEFAULT_FLEET, 0);
         for _ in 0..LINE_CAP_RAISE_TICKS {
-            st = fleet_step(st.0, st.1, mbit(10_000), 0, 0);
+            st = fleet_step(st.0, st.1, mbit(10_000), 0, 0, LINE_CAP_MAX_FLEET);
         }
         assert_eq!(st.0, LINE_CAP_MAX_FLEET);
     }
@@ -1307,6 +1795,45 @@ mod tests {
         spawns: &[usize],
         cap: usize,
         anchor_bps: u64,
+    ) -> (Arc<Shared>, Vec<Arc<ConnTarget>>) {
+        // A TYPED anchor, which is what every test written before TODO
+        // 275 item 7 assumed and what keeps them all asserting about
+        // the first ceiling.
+        seeded_fleet_full(spawns, cap, anchor_bps, false)
+    }
+
+    /// [`seeded_fleet_n`] with the line anchor's PROVENANCE said out
+    /// loud (TODO 275 item 7).
+    ///
+    /// `measured` becomes `PoolConfig::line_anchor_measured` on every
+    /// server, which is what `LineCap::new` ALL-folds, and each
+    /// server's `line_cap_uncapped` is its own `spawns` entry - the
+    /// grant the second ceiling is bounded by, exactly as
+    /// `get::fleet::cap_exposed` stamps it for a server the cap may
+    /// cut.
+    fn seeded_fleet_full(
+        spawns: &[usize],
+        cap: usize,
+        anchor_bps: u64,
+        measured: bool,
+    ) -> (Arc<Shared>, Vec<Arc<ConnTarget>>) {
+        // A fixture stamps NO holds ceiling, so TODO 275 item 10's
+        // growth gate is inert for every test but the ones about it.
+        // That is the point rather than a convenience: the gate reads a
+        // PROCESS-WIDE gauge, and a fixture carrying a cap would make
+        // every fleet test in this file depend on what an unrelated
+        // test left in that gauge.
+        seeded_fleet_holds(spawns, cap, anchor_bps, measured, 0)
+    }
+
+    /// [`seeded_fleet_full`] with the consumer's held-span ceiling set,
+    /// which is what arms TODO 275 item 10's growth gate.
+    fn seeded_fleet_holds(
+        spawns: &[usize],
+        cap: usize,
+        anchor_bps: u64,
+        measured: bool,
+        holds_cap: u64,
     ) -> (Arc<Shared>, Vec<Arc<ConnTarget>>) {
         let n = spawns.len();
         let targets: Vec<_> = (0..n)
@@ -1341,6 +1868,7 @@ mod tests {
                         max_source_ips: None,
                         address_family: Default::default(),
                         tls_hostname: None,
+                        warm_reserve: None,
                     },
                     PoolConfig {
                         connections: spawn,
@@ -1352,6 +1880,9 @@ mod tests {
                         // job. Anything else is the daemon's persisted
                         // `linkpeak.effective`.
                         line_anchor_bps: anchor_bps,
+                        line_anchor_measured: measured,
+                        line_cap_uncapped: spawn,
+                        holds_cap,
                         ..PoolConfig::default()
                     },
                 )
@@ -1439,7 +1970,7 @@ mod tests {
         );
         // 25 sockets at ~13 Mbit each: ~325 Mbit of a 1 Gbit line.
         let now = mbit(325);
-        let got = fleet_for_supply(line, now, 25, LINE_CAP_DEFAULT_FLEET);
+        let got = fleet_for_supply(line, now, 25, LINE_CAP_DEFAULT_FLEET, LINE_CAP_MAX_FLEET);
         assert!(
             got > LINE_CAP_DEFAULT_FLEET,
             "the line is a third used and the sockets are under the plan: {got}"
@@ -1447,12 +1978,12 @@ mod tests {
         assert_eq!(got, LINE_CAP_MAX_FLEET, "and it is held at the ceiling");
         // The old rule could not move: same inputs, no rate.
         assert_eq!(
-            fleet_step(LINE_CAP_DEFAULT_FLEET, 2, line, 0, 0).0,
+            fleet_step(LINE_CAP_DEFAULT_FLEET, 2, line, 0, 0, LINE_CAP_MAX_FLEET).0,
             LINE_CAP_DEFAULT_FLEET,
             "the curve alone is stuck at the floor, which is the bug"
         );
         assert_eq!(
-            fleet_step(LINE_CAP_DEFAULT_FLEET, 2, line, now, 25).0,
+            fleet_step(LINE_CAP_DEFAULT_FLEET, 2, line, now, 25, LINE_CAP_MAX_FLEET).0,
             LINE_CAP_MAX_FLEET,
             "and the supply arm carries it through the same streak rule"
         );
@@ -1467,35 +1998,39 @@ mod tests {
         let line = mbit(1_000);
         let f = LINE_CAP_DEFAULT_FLEET;
         assert_eq!(
-            fleet_for_supply(line, mbit(800), 25, f),
+            fleet_for_supply(line, mbit(800), 25, f, LINE_CAP_MAX_FLEET),
             f,
             "80% of the line is LINE-bound - the regime the curve measured"
         );
         assert_eq!(
-            fleet_for_supply(line, mbit(750), 25, f),
+            fleet_for_supply(line, mbit(750), 25, f, LINE_CAP_MAX_FLEET),
             f,
             "the gate is inclusive at exactly LINE_CAP_SUPPLY_PCT"
         );
         assert_eq!(
-            fleet_for_supply(mbit(10_000), mbit(4_000), 25, f),
+            fleet_for_supply(mbit(10_000), mbit(4_000), 25, f, LINE_CAP_MAX_FLEET),
             f,
             "160 Mbit a socket is ABOVE the planned carry, so the curve owns this \
              one however little of the line is used - the arm is about sockets \
              that under-deliver, not about headroom on its own"
         );
         assert_eq!(
-            fleet_for_supply(0, mbit(100), 25, f),
+            fleet_for_supply(0, mbit(100), 25, f, LINE_CAP_MAX_FLEET),
             f,
             "no line reading, no opinion"
         );
-        assert_eq!(fleet_for_supply(line, 0, 25, f), f, "no rate, no opinion");
         assert_eq!(
-            fleet_for_supply(line, mbit(100), 0, f),
+            fleet_for_supply(line, 0, 25, f, LINE_CAP_MAX_FLEET),
+            f,
+            "no rate, no opinion"
+        );
+        assert_eq!(
+            fleet_for_supply(line, mbit(100), 0, f, LINE_CAP_MAX_FLEET),
             f,
             "nothing dialling, no divisor, no opinion"
         );
         assert_eq!(
-            fleet_for_supply(line, mbit(100), 25, 0),
+            fleet_for_supply(line, mbit(100), 25, 0, LINE_CAP_MAX_FLEET),
             0,
             "the rule off stays off"
         );
@@ -1509,23 +2044,36 @@ mod tests {
         // A wildly wrong (typed) line on a slow pipe reaches the
         // ceiling and stops there - the rung §208 Round A cleared.
         assert_eq!(
-            fleet_for_supply(mbit(10_000), mbit(90), 25, LINE_CAP_DEFAULT_FLEET),
+            fleet_for_supply(
+                mbit(10_000),
+                mbit(90),
+                25,
+                LINE_CAP_DEFAULT_FLEET,
+                LINE_CAP_MAX_FLEET
+            ),
             LINE_CAP_MAX_FLEET,
             "the worst a wrong reading can do is a measured-free rung"
         );
         // Self-limiting: once the bigger fleet fills the line, the gate
         // shuts and the fleet stops growing.
         let line = mbit(1_000);
-        let grown = fleet_for_supply(line, mbit(325), 25, LINE_CAP_DEFAULT_FLEET);
+        let grown = fleet_for_supply(
+            line,
+            mbit(325),
+            25,
+            LINE_CAP_DEFAULT_FLEET,
+            LINE_CAP_MAX_FLEET,
+        );
         assert_eq!(
-            fleet_for_supply(line, mbit(950), grown, grown),
+            fleet_for_supply(line, mbit(950), grown, grown, LINE_CAP_MAX_FLEET),
             grown,
             "a fleet that now fills its line asks for nothing more"
         );
         // Never falls, whatever it is handed.
         for now in [1, mbit(1), mbit(10), mbit(999)] {
             for dialling in [1, 7, 25, 50, 500] {
-                let got = fleet_for_supply(line, now, dialling, LINE_CAP_MAX_FLEET);
+                let got =
+                    fleet_for_supply(line, now, dialling, LINE_CAP_MAX_FLEET, LINE_CAP_MAX_FLEET);
                 assert!(
                     got >= LINE_CAP_MAX_FLEET,
                     "fell from the ceiling at now={now} dialling={dialling}: {got}"
@@ -1544,11 +2092,11 @@ mod tests {
         let line = mbit(1_000);
         // 10 sockets holding 300 Mbit is 30 Mbit each - under the plan,
         // so it grows.
-        assert!(fleet_for_supply(line, mbit(300), 10, 25) > 25);
+        assert!(fleet_for_supply(line, mbit(300), 10, 25, LINE_CAP_MAX_FLEET) > 25);
         // The SAME rate carried by 1 socket is 300 Mbit - at twice the
         // plan, so the curve owns it and this arm stands down.
         assert_eq!(
-            fleet_for_supply(line, mbit(300), 1, 25),
+            fleet_for_supply(line, mbit(300), 1, 25, LINE_CAP_MAX_FLEET),
             25,
             "a socket above the planned carry is not this arm's business"
         );
@@ -1566,10 +2114,27 @@ mod tests {
     /// timing-dependent, and it is why the carry can be asserted to
     /// within a percent below rather than to an order of magnitude.
     fn feed_and_tick(sh: &Arc<Shared>, secs: u64, bps: u64, tail: bool) -> u64 {
+        feed_and_tick_from(sh, 0, secs, bps, tail)
+    }
+
+    /// [`feed_and_tick`] CONTINUING from a clock this fleet has already
+    /// seen, returning the new one.
+    ///
+    /// A second `feed_and_tick` on the same pool does almost nothing
+    /// and does it silently: it restarts at zero, so the governor's own
+    /// interval guard (`now - lc.at < LINE_CAP_TICK_MS`) drops every
+    /// tick in it and the saturation window is fed timestamps behind
+    /// the ones it holds. Any test that wants a SECOND stretch of run -
+    /// a condition that lifts, a latch that does not - has to move the
+    /// clock forward instead. `from` is left a multiple of
+    /// [`LINE_CAP_TICK_MS`] by every caller, so the tick alignment
+    /// carries across the join.
+    fn feed_and_tick_from(sh: &Arc<Shared>, from: u64, secs: u64, bps: u64, tail: bool) -> u64 {
         let step = 10u64;
         let per = bps * step / 1000;
-        let mut now = 0u64;
-        while now < secs * 1000 {
+        let mut now = from;
+        let end = from + secs * 1000;
+        while now < end {
             now += step;
             sh.sat.note_bytes(now, per, tail);
             if now.is_multiple_of(LINE_CAP_TICK_MS) {
@@ -1607,14 +2172,20 @@ mod tests {
         let want = line.div_ceil(carry) as usize;
         assert_eq!(want, 35, "the case is only interesting off the clamps");
         assert_eq!(
-            fleet_for_supply(line, now, dialling, LINE_CAP_DEFAULT_FLEET),
+            fleet_for_supply(
+                line,
+                now,
+                dialling,
+                LINE_CAP_DEFAULT_FLEET,
+                LINE_CAP_MAX_FLEET
+            ),
             35,
             "the arm must return the carry's own answer, not merely a bigger one"
         );
         // Wired to the spawned count instead, the same rate reads as
         // half the carry and runs into the ceiling.
         assert_eq!(
-            fleet_for_supply(line, now, 50, LINE_CAP_DEFAULT_FLEET),
+            fleet_for_supply(line, now, 50, LINE_CAP_DEFAULT_FLEET, LINE_CAP_MAX_FLEET),
             LINE_CAP_MAX_FLEET,
             "or this case does not separate the divisor from the clamp"
         );
@@ -1631,7 +2202,13 @@ mod tests {
                 .saturating_mul(LINE_CAP_RUNG)
                 .clamp(LINE_CAP_DEFAULT_FLEET, LINE_CAP_MAX_FLEET);
             assert_eq!(
-                fleet_for_supply(line, n, dialling, LINE_CAP_DEFAULT_FLEET),
+                fleet_for_supply(
+                    line,
+                    n,
+                    dialling,
+                    LINE_CAP_DEFAULT_FLEET,
+                    LINE_CAP_MAX_FLEET
+                ),
                 expect,
                 "carry {c} B/s a socket wants {ideal} sockets"
             );
@@ -1687,6 +2264,626 @@ mod tests {
             targets.iter().map(|t| t.get()).collect::<Vec<_>>()
         );
         assert_eq!(server_share(35, 5), 7);
+    }
+
+    /// TODO 275 item 7, acceptance (a): an install whose line reading
+    /// is TYPED, or absent, tops out exactly where it always did.
+    ///
+    /// This is the half of item 7 that is a promise about EVERY
+    /// install rather than about the regime the ladders measured, and
+    /// it is what makes the second ceiling safe at all
+    /// (`supply_ceiling`'s doc has the argument): the typed 10 Gbps on
+    /// a 100 Mbit line holds the supply gate open for ever, so the only
+    /// thing between it and §208's measured-bad far end is where this
+    /// clamp lands.
+    ///
+    /// The grants swept here go far past the second ceiling on purpose.
+    /// A fleet's ACCOUNT allowance says nothing about whether its line
+    /// reading is worth believing, and a rule that read the two
+    /// together would let a big account buy provenance.
+    #[test]
+    fn a_typed_or_absent_anchor_tops_out_where_it_always_did() {
+        for grant in [0, 1, 25, 50, 77, 100, 500, usize::MAX] {
+            assert_eq!(
+                supply_ceiling(false, grant),
+                LINE_CAP_MAX_FLEET,
+                "a typed anchor with a grant of {grant} moved the ceiling"
+            );
+        }
+        // And through the arm itself, in the shape that most nearly
+        // reaches for the second ceiling: a wildly over-stated line, a
+        // carry far under the plan, and every tick agreeing for long
+        // enough that the hysteresis is not what is holding it.
+        let ceiling = supply_ceiling(false, 500);
+        let mut st = (LINE_CAP_DEFAULT_FLEET, 0);
+        for _ in 0..(LINE_CAP_RAISE_TICKS * 10) {
+            st = fleet_step(st.0, st.1, mbit(10_000), mbit(90), 25, ceiling);
+            assert!(
+                st.0 <= LINE_CAP_MAX_FLEET,
+                "a typed anchor reached {} sockets",
+                st.0
+            );
+        }
+        assert_eq!(st.0, LINE_CAP_MAX_FLEET, "and it still reaches the first");
+    }
+
+    /// TODO 275 item 7, acceptance (b): a MEASURED anchor may walk past
+    /// the first ceiling, and never past the account's own grant.
+    ///
+    /// The grant is the operative bound and the constant is the
+    /// backstop, which is the whole shape of the decision taken on
+    /// 2 Sep 2026: `conntune::line_cap_spawn_slots` already held the
+    /// fleet to what each account sells, so the second ceiling needed
+    /// no new number to be safe - only one to bound the band above the
+    /// grant, where nothing has been measured on any route.
+    #[test]
+    fn a_measured_anchor_may_walk_up_to_the_account_grant() {
+        // Never below the first ceiling, whatever the grant says. A
+        // small account is already held by its own share walk, and a
+        // ceiling that dipped under 50 would take sockets off an
+        // install that had them before this existed.
+        for grant in [0, 1, 25, 49, 50] {
+            assert_eq!(
+                supply_ceiling(true, grant),
+                LINE_CAP_MAX_FLEET,
+                "a grant of {grant} lowered the ceiling"
+            );
+        }
+        // Between the two it IS the grant: the fleet can never ask a
+        // provider for more than it sells.
+        for grant in [51, 60, 77, 99] {
+            assert_eq!(supply_ceiling(true, grant), grant, "grant {grant}");
+        }
+        // And above it the constant is what bounds the unmeasured band.
+        for grant in [100, 250, 500, usize::MAX] {
+            assert_eq!(
+                supply_ceiling(true, grant),
+                LINE_CAP_SUPPLY_MAX_FLEET,
+                "grant {grant} walked past the measured band"
+            );
+        }
+        // Monotone in the grant, so no account size is a cliff.
+        let mut last = 0;
+        for grant in 0..=200 {
+            let got = supply_ceiling(true, grant);
+            assert!(got >= last, "ceiling fell at grant {grant}");
+            last = got;
+        }
+    }
+
+    /// The same, through the governor's own step: the second ceiling
+    /// changes WHERE the walk stops and nothing about HOW it walks.
+    ///
+    /// Every property the first ceiling had is asserted again here
+    /// rather than assumed, because the ceiling is the one argument
+    /// `fleet_step` gained and an arm that reached it by any other
+    /// route would pass a test that only looked at the destination: a
+    /// raise still needs `LINE_CAP_RAISE_TICKS` consecutive ticks, the
+    /// fleet still never falls, and a tick with no supply reading
+    /// (`now_bps == 0`) still leaves the curve to answer alone - which
+    /// on this line is the floor.
+    #[test]
+    fn the_second_ceiling_moves_the_destination_and_not_the_walk() {
+        let line = mbit(1_000);
+        // 25 sockets at 10 Mbps each - the carry the 27 Aug ladder
+        // MEASURED against a cold provider, flat across a 4x fleet
+        // range - which is 25% of a gigabit and implies 100 sockets.
+        let now = COLD_CARRY_BPS * LINE_CAP_DEFAULT_FLEET as u64;
+        let ceiling = supply_ceiling(true, 100);
+        assert_eq!(ceiling, LINE_CAP_SUPPLY_MAX_FLEET);
+
+        // A raise still costs a full agreement streak, at every rung.
+        let mut st = (LINE_CAP_DEFAULT_FLEET, 0);
+        let mut raises = 0;
+        for _ in 0..(LINE_CAP_RAISE_TICKS * 12) {
+            let before = st.0;
+            st = fleet_step(st.0, st.1, line, now, LINE_CAP_DEFAULT_FLEET, ceiling);
+            if st.0 > before {
+                raises += 1;
+                assert_eq!(st.1, 0, "a raise clears the count");
+            }
+        }
+        assert!(raises >= 1, "the fleet never moved at all");
+        assert!(
+            st.0 > LINE_CAP_MAX_FLEET,
+            "a measured anchor stopped at the first ceiling: {}",
+            st.0
+        );
+        assert!(st.0 <= ceiling, "it left the window: {}", st.0);
+
+        // It never falls, and a tick carrying no supply reading is the
+        // curve alone - which at 1 Gbit is the floor, so the fleet
+        // simply stays where it is.
+        let held = st.0;
+        for r in [0, mbit(10), mbit(999)] {
+            st = fleet_step(st.0, st.1, line, r, LINE_CAP_DEFAULT_FLEET, ceiling);
+            assert!(st.0 >= held, "a {r} B/s reading shrank the fleet");
+        }
+    }
+
+    /// TODO 275 item 7 end to end through the real tick, and the pair
+    /// that says the provenance is what does it: two fleets identical
+    /// in every number - same line, same carry, same grant, same seed -
+    /// and only the anchor's PROVENANCE different.
+    ///
+    /// That is the configuration `a_typed_anchor_and_a_measured_one_are_distinguishable_in_the_pool`
+    /// pinned as merely VISIBLE on 28 Aug 2026, with a note saying that
+    /// the edit which made a rule read it is where the measurement has
+    /// to be. This is that edit, and the measurement is in
+    /// `LINE_CAP_SUPPLY_MAX_FLEET`'s own doc: three published rounds,
+    /// two routes, carry flat to 100 sockets.
+    #[test]
+    fn only_a_measured_anchor_puts_the_extra_sockets_on_the_wire() {
+        let line = mbit(1_000);
+        // Grant each of the five servers 20, so the fleet's own
+        // allowance is 100 - the second ceiling - and the share walk
+        // has somewhere to go.
+        let per_server = 20usize;
+        let mut reached = Vec::new();
+        for measured in [false, true] {
+            let (sh, targets) =
+                seeded_fleet_full(&[per_server; 5], LINE_CAP_DEFAULT_FLEET, line, measured);
+            // The seed's own shape: the headroom's share spawned, the
+            // curve's share admitted, the rest parked.
+            sh.workers_live.store(per_server * 5, Ordering::Release);
+            sh.parked_total
+                .store(per_server * 5 - LINE_CAP_DEFAULT_FLEET, Ordering::Release);
+            assert_eq!(sh.workers_dialling(), LINE_CAP_DEFAULT_FLEET);
+            // The ladder's own measured cold carry: 10 Mbps a socket,
+            // so this line wants 100 of them and the gate is open the
+            // whole way.
+            let carry = COLD_CARRY_BPS;
+            feed_and_tick(&sh, 30, carry * LINE_CAP_DEFAULT_FLEET as u64, false);
+            let cap = sh.line_cap.cur.load(Ordering::Relaxed);
+            let widest = targets.iter().map(|t| t.get()).max().unwrap_or(0);
+            assert_eq!(
+                widest,
+                server_share(cap, 5).min(per_server),
+                "every target should hold its share of {cap} (measured {measured})"
+            );
+            reached.push(cap);
+        }
+        assert_eq!(
+            reached[0], LINE_CAP_MAX_FLEET,
+            "a typed anchor must stop at the first ceiling"
+        );
+        assert!(
+            reached[1] > reached[0],
+            "a measured anchor bought nothing: {} against {}",
+            reached[1],
+            reached[0]
+        );
+        assert!(
+            reached[1] <= LINE_CAP_SUPPLY_MAX_FLEET,
+            "and it left the measured band: {}",
+            reached[1]
+        );
+    }
+
+    /// TODO 275 item 10: the ledger question, on its own and with no
+    /// pool in the way.
+    ///
+    /// A cap of 0 is NO CLAIM and must read as "yes". That is the arm
+    /// most likely to be got wrong by a later edit, because a missing
+    /// number and a full ledger are both falsy-looking and only one of
+    /// them is a constraint - a fixture, a rig, or any caller that
+    /// stamped no budget would otherwise have its fleet gated by a
+    /// ceiling nobody set.
+    #[test]
+    fn a_ledger_with_no_ceiling_constrains_nothing() {
+        for bytes in [0, 1, 1 << 30, u64::MAX] {
+            assert!(
+                holds_allow_growth(bytes, 0),
+                "a cap of 0 gated growth at {bytes} bytes"
+            );
+        }
+        let cap = 1_000_000_000u64;
+        assert!(holds_allow_growth(0, cap), "an empty ledger");
+        assert!(
+            holds_allow_growth(cap / 4, cap),
+            "the quarter measured healthy"
+        );
+        assert!(
+            holds_allow_growth(cap * LINE_CAP_HOLDS_PCT / 100 - 1, cap),
+            "one byte under the bar"
+        );
+        assert!(
+            !holds_allow_growth(cap * LINE_CAP_HOLDS_PCT / 100, cap),
+            "the bar itself is inclusive, like the supply gate"
+        );
+        assert!(!holds_allow_growth(cap, cap), "the ledger measured pinned");
+        // Neither side may overflow into the wrong answer.
+        assert!(!holds_allow_growth(u64::MAX, cap));
+        assert!(holds_allow_growth(0, u64::MAX));
+    }
+
+    /// TODO 275 item 10 through the real tick, as a control pair: the
+    /// SAME fleet, the same line, the same carry, and only the
+    /// consumer's ledger different.
+    ///
+    /// This is the defect the 2 Sep 2026 round found in item 7 as
+    /// shipped. The fleet buys a reorder window, a cold route fills it,
+    /// and past the ledger's cap the sequential consumer head-of-line
+    /// blocks - 3.31x longer per GB at 100 sockets than at 50. The arm
+    /// could not see it, and worse, it feeds itself: a blocked consumer
+    /// drops the achieved rate, which makes the LINE look even more
+    /// under-used, which is the arm's own signal to ask for more
+    /// sockets.
+    ///
+    /// It holds the gauge lock because the ledger is a PROCESS-wide
+    /// atomic, and it puts back exactly what it added rather than
+    /// resetting, so a test running beside it in the same process keeps
+    /// whatever it was counting.
+    #[test]
+    fn a_full_holds_ledger_stops_the_fleet_at_the_first_ceiling() {
+        let _guard = crate::memgauge::one_gauge_test_at_a_time();
+        let line = mbit(1_000);
+        let per_server = 20usize;
+        let holds_cap = 1_000_000_000u64;
+        let carry = COLD_CARRY_BPS;
+        let mut reached = Vec::new();
+        // Full first, then empty: the second arm is the control and it
+        // must reach the second ceiling, or the first proves nothing.
+        for full in [true, false] {
+            let charged = match full {
+                true => holds_cap,
+                false => 0,
+            };
+            crate::memgauge::add(crate::memgauge::Sub::Holds, charged);
+            let (sh, _t) = seeded_fleet_holds(
+                &[per_server; 5],
+                LINE_CAP_DEFAULT_FLEET,
+                line,
+                true,
+                holds_cap,
+            );
+            sh.workers_live.store(per_server * 5, Ordering::Release);
+            sh.parked_total
+                .store(per_server * 5 - LINE_CAP_DEFAULT_FLEET, Ordering::Release);
+            feed_and_tick(&sh, 30, carry * LINE_CAP_DEFAULT_FLEET as u64, false);
+            reached.push(sh.line_cap.cur.load(Ordering::Relaxed));
+            crate::memgauge::sub(crate::memgauge::Sub::Holds, charged);
+        }
+        assert_eq!(
+            reached[0], LINE_CAP_MAX_FLEET,
+            "a fleet whose consumer is already blocked climbed to {}",
+            reached[0]
+        );
+        assert!(
+            reached[1] > LINE_CAP_MAX_FLEET,
+            "the control never reached the second ceiling, so this test proves nothing: {}",
+            reached[1]
+        );
+    }
+
+    /// The gate must NOT fire below the first ceiling, which is the
+    /// constraint that keeps it away from every TODO 208 round.
+    ///
+    /// Those rounds measured the 25-to-50 window on lines this rule
+    /// still governs, and a consumer-pressure gate reaching into it
+    /// would change what they measured for every install, including
+    /// every one that never goes near the second ceiling.
+    #[test]
+    fn a_full_holds_ledger_still_lets_a_fleet_reach_the_first_ceiling() {
+        let _guard = crate::memgauge::one_gauge_test_at_a_time();
+        let holds_cap = 1_000_000_000u64;
+        crate::memgauge::add(crate::memgauge::Sub::Holds, holds_cap);
+        let (sh, targets) = seeded_fleet_holds(
+            &[20; 5],
+            LINE_CAP_DEFAULT_FLEET,
+            mbit(1_000),
+            true,
+            holds_cap,
+        );
+        sh.workers_live.store(100, Ordering::Release);
+        sh.parked_total
+            .store(100 - LINE_CAP_DEFAULT_FLEET, Ordering::Release);
+        feed_and_tick(
+            &sh,
+            30,
+            COLD_CARRY_BPS * LINE_CAP_DEFAULT_FLEET as u64,
+            false,
+        );
+        let cap = sh.line_cap.cur.load(Ordering::Relaxed);
+        crate::memgauge::sub(crate::memgauge::Sub::Holds, holds_cap);
+        assert_eq!(
+            cap, LINE_CAP_MAX_FLEET,
+            "the fleet must still climb to the first ceiling under a full ledger"
+        );
+        assert!(
+            targets.iter().all(|t| t.get() == server_share(cap, 5)),
+            "and the share walk must have handed it out: {:?}",
+            targets.iter().map(|t| t.get()).collect::<Vec<_>>()
+        );
+    }
+
+    /// The gate stops GROWTH and never takes sockets back.
+    ///
+    /// The cap may not fall within a run - a reading is an achieved
+    /// rate and so a lower bound on the line, which is evidence for
+    /// growing and none at all for shrinking - and a ceiling that could
+    /// shrink a fleet would let a ledger crossing its bar oscillate the
+    /// whole fleet for the rest of the job. So a fleet already past the
+    /// first ceiling when the ledger fills STAYS there.
+    #[test]
+    fn a_ledger_that_fills_after_the_fleet_grew_takes_nothing_back() {
+        let _guard = crate::memgauge::one_gauge_test_at_a_time();
+        let holds_cap = 1_000_000_000u64;
+        let (sh, _t) = seeded_fleet_holds(
+            &[20; 5],
+            LINE_CAP_DEFAULT_FLEET,
+            mbit(1_000),
+            true,
+            holds_cap,
+        );
+        sh.workers_live.store(100, Ordering::Release);
+        sh.parked_total
+            .store(100 - LINE_CAP_DEFAULT_FLEET, Ordering::Release);
+        // Grow with the ledger empty.
+        let at = feed_and_tick(
+            &sh,
+            30,
+            COLD_CARRY_BPS * LINE_CAP_DEFAULT_FLEET as u64,
+            false,
+        );
+        let grown = sh.line_cap.cur.load(Ordering::Relaxed);
+        assert!(grown > LINE_CAP_MAX_FLEET, "the fleet never grew: {grown}");
+        // Now fill it and keep ticking.
+        crate::memgauge::add(crate::memgauge::Sub::Holds, holds_cap);
+        for _ in 0..LINE_CAP_RAISE_TICKS * 4 {
+            sh.line_cap.at.store(0, Ordering::Relaxed);
+            sh.line_cap_tick(at + 1_000, false);
+        }
+        let after = sh.line_cap.cur.load(Ordering::Relaxed);
+        crate::memgauge::sub(crate::memgauge::Sub::Holds, holds_cap);
+        assert_eq!(after, grown, "a full ledger shrank the fleet from {grown}");
+    }
+
+    /// TODO 275 item 7, acceptance (c): a provider that REFUSES for
+    /// capacity takes the second ceiling back off the table.
+    ///
+    /// The walk-back is a stand-down and NOT a shrink, which is the one
+    /// thing to read before changing it. The cap never falls within a
+    /// run - a reading is a lower bound on the line, so it is evidence
+    /// for growing and none at all for shrinking - and a ceiling that
+    /// could shrink a fleet would let one refusal from one server
+    /// oscillate the whole fleet for the rest of the job. What this
+    /// buys is that a fleet cannot keep climbing into an account that
+    /// has already said no; the surplus workers that meet the refusal
+    /// are parked by `park_or_probe`, which is the machinery that
+    /// shipped and is untouched here.
+    #[test]
+    fn a_capacity_refusal_stands_the_second_ceiling_down() {
+        let line = mbit(1_000);
+        let per_server = 20usize;
+        let (sh, _targets) =
+            seeded_fleet_full(&[per_server; 5], LINE_CAP_DEFAULT_FLEET, line, true);
+        sh.workers_live.store(per_server * 5, Ordering::Release);
+        sh.parked_total
+            .store(per_server * 5 - LINE_CAP_DEFAULT_FLEET, Ordering::Release);
+        // ONE server of five, in the provider's own words. The ceiling
+        // is a whole-fleet budget, so one refusing account is enough:
+        // the arm cannot aim its extra sockets at the four that are
+        // not refusing.
+        sh.auth[3].note(
+            crate::nntp::AuthRefusal::Capacity,
+            "481 exceeded maximum number of connections per user",
+        );
+        assert!(sh.auth[3].capacity_refused());
+        let carry = COLD_CARRY_BPS;
+        feed_and_tick(&sh, 30, carry * LINE_CAP_DEFAULT_FLEET as u64, false);
+        let cap = sh.line_cap.cur.load(Ordering::Relaxed);
+        assert_eq!(
+            cap, LINE_CAP_MAX_FLEET,
+            "a refused fleet climbed past the first ceiling to {cap}"
+        );
+        // And it is the REFUSAL doing it: the identical fleet without
+        // one is the control, and it walks past.
+        let (ok, _t) = seeded_fleet_full(&[per_server; 5], LINE_CAP_DEFAULT_FLEET, line, true);
+        ok.workers_live.store(per_server * 5, Ordering::Release);
+        ok.parked_total
+            .store(per_server * 5 - LINE_CAP_DEFAULT_FLEET, Ordering::Release);
+        feed_and_tick(&ok, 30, carry * LINE_CAP_DEFAULT_FLEET as u64, false);
+        assert!(
+            ok.line_cap.cur.load(Ordering::Relaxed) > LINE_CAP_MAX_FLEET,
+            "the control never reached the second ceiling, so the test proves nothing"
+        );
+    }
+
+    /// TODO 275 item 7, the residue handoff's OWED 4: the stand-down
+    /// this arm applies REACHES A SURFACE.
+    ///
+    /// `LiveStats::line_cap_ceiling` was seeded at fleet build and
+    /// never written again, which was right for one day and wrong from
+    /// the moment this arm made the ceiling a per-tick quantity. On the
+    /// install the second ceiling was built for - a measured anchor
+    /// over an account granting more than the first ceiling - the gauge
+    /// went on reading the grant while the governor was pinned at
+    /// `LINE_CAP_MAX_FLEET` for the rest of the run, and
+    /// `whyslow::fleet_bound` reads exactly that gauge to decide
+    /// whether a cap can still fix itself. So the one thing pinning the
+    /// fleet was the one thing the "why is this slow?" panel could not
+    /// say.
+    ///
+    /// The cap DOES NOT MOVE in either arm here and that is deliberate:
+    /// the failure being repaired is a stand-down that PREVENTS a
+    /// raise, so a test that waited for a move would be waiting for the
+    /// thing this case does not have.
+    ///
+    /// The control is the identical fleet with no refusal, which is
+    /// what says the refusal and not the seeding did it.
+    #[test]
+    fn the_tick_publishes_the_stand_down_it_applied() {
+        let line = mbit(1_000);
+        let grant = LINE_CAP_SUPPLY_MAX_FLEET;
+        // The fixture's own guard: without a grant past the first
+        // ceiling there is no second ceiling to stand down from, and
+        // both arms below would read 50 whatever the code did.
+        assert_eq!(
+            supply_ceiling(true, grant),
+            grant,
+            "a measured anchor must reach past the first ceiling here"
+        );
+        assert!(grant > LINE_CAP_MAX_FLEET);
+        let (sh, _t, live) = seeded_fleet_live_full(LINE_CAP_DEFAULT_FLEET, line, grant, 0, true);
+        assert_eq!(
+            live.line_cap_ceiling.load(Ordering::Relaxed),
+            grant,
+            "the fleet was built with the whole grant available to it"
+        );
+        assert!(
+            !live.line_cap_refused.load(Ordering::Relaxed),
+            "nothing has refused anything yet"
+        );
+        // One server of two, in the provider's own words. The arm is
+        // fleet-wide because the cap is, so the gauge is too.
+        sh.auth[1].note(
+            crate::nntp::AuthRefusal::Capacity,
+            "481 max simultaneous IP addresses reached",
+        );
+        let carry = COLD_CARRY_BPS * LINE_CAP_DEFAULT_FLEET as u64;
+        let at = feed_and_tick(&sh, 5, carry, false);
+        assert_eq!(
+            live.line_cap_ceiling.load(Ordering::Relaxed),
+            LINE_CAP_MAX_FLEET,
+            "the gauge went on offering a ceiling the governor had taken away"
+        );
+        assert!(
+            live.line_cap_refused.load(Ordering::Relaxed),
+            "the number alone cannot say a refusal is why it fell"
+        );
+        // And it LATCHES with the arm it mirrors: five more seconds of
+        // an account serving normally do not put the ceiling back,
+        // because the question the arm asks is whether this account has
+        // said no AT ANY POINT.
+        feed_and_tick_from(&sh, at, 5, carry, false);
+        assert_eq!(
+            live.line_cap_ceiling.load(Ordering::Relaxed),
+            LINE_CAP_MAX_FLEET,
+            "a run the account went back to serving got its second ceiling back"
+        );
+        assert!(live.line_cap_refused.load(Ordering::Relaxed));
+        // The control: the same fleet, the same ticks, no refusal.
+        let (ok, _t2, live2) = seeded_fleet_live_full(LINE_CAP_DEFAULT_FLEET, line, grant, 0, true);
+        feed_and_tick(
+            &ok,
+            5,
+            COLD_CARRY_BPS * LINE_CAP_DEFAULT_FLEET as u64,
+            false,
+        );
+        assert_eq!(
+            live2.line_cap_ceiling.load(Ordering::Relaxed),
+            grant,
+            "the control lost its ceiling with nothing refusing it"
+        );
+        assert!(!live2.line_cap_refused.load(Ordering::Relaxed));
+    }
+
+    /// The refusal receipt is published on a TYPED cap too, where there
+    /// is no ceiling for the refusal to take away.
+    ///
+    /// The governor does not run on a typed cap, so nothing lowers a
+    /// ceiling and `line_cap_ceiling` keeps the number it was seeded
+    /// with. But `whyslow::fleet_bound` convicts a typed cap on evidence
+    /// that never asks about a ceiling at all - a typed cap never grows,
+    /// so it binds at whatever number it holds - and the panel then
+    /// offers to raise the connection budget. That offer is the one this
+    /// receipt exists to withhold, and it is made here as readily as in
+    /// the automatic regime.
+    #[test]
+    fn a_typed_cap_publishes_the_refusal_even_though_no_ceiling_moved() {
+        let line = mbit(1_000);
+        let grant = LINE_CAP_SUPPLY_MAX_FLEET;
+        let (sh, _t, live) = seeded_fleet_live_full(LINE_CAP_DEFAULT_FLEET, line, grant, 0, false);
+        let seeded = live.line_cap_ceiling.load(Ordering::Relaxed);
+        sh.auth[0].note(
+            crate::nntp::AuthRefusal::Capacity,
+            "481 exceeded maximum number of connections per user",
+        );
+        feed_and_tick(
+            &sh,
+            5,
+            COLD_CARRY_BPS * LINE_CAP_DEFAULT_FLEET as u64,
+            false,
+        );
+        assert!(
+            live.line_cap_refused.load(Ordering::Relaxed),
+            "a typed cap met a refusal and published nothing a surface could read"
+        );
+        assert_eq!(
+            live.line_cap_ceiling.load(Ordering::Relaxed),
+            seeded,
+            "a typed cap has no ceiling arm, so nothing may move the ceiling gauge"
+        );
+        assert_eq!(
+            sh.line_cap.cur.load(Ordering::Relaxed),
+            LINE_CAP_DEFAULT_FLEET,
+            "the governor ran on a typed cap, so this fixture is not the regime it claims"
+        );
+    }
+
+    /// The DESIGN CALL at the centre of OWED 4, made testable: the
+    /// gauge carries the LATCHED half of the ceiling and not the
+    /// passing one.
+    ///
+    /// Two arms lower the tick's ceiling and they are not the same kind
+    /// of fact. A capacity refusal is a durable statement about an
+    /// account and never cleared; item 10's held-span gate is a
+    /// condition that passes, and its own comment says the ceiling
+    /// comes back when the ledger drains. `fleet_bound` reads this
+    /// gauge to ask whether a cap can still fix itself, so a gauge that
+    /// simply mirrored the tick's ceiling would flap with the holds arm
+    /// and convict a cap that really is three ticks from raising
+    /// itself - which is the defect OWED 4 repairs, wearing the other
+    /// hat.
+    ///
+    /// So: a full ledger holds the GOVERNOR at the first ceiling, and
+    /// leaves the gauge alone. Both halves are asserted, because a
+    /// gauge that stayed put on a fleet whose governor was never gated
+    /// would prove nothing.
+    #[test]
+    fn a_full_holds_ledger_gates_the_governor_and_not_the_gauge() {
+        let _guard = crate::memgauge::one_gauge_test_at_a_time();
+        let line = mbit(1_000);
+        let grant = LINE_CAP_SUPPLY_MAX_FLEET;
+        let holds_cap = 1_000_000_000u64;
+        let (sh, _t, live) =
+            seeded_fleet_live_full(LINE_CAP_DEFAULT_FLEET, line, grant, holds_cap, true);
+        // Wide enough that a raise has somewhere to land, so a cap that
+        // stops at the first ceiling stopped because it was gated.
+        sh.workers_live.store(grant, Ordering::Release);
+        sh.parked_total
+            .store(grant - LINE_CAP_DEFAULT_FLEET, Ordering::Release);
+        crate::memgauge::add(crate::memgauge::Sub::Holds, holds_cap);
+        let carry = COLD_CARRY_BPS * LINE_CAP_DEFAULT_FLEET as u64;
+        let at = feed_and_tick(&sh, 30, carry, false);
+        let gated = sh.line_cap.cur.load(Ordering::Relaxed);
+        let ceiling = live.line_cap_ceiling.load(Ordering::Relaxed);
+        let refused = live.line_cap_refused.load(Ordering::Relaxed);
+        crate::memgauge::sub(crate::memgauge::Sub::Holds, holds_cap);
+        assert_eq!(
+            gated, LINE_CAP_MAX_FLEET,
+            "the governor was not gated by the ledger, so the gauge half proves nothing"
+        );
+        assert_eq!(
+            ceiling, grant,
+            "a passing condition took the durable ceiling off the gauge"
+        );
+        assert!(
+            !refused,
+            "a full ledger is not an account refusing anything"
+        );
+        // Drained - the `sub` above - the governor walks past the first
+        // ceiling again, which is the property that makes this cap one
+        // that CAN fix itself and so the one a verdict must not
+        // convict. The clock CONTINUES: a second run from zero would be
+        // dropped by the governor's own interval guard and would read
+        // as a gate that never lifted.
+        feed_and_tick_from(&sh, at, 30, carry, false);
+        assert!(
+            sh.line_cap.cur.load(Ordering::Relaxed) > LINE_CAP_MAX_FLEET,
+            "the ledger drained and the fleet stayed put, so it was never the ledger"
+        );
     }
 
     /// TODO 275 item 1 part 2, the other end of the same tick: the
@@ -1762,6 +2959,34 @@ mod tests {
         cap: usize,
         anchor_bps: u64,
     ) -> (Arc<Shared>, Vec<Arc<ConnTarget>>, Arc<LiveStats>) {
+        // A grant of 0 leaves `supply_ceiling` at the FIRST ceiling for
+        // every one of this helper's older callers, which is what they
+        // were written against.
+        seeded_fleet_live_full(cap, anchor_bps, 0, 0, true)
+    }
+
+    /// [`seeded_fleet_live`] with the two inputs the second ceiling and
+    /// its two stand-down arms are made of: the account `grant` the
+    /// ceiling is bounded by ([`seed_uncapped`], split evenly over the
+    /// two servers) and the consumer's `holds_cap`.
+    ///
+    /// `auto` is the cap's own provenance: `true` is the curve's number
+    /// and the governor may walk it, `false` is one somebody typed and
+    /// the governor never runs at all - which is the regime that has a
+    /// refusal receipt to publish and no ceiling to take away.
+    ///
+    /// A grant of 0 and a holds cap of 0 are both "inert", not "zero":
+    /// the first leaves `supply_ceiling` at [`LINE_CAP_MAX_FLEET`] and
+    /// the second leaves item 10's growth gate unarmed, which is what
+    /// keeps a fixture from making every test in this file depend on
+    /// what an unrelated one left in a process-wide gauge.
+    fn seeded_fleet_live_full(
+        cap: usize,
+        anchor_bps: u64,
+        grant: usize,
+        holds_cap: u64,
+        auto: bool,
+    ) -> (Arc<Shared>, Vec<Arc<ConnTarget>>, Arc<LiveStats>) {
         let per = server_share(LINE_CAP_MAX_FLEET, 2);
         let targets: Vec<_> = (0..2)
             .map(|_| ConnTarget::new(server_share(cap, 2)))
@@ -1772,6 +2997,9 @@ mod tests {
             pc.connections = per;
             pc.live_target = Some(targets[i].clone());
             pc.line_cap_fleet = cap;
+            pc.line_cap_uncapped = grant / 2;
+            pc.holds_cap = holds_cap;
+            pc.line_cap_auto = auto;
         }
         let live = LiveStats::for_servers(&servers);
         for (_, pc) in servers.iter_mut() {
@@ -1890,7 +3118,13 @@ mod tests {
         let now = (2 * per_server as u64) * slow + (3 * per_server as u64) * fast;
         let mean = now / dialling as u64;
         assert_eq!(mean, 3_500_000, "the fleet's mean carry");
-        let got = fleet_for_supply(line, now, dialling, LINE_CAP_DEFAULT_FLEET);
+        let got = fleet_for_supply(
+            line,
+            now,
+            dialling,
+            LINE_CAP_DEFAULT_FLEET,
+            LINE_CAP_MAX_FLEET,
+        );
         let by_mean = line.div_ceil(mean) as usize;
         assert_eq!(
             got,
@@ -1908,6 +3142,7 @@ mod tests {
             (3 * per_server as u64) * fast,
             3 * per_server,
             LINE_CAP_DEFAULT_FLEET,
+            LINE_CAP_MAX_FLEET,
         );
         assert!(
             fast_only <= got,
@@ -1969,7 +3204,13 @@ mod tests {
         let ideal = line.div_ceil(carry) as usize;
         assert_eq!(ideal, 77, "the reporter's measured arithmetic");
         assert_eq!(
-            fleet_for_supply(line, carry * 25, 25, LINE_CAP_DEFAULT_FLEET),
+            fleet_for_supply(
+                line,
+                carry * 25,
+                25,
+                LINE_CAP_DEFAULT_FLEET,
+                LINE_CAP_MAX_FLEET
+            ),
             LINE_CAP_MAX_FLEET,
             "and the arm is held at the ceiling, not at 77"
         );
@@ -2009,7 +3250,13 @@ mod tests {
         // carry, same line, same answer.
         assert_eq!(
             seeded,
-            fleet_for_supply(line, carry * 25, 25, LINE_CAP_DEFAULT_FLEET),
+            fleet_for_supply(
+                line,
+                carry * 25,
+                25,
+                LINE_CAP_DEFAULT_FLEET,
+                LINE_CAP_MAX_FLEET
+            ),
             "the seed asks the in-run arm's own question"
         );
         assert_eq!(server_share(seeded, 5), 10, "10 a server, not 5");
@@ -2154,6 +3401,7 @@ mod tests {
                         max_source_ips: None,
                         address_family: Default::default(),
                         tls_hostname: None,
+                        warm_reserve: None,
                     },
                     PoolConfig {
                         line_cap_fleet: LINE_CAP_DEFAULT_FLEET,

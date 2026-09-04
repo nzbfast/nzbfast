@@ -81,28 +81,6 @@ pub(super) fn absolute_out_root(out_root: PathBuf) -> PathBuf {
     }
 }
 
-// Size paydown, same move giveup.rs made: the accessor lives with the
-// code that DECIDES what it reports. `resolve_tls_pair` below settles
-// the pair, `announce_ready` prints the matching banner scheme, and
-// daemon.rs was over its ceiling.
-impl Daemon {
-    /// The scheme THIS listener answers on, for every link we hand a
-    /// client. Bind-time state like `port`, and the pair is
-    /// both-or-neither (see `resolve_tls_pair`), so `tls_cert` decides.
-    ///
-    /// Links used to say `http` unconditionally, which a reverse proxy
-    /// could correct with `X-Forwarded-Proto` but a DIRECT TLS listener
-    /// could not: `/m3u`, `.strm` and the newznab items all pointed at
-    /// plaintext on a TLS-only socket and got a reset.
-    pub fn scheme(&self) -> &'static str {
-        if self.tls_cert.is_some() {
-            "https"
-        } else {
-            "http"
-        }
-    }
-}
-
 /// Both halves or neither: one file alone is a misconfiguration the
 /// user should hear about, but not one worth refusing to start over -
 /// the daemon they had yesterday still works, on plain HTTP.
@@ -516,6 +494,13 @@ pub(super) fn spawn_core_tasks(
     // and writing after a full pass began.
     let index_pass_gate = Arc::new(tokio::sync::Mutex::new(()));
 
+    // Local-only exact membership evidence from NZBs this daemon already
+    // accepted. It neither contacts a provider nor needs a reference
+    // indexer, so it stays live under NZBFAST_NO_ENRICH. Its commit shares
+    // the pass gate; manifest parsing happens before it tries the gate.
+    #[cfg(feature = "indexer")]
+    seed_harvest::spawn(daemon, &index_pass_gate);
+
     #[cfg(feature = "indexer")]
     tasks::spawn_index_scan(daemon, config, index_db, &index_pass_gate);
 
@@ -538,7 +523,7 @@ pub(super) fn spawn_core_tasks(
     // and scratch daemons must be able to keep it entirely off the
     // wire with one env var.
     #[cfg(feature = "indexer")]
-    if std::env::var_os("NZBFAST_NO_ENRICH").is_none() {
+    if crate::identity::may_call_out() {
         tasks::spawn_probe7z(daemon, config);
         // TODO 131 #6: the posted-NZB ingestion rung - same gate, for
         // the same reason (it fetches posted objects off the fleet).
@@ -548,7 +533,7 @@ pub(super) fn spawn_core_tasks(
     // TODO 131 red-team 5a: the pesto tiny-PAR2 naming rung. Same
     // wire-spend gate as the byte prober.
     #[cfg(feature = "indexer")]
-    if std::env::var_os("NZBFAST_NO_ENRICH").is_none() {
+    if crate::identity::may_call_out() {
         tasks::spawn_pesto(daemon, config);
     }
 
@@ -629,6 +614,11 @@ pub(super) fn spawn_core_tasks(
 /// workers, which need the TMDB key resolved first.
 pub(super) fn spawn_aux_tasks(daemon: &Arc<Daemon>, config: &Path) {
     tasks::spawn_update_checker(daemon);
+    // §310. Spawned unconditionally and gated INSIDE, on `heal_auto`,
+    // for the reason `spawn_index_scan` is: the switch is a live
+    // setting, so a spawn conditional on it here would mean turning the
+    // feature on needed a restart.
+    healauto::spawn_scheduled_heal(daemon);
     tasks::spawn_scheduled_bench(daemon, config);
     tasks::spawn_auto_connections(daemon, config);
     finish_action::spawn_finish_watcher(daemon);
@@ -1017,7 +1007,9 @@ fn build_daemon(
         queue: Mutex::new(VecDeque::new()),
         history: Mutex::new(Vec::new()),
         queue_rev: AtomicU64::new(1),
+        queue_pub: Mutex::new(Default::default()),
         history_rev: AtomicU64::new(1),
+        post_ids: Mutex::new(std::collections::HashMap::new()),
         hist_inflight: Mutex::new(std::collections::HashSet::new()),
         hist_rewrite_fail_ms: AtomicU64::new(0),
         life_seq: AtomicU64::new(0),
@@ -1028,6 +1020,8 @@ fn build_daemon(
         finish: Default::default(),
         save_soon: AtomicBool::new(false),
         save_wake: tokio::sync::Notify::new(),
+        #[cfg(feature = "indexer")]
+        seed_harvest_wake: tokio::sync::Notify::new(),
         saver_armed: AtomicBool::new(false),
         save_failed_at: AtomicU64::new(0),
         hooks_tx: Mutex::new(None),
@@ -1046,7 +1040,10 @@ fn build_daemon(
         // is a poll and a second read of every finished file in
         // exchange for no early file at all.
         early_file_publish: std::sync::atomic::AtomicBool::new(false),
-        write_manifest: std::sync::atomic::AtomicBool::new(false),
+        // §310, 2 Sep 2026. ON, and it ships in the same change as the
+        // tick that turns it off - see the field docs for why an off
+        // default made the whole section unreachable.
+        write_manifest: std::sync::atomic::AtomicBool::new(true),
         boot_at: Instant::now(),
         metrics_open: std::sync::atomic::AtomicBool::new(false),
         reserved: Mutex::new(std::collections::HashSet::new()),
@@ -1111,6 +1108,7 @@ fn build_daemon(
         post_health: std::sync::atomic::AtomicBool::new(true),
         post_health_defer: std::sync::atomic::AtomicBool::new(true),
         alt: Default::default(),
+        heal_auto: Default::default(),
         post_health_fail: std::sync::atomic::AtomicBool::new(false),
         auto_prefetch: std::sync::atomic::AtomicBool::new(true),
         race_stragglers: std::sync::atomic::AtomicBool::new(true),
@@ -1119,6 +1117,7 @@ fn build_daemon(
         index_deepen: AtomicU64::new(200_000),
         index_coverage: std::sync::atomic::AtomicBool::new(true),
         index_gapfill: AtomicU64::new(4),
+        index_fold_secs: AtomicU64::new(Daemon::FOLD_SECS_DEFAULT),
         index_probe7z: std::sync::atomic::AtomicBool::new(true),
         index_probe7z_budget: AtomicU64::new(150),
         index_pesto: std::sync::atomic::AtomicBool::new(true),
@@ -1179,6 +1178,10 @@ fn build_daemon(
         smart_folders: Mutex::new(Vec::new()),
         par_cleanup: AtomicBool::new(true),
         postproc_jobs: AtomicU64::new(2),
+        // TODO 313: OFF. See the field's own doc for what is owed
+        // before it could be anything else.
+        queue_spill: AtomicBool::new(false),
+        spill: crate::serve::spill::Governor::default(),
         slow_storage: Default::default(),
         pause_cost: Default::default(),
         // OFF unless asked for: a silent install keeps its modes (#20).
@@ -1201,19 +1204,11 @@ fn build_daemon(
         // settings replay over these below.
         identity_lookup: std::sync::atomic::AtomicBool::new(true),
         auto_rename: std::sync::atomic::AtomicBool::new(true),
-        rename_resolution: std::sync::atomic::AtomicBool::new(true),
-        rename_vcodec: std::sync::atomic::AtomicBool::new(false),
-        rename_acodec: std::sync::atomic::AtomicBool::new(false),
-        rename_source: std::sync::atomic::AtomicBool::new(false),
-        rename_group: std::sync::atomic::AtomicBool::new(false),
-        rename_year_parens: std::sync::atomic::AtomicBool::new(legacy_rename_punctuation),
-        rename_quality_brackets: std::sync::atomic::AtomicBool::new(legacy_rename_punctuation),
-        rename_extra_words: std::sync::atomic::AtomicBool::new(true),
-        rename_identify: std::sync::atomic::AtomicBool::new(true),
-        // Off by default, alone among the rename sub-settings: it
-        // changes filenames an existing install already wrote, and an
-        // *arr's import matcher is reading those. See the field docs.
-        rename_episode_titles: std::sync::atomic::AtomicBool::new(false),
+        // The thirteen `rename_*` switches moved into `RenameSettings`
+        // for this function's 500-line ceiling; their defaults and the
+        // reasons for them are on `RenameSettings::new`. The settings
+        // API keys did not move.
+        rename: crate::serve::daemon::RenameSettings::new(legacy_rename_punctuation),
         history_rows: AtomicU64::new(10),
         history_color_names: std::sync::atomic::AtomicBool::new(true),
         ladder_live: Mutex::new(None),
@@ -1223,7 +1218,6 @@ fn build_daemon(
         preview_busy: std::sync::atomic::AtomicBool::new(false),
         media_chip_color: std::sync::atomic::AtomicBool::new(true),
         shape_chip_color: std::sync::atomic::AtomicBool::new(true),
-        rename_junk: std::sync::atomic::AtomicBool::new(true),
         // Default OFF, where SABnzbd's equivalent is on. Skipping is
         // irreversible within the job - the bytes are gone from the
         // wire, and a wrong call cannot be undone by a later pass -
@@ -1232,8 +1226,6 @@ fn build_daemon(
         // costs a teaser's worth of bandwidth and nothing else; turning
         // it on trades that for the risk a name always carries.
         skip_samples: std::sync::atomic::AtomicBool::new(false),
-        rename_media_only: std::sync::atomic::AtomicBool::new(false),
-        rename_from_nzb: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "indexer")]
         index_max_age_secs: AtomicU64::new(index_max_age_secs),
         #[cfg(not(feature = "indexer"))]
@@ -1251,42 +1243,15 @@ fn build_daemon(
         // Pre feed: OFF unless the user has explicitly saved it on. A
         // missing key, a null, or a non-bool all land here - there is no
         // path that opens an outbound IRC connection by accident.
-        predb_enabled: seed_predb_enabled(&settings_path),
-        predb_server: seed_predb_server(&settings_path),
-        predb_channels: seed_predb_channels(&settings_path),
-        predb_nick: seed_predb_nick(&settings_path),
-        #[cfg(feature = "indexer")]
-        predb_pending: Mutex::new(Vec::new()),
-        predb_status: Mutex::new(String::new()),
+        predb: seeded_predb(&settings_path),
         // Correlation: same explicit-opt-in contract as the feed. Both
         // default OFF; a missing key never turns an inference engine on.
-        predb_corr_enabled: seed_predb_corr_enabled(&settings_path),
-        predb_corr_auto: seed_predb_corr_auto(&settings_path),
-        #[cfg(feature = "indexer")]
-        predb_max_rows: std::sync::atomic::AtomicU64::new(predb_seed::PREDB_MAX_ROWS_DEFAULT),
-        #[cfg(feature = "indexer")]
-        predb_seed_days: std::sync::atomic::AtomicU64::new(predb_seed::PREDB_SEED_DAYS_DEFAULT),
-        #[cfg(not(feature = "indexer"))]
-        predb_seed_days: std::sync::atomic::AtomicU64::new(180),
-        #[cfg(feature = "indexer")]
-        predb_seed_running: std::sync::atomic::AtomicBool::new(false),
-        #[cfg(feature = "indexer")]
-        predb_seed_status: Mutex::new(String::new()),
         // Parity scoreboard: OFF and sourceless unless the user saved
         // their own reference indexer. No path samples anybody's API by
         // accident, and no key or URL ever ships as a constant.
-        scoreboard_enabled: seed_scoreboard_enabled(&settings_path),
-        scoreboard_url: seed_scoreboard_url(&settings_path),
-        scoreboard_source: seed_scoreboard_source(&settings_path),
+        scoreboard: seeded_scoreboard(&settings_path),
         corr_confirm_enabled: seed_corr_confirm_enabled(&settings_path),
         corr_confirm_source: seed_corr_confirm_source(&settings_path),
-        scoreboard_cats: seed_scoreboard_cats(&settings_path),
-        scoreboard_key: seed_scoreboard_key(&settings_path),
-        scoreboard_calibrate: seed_scoreboard_calibrate(&settings_path),
-        #[cfg(feature = "indexer")]
-        scoreboard_running: std::sync::atomic::AtomicBool::new(false),
-        #[cfg(feature = "indexer")]
-        scoreboard_status: Mutex::new(String::new()),
         // Spots are new, so there is no existing-install case to seed
         // from: nobody has one running today. Straight off until asked.
         spot_enabled: seed_spot_enabled(&settings_path),
@@ -1372,6 +1337,7 @@ fn build_daemon(
         watch_dir: Mutex::new(watch),
         watch_keep_nzb: AtomicBool::new(false),
         refeed_nzb: AtomicBool::new(false),
+        script_confined: AtomicBool::new(true),
         watch_recursive: AtomicBool::new(false),
         watch_move_rejected: AtomicBool::new(false),
         watch_failed: Mutex::new(std::collections::HashMap::new()),

@@ -21,176 +21,18 @@ mod custom_category_tests;
 #[cfg(test)]
 mod gen_split_tests;
 
-/// Is this stem obfuscation-SHAPED - a hash, a blob, a string that
-/// carries no semantic content? This is deliberately narrower than
-/// "junk_score >= 70": Kind::Other also scores 70 for stems that are
-/// unparseable yet perfectly readable ("misfits-wegedeutschensd"), and
-/// the correlation population gate must not guess a name for a post
-/// that already SHOWS one (red-team 10 Aug 2026: junk>=70 alone is not
-/// "obfuscated"). Extracted verbatim from junk_score so the two can
-/// never drift.
-pub fn stem_obfuscated(stem: &str, p: &crate::release::Parsed) -> bool {
-    // Hash/blob names - parse_release can still guess a Kind for these,
-    // so ask the obfuscation detector directly (sans a short extension
-    // token, which would break its all-token rules).
-    let bare = bare_stem(stem);
-    if crate::release::looks_obfuscated(bare) {
-        return true;
-    }
-    // Multi-token blobs the single-token detector misses
-    // ("NGKzwg4lCQF_vMr95eoDx2X9NxbLi", "[ff63de8461]_[newzNZB]_…"):
-    // a mixed-case-with-digits token ≥8 chars, or a ≥10-char hex run,
-    // is no word from any title - but only damn a stem that parsed NO
-    // real structure (year/season/resolution), so scene names with
-    // hashes next to real markers survive.
-    if p.year.is_none() && p.season.is_none() && p.res.is_none() {
-        let blobbish = |t: &str| {
-            let (up, lo, di) = t.chars().fold((false, false, false), |(u, l, d), c| {
-                (
-                    u || c.is_ascii_uppercase(),
-                    l || c.is_ascii_lowercase(),
-                    d || c.is_ascii_digit(),
-                )
-            });
-            (t.len() >= 8 && t.chars().all(|c| c.is_ascii_alphanumeric()) && up && lo && di)
-                || (t.len() >= 10 && di && t.chars().all(|c| c.is_ascii_hexdigit()))
-                // Scattered internal caps, no digits ("gUSbVwIDqhrR") -
-                // same signal as the single-token detector, per token.
-                || (t.len() >= 9
-                    && t.chars().all(|c| c.is_ascii_alphabetic())
-                    && t.chars().skip(1).filter(|c| c.is_ascii_uppercase()).count() >= 3)
-        };
-        if bare
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(blobbish)
-            // Nothing but digits and separators ("12895-1.11").
-            || !bare.chars().any(|c| c.is_ascii_alphabetic())
-        {
-            return true;
-        }
-    }
-    false
-}
+// The strip lives beside the detector it feeds - `crate::junk` takes its
+// own `use crate::release::bare_stem;` - so the picks and the claims
+// apply-gate cannot drift apart; see `release::stem_is_a_name`. The
+// `pub(super) use` that stood here went with the scorer at the
+// nzbkit-base cut: `index::scoreboard` was its last in-crate reader and
+// it names `crate::release::bare_stem` directly.
 
-/// The strip now lives beside the detector it feeds, so the picks and
-/// the claims apply-gate cannot drift apart again - see
-/// `release::stem_is_a_name`. Re-exported because the byte-probe picks
-/// reach it as `super::ingest::bare_stem`.
-pub(super) use crate::release::bare_stem;
-
-pub fn junk_score(stem: &str, p: &crate::release::Parsed, total_bytes: u64, has_exe: bool) -> i64 {
-    use crate::release::Kind;
-    let bare = bare_stem(stem);
-    let mut s: i64 = match p.kind {
-        // Unparseable stems.
-        Kind::Other => 70,
-        // Keygen/crack/app-spam markers.
-        Kind::Software => 55,
-        _ => 0,
-    };
-    if stem_obfuscated(stem, p) {
-        s = s.max(70);
-    }
-    // junk_v6: evidence-free "media". A real scene/P2P post virtually
-    // always carries at least one technical marker (year, S/E, res,
-    // source, codec, remux). A media extension on bare words
-    // ("aula.mp4", "misfits-wegedeutschensd") is a course rip, personal
-    // file, or spam - nothing an indexer would list. The trailing
-    // -group token deliberately does NOT count as evidence: any
-    // "words-blob" name grows one for free.
-    let no_evidence = p.year.is_none()
-        && p.season.is_none()
-        && p.episode.is_none()
-        && p.res.is_none()
-        && p.source.is_none()
-        && p.vcodec.is_none()
-        && p.acodec.is_none()
-        && !p.remux;
-    if no_evidence && matches!(p.kind, Kind::Movie | Kind::Tv) {
-        s = s.max(60);
-    }
-    // junk_v6: numbered-lecture prefix ("003 - Estômago.mp4",
-    // "056 - Ortografia II") - course/track dumps open with a short
-    // track number; scene names never start "NNN - ". Fires even when a
-    // stray year parses later in the name, but never on anything that
-    // parsed a season/episode.
-    if p.season.is_none() && p.episode.is_none() {
-        let t = bare.trim_start();
-        let nd = t.chars().take_while(|c| c.is_ascii_digit()).count();
-        if (1..=3).contains(&nd) && t[nd..].trim_start_matches(' ').starts_with("- ") {
-            s = s.max(60);
-        }
-    }
-    // junk_v6: leading bracketed pure-hex tag ("[a1911f7bca]_[newzNZB]_
-    // name") - repost-bot spam whose inner name looks real and would
-    // otherwise pollute a genuine title's card. Anime subgroup brackets
-    // ("[SubsPlease]") are words, not hex, and survive.
-    if let Some(rest) = bare.strip_prefix('[')
-        && let Some(end) = rest.find(']')
-    {
-        let tag = &rest[..end];
-        if tag.len() >= 8 && tag.chars().all(|c| c.is_ascii_hexdigit()) {
-            s = s.max(60);
-        }
-    }
-    // junk_v6: a parsed MOVIE claiming HD on a sub-200 MB post is spam
-    // or a fake repost - a real 720p+ feature is never that small.
-    // Mid-uploads shed this as their parts arrive (scores recompute on
-    // every ingest touch). TV is exempt: short-form episodes can be
-    // legitimately tiny.
-    if matches!(p.kind, Kind::Movie)
-        && p.res.is_some()
-        && total_bytes > 0
-        && total_bytes < 200 << 20
-    {
-        s = s.max(55);
-    }
-    // Media-shaped title on a tiny post: indexer spam or nfo-only. A
-    // parsed movie/episode name claiming <10 MB is never the media
-    // itself - hide it outright (55 crosses the default-50 line). A
-    // custom category is exempt in BOTH directions: its payloads can be
-    // legitimately tiny (comics, podcasts), so tiny is not evidence of
-    // anything there. Books and music are exempt for the same reason and
-    // it is not a nicety: an epub is about a megabyte and a single
-    // track a few, so scoring them by film sizes would have hidden the
-    // whole lane the moment the parser started producing it.
-    if total_bytes > 0 && total_bytes < 10 << 20 {
-        s = match p.kind {
-            Kind::Movie | Kind::Tv => s.max(55),
-            Kind::Custom(_) | Kind::Music | Kind::Book => s,
-            _ => s + 40,
-        };
-    }
-    // Furniture posted as its own "release": nfo/srr/sfv/sample/subs
-    // riding a real release's name. These filled the newest-first list
-    // with 0.00 GB rows no indexer site would show.
-    let lower = stem.to_ascii_lowercase();
-    const FURNITURE: [&str; 8] = [
-        ".nfo", ".srr", ".sfv", ".nzb", ".idx", ".sub", ".srt", ".sample",
-    ];
-    if FURNITURE.iter().any(|e| lower.ends_with(e)) {
-        s = s.max(60);
-    }
-    // "sample"/"proof" as a NAME token is only furniture when the post is
-    // sample-SIZED (M32: name-only matching wrongly damns
-    // full releases with 'sample' in the title). Real samples are tens of
-    // MB; past 300 MB the token is part of a title, not a role.
-    if total_bytes < 300 << 20
-        && lower
-            .split(['.', '_', '-', ' '])
-            .any(|t| t == "sample" || t == "proof")
-    {
-        s = s.max(60);
-    }
-    // M32 (Prowlarr#2329): an executable riding a media-shaped release is
-    // the classic malware shape - no legitimate movie/episode/music post
-    // carries an .exe. Software releases legitimately do, so only their
-    // Kind escapes the hammer.
-    if has_exe && !matches!(p.kind, Kind::Software) {
-        s = s.max(85);
-    }
-    s.min(100)
-}
+// The junk scorer itself is `crate::junk` since the nzbkit-base cut: it is
+// a pure function over a stem and its `release::Parsed`, and `release`'s own
+// test table pins it. Re-exported here so `nzbkit::index::junk_score` and
+// every `super::ingest::` path inside the indexer are unchanged.
+pub use crate::junk::{junk_score, stem_obfuscated};
 
 /// `… "name" yEnc (n/m)` → (subject minus counter, n, m).
 ///
@@ -200,6 +42,16 @@ pub fn junk_score(stem: &str, p: &crate::release::Parsed, total_bytes: u64, has_
 /// returned None, every part collapsed to (1,1), and a 50-part file
 /// indexed as one segment yet counted "complete".
 pub fn split_subject(subject: &str) -> Option<(String, u32, u32)> {
+    split_subject_at(subject).map(|(base, n, m, _)| (base, n, m))
+}
+
+/// [`split_subject`], plus the BYTE OFFSET of the bracket it consumed.
+///
+/// The offset is what tells a leading session tag from a trailing part
+/// counter, and only the offset can: the two are indistinguishable by
+/// value, because `[1/3] "x.mkv" yEnc (1/3)` carries the same pair
+/// twice and a value test reads the trailing counter as the tag.
+pub fn split_subject_at(subject: &str) -> Option<(String, u32, u32, usize)> {
     let opens: Vec<(usize, char, char)> = subject
         .char_indices()
         .filter_map(|(i, c)| match c {
@@ -227,9 +79,17 @@ pub fn split_subject(subject: &str) -> Option<(String, u32, u32)> {
         let mut base = String::new();
         base.push_str(subject[..open].trim_end());
         base.push_str(subject[close + close_ch.len_utf8()..].trim_end());
-        return Some((base, n, m));
+        return Some((base, n, m, open));
     }
     None
+}
+
+/// Is the pair at byte offset `open` the subject's LEADING one - the
+/// posting-session tag rather than a part counter?
+fn pair_is_leading(subject: &str, open: usize) -> bool {
+    subject
+        .find(|c| !char::is_whitespace(c))
+        .is_some_and(|first| first == open)
 }
 
 /// The posting-session tag: a subject that OPENS with `[37/209]` (or
@@ -330,6 +190,29 @@ pub fn quoted_name(s: &str) -> Option<String> {
 /// One clustered file of a batch: its `(x/y)` total and its parts,
 /// numbered part → (message-id, bytes).
 type ClusterFiles = HashMap<String, (u32, BTreeMap<u32, (String, u64)>)>;
+
+/// What one ingest pass makes of a batch of articles in memory, before
+/// it opens a transaction: the clusters themselves, the four per-cluster
+/// side-tables, and the two ledgers of what could not be placed.
+///
+/// A struct rather than seven returned values, because
+/// [`Index::cluster_batch`] is the seam [`Index::ingest_pass`] was split
+/// at and all seven cross it.
+struct Clustered {
+    /// (poster, stem) -> filename -> (total, parts: number -> (msgid, bytes)).
+    clusters: HashMap<(String, String), ClusterFiles>,
+    /// Earliest article Date per cluster - the release's upload time.
+    posted: HashMap<(String, String), i64>,
+    /// Pesto family: decoded counter range + earliest clock per cluster.
+    pesto: HashMap<(String, String), (i64, i64, i64)>,
+    /// Posting-session tag: the leading "[037/209]" file-of-session marker.
+    sess: HashMap<(String, String), (i64, i64)>,
+    /// Articles this pass refuses to place - see [`Index::ingest`].
+    deferred: Vec<OverEntry>,
+    /// Per-slot deferral ledger, for the generation-depth census.
+    slot_gen: SlotGens,
+    drops: DropCensus,
+}
 
 /// Fold one batch's parts into the parts a `files` row already holds,
 /// keeping the LARGER byte count for a part BOTH of them carry.
@@ -459,9 +342,27 @@ fn contradicts(existing: &ExistingFiles, files: &ClusterFiles) -> bool {
 }
 
 /// How many generation-marked siblings of one triple are ever
-/// considered. A backstop, not a policy: the marked namespace holds the
-/// reposts of ONE name by ONE poster in ONE group, so reaching this
-/// would itself be the anomaly.
+/// considered.
+///
+/// "A backstop, not a policy - reaching this would itself be the
+/// anomaly" stood here until 1 Sep 2026, and was wrong in the same way
+/// [`MAX_GEN_PASSES`]'s contract was, for the same reason. Measured over
+/// 21 h of live daemon log: **811,828 postings dropped at this cap in
+/// 15,759 events, 99.5% of them alt.binaries.teevee**. The shape is in
+/// the per-event rate - moovee/movies/tv drop 1.0-1.3 postings per
+/// event, which IS the backstop this comment described; teevee drops
+/// 63.0, and its hourly count tracks the [`MAX_GEN_PASSES`] overflow at
+/// Pearson r = 0.914 over 23 hourly buckets. One phenomenon, two caps.
+///
+/// The marked namespace does not hold "the reposts of one name by one
+/// poster in one group": the key is a digest of the BATCH's own lowest
+/// message-ids (see `pick_release_row`), so a reinjection flood that
+/// presents a different msgid set every window mints a different
+/// sibling every window. That is what puts the families past this cap
+/// that [`pick_release_row`] counts and dates, and why the exact-home
+/// probe below exists. The count is kept in that one place on purpose:
+/// it has already more than doubled once, and a second copy here would
+/// be the copy that goes stale.
 const MAX_GEN_SIBLINGS: i64 = 16;
 
 /// Every release row this batch's triple could mean: the plain-poster
@@ -684,7 +585,16 @@ enum RowPick {
 /// index (14 Aug 2026): 6.5M marked rows, 166k families past the cap,
 /// one family at 2,730 rows - flood bots reinject the same posting
 /// under fresh message-ids, which this key treats as a new generation
-/// every time. Past the cap the cluster is dropped instead, but only
+/// every time. Re-measured 1 Sep 2026: 7,366,437 marked rows (32.78% of
+/// the index) and 346,779 families at or past the cap, 2.1x the 14 Aug
+/// figure - the flood did not abate, and this cap is what stands in it.
+/// "At or past" is as sharp as that count can be:
+/// `research/GEN-ROW-DEPTH-CENSUS-2026-09-01.md` measures stored family
+/// depth as TRUNCATED at exactly 17 by this cap (2 families in 15.1M
+/// exceed it), so the depth a flood actually reaches - 133 to 850,
+/// dumped from memory during ingest - is not recorded anywhere and
+/// cannot be recovered from the index.
+/// Past the cap the cluster is dropped instead, but only
 /// after one exact lookup of the batch's own marked key: no row of its
 /// own can be minted, and dropping is right only when no EXISTING row
 /// is its exact home. A family already past the cap has siblings the
@@ -748,8 +658,9 @@ fn pick_release_row(
         // The cap stops new rows being MINTED; it was never meant to
         // stop an existing row being FED. `gen_candidates` cuts at
         // MAX_GEN_SIBLINGS in poster order, so on a family already past
-        // the cap - 166k of them on the live index, plus anything the
-        // uncapped spot minting site pushes over - this batch's own
+        // the cap - hundreds of thousands of them, counted and dated at
+        // `pick_release_row`, plus anything the uncapped spot minting
+        // site pushes over - this batch's own
         // deterministic home can sort outside the window and never be
         // offered for adoption. Before the fix that row was invisible
         // and the cluster was dropped on every scan, forever: a second
@@ -802,12 +713,611 @@ fn pick_release_row(
 }
 
 /// How many times [`Index::ingest`] re-drives its own leftovers before
-/// giving up on a batch. Three generations of one release inside a
-/// single OVER window is already beyond anything observed; past that the
-/// articles are dropped and re-arrive on the next scan of the window.
+/// giving up on a batch, and so the most generations of one release a
+/// single OVER window can contribute.
+///
+/// "Three generations inside one window is beyond anything observed"
+/// stood here until 1 Sep 2026 and was wrong by a factor of ~45.
+/// Measured on live `alt.binaries.teevee` traffic, 25,000-header
+/// windows: **194 distinct (poster, file, part) slots carrying 133-134
+/// distinct message-ids each** - a reinjection flood, the same shape
+/// [`MAX_GEN_SIBLINGS`] was raised against on 14 Aug 2026. So this cap
+/// is load-bearing on ordinary production traffic, not the
+/// untrusted-input backstop the old comment claimed, and 91% of a
+/// teevee window defers on the first pass.
+///
+/// Raising it is the wrong lever twice over: draining a 134-deep slot
+/// needs ~134 passes (each pass places exactly one article per slot -
+/// measured leftover series `[25000, 23257, 23058, 22862, 22668]`,
+/// shrinking by the 194-slot count every time), and every pass past the
+/// first mints another marked generation row for a copy that carries no
+/// article the index does not already hold. Full measurement:
+/// `research/TEEVEE-GENERATION-PASS-DROPS-2026-09-01.md`.
 const MAX_GEN_PASSES: u32 = 4;
 
+/// How many articles one [`Index::ingest`] call should carry.
+///
+/// A caller that has fetched MORE than this - the deepen scan asks the
+/// wire for up to 100,000 headers in one OVER when the fan-out is a
+/// single connection - should ingest in `entries.chunks(INGEST_BATCH)`
+/// rather than hand the whole fetch over at once. The fetch size and the
+/// ingest size are separate decisions that want opposite answers: on the
+/// wire a lone connection reads 82-95k headers/s at 100k ranges against
+/// 31-54k/s at 10k, so big is right there; in `ingest` big is wrong.
+///
+/// Measured 3 Sep 2026 on `crates/nzbkit/examples/indexscan_bench`
+/// (400,000 headers, four sizes interleaved, three rounds, median):
+///
+/// | batch | instructions/header | max RSS | transaction p50 | p90 | max |
+/// |---|---|---|---|---|---|
+/// | 10,000 | 207,239 | 140 MB | 242 ms | 405 ms | 657 ms |
+/// | 20,000 | 203,146 | 151 MB | 533 ms | 715 ms | 821 ms |
+/// | 50,000 | 200,295 | 178 MB | 1,350 ms | 1,630 ms | 2,620 ms |
+/// | 100,000 | 198,860 | 218 MB | 2,660 ms | 3,410 ms | 4,140 ms |
+///
+/// A bigger batch buys 4.0% of instructions and costs 11x the hold, plus
+/// 55% more RSS. The CPU saving is real, monotonic and tiny; the hold is
+/// neither. `ingest` runs its passes in a transaction, and the scan's
+/// `Index::open_scratch` connection is not the daemon's, so that hold is
+/// a SQLite WRITE-LOCK hold every other connection waits out against a
+/// 10 s `busy_timeout` - a 4.14 s transaction spends 41% of that budget
+/// in one call. It is the stall in memory topic
+/// `nzbfast-tail-blocked-on-index-mutex`, priced.
+///
+/// 20,000 rather than 10,000 because it is what the rest of the engine
+/// already picked independently - the gapfill leg's `CHUNK` and the tip
+/// walker's `TIP_CHUNK` are both 20,000 - so this makes the deepen pass
+/// agree with its neighbours instead of minting a third number, and it
+/// keeps three quarters of the instruction saving.
+///
+/// # This changes generation outcomes on reposted traffic, deliberately
+///
+/// [`Index::ingest`]'s generation split resolves a second posting of the
+/// same (file, part) slot WITHIN a batch, under a budget of
+/// [`MAX_GEN_PASSES`] passes; articles past that budget are dropped and
+/// re-arrive on a later scan. The budget is PER BATCH, so regrouping the
+/// same header stream changes both how many articles the budget drops
+/// and the `POSTER_GEN_MARK` suffix of any generation row it mints
+/// (that suffix is a digest of the batch's own lowest message-ids, so it
+/// is a function of what the batch carries, by design).
+///
+/// Measured on 600,000 headers at a 25% repost rate, the same stream at
+/// three batch sizes - every one of which the SHIPPED code already
+/// reaches today, because `scan_pass` picks `(100_000 / nconn)` and
+/// `nconn` follows the user's connection count:
+///
+/// | batch | reached today at | releases | files | msgid_map | gen-depth drops |
+/// |---|---|---|---|---|---|
+/// | 10,000 | nconn 10 (turbo) | 86,856 | 93,475 | 107,301 | 936 |
+/// | 20,000 | nconn 5 (default) | 86,850 | 93,428 | 107,161 | 2,808 |
+/// | 100,000 | nconn 1 (one server) | 86,838 | 93,291 | 106,757 | 12,182 |
+///
+/// So the row set is ALREADY a function of a setting in the UI: a
+/// single-server install drops 13x more articles than a ten-connection
+/// one on an identical stream. Pinning ingest here does not introduce
+/// that variance, it REMOVES it - the generation outcome stops depending
+/// on the fan-out - and it lands on the end of the range that keeps more
+/// articles. On traffic with no repost in the window the regrouping is
+/// inert: 600,000 headers dumped at 100,000 and at 20,000 differ in one
+/// `kv` row, `ingest_drop_since`, which is a `SystemTime::now()` stamp
+/// that differs between any two runs of any binary.
+///
+/// Full record: `research/INDEXER-SCAN-CPU-AUDIT-2026-09-03.md`.
+pub const INGEST_BATCH: usize = 20_000;
+
+/// The generation pass loop's state for one batch: how many passes
+/// remain AFTER the current one, and the running census of articles the
+/// loop dropped because their slot is deeper than it can place.
+#[derive(Default)]
+struct GenPasses {
+    /// Passes still to come after this one. A slot can gain at most one
+    /// article per pass, so this is exactly how many more of a slot's
+    /// contradicting articles are worth carrying; at 0 the last pass is
+    /// running and a deferral has nowhere left to go.
+    budget: u32,
+    /// Articles dropped for being past `budget` in their slot.
+    dropped: u64,
+    /// Articles seen for the single deepest (cluster, file, part) slot -
+    /// the flood-depth number, and the one worth reading.
+    deepest: usize,
+    /// This batch's slot-depth distribution - see [`GenDepthCensus`].
+    /// Instrumentation only; nothing here is read by the pass loop.
+    depth: GenDepthCensus,
+    /// FIRST pass only: each clashing cluster to the depth of its
+    /// SHALLOWEST clashing slot, carried across the passes so a
+    /// generation row minted in pass 2, 3 or 4 can be filed under the
+    /// depth the whole window really presented. A later pass sees only
+    /// the leftovers, where every slot is at most `MAX_GEN_PASSES`
+    /// deep, so its own ledger cannot answer that. Only clashing
+    /// clusters get an entry, so an ordinary batch never allocates.
+    floor: HashMap<(String, String), usize>,
+}
+
+impl GenPasses {
+    /// Is the FIRST pass running? `budget` is `MAX_GEN_PASSES - pass`,
+    /// so this is the pass that sees the batch entire - the only one
+    /// whose slot ledger holds a window's true depth, and the one whose
+    /// row a depth cutoff would keep rather than decline.
+    fn first_pass(&self) -> bool {
+        self.budget + 1 == MAX_GEN_PASSES
+    }
+
+    /// Fold the FIRST pass's slot ledger into the census, ignoring
+    /// every later one - a later pass sees only leftovers and would
+    /// count the same slots again at a shallower depth. Called AFTER
+    /// the clustering loop rather than inside it: only slots that
+    /// actually clashed have an entry, so this walks hundreds where the
+    /// loop walks tens of thousands.
+    ///
+    /// Depth is `1 + distinct deferred ids + articles dropped` - the
+    /// same quantity `defer_fits_budget` folds into `deepest`, and it
+    /// carries the same stated limit: a repeat of an id that was already
+    /// dropped counts twice, so a window that re-presents the same
+    /// message-id past the budget reads one deeper than it is. Live
+    /// message-ids inside one window are unique, so this is a
+    /// hostile-input caveat rather than a measurement error.
+    fn observe_slots(&mut self, slots: &SlotGens) {
+        if !self.first_pass() {
+            return;
+        }
+        for ((cluster, _, _), (kept, dropped)) in slots {
+            let depth = 1 + kept.len() + dropped;
+            self.depth.slots[gen_depth_bucket(depth)] += 1;
+            let floor = self.floor.entry(cluster.clone()).or_insert(depth);
+            *floor = (*floor).min(depth);
+        }
+    }
+
+    /// File one freshly minted generation row under its cluster's
+    /// shallowest first-pass slot depth.
+    ///
+    /// Passes 2+ only: pass 1's row is the one a depth cutoff would
+    /// KEEP, so counting it would overstate the policy by one row per
+    /// clashing cluster. A cluster with no first-pass entry never
+    /// clashed and is not a generation this census is about - which is
+    /// also why the key is only built after those two tests.
+    fn note_gen_row(&mut self, poster: &str, stem: &str) {
+        if self.first_pass() || self.floor.is_empty() {
+            return;
+        }
+        if let Some(&depth) = self.floor.get(&(poster.to_string(), stem.to_string())) {
+            self.depth.rows[gen_depth_bucket(depth)] += 1;
+        }
+    }
+}
+
+/// One [`Index::ingest_pass`]'s per-slot deferral ledger: a (cluster,
+/// file, part) slot to the distinct message-ids it has already deferred
+/// and the count it dropped outright.
+type SlotGens =
+    HashMap<((String, String), String, u32), (std::collections::HashSet<String>, usize)>;
+
+/// Can this contradicting article still reach a row from this batch?
+///
+/// A pass places exactly ONE article per (cluster, file, part) slot, so
+/// with `gp.budget` passes left after this one, only that many more of
+/// the slot's contradicting articles can ever be placed. Everything past
+/// that is provably unplaceable, and answering `false` drops it in the
+/// pass that can prove it rather than carrying it through every
+/// remaining pass to be dropped at the end - the same articles placed
+/// and the same articles dropped, without the passes. Measured on
+/// teevee, 22,463 of 23,257 leftovers now go in the first pass rather
+/// than the fourth.
+///
+/// Distinct ids, not articles: a repeat of an already-deferred id is
+/// free, because the next pass writes it into the slot it just filled.
+fn defer_fits_budget(
+    slots: &mut SlotGens,
+    slot: ((String, String), String, u32),
+    msgid: &str,
+    gp: &mut GenPasses,
+) -> bool {
+    let seen = slots.entry(slot).or_default();
+    let idn = norm_msgid(msgid);
+    let fits = seen.0.contains(idn) || seen.0.len() < gp.budget as usize;
+    if fits {
+        seen.0.insert(idn.to_string());
+    } else {
+        seen.1 += 1;
+    }
+    gp.deepest = gp.deepest.max(1 + seen.0.len() + seen.1);
+    fits
+}
+
+/// The generation-depth census's buckets: the LOW bound of each, with
+/// the label its `kv` key carries. Labels are zero-padded low bounds so
+/// a plain `ORDER BY k` over the census sorts by depth rather than
+/// putting `1025_up` between `0009_0012` and `0013_0016`.
+///
+/// Log-ish, but singleton up to 8 and quartered to 32, because that is
+/// where the decision lives: the prior from the stored (truncated) index
+/// is ordinary reposts at depth 2-3 and floods at 133-850, so a cutoff
+/// is going to be argued somewhere in 5..32 and a reader must be able to
+/// price each candidate exactly. A cutoff at any bucket's low bound is
+/// answered EXACTLY by summing that bucket and every one above it; a
+/// cutoff at some other N (say 20) is bracketed, not answered.
+const GEN_DEPTH_BUCKETS: [(usize, &str); 17] = [
+    (2, "0002"),
+    (3, "0003"),
+    (4, "0004"),
+    (5, "0005"),
+    (6, "0006"),
+    (7, "0007"),
+    (8, "0008"),
+    (9, "0009_0012"),
+    (13, "0013_0016"),
+    (17, "0017_0024"),
+    (25, "0025_0032"),
+    (33, "0033_0064"),
+    (65, "0065_0128"),
+    (129, "0129_0256"),
+    (257, "0257_0512"),
+    (513, "0513_1024"),
+    (1025, "1025_up"),
+];
+
+/// Which [`GEN_DEPTH_BUCKETS`] entry a slot depth falls in. Depth is
+/// never below 2 here - a slot only gets a ledger entry when a second,
+/// contradicting article arrives for it - so the floor is bucket 0.
+fn gen_depth_bucket(depth: usize) -> usize {
+    GEN_DEPTH_BUCKETS
+        .iter()
+        .rposition(|(lo, _)| depth >= *lo)
+        .unwrap_or(0)
+}
+
+/// How deep the generation slots in one batch were, and what it cost.
+///
+/// Stage 1 of the generation-row policy (1 Sep 2026): pure
+/// instrumentation, and the ONLY way the question can be answered.
+/// `MAX_GEN_SIBLINGS` truncates stored family depth at exactly 17
+/// (`research/GEN-ROW-DEPTH-CENSUS-2026-09-01.md`), so the depths a
+/// flood really reaches - 133 to 850 for one (poster, file, part) slot
+/// inside one 25,000-header window - exist only in memory during ingest
+/// and are in no stored row. A depth-N cutoff therefore cannot be
+/// backtested; it can only be costed on forward traffic, here.
+///
+/// NOT a drop census, and deliberately NOT under the `ingest_drop_`
+/// prefix that `DropCensus` writes and `Index::ingest_drop_census`
+/// scans, for two reasons. `rows` counts generation rows MINTED, which
+/// is the opposite of a drop and would be classified as one by any
+/// prefix reader; and this census is group x bucket, so it is up to a
+/// few hundred keys, which would swamp that reader's unclassified
+/// bucket. Read it with sqlite3 (see the module tests) until somebody
+/// needs a surface, and note the near-rhyme with the existing
+/// `ingest_drop_gen_depth`, which is a genuine drop counter for
+/// articles this arm refuses.
+///
+/// TWO QUANTITIES, and whoever picks the cutoff wants the second.
+///
+/// * `slots` counts (cluster, file, part) SLOTS at a depth. It answers
+///   the safety half - does depth separate a flood from an ordinary
+///   repost, per group - which needs a distribution and not a total.
+/// * `rows` counts generation-marked rows the batch actually MINTED,
+///   filed under the bucket of the SHALLOWEST clashing slot in their
+///   cluster. That is exactly "rows a depth-N cutoff would decline":
+///   a row is minted per cluster per pass, and a cutoff at N stops a
+///   cluster reaching pass 2 only when EVERY one of its clashing slots
+///   is at depth >= N, because a slot below the cutoff still defers and
+///   still carries the cluster forward. Filing by the deepest slot
+///   instead would over-count a mixed cluster.
+///
+/// Rows are counted where they are minted rather than derived from
+/// depth, which matters on this index: a family already at
+/// `MAX_GEN_SIBLINGS` mints nothing at all (`RowPick::Saturated`), so
+/// the arithmetic `min(depth, MAX_GEN_PASSES) - 1` would price a cutoff
+/// well above what it would really reclaim.
+#[derive(Default)]
+struct GenDepthCensus {
+    slots: [u64; GEN_DEPTH_BUCKETS.len()],
+    rows: [u64; GEN_DEPTH_BUCKETS.len()],
+}
+
+/// The prefix every generation-depth counter shares, and the epoch the
+/// readout dates them by. One copy, read by both the writer below and
+/// [`Index::gen_depth_census`] - a second spelling of a key is a census
+/// that silently reports nothing.
+pub(crate) const GEN_DEPTH_KEY_PREFIX: &str = "ingest_gen_depth_census_";
+pub(crate) const GEN_DEPTH_SINCE_KEY: &str = "ingest_gen_depth_census_since";
+
+impl GenDepthCensus {
+    /// Fold one batch into the running per-group totals. One kv
+    /// read/write per NON-EMPTY bucket and nothing for a batch that
+    /// clashed nowhere, which is every ordinary batch; the measured
+    /// flood shape touches two keys.
+    fn record(&self, ix: &Index, grp: &str, now: i64) -> rusqlite::Result<()> {
+        let mut wrote = false;
+        for (metric, counts) in [("slots", &self.slots), ("rows", &self.rows)] {
+            for (i, add) in counts.iter().enumerate().filter(|(_, n)| **n > 0) {
+                let k = format!(
+                    "{GEN_DEPTH_KEY_PREFIX}{metric}:{grp}:{}",
+                    GEN_DEPTH_BUCKETS[i].1
+                );
+                let cur: u64 = ix.kv_get(&k).and_then(|v| v.parse().ok()).unwrap_or(0);
+                ix.kv_set(&k, &(cur + add).to_string())?;
+                wrote = true;
+            }
+        }
+        // The totals are cumulative and never reset, so a rate needs a
+        // start. Stamped once, and only on an index this census has
+        // never touched, so it dates the counters rather than the read -
+        // the same rule `ingest_drop_since` follows. `now` is the scan
+        // clock the rest of the batch is written against, not a fresh
+        // syscall.
+        if wrote && ix.kv_get(GEN_DEPTH_SINCE_KEY).is_none() {
+            ix.kv_set(GEN_DEPTH_SINCE_KEY, &now.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+/// What one [`Index::ingest_pass`] threw away, and why.
+///
+/// The first three (commissioning memo rec 3, 31 Aug 2026) were silent
+/// `continue`s for the life of the indexer, so the size of the
+/// fully-subject-obfuscated band - every article whose subject carries
+/// no filename at all, the ngPost `--obfuscate` shape - was not merely
+/// unknown but unknowable. nZEDb counts the same drop (`notYEnc++`) and
+/// writes it to a log; these run into kv totals, which is the number the
+/// no-filename admission decision (rec 4) has been waiting on.
+///
+/// `gen_depth` (1 Sep 2026) is the fourth and is not an obfuscation
+/// measure: it counts the reinjection surplus `defer_fits_budget`
+/// refuses.
+#[derive(Default)]
+struct DropCensus {
+    unparseable: u64,
+    no_filename: u64,
+    empty_stem: u64,
+    gen_depth: u64,
+}
+
+/// When this index started counting drops, stamped once and never
+/// again. NOT a counter and never reported as one - the census excludes
+/// it by name, so a `kv` prefix scan cannot mistake a clock for a total.
+pub(crate) const DROP_SINCE_KEY: &str = "ingest_drop_since";
+
+/// The prefix every census counter shares. The readout scans for this
+/// rather than hard-listing the counters it knows, so a counter added
+/// later is VISIBLE the day it lands instead of waiting for someone to
+/// extend a list - which is the exact defect this census had for its
+/// first day of life, when four keys accumulated 5.8M drops and nothing
+/// outside a unit test read any of them.
+pub(crate) const DROP_KEY_PREFIX: &str = "ingest_drop_";
+
+impl DropCensus {
+    /// Running totals only, no per-batch log line: a tier-4 group makes
+    /// these drops on nearly every batch, and a routine event logged
+    /// routinely is a log nobody reads. `kv` is the census.
+    fn record(&self, ix: &Index) -> rusqlite::Result<()> {
+        let keys = [
+            ("ingest_drop_unparseable", self.unparseable),
+            ("ingest_drop_no_filename", self.no_filename),
+            ("ingest_drop_empty_stem", self.empty_stem),
+            ("ingest_drop_gen_depth", self.gen_depth),
+        ];
+        // Stamp the window OPEN, once, and only on an index that has
+        // never counted: a cumulative total with no start is a number
+        // nobody can turn into a rate, and stamping one on an index that
+        // was ALREADY counting would date 5.8M drops to this afternoon.
+        // So the guard is the absence of every counter key, which is the
+        // one moment the claim is true - and an index that was already
+        // counting when this landed stays unstamped forever and is
+        // reported as an unknown window rather than a confident one.
+        // This is the same argument as `shatter_fold_census_partial`,
+        // taken from the other end: that one records that the totals are
+        // partial, this one records when they stopped being so.
+        if ix.kv_get(DROP_SINCE_KEY).is_none() && keys.iter().all(|(k, _)| ix.kv_get(k).is_none()) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            ix.kv_set(DROP_SINCE_KEY, &now.to_string())?;
+        }
+        for (k, add) in keys {
+            if add > 0 {
+                let cur: u64 = ix.kv_get(k).and_then(|v| v.parse().ok()).unwrap_or(0);
+                ix.kv_set(k, &(cur + add).to_string())?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Index {
+    /// The ingest drop census, read back (`mode=index_drops`).
+    ///
+    /// The counters have been written since 31 Aug 2026 and, until this
+    /// existed, nothing outside a unit test read one: 5.8M no-filename
+    /// drops sat on the live index while the no-filename admission
+    /// decision they were taken for could not be made from any shipped
+    /// surface. Read-only, one `kv` scan, no table touched.
+    ///
+    /// TWO FAMILIES, and they do not mean the same thing:
+    ///
+    /// * `dropped` - the article was discarded and does not come back.
+    ///   `no_filename` is the fully-subject-obfuscated band (the ngPost
+    ///   `--obfuscate` shape), `empty_stem` a filename that reduces to
+    ///   nothing, `unparseable` a missing message-id or an `(n/m)` that
+    ///   will not parse.
+    /// * `over_budget` - `gen_depth`, the reinjection surplus a pass
+    ///   refuses because the slot already holds more contradicting
+    ///   articles than the remaining generation passes can place. Those
+    ///   articles are NOT lost: they re-arrive on the next scan of that
+    ///   window. Summing them with the first family would be a category
+    ///   error, so nothing here does.
+    ///
+    /// A KEY THIS DOES NOT KNOW IS REPORTED, NOT DROPPED. The scan is
+    /// over the `ingest_drop_` prefix rather than a list of four names,
+    /// and anything unrecognised lands in `unclassified` under its full
+    /// key with its raw value. A counter added tomorrow is therefore
+    /// visible the day it lands - unclaimed as to meaning, which is the
+    /// honest half - instead of waiting for somebody to remember this
+    /// function. That is this census's own founding defect, and it is
+    /// the one a `git grep` for the key name will not save you from.
+    ///
+    /// THE TOTALS ARE CUMULATIVE AND NEVER RESET, and `window_known`
+    /// says whether that window has a start at all. `since` is stamped
+    /// only on an index that had never counted (see `DROP_SINCE_KEY`),
+    /// so an index already counting when the stamp landed reports
+    /// `window_known: false` forever - which is the truth, and is what
+    /// stops a reader dividing 5.8M by an uptime it made up.
+    ///
+    /// A FAILED SCAN IS AN ERROR, NOT AN EMPTY CENSUS. Swallowing it
+    /// would answer a database this could not read with a full set of
+    /// confident zeroes, which reads as "nothing was dropped" - the same
+    /// class of silence the counters were added to end.
+    pub fn ingest_drop_census(&self) -> rusqlite::Result<serde_json::Value> {
+        // `_` is a LIKE wildcard, and this prefix carries two of them:
+        // unescaped, `ingest_drop_%` also matches whatever a future
+        // `ingestXdropY` key is called, which is how a census quietly
+        // starts reporting somebody else's numbers.
+        let pat = format!("{}%", DROP_KEY_PREFIX.replace('_', r"\_"));
+        let mut stmt = self
+            .db
+            .prepare("SELECT k, v FROM kv WHERE k LIKE ?1 ESCAPE '\\'")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([pat], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut dropped = serde_json::Map::new();
+        let mut over_budget = serde_json::Map::new();
+        let mut unclassified = serde_json::Map::new();
+        let mut dropped_total: u64 = 0;
+        // Materialize the three known `dropped` counters as zeroes: a
+        // counter that has never fired has no key (`empty_stem` has none
+        // on the live index), and an absent field reads as "this build
+        // does not count that" rather than "it has not happened".
+        for k in ["no_filename", "empty_stem", "unparseable"] {
+            dropped.insert(k.to_string(), serde_json::json!(0));
+        }
+        over_budget.insert("gen_depth".to_string(), serde_json::json!(0));
+        let mut since: Option<i64> = None;
+        for (k, v) in rows {
+            if k == DROP_SINCE_KEY {
+                since = v.parse().ok();
+                continue;
+            }
+            let short = k.trim_start_matches(DROP_KEY_PREFIX);
+            let n: Option<u64> = v.parse().ok();
+            match (short, n) {
+                ("no_filename" | "empty_stem" | "unparseable", Some(n)) => {
+                    dropped_total += n;
+                    dropped.insert(short.to_string(), serde_json::json!(n));
+                }
+                ("gen_depth", Some(n)) => {
+                    over_budget.insert(short.to_string(), serde_json::json!(n));
+                }
+                // A known name whose value will not parse is a corrupt
+                // counter, not a zero: it goes to `unclassified` with the
+                // string that is actually there.
+                _ => {
+                    unclassified.insert(k, serde_json::json!(v));
+                }
+            }
+        }
+        Ok(serde_json::json!({
+            "dropped": dropped,
+            "dropped_total": dropped_total,
+            "over_budget": over_budget,
+            "unclassified": unclassified,
+            "since": since,
+            "window_known": since.is_some(),
+        }))
+    }
+
+    /// The generation-depth census, nested for reading: metric ->
+    /// group -> bucket -> count, plus the bucket vocabulary IN ORDER.
+    ///
+    /// Served as a `gen_depth` object beside `dropped` and `over_budget`
+    /// on `mode=index_drops` and deliberately NEVER merged into either:
+    /// `slots` is not a drop and `rows` is the opposite of one, so
+    /// `dropped_total` must keep summing exactly the three outright-drop
+    /// counters. Its window is its OWN - the two censuses are stamped
+    /// independently and on any existing index their stamps differ, so
+    /// one shared `window_known` would be wrong the moment it mattered.
+    ///
+    /// `buckets` is the half a reader cannot reconstruct: the counters
+    /// are a histogram and the cutoff question is "sum this bucket and
+    /// every DEEPER one", which needs the order and needs to include
+    /// the buckets no group has reached. Labels sort lexicographically
+    /// by design, but a reader should not have to know that.
+    ///
+    /// Same three rules as [`Self::ingest_drop_census`], for the same
+    /// reasons: the scan is over a prefix rather than a name list (with
+    /// the `_` LIKE wildcards escaped, or it would also match a future
+    /// `ingestXgenY` key), an unrecognised key is REPORTED under
+    /// `unclassified` rather than dropped, and a failed scan is an
+    /// error rather than a census of confident zeroes.
+    pub fn gen_depth_census(&self) -> rusqlite::Result<serde_json::Value> {
+        let pat = format!("{}%", GEN_DEPTH_KEY_PREFIX.replace('_', r"\_"));
+        let mut stmt = self
+            .db
+            .prepare("SELECT k, v FROM kv WHERE k LIKE ?1 ESCAPE '\\'")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([pat], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut by_metric: std::collections::BTreeMap<
+            String,
+            serde_json::Map<String, serde_json::Value>,
+        > = ["slots", "rows"]
+            .iter()
+            .map(|m| ((*m).to_string(), serde_json::Map::new()))
+            .collect();
+        let mut unclassified = serde_json::Map::new();
+        let mut since: Option<i64> = None;
+        for (k, v) in rows {
+            if k == GEN_DEPTH_SINCE_KEY {
+                since = v.parse().ok();
+                continue;
+            }
+            // `<metric>:<group>:<bucket>`. Split the metric off the
+            // front and the bucket off the BACK, so a group carrying a
+            // colon lands whole rather than shredding the key into
+            // `unclassified` - newsgroup names cannot, but the census
+            // should not be the thing that assumes it.
+            let short = k.trim_start_matches(GEN_DEPTH_KEY_PREFIX);
+            match (
+                short
+                    .split_once(':')
+                    .and_then(|(m, rest)| rest.rsplit_once(':').map(|(grp, bkt)| (m, grp, bkt))),
+                v.parse::<u64>().ok(),
+            ) {
+                (Some((m, grp, bkt)), Some(n))
+                    if by_metric.contains_key(m)
+                        && GEN_DEPTH_BUCKETS.iter().any(|(_, l)| *l == bkt) =>
+                {
+                    by_metric
+                        .get_mut(m)
+                        .expect("checked by contains_key")
+                        .entry(grp.to_string())
+                        .or_insert_with(|| serde_json::json!({}))
+                        .as_object_mut()
+                        .expect("just inserted an object")
+                        .insert(bkt.to_string(), serde_json::json!(n));
+                }
+                // An unknown metric, an unknown bucket label, or a value
+                // that will not parse. All three are somebody else's key
+                // or a corrupt counter, and reporting is the honest
+                // answer to both.
+                _ => {
+                    unclassified.insert(k, serde_json::json!(v));
+                }
+            }
+        }
+        Ok(serde_json::json!({
+            "slots": by_metric["slots"],
+            "rows": by_metric["rows"],
+            "buckets": GEN_DEPTH_BUCKETS.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
+            "unclassified": unclassified,
+            "since": since,
+            "window_known": since.is_some(),
+        }))
+    }
+
     /// Ingest-time parse: built-in classifier plus the installed custom
     /// categories. Every site that WRITES kind/title_key must call this,
     /// not `parse_release`, or custom rows would flap back to their
@@ -817,7 +1327,7 @@ impl Index {
     }
 
     /// TODO 24D: chunked re-classification of stored rows after the
-    /// category config changed. Same shape as the quality_v9 migration
+    /// category config changed. Same shape as the quality_v10 migration
     /// (10k-row transactions, persisted cursor, write-only-on-change) so
     /// it can run against a live db without starving parallel scanners.
     /// The current config's fingerprint is stamped in `kv`; calling this
@@ -849,7 +1359,7 @@ impl Index {
         } else {
             // New config: stamp it and start from the top. Stamping
             // FIRST is deliberate - an interrupted pass resumes from the
-            // cursor rather than restarting, exactly like quality_v9.
+            // cursor rather than restarting, exactly like quality_v10.
             // The fingerprint and cursor are ONE state transition. Two
             // autocommit writes left a crash window where the new
             // fingerprint existed without a cursor; every later call then
@@ -886,21 +1396,28 @@ impl Index {
                 rusqlite::TransactionBehavior::Immediate,
             )?;
             // COALESCE(pre_title, stem), the same name every other
-            // classification site reads (ingest_pass, the quality_v9
+            // classification site reads (ingest_pass, the quality_v10
             // backfill): classifying the raw stem here rewrote pre-named
             // obfuscated releases back to kind=other / blank title_key /
             // junk>=70 on any category edit, and the naming seam refuses
             // rows whose pre_title is already set, so nothing healed them.
-            let rows: Vec<(i64, String, i64, bool, String)> = {
+            let rows: Vec<(i64, String, i64, bool, String, String)> = {
                 let mut sel = tx.prepare_cached(&format!(
                     "SELECT id, COALESCE(NULLIF(pre_title,''), stem), total_bytes,
                             EXISTS(SELECT 1 FROM files
                                    WHERE release_id=releases.id AND {EXE_FILE_SQL}),
-                            stem
+                            stem, grp
                      FROM releases WHERE id > ?1 ORDER BY id LIMIT 10000"
                 ))?;
                 sel.query_map([cursor], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<_>>()?
             };
@@ -914,9 +1431,27 @@ impl Index {
                     "UPDATE releases SET kind=?2, title_key=?3, junk=?4
                      WHERE id=?1 AND (kind<>?2 OR title_key<>?3 OR junk<>?4)",
                 )?;
-                for (id, name, bytes, has_exe, stem) in &rows {
+                for (id, name, bytes, has_exe, stem, grp) in &rows {
                     let mut p = self.classify(name);
                     crate::release::recover_media_kind(&mut p, name, stem);
+                    // The group-aware half of the chain, for the same
+                    // reason the media-kind recovery is here: this pass
+                    // WRITES kind/title_key/junk, so anything ingest
+                    // applies and this does not gets UNDONE the first
+                    // time a user edits a category. Without these two
+                    // lines a single category edit refiled every
+                    // audiobook and magazine row the group prior had
+                    // rescued back to an evidence-free movie at junk 60,
+                    // and nothing would have healed them again - the
+                    // fingerprint is already stamped, so the next call
+                    // is a no-op. Custom rows are untouched by
+                    // construction: both functions return early on any
+                    // kind that is not Movie, and `apply_custom` has
+                    // already made a matched row Custom.
+                    crate::release::recover_kind_from_group(&mut p, grp, stem);
+                    if !stem_obfuscated(stem, &p) {
+                        crate::release::recover_episode_from_group(&mut p, grp, name);
+                    }
                     changed += upd.execute(rusqlite::params![
                         id,
                         kind_str(&p.kind),
@@ -1056,35 +1591,63 @@ impl Index {
         completed: &mut u32,
         hits: &mut Vec<WatchHit>,
     ) -> rusqlite::Result<()> {
-        let mut deferred = self.ingest_pass(grp, entries, now, completed, hits)?;
         let mut pass = 1u32;
+        let mut gp = GenPasses {
+            budget: MAX_GEN_PASSES.saturating_sub(pass),
+            ..Default::default()
+        };
+        let mut deferred = self.ingest_pass(grp, entries, now, completed, hits, &mut gp)?;
         while !deferred.is_empty() {
-            if pass >= MAX_GEN_PASSES {
-                warn!(
-                    target: "index",
-                    "{grp}: {} articles still contradict after {MAX_GEN_PASSES} generation \
-                     passes - dropping them; they re-arrive on the next scan of this window",
-                    deferred.len()
-                );
-                break;
-            }
             pass += 1;
+            gp.budget = MAX_GEN_PASSES.saturating_sub(pass);
             let batch = std::mem::take(&mut deferred);
-            deferred = self.ingest_pass(grp, &batch, now, completed, hits)?;
+            deferred = self.ingest_pass(grp, &batch, now, completed, hits, &mut gp)?;
         }
+        // Termination is now structural rather than argued: the last
+        // pass runs at budget 0, where a pass defers nothing at all, so
+        // the loop cannot reach a fifth pass whatever the input.
+        //
+        // The pass COUNT is unchanged - four passes, four IMMEDIATE
+        // transactions, same as before. What changed is what they carry:
+        // on the measured teevee shape passes 2-4 each re-drove ~23,000
+        // leftovers to place ~194 and drop the rest at the end, and now
+        // carry ~582/388/194. Measured on that shape (194 slots x 134
+        // ids, 25,996 entries), median of 5 alternating runs of the two
+        // binaries: ingest 95 ms -> 55 ms, and 776 rows either way - the
+        // same rows, with the same message-ids in them.
+        debug_assert!(
+            deferred.is_empty(),
+            "a zero-budget pass deferred articles it can never place"
+        );
+        if gp.dropped > 0 {
+            // Level and site unchanged from the overflow warning this
+            // replaces: the drop is the same drop, made in the pass that
+            // can already prove it rather than three passes later, and
+            // the depth is the number that names the cause.
+            warn!(
+                target: "index",
+                "{grp}: {} articles dropped - their (file, part) slot carries more \
+                 contradicting articles than {MAX_GEN_PASSES} generation passes can place \
+                 (deepest slot: {} articles); they re-arrive on the next scan of this window",
+                gp.dropped, gp.deepest
+            );
+        }
+        // Once per batch, not once per pass: the row half is only
+        // complete when the last pass has minted, and the counters are
+        // per-group totals rather than per-pass events.
+        gp.depth.record(self, grp, now)?;
         Ok(())
     }
 
-    /// One clustering-and-write pass over `entries`. Returns the
-    /// articles it deliberately did not place - see [`Index::ingest`].
-    fn ingest_pass(
-        &mut self,
-        grp: &str,
-        entries: &[OverEntry],
-        now: i64,
-        completed: &mut u32,
-        hits: &mut Vec<WatchHit>,
-    ) -> rusqlite::Result<Vec<OverEntry>> {
+    /// The in-memory half of one ingest pass: cluster a batch of
+    /// articles by (poster, stem) and file, deciding along the way which
+    /// ones this pass cannot place.
+    ///
+    /// Split out of [`Index::ingest_pass`] verbatim for the 500-line
+    /// function ceiling. It touches no database - every read it would
+    /// need happens after it returns, which is also why the generation
+    /// clash below defers rather than resolves.
+    fn cluster_batch(entries: &[OverEntry], now: i64, gp: &mut GenPasses) -> Clustered {
         // Cluster the batch in memory first: (poster, stem) → filename →
         // (total, parts: number → (msgid, bytes)).
         let mut clusters: HashMap<(String, String), ClusterFiles> = HashMap::new();
@@ -1102,17 +1665,54 @@ impl Index {
         // Articles this pass refuses to place - see the note at the
         // clash test below. Empty on every ordinary batch.
         let mut deferred: Vec<OverEntry> = Vec::new();
+        // Per-slot deferral ledger (see `defer_fits_budget`). Only slots
+        // that actually clash get an entry, so an ordinary batch never
+        // allocates one.
+        let mut slot_gen = SlotGens::new();
+        let mut drops = DropCensus::default();
+        let files_of_session = Self::session_totals_that_count_files(entries);
         for e in entries {
-            let (base, part, total) =
-                split_subject(&e.subject).unwrap_or_else(|| (e.subject.clone(), 1, 1));
+            let (base, part, total, open) = split_subject_at(&e.subject)
+                .unwrap_or_else(|| (e.subject.clone(), 1, 1, usize::MAX));
+            // A subject whose ONLY pair is the leading session tag has
+            // no per-article part counter, so it is a one-segment file -
+            // BUT ONLY when the batch proves the tag counts files.
+            //
+            // `split_subject` takes the rightmost pair and knows nothing
+            // about session tags, so `[01/15] "track01.mp3" yEnc` with no
+            // trailing `(1/1)` stored part=1, total_parts=15. Fifteen
+            // MP3s became fifteen files each needing fifteen parts,
+            // `RelAgg::complete` could never go true, and newznab, hunt's
+            // local search and the album fold's complete-members gate all
+            // stopped seeing them.
+            //
+            // Demoting every such subject to (1,1) unconditionally would
+            // be the worse bug in the other direction: a poster who
+            // genuinely LEADS with the part counter would have a 50-part
+            // file stored as one complete segment, which is the garbage
+            // `contradicts` exists to refuse. So the demotion needs
+            // evidence, and the batch carries it - see
+            // `session_totals_that_count_files`.
+            let total = if total > 1
+                && pair_is_leading(&e.subject, open)
+                && files_of_session.contains(&(e.from.as_str(), total))
+            {
+                1
+            } else {
+                total
+            };
+            let part = if total == 1 { 1 } else { part };
             if e.message_id.is_empty() || part == 0 || total == 0 {
+                drops.unparseable += 1;
                 continue;
             }
             let Some(fname) = quoted_name(&base) else {
+                drops.no_filename += 1;
                 continue;
             };
             let stem = release_stem(&fname);
             if stem.is_empty() {
+                drops.empty_stem += 1;
                 continue;
             }
             let key = (e.from.clone(), stem);
@@ -1140,6 +1740,12 @@ impl Index {
                         .get(&part)
                         .is_some_and(|(id, _)| norm_msgid(id) != norm_msgid(&e.message_id)))
             {
+                let slot = (key.clone(), fname.clone(), part);
+                if !defer_fits_budget(&mut slot_gen, slot, &e.message_id, gp) {
+                    // Provably unplaceable within the pass budget.
+                    drops.gen_depth += 1;
+                    continue;
+                }
                 deferred.push(e.clone());
                 continue;
             }
@@ -1174,6 +1780,130 @@ impl Index {
                 .1
                 .insert(part, (e.message_id.clone(), e.bytes));
         }
+        Clustered {
+            clusters,
+            posted,
+            pesto,
+            sess,
+            deferred,
+            slot_gen,
+            drops,
+        }
+    }
+
+    /// `(poster, m)` pairs where a leading `[n/m]` demonstrably counts
+    /// FILES rather than the parts of one file.
+    ///
+    /// The two readings of `[01/15]` are indistinguishable in a single
+    /// subject, which is why this looks at the batch. Only subjects
+    /// whose ONLY pair is the leading tag are considered, because a
+    /// subject with a trailing counter already has its answer.
+    ///
+    /// The evidence is a SESSION SHAPE, and it is deliberately narrow -
+    /// the cost of a false positive is a release advertised complete
+    /// with a fraction of its data, so every ambiguous batch is left
+    /// alone. All three arms must hold for `(poster, m)`:
+    ///
+    /// 1. **No filename under more than one `n`.** One filename seen at
+    ///    two positions is positive proof that `m` counts the parts of
+    ///    that file - a file has exactly one position in its session.
+    ///    This is the arm the first cut of this function lacked: it kept
+    ///    only the FIRST `n` per filename, so a backfill window opening
+    ///    mid-file (file A from part 23, file B from part 1) looked like
+    ///    two files at two session positions and demoted all 100
+    ///    articles onto part 1.
+    /// 2. **Every `n` distinct across the filenames.** A session
+    ///    position is unique, so two files claiming position 1 are not a
+    ///    session.
+    /// 3. **At least three filenames.** Two lone articles - `[1/50]
+    ///    "A.mkv"` and `[2/50] "B.mkv"` from one poster, two unrelated
+    ///    releases in one window - satisfy 1 and 2 and are still far
+    ///    more likely to be two 50-part files than a two-file session.
+    ///    A real album session has many tracks, so the floor costs it
+    ///    nothing.
+    ///
+    /// A genuine leading part counter over one file is the opposite
+    /// shape by construction - one filename, many `n` - so it fails arms
+    /// 1 and 3 and is left exactly as it was.
+    ///
+    /// WHAT THIS LEAVES UN-DEMOTED, by design: a session window
+    /// carrying fewer than three of the session's files, which is what
+    /// a batch boundary can cut an album down to. Those subjects keep
+    /// `total_parts = m` and read incomplete until a later window that
+    /// does carry three or more re-clusters them - the same
+    /// under-reporting the demotion exists to fix, but bounded to a
+    /// window rather than a poster, and never the over-reporting (a
+    /// release complete on a fiftieth of its bytes) that a false
+    /// demotion produces.
+    fn session_totals_that_count_files(
+        entries: &[OverEntry],
+    ) -> std::collections::HashSet<(&str, u32)> {
+        // (poster, m) → filename → EVERY n it was seen under. The full
+        // set, not the first: arm 1 above is exactly the information the
+        // first-seen-only version threw away.
+        let mut seen: HashMap<(&str, u32), HashMap<String, std::collections::HashSet<u32>>> =
+            HashMap::new();
+        for e in entries {
+            let Some((base, n, m, open)) = split_subject_at(&e.subject) else {
+                continue;
+            };
+            if m <= 1 || !pair_is_leading(&e.subject, open) {
+                continue;
+            }
+            let Some(fname) = quoted_name(&base) else {
+                continue;
+            };
+            seen.entry((e.from.as_str(), m))
+                .or_default()
+                .entry(fname)
+                .or_default()
+                .insert(n);
+        }
+        seen.into_iter()
+            .filter(|(_, by_name)| {
+                // Arm 1: a filename at two positions vetoes the key.
+                if by_name.values().any(|ns| ns.len() > 1) {
+                    return false;
+                }
+                // Arm 3: too few files to read as a session.
+                if by_name.len() < 3 {
+                    return false;
+                }
+                // Arm 2: one position per file. Every set is a singleton
+                // by arm 1, so this is "no two files share an n".
+                let mut positions = std::collections::HashSet::new();
+                by_name
+                    .values()
+                    .all(|ns| ns.iter().all(|n| positions.insert(*n)))
+            })
+            .map(|(k, _)| k)
+            .collect()
+    }
+
+    /// One clustering-and-write pass over `entries`. Returns the
+    /// articles it deliberately did not place - see [`Index::ingest`].
+    fn ingest_pass(
+        &mut self,
+        grp: &str,
+        entries: &[OverEntry],
+        now: i64,
+        completed: &mut u32,
+        hits: &mut Vec<WatchHit>,
+        gp: &mut GenPasses,
+    ) -> rusqlite::Result<Vec<OverEntry>> {
+        let Clustered {
+            mut clusters,
+            posted,
+            pesto,
+            sess,
+            deferred,
+            slot_gen,
+            drops,
+        } = Self::cluster_batch(entries, now, gp);
+        // Generation-depth census (stage 1 of the generation-row
+        // policy, 1 Sep 2026). Instrumentation only, first pass only,
+        // and off the hot loop entirely - see `GenDepthCensus`.
+        gp.observe_slots(&slot_gen);
         // Pre feed: ask the relay corpus what each clustered stem was
         // really called, BEFORE the gate runs. Order matters - a gate
         // like `{"kinds":["tv"]}` reads a name, and an obfuscated stem
@@ -1235,6 +1965,7 @@ impl Index {
                     RowPick::Adopt(known, key, existing) => (known, key, existing),
                     RowPick::Mint(key) => {
                         gen_minted += 1;
+                        gp.note_gen_row(&poster, &stem);
                         (None, key, ExistingFiles::new())
                     }
                     RowPick::Saturated => {
@@ -1317,7 +2048,7 @@ impl Index {
             // a -1 (pre-migration row, or a maintenance rewrite that
             // could not recompute) falls back to one full scan below.
             type Baseline = (bool, String, String, Option<RelAgg>);
-            let (was, had_title, had_source, base): Baseline = tx
+            let (was, mut had_title, mut had_source, base): Baseline = tx
                 .prepare_cached(
                     "SELECT complete, pre_title, pre_source, files, total_bytes,
                             has_par2, have_parts, need_parts, nfiles_complete, nfiles_exe
@@ -1336,6 +2067,7 @@ impl Index {
                     });
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, agg))
                 })?;
+            let mut manifest_touched = false;
             let mut agg = base;
             for (fname, (total, parts)) in files {
                 // Merge with existing segments (batches split arbitrarily).
@@ -1413,6 +2145,7 @@ impl Index {
                     seg_blob,
                     merged.len() as i64
                 ])?;
+                manifest_touched = true;
                 // §131 identity substrate: key this file's lowest-part
                 // message-ids for the reverse lookup (BTreeMap iterates
                 // in part order). Append-only and idempotent, so a
@@ -1455,6 +2188,13 @@ impl Index {
             // title_key lands the release on the right wall card, and
             // kind/res/codecs/junk all come out of a name that actually
             // says something instead of a random stem.
+            // File-table triggers revoke exact external-NZB claims whenever
+            // this batch changes a manifest. Do not restore the pre-trigger
+            // snapshot in the aggregate UPDATE at the end of ingest.
+            if manifest_touched && super::seed::is_external_nzb_pre_source(&had_source) {
+                had_title.clear();
+                had_source.clear();
+            }
             let (pre_title, pre_source) =
                 named.get(&stem).cloned().unwrap_or((had_title, had_source));
             let name = if pre_title.is_empty() {
@@ -1467,6 +2207,25 @@ impl Index {
             // a spot title drops the `.epub`/`.pdf` the stem carries, and
             // that marker is a book's only evidence.
             crate::release::recover_media_kind(&mut p, name, stem.as_str());
+            // And when the name proves nothing either way, the group
+            // it was posted to does: an audiobook folder in an
+            // audiobook group is a book, not an evidence-free movie.
+            crate::release::recover_kind_from_group(&mut p, grp, stem.as_str());
+            // ...and in a group that vouches for VIDEO, the same
+            // evidence reads the episode number out of a name that
+            // carries one: "Bleach - 187 - Ichigo Rages!" is episode
+            // 187, not a movie called the whole line.
+            //
+            // Asked only of a stem `stem_obfuscated` does not already
+            // damn, and asked HERE because that answer has to be taken
+            // BEFORE the pass runs: its second arm is guarded on
+            // `p.season.is_none()`, so the season this rule records
+            // would make the blob test more lenient than it was, and a
+            // repost bot's "<blob> - 04 - <blob>" would buy its way out
+            // of the very rule that hides it.
+            if !stem_obfuscated(stem.as_str(), &p) {
+                crate::release::recover_episode_from_group(&mut p, grp, name);
+            }
             tx.prepare_cached(
                 "UPDATE releases SET files=?2, total_bytes=?3, has_par2=?4, complete=?5,
                         kind=?6, res=?7, have_parts=?8, need_parts=?9,
@@ -1537,6 +2296,8 @@ impl Index {
                  {gen_dropped} dropped at the {MAX_GEN_SIBLINGS}-sibling cap",
             );
         }
+        drops.record(self)?;
+        gp.dropped += drops.gen_depth;
         Ok(deferred)
     }
 
@@ -1575,6 +2336,226 @@ mod tests {
         );
         // No counter at all.
         assert_eq!(split_subject("just a subject (German)"), None);
+    }
+
+    /// A LEADING pair is told from a trailing one by POSITION, never by
+    /// value: `[1/3] "x.mkv" yEnc (1/3)` carries the same numbers twice,
+    /// so a value test reads the trailing part counter as the session
+    /// tag and demotes a real three-part file to one segment.
+    #[test]
+    fn a_leading_pair_is_identified_by_position_not_by_value() {
+        let at = |s: &str| split_subject_at(s).map(|(_, n, m, open)| (n, m, open));
+        // The rightmost pair is taken, and it is NOT the leading one.
+        let (n, m, open) = at(r#"[1/3] "x.mkv" yEnc (1/3)"#).unwrap();
+        assert_eq!((n, m), (1, 3));
+        assert!(
+            !pair_is_leading(r#"[1/3] "x.mkv" yEnc (1/3)"#, open),
+            "the trailing counter was read as the session tag"
+        );
+        // With no trailing counter, the leading tag IS what was taken.
+        let (_, _, open) = at(r#"[01/15] "track01.mp3" yEnc"#).unwrap();
+        assert!(pair_is_leading(r#"[01/15] "track01.mp3" yEnc"#, open));
+        // Leading whitespace does not move the answer.
+        let s = r#"   [01/15] "track01.mp3" yEnc"#;
+        let (_, _, open) = at(s).unwrap();
+        assert!(pair_is_leading(s, open));
+    }
+
+    /// `[NN/MM] "file.ext" yEnc` with no per-article counter: MM counts
+    /// the session's FILES, so each file is a one-segment file.
+    ///
+    /// Fifteen tracks used to store `total_parts = 15` apiece, so every
+    /// one of them needed fifteen parts it would never get:
+    /// `RelAgg::complete` could not go true, and newznab, hunt's local
+    /// search and the album fold all stopped seeing the post.
+    #[test]
+    fn a_leading_file_of_session_tag_is_not_the_part_count() {
+        let subjects: Vec<String> = (1..=15)
+            .map(|i| format!(r#"[{i:02}/15] "track{i:02}.mp3" yEnc"#))
+            .collect();
+        let entries: Vec<OverEntry> = subjects
+            .iter()
+            .enumerate()
+            .map(|(i, s)| entry(s, "poster@h.tld", &format!("m{i}"), 1000))
+            .collect();
+        let files = Index::session_totals_that_count_files(&entries);
+        assert!(
+            files.contains(&(entries[0].from.as_str(), 15)),
+            "fifteen distinct filenames under one poster did not prove 15 counts files"
+        );
+    }
+
+    /// THE CONTROL ARM, and the reason the demotion needs evidence at
+    /// all: a poster who genuinely LEADS with the part counter has ONE
+    /// filename under many n, which is the opposite shape. Demoting it
+    /// would store a 50-part file as one complete segment - the garbage
+    /// `contradicts` exists to refuse.
+    #[test]
+    fn a_leading_part_counter_over_one_file_is_left_alone() {
+        let subjects: Vec<String> = (1..=50)
+            .map(|i| format!(r#"[{i}/50] "movie.mkv" yEnc"#))
+            .collect();
+        let entries: Vec<OverEntry> = subjects
+            .iter()
+            .enumerate()
+            .map(|(i, s)| entry(s, "poster@h.tld", &format!("m{i}"), 1000))
+            .collect();
+        let files = Index::session_totals_that_count_files(&entries);
+        assert!(
+            files.is_empty(),
+            "one filename under fifty part numbers was read as a file count"
+        );
+    }
+
+    /// TWO UNRELATED RELEASES, ONE POSTER, ONE WINDOW - the shape that
+    /// made the first cut of the demotion advertise a release complete
+    /// on a fiftieth of its bytes.
+    ///
+    /// `[1/50] "Alpha.Movie.mkv"` and `[2/50] "Bravo.Movie.mkv"` are two
+    /// distinct filenames under one poster at two different `n`, which
+    /// is everything the first version tested for. Both demoted to
+    /// (1, 1), landed in two releases (different stems), and each read
+    /// COMPLETE holding one article. Two files is not a session: the
+    /// three-filename floor is what refuses it.
+    #[test]
+    fn two_lone_articles_under_one_poster_are_not_a_session() {
+        let entries = vec![
+            entry(r#"[1/50] "Alpha.Movie.mkv" yEnc"#, "p@x", "a1", 1000),
+            entry(r#"[2/50] "Bravo.Movie.mkv" yEnc"#, "p@x", "b1", 1000),
+        ];
+        assert!(
+            Index::session_totals_that_count_files(&entries).is_empty(),
+            "two unrelated 50-part files were read as a two-file session"
+        );
+
+        // And the same shape through the real ingest path, so the
+        // verdict under test is `RelAgg::complete` and not the helper's
+        // set: neither release may claim to be complete.
+        let dir = std::env::temp_dir().join(format!("nzbfast-sessdemote-a-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        ix.ingest("alt.test", &entries, 1000).unwrap();
+        let hits = ix.search("", 10).unwrap();
+        assert_eq!(hits.len(), 2, "expected two releases, one per stem");
+        for r in &hits {
+            assert!(
+                !r.complete,
+                "{} read complete holding {} of {} parts",
+                r.stem, r.have_parts, r.need_parts
+            );
+            assert_eq!((r.have_parts, r.need_parts), (1, 50), "{}", r.stem);
+        }
+        teardown(&dir, ix);
+    }
+
+    /// ARM 1, THE VETO: one filename under two `n` is positive proof
+    /// that `m` counts the parts of that file, and it holds even when
+    /// other filenames sit beside it in the batch.
+    ///
+    /// The first cut kept only the FIRST `n` per filename, so this batch
+    /// looked like {movie: 1, sample: 3} - two names, differing n - and
+    /// demoted all three articles onto part 1 of two one-segment files.
+    #[test]
+    fn one_filename_at_two_positions_vetoes_the_whole_key() {
+        let entries = vec![
+            entry(r#"[1/50] "Big.Movie.mkv" yEnc"#, "p@x", "a1", 1000),
+            entry(r#"[2/50] "Big.Movie.mkv" yEnc"#, "p@x", "a2", 1000),
+            entry(r#"[3/50] "Big.Sample.mkv" yEnc"#, "p@x", "s1", 1000),
+        ];
+        assert!(
+            Index::session_totals_that_count_files(&entries).is_empty(),
+            "a filename seen at two session positions did not veto the key"
+        );
+    }
+
+    /// THE BACKFILL WINDOW, and the worst of the three: an OVER window
+    /// that opens mid-file. File A is caught from part 23, file B from
+    /// part 1, all under `[n/50]` with no trailing counter.
+    ///
+    /// First-seen-only saw {A: 23, B: 1} - two names, differing n - and
+    /// demoted all 78 articles to (1, 1), collapsing 28 of A's parts and
+    /// 50 of B's onto part 1 of a one-segment file apiece. Arm 1 vetoes
+    /// on A alone. Left un-demoted, the truth survives: A holds 28 of
+    /// its 50 parts and is incomplete, B holds all 50 and is not.
+    #[test]
+    fn a_window_opening_mid_file_does_not_demote_the_poster() {
+        let mut entries: Vec<OverEntry> = (23..=50)
+            .map(|n| {
+                entry(
+                    &format!(r#"[{n}/50] "Alpha.Movie.mkv" yEnc"#),
+                    "p@x",
+                    &format!("a{n}"),
+                    1000,
+                )
+            })
+            .collect();
+        entries.extend((1..=50).map(|n| {
+            entry(
+                &format!(r#"[{n}/50] "Bravo.Movie.mkv" yEnc"#),
+                "p@x",
+                &format!("b{n}"),
+                1000,
+            )
+        }));
+        assert!(
+            Index::session_totals_that_count_files(&entries).is_empty(),
+            "a window opening mid-file was read as a two-file session"
+        );
+
+        let dir = std::env::temp_dir().join(format!("nzbfast-sessdemote-d-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        ix.ingest("alt.test", &entries, 1000).unwrap();
+        let hits = ix.search("", 10).unwrap();
+        assert_eq!(hits.len(), 2, "expected two releases, one per stem");
+        let a = hits.iter().find(|r| r.stem.contains("Alpha")).unwrap();
+        let b = hits.iter().find(|r| r.stem.contains("Bravo")).unwrap();
+        assert_eq!((a.have_parts, a.need_parts), (28, 50));
+        assert!(!a.complete, "a partly-caught 50-part file read complete");
+        assert_eq!((b.have_parts, b.need_parts), (50, 50));
+        assert!(b.complete, "a fully-caught 50-part file read incomplete");
+        teardown(&dir, ix);
+    }
+
+    /// THE FLOOR IS EXACTLY THREE, and a session position is unique.
+    /// Three tracks at three positions demote; the same three with two
+    /// of them claiming position 1 are not a session and do not.
+    #[test]
+    fn three_files_at_distinct_positions_is_the_smallest_session() {
+        let three: Vec<OverEntry> = [1, 2, 3]
+            .iter()
+            .map(|n| {
+                entry(
+                    &format!(r#"[{n}/12] "track{n:02}.mp3" yEnc"#),
+                    "p@x",
+                    &format!("t{n}"),
+                    1000,
+                )
+            })
+            .collect();
+        assert!(
+            Index::session_totals_that_count_files(&three).contains(&("p@x", 12)),
+            "three tracks at three positions were not read as a session"
+        );
+
+        let collided: Vec<OverEntry> = [1, 1, 2]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                entry(
+                    &format!(r#"[{n}/12] "track{i:02}.mp3" yEnc"#),
+                    "p@x",
+                    &format!("c{i}"),
+                    1000,
+                )
+            })
+            .collect();
+        assert!(
+            Index::session_totals_that_count_files(&collided).is_empty(),
+            "two files sharing session position 1 were read as a session"
+        );
     }
 
     #[test]
@@ -1659,6 +2640,152 @@ mod tests {
         assert!(score("Dont.Breathe.2016.1080p.WEB-DL.DD5.1.H264-FGT", 180 << 20) >= 50);
         assert!(score("Old.Short.Film.1962.DVDRip.XviD-GRP", 180 << 20) < 50);
         assert!(score("some.show.s01e04.720p.hdtv.x264-grp", 150 << 20) < 50);
+    }
+
+    #[test]
+    fn dropped_articles_are_counted_not_silent() {
+        // Commissioning memo rec 3: an article whose subject carries no
+        // filename (the ngPost --obfuscate shape - the subject is a
+        // bare token, no quotes, no name.ext) used to vanish without a
+        // trace. The drop still happens; the COUNT no longer hides.
+        let dir = std::env::temp_dir().join(format!("nzbfast-index-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        ix.ingest(
+            "alt.binaries.test",
+            &[
+                entry("aGVsbG8gb2JmdXNjYXRlZA (1/50)", "a@a", "d1", 700_000),
+                entry("bm8gbmFtZSBoZXJlIGVpdGhlcg (2/50)", "b@b", "d2", 700_000),
+                entry(
+                    "\"Kept.Release.2026.1080p-GRP.mkv\" yEnc (1/1)",
+                    "c@c",
+                    "d3",
+                    4 << 30,
+                ),
+            ],
+            1_000,
+        )
+        .unwrap();
+        let rows: i64 = ix
+            .db
+            .query_row("SELECT COUNT(*) FROM releases", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            rows, 1,
+            "the named article placed, the obfuscated two did not"
+        );
+        assert_eq!(
+            ix.kv_get("ingest_drop_no_filename").as_deref(),
+            Some("2"),
+            "both no-filename drops counted"
+        );
+        assert!(
+            ix.kv_get("ingest_drop_unparseable").is_none(),
+            "no unparseable drops on this batch"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_drop_census_reads_back_as_two_families_over_a_known_window() {
+        // The counters existed for a day before anything read one. This
+        // is the read side: the three outright drops in one family, the
+        // pass-budget surplus in another (those articles come back on
+        // the next scan of the window, so summing the two would be a
+        // category error), and a window that says when counting began.
+        let dir = std::env::temp_dir().join(format!("nzbfast-index-census-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        ix.ingest(
+            "alt.binaries.test",
+            &[
+                entry("aGVsbG8gb2JmdXNjYXRlZA (1/50)", "a@a", "d1", 700_000),
+                entry("bm8gbmFtZSBoZXJlIGVpdGhlcg (2/50)", "b@b", "d2", 700_000),
+                entry(
+                    "\"Kept.Release.2026.1080p-GRP.mkv\" yEnc (1/1)",
+                    "c@c",
+                    "d3",
+                    4 << 30,
+                ),
+            ],
+            1_000,
+        )
+        .unwrap();
+        let c = ix.ingest_drop_census().unwrap();
+        assert_eq!(c["dropped"]["no_filename"], 2, "both no-filename drops");
+        assert_eq!(
+            c["dropped"]["empty_stem"], 0,
+            "a counter that never fired reads as a zero, not as a missing field"
+        );
+        assert_eq!(c["dropped"]["unparseable"], 0);
+        assert_eq!(c["dropped_total"], 2);
+        assert_eq!(
+            c["over_budget"]["gen_depth"], 0,
+            "the surplus family is reported separately and is not in the total"
+        );
+        assert_eq!(c["unclassified"], serde_json::json!({}));
+        assert_eq!(
+            c["window_known"], true,
+            "this index started counting on its first batch"
+        );
+        assert!(
+            c["since"].as_i64().unwrap_or(0) > 1_700_000_000,
+            "the window opens at a real clock, not zero: {}",
+            c["since"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_census_that_was_already_counting_reports_an_unknown_window() {
+        // An index that has been scanning for weeks carries millions of
+        // drops counted before the window stamp existed (the measured
+        // case was 5.8M). Stamping one NOW would date them to this
+        // afternoon, so the stamp declines and the readout says so - an
+        // unknown window is the honest answer, not a defect.
+        //
+        // The two decoy keys are the other half: an `ingest_drop_*` name
+        // this build does not know must be REPORTED rather than dropped
+        // (that is how the next counter avoids being invisible for a day
+        // like these four were), and `_` being a LIKE wildcard, a key
+        // that only matches with the wildcards live must not be scanned
+        // at all.
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-index-census2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        ix.kv_set("ingest_drop_no_filename", "5000000").unwrap();
+        ix.kv_set("ingest_drop_future_thing", "7").unwrap();
+        ix.kv_set("ingestXdropY_bogus", "9").unwrap();
+        ix.ingest(
+            "alt.binaries.test",
+            &[entry("aGVsbG8gb2JmdXNjYXRlZA (1/50)", "a@a", "d1", 700_000)],
+            1_000,
+        )
+        .unwrap();
+        assert!(
+            ix.kv_get(super::DROP_SINCE_KEY).is_none(),
+            "an index that was already counting is never stamped retroactively"
+        );
+        let c = ix.ingest_drop_census().unwrap();
+        assert_eq!(c["window_known"], false);
+        assert_eq!(c["since"], serde_json::Value::Null);
+        assert_eq!(
+            c["dropped"]["no_filename"], 5_000_001,
+            "the batch adds to what was there"
+        );
+        assert_eq!(
+            c["unclassified"]["ingest_drop_future_thing"], "7",
+            "a counter this build does not know is reported under its own key, meaning unclaimed"
+        );
+        assert!(
+            c["unclassified"].get("ingestXdropY_bogus").is_none(),
+            "the `_` in the prefix is escaped, so the scan is a prefix and not a pattern"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

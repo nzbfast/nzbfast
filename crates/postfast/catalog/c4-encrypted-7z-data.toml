@@ -1,0 +1,77 @@
+# C4 + C12 + C3: a data-encrypted 7z, which is the first encrypted
+# container in this catalog that is not a RAR archive.
+
+[layout]
+name = "c4-encrypted-7z-data"
+seed = 181
+note = """
+An AES-256 7z whose member DATA is encrypted and whose header is not, so
+a client can list `movie.bin` and its size without the password and
+cannot read a byte of it.
+
+This row could not be written until 4 Sep 2026 and the reason is worth
+keeping. `postfast` refused an encrypted 7z profile BY NAME, because
+`crate::sevenz::write_archive` configured the writer with a content
+method and nothing else: it was handed no password, so the archive it
+emitted opened for ANYONE while the profile said C4 - and `extract_kind`
+dropped the password on the way back too, so the generator's own round
+trip agreed with itself over the readable archive. That shape passed
+every test that existed at the time, which is exactly what a row over it
+would have done: green, and evidence of nothing.
+
+Three things had to move together, each measured before any of them was
+built. The writer now takes an `Encrypt` selection and puts an AES coder
+in front of the content method. The reader takes the level's password.
+And `vendor/sevenz-rust2` grew a caller-supplied entropy source, because
+`AesEncoderOptions::new` drew its salt and its initialisation vector from
+`getrandom::fill` - one profile and one seed would have emitted a
+different archive on every run, and the catalog walk would have failed on
+bytes carrying no meaning. That is the same problem `rars::Entropy`
+answered for the RAR writers the same day, and it is answered the same
+way: one seed per nesting level, drawn from the container plane's own
+`ENTROPY_STREAM`, handed to whichever writer that level selected.
+
+COMPRESSED rather than stored, and deliberately: an encrypted 7z on the
+wire is LZMA2, because that is what every 7-Zip build writes unless a
+poster asks for copy. So the client has to derive the key from the
+password, decrypt, and then run the LZMA2 decoder over what comes out -
+three things in sequence, and a row over a stored archive would ask for
+two of them. `c5-encrypted-7z-header` is this row with ONE selection
+changed, and the two stored corners are pinned in the generator's own
+tests rather than costing a push a fourth process.
+
+The password is furniture. It travels in the clear in the NZB's
+`<meta type="password">`, which is the point of the shape and why nothing
+real goes here.
+
+MEASURED RATHER THAN ASSUMED, 4 Sep 2026, which is the arm that makes
+the row worth having. With `meta_password = false` and nothing else
+changed the row FAILS, and it fails in the shape this note predicts: the
+client reports "7z materialized for the disk pass: inner 7z is encrypted
+(no password)" and then "an archive in the output directory could not be
+unpacked", leaving the payload sealed. Without that arm a green row here
+would also be green over an archive that was never encrypted at all -
+which is precisely the archive this generator emitted before the writer
+took a password, and precisely why the profile was refused rather than
+shipped.
+
+The end state is the payload file. No recovery set: a set beside it
+would put a verify in front of the question this row asks.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 16000 }]
+
+[container]
+kind = "7z-compressed"
+encryption = "data"
+password = "sevenz-fixture-pw"
+
+[nzb]
+meta_password = true
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

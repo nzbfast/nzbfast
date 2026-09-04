@@ -1,0 +1,43 @@
+# C5: a header-encrypted RAR5 archive, unlocked from the NZB.
+
+[layout]
+name = "c5-encrypted-rar5-header"
+seed = 105
+note = """
+The stronger encrypted shape, and a different problem for the client
+than C4 is.
+
+Header encryption gates the FILE LIST as well as the data: without the
+password an opener cannot say how many members the archive holds or
+what they are called, and `ArchiveReader::read` refuses with NeedPassword
+before it reaches an entry. So every step that would normally look
+inside an archive to decide what to do next - what the members are,
+whether one of them is itself an archive - has nothing to look at until
+the password is in hand. A client that treats an unreadable header as a
+corrupt archive fails this row while passing C4.
+
+Both writers derive the file key from the same password, so a
+header-encrypted archive is data-encrypted too. There is no shape where
+the list is gated and the bytes are not.
+
+The carrier is the NZB meta, as in C4: the oracle gives no flag and the
+NZB has a fixed name, so the meta is the only source. See that row's
+note for why the salt is seeded and why the password is furniture.
+"""
+
+[source]
+files = [{ name = "sealed.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+encryption = "header"
+password = "layout-fixture-pw"
+
+[nzb]
+meta_password = true
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

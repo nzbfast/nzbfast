@@ -51,9 +51,18 @@ fn main() {
     // One options value for both the parse and the extract, so the policy
     // is attached on every step the daemon attaches it on.
     let options = nzbkit::mem::rar_read_options(password.as_deref().map(str::as_bytes));
+    // ONE session across the set, as crates/nzbfast-unpack/src/rarfix/native.rs
+    // opens it: the session carries the RAR 5 key cache, so an encrypted
+    // set derives its PBKDF2 key once. `read_path_with_options` per volume
+    // minted a fresh cache each time and paid one 2^15-round derivation
+    // per volume - 21 of them on the census shape, which on a six-core
+    // desktop part without SHA extensions was ~0.3 s of the encrypted
+    // store leg that the product never pays
+    // (research/RAR-PERF-AUDIT-2026-09-02.md, round 2).
+    let mut session = rars::ReadSession::new(options);
     let archives: Vec<_> = vols
         .iter()
-        .map(|p| rars::ArchiveReader::read_path_with_options(p, options).expect("open volume"))
+        .map(|p| session.read_path(p).expect("open volume"))
         .collect();
 
     std::fs::create_dir_all(&out).expect("create output dir");

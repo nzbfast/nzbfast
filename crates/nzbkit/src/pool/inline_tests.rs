@@ -120,6 +120,7 @@ fn seed_masks_and_unservable_split() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig::default(),
         )
@@ -286,6 +287,7 @@ fn shared_new_dedupes_repeated_ids() {
             max_source_ips: None,
             address_family: Default::default(),
             tls_hostname: None,
+            warm_reserve: None,
         },
         PoolConfig::default(),
     );
@@ -381,6 +383,7 @@ async fn futile_scan_throttles_before_retrying() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig::default(),
         )
@@ -463,6 +466,7 @@ async fn endgame_fans_out_dup_races_for_laddering_articles() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig::default(),
         )
@@ -606,6 +610,7 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig {
                 tail_fanout: fanout,
@@ -754,6 +759,7 @@ async fn a_futile_idle_dup_scan_gates_until_the_map_moves_or_the_window_ends() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig {
                 tail_fanout: true,
@@ -902,6 +908,7 @@ async fn a_server_with_more_connections_is_not_mistaken_for_a_faster_one() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig::default(),
         )
@@ -979,6 +986,7 @@ async fn a_fill_server_never_duplicates_primary_work_on_speed() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig::default(),
         )
@@ -1091,6 +1099,7 @@ pub(super) fn one_server() -> Vec<(ServerConfig, PoolConfig)> {
             max_source_ips: None,
             address_family: Default::default(),
             tls_hostname: None,
+            warm_reserve: None,
         },
         PoolConfig::default(),
     )]
@@ -1138,6 +1147,129 @@ fn wire_cap_accounting_charges_and_releases_symmetrically() {
     // A zero-count release (empty pipeline on abort) is a no-op.
     shared.release_wire(0);
     assert_eq!(shared.inflight_body_bytes.load(Ordering::Acquire), 0);
+}
+
+/// Two pools, each with its own articles, built off one budget-derived
+/// cap - the shape the queue hand-over and the prefetch sidecar both
+/// put on the wire at once. `ledger` shared = the fix; `None` = the
+/// per-pool accounting that shipped until 2 Sep 2026.
+fn wire_pools(cap: u64, ledger: Option<Arc<WireCharge>>) -> (Arc<Shared>, Arc<Shared>) {
+    let srv = one_server()[0].0.clone();
+    let cfg = PoolConfig {
+        inflight_cap: cap,
+        wire_charge: ledger,
+        ..PoolConfig::default()
+    };
+    let mk = |id: &str| Shared::new(vec![ArticleReq::fresh(id)], &[(srv.clone(), cfg.clone())]).0;
+    (mk("<p0@x>"), mk("<p1@x>"))
+}
+
+/// Charge until the dispatch gate closes, and say how many articles got
+/// in. This is `top_up_window`'s test verbatim, minus the
+/// one-in-flight floor it is `&&`ed with there (a floor is per
+/// connection and says nothing about the ceiling).
+fn admit_until_capped(sh: &Arc<Shared>, cap: u64) -> u64 {
+    let mut n = 0;
+    while !sh.wire_over_cap(cap) {
+        sh.charge_wire();
+        n += 1;
+        assert!(n < 10_000, "cap never engaged - the gate is not gating");
+    }
+    n
+}
+
+#[test]
+fn two_pipelines_on_one_budget_share_one_wire_ceiling() {
+    // TODO 313 item 1. `inflight_cap` is a slice of ONE process budget
+    // and is documented as global across every pool, but the counter it
+    // was compared against lived on `Shared`, which is per pool. Two
+    // pools run concurrently as ordinary business (hand-over successor
+    // during the drain window; prefetch sidecar beside the active job),
+    // so the wire-side ceiling was doubled on exactly the small-RAM
+    // boxes the clamp exists for.
+    let cap = crate::mem::MemBudget::with_total(crate::mem::MemBudget::MIN).inflight_cap();
+    assert_eq!(cap, 32 << 20, "the budget floor's wire slice");
+
+    // WITH the shared ledger: the first pipeline fills the ceiling and
+    // the second finds it already full - the sum is what is capped.
+    let ledger = WireCharge::new();
+    let (a, b) = wire_pools(cap, Some(ledger.clone()));
+    let first = admit_until_capped(&a, cap);
+    assert!(first > 1, "a lone pipeline still gets its full depth");
+    assert_eq!(
+        admit_until_capped(&b, cap),
+        0,
+        "the second pipeline admits nothing over a ceiling already reached"
+    );
+    assert!(
+        ledger.bytes() < cap + EST_BODY_BYTES,
+        "the sum overshoots by at most the one article that reached it: \
+         {} against a {cap} cap",
+        ledger.bytes()
+    );
+    // And it is a shared ceiling, not a split one: what the first
+    // pipeline gives back, the second may take.
+    a.release_wire(2);
+    assert_eq!(
+        admit_until_capped(&b, cap),
+        2,
+        "released capacity goes to whoever asks next, not back to its owner"
+    );
+
+    // WITHOUT it - the shape that shipped - each pool measures only
+    // itself, so both admit a full cap and the wire holds two.
+    let (c, d) = wire_pools(cap, None);
+    let c_admitted = admit_until_capped(&c, cap);
+    let d_admitted = admit_until_capped(&d, cap);
+    assert_eq!(d_admitted, c_admitted, "each pool admitted a whole cap");
+    assert!(
+        (c_admitted + d_admitted) * EST_BODY_BYTES >= 2 * cap,
+        "the defect this test pins: two pipelines, twice the ceiling"
+    );
+}
+
+#[test]
+fn a_pool_dropped_holding_charges_hands_them_back() {
+    // A ledger that outlives the pool must not inherit its leaks.
+    // `join_fleet` aborts stragglers at EXIT_GRACE and a dropped task
+    // never drains its deque, so a run CAN end with charges outstanding
+    // - per pool that died with the counter, on a shared ledger it
+    // would pin every later pipeline at depth one until restart.
+    let cap = 4 * EST_BODY_BYTES;
+    let ledger = WireCharge::new();
+    let (a, b) = wire_pools(cap, Some(ledger.clone()));
+    a.charge_wire();
+    a.charge_wire();
+    b.charge_wire();
+    assert_eq!(ledger.bytes(), 3 * EST_BODY_BYTES);
+
+    drop(a);
+    assert_eq!(
+        ledger.bytes(),
+        EST_BODY_BYTES,
+        "an abandoned pool's charges come back; the live pool's stay"
+    );
+    drop(b);
+    assert_eq!(ledger.bytes(), 0, "and the books close on an empty ledger");
+}
+
+#[test]
+fn a_pool_with_no_ledger_is_its_own_ledger() {
+    // The library and one-shot CLI case: nobody hands a pool a ledger,
+    // so the shared total and the pool's own count are the same number
+    // and nothing about a lone pipeline changed.
+    let (a, _b) = wire_pools(2 * EST_BODY_BYTES, None);
+    a.charge_wire();
+    assert_eq!(
+        a.inflight_body_bytes.load(Ordering::Acquire),
+        EST_BODY_BYTES
+    );
+    assert_eq!(a.wire.bytes(), EST_BODY_BYTES);
+    assert!(!a.wire_over_cap(2 * EST_BODY_BYTES));
+    a.charge_wire();
+    assert!(a.wire_over_cap(2 * EST_BODY_BYTES));
+    a.release_wire(2);
+    assert_eq!(a.wire.bytes(), 0);
 }
 
 #[tokio::test]
@@ -1330,6 +1462,7 @@ async fn promoted_work_routes_to_the_faster_server() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig::default(),
         )
@@ -1625,6 +1758,7 @@ async fn drain_signals_graceful_and_leaves_the_queue_intact() {
             max_source_ips: None,
             address_family: Default::default(),
             tls_hostname: None,
+            warm_reserve: None,
         },
         PoolConfig::default(),
     )];

@@ -47,11 +47,21 @@ use super::*;
 /// than by their length, which is what the pre-fix measurement above
 /// leaned on. Its presence is asserted before the run: an id that has
 /// moved damages nothing and would make this pass for no reason.
+/// 25%, not the 10% both rows posted until 4 Sep 2026, and CONTROL B
+/// below moved with it. One corrupt 40,000-byte article of a
+/// 220,000-byte payload is 358 bad blocks of 1,965 (18.2%), which 10%
+/// (197 blocks) cannot close - so both damaged rows completed on the
+/// `payload` generator's 131,072-byte self-period rather than on the
+/// set, at `52 block(s) rebuilt, 306 adopted`, while asserting "a
+/// repairable post failed"
+/// (research/PAYLOAD-TRAP-PATH-DEPENDENT-CENSUS-2026-09-04.md). 25% is
+/// 491 blocks. The payloads moved to `payloads::unique_payload` in the
+/// same commit; the two changes are one fix and neither works alone.
 fn sixtythree_fixture(tag: &str, data: &[u8]) -> Fixture {
     let mut fx = Fixture::new(tag);
     fx.add_file_renamed_by_par2("KpZ7mQx4TvB9nR2sLdFq.mkv", "Terminator2.mkv", data, 40_000);
     assert!(
-        fx.add_par2(10, &["KpZ7mQx4TvB9nR2sLdFq.mkv"], 40_000),
+        fx.add_par2(25, &["KpZ7mQx4TvB9nR2sLdFq.mkv"], 40_000),
         "par2 create failed"
     );
     fx
@@ -77,7 +87,9 @@ async fn a_refused_filedesc_rename_does_not_leave_the_set_rebuilding_its_own_mem
         eprintln!("skipping: par2 not installed");
         return;
     }
-    let data = payload(220_000, 97);
+    // `unique_payload`: on the repeating generator the damage healed out
+    // of this same file - see `sixtythree_fixture`'s note.
+    let data = crate::payloads::unique_payload(220_000, 97);
     let fx = sixtythree_fixture("norar63dmg", &data);
     assert!(
         fx.articles.contains_key(DAMAGED),
@@ -150,7 +162,8 @@ async fn the_deobfuscation_direction_still_repairs_in_place_under_the_same_damag
         eprintln!("skipping: par2 not installed");
         return;
     }
-    let data = payload(220_000, 99);
+    // `unique_payload`, for the reason at `sixtythree_fixture`.
+    let data = crate::payloads::unique_payload(220_000, 99);
     let mut fx = Fixture::new("norar63inv");
     fx.add_file_renamed_by_par2(
         "Real.Feature.2021.1080p-GRP.mkv",
@@ -159,7 +172,7 @@ async fn the_deobfuscation_direction_still_repairs_in_place_under_the_same_damag
         40_000,
     );
     assert!(
-        fx.add_par2(10, &["Real.Feature.2021.1080p-GRP.mkv"], 40_000),
+        fx.add_par2(25, &["Real.Feature.2021.1080p-GRP.mkv"], 40_000),
         "par2 create failed"
     );
     let id = "<Zq4hVn82BdT7mKxLpWcE-0-3@mock>";

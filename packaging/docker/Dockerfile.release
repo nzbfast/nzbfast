@@ -19,11 +19,14 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 ARG TARGETARCH
 ARG VERSION=0.0.0
 
-# RAR extraction and PAR2 verify/repair are fully native (no unrar or
-# par2 package). 7z covers other archive types.
+# RAR extraction, PAR2 verify/repair and 7z are all fully native - no
+# unrar, par2 or p7zip package. p7zip-full was installed here and
+# invoked by NOTHING (7z has been native since the sevenz-rust2
+# integration); dropped 2 Sep 2026 as pure attack-surface removal
+# (TODO 314, appendix A of research/SANDBOX-SCOPING-2026-08.md).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        p7zip-full ca-certificates tini curl gosu \
+        ca-certificates tini curl gosu \
     && rm -rf /var/lib/apt/lists/*
 
 COPY bin/${TARGETARCH}/nzbfast /usr/local/bin/nzbfast

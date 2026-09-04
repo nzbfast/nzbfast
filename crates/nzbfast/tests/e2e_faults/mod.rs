@@ -308,7 +308,7 @@ fn trace(tag: &str, log: &str) {
 /// How many times the run escalated its recovery fetch.
 ///
 /// Matched on the `[repair]` planner's own wording, which
-/// `crates/nzbfast/src/repair.rs` owns; §282's escalation lane is
+/// `crates/nzbfast-unpack/src/repair.rs` owns; §282's escalation lane is
 /// actively reworking that file, so if this stops counting, the count
 /// is what matters and the string is what moved. Both spellings the
 /// planner emits are counted (`fetching` and the reuse arm).
@@ -1176,7 +1176,7 @@ async fn a_backend_serving_the_wrong_article_cannot_pass_as_complete() {
 /// is not in the log at all, and that was checked rather than assumed -
 /// `VolumeYield::asked` reaches a log line only through `describe()`, and
 /// all three of that method's call sites in
-/// `crates/nzbfast/src/repair.rs` sit inside a `source_will_not_serve()`
+/// `crates/nzbfast-unpack/src/repair.rs` sit inside a `source_will_not_serve()`
 /// arm, so the ask is printed only once the gate has already judged and
 /// is absent in exactly the under-the-floor case a caller would want it
 /// for. The planner's `need N block(s)` line counts volumes and blocks,
@@ -1408,7 +1408,7 @@ fn recovery_failure_rounds(log: &str) -> Vec<usize> {
 /// **Shape 14 - the LAST ask is the one nobody judged.**
 ///
 /// §282 item 4's yield gate is read at three places in
-/// `crates/nzbfast/src/repair.rs`, and until 24 Aug 2026 all three were
+/// `crates/nzbfast-unpack/src/repair.rs`, and until 24 Aug 2026 all three were
 /// BEFORE an ask - which is what its own BUILT note says it is for,
 /// "read at every point that would otherwise ask for more". The
 /// escalation's own fetch is the last ask the job makes and there is
@@ -1544,7 +1544,7 @@ async fn a_refused_escalation_is_judged_like_any_other_ask() {
 ///
 /// Until 26 Aug 2026 it split them by reading the opening words of a
 /// SAMPLE STRING (`starts_with("decode error")`) that
-/// `crates/nzbfast/src/get/workers.rs` had formatted a moment earlier,
+/// `crates/nzbfast-engine/src/get/workers.rs` had formatted a moment earlier,
 /// at a site that already knew which of the two it had hit. TODO 307
 /// item 1 named that as an instance of the tree's string-classification
 /// class and left it for its own claim; the fault now travels as a
@@ -1552,7 +1552,7 @@ async fn a_refused_escalation_is_judged_like_any_other_ask() {
 /// the text.
 ///
 /// WHAT THIS SHAPE IS FOR, and it is not the sentence. The sentence is
-/// pinned six ways over in `crates/nzbfast/src/failkind/tests.rs`, which
+/// pinned six ways over in `crates/nzbfast-core/src/failkind/tests.rs`, which
 /// CONSTRUCTS the sample and can therefore pin only what it was handed.
 /// What no unit test in this tree can reach is the pairing itself - that
 /// the site which saw a yEnc check fail is the site that records

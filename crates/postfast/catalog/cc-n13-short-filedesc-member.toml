@@ -1,0 +1,45 @@
+# P3 over a member SHORTER than the 16 KiB head window.
+
+[layout]
+name = "cc-n13-short-filedesc-member"
+seed = 152
+note = """
+Expresses bench/capability-corpus leg n13-short.
+
+p1-filedesc-name-16k sits exactly ON the boundary, where the head hash
+window and the file are the same length. This row is the other side of
+it: 9,000 bytes, so the head is the whole file and is SHORTER than the
+window, and a matcher that asks for 16,384 bytes of head and compares
+against a descriptor's own min(length, 16384) has to agree with itself
+about which of the two numbers it clipped. The corpus leg pairs the two
+sizes for that reason and so does the catalog.
+
+It matters more than a size usually would because n37's note records
+the shape where the two DISAGREE: a lie about the declared size over a
+file whose true length is under 16 KiB makes the head window and the
+descriptor window differ, and the file then joins no set at all. This
+row is the honest control for that: same short length, no lie, must
+land.
+
+One article, so the post is single-part as well as short.
+"""
+
+[source]
+files = [{ name = "Short.Sample.bin", bytes = 9000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 9000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

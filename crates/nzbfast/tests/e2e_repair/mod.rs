@@ -452,6 +452,110 @@ async fn damage_in_a_plain_set_member_leaves_the_volumes_one_pass() {
     }
 }
 
+/// THE DAEMON'S TAIL ON THE SHAPE A USER NOTICES: a big member with one
+/// bad article. The repair's self-prove hashes every rebuilt file end to
+/// end against its FileDesc MD5, which is a serial 0.74 GB/s chain and
+/// ~31 s on a 23 GB member - measured as `postproc_secs`. Since 2 Sep
+/// 2026 the bytes BELOW the first hole are hashed off disk while the
+/// download is still running (`nzbkit::live::prefix`, armed here by the
+/// engine's first-lost-article gate) and the self-prove resumes there,
+/// rereading that span against its IFSC CRC32s instead - 16x cheaper
+/// through the same reader.
+///
+/// THE BOUND IS IN BYTES, NOT SECONDS, and deliberately: a wall-clock
+/// assertion on a shared CI runner measures the runner. The bytes the
+/// MD5 chain had to walk are a deterministic function of where the hole
+/// is, and they are what the whole change moves - so the repair line
+/// reports them and this row bounds them.
+///
+/// The damage is placed LATE on purpose. The saving IS the prefix, so a
+/// hole a quarter of the way in can only ever buy a quarter, and a
+/// fixture that hides that is a fixture that cannot fail when the
+/// mechanism regresses to nothing (measured on
+/// `par2_mapped_repair_bench`, 2 Sep 2026: first hole at 10/25/50/75/90%
+/// bought 9/22/44/63/79% of the tail).
+#[tokio::test(flavor = "multi_thread")]
+async fn one_bad_article_late_in_a_member_keeps_the_selfprove_off_the_prefix() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("selfprove-prefix");
+    // A plain member big enough for the split to be legible in the
+    // report line's one decimal place, in 40 articles so the hole can
+    // be placed at a percentage rather than at a boundary.
+    const MEMBER: usize = 4_000_000;
+    let notes = payload(MEMBER, 23);
+    fx.add_file("notes.bin", &notes, 100_000);
+    let filler = payload(400_000, 24);
+    fx.add_file("other.bin", &filler, 100_000);
+    let covered = ["notes.bin", "other.bin"];
+    assert!(fx.add_par2(30, &covered, 100_000), "par2 create failed");
+
+    // Article 35 of 40: ~85% of the way in, so the proven prefix is
+    // most of the member and the MD5 chain is left with the rest.
+    let victim = fx
+        .articles
+        .keys()
+        .find(|k| k.contains("notes_bin") && k.ends_with("-35@mock>"))
+        .expect("victim article exists")
+        .clone();
+    let chaos = Chaos {
+        missing: [victim].into(),
+        // A slow server, so the hasher has the ordinary thing it has on
+        // a real job - wall clock between the loss being known and the
+        // slot settling. Over loopback with no delay the whole download
+        // is milliseconds and this row would be measuring the scheduler.
+        delay_ms: 4,
+        ..Default::default()
+    };
+    let srv = MockServer::start(fx.articles.clone(), chaos).await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+        .await
+        .unwrap();
+    assert!(ok, "job failed:\n{log}");
+    assert_eq!(
+        std::fs::read(fx.dir.join("out").join("notes.bin")).unwrap(),
+        notes,
+        "the repaired member differs - the prefix arm must not change a byte"
+    );
+    assert!(
+        log.contains("repair complete") && log.contains("(native, mapped"),
+        "the damage did not repair through the mapping:\n{log}"
+    );
+
+    // `self-prove: X MiB hashed, Y MiB carried in from ...`
+    let line = log
+        .lines()
+        .find(|l| l.contains("carried in from the download's prefix digest"))
+        .unwrap_or_else(|| panic!("the self-prove reported no carried prefix at all:\n{log}"));
+    let mib = |after: &str| -> f64 {
+        let tail = line.split(after).nth(1).expect("report line shape");
+        tail.trim()
+            .split(' ')
+            .next()
+            .and_then(|n| n.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("unparseable figure before {after}: {line}"))
+    };
+    let hashed = mib("self-prove: ");
+    let carried = mib("MiB hashed, ");
+    let member_mib = MEMBER as f64 / (1 << 20) as f64;
+    assert!(
+        carried > member_mib / 2.0,
+        "the prefix carried {carried:.1} MiB of a {member_mib:.1} MiB member - \
+         a hole at 85% should carry most of it: {line}"
+    );
+    assert!(
+        hashed < member_mib / 2.0,
+        "the self-prove still hashed {hashed:.1} MiB of a {member_mib:.1} MiB \
+         member: {line}"
+    );
+}
+
 /// TODO §282 item 15, at the surface the operator actually reads.
 ///
 /// On a real daemon, 24 Aug 2026 00:36Z, a 1024 MB recovery fetch came

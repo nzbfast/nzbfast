@@ -80,6 +80,12 @@ impl Extractor {
             // ledger - and the ledger records nothing without a hash
             // (TODO 217). Level 0 stays unhashed so the per-byte download
             // path pays nothing.
+            // The job's feeding signal rides every writer this chain
+            // makes (round 44) - see `Extractor::set_feeding`. Attached
+            // here rather than at each caller so a member discovered
+            // half way through a download inherits it with nobody
+            // walking the writer table.
+            let w = w.with_feeding(self.feeding.clone());
             let w = if self.depth > 0 {
                 w.with_budget(inner.limits.budget.clone())
                     .with_prefix_hash()
@@ -187,7 +193,7 @@ impl Extractor {
         // whose identity offsets this path knows - and the disk oracle
         // is the wider claim, made where the destination can be asked.
         if inner.refeed_active {
-            inner.late_placements.push(LatePlacement {
+            inner.push_late(LatePlacement {
                 slot,
                 frag: Frag {
                     // The out_dir-RELATIVE name, never the bare one (30 Aug 2026
@@ -244,7 +250,7 @@ impl Extractor {
             {
                 let mut inner = self.inner.lock_ok();
                 for cf in cfrags {
-                    inner.late_placements.push(LatePlacement {
+                    inner.push_late(LatePlacement {
                         slot: j.parent_slot,
                         frag: Frag {
                             file: cf.file,
@@ -417,7 +423,7 @@ impl Extractor {
                                         // fragments only (see
                                         // `compose_persist`), so these
                                         // are never crypto.
-                                        inner.late_placements.push(LatePlacement {
+                                        inner.push_late(LatePlacement {
                                             slot: parent_slot,
                                             frag: Frag {
                                                 file: cf.file.clone(),
@@ -484,38 +490,50 @@ impl Extractor {
         offset: u64,
         data: &[u8],
     ) -> usize {
+        // Reuse the Inner-owned hit buffer and hold the gaps in a
+        // scalar cursor rather than a `keep` vector: this runs under the
+        // routing lock for EVERY article of a mapped volume, and the
+        // three per-article Vecs it used to build (`map_span`'s return,
+        // `covered`, `keep`) were allocator traffic inside that critical
+        // section. `map_span_into` appends in data-area order - entries
+        // come off a forward-only parse cursor, which its own
+        // `debug_assert` pins - so the sort the `covered` copy existed
+        // for was already true of the input.
+        let mut hits = std::mem::take(&mut inner.hdr_scratch);
         let s = &mut inner.slots[slot];
-        let Some(m) = s.mapper.as_ref() else { return 0 };
-        let mut covered: Vec<(u64, u64)> = m
-            .map_span(offset, data.len() as u64)
-            .into_iter()
-            .map(|(_, _, span_off, len)| (span_off, span_off + len))
-            .collect();
-        covered.sort_unstable();
-        let mut pos = 0u64;
-        let mut keep: Vec<(u64, u64)> = Vec::new();
-        for (cs, ce) in covered {
-            if cs > pos {
-                keep.push((pos, cs));
-            }
-            pos = pos.max(ce);
-        }
-        if pos < data.len() as u64 {
-            keep.push((pos, data.len() as u64));
-        }
+        let Some(m) = s.mapper.as_ref() else {
+            inner.hdr_scratch = hits;
+            return 0;
+        };
+        let through = m.mapped_through();
+        m.map_span_into(offset, data.len() as u64, &mut hits);
         let mut stashed = 0usize;
-        for (ks, ke) in keep {
+        let mut pos = 0u64;
+        // One `keep` gap is `[pos, cs)` before each hit, plus the tail
+        // past the last one; stash each as it is found.
+        let mut stash = |s: &mut Slot, ks: u64, ke: u64| {
             let abs_s = offset + ks;
-            if abs_s >= m.mapped_through() {
-                continue; // not header - just not-yet-mapped data
+            if abs_s >= through {
+                return; // not header - just not-yet-mapped data
             }
-            let abs_e = (offset + ke).min(m.mapped_through());
+            let abs_e = (offset + ke).min(through);
             if abs_e > abs_s {
                 let part = data[ks as usize..(abs_e - offset) as usize].to_vec();
                 stashed += part.len();
                 s.header_spans.push((abs_s, HoldSpan::Ram(part)));
             }
+        };
+        for &(_, _, span_off, len) in hits.iter() {
+            if span_off > pos {
+                stash(s, pos, span_off);
+            }
+            pos = pos.max(span_off + len);
         }
+        if pos < data.len() as u64 {
+            stash(s, pos, data.len() as u64);
+        }
+        hits.clear();
+        inner.hdr_scratch = hits;
         inner.budget.add(stashed);
         stashed
     }

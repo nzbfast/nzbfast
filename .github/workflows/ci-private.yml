@@ -2,9 +2,13 @@
 # other workflow is gated to the public repo (cost rationale lives in
 # pr-check.yml); before this file existed nothing built or tested the
 # private tree between merge and release. Kept lean on purpose: format
-# + lint gates and the fast unit suites, on Linux and on Windows. The
-# long daemon/e2e suites stay nightly (nightly.yml) plus a local
-# pre-push discipline.
+# + lint gates and the fast unit suites, on Linux and on Windows, plus
+# - since 2 Sep 2026 - the fast e2e subset sharded four ways and the
+# whole DAEMON suite sharded six ways, both out of one archive, which
+# is the section above `windows-build`. What stays nightly
+# (nightly.yml) is the three `_at_shipped_thresholds` e2e tests, the
+# six other heavy elapsed-time targets, `leak_soak` and the Windows
+# copies - everything that needs a box with nothing else on it.
 #
 # ---------------------------------------------------------------------
 # SHAPE (rewritten 17 Aug 2026 - "the slow path IS the release path")
@@ -69,6 +73,17 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      conformance_capture:
+        # The par2 conformance table for THIS platform can only be
+        # captured where the pinned reference runs, and no box on this
+        # fleet is linux. So the linux table is captured here, by hand,
+        # on a dispatch, and downloaded from the run's artifact to be
+        # committed. Every other run asserts against the committed file.
+        # Re-capture when a pin moves; never hand-edit the table.
+        description: 'capture the linux par2 conformance table and upload it'
+        type: boolean
+        default: false
 permissions:
   contents: read
 # There is deliberately NO workflow-level `concurrency` block here. It
@@ -304,6 +319,20 @@ env:
   # That override moves a fingerprint without moving Cargo.lock, so the
   # rule above applies verbatim and the bump rides with it.
   #
+  # `-v4` became `-v5` on 1 Sep 2026 for the toolchain pin moving 1.97.0
+  # -> 1.98.0 in rust-toolchain.toml (clippy's statically combined late
+  # pass, measured -22% on the clippy step). A new rustc moves every
+  # fingerprint and Cargo.lock does not move, so the rule above applies
+  # verbatim: one cold rebuild per runner, then warm again.
+  #
+  # `-v5` became `-v6` on 2 Sep 2026 for the `[profile.dev.package.{aes,
+  # cbc,rusqlite,libsqlite3-sys}]` opt-level overrides in the workspace
+  # Cargo.toml (fixture-builder crates, same lever as rars; measurements
+  # in TEST-SWEEP-SLOW-TESTS-2026-09-01.md, in the private notes tree -
+  # cited without its directory on purpose: this file SHIPS, and
+  # publish-public.sh refuses an export naming that tree). Four rlibs
+  # plus the crates that link them move fingerprint; Cargo.lock does not.
+  #
   # WHY THIS ONE IS CHEAPER THAN THE `-v3` BUMP WAS, which is worth
   # knowing before the next reader assumes symmetry. `-v3` moved
   # `profile.test.debug`, i.e. every one of the ~54 test executables in
@@ -337,8 +366,12 @@ env:
   # `required-features` at BUILD time, so they never enter the archive -
   # verified by listing the archive's binaries. This expression is the
   # run-stage belt if they are ever built here again, and it is where a
-  # reader learns the eight names. nextest accepts binary() predicates
-  # that match nothing. Seven are ELAPSED-TIME suites; `par2gen_large_set`
+  # reader learns the eight names. TWO OF THEM DO RUN ON EVERY PUSH
+  # SINCE 2 Sep 2026, and this line is still exactly right: `e2e` and
+  # `daemon` are built and run by the `heavy-build` / `e2e` / `daemon`
+  # jobs below, out of their OWN archive, so they stay out of this one
+  # and out of every shard that reads it. nextest accepts binary()
+  # predicates that match nothing. Seven are ELAPSED-TIME suites; `par2gen_large_set`
   # is heavy for the other reason, tens of megabytes of generated PAR2
   # fixture and seconds of Reed-Solomon, and is gated the same way.
   NT_EXCLUDE: >-
@@ -351,6 +384,30 @@ env:
   # without it a push can put live xREL / TMDB requests on the wire from
   # a CI runner.
   NZBFAST_NO_ENRICH: "1"
+  # The PINNED par2cmdline reference, built from tag and cached at
+  # ~/par2ref/par2, consumed by TWO jobs now - `par2-conformance` (the
+  # spec-section-11 CLI harness) and `unit-one-process` (postfast's
+  # catalog conformance guard). Hoisted here for the same reason
+  # NT_VERSION is: the recipe is a dozen lines and both copies of it
+  # would otherwise carry their own spelling of the version, in the
+  # cache key AND in the clone, and a bump would land in one of the
+  # four places and not the other three. The KEY below still resolves
+  # to the byte-identical string it did when `par2-conformance` owned
+  # it alone (`par2cmdline-v1.3.0-<os>-v1`), so the warm cache survives
+  # this refactor - check that before changing the shape of it.
+  #
+  # NOT `apt-get install -y par2`, and this is the load-bearing half.
+  # Ubuntu's package is 0.8.1, which cannot verify ANY set describing a
+  # 0-byte member (upstream #128, fixed in 1.0.0; measured across tags
+  # in NIGHTLY-PAR2GEN-INTEROP-RED-2026-09-01.md). postfast's catalog
+  # carries three such rows today, so the distro package would redden
+  # perfectly good sets for a reason two majors old - which is exactly
+  # why the guard it protects had to wait for THIS binary rather than
+  # the cheap one. Nothing else in the fleet uses it: the nightly jobs
+  # that install par2 install 0.8.1 on purpose and their assertions
+  # name the version they got.
+  PAR2REF_TAG: "v1.3.0"
+  PAR2REF_KEY_SUFFIX: "v1"
   # Pinned once, consumed by six jobs. Both the version and the two
   # SHA256s move together.
   NT_VERSION: "0.9.140"
@@ -419,7 +476,7 @@ jobs:
       - name: toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt && rustup default stable
       - name: fmt
-        run: cargo fmt -p nzbkit -p nzbfast -p nzbtray -p nzbfast-ffi --check
+        run: cargo fmt -p nzbkit-base -p nzbkit -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbfast -p postfast -p parfast -p nzbtray -p nzbfast-ffi --check
   site-version-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -450,7 +507,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The sibling of the job above, one medium over. Every dashboard
-      # capture in website/assets/ renders the running version in its
+      # capture in website/assets/ rendered the running version in its
       # header pill, and nothing held those images to the crate version:
       # all four versioned shots went two releases stale AT ONCE, reading
       # `v1.1.4 beta 4` against a crate at 1.2.2, and it was caught only
@@ -462,7 +519,18 @@ jobs:
       # web/site.webmanifest. No other gate could ever have seen it:
       # website/ is not in PUBLIC_MANIFEST, so leak-check prints `0 public
       # file(s) clean` without scanning it, and nothing here can read a
-      # PNG. `--selftest` first, same reason as every gate above it.
+      # PNG.
+      #   SINCE 1 Sep 2026 IT READS NO VERSION. Holding the captures to
+      # the crate version reddened all four on every release, a release
+      # that moved no pixel included, and clearing that red honestly meant
+      # a ~30-minute rig run, so the version was taken out of the
+      # captures. The shoot rig hides `#ver`, the manifest declares a
+      # `ui-revision` a human bumps on a material UI change, and a 90-day
+      # staleness warning (never a failure, emitted as a `::warning`
+      # annotation so a green job still shows it) is the backstop. The job
+      # name is historical and is kept so the ci-verdict roster and the
+      # research record that cite it keep matching.
+      # `--selftest` first, same reason as every gate above it.
       - name: screenshot version gate
         run: tools/shot-version-gate.py --selftest && tools/shot-version-gate.py
   one-process-roster:
@@ -508,6 +576,35 @@ jobs:
         run: |
           tools/wedge-gate.py --selftest
           tools/wedge-gate.py
+  layout-coverage-selftest:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-layout-coverage-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # THE SELFTEST ONLY, and this job is deliberately not the report.
+      # `tools/layout-coverage.py` derives every posting-layout plane's
+      # status from crates/postfast/catalog and the oracle's junit; K
+      # (contemplated) and U (unselected) are declared states rather than
+      # defects, so the report reddens nothing and must never become a
+      # gate. What DOES need a runner is its selftest: it pins that a
+      # declared-gap profile which PASSES still reads K, that an unrun
+      # platform column stays `-`, and that a partial junit is refused
+      # instead of printed - three matchers that would each rot into a
+      # silent green. The last of those is why the report is not built
+      # here from a shard's junit: the workspace suite runs in four
+      # partitions and no single shard is the platform's run. The shards
+      # keep their junit as an artifact instead (`layouts-junit-linux-*`
+      # in `linux-tests`), and the report is run over all four together.
+      # The bare run at the end is over the real catalog, which is what
+      # turns a plane added to the spec with no predicate into a red line.
+      - name: layout coverage report
+        run: |
+          python3 tools/layout-coverage.py --selftest
+          python3 tools/layout-coverage.py --brief
   packaging-tests-roster:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -957,6 +1054,22 @@ jobs:
       # off a sha behind the tip, or a tip nothing has run for yet, reads
       # as UNKNOWN rather than as the OK this script used to print for
       # it, without ever turning the exit code red on a stalled queue.
+      # ON A BRANCH `workflow_dispatch` THIS JOB JUDGES MAIN, NOT THE
+      # BRANCH, and it is the one row in such a run that can be red for
+      # something the branch did not do. The script's subject is main's
+      # newest real verdict per job; the ref it was dispatched on only
+      # decides which checkout it reads the roster from. Measured 2 Sep
+      # 2026 on dispatch 33634506101, the in-situ run that proved the
+      # daemon lane: every job green except this one, whose red was
+      # main's own e2e failure on d170c6a9, already claimed by another
+      # lane and fixed within the hour. Read the other rows, not this
+      # one, when you dispatch this file to test a change.
+      #
+      # It is deliberately NOT skipped on a non-main ref. The row is
+      # still TRUE about main, and a lane about to branch is exactly
+      # who should see it - the repo convention is to take the red and
+      # claim it, and a dispatch that hid it would be teaching the
+      # opposite. What was missing was this paragraph, not a condition.
       - name: ci verdict
         env:
           # The script resolves the repo from GITHUB_REPOSITORY, which
@@ -1249,7 +1362,7 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ci-private-v4-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+          key: ci-private-v6-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       # CARGO_INCREMENTAL above stops us WRITING incremental state; this
       # evicts what a cache written before that flag existed hands us.
       # Deleting them costs nothing - nothing downstream reads them -
@@ -1777,7 +1890,7 @@ jobs:
         # Consequence to expect: re-running an OLD commit whose lock
         # predates a manifest edit now fails where it used to pass. That
         # is the flag doing its job, not a regression.
-        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray -p nzbfast-ffi --locked --all-targets --no-deps --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
+        run: cargo clippy -p nzbkit-base -p nzbkit -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbfast -p postfast -p parfast -p nzbtray -p nzbfast-ffi --locked --all-targets --no-deps --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
       # Prebuilt binary pinned by version and checked by SHA256 rather
       # than trusted, same pattern (and rationale) as the cargo-deny
       # step below.
@@ -1807,7 +1920,8 @@ jobs:
       #   test target added tomorrow is archived and run automatically,
       #   and the only names anyone maintains are the few that must NOT
       #   be. It replaced three steps naming `-p nzbkit --lib`, `-p
-      #   nzbfast --bin nzbfast` and two integration targets; everything
+      #   nzbfast --bin nzbfast` (`--lib` since the crate-split step
+      #   4.5) and two integration targets; everything
       #   else was reachable only through pr-check.yml, which triggers on
       #   `pull_request` while this repo pushes straight to main. 27
       #   integration targets plus vendor/rars (728 tests, the RAR
@@ -1899,7 +2013,7 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ci-private-v4-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+          key: ci-private-v6-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       # compression-level 0: the archive is already zstd, and re-zipping
       # 250 MB of incompressible data costs a minute and saves nothing.
       # retention 1 day - nothing outside this run ever reads it.
@@ -2071,6 +2185,38 @@ jobs:
       - name: wedge gate (shard ${{ matrix.shard }}/4)
         if: ${{ !cancelled() }}
         run: python3 tools/wedge-gate.py --junit "$GITHUB_WORKSPACE/target/nextest"
+      # THE POSTING-LAYOUT ORACLE'S JUNIT, KEPT so the catalog's coverage
+      # report can be produced from a real run. `tools/layout-coverage.py`
+      # derives every plane's status (R recognised / K contemplated /
+      # U unselected) from two things and nothing else: what the profiles
+      # in crates/postfast/catalog select, and what the oracle did with
+      # them. Without a junit every platform column is `-`, which is the
+      # honest reading and also a useless one.
+      #
+      # WHY THE JUNIT AND NOT THE REPORT ITSELF. This job runs the
+      # workspace suite in four PARTITIONS, so a shard holds about a
+      # quarter of the layout rows and its junit alone is not this
+      # platform's run - a report built from it would print K over planes
+      # that are green in another shard. The report refuses a partial set
+      # by name rather than printing one, so the four artifacts are
+      # downloaded together and the report is run over all of them:
+      #
+      #   tools/layout-coverage.py --platform linux --junit sh1/junit.xml \
+      #     --platform linux --junit sh2/junit.xml ... (once per shard)
+      #
+      # It is not a gate and this step must not become one: K is a
+      # declared state and U is usually just a profile nobody has written
+      # yet, so neither reddens anything. AFTER the wedge gate,
+      # deliberately - that gate reads this same file and its workflow arm
+      # refuses a suite step that is not followed by a junit check.
+      - name: layouts junit (shard ${{ matrix.shard }}/4)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: layouts-junit-linux-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 7
   # ===================================================================
   # THE ONE-PROCESS UNIT SUITE. The same binaries `linux-tests` runs,
   # run the OTHER way: one process per test BINARY instead of one per
@@ -2093,8 +2239,8 @@ jobs:
   # `OnceLock<Mutex<HashMap<..>>>`; one test ended by penalising a
   # provider for the clamped maximum of an hour, and a test over in
   # `crate::wall` read exactly that provider as its "an unrelated
-  # service is untouched" control. main was red on `cargo test -p
-  # nzbfast --bin nzbfast` for a full day and NO CI JOB SAID SO. The
+  # service is untouched" control. main was red on the nzbfast unit
+  # binary for a full day and NO CI JOB SAID SO. The
   # collision itself is fixed (a29a8e4cc made the buckets disjoint
   # across the binary); this job is the half that was still missing.
   # The class is live in both first-party crates - 79 statics with
@@ -2105,7 +2251,7 @@ jobs:
   # Two cheaper-looking spellings were measured and are BOTH wrong
   # here:
   #
-  #   `cargo test -p nzbfast --bin nzbfast` - the line CLAUDE.md
+  #   `cargo test -p nzbfast --lib` - the line CLAUDE.md
   #   documents, and the right one to type by hand - resolves FEWER
   #   features than `--workspace` does (nzbfast-ffi is a workspace
   #   member and turns nzbfast's `ffi` feature on; tokio and rusqlite
@@ -2126,25 +2272,31 @@ jobs:
   # than named in this file. That auto-enrols a crate added tomorrow,
   # for the same reason the archive step takes no package selection,
   # and it leaves the vendored crates out - their unit tests are
-  # upstream's and this job is about OUR globals. Today it selects four
-  # binaries and 3,596 tests: nzbkit 1,803, the nzbfast bin root 1,776,
-  # nzbtray 17, and the nzbfast lib root 0.
+  # upstream's and this job is about OUR globals. It selects a LIB root
+  # per first-party crate in `default-members` plus two bin roots
+  # (nzbtray, and nzbfast's - the latter carrying zero tests, being a
+  # shim over `cli_main` since the crate-split step 4.5, 2 Sep 2026):
+  # eight at the time that count was written, fourteen after the
+  # daemon/tasks/api and nzbkit-base cuts. The number is not maintained
+  # here on purpose - the selection derives it, and a crate cut out
+  # tomorrow enrols itself. `postfast` is one of them, which is what
+  # makes this the job where the catalog conformance guard finally has a
+  # reference in front of it; see the par2 steps at the head of it.
   #
-  # It selected FIVE and about 5,370 until 23 Aug 2026. Both numbers
-  # fell for the same reason and neither is a coverage loss. The fifth
-  # binary was nzbfast-ffi's own (empty) lib root, which is no longer
-  # archived at all. The 1,774 tests were the nzbfast LIB root - the
-  # ffi root over the same module tree - which the note here used to
-  # call "a near-duplicate second sample rather than new coverage",
-  # kept only because excluding it would have meant maintaining a name.
-  # That was too generous by exactly one word: it was an EXACT
-  # duplicate. `feature = "ffi"` has one site in the workspace, so the
-  # two roots compile the same module files under the same resolved
-  # features, and its 1,774 tests were a strict SUBSET of the bin
-  # root's 1,776. Nothing is named here to exclude it, then or now -
-  # the archive step dropped `--workspace`, the `ffi` feature went off
-  # with it, and that root now compiles to an empty binary the selector
-  # still picks up and nextest still runs, in 0 s. See the long note at
+  # WHICH ROOT CARRIES nzbfast's TESTS SWAPPED on 2 Sep 2026 and the
+  # selector needed no edit, which is the argument for deriving it.
+  # Until the crate-split step 4.5 the package had TWO crate roots over
+  # one module tree: the bin's, which carried the tests, and an
+  # `#![cfg(feature = "ffi")]` lib root that was an EXACT duplicate of
+  # it whenever anything turned that feature on (`feature = "ffi"` had
+  # one site in the workspace, so the two compiled the same files under
+  # the same resolved features and the lib's 1,774 tests were a strict
+  # subset of the bin's 1,776). The archive dropped `--workspace` on
+  # 23 Aug 2026, which took the feature off with it and left that root
+  # compiling to an empty binary the selector still picked up and ran in
+  # 0 s. Step 4.5 made the lib the ONE root: it now carries all 1,461 of
+  # them and the BIN is the 0 s empty one. Nothing here was named to
+  # exclude either, then or now. See the long note at
   # the archive step for what else that flag was costing.
   #
   # WHAT IT COSTS, measured on the runner in the first run that had it
@@ -2214,6 +2366,98 @@ jobs:
       # manifest in it, and refuses it AFTER extracting, so a missing
       # checkout would fail the step rather than quietly list nothing.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---------------------------------------------------------------
+      # THE PINNED par2 REFERENCE, so postfast's catalog conformance
+      # guard has one. Added 4 Sep 2026 under claim
+      # `postfast-par2-conformance-runs-nowhere`.
+      #
+      # `par2cmdline_verifies_every_unpatched_set_the_catalog_emits` is
+      # the layout catalog's one claim that cannot be self-consistent -
+      # the rest of that file has our creator judged by our own parser,
+      # and a writer and a reader that share a mistake pass together -
+      # and there was no job on which it both RAN and could PASS. It is
+      # a postfast LIB test, so per-push it rides `linux-tests` and this
+      # job, and NEITHER installs par2 - so the guard's `let Some(v) =
+      # par2_version() else { skip }` arm fired on both, and a guard
+      # that skips is INDISTINGUISHABLE from a guard that passes in
+      # every summary line either job prints. `par2-conformance` below
+      # is a different thing entirely - the spec-section-11 CLI harness,
+      # which never touches this guard.
+      #
+      # CORRECTED 4 Sep 2026, hours after this block first landed, and
+      # the correction is the lesson: this said "it ran on NO CI JOB AT
+      # ALL" and named nightly's `one-process-loaded` as a third job
+      # with no par2. That was taken from a handoff instead of from the
+      # workflow, and it is WRONG - `one-process-loaded` installs par2
+      # (nightly.yml, `test deps (par2 for repair fixtures)`) and sets
+      # NZBFAST_REQUIRE_PAR2, so the `postfast:lib` leg has been running
+      # this guard against ubuntu's 0.8.1, which cannot verify the
+      # catalog's three 0-byte-member rows, and FAILING. Read the
+      # workflow, never the handoff's summary of it. That red is
+      # `red-one-process-loaded-d7d89a88`, a separate item; the leg
+      # wants this same pinned reference.
+      #
+      # WHY THIS JOB and not the four `linux-tests` shards: only one
+      # shard would ever draw the test and all four would pay the
+      # restore. WHY PER-PUSH and not nightly: the guard is 0.53 s over
+      # 52 set files once the binary is there (measured on the dev Mac),
+      # so the whole cost here is a warm cache restore - a regression is
+      # caught on the commit that lands it rather than a day later.
+      #
+      # WHY NOT `apt-get install par2`, which is the obvious fix and the
+      # wrong one: ubuntu's is 0.8.1 and cannot verify a set describing
+      # a 0-byte member, of which this catalog has three. The long form
+      # is at PAR2REF_TAG in `env:` above.
+      # ---------------------------------------------------------------
+      - name: cache the pinned par2cmdline reference
+        id: par2ref
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/par2ref
+          key: par2cmdline-${{ env.PAR2REF_TAG }}-${{ runner.os }}-${{ env.PAR2REF_KEY_SUFFIX }}
+      - name: build par2cmdline from tag ${{ env.PAR2REF_TAG }}
+        if: steps.par2ref.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$PAR2REF_TAG" \
+            https://github.com/Parchive/par2cmdline.git "$RUNNER_TEMP/par2src"
+          cd "$RUNNER_TEMP/par2src"
+          ./automake.sh
+          ./configure
+          make -j"$(nproc)"
+          ./par2 --version
+          mkdir -p ~/par2ref
+          cp par2 ~/par2ref/par2
+      # FAILING TO FIND IS FAILING, in two layers. This step refuses
+      # outright if the reference did not survive the restore, so the
+      # job says so in one line instead of running a suite whose one
+      # par2 assertion quietly opted out; and NZBFAST_REQUIRE_PAR2 turns
+      # the guard's own skip arm into a failure, which covers the case
+      # where the binary is there and stops answering `-V`.
+      #
+      # NZBFAST_PAR2_BIN rather than a PATH prepend: it is explicit in
+      # the log, it cannot be defeated by a later step installing the
+      # distro package, and it is the spelling `parfast`'s
+      # creator-packet interop test already uses - one mechanism, not a
+      # second one. `$GITHUB_ENV` rather than a step-level `env:`
+      # because `~` and `$HOME` are not expanded in a workflow env
+      # value, and the cache path is `~/par2ref` by the action's own
+      # tilde handling.
+      #
+      # Both variables are read by NOTHING ELSE this job runs: every
+      # other reader in the tree is an integration (`kind: test`)
+      # target, and the selection below takes `lib`/`bin` only.
+      - name: point the catalog conformance guard at the pinned reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! "$HOME/par2ref/par2" -V; then
+            echo "::error::the pinned par2cmdline reference is not at ~/par2ref/par2."
+            echo "::error::postfast's catalog conformance guard would skip, which reads as a pass."
+            exit 1
+          fi
+          echo "NZBFAST_PAR2_BIN=$HOME/par2ref/par2" >> "$GITHUB_ENV"
+          echo "NZBFAST_REQUIRE_PAR2=1" >> "$GITHUB_ENV"
       - name: install cargo-nextest
         run: |
           curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors \
@@ -2280,6 +2524,46 @@ jobs:
               print(binary_id, binary["binary-path"], sep="\t")
           PY
           cat unit-binaries.tsv
+      # THE ONE LINE THIS JOB EXISTS TO PUT IN THE LOG, and it needs a
+      # step of its own for a reason that is the finding itself. The
+      # loop below runs each binary BARE, so libtest captures the output
+      # of every passing test - which means the guard's own
+      # "par2cmdline conformance against: ... / N set file(s) verified"
+      # is invisible on a green run, and `postfast: ok` on its own is
+      # exactly the summary line that cannot tell a real sweep from the
+      # skip arm. NZBFAST_REQUIRE_PAR2 makes that distinction hold
+      # MECHANICALLY (a skip is a panic now); this step is what makes it
+      # legible to a person reading the log.
+      #
+      # `--nocapture` is not an option for the loop itself - it would
+      # print the output of every test in every binary, nzbkit's ~1,600
+      # included - so one named test is re-run for its output. It costs
+      # 0.5 s and no build: the binary is already extracted.
+      #
+      # FAILING TO FIND IS FAILING, twice: an empty `postfast` row means
+      # the crate was renamed or dropped from the archive, and a run
+      # whose output does not carry the conformance line means the test
+      # name stopped resolving - libtest exits 0 on a filter that
+      # matches nothing, which is the rubber stamp this whole change is
+      # about. Both refuse rather than print nothing.
+      - name: show the catalog conformance verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=$(awk -F'\t' '$1 == "postfast" { print $2 }' unit-binaries.tsv)
+          if [ -z "$bin" ]; then
+            echo "::error::no 'postfast' lib binary in the archive inventory."
+            echo "::error::The catalog conformance guard cannot be shown, and may not have run."
+            exit 1
+          fi
+          out=$("$bin" --exact --nocapture \
+            recovery::tests::par2cmdline_verifies_every_unpatched_set_the_catalog_emits 2>&1)
+          echo "$out"
+          if ! grep -q "par2cmdline conformance:" <<<"$out"; then
+            echo "::error::the guard printed no conformance line - the test name no longer resolves."
+            echo "::error::libtest exits 0 on a filter that matches nothing, so this step checks."
+            exit 1
+          fi
       - name: run each first-party unit binary in ONE process
         shell: bash
         run: |
@@ -2313,6 +2597,467 @@ jobs:
             echo "::endgroup::"
           done < unit-binaries.tsv
           exit "$rc"
+
+  # ===================================================================
+  # THE TWO HEAVY SUITES THAT RUN ON EVERY PUSH: the fast e2e subset,
+  # sharded four ways, and the whole daemon suite, sharded six, both
+  # out of the one archive `heavy-build` writes. The e2e half landed
+  # first and its case is immediately below; the daemon half followed
+  # the same day and its case, its measurement and the balance
+  # question that decided six rather than four, are in the block above
+  # the `daemon` job.
+  #
+  # THE FAST e2e SUBSET, ON EVERY PUSH. Added 2 Sep 2026 under claim
+  # `ci-e2e-on-push`, and the premise is a count rather than a taste:
+  # `binary(e2e)` is excluded from NT_EXCLUDE above, so the end-to-end
+  # suite had NO per-push verdict at all, and roughly 2,700 commits
+  # went from v1.3.0 to v1.3.1 with nothing having run it. The only job
+  # that ran it is nightly's `long-suites`, which is SCHEDULED - its
+  # verdict is about a sha up to a day and a thousand commits behind
+  # tip, nothing re-runs it when a fix lands, and two e2e tests sat red
+  # in it for days for exactly that reason.
+  #
+  # WHAT MADE IT AFFORDABLE, because until 31 Aug 2026 it was not. The
+  # whole binary was pinned to a `max-threads = 1` test group and ran
+  # 1434 s serial, which fits no push. That group is gone; only the
+  # `_at_shipped_thresholds` tests (four since 2 Sep 2026, when the
+  # queue-spill rig joined after losing its window on shard 1/4) are
+  # held apart, by `threads-required = 'num-test-threads'`. They are
+  # DELIBERATELY NOT RUN HERE and stay nightly-only: they assert
+  # elapsed wall against a ~69 s demotion window and lose it under any
+  # competing load, so a shared runner cannot judge them. The
+  # complement is 443 tests in 210 s on an 18-core dev Mac. The whole
+  # measurement, including the contention-sensitive tests it names and
+  # the two hypotheses it refuted, is in
+  # E2E-SERIALIZATION-COST-2026-08-31.md.
+  #
+  # A DEV MAC IS NOT A 4-vCPU RUNNER, so the shape below was measured
+  # on the runner BEFORE it was written rather than extrapolated - the
+  # exact mistake that document's own section 5 records making. On
+  # nightly run 33491207417 (1 Sep 2026), with the box to itself, that
+  # same subset is 452 tests, 2,164 test-seconds and 1,102 s of nextest
+  # WALL at four threads: 5.2x the Mac, an 18m48s step, and three to
+  # seven pushes' worth of cadence. As one job it would have been
+  # another `windows-build` - a verdict every ~25 min and a blame
+  # window of six to nine commits.
+  #
+  # So it takes the shape this file already uses for that problem:
+  # BUILD ONCE, TEST SHARDED. MEASURED END TO END on run 33591477452,
+  # a branch push of these exact job bodies:
+  #
+  #   e2e-build        3m01s   (24 s of it the cache restore; that job
+  #                            is `heavy-build` now and 3m16s, because
+  #                            it archives the daemon target too)
+  #   e2e shard 1      5m43s   nextest 313.6 s, 114 tests
+  #   e2e shard 2      3m13s   nextest 162.9 s, 113 tests
+  #   e2e shard 3      4m17s   nextest 220.9 s, 113 tests
+  #   e2e shard 4      4m20s   nextest 223.2 s, 113 tests
+  #   ----------------------------------------------------------------
+  #   pipeline         8m47s   453 tests, 453 passed, ZERO flaky,
+  #                            wedge gate clean on all four shards
+  #
+  # 8m47s is inside `check`'s own ~9.8 min, which is the bar that
+  # matters: the note above `env:` shows the verdict INTERVAL is about
+  # one job duration whatever the push cadence does, so this lands a
+  # verdict about as often as the job whose archive every Linux shard
+  # runs from. `count:i/4` assigns round-robin over the ordered test
+  # list, which is what keeps the long poles apart - shard 1 still drew
+  # `queue_progress_at_scale` (147 s) and both `e2e_multiset` tests, and
+  # it is the 5m43s row.
+  #
+  # WHAT IT COSTS, stated honestly the way the three declined options
+  # above `env:` are. Each job carries a concurrency group, so a push
+  # arriving mid-pipeline replaces the PENDING entry and costs nothing;
+  # the steady-state ceiling is therefore one pipeline at a time, about
+  # 20.5 billed ubuntu minutes per 8m47s of wall, ~2.3 runner-minutes
+  # per minute of main. Against the 1,125 billed minutes measured over
+  # a 150-minute window on 22 Aug that is roughly +30%, all of it at
+  # the 1x Linux rate rather than the 2x Windows one - which is why
+  # this was affordable and option 3 up there was not.
+  #
+  # THE CONTENTION-SENSITIVE TESTS, which is the question a reader
+  # should ask next. The 31 Aug write-up names five: the two
+  # `_at_shipped_thresholds` qprog tests (excluded here) and three
+  # `e2e_norar` ones (`casevol::w4_07_case_only_twins_...` and two
+  # `namelatch::` rows) that lose under 16-way load on a 32-core box.
+  # All three PASSED on the measured run, and the reason is structural
+  # rather than lucky: a 4-vCPU runner runs four tests at once, not
+  # sixteen, so it is a gentler box than anything that write-up
+  # measured. If one of them ever does flake here, the fix is
+  # ISOLATION or a nightly-only filter naming it, never deleting the
+  # test and never widening the exclusion to a module.
+  # ===================================================================
+  # NAMED `heavy-build`, NOT `e2e-build`, since 2 Sep 2026. It was
+  # `e2e-build` for the few hours between the two claims, and the
+  # rename rides with the daemon target entering the archive so the
+  # name keeps saying what the job does: it builds the targets behind
+  # the `heavy-tests` feature that this file runs, which is now two of
+  # them. ci-verdict's roster and `suites-ran` below carry the new name
+  # in the same commit; nothing else in the tree referenced the old one.
+  heavy-build:
+    needs: changes
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ci-heavy-build-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    outputs:
+      # Same reasoning as `check`'s: the shards need the ARCHIVE, not
+      # this job's conclusion.
+      archive: ${{ steps.archive.outcome }}
+      workspace: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: toolchain
+        id: toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: dependency cache key
+        id: depkey
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          echo "hash=$($py tools/dep-cache-key.py)" >> "$GITHUB_OUTPUT"
+      # RESTORE ONLY. There is no `cache/save` in this job and that is
+      # deliberate on two counts. It reads the archive `check` banks, so
+      # ~600 dependency crates arrive warm for the price of one restore
+      # and no second multi-GB entry competes for the repository's cache
+      # budget (measured 2 Sep 2026: 14.4 GB across 25 entries, and the
+      # eviction that budget forces would cost `check` far more than
+      # this job could ever save). And because it never writes, the
+      # `--features heavy-tests` build below CANNOT poison the archive
+      # `check` restores - which is what would otherwise make this a
+      # cache-key bump under the rule stated above `env:`, a feature
+      # flag being exactly the kind of fingerprint move that rule is
+      # about.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ci-private-v6-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+      - name: install cargo-nextest
+        id: nextest
+        run: |
+          set -euo pipefail
+          curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 20 -o cargo-nextest.tar.gz \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NT_VERSION}/cargo-nextest-${NT_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${NT_SHA_LINUX}  cargo-nextest.tar.gz" | sha256sum -c -
+          tar -xzf cargo-nextest.tar.gz
+          sudo mv cargo-nextest /usr/local/bin/
+          rm cargo-nextest.tar.gz
+      # TWO TEST BINARIES, NAMED, not the eight the feature gates.
+      # `check`'s archive step takes no package selection on purpose, so
+      # that a target added tomorrow is archived automatically; this one
+      # is the opposite and says why: `--features heavy-tests` satisfies
+      # the `required-features` of all eight heavy targets, and six of
+      # them belong to nightly. `-p nzbfast --test e2e --test daemon`
+      # builds the two this file runs, and cargo pulls in the `nzbfast`
+      # binary with them because ~30 test files locate the daemon
+      # through `env!("CARGO_BIN_EXE_nzbfast")`. Verified on the
+      # archive's own member list: the two test binaries,
+      # `target/debug/nzbfast` and the build-script output the embedded
+      # assets live in.
+      #
+      # ONE ARCHIVE FOR BOTH, MEASURED, not assumed. On branch run
+      # 33631515208 the same job built e2e alone in 3m01s / 85 MB, the
+      # two together in 3m16s / 118 MB, and daemon alone in 2m58s /
+      # 96 MB. So a second build job of its own would have cost about
+      # three billed minutes and a second cache restore per push to
+      # save 15 seconds and 33 MB here - the two binaries share the
+      # `nzbfast` bin, the build-script output and the standard library
+      # that dominate both archives. The shards pay for it in a
+      # download that is 5 s at 118 MB, measured on the same run.
+      #
+      # WHY NOT ADD THE FEATURE TO `check`'s ARCHIVE INSTEAD, which
+      # would compile nothing twice. It would put all eight heavy
+      # binaries into an artifact five jobs already download, on the
+      # job that has died of ENOSPC four times, and it would move a
+      # fingerprint on the cache every one of those jobs restores.
+      # `check` is the job whose verdict interval the note above `env:`
+      # spends a page measuring; this buys its coverage without
+      # spending any of that.
+      - name: build heavy archive (e2e + daemon)
+        id: archive
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.nextest.outcome == 'success' }}
+        run: cargo nextest archive --locked -p nzbfast --features heavy-tests --test e2e --test daemon --archive-file nextest-archive-heavy.tar.zst
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() && steps.archive.outcome == 'success' }}
+        with:
+          name: nextest-archive-heavy
+          path: nextest-archive-heavy.tar.zst
+          retention-days: 1
+          compression-level: 0
+  e2e:
+    # `!cancelled()` plus the archive, the same form `linux-tests` uses
+    # and for the same reason: this job's real precondition is the
+    # artifact, never the build job's conclusion.
+    if: ${{ !cancelled() && github.repository != 'nzbfast/nzbfast' && needs.heavy-build.outputs.archive == 'success' }}
+    needs: heavy-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    # The shard number is IN the group. Without it every shard of a run
+    # lands in one group and they serialise, which would undo the split
+    # - the rule stated in the note above `env:`.
+    concurrency:
+      group: ci-e2e-${{ github.ref }}-${{ matrix.shard }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The repair tests CREATE their PAR2 sets with the external
+      # `par2` and SKIP without it, so the install is coverage rather
+      # than convenience, and NZBFAST_REQUIRE_PAR2 below turns a broken
+      # install into a red run instead of quietly skipped repair tests.
+      # Same pair, same reason, as nightly's e2e steps.
+      - name: test deps (par2 for the repair tests)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq par2
+      - name: install cargo-nextest
+        run: |
+          set -euo pipefail
+          curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 20 -o cargo-nextest.tar.gz \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NT_VERSION}/cargo-nextest-${NT_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${NT_SHA_LINUX}  cargo-nextest.tar.gz" | sha256sum -c -
+          tar -xzf cargo-nextest.tar.gz
+          sudo mv cargo-nextest /usr/local/bin/
+          rm cargo-nextest.tar.gz
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nextest-archive-heavy
+      # The same assert `linux-tests` carries, and this suite is the
+      # one it matters most for: `env!("CARGO_BIN_EXE_nzbfast")` is
+      # resolved at COMPILE time, so the archived binaries hold an
+      # ABSOLUTE path into the BUILD runner's workspace and nothing at
+      # runtime can remap it. Extracting to `$GITHUB_WORKSPACE` is what
+      # puts it back; this says so in one line if the two ever differ,
+      # instead of failing every test with a NotFound apiece.
+      - name: assert this runner's workspace matches the build's
+        shell: bash
+        run: |
+          want='${{ needs.heavy-build.outputs.workspace }}'
+          got='${{ github.workspace }}'
+          if [ "$want" != "$got" ]; then
+            echo "::error::this runner's workspace is '$got' but the archive was built in '$want'."
+            echo "::error::env!(\"CARGO_BIN_EXE_*\") bakes an absolute path at compile time, so every"
+            echo "::error::daemon-spawning test would fail NotFound. See the note above this step."
+            exit 1
+          fi
+          echo "workspace matches the build job: $got"
+      # THE FILTER IS THE COMPLEMENT OF NIGHTLY'S, which is what keeps
+      # the pair honest: nightly runs `test(/_at_shipped_thresholds$/)`
+      # one at a time on a box with nothing else on it, this runs
+      # everything else. Between them they are the whole binary. A
+      # filter naming a test that no longer exists is the rot this
+      # repository's gates keep refusing, so if that suffix is ever
+      # renamed, both sides move together.
+      #
+      # `binary(e2e)` IS LOAD-BEARING since the archive gained the
+      # daemon target: without it this shard would run the daemon
+      # suite too, partitioned differently from the `daemon` job and
+      # serialised behind its `max-threads = 1` group, and the pipeline
+      # would grow by most of a daemon suite on the longest shard. The
+      # `daemon` job carries the mirror-image predicate for the same
+      # reason. Proved on branch run 33631515208, which ran one e2e
+      # shard out of the combined archive: 114 tests, the same 114 the
+      # e2e-only archive gave shard 1 of 4.
+      - name: e2e subset (shard ${{ matrix.shard }}/4)
+        env:
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: |
+          cargo-nextest nextest run --profile ci \
+            --archive-file nextest-archive-heavy.tar.zst \
+            --extract-to "$GITHUB_WORKSPACE" --extract-overwrite \
+            --workspace-remap "$GITHUB_WORKSPACE" \
+            --partition count:${{ matrix.shard }}/4 \
+            -E 'binary(e2e) and not test(/_at_shipped_thresholds$/)'
+      # nextest RETRIES a timed-out test and reports the run "N passed
+      # (1 flaky)" at exit 0, so a wedge comes out green - the step
+      # above cannot see it and the report it wrote can. Every test job
+      # in this file carries this for that reason.
+      - name: wedge gate (shard ${{ matrix.shard }}/4)
+        if: ${{ !cancelled() }}
+        run: python3 tools/wedge-gate.py --junit "$GITHUB_WORKSPACE/target/nextest"
+
+  # ===================================================================
+  # THE DAEMON SUITE, ON EVERY PUSH, SHARDED SIX WAYS. Added 2 Sep 2026
+  # under claim `daemon-suite-on-push`, hours after the e2e half above
+  # and for the same reason, which is a count and not a taste: nothing
+  # per-push ran `binary(daemon)` at all. Its only runners were
+  # nightly's `long-suites`, `one-process-heavy` and `windows-daemon` -
+  # all SCHEDULED at 09:00 UTC, so a verdict about a sha up to a day
+  # and a thousand commits behind tip, with nothing re-running it when
+  # a fix lands - and step 5 of a hand-run pre-release lane, which is a
+  # person remembering.
+  #
+  # WHY SHARDING IS THE INSTRUMENT HERE, and it is a different argument
+  # from the e2e one. `binary(daemon)` is pinned to the `daemon-serial`
+  # test group in `.config/nextest.toml` (max-threads = 1, CLAUDE.md
+  # invariant 4: these tests spawn real daemons and bind ports), so a
+  # shard runs its slice ONE TEST AT A TIME whatever the box has.
+  # e2e ran four at once and a shard's wall was bounded below by its own
+  # long poles; here there is no in-box parallelism to lose, so the wall
+  # falls with the shard count until the longest pole stops it. That the
+  # group holds INSIDE a `--partition` shard is what `9294248c4` said
+  # would make sharding these safe later, and it is now measured rather
+  # than assumed: on run 33631515208 each shard's nextest wall equalled
+  # the SUM of its own tests' times to the tenth of a second
+  # (167.333 s against 167.3 s on shard 1 of 6).
+  #
+  # MEASURED ON THE RUNNER, THREE ARMS, ONE RUN (33631515208), against
+  # a suite that is 769.159 s of nextest and 191 tests in nightly run
+  # 33613046588 with the box to itself:
+  #
+  #   shards   nextest per shard (s)                       longest job
+  #     4      218.3 178.8 237.2 142.3                        4m25s
+  #     6      167.3 114.1 145.0  84.5 147.9 116.2             3m24s
+  #     8       76.0  96.6 113.5  88.5 147.9  83.9 134.2 54.3  2m56s
+  #
+  # SIX, and the reason is that the third column stops paying while the
+  # bill keeps growing. Six costs the same billed minutes as four - 18
+  # either way, because GitHub rounds each job up to the minute and six
+  # shorter jobs land where four longer ones did - and takes a minute
+  # off the wall. Eight costs three billed minutes more and buys 28
+  # seconds, because the long poles CLUSTER: one 35.5 s test and one
+  # 30.2 s test hold a shard near 148 s at six shards and at eight
+  # alike, so past six the split is dividing the tests that were never
+  # the problem. Per-shard fixed cost is ~31 s on this lane (checkout,
+  # par2, the nextest binary, a 118 MB artifact), which is well under
+  # the ~90 s the e2e shards pay and is why eight is not free.
+  #
+  # PIPELINE: 6m39s to 6m40s, over FOUR runs of the six-way shape
+  # (33631515208 and the three repeats below) - `heavy-build` 3m16s to
+  # 3m26s plus a longest shard of 3m03s to 3m24s. That is inside
+  # `check`'s own ~9.8 min, which is the bar the note above `env:`
+  # establishes, since the verdict INTERVAL is about one job duration
+  # whatever the push cadence does. Cost is ~18 billed ubuntu minutes
+  # per pipeline at the 1x Linux rate, and a push arriving mid-pipeline
+  # replaces the PENDING entry rather than adding a second one, so the
+  # steady-state ceiling is one pipeline at a time.
+  #
+  # THE ONE REAL RISK, which was a stated margin rather than a guess.
+  # `b3addcd08` established that
+  # `the_finishing_tail_is_named_and_never_borrows_the_next_job_s_bar`
+  # is a SAMPLING BUDGET IN THE TEST - assertion (2) needs one sample
+  # inside a millisecond-wide named tail phase, and it was surviving on
+  # 1-3 of ~400 polls. Polling history every 8th iteration bought 2.6x
+  # the samples and moved the failure onset from a 12 ms poll period to
+  # 25 ms; 50 ms still fails 6 of 6, and that limit is stated at the
+  # site. Every one of those numbers came off a quiet 18-core box, and
+  # this is a 4 vCPU runner, so it was re-asked HERE rather than
+  # assumed: that test failed its first attempt in nightly 33491207417
+  # (1 Sep, before the fix), passed in nightly 33613046588 (2 Sep,
+  # after it), and has not lost an attempt on a runner since. Across
+  # the three arms above, three repeat dispatches of the shipped six-way
+  # shape (33633141987, 33633147083, 33633150720) and the in-situ
+  # dispatch of THIS file on the branch (33634506101), that is seven
+  # complete passes and 1,337 daemon test executions on this hardware:
+  # ZERO failed, ZERO flaky, wedge gate clean on every shard.
+  #
+  # IF ONE OF THEM EVER DOES FLAKE HERE, the fix is the one b3addcd08
+  # used - fix the sampling at the SITE - or a nightly-only filter that
+  # NAMES the test and says why, the way the `_at_shipped_thresholds`
+  # pair above is named. Never delete the test, never loosen an
+  # assertion, and never widen the exclusion to a module: `retries = 1`
+  # means a once-failing test is reported FLAKY at exit 0, so the
+  # evidence is in the junit that the wedge gate reads, not in the step
+  # conclusion.
+  #
+  # NIGHTLY KEEPS ITS OWN DAEMON STEP and the duplication is deliberate,
+  # exactly as it is for e2e: this job carries this file's cancellation
+  # arithmetic, so a commit whose shards were displaced while pending
+  # has no daemon verdict of its own, and nightly is what covers that.
+  # `one-process-heavy` (the same tests in ONE process, where cross-test
+  # pollution is visible) and `windows-daemon` (2x billing) stay there
+  # too, and neither is replaced by this.
+  # ===================================================================
+  daemon:
+    # `!cancelled()` plus the archive, the same form `linux-tests` and
+    # `e2e` use: this job's real precondition is the artifact, never
+    # the build job's conclusion.
+    if: ${{ !cancelled() && github.repository != 'nzbfast/nzbfast' && needs.heavy-build.outputs.archive == 'success' }}
+    needs: heavy-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    # The shard number is IN the group, the rule stated in the note
+    # above `env:`. Without it all six land in one group and serialise,
+    # which here would cost the entire split: serialised, these shards
+    # are the 769 s suite plus six lots of setup.
+    concurrency:
+      group: ci-daemon-${{ github.ref }}-${{ matrix.shard }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Same pair, same reason, as the e2e shards and nightly's daemon
+      # step: the repair tests CREATE their PAR2 sets with the external
+      # `par2` and SKIP without it, and NZBFAST_REQUIRE_PAR2 turns a
+      # broken install into a red run rather than quietly skipped
+      # repair coverage.
+      - name: test deps (par2 for the repair tests)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq par2
+      - name: install cargo-nextest
+        run: |
+          set -euo pipefail
+          curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 20 -o cargo-nextest.tar.gz \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NT_VERSION}/cargo-nextest-${NT_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${NT_SHA_LINUX}  cargo-nextest.tar.gz" | sha256sum -c -
+          tar -xzf cargo-nextest.tar.gz
+          sudo mv cargo-nextest /usr/local/bin/
+          rm cargo-nextest.tar.gz
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nextest-archive-heavy
+      # The daemon suite is the one that spawns the product binary
+      # oftenest, so the workspace assert matters here for exactly the
+      # reason it does on the e2e shards: `env!("CARGO_BIN_EXE_nzbfast")`
+      # is resolved at COMPILE time, the archived binary holds an
+      # ABSOLUTE path into the BUILD runner's workspace, and nothing at
+      # runtime can remap it. One line here beats a NotFound per test.
+      - name: assert this runner's workspace matches the build's
+        shell: bash
+        run: |
+          want='${{ needs.heavy-build.outputs.workspace }}'
+          got='${{ github.workspace }}'
+          if [ "$want" != "$got" ]; then
+            echo "::error::this runner's workspace is '$got' but the archive was built in '$want'."
+            echo "::error::env!(\"CARGO_BIN_EXE_*\") bakes an absolute path at compile time, so every"
+            echo "::error::daemon-spawning test would fail NotFound. See the note above this step."
+            exit 1
+          fi
+          echo "workspace matches the build job: $got"
+      # THE WHOLE BINARY, unlike the e2e shards: there is no
+      # nightly-only slice of this suite to complement, so the six
+      # shards between them run all 191 tests and the filter names the
+      # binary only. `binary(daemon)` is required because the archive
+      # also carries `e2e` - without it a shard would run a slice of
+      # both, serialised behind the daemon group.
+      - name: daemon suite (shard ${{ matrix.shard }}/6)
+        env:
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: |
+          cargo-nextest nextest run --profile ci \
+            --archive-file nextest-archive-heavy.tar.zst \
+            --extract-to "$GITHUB_WORKSPACE" --extract-overwrite \
+            --workspace-remap "$GITHUB_WORKSPACE" \
+            --partition count:${{ matrix.shard }}/6 \
+            -E 'binary(daemon)'
+      # nextest RETRIES a timed-out test and reports the run "N passed
+      # (1 flaky)" at exit 0, so a wedge comes out green - the step
+      # above cannot see it and the report it wrote can. This suite is
+      # the one where that matters most: a 4,666-second deadlock came
+      # out of CI green on 23 Aug 2026 in exactly this shape.
+      - name: wedge gate (shard ${{ matrix.shard }}/6)
+        if: ${{ !cancelled() }}
+        run: python3 tools/wedge-gate.py --junit "$GITHUB_WORKSPACE/target/nextest"
 
   # ===================================================================
   # WINDOWS. The same fast unit suites, on every push.
@@ -2414,7 +3159,7 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ci-private-v4-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+          key: ci-private-v6-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       # The Linux twin of this step carries the reasoning. pwsh, and
       # -ErrorAction SilentlyContinue, because Remove-Item throws on a
       # missing path where `rm -rf` does not, and a cold cache is
@@ -2482,7 +3227,7 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ci-private-v4-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+          key: ci-private-v6-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() && steps.archive.outcome == 'success' }}
         with:
@@ -2756,7 +3501,7 @@ jobs:
       # mingw-w64 required, per the recipe in 012549847): 35.8 s ->
       # 44.5 s wall, 127 s -> 149 s CPU, zero new findings.
       - name: clippy (windows-gated code)
-        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray -p nzbfast-ffi --locked --all-targets --no-deps --keep-going --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
+        run: cargo clippy -p nzbkit-base -p nzbkit -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbfast -p postfast -p parfast -p nzbtray -p nzbfast-ffi --locked --all-targets --no-deps --keep-going --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
 
   # The ARM64 gate. `cargo clippy --target` runs in check mode - it
   # never links - so an x64 runner covers aarch64-pc-windows-msvc with
@@ -2844,7 +3589,7 @@ jobs:
   # that kept it out. The job shipped without it, so the slim TEST
   # targets had never been built anywhere by anyone, and that hole cost
   # a real breakage the same day: two E0425s on `WALL_HTML`, which is
-  # gated with the indexer stack in serve/assets.rs and was named by two
+  # gated with the indexer stack in assets.rs and was named by two
   # UNGATED `#[cfg(test)]` sites, broken for an unknown length of time
   # and fixed in c013e1878. The guess was that `--all-targets` roughly
   # DOUBLES the job, which given the budget below would have made it a
@@ -2936,7 +3681,7 @@ jobs:
   # `--all-targets` stay silenced at the `let`, and they are the SHAPE
   # the paragraph above says `#[expect]` is wrong for, done right:
   # `#[cfg_attr(not(feature = "indexer"), expect(unused_mut))]` in
-  # `serve/tests_grabs.rs`, `serve/webasset.rs` and `serve/assets.rs`.
+  # `tests_grabs.rs`, `webasset.rs` and `assets.rs`.
   # The cfg predicate names the one configuration where the lint fires,
   # so the expectation is fulfilled exactly there and unfulfilled
   # nowhere - which is what a bare `#[expect]` on a rustc lint cannot
@@ -2993,6 +3738,22 @@ jobs:
         run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: check --no-default-features --all-targets (indexer off)
         run: cargo check -p nzbfast --no-default-features --locked --all-targets
+      # THE SAME LINE OVER THE ENGINE CRATE, added 3 Sep 2026. The bin
+      # line above resolves nzbkit with `default-features = false`, so
+      # the ENGINE'S slim configuration was compiled here all along -
+      # but only its lib. nzbkit's own test and example targets are
+      # reached by `-p nzbkit --all-targets` and by nothing else, and
+      # five integration-test modules plus two examples that reach
+      # `nzbkit::index` (an `indexer`-gated module) had been red under
+      # this line since the day they landed, with every job green,
+      # because no job ran it. It is the configuration every phone
+      # build starts from. Fixed at the sites (`#[cfg(feature =
+      # "indexer")]` on the `mod` lines, `required-features` on the two
+      # examples) and held green here; never fix a red by widening the
+      # production cfg. ~2 s warm on top of the step above, the whole
+      # dependency graph being shared with it.
+      - name: check --no-default-features --all-targets (nzbkit, indexer off)
+        run: cargo check -p nzbkit --no-default-features --locked --all-targets
 
   # ===================================================================
   # THE OTHER CONFIGURATION NOBODY BUILDS, added 29 Aug 2026, and it is
@@ -3109,6 +3870,98 @@ jobs:
   #
   # The TWENTY-SEVENTH gate holds both commands and this job's two steps
   # as PAIRS now, the same as the fmt line above.
+  # ===================================================================
+  # CLI-COMPATIBILITY CONFORMANCE, the par2 half. Added 3 Sep 2026.
+  #
+  # WHAT IT ASSERTS. tools/conformance/run.py runs a fixed matrix of
+  # commands, switches and damaged inputs through a reference binary and
+  # a candidate, and compares the exit code, the normalised output and
+  # the produced file bytes row by row. The reference's answers are
+  # committed as fixtures under tools/conformance/expected/ and its own
+  # help screen under tools/conformance/inventory/, so this job needs
+  # only the reference plus those files. It is the mechanical form of
+  # "our par2 is a drop-in": a claim about a file, not about a manual.
+  #
+  # IT INSTALLS NOTHING VIA apt FOR par2, AND THAT IS THE POINT.
+  # Ubuntu's package is par2cmdline 0.8.1, which miscounts identical
+  # blocks and cannot verify a set holding a 0-byte member - two full
+  # investigations in this repo, memory nzbfast-ci-par2-version-skew.
+  # Capturing exit codes "empirically from the reference" inherits every
+  # defect of whatever answers to the name par2, so the reference is
+  # BUILT from tag v1.3.0 and the version is in the fixture's file name.
+  # The matrix carries a 0-byte member and a pair of byte-identical
+  # members on purpose: those two shapes are exactly where 0.8.1 differs,
+  # so a candidate that inherited its behaviour diverges here.
+  #
+  # WHAT DOES NOT RUN HERE, said rather than left as a skipped job.
+  # There is no reference `rar` on CI and there will not be one, for
+  # licence reasons, so the creator half of the suite runs on a dev box.
+  # The windows leg runs on a fleet windows box for the same reason plus
+  # the console and path handling. tools/conformance/README.md has both
+  # command lines. A green run of this job is a statement about par2 on
+  # linux and about nothing else.
+  #
+  # THE BUILD IS CACHED on the tag, not on a lockfile: the reference
+  # changes only when the pin does, so a cache miss is a deliberate
+  # event. About 40 s cold, nothing warm.
+  par2-conformance:
+    needs: changes
+    # Gated exactly like slim-check and ktls-check beside it, and NOT
+    # widened with an `|| github.event_name == 'workflow_dispatch'` arm
+    # for the capture path: a dispatch carries no before-sha, so the
+    # classifier above already answers build=true for it. The narrow
+    # guard is also the one the selftest roster can read - an `||` around
+    # the repository comparison makes it refuse rather than guess, and it
+    # is right to.
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-par2-conformance-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: harness selftest
+        run: tools/conformance/run.py --selftest
+      # The version lives in `env:` at the head of this file, because
+      # `unit-one-process` restores the SAME cache under the SAME key
+      # for postfast's catalog conformance guard. Whichever job misses
+      # first pays the ~2 min build and saves it for the other.
+      - name: cache the pinned par2cmdline reference
+        id: par2ref
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/par2ref
+          key: par2cmdline-${{ env.PAR2REF_TAG }}-${{ runner.os }}-${{ env.PAR2REF_KEY_SUFFIX }}
+      - name: build par2cmdline from tag ${{ env.PAR2REF_TAG }}
+        if: steps.par2ref.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$PAR2REF_TAG" \
+            https://github.com/Parchive/par2cmdline.git "$RUNNER_TEMP/par2src"
+          cd "$RUNNER_TEMP/par2src"
+          ./automake.sh
+          ./configure
+          make -j"$(nproc)"
+          ./par2 --version
+          mkdir -p ~/par2ref
+          cp par2 ~/par2ref/par2
+      - name: capture the linux table (dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.conformance_capture }}
+        run: tools/conformance/run.py par2 --reference ~/par2ref/par2 --capture
+      - name: upload the captured table (dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.conformance_capture }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: par2-conformance-linux
+          path: |
+            tools/conformance/expected/par2-1.3.0-linux.json
+            tools/conformance/inventory/par2-1.3.0-linux.txt
+          if-no-files-found: error
+      - name: par2cmdline v1.3.0 against its committed table
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.conformance_capture) }}
+        run: tools/conformance/run.py par2 --reference ~/par2ref/par2 --candidate ~/par2ref/par2
+
   fuzz-gate:
     needs: changes
     if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
@@ -3224,7 +4077,7 @@ jobs:
   # ===================================================================
   suites-ran:
     if: ${{ !cancelled() && github.repository != 'nzbfast/nzbfast' }}
-    needs: [check, linux-tests, windows-build, windows-unit]
+    needs: [check, linux-tests, windows-build, windows-unit, heavy-build, e2e, daemon]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -3238,16 +4091,34 @@ jobs:
           LINUX_RESULT: ${{ needs.linux-tests.result }}
           WBUILD_RESULT: ${{ needs.windows-build.result }}
           WUNIT_RESULT: ${{ needs.windows-unit.result }}
+          HEAVYBUILD_RESULT: ${{ needs.heavy-build.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+          DAEMON_RESULT: ${{ needs.daemon.result }}
         run: |
           rc=0
           lane() {
             printf '%-8s %-14s %-9s   shards %s\n' "$1" "$2" "$3" "$4"
             if [ "$4" = skipped ] && [ "$3" = failure ]; then
-              echo "::error title=$1 tests never ran::$2 failed, so the four $1 shards were skipped. This commit has NO $1 test coverage - the red $2 row is not the whole story."
+              # "the $1 shards", not "the four $1 shards": the lanes no
+              # longer agree on a count (Linux 4, Windows 6, e2e 4,
+              # daemon 6) and a message that names the wrong number is
+              # the kind of small lie that makes a reader distrust the
+              # rest of the annotation.
+              echo "::error title=$1 tests never ran::$2 failed, so the $1 shards were skipped. This commit has NO $1 test coverage - the red $2 row is not the whole story."
               rc=1
             fi
           }
           echo "lane     build job      result      test shards"
           lane Linux   check         "$CHECK_RESULT"  "$LINUX_RESULT"
           lane Windows windows-build "$WBUILD_RESULT" "$WUNIT_RESULT"
+          # The two heavy lanes, added with their jobs on 2 Sep 2026.
+          # Exactly the same masking is available to them, and to both
+          # at once: their shards are gated on `heavy-build`'s ARCHIVE,
+          # so one build that fails takes the end-to-end AND the daemon
+          # coverage with it silently unless something says so here.
+          # That is also why both rows name the same build job - one
+          # red build is two lanes of silence, and this prints it as
+          # two rows because they are two suites.
+          lane e2e     heavy-build   "$HEAVYBUILD_RESULT" "$E2E_RESULT"
+          lane daemon  heavy-build   "$HEAVYBUILD_RESULT" "$DAEMON_RESULT"
           exit "$rc"

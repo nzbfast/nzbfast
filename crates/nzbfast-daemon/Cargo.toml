@@ -1,0 +1,113 @@
+[package]
+name = "nzbfast-daemon"
+version = "1.4.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The nzbfast daemon layer: the Daemon type, its queue/history stores, settings and background state"
+
+[lints]
+workspace = true
+
+# Lane 2 of Option C in
+# research/PLAN-NZBFAST-CRATE-SPLIT-2026-09-01.md: the 71 units
+# `tools/modgraph.py`'s `SERVE_LAYERS` puts in the `daemon` layer. It must
+# not name `nzbfast` - that is what keeps the bin (and serve's api, tasks
+# and wiring layers, which stay there until lane 3) the only thing above
+# this. `--serve --check` holds the rule from the source side; the absence
+# of a dependency line here holds it from the cargo side.
+#
+# NOTHING HERE EMBEDS A WEB ASSET, and that is a property of the partition
+# rather than a rule imposed on top of it: every `include_str!` /
+# `include_bytes!` of `web/` lives in `assets.rs` / `webasset.rs` /
+# `devweb.rs`, which SERVE_LAYERS puts in the api layer, so they stayed in
+# the bin with the `dashboard` feature and this crate has no build.rs.
+[dependencies]
+nzbkit = { path = "../nzbkit", default-features = false }
+nzbfast-core = { path = "../nzbfast-core" }
+nzbfast-unpack = { path = "../nzbfast-unpack" }
+nzbfast-meta = { path = "../nzbfast-meta" }
+# The download engine. `Daemon::enqueue` hands it `JobSpec`s and the queue
+# lanes drive `get_with_progress` directly.
+nzbfast-engine = { path = "../nzbfast-engine" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+# The daemon's own HTTP vocabulary: `Request`/`Response`/`Header` cross
+# this boundary in the reqbody, httputil and peeracct units even though
+# the routing table itself is `http.rs`, which is wiring and stays in the
+# bin. Same vendored + hardened fork the bin links.
+tiny_http = { path = "../../vendor/tiny_http", features = ["ssl-rustls"] }
+# The watch-folder and settings watchers.
+notify = "8.2.0"
+libc = "0.2"
+# Outbound HTTP for the update check, the indexer probes and the webhook
+# sender.
+ureq = "2"
+# §129 4a webhook signing (X-NzbFast-Signature) and the update manifest's
+# payload digest.
+sha2 = "0.11"
+hex = "0.4"
+ed25519-dalek = "3"
+# The first-run API key comes from the platform CSPRNG, not RandomState.
+getrandom = "0.4"
+# Startup-time certificate sanity for --tls-cert, and the ServerConfig the
+# wiring layer hands to tiny_http prebuilt.
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+x509-parser = "0.18"
+md-5 = "0.10"
+crc32fast = "1.5.0"
+# M28 wall thumbnails: the maint sweep and the art staging recogniser
+# decode and re-encode cached posters. Indexer-gated, same as the bin.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"], optional = true }
+
+# serve/peeracct.rs: which account owns the far end of a loopback
+# connection (GetExtendedTcpTable -> pid -> token user SID), the second
+# factor on the first-run handoff token.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
+[features]
+default = []
+# Forwarded from the bin, exactly as the other layer crates forward it:
+# the daemon layer carries the bulk of serve's `#[cfg(feature =
+# "indexer")]` sites, and forwarding keeps them ONE switch rather than
+# two, so `slim-check` compiles what the phones ship.
+indexer = [
+    "nzbkit/indexer",
+    "nzbfast-core/indexer",
+    "nzbfast-meta/indexer",
+    "dep:image",
+]
+# The test seams the layers ABOVE this one reach. `cfg(test)` is a
+# property of ONE crate's build, so an item behind it is invisible across
+# a crate boundary whatever its visibility - the same finding steps 2, 3
+# and 4 each met. Turned on through nzbfast's DEV dependency, so
+# `cargo build -p nzbfast` (the shipped binary) never sees it.
+#
+# Every item behind this is INERT until a test in the same process arms
+# it: `testutil` only constructs a Daemon over a directory the caller
+# owns, and `storecut`'s cuts and gaps are thread-locals that default to
+# None. That is the test the plan's step 3 asks per seam - would this
+# feature reading true in the SPAWNED daemon change what a user gets? -
+# and the answer here is no, which is why these are a feature rather
+# than a default-off runtime switch.
+test-support = []
+
+[dev-dependencies]
+nzbfast-core = { path = "../nzbfast-core", features = ["test-support"] }
+nzbfast-unpack = { path = "../nzbfast-unpack", features = ["test-support"] }
+# Seed-harvest migration tests open the daemon's closed index directly to
+# model a pre-manifest database. Same version/features nzbkit's index
+# tests already compile, so it adds no production dependency.
+rusqlite = { version = "0.40.1", features = ["hooks"] }

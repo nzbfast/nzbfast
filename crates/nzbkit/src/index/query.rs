@@ -142,6 +142,72 @@ pub(super) fn stem_fold_arm(pfx: &str, p: &str) -> String {
 }
 
 impl Index {
+    /// Is any release posted under exactly this stem? One probe of
+    /// `idx_rel_stem`. The seed lane's cheap already-have-it screen: a
+    /// readably-posted release indexes under its real name, so a
+    /// listing whose title IS a held stem needs no grab.
+    pub fn stem_exists(&self, stem: &str) -> rusqlite::Result<bool> {
+        self.db
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM releases WHERE stem=?1)")?
+            .query_row([stem], |r| r.get(0))
+    }
+
+    /// The oldest posting time on record IN `groups` (0 = none, and an
+    /// empty list is none). One ascending walk of `idx_rel_posted`,
+    /// stopping at the first row whose group is in the set, so it costs
+    /// a lookup per row OLDER than the answer and nothing per row after
+    /// it - 3,560 rows and under 20 ms on the 17.6M-row live index of
+    /// 2 Sep 2026.
+    ///
+    /// **The group list is the whole point and is not optional.** The
+    /// seed lane screens a listing out when it is older than anything
+    /// the join could hit, and the join can only fire on articles the
+    /// SCAN ingested - which is `index_groups` and nothing else. This
+    /// was a `MIN(first_posted)` over the whole table until 2 Sep 2026,
+    /// and on the live index that number was **2009-07-30**: one stray
+    /// repost in `alt.binaries.boneless`, a group nothing scans. The
+    /// screen therefore rejected nothing at all, ever, on any index that
+    /// had once seen a single old crosspost. Scoped to the seven scanned
+    /// groups the same index answers 2025-11-10.
+    /// Measurements: research/CONFIRM-LANE-UNMATCHED-2026-09-02.md
+    /// section 3.
+    ///
+    /// It is an exact minimum and deliberately not a robust one. A
+    /// tighter floor is available - the three big scanned groups have
+    /// their real coverage cliff around 13 Aug 2026 and hold under 0.1%
+    /// of their rows before it - but it would have to be a percentile,
+    /// which is a threshold nobody has measured a cost for, and the two
+    /// errors are not symmetric: a floor set too LOOSE spends a little
+    /// quota, a floor set too TIGHT drops candidates the seed lane
+    /// exists to find. It would also buy nothing on the evidence: a real
+    /// 100-listing sweep taken the same day was 100 listings posted that
+    /// same day, which every candidate floor admits. The remaining
+    /// looseness is not slack either - two small scanned groups
+    /// (`hdtv.x264`, `tvseries`) genuinely hold rows back to Nov 2025,
+    /// and a single global floor cannot be tighter than its loosest
+    /// group.
+    ///
+    /// A per-group floor would be better still and is not reachable
+    /// here: a newznab search result carries no group, so the caller has
+    /// nothing to compare one against until after it has paid for the
+    /// NZB.
+    pub fn oldest_first_posted(&self, groups: &[String]) -> rusqlite::Result<i64> {
+        if groups.is_empty() {
+            return Ok(0);
+        }
+        let marks = vec!["?"; groups.len()].join(",");
+        let mut st = self.db.prepare(&format!(
+            "SELECT first_posted FROM releases \
+               WHERE first_posted>0 AND grp IN ({marks}) \
+             ORDER BY first_posted LIMIT 1"
+        ))?;
+        match st.query_row(rusqlite::params_from_iter(groups.iter()), |r| r.get(0)) {
+            Ok(v) => Ok(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Search by substring over the stem (case-insensitive), newest first.
     pub(super) fn search_once(&self, query: &str, limit: u32) -> rusqlite::Result<Vec<Release>> {
         self.search_filtered(query, limit, false)
@@ -839,7 +905,7 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::testutil::{entry, teardown};
+    use crate::index::testutil::{dated_entry, entry, teardown};
 
     /// The filename-fallback census (`FN_FALLBACK_*`) is process-global
     /// and `cargo test` runs the lib tests as threads in ONE process, so
@@ -854,6 +920,75 @@ mod tests {
     /// these tests must fail that test, not cascade into the other.
     fn census_lock() -> std::sync::MutexGuard<'static, ()> {
         CENSUS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The seed lane's depth floor is scoped to the groups the SCAN
+    /// covers, and one stray old row in a group nothing scans must not
+    /// move it.
+    ///
+    /// That is the whole defect this signature exists to close. The
+    /// unscoped `MIN(first_posted)` over the live index of 2 Sep 2026
+    /// answered 2009-07-30 - one repost in `alt.binaries.boneless` - so
+    /// the screen above it rejected nothing at all, on any index that
+    /// had ever seen a single old crosspost.
+    #[test]
+    fn the_depth_floor_ignores_groups_the_scan_does_not_cover() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-index-floor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        let scanned = vec!["alt.binaries.teevee".to_string()];
+
+        // Nothing held yet: no floor, so the screen must not bite.
+        assert_eq!(ix.oldest_first_posted(&scanned).unwrap(), 0);
+
+        // The stray: an ancient post in a group nobody scans. It is the
+        // whole-table minimum and it must be invisible here.
+        ix.ingest(
+            "alt.binaries.boneless",
+            &[dated_entry(
+                "\"Ancient.Repost.mkv\" yEnc (1/1)",
+                "b1",
+                1_000,
+            )],
+            9_000_000,
+        )
+        .unwrap();
+        assert_eq!(
+            ix.oldest_first_posted(&scanned).unwrap(),
+            0,
+            "an unscanned group cannot lower a floor the join can never use"
+        );
+
+        // Two scanned rows: the older one is the floor.
+        for (id, posted) in [("t1", 8_000_000), ("t2", 7_000_000)] {
+            ix.ingest(
+                "alt.binaries.teevee",
+                &[dated_entry(
+                    &format!("\"Scanned.Show.S01E01.{id}.mkv\" yEnc (1/1)"),
+                    id,
+                    posted,
+                )],
+                9_000_000,
+            )
+            .unwrap();
+        }
+        assert_eq!(ix.oldest_first_posted(&scanned).unwrap(), 7_000_000);
+
+        // Widening the scan to the group holding the stray DOES move the
+        // floor - the rule is "what the scan covers", not "what looks
+        // old".
+        let wider = vec![
+            "alt.binaries.teevee".to_string(),
+            "alt.binaries.boneless".to_string(),
+        ];
+        assert_eq!(ix.oldest_first_posted(&wider).unwrap(), 1_000);
+
+        // An index that scans nothing has no floor to offer, and the
+        // caller reads 0 as "do not screen" rather than as "reject
+        // everything posted after the epoch".
+        assert_eq!(ix.oldest_first_posted(&[]).unwrap(), 0);
+        teardown(&dir, ix);
     }
 
     /// `titles.tmdb_id` holds a TMDB movie id on a movie row and a

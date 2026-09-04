@@ -1,0 +1,58 @@
+# G1: the payload's first 16 KiB is spoiled AFTER the set was cut, so
+# the head-hash tier has nothing to claim and only parity can answer.
+
+[layout]
+name = "cc-n14-damaged-head-repairs"
+seed = 1401
+note = """
+Expresses bench/capability-corpus leg n14-damaged-head, and it is the
+first catalog row to select [fault] corrupt_payload at all (gap G1 of
+research/POSTFAST-VS-CAPABILITY-CORPUS-2026-09-03.md).
+
+WHAT MAKES THIS DIFFERENT FROM EVERY OTHER DAMAGE ROW HERE. The 64
+spoiled bytes go into the SOURCE file before it is encoded, so the
+article that carries them is well formed and its yEnc part CRC is
+computed over the damage. A client re-asking the server gets the same
+plausible wrong bytes forever. That is the half [serve] corrupt cannot
+reach: the mock flips its byte in the ENCODED article, the part CRC
+fails, and the client meets a refused article whose missing range it
+already knows. Here it knows nothing until the set's block hashes
+disagree.
+
+AND THE SPAN IS INSIDE THE FIRST 16 KiB, which is the row rather than a
+detail. (length, md5-16k) is the live matcher's key, so a damaged head
+means the payload cannot be claimed by content at all: the repair has
+to both rebuild the bytes and supply the name, from the same set, in
+that order.
+
+THE PARITY ARITHMETIC, per the catalog README's rule. 200,000 bytes at
+a 32,768-byte block is 7 slices; the span at offset 1,000 lies wholly
+inside slice 0, so exactly one block is lost. redundancy_pct = 10 over
+7 slices is ceil(0.7) = 1 recovery block, which is the one the repair
+consumes - so "the volume arrives" is forced by arithmetic rather than
+by a client policy this row would otherwise be pinning.
+"""
+
+[source]
+files = [{ name = "Damaged.Head.mkv", bytes = 200000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 32768
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 50000
+
+[fault]
+corrupt_payload = [{ file = "Damaged.Head.mkv", at = 1000, bytes = 64 }]
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

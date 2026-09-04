@@ -36,6 +36,14 @@ pub(super) struct FrontierBuffer {
     /// needs no fresh answer - which matters for a routed child, whose
     /// answer is a walk of the parent's routing map under the parent's
     /// lock, asked once per engine read otherwise.
+    ///
+    /// This caches the PREFIX answer only. The per-range answer
+    /// (`ChaseGate::vouched_end`, the tail-first reader's) is not
+    /// monotonic in `offset` - vouching for a block at 93% says nothing
+    /// about the one at 12% - so it has no `fetch_max` to ride and is
+    /// never stored here. It is asked only where this cache would have
+    /// parked the reader, so the fast path keeps exactly the shape it
+    /// had.
     gate_cache: std::sync::atomic::AtomicU64,
     /// The chain's holds scratch, when this buffer may page cold spans
     /// out of RAM ([`Self::page_cold`] - the terminally-stalled-chase
@@ -74,6 +82,12 @@ pub(super) struct FrontierState {
     pub(super) paged_bytes: usize,
     /// Declared volume size (the level-1 entry's unpacked size).
     pub(super) total: u64,
+    /// What this buffer's `data` allocation currently has charged to
+    /// `memgauge::HoldsReserve` - the reserved-but-unused slack
+    /// (`data.capacity() - data.len()`) that the holds budget does NOT
+    /// see, because it charges `stored`. Kept so the gauge can be moved
+    /// by the DELTA at each mutation rather than recomputed globally.
+    pub(super) reserve_charged: usize,
     /// Retained RAM bytes (frontier + pending; paged spans excluded) -
     /// what the holds budget is charged for.
     pub(super) stored: usize,
@@ -96,6 +110,17 @@ pub(super) struct FrontierState {
     /// not reads of the decode and do not move it. The line a rewrite
     /// is judged against: below it the decoded output may already
     /// depend on the stale bytes.
+    ///
+    /// A HIGH-WATER MARK, not a set of ranges, and the random-access
+    /// reader has always been able to run it far ahead of the bytes it
+    /// actually consumed (the 7z footer read, and since the §94 B gate
+    /// answers per range, a zip central directory served from above the
+    /// damage). A repair landing BELOW that mark then forfeits a chase
+    /// whose decode never read those bytes. That is the conservative
+    /// direction - it costs a materialize, never a wrong byte - and it
+    /// is exactly the pre-gate behaviour, so it is left as it stands;
+    /// the fix, if a route is ever measured losing to it, is to judge
+    /// the rewrite against the served RANGES rather than this line.
     pub(super) served: u64,
     pub(super) abort: Option<String>,
     /// §156.1: an article of THIS volume got a terminal verdict (430
@@ -259,6 +284,44 @@ impl FrontierState {
         }
         self.stored = stored;
         self.pending_max_len = max_len;
+        self.resync_reserve();
+    }
+
+    /// Move the `holds_reserve` gauge to this buffer's current slack.
+    ///
+    /// Instrument-first, and the tier that answers audit round 14's
+    /// residue 1. The holds budget charges BYTES STORED; `data` is a
+    /// `Vec` whose capacity is the doubling ladder clamped at the
+    /// declared volume size, so a volume past the halfway rung reserves
+    /// its whole volume - and once those pages have been written they
+    /// stay in `phys_footprint` after a trim drains the bytes, because
+    /// dropping a `Vec`'s contents is not dropping its allocation.
+    /// Round 35 measured 36 volume-sized allocations totalling 1,869 MB
+    /// against a holds gauge reading 0 to 781 MB at the same instant -
+    /// the largest single term in the compressed-RAR chase peak and the
+    /// whole of what "unattributed" had been hiding.
+    ///
+    /// Called from [`Self::resync_retained`], which every mutation of
+    /// this state already ends with, so there is one site rather than a
+    /// list to keep in step. [`FrontierBuffer`]'s `Drop` releases the
+    /// remainder.
+    fn resync_reserve(&mut self) {
+        let slack = self.data.capacity() - self.data.len();
+        if slack == self.reserve_charged {
+            return;
+        }
+        if slack > self.reserve_charged {
+            crate::memgauge::add(
+                crate::memgauge::Sub::HoldsReserve,
+                (slack - self.reserve_charged) as u64,
+            );
+        } else {
+            crate::memgauge::sub(
+                crate::memgauge::Sub::HoldsReserve,
+                (self.reserve_charged - slack) as u64,
+            );
+        }
+        self.reserve_charged = slack;
     }
 }
 
@@ -418,10 +481,21 @@ impl FrontierBuffer {
     /// otherwise it drops the lock for the ask and hands back a fresh
     /// guard - the caller's loop re-runs every check against the new
     /// state.
+    ///
+    /// `per_range` is the tail-first reader's escape (see
+    /// `crate::live::VerifyGate::vouched_end`): where the PREFIX answer
+    /// would park this read, ask whether the range at `offset` is
+    /// individually vouched for after all. Only the random-access
+    /// reader passes it - the forward-only RAR decode stops at the
+    /// first hole regardless, so a per-range answer could only cost it
+    /// an extra ask per read and buy it nothing. The ask happens with
+    /// the state lock DOWN, like the prefix ask and for the same
+    /// cycle, and its answer is deliberately not cached.
     fn gate_limit_unlocked<'a>(
         &'a self,
         st: std::sync::MutexGuard<'a, FrontierState>,
         offset: u64,
+        per_range: bool,
     ) -> (u64, std::sync::MutexGuard<'a, FrontierState>, bool) {
         use std::sync::atomic::Ordering;
         if self.gate.is_none() || self.gate_released.load(Ordering::Acquire) {
@@ -432,8 +506,14 @@ impl FrontierBuffer {
             return (cached, st, false);
         }
         drop(st);
-        let lim = self.gate_limit();
+        let mut lim = self.gate_limit();
         self.gate_cache.fetch_max(lim, Ordering::AcqRel);
+        if per_range
+            && lim <= offset
+            && let Some(g) = &self.gate
+        {
+            lim = g.vouched_end(offset);
+        }
         (lim, self.state.lock_ok(), true)
     }
 
@@ -721,6 +801,7 @@ impl FrontierBuffer {
         st.resync_retained();
         let stored = st.retained();
         drop(st);
+        super::chasestat::buf_retained(stored);
         if accepted {
             self.arrived.notify_all();
         }
@@ -1132,6 +1213,19 @@ impl FrontierBuffer {
             return None;
         }
         st.data.drain(..n);
+        // Give the drained capacity back, exactly as `trim_to` does and
+        // for the same reason - this three-phase spill path is the one
+        // that actually runs under the holds cap, and it was drained
+        // without shrinking from the day it was split out of `trim_to`.
+        // Measured 3 Sep 2026 (audit round 35) on `bigv4` under
+        // `--mem-limit 2G`: 1,835 MB spilled through here left 36
+        // volume-sized `data` allocations alive - 1,869 MB of touched,
+        // still-resident pages holding nothing, against a holds gauge
+        // reading 0 at the same instant. `phys_footprint` counts pages a
+        // `Vec` has written, not the bytes it currently holds.
+        if st.data.capacity() > st.data.len() * 2 + (1 << 20) {
+            st.data.shrink_to_fit();
+        }
         st.base = at + n as u64;
         st.resync_retained();
         Some(n)
@@ -1395,6 +1489,7 @@ impl FrontierBuffer {
         if buf.is_empty() {
             return Ok(0);
         }
+        super::chasestat::read_call();
         let mut st = self.state.lock_ok();
         loop {
             if let Some(reason) = &st.abort {
@@ -1408,7 +1503,9 @@ impl FrontierBuffer {
             // repair pass is over, so an unresumed pause must not strand
             // the reader (TODO 255) - fall through to serve or error.
             if st.paused && !st.sealed {
+                let t = super::chasestat::mark();
                 st = self.arrived.wait(st).unwrap();
+                super::chasestat::pause_park(t);
                 continue;
             }
             if offset >= st.total {
@@ -1431,11 +1528,22 @@ impl FrontierBuffer {
                     st.base
                 )));
             }
-            // §94 B: nothing at or past the verified watermark may reach
+            // §94 B: nothing the PAR2 set has not vouched for may reach
             // the decode. Blocked-by-gate is a different wait from
             // blocked-by-arrival: the bytes are here, the vouching is
             // not - park on the gate (bounded) and re-run every check.
-            let (lim, guard, relocked) = self.gate_limit_unlocked(st, offset);
+            //
+            // PER RANGE for this reader, unlike the forward-only one
+            // below: it is the 7z/zip chase, whose FIRST read is the
+            // container map at the TAIL, above every hole. Asked as a
+            // contiguous prefix, that read parks on one damaged block at
+            // 12% and never comes back, and the whole direct-map route
+            // is lost for a damaged container (the race written up in
+            // `research/MEASURED-2026-09-03-zip-mapped-damaged-container-races.md`).
+            // Serving an individually-vouched block is not a loosening:
+            // a repair only rewrites blocks that FAILED, so a block this
+            // gate serves is one no repair will ever touch.
+            let (lim, guard, relocked) = self.gate_limit_unlocked(st, offset, true);
             st = guard;
             // The gate read RELEASED the state lock, so the checks
             // above were made against a state that may have moved
@@ -1467,7 +1575,9 @@ impl FrontierBuffer {
             }
             if offset >= lim {
                 drop(st);
+                let t = super::chasestat::mark();
                 self.gate_wait(offset);
+                super::chasestat::gate_park(t);
                 st = self.state.lock_ok();
                 continue;
             }
@@ -1526,7 +1636,9 @@ impl FrontierBuffer {
                     "chase source sealed at offset {offset}: bytes never arrived"
                 )));
             }
+            let t = super::chasestat::mark();
             st = self.arrived.wait(st).unwrap();
+            super::chasestat::hole_park(t);
         }
     }
 }
@@ -1548,6 +1660,12 @@ impl Drop for FrontierBuffer {
             st.paged_bytes = 0;
             st.paged.clear();
         }
+        // The `data` allocation dies with this state, so hand its
+        // charged slack back (see `FrontierState::resync_reserve`).
+        crate::memgauge::sub(
+            crate::memgauge::Sub::HoldsReserve,
+            std::mem::take(&mut st.reserve_charged) as u64,
+        );
     }
 }
 
@@ -1558,6 +1676,7 @@ impl rars::BlockingRangeSource for FrontierBuffer {
         if buf.is_empty() {
             return Ok(0);
         }
+        super::chasestat::read_call();
         let mut st = self.state.lock_ok();
         loop {
             if let Some(reason) = &st.abort {
@@ -1565,7 +1684,9 @@ impl rars::BlockingRangeSource for FrontierBuffer {
             }
             // Same repair pause as `read_covered_blocking`.
             if st.paused {
+                let t = super::chasestat::mark();
                 st = self.arrived.wait(st).unwrap();
+                super::chasestat::pause_park(t);
                 continue;
             }
             // Behind the trim point, the RAR twin of the guard in
@@ -1584,7 +1705,7 @@ impl rars::BlockingRangeSource for FrontierBuffer {
             }
             // §94 B: same gate as `read_covered_blocking` - the decode
             // may only consume PAR2-vouched bytes.
-            let (lim, guard, relocked) = self.gate_limit_unlocked(st, offset);
+            let (lim, guard, relocked) = self.gate_limit_unlocked(st, offset, false);
             st = guard;
             // Same released-lock window, same lost wakeup, as
             // `read_covered_blocking` above.
@@ -1601,7 +1722,9 @@ impl rars::BlockingRangeSource for FrontierBuffer {
             }
             if offset >= lim && offset < st.total {
                 drop(st);
+                let t = super::chasestat::mark();
                 self.gate_wait(offset);
+                super::chasestat::gate_park(t);
                 st = self.state.lock_ok();
                 continue;
             }
@@ -1664,7 +1787,9 @@ impl rars::BlockingRangeSource for FrontierBuffer {
             {
                 ex.wake_pager();
             }
+            let t = super::chasestat::mark();
             st = self.arrived.wait(st).unwrap();
+            super::chasestat::hole_park(t);
         }
     }
 
@@ -2100,6 +2225,90 @@ mod tests {
         assert_eq!(first_diff(0, &got, &pat(0, TOTAL)), None);
     }
 
+    /// The reserved-but-unused slack is charged, tracks the run, and
+    /// comes back when the buffer dies.
+    ///
+    /// The per-buffer field is what is asserted rather than the process
+    /// gauge: `memgauge` is process-global and `cargo test --lib` shares
+    /// one process, so only this buffer's own view is deterministic here
+    /// (the module header says as much).
+    #[test]
+    fn the_reserved_slack_is_charged_and_released_with_the_buffer() {
+        const TOTAL: usize = 300_000;
+        let buf = FrontierBuffer::new(TOTAL as u64);
+        buf.write_span(0, &pat(0, 7_000));
+        // The first span reserves EXACTLY (capacity doubles from zero and
+        // clamps up to `want`), so the slack only appears once a second,
+        // shorter span rides the doubled reservation.
+        buf.write_span(7_000, &pat(7_000, 1_000));
+        {
+            let st = buf.state.lock().unwrap();
+            assert_eq!(
+                st.reserve_charged,
+                st.data.capacity() - st.data.len(),
+                "the charge must be the slack, not the capacity"
+            );
+            assert!(st.reserve_charged > 0, "a doubling run reserves ahead");
+        }
+        // Filling the run spends the slack it had already reserved.
+        let mut off = 7_000usize;
+        while off < TOTAL {
+            let n = 7_000.min(TOTAL - off);
+            buf.write_span(off as u64, &pat(off, n));
+            off += n;
+        }
+        let st = buf.state.lock().unwrap();
+        assert_eq!(st.reserve_charged, st.data.capacity() - st.data.len());
+        drop(st);
+        let before = crate::memgauge::cur(crate::memgauge::Sub::HoldsReserve);
+        let charged = buf.state.lock().unwrap().reserve_charged as u64;
+        drop(buf);
+        assert!(
+            crate::memgauge::cur(crate::memgauge::Sub::HoldsReserve)
+                <= before - charged.min(before),
+            "dropping the buffer must hand its charged slack back"
+        );
+    }
+
+    /// The three-phase spill trim gives the drained capacity back, like
+    /// the one-step `trim_to` beside it.
+    ///
+    /// Audit round 35: it did not, and this is the path that actually
+    /// runs under the holds cap - 1,835 MB spilled through it left 36
+    /// volume-sized allocations resident holding nothing, which was the
+    /// largest term in the compressed-RAR chase's unattributed peak.
+    #[test]
+    fn the_spill_trim_hands_the_drained_capacity_back() {
+        const TOTAL: usize = 4 << 20;
+        let buf = FrontierBuffer::new(TOTAL as u64);
+        let mut off = 0usize;
+        while off < TOTAL {
+            let n = (256 << 10).min(TOTAL - off);
+            buf.write_span(off as u64, &pat(off, n));
+            off += n;
+        }
+        let full = buf.state.lock().unwrap().data.capacity();
+        assert!(full >= TOTAL, "the run should hold the whole volume");
+        // Phase 1/2/3 of the spill, as `chase_span`'s trim ladder runs it.
+        let (at, n, seq) = buf
+            .trim_plan(TOTAL as u64, 1)
+            .expect("the whole run is consumed");
+        assert_eq!(n, TOTAL, "the plan must cover the run");
+        let mut done = 0usize;
+        while let Some(chunk) = buf.trim_chunk(at, done, 1 << 20, seq) {
+            done += chunk.len();
+        }
+        assert_eq!(buf.trim_commit(at, seq), Some(TOTAL));
+        let st = buf.state.lock().unwrap();
+        assert_eq!(st.data.len(), 0, "the spill drained the run");
+        assert!(
+            st.data.capacity() < full / 2,
+            "the drained capacity must be handed back, not retained: {} of {full}",
+            st.data.capacity()
+        );
+        assert_eq!(st.reserve_charged, st.data.capacity());
+    }
+
     /// The stalled-chase cold spill end to end at the buffer level:
     /// parked spans and the contiguous tail page to scratch, coverage
     /// stays whole (intervals, peek, completeness), a forward reader
@@ -2308,6 +2517,103 @@ mod tests {
         drop(buf);
         sc.cleanup();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// §94 B per RANGE: the reader whose FIRST read is at the TAIL - a
+    /// zip central directory, a 7z end header - is served off blocks
+    /// the set vouched for individually, even while the contiguous
+    /// prefix is pinned at damage far below. Before this the read
+    /// parked for the life of the job and the whole direct-map route
+    /// was lost for a damaged container
+    /// (`research/MEASURED-2026-09-03-zip-mapped-damaged-container-races.md`,
+    /// race 1). The clamp still holds: the serve stops at the next
+    /// unvouched block, and an unvouched offset still parks.
+    #[test]
+    fn a_tail_read_is_served_from_blocks_above_the_damage() {
+        let gate = crate::live::VerifyGate::new(1);
+        gate.engage(0);
+        // 10 blocks of 100 bytes. Block 3 is damaged, so the prefix
+        // pins at 300 - and blocks 4..10 are vouched for anyway.
+        let bits = gate.arm_vouch(0, 10, 100);
+        for bi in [0, 1, 2, 4, 5, 6, 7, 8, 9] {
+            bits.set_ok(bi);
+        }
+        gate.advance(0, 300);
+        let buf = FrontierBuffer::new_gated(
+            1000,
+            Some(Arc::new(crate::live::SlotGate {
+                gate: gate.clone(),
+                slot: 0,
+            })),
+            None,
+            None,
+        );
+        // Everything except the damaged block has arrived, exactly as
+        // it does for a post whose two mid-archive articles vanished.
+        buf.write_span(0, &pat(0, 300));
+        buf.write_span(400, &pat(400, 600));
+        // The tail read - the one that used to park forever.
+        let mut out = [0u8; 64];
+        let n = buf.read_covered_blocking(900, &mut out).unwrap();
+        assert_eq!(n, 64, "the map at the tail is served");
+        assert_eq!(&out[..], &pat(900, 64)[..]);
+        // ...and the damaged block itself still parks, which is the
+        // invariant this gate exists for.
+        let b2 = std::sync::Arc::new(buf);
+        let b3 = b2.clone();
+        let t = std::thread::spawn(move || {
+            let mut out = [0u8; 16];
+            b3.read_covered_blocking(300, &mut out).unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert!(!t.is_finished(), "an unvouched block must not be served");
+        // A repair fills it, the block claims, and the reader wakes.
+        b2.write_span(300, &pat(300, 100));
+        bits.set_ok(3);
+        gate.advance(0, u64::MAX);
+        assert_eq!(t.join().unwrap(), 16);
+    }
+
+    /// The per-range serve is CLAMPED at the next unvouched block, and
+    /// a read that starts in one parks - a per-range answer is not a
+    /// licence to serve the whole file.
+    #[test]
+    fn a_per_range_serve_stops_at_the_next_unvouched_block() {
+        let gate = crate::live::VerifyGate::new(1);
+        gate.engage(0);
+        let bits = gate.arm_vouch(0, 10, 100);
+        for bi in [4, 5] {
+            bits.set_ok(bi);
+        }
+        let buf = FrontierBuffer::new_gated(
+            1000,
+            Some(Arc::new(crate::live::SlotGate {
+                gate: gate.clone(),
+                slot: 0,
+            })),
+            None,
+            None,
+        );
+        buf.write_span(0, &pat(0, 1000));
+        let mut out = [0u8; 500];
+        let n = buf.read_covered_blocking(400, &mut out).unwrap();
+        assert_eq!(n, 200, "serve clamps at block 6, which nothing vouched for");
+        assert_eq!(&out[..200], &pat(400, 200)[..]);
+        // The forward-only reader is NOT given the per-range answer:
+        // it asks the prefix, which is still zero here, so it parks.
+        let b2 = std::sync::Arc::new(buf);
+        let b3 = b2.clone();
+        let t = std::thread::spawn(move || {
+            let mut out = [0u8; 16];
+            rars::BlockingRangeSource::read_at(&*b3, 0, &mut out)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert!(
+            !t.is_finished(),
+            "the forward-only reader keeps the prefix contract"
+        );
+        gate.advance(0, u64::MAX);
+        assert_eq!(t.join().unwrap().unwrap(), 16);
     }
 
     /// §94 B: a gated buffer serves only PAR2-vouched bytes. Bytes are

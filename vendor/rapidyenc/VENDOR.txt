@@ -31,5 +31,70 @@ on this machine; the cc route replicates the per-file -march flags from
 upstream CMakeLists.txt). Encoder is excluded (RAPIDYENC_DISABLE_ENCODE=1 and
 encoder_*.cc not compiled) — we only need decode + CRC.
 
+Local patches
+-------------
+The tree is NO LONGER a pristine snapshot. One defect is patched in place,
+in two files, and a re-sync must re-apply it or re-check that upstream has
+fixed it:
+
+- src/decoder_neon64.cc and src/decoder_neon.cc, 2 Sep 2026. Both ARM
+  decode kernels loaded a whole 16-byte vector (`vld1q_u8` /
+  `vld1q_u8_align`) for the 4-byte lookahead past the SIMD region, which
+  is all the algorithm consumes and all that `_do_decode_simd`'s
+  `lenBuffer` reserves. That is an out-of-bounds read of up to 12 bytes
+  past the caller's buffer on every arm64 article decode. It is
+  width-aligned and so cannot fault, and it cannot change an answer
+  (only lanes 0..3 of the loaded vector are ever read), but
+  AddressSanitizer aborts on it - which made `yenc_decode` unfuzzable on
+  arm64 the moment ASan started reaching this C++ (e0dedc105). Both
+  sites now use `vld1q_lane_u32`, the intrinsic upstream's own comment
+  says it looked for. The x86 kernels were already correct
+  (src/decoder_sse_base.h loads 4 via `_mm_cvtsi32_si128`).
+  Found by the yEnc fuzz campaign; written up in
+  research/YENC-NEON-OVERREAD-2026-09-02.md. NOT yet reported upstream.
+
+  The aarch32 half (decoder_neon.cc) is COMPILED AND RUN, just not
+  sanitized. No box on this fleet is aarch32, so locally it could only be
+  syntax-checked (clang --target=armv7a-none-eabi -fsyntax-only); but
+  armv7-unknown-linux-musleabihf is a shipped target (TODO 178, 32-bit
+  Raspberry Pi OS) and nightly.yml's `armv7-cross` job builds the
+  workspace for it and runs the suite under qemu-user. clang defines
+  __ARM_NEON for that triple by default, so this file is live code there,
+  not a dead arm. What that job does NOT have is AddressSanitizer, so the
+  over-read class stays invisible on aarch32 and this half of the fix
+  rests on the argument being identical to the aarch64 one.
+
+- src/crc_folding_256.cc and src/crc_folding.cc, 3 Sep 2026. THE x86 CRC
+  TWIN OF THE ENTRY ABOVE, same class and same argument. Both CLMUL
+  folding kernels finished a buffer with a full ALIGNED vector load
+  (`_mm256_load_si256` / `_mm_load_si128`) while only 1..31 (resp. 1..15)
+  bytes remained, reading that many bytes past the caller's buffer. It is
+  width-aligned, so it cannot fault - 32 and 16 both divide the page size
+  - and partial_fold() masks the surplus out, so the CRC was always
+  right. AddressSanitizer reports it as the out-of-bounds read it is:
+  the scheduled fuzz smoke's yenc_decode burst died on the vpclmul
+  kernel in run 33719528482 (3 Sep 2026), which was the FIRST run to
+  reach that kernel - the CRC pin (db85dff50) landed 2 Sep. The
+  reproducer is kept at
+  crates/nzbkit/fuzz/seeds/yenc_decode/crash-d94c80b4149bae0e461b8c0d86d2f5757efdf9cf.
+  Both files now zero-fill and memcpy the tail, which is what the
+  `len < 32` / `len < 16` head paths in the same two functions have
+  always done - so this makes no new claim about which bytes
+  partial_fold ignores, it makes the existing one everywhere. Five sites:
+  one in the 256-bit file, four in the 128-bit one (the 48/32/16/0-byte
+  tails).
+
+  NOT RUNNABLE ON THIS FLEET, and that is the honest limit on the fix.
+  Every box here is arm64, and Rosetta does not implement AVX2 or
+  VPCLMULQDQ, so neither patched kernel can execute locally at all; the
+  files were compiled for x86-64 with the real flags
+  (`clang++ -target x86_64-apple-macos12 -mavx2 -mvpclmulqdq -mpclmul`)
+  and verified in CI. The verifying test is
+  `yenc_simd::tests::every_reachable_crc_kernel_matches_the_oracle`,
+  which sweeps lengths 0..=160 at four alignments and deliberately puts
+  each case at the END of its own heap block; it runs on the x86 CI
+  runners and pins every kernel that runner can reach. NOT yet reported
+  upstream.
+
 Pruned: nothing beyond the .git/.github metadata. The tree is small (~950 KB);
 tool/ (CLI + bench sources, not compiled by us) and crcutil-1.0/ were kept.

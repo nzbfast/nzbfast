@@ -43,18 +43,34 @@ CLEAN='a 10-core laptop'
 # reads the pattern file and the manifest from there - both copied from
 # the real tree so the path predicates and the pattern loading are
 # exercised for real rather than against a stub.
+# The three helpers are staged and NOT stubbed, for the reason
+# leak-check.sh states at each: it refuses outright when one is missing,
+# because a scanner that cannot run is not a clean tree. privrefs-scan.sh
+# derives both of its lists out of publish-public.sh, so that has to be
+# the real one too - a stub would derive an empty removal set and the
+# private-reference arm would then refuse every file the export deletes.
+# FOUR scratch roots stage this script - the four leak-check-*.sh tests -
+# and they are deliberately separate. A helper added to leak-check.sh
+# tomorrow has to be staged in ALL FOUR, and the symptom of missing one is
+# every case in that file failing with the same REFUSED line. That is how
+# this one was found, on main, ten minutes after the helper landed.
 make_repo() {
   local root=$1
   mkdir -p "$root/packaging" "$root/crates/nzbkit/src" "$root/research" "$root/tools"
   cp "$SCRIPT" "$root/packaging/leak-check.sh"
   cp "$PKG/private-patterns.txt" "$root/packaging/private-patterns.txt"
   cp "$PKG/PUBLIC_MANIFEST" "$root/packaging/PUBLIC_MANIFEST"
+  cp "$PKG/privrefs-scan.sh" "$root/packaging/privrefs-scan.sh"
+  cp "$PKG/ci-private-strip.sh" "$root/packaging/ci-private-strip.sh"
+  cp "$PKG/publish-public.sh" "$root/packaging/publish-public.sh"
   # The region decomposer. leak-check resolves it as ROOT/tools, so a
   # fixture without it exercises the no-decomposer FALLBACK rather than
   # the split - which is a case below, deliberately, and must not be the
   # accidental state of every other one.
   [ -f "$SPLITTER" ] && cp "$SPLITTER" "$root/tools/site-leak-scan.py"
-  chmod +x "$root/packaging/leak-check.sh"
+  chmod +x "$root/packaging/leak-check.sh" \
+           "$root/packaging/privrefs-scan.sh" \
+           "$root/packaging/ci-private-strip.sh"
   git -C "$root" init -q -b main
   git -C "$root" config user.name t
   git -C "$root" config user.email t@t

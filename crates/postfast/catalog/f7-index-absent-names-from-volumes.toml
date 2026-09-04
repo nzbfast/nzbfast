@@ -1,0 +1,50 @@
+# F7 plus P3: the index was never posted, so every real name has to be
+# read out of a recovery VOLUME.
+
+[layout]
+name = "f7-index-absent-names-from-volumes"
+seed = 21
+note = """
+Ports the P7 half of the matrix: a post whose `.par2` index is simply
+not there. It happens - an incomplete post, a takedown that caught the
+smallest file, a poster who only ever uploaded the volumes - and the
+naming question it asks is the whole point. Every `.volNNN+MM.par2`
+carries the complete critical packet set as well as its recovery
+slices, because that repetition is what PAR2 is for, so a post with no
+index still names its members and a client that only ever looks in the
+file it usually finds first has thrown that away.
+
+names = "filedesc-only" is what makes the row bite. The wire carries a
+token, the map carries a token, and the FileDesc packet inside a
+VOLUME is the one place `Feature.Reel.bin` exists at all. There is no
+second source to fall back on and no way for the row to pass by
+accident.
+
+The volumes are in the end state because a run that has to read them
+fetches them; a clean row's are not. Both halves are requirements, and
+this is the arm where the reason is not repair but naming.
+
+10 % over six blocks is ONE recovery block and therefore ONE volume,
+and that is load-bearing rather than thrift. Nothing here damages the
+post, so the client reads volumes only until it has the names and then
+stops - and how many that is is its answer, not a requirement. With a
+single volume "the ones it read" and "the ones there are" cannot
+differ, and the generator refuses the multi-volume shape by name
+rather than letting a row guess.
+"""
+
+[source]
+files = [{ name = "Feature.Reel.bin", bytes = 120000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 20000
+names = "filedesc-only"
+index = "absent"
+
+[encoding]
+article_bytes = 20000

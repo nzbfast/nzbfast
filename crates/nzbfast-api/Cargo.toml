@@ -1,0 +1,111 @@
+[package]
+name = "nzbfast-api"
+version = "1.4.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The nzbfast request layer: the JSON API, the SABnzbd-compatible surface and the embedded web pages"
+
+[lints]
+workspace = true
+
+# Lane 3 of Option C in
+# research/PLAN-NZBFAST-CRATE-SPLIT-2026-09-01.md: the eight units
+# `tools/modgraph.py`'s `SERVE_LAYERS` puts in the `api` layer.
+#
+# IT IS A SIBLING OF `nzbfast-tasks`, NOT A LAYER OVER IT, and the
+# ABSENCE of an `nzbfast-tasks` line below is what holds that from the
+# cargo side (`--serve --check` holds it from the source side). Two
+# crates that do not name each other are checked in PARALLEL, which is
+# the whole point of siblings over a chain and the reason lane 1b broke
+# the twelve cross-layer edges before either crate existed. It must not
+# name `nzbfast` either - that is what keeps the bin the only thing
+# above both.
+#
+# THIS IS THE CRATE THAT EMBEDS THE WEB, which is why it is the only one
+# of the three with a `build.rs` and a `dashboard` feature: every
+# `include_str!` / `include_bytes!` of `web/` lives in `assets.rs`,
+# `webasset.rs` and `devweb.rs`, all api-layer units, and the OUT_DIR
+# gz/etag pairs they read are written by `precompress_pages` here.
+[dependencies]
+nzbkit = { path = "../nzbkit", default-features = false }
+nzbfast-core = { path = "../nzbfast-core" }
+nzbfast-unpack = { path = "../nzbfast-unpack" }
+nzbfast-meta = { path = "../nzbfast-meta" }
+nzbfast-engine = { path = "../nzbfast-engine" }
+# The layer every handler reads and writes: `Daemon`, its queue and
+# history stores, its settings and its persistence.
+nzbfast-daemon = { path = "../nzbfast-daemon" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+# `Request`/`Response`/`Header` are this layer's whole vocabulary: every
+# handler takes one and answers the other. Same vendored + hardened fork
+# the bin and the daemon layer link.
+tiny_http = { path = "../../vendor/tiny_http", features = ["ssl-rustls"] }
+# webasset.rs gzips the embedded pages at respond time, and the
+# precompressed OUT_DIR members build.rs writes are read back through
+# the same crate.
+flate2 = "1"
+# The pairing QR the setup card renders.
+qrcodegen = "1.8.0"
+# The watch-folder settings arm hands `notify` its own recursive mode.
+notify = "8.2.0"
+libc = "0.2"
+
+[features]
+default = []
+# Forwarded from the bin, exactly as the other layer crates forward it:
+# the wall, browse and indexer API arms live here, and forwarding keeps
+# them ONE switch rather than two, so `slim-check` compiles what the
+# phones ship. It PULLS IN `dashboard` for the reason the bin's own note
+# gives: /wall is a dashboard page, served by the same `respond_shell`
+# off the same shared tokens, so an indexer with no page to render it on
+# is not a configuration anything wants.
+indexer = [
+    "nzbkit/indexer",
+    "nzbfast-core/indexer",
+    "nzbfast-meta/indexer",
+    "nzbfast-daemon/indexer",
+    "dashboard",
+]
+# The browser-facing web UI - the dashboard and wall shells, the user's
+# own stylesheet, the 27 i18n catalogues, the 16 manuals, the favicons
+# and the web manifest. About 11.5 MB of source before `build.rs` gzips
+# it, and every byte of it exists to be read in a browser.
+#
+# IT LIVES HERE AND NOT IN THE BIN since lane 3, and that is the whole
+# reason this crate has a build.rs: the `include_*!` sites are in
+# `assets.rs`, so the OUT_DIR members they read must be written by THIS
+# package's build script. `crates/nzbfast`'s `dashboard` forwards to it,
+# so `--no-default-features` there still compiles the store shape and
+# `tools/ffi-cutout-gate.py` still holds it.
+dashboard = []
+
+[build-dependencies]
+# build.rs gzips the immutable embedded pages (i18n catalogues, manuals)
+# so the binary carries the compressed member rather than 9.0 MB of
+# plain text - see `precompress_pages`, moved here from
+# `crates/nzbfast/build.rs` with the `include_*!` sites that read its
+# output.
+flate2 = "1"
+
+[dev-dependencies]
+# The layers below with their test seams switched on. `cfg(test)` is a
+# property of ONE crate's build, so an item behind it is invisible
+# across a crate boundary whatever its visibility - the same finding
+# steps 2, 3 and 4 and lane 2 each met. Every test in here builds its
+# Daemon with `nzbfast_daemon::testutil::test_daemon`, and
+# `api/queue/custody_tests.rs` arms `storecut`'s durable-write cut.
+nzbfast-core = { path = "../nzbfast-core", features = ["test-support"] }
+nzbfast-unpack = { path = "../nzbfast-unpack", features = ["test-support"] }
+nzbfast-daemon = { path = "../nzbfast-daemon", features = ["test-support"] }
+# The update-manifest tests in `tests_grabs.rs`: `ureq` serves the
+# manifest over a scratch listener and `ed25519-dalek` mints the signing
+# key the daemon is asked to verify against. Dev-only - nothing in this
+# crate's production code fetches or verifies an update.
+ureq = "2"
+ed25519-dalek = "3"
+hex = "0.4"

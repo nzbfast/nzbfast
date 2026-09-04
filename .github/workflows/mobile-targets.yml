@@ -18,7 +18,7 @@
 # It is not a theoretical surface. These arms exist today and NOTHING on
 # this fleet compiles any of them:
 #
-#   crates/nzbfast/src/smart.rs
+#   crates/nzbfast-unpack/src/smart.rs
 #       #[cfg(any(target_os = "android", target_os = "ios"))] - the
 #       no-system-trash arm. Its two siblings are compiled by the mac
 #       and Linux jobs; this one by neither.
@@ -31,7 +31,7 @@
 #       never been judged by anything. That is exactly the class
 #       CLAUDE.md's FIFTEENTH gate exists for, in the one configuration
 #       that gate cannot reach.
-#   crates/nzbkit/src/nntp.rs
+#   crates/nzbkit-base/src/nntp.rs
 #       the bionic keepalive arms (TCP_KEEPIDLE, TCP_USER_TIMEOUT) and
 #       the Apple TCP_KEEPALIVE arm. Android shares the Linux arm and
 #       iOS shares the macOS one, so those two are covered by proxy -

@@ -43,12 +43,25 @@ pub(super) fn rename_filedesc_raw(data: &mut Vec<u8>, from: &str, to: &[u8]) -> 
 /// bytes of the SAME name - one byte, `\xE9` where the UTF-8 spelling
 /// has `\xC3\xA9`, so the name region and every file id in the set are
 /// untouched.
+/// 25%, not the 10% this posted until 4 Sep 2026, and the number is
+/// derived rather than copied. The damaged row below corrupts ONE
+/// 40,000-byte article of a 220,000-byte payload, which par2 prices at
+/// 358 bad blocks of 1,965 (18.2%); 10% is 197 recovery blocks and
+/// cannot close that, so the row completed only because `payload`
+/// repeats every 131,072 bytes and the adoption scan found the damage's
+/// twin inside the same file - `52 block(s) rebuilt, 306 adopted from
+/// caf\u{e9}.mkv`, on a row that asserts "a repairable post failed"
+/// (research/PAYLOAD-TRAP-PATH-DEPENDENT-CENSUS-2026-09-04.md). 25% is
+/// 491 blocks, 133 clear of the damage. The payload moved to
+/// `payloads::unique_payload` in the same commit, so the recovery set is
+/// now the only route and both halves had to change together: converting
+/// alone leaves the row unrepairable, raising alone leaves the trap.
 fn cp1252_fixture(tag: &str, data: &[u8], posted: &str) -> Fixture {
     let mut fx = Fixture::new(tag);
     fx.add_file_renamed_by_par2("caf\u{e9}.mkv", posted, data, 40_000);
     let hits = std::sync::atomic::AtomicUsize::new(0);
     assert!(
-        add_par2_patched(&mut fx, 10, &["caf\u{e9}.mkv"], 40_000, |b| {
+        add_par2_patched(&mut fx, 25, &["caf\u{e9}.mkv"], 40_000, |b| {
             let n = rename_filedesc_raw(b, "caf\u{e9}.mkv", b"caf\xE9.mkv");
             hits.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
         }),
@@ -162,7 +175,11 @@ async fn a_deferred_readable_rename_still_lets_the_set_repair_in_place() {
         eprintln!("skipping: par2 not installed");
         return;
     }
-    let data = payload(220_000, 95);
+    // `unique_payload`, not `payload`: see `cp1252_fixture`'s note on the
+    // recovery percentage. On the repeating generator this row's damage
+    // healed itself out of the same file and the set was never
+    // load-bearing.
+    let data = crate::payloads::unique_payload(220_000, 95);
     let fx = cp1252_fixture("norarcp1252dmg", &data, "caf\u{e9}.mkv");
     let chaos = Chaos {
         corrupt: std::iter::once("<caf\u{e9}_mkv-0-3@mock>".to_string()).collect(),

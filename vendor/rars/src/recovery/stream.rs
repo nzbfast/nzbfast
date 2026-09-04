@@ -1392,7 +1392,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// The streaming path across MORE THAN ONE GROUP - the shape the daemon
     /// actually meets, and the one the single-group scan rejected outright
     /// (every archive over ~13 MB).

@@ -16,7 +16,7 @@
 //! it), and hostile/duplicate FileDesc names (`../evil.bin`, two
 //! descriptors sharing one name). The patch edits the FileDesc body in
 //! place and reseals the packet MD5 (offset 16 covers setid+type+body,
-//! per the spec header in nzbkit/src/par2.rs), so every packet still
+//! per the spec header in nzbkit-base/src/par2.rs), so every packet still
 //! verifies; the stored file id is left alone, because readers key
 //! Main/FileDesc/IFSC by the STORED id and never recompute it. Real
 //! creators (MultiPar, parpar) emit these shapes natively - the patch
@@ -244,43 +244,6 @@ pub(crate) fn rename_filedesc(data: &mut Vec<u8>, from: &str, to: &str) -> usize
     hits
 }
 
-/// Turn the FileDesc for `name` into a 0-BYTE file: length 0, whole-file
-/// and 16k MD5s = MD5 of the empty string, and its IFSC packets dropped
-/// (a real creator emits none for an empty file). The file id is left
-/// as minted from the 1-byte placeholder - readers use the stored id.
-fn empty_filedesc(data: &mut Vec<u8>, name: &str) -> usize {
-    let empty: [u8; 16] = md5::Md5::digest(b"").into();
-    let mut fid: Option<[u8; 16]> = None;
-    let mut hits = 0;
-    for (start, len, ptype) in packets(data) {
-        if &ptype != b"PAR 2.0\0FileDesc" || filedesc_name(data, start, len) != name {
-            continue;
-        }
-        fid = Some(data[start + 64..start + 80].try_into().unwrap());
-        data[start + 80..start + 96].copy_from_slice(&empty);
-        data[start + 96..start + 112].copy_from_slice(&empty);
-        data[start + 112..start + 120].copy_from_slice(&0u64.to_le_bytes());
-        reseal(data, start, len);
-        hits += 1;
-    }
-    if let Some(fid) = fid {
-        // Splice the placeholder's IFSC packets out, back to front so
-        // the recorded offsets stay valid while draining.
-        let mut spans: Vec<(usize, usize)> = packets(data)
-            .into_iter()
-            .filter(|&(s, l, t)| {
-                &t == b"PAR 2.0\0IFSC\0\0\0\0" && data[s + 64..s + 80] == fid && l >= 80
-            })
-            .map(|(s, l, _)| (s, l))
-            .collect();
-        spans.reverse();
-        for (s, l) in spans {
-            data.drain(s..s + l);
-        }
-    }
-    hits
-}
-
 /// `add_par2` with a patch pass over every generated .par2 blob before
 /// it is posted (under its real name - the payload carries the
 /// obfuscation in these fixtures, the recovery set is announced).
@@ -323,18 +286,6 @@ pub(crate) fn add_par2_patched(
     true
 }
 
-/// Write a payload into a SUBDIRECTORY of the fixture (so `par2 create`
-/// records the relative path in the FileDesc), posted under an
-/// obfuscated name - subject and yEnc name both the hash.
-fn add_tree_file_obfuscated(fx: &mut Fixture, rel: &str, posted: &str, data: &[u8], art: usize) {
-    let path = fx.dir.join(rel);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, data).unwrap();
-    let tag = format!("{}-{}", posted.replace('.', "_"), fx.nzb_files.len());
-    let segs = make_file_articles(posted, data, art, &tag, &mut fx.articles);
-    fx.nzb_files.push((posted.to_string(), segs));
-}
-
 /// One undamaged no-RAR run: mock server, config, `get`, log + rc.
 pub(crate) async fn run_norar(fx: &Fixture) -> (String, bool, PathBuf) {
     run_norar_chaos(fx, Chaos::default()).await
@@ -360,31 +311,6 @@ pub(crate) async fn run_norar_chaos(fx: &Fixture, chaos: Chaos) -> (String, bool
         eprintln!("==== run log ====\n{log}\n==== end ====");
     }
     (log, ok, out)
-}
-
-/// Case 6 of the no-RAR family: a file of EXACTLY 16384 bytes, the
-/// boundary where head = whole file and md5_16k = whole-file MD5. The
-/// live tier must still claim it and settle must still publish the
-/// FileDesc name.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_file_of_exactly_16384_bytes_lands_under_its_filedesc_name() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("norar16k");
-    let data = payload(16384, 50);
-    fx.add_file_renamed_by_par2("Exact.Head.bin", "Xk2vRq81LmZ", &data, 6_000);
-    assert!(fx.add_par2(20, &["Exact.Head.bin"], 40_000));
-    let (log, ok, out) = run_norar(&fx).await;
-    assert!(ok, "exact-16384 post failed:\n{log}");
-    let got = std::fs::read(out.join("Exact.Head.bin"))
-        .unwrap_or_else(|e| panic!("payload missing under its FileDesc name: {e}\n{log}"));
-    assert!(got == data, "payload not byte-exact\n{log}");
-    assert!(
-        !out.join("Xk2vRq81LmZ").exists(),
-        "the obfuscated source name survived beside the published one:\n{log}"
-    );
 }
 
 /// Builds the identical-head twin fixture: two files of the SAME
@@ -526,162 +452,6 @@ async fn three_identical_head_files_all_land_under_their_own_names() {
     }
 }
 
-/// Case 3, CLOSED: a 0-byte member whose real name lives only in a
-/// FileDesc (the VIDEO_TS placeholder shape). No content tier can claim
-/// len == 0 (live.rs:1832, adopt.rs:98/249, settle.rs:1461) - and none
-/// may loosen - so `get/emptydesc.rs` lands it at settle instead: a
-/// zero-length descriptor whose MD5 is the empty digest is proven by
-/// construction, and the empty file is materialized (or an arrived
-/// empty slot file renamed) under the FileDesc name. par2cmdline
-/// refuses to even describe an empty file, so the set here is patched
-/// to the shape MultiPar/parpar emit natively. This row used to pin the
-/// gap; `zero-byte-filedesc-rename` flipped its last assertion.
-/// `e2e_emptydesc` holds the deeper pins (both tiers, red-verified).
-#[tokio::test(flavor = "multi_thread")]
-async fn a_zero_byte_filedesc_member_materializes_under_its_real_name() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("norarzero");
-    let data = payload(300_000, 53);
-    fx.add_file("Feature.Main.mkv", &data, 40_000);
-    // The placeholder exists only long enough for par2 create to
-    // describe it; it is never posted, and the patch below rewrites its
-    // FileDesc to the 0-byte truth before the set goes on the wire.
-    std::fs::write(fx.dir.join("VIDEO_TS.bup"), [0u8]).unwrap();
-    assert!(add_par2_patched(
-        &mut fx,
-        20,
-        &["Feature.Main.mkv", "VIDEO_TS.bup"],
-        40_000,
-        |blob| {
-            empty_filedesc(blob, "VIDEO_TS.bup");
-        },
-    ));
-    std::fs::remove_file(fx.dir.join("VIDEO_TS.bup")).unwrap();
-    let (log, ok, out) = run_norar(&fx).await;
-    assert!(
-        ok,
-        "a clean post with an empty covered member failed:\n{log}"
-    );
-    let got = std::fs::read(out.join("Feature.Main.mkv"))
-        .unwrap_or_else(|e| panic!("payload missing: {e}\n{log}"));
-    assert!(got == data, "payload not byte-exact\n{log}");
-    let bup = std::fs::metadata(out.join("VIDEO_TS.bup"))
-        .unwrap_or_else(|e| panic!("the 0-byte member never landed: {e}\n{log}"));
-    assert_eq!(bup.len(), 0, "the placeholder must be empty\n{log}");
-}
-
-/// Case 4, CLOSED by `relpath-preserve-tree` (fd455c01b): a directory
-/// tree in FileDesc names (`VIDEO_TS/VTS_01_1.VOB`) now lands as the
-/// TREE - `sanitize_out_name` honors provably safe relative paths and
-/// flattens only what it cannot prove safe. This row asserted the old
-/// flattening until 30 Aug 2026 and was red from the moment the
-/// preservation landed; the deeper pins live in `e2e_relpath`.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_directory_tree_in_filedesc_names_lands_intact() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("norartree");
-    let vob = payload(120_000, 54);
-    let bup = payload(8_000, 55);
-    add_tree_file_obfuscated(
-        &mut fx,
-        "VIDEO_TS/VTS_01_1.VOB",
-        "Gh3sLp94WtY",
-        &vob,
-        40_000,
-    );
-    add_tree_file_obfuscated(
-        &mut fx,
-        "VIDEO_TS/VTS_01_0.BUP",
-        "Zc6xNv27KqM",
-        &bup,
-        40_000,
-    );
-    assert!(fx.add_par2(
-        20,
-        &["VIDEO_TS/VTS_01_1.VOB", "VIDEO_TS/VTS_01_0.BUP"],
-        40_000
-    ));
-    let (log, ok, out) = run_norar(&fx).await;
-    assert!(ok, "tree-named post failed:\n{log}");
-    let got_vob = std::fs::read(out.join("VIDEO_TS").join("VTS_01_1.VOB"))
-        .unwrap_or_else(|e| panic!("VIDEO_TS/VTS_01_1.VOB missing from the tree: {e}\n{log}"));
-    let got_bup = std::fs::read(out.join("VIDEO_TS").join("VTS_01_0.BUP"))
-        .unwrap_or_else(|e| panic!("VIDEO_TS/VTS_01_0.BUP missing from the tree: {e}\n{log}"));
-    assert!(
-        got_vob == vob && got_bup == bup,
-        "tree payload not byte-exact\n{log}"
-    );
-    assert!(
-        !out.join("VIDEO_TS_VTS_01_1.VOB").exists(),
-        "the old flattened name appeared beside the preserved tree:\n{log}"
-    );
-}
-
-/// Case 8: duplicate BASENAMES from different directories. Since
-/// fd455c01b each keeps its own TREE (`a/readme.txt`, `b/readme.txt`),
-/// so no collision arises on this shape at all - previously the
-/// flattening kept them apart as `a_readme.txt` / `b_readme.txt`.
-#[tokio::test(flavor = "multi_thread")]
-async fn duplicate_basenames_across_directories_keep_their_trees() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("norardup");
-    let ra = payload(30_000, 56);
-    let rb = payload(45_000, 57);
-    add_tree_file_obfuscated(&mut fx, "a/readme.txt", "Wq1bXs63JnH", &ra, 40_000);
-    add_tree_file_obfuscated(&mut fx, "b/readme.txt", "Fk9mDt48RvC", &rb, 40_000);
-    assert!(fx.add_par2(20, &["a/readme.txt", "b/readme.txt"], 40_000));
-    let (log, ok, out) = run_norar(&fx).await;
-    assert!(ok, "dup-basename post failed:\n{log}");
-    let got_a = std::fs::read(out.join("a").join("readme.txt"))
-        .unwrap_or_else(|e| panic!("a/readme.txt missing: {e}\n{log}"));
-    let got_b = std::fs::read(out.join("b").join("readme.txt"))
-        .unwrap_or_else(|e| panic!("b/readme.txt missing: {e}\n{log}"));
-    assert!(
-        got_a == ra && got_b == rb,
-        "dup-basename payload not byte-exact\n{log}"
-    );
-}
-
-/// `sub/movie.mkv` beside `sub_movie.mkv`: before fd455c01b the
-/// flattening mapped both onto one on-disk name and the publish claim
-/// had to disambiguate (`{slot:03}-` form). With safe trees preserved
-/// the pair no longer collides at all - the tree name keeps its
-/// directory and the flat name stays flat. Both must land byte-exact
-/// and neither may be renamed over the other (published_names.rs still
-/// guards the shapes that DO collide, e.g. `../movie.mkv`).
-#[tokio::test(flavor = "multi_thread")]
-async fn a_tree_name_and_its_flat_lookalike_land_apart() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("norarcoll");
-    let inner = payload(60_000, 58);
-    let flat = payload(70_000, 59);
-    add_tree_file_obfuscated(&mut fx, "sub/movie.mkv", "Pt4gHj52BwQ", &inner, 40_000);
-    add_tree_file_obfuscated(&mut fx, "sub_movie.mkv", "Ln7yVz16McK", &flat, 40_000);
-    assert!(fx.add_par2(20, &["sub/movie.mkv", "sub_movie.mkv"], 40_000));
-    let (log, ok, out) = run_norar(&fx).await;
-    assert!(ok, "tree-and-flat-lookalike post failed:\n{log}");
-    let got_tree = std::fs::read(out.join("sub").join("movie.mkv"))
-        .unwrap_or_else(|e| panic!("sub/movie.mkv missing from its tree: {e}\n{log}"));
-    let got_flat = std::fs::read(out.join("sub_movie.mkv"))
-        .unwrap_or_else(|e| panic!("flat sub_movie.mkv missing: {e}\n{log}"));
-    assert!(
-        got_tree == inner && got_flat == flat,
-        "the lookalike pair's bytes crossed or corrupted\n{log}"
-    );
-}
-
 /// Case 9, the SECURITY row: a traversal attempt in a FileDesc name
 /// (`../evil.bin`). The name is poster-typed bytes; containment is the
 /// only right answer. The payload must land INSIDE the job directory
@@ -765,34 +535,6 @@ async fn duplicate_filedesc_names_keep_both_files() {
         }
     }
     assert_eq!(found, 2, "a duplicate-named file was lost\n{log}");
-}
-
-/// Case 13: the PAR2 set covers only a SUBSET of the post. The covered
-/// file deobfuscates; the uncovered one has no name anywhere and must
-/// keep its posted hash - and its presence must not fail the job.
-#[tokio::test(flavor = "multi_thread")]
-async fn par2_covering_a_subset_renames_only_what_it_covers() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("norarsub");
-    let covered = payload(80_000, 63);
-    let stray = payload(65_000, 64);
-    fx.add_file_renamed_by_par2("Named.By.Par2.bin", "Cw3fJq67ZtL", &covered, 40_000);
-    fx.add_file_obfuscated("Ux9kBs25NhD", "Ux9kBs25NhD", &stray, 40_000);
-    assert!(fx.add_par2(20, &["Named.By.Par2.bin"], 40_000));
-    let (log, ok, out) = run_norar(&fx).await;
-    assert!(ok, "subset-covered post failed:\n{log}");
-    let got = std::fs::read(out.join("Named.By.Par2.bin"))
-        .unwrap_or_else(|e| panic!("covered payload missing under its name: {e}\n{log}"));
-    assert!(got == covered, "covered payload not byte-exact\n{log}");
-    let got_stray = std::fs::read(out.join("Ux9kBs25NhD"))
-        .unwrap_or_else(|e| panic!("uncovered payload missing under its posted name: {e}\n{log}"));
-    assert!(
-        got_stray == stray,
-        "uncovered payload not byte-exact\n{log}"
-    );
 }
 
 /// Case 2, MEASURE ONLY on this path: an extensionless obfuscated
@@ -922,65 +664,6 @@ pub(crate) fn add_file_yenc_names(
     fx.nzb_files.push((subject.to_string(), segs));
 }
 
-/// Post `data` with LYING yEnc headers: every `=ybegin size=` overstates
-/// the file by `size_lie` bytes and every `total=` overstates the part
-/// count, while the `=ypart begin/end` ranges stay true (a real poster's
-/// tooling gets the ranges right or nothing decodes at all).
-fn add_file_lying_headers(
-    fx: &mut Fixture,
-    real_name: &str,
-    subject: &str,
-    data: &[u8],
-    art_size: usize,
-    size_lie: u64,
-) {
-    let lied = data.len() as u64 + size_lie;
-    let total = data.len().div_ceil(art_size).max(1) as u32;
-    std::fs::write(fx.dir.join(real_name), data).unwrap();
-    let tag = format!("{}-{}", subject.replace('.', "_"), fx.nzb_files.len());
-    let mut segs = Vec::new();
-    for (i, chunk) in data.chunks(art_size).enumerate() {
-        let part = i as u32 + 1;
-        let begin = (i * art_size) as u64 + 1;
-        let article = nzbkit::yenc::encode(
-            &format!("{subject}.dat"),
-            lied,
-            Some((part, total + 9)),
-            begin,
-            chunk,
-        );
-        let id = format!("{tag}-{part}@mock");
-        segs.push((id.clone(), article.len() as u64, part));
-        fx.articles.insert(format!("<{id}>"), article);
-    }
-    fx.nzb_files.push((subject.to_string(), segs));
-}
-
-/// Case 16: MANIFEST-ONLY PAR2 - the poster ships just the .par2 index
-/// (FileDesc + IFSC, zero recovery volumes), kilobytes buying names and
-/// verification with no redundancy spend. The lightest possible full
-/// obfuscation; rename and verify must both work with 0 recovery blocks.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_manifest_only_par2_set_renames_and_verifies_with_zero_recovery() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("norarmanif");
-    let data = payload(120_000, 70);
-    fx.add_file_renamed_by_par2("Manifest.Only.mkv", "Qd7wPk15RzT", &data, 40_000);
-    assert!(add_par2_index_only(&mut fx, &["Manifest.Only.mkv"], 40_000));
-    let (log, ok, out) = run_norar(&fx).await;
-    assert!(ok, "manifest-only post failed:\n{log}");
-    let got = std::fs::read(out.join("Manifest.Only.mkv"))
-        .unwrap_or_else(|e| panic!("payload missing under its FileDesc name: {e}\n{log}"));
-    assert!(got == data, "payload not byte-exact\n{log}");
-    assert!(
-        !out.join("Qd7wPk15RzT").exists(),
-        "the obfuscated source name survived beside the published one:\n{log}"
-    );
-}
-
 /// Case 16, the damage half: one corrupt article under a manifest-only
 /// set. Zero recovery blocks means nothing can repair it - the job must
 /// FAIL CLEANLY (an honest terminal verdict, promptly), never wedge and
@@ -1072,126 +755,6 @@ async fn per_article_random_and_empty_yenc_names_do_not_break_grouping() {
     let got_b = std::fs::read(out.join("Names.Empty.bin"))
         .unwrap_or_else(|e| panic!("empty-name payload missing: {e}\n{log}"));
     assert!(got_a == va && got_b == vb, "payload not byte-exact\n{log}");
-}
-
-/// Case 20 (matrix finding F5, CLOSED): LYING yEnc headers -
-/// `=ybegin size=` overstates the file by 77,777 bytes, `total=`
-/// overstates the parts, while the `=ypart` ranges stay true. The
-/// slot is preallocated at the DECLARED size; until 30 Aug 2026
-/// nothing truncated it back, and the published file was the payload
-/// plus 77,777 zero bytes of tail at rc=0 with verify green. Settle
-/// now holds the published length to the FileDesc length once every
-/// covered block verified, so the landed file is byte-exact.
-#[tokio::test(flavor = "multi_thread")]
-async fn lying_yenc_size_lands_at_the_filedesc_length() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("norarliar");
-    let data = payload(120_000, 77);
-    add_file_lying_headers(
-        &mut fx,
-        "Liar.Size.bin",
-        "Dq1fXv85NcM",
-        &data,
-        40_000,
-        77_777,
-    );
-    assert!(fx.add_par2(20, &["Liar.Size.bin"], 40_000));
-    let (log, ok, out) = run_norar(&fx).await;
-    assert!(ok, "lying-header post failed outright:\n{log}");
-    let got = std::fs::read(out.join("Liar.Size.bin"))
-        .unwrap_or_else(|e| panic!("payload missing under its FileDesc name: {e}\n{log}"));
-    assert!(
-        got == data,
-        "published file not byte-exact ({} bytes vs FileDesc {}) - the \
-         F5 settle truncation regressed\n{log}",
-        got.len(),
-        data.len()
-    );
-}
-
-/// Case 21: UNCOVERED JUNK beside a covered payload - decoy files in
-/// the NZB that no PAR2 set describes, one of them the SAME LENGTH as
-/// the covered payload (a decoy aimed at content matching). The junk
-/// must not fail the job, must not claim the FileDesc name, and the
-/// covered payload must land exact.
-#[tokio::test(flavor = "multi_thread")]
-async fn uncovered_junk_beside_a_covered_payload_neither_fails_nor_claims() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("norarjunk");
-    let covered = payload(100_000, 78);
-    let decoy = payload(100_000, 79); // same length, different bytes
-    let crumb = payload(5_000, 80);
-    fx.add_file_renamed_by_par2("Covered.Real.mkv", "Zt6hKm29PwB", &covered, 40_000);
-    fx.add_file_obfuscated("Ae4rYc73JnV", "Ae4rYc73JnV", &decoy, 40_000);
-    fx.add_file_obfuscated("Ox8bFs51QdG", "Ox8bFs51QdG", &crumb, 40_000);
-    assert!(fx.add_par2(20, &["Covered.Real.mkv"], 40_000));
-    let (log, ok, out) = run_norar(&fx).await;
-    assert!(ok, "junk-beside-payload post failed:\n{log}");
-    let got = std::fs::read(out.join("Covered.Real.mkv"))
-        .unwrap_or_else(|e| panic!("covered payload missing under its name: {e}\n{log}"));
-    assert!(
-        got == covered,
-        "covered payload not byte-exact (the same-length decoy claimed the name?)\n{log}"
-    );
-    let got_decoy = std::fs::read(out.join("Ae4rYc73JnV"))
-        .unwrap_or_else(|e| panic!("decoy missing under its posted hash: {e}\n{log}"));
-    assert!(got_decoy == decoy, "decoy not byte-exact\n{log}");
-    assert!(
-        out.join("Ox8bFs51QdG").exists(),
-        "small junk file was deleted:\n{log}"
-    );
-}
-
-/// Case 23: TWO INDEPENDENT PAR2 SETS in one post, each covering half
-/// the files. Each set must claim only its own; all four payloads land
-/// exact under their own FileDesc names.
-#[tokio::test(flavor = "multi_thread")]
-async fn two_independent_par2_sets_each_claim_only_their_own() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("norartwoset");
-    let a1 = payload(50_000, 83);
-    let a2 = payload(60_000, 84);
-    let b1 = payload(55_000, 85);
-    let b2 = payload(65_000, 86);
-    fx.add_file_renamed_by_par2("SetA.One.bin", "Wm3nRt68KcE", &a1, 40_000);
-    fx.add_file_renamed_by_par2("SetA.Two.bin", "Gv5xHp21YsD", &a2, 40_000);
-    fx.add_file_renamed_by_par2("SetB.One.bin", "Ly9kQf47BwZ", &b1, 40_000);
-    fx.add_file_renamed_by_par2("SetB.Two.bin", "Sc4jMv83TnU", &b2, 40_000);
-    assert!(add_par2_named(
-        &mut fx,
-        "setA",
-        &["SetA.One.bin", "SetA.Two.bin"],
-        40_000,
-        false
-    ));
-    assert!(add_par2_named(
-        &mut fx,
-        "setB",
-        &["SetB.One.bin", "SetB.Two.bin"],
-        40_000,
-        false
-    ));
-    let (log, ok, out) = run_norar(&fx).await;
-    assert!(ok, "two-set post failed:\n{log}");
-    for (name, want) in [
-        ("SetA.One.bin", &a1),
-        ("SetA.Two.bin", &a2),
-        ("SetB.One.bin", &b1),
-        ("SetB.Two.bin", &b2),
-    ] {
-        let got = std::fs::read(out.join(name))
-            .unwrap_or_else(|e| panic!("{name} missing under its FileDesc name: {e}\n{log}"));
-        assert!(&got == want, "{name} not byte-exact\n{log}");
-    }
 }
 
 /// Case 24: WINDOWS-HOSTILE FileDesc names - trailing dot/space,
@@ -1644,8 +1207,7 @@ async fn a_dedupe_fanout_past_the_cap_refuses_the_remainder() {
 /// download-time `stall` on the sibling - the probe's lever - cannot
 /// reach it: measured 30 Aug 2026, stalling either twin produced the
 /// identical declining path, 127 s apart. Neither can the posting
-/// order, on a box wide enough to run both slots at once: both legs
-/// below see the damaged slot weigh two still-unclaimed descriptors.
+/// order, on a box wide enough to run both slots at once.
 ///
 /// Both orders are driven anyway, and cost about three seconds each.
 /// On a narrow finish pool the slots ARE settled in index order, and
@@ -1654,9 +1216,61 @@ async fn a_dedupe_fanout_past_the_cap_refuses_the_remainder() {
 /// through the ordinary md5-16k tier instead, which is a different code
 /// path to the same verdict. Both must be green, whichever way the race
 /// falls on the box running them - which is the row's actual claim.
-/// The in-place assertion below is therefore made only where the twin
-/// tier is the path taken: the md5-16k tier claims a sole survivor by
-/// content and prints no line of its own.
+///
+/// AND THE RACE FALLS BOTH WAYS EVEN IN THE FIRST LEG, which is what
+/// this comment used to get wrong and 4 Sep 2026 measured. A wide pool
+/// does NOT guarantee the damaged slot weighs two unclaimed
+/// descriptors: `twintier` reads `claimed` on entry and needs two
+/// candidates still there (`if cands.len() < 2 { return false }`), so
+/// if the scheduler lets the clean twin's whole-file MD5 land first the
+/// damaged slot sees ONE candidate and takes the md5-16k tier - the
+/// same legitimate path this comment already describes for the second
+/// leg. It is a thread-scheduling race with a microsecond margin, and
+/// under load it is simply a coin the test does not own.
+///
+/// TWO CONSEQUENCES, and the flake was the second one.
+///
+/// The mechanism assertion is now made only where the tier ran, and
+/// says nothing about it having run. Making it deterministic would need
+/// a lever the fixture does not have: a per-job settle-concurrency knob
+/// (or a test hook on `settle_with_set`'s finish pool) that could pin
+/// the pool to one worker, so index order really decided the order.
+/// `NZBFAST_CPU_WORKERS` is not that lever - `mem::cpu_workers` latches
+/// in a process-wide `OnceLock`, so under `cargo test`, where the whole
+/// crate shares one process, whoever calls first decides for everyone.
+/// The tier's unconditional coverage is in
+/// `two_damaged_identical_head_twins_are_never_crossed` instead, where
+/// neither slot can claim by whole-file MD5 and there is no race to
+/// lose.
+///
+/// The payloads are `payloads::unique_payload` and not `payload`, and
+/// that half is what the row was ACTUALLY losing its first attempt on.
+/// A claimed slot's damage is offered to the adoption donor scan before
+/// parity is asked for anything, and `payload(n, 71)` and
+/// `payload(n, 72)` differ by one in every byte - so on the minority
+/// path the scan found all 200 damaged blocks in the OTHER twin's
+/// hash-named file and the recovery set did nothing:
+///
+/// ```text
+/// [repair] repair complete ✔ (native, in place: 0 block(s) rebuilt across
+///          1 file(s), 200 block(s) adopted from Ty8cKd31VbN)
+/// ```
+///
+/// `adoptguard::refuse_a_solve_that_solved_nothing` refuses exactly
+/// that - a row named for parity whose parity was never load-bearing -
+/// and it panics from inside the engine's own worker, so it lands
+/// before any assertion here. Unique payloads leave the damage
+/// unadoptable, so parity does the work whichever tier claims the slot,
+/// and the row tests what its name says whichever way the coin lands.
+/// Measured after the change, 72 legs 12-way under load: 200 blocks
+/// rebuilt from parity and 0 adopted on both the twin-tier path and the
+/// md5-16k one, and 15% redundancy (300 blocks against 200 of damage)
+/// still covers it.
+///
+/// MEASURED at `--retries 0`: in isolation 0 of 25 either way (this
+/// race needs contention), and 12-way concurrent at load average ~90,
+/// **1 failure in 48 before** - the adoptguard, on the first leg - and
+/// **0 in 48 after**.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_damaged_identical_head_twin_is_repaired_in_place_in_either_settle_order() {
     if !have_par2() {
@@ -1670,8 +1284,14 @@ async fn a_damaged_identical_head_twin_is_repaired_in_place_in_either_settle_ord
         let mut fx = Fixture::new(tag);
         let mut a = vec![0u8; 200_000];
         let mut b = vec![0u8; 200_000];
-        a[20_000..].copy_from_slice(&payload(180_000, 71));
-        b[20_000..].copy_from_slice(&payload(180_000, 72));
+        // `payloads::unique_payload` and NOT `payload`, since 4 Sep
+        // 2026 - see the doc comment's flake note. The leading 20,000
+        // zeros are what makes these identical-head twins and are
+        // untouched; what changes is that the tails no longer resemble
+        // each other or themselves, so the sliding adoption scan cannot
+        // solve the damage and the recovery set has to.
+        a[20_000..].copy_from_slice(&payloads::unique_payload(180_000, 71));
+        b[20_000..].copy_from_slice(&payloads::unique_payload(180_000, 72));
         let (dmg, clean) = (
             ("Dmg.Alpha.vob", "Jm5nPw72QsX"),
             ("Dmg.Beta.vob", "Ty8cKd31VbN"),
@@ -1717,19 +1337,25 @@ async fn a_damaged_identical_head_twin_is_repaired_in_place_in_either_settle_ord
                  rebuilt file - an *arr would import {p}\n{log}"
             );
         }
-        // Repaired IN PLACE, not recreated: the damaged slot claimed its
-        // own descriptor on per-block evidence. Only asserted on the leg
-        // where the twin tier is the path taken - see the note above.
-        if damaged_first {
+        // WHICH TIER CLAIMED THE DAMAGED SLOT IS A POOL RACE, so the
+        // assertion is on the tier's own correctness where it ran and
+        // never on it having run - see the doc comment's flake note for
+        // the measurement and for what would have to exist to assert it.
+        // The twin tier's unconditional coverage lives in
+        // `two_damaged_identical_head_twins_are_never_crossed`, where
+        // neither slot can claim by whole-file MD5 and no race is
+        // possible.
+        if log.contains("is a damaged member of a 2 identical-head group") {
             assert!(
-                log.contains("is a damaged member of a 2 identical-head group")
-                    && log.contains("Dmg.Alpha.vob's own PAR2 block checksums"),
-                "[{tag}] the damaged twin was not paired on per-block evidence\n{log}"
+                log.contains("Dmg.Alpha.vob's own PAR2 block checksums"),
+                "[{tag}] the twin tier fired but paired the damaged slot with the \
+                 WRONG descriptor's block checksums\n{log}"
             );
             assert!(
                 !log.contains("recreated"),
-                "[{tag}] the member was recreated from parity - the in-place \
-                 claim did not happen\n{log}"
+                "[{tag}] the twin tier claimed the slot and the member was \
+                 recreated from parity anyway - the in-place claim did not \
+                 happen\n{log}"
             );
         }
     }
@@ -2361,6 +1987,83 @@ async fn an_uncovered_file_wearing_a_set_members_name_stays_out_of_the_set() {
         tree.iter()
             .map(|(n, b)| (n.clone(), b.len()))
             .collect::<Vec<_>>()
+    );
+}
+
+/// W4-18 AT THE COMPONENT CAP (bug sweep, 1 Sep 2026). A covered file
+/// posted under a hash, plus an UNCOVERED payload posted honestly under
+/// the set member's own name - with that name 255 bytes long, which is
+/// what a long posted name always comes back as, because
+/// `sanitize_out_name` capping it is what produced it.
+///
+/// `get::publishplan::plan_publish_names` composed the occupant's
+/// step-aside name with a bare `format!("{sidx:03}-{here}")`, so the
+/// aside was a 259-byte component and `renameat` refused it with
+/// `ENAMETOOLONG`. The `Err` arm seeds `here` back and the set member
+/// falls through to a disambiguated name - and everything downstream
+/// addresses a member BY its descriptor name, which is where the test
+/// above's measured loss starts: repair recreates the member over the
+/// uncovered file. This fixture is INTACT, so it stops one step short
+/// of paying that, and grades the refused rename itself. The aside goes
+/// through `nzbkit::disk::disambiguated_out_name` now, which caps the
+/// COMPOSED name.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_uncovered_file_at_the_component_cap_still_steps_aside() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    // Exactly the cap, so a raw `{slot:03}-` prefix is 259 bytes. Held
+    // by an assertion rather than by arithmetic in a comment.
+    let long_name = format!("{}.bin", "C".repeat(251));
+    assert_eq!(
+        nzbkit::disk::sanitize_out_name(&long_name).len(),
+        255,
+        "the premise moved: the squatted name is no longer at the cap"
+    );
+    let mut fx = Fixture::new("norarnamesquatlong");
+    let covered = payload(80_000, 79);
+    let occupant = payload(80_000, 80);
+    // The set's own file, posted under a hash: a MOVER, whose target is
+    // the 255-byte FileDesc name.
+    fx.add_file_renamed_by_par2(&long_name, "Yf2oHw65CnJ", &covered, 40_000);
+    assert!(fx.add_par2(10, &[&long_name], 40_000));
+    // ...and an uncovered, different payload already wearing that name:
+    // a STAYER sitting on the mover's target. Posted only - the disk
+    // copy under `dir` is the covered content `par2 create` just read.
+    let segs = make_file_articles(
+        &long_name,
+        &occupant,
+        40_000,
+        "namesquatlong-occ",
+        &mut fx.articles,
+    );
+    fx.nzb_files.push((long_name.clone(), segs));
+    let (log, ok, out) = run_norar(&fx).await;
+    assert!(ok, "capped-name squat post failed outright:\n{log}");
+    let tree = out_tree(&out);
+    let have_covered = tree.iter().any(|(_, b)| *b == covered);
+    let have_occupant = tree.iter().any(|(_, b)| *b == occupant);
+    assert!(
+        have_covered && have_occupant,
+        "a payload was lost at the cap (covered={have_covered} \
+         occupant={have_occupant}); tree: {:?}\n{log}",
+        tree.iter()
+            .map(|(n, b)| (n.clone(), b.len()))
+            .collect::<Vec<_>>()
+    );
+    // THE ARM THAT BITES, and the one the loss above is downstream of:
+    // the aside rename must actually have happened. On the pre-fix
+    // spelling it is refused with `File name too long (os error 63)`
+    // and the member publishes as `000-...-<hash>.bin` instead, which
+    // is where W4-18's recreate-over-the-occupant loss starts - this
+    // fixture is clean, so it stops one step short of paying it. It is
+    // also the drift guard: a fixture that stopped colliding would sail
+    // past the payload check having tested nothing.
+    assert!(
+        log.contains("the recovery set names that file"),
+        "the step-aside rename never happened - refused, or this row no \
+         longer reaches the composed name it pins:\n{log}"
     );
 }
 

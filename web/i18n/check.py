@@ -286,11 +286,39 @@ def selftest():
     errs = stay_english_errors('de', bad, r)
     assert len(errs) == 1 and "de.json sched.days.ph: 'alle · mo-fr · sa,so'" in errs[0], errs
     assert 'sched.days.ph' in MUST_STAY_ENGLISH, 'seed key must stay pinned'
+
+    # An unknown flag must be a REFUSAL naming it, never a silent skip that
+    # falls through to the ordinary clean gate verdict about a request
+    # nobody honoured - the shape reproduced live on size-gate.py 31 Aug 2026.
+    assert unrecognised_argv(['--this-flag-does-not-exist']) is not None
+    assert unrecognised_argv([]) is None
+    assert unrecognised_argv(['--selftest']) is None
     print('check.py selftest: OK')
+
+
+KNOWN_FLAGS = {'--selftest'}
+
+
+def unrecognised_argv(argv):
+    """First arg outside the known set, or None."""
+    for a in argv:
+        if a not in KNOWN_FLAGS:
+            return a
+    return None
 
 
 if '--selftest' in sys.argv:
     selftest(); sys.exit(0)
+
+_bad_arg = unrecognised_argv(sys.argv[1:])
+if _bad_arg is not None:
+    print(
+        f"check.py: unrecognised argument {_bad_arg!r} - known flags are "
+        "--selftest, or no args for the gate. A stale checkout may be "
+        "missing a flag this script now supports - merge origin/main.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 ref = json.load(open('web/i18n/en.reference.json'))
 PH = re.compile(r'\{[a-z]+\}')

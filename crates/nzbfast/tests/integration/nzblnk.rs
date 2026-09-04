@@ -356,18 +356,18 @@ async fn a_pasted_link_resolves_from_our_own_index() {
         // only that a password exists, never its value.
         let mut saved = String::new();
         for _ in 0..40 {
-            saved = std::fs::read_to_string(spool.join("queue.json")).unwrap_or_default();
+            saved = std::fs::read_to_string(spool.join("queue.jsonl")).unwrap_or_default();
             if saved.contains("v4c4t10n") {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert!(
-            saved.contains("\"password\": \"v4c4t10n\""),
+            saved.contains("\"password\":\"v4c4t10n\""),
             "password not stored:\n{saved}"
         );
         assert!(
-            saved.contains("\"origin\": \"nzblnk\""),
+            saved.contains("\"origin\":\"nzblnk\""),
             "origin not recorded:\n{saved}"
         );
 

@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast"
-version = "1.3.1"
+version = "1.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,6 +11,60 @@ workspace = true
 
 [dependencies]
 nzbkit = { path = "../nzbkit", default-features = false }
+# The bottom layer, cut out by step 2 of
+# research/PLAN-NZBFAST-CRATE-SPLIT-2026-09-01.md. Its 30 modules are
+# re-imported under their old names in main.rs and lib.rs
+# (`pub(crate) use nzbfast_core::diag;`), so every `crate::diag::...`
+# path in the modules that stayed here resolves unchanged.
+nzbfast-core = { path = "../nzbfast-core" }
+# The extraction, repair and filing layer, cut out by step 3 of the same
+# plan. Its nine modules are re-imported under their old names in main.rs
+# and lib.rs (`pub(crate) use nzbfast_unpack::smart;`), so every
+# `crate::smart::...` path in the modules that stayed here resolves
+# unchanged.
+nzbfast-unpack = { path = "../nzbfast-unpack" }
+# The search, index-scan and metadata layer, cut out by the same step.
+# Its twelve modules are re-imported under their old names in main.rs and
+# lib.rs (`pub(crate) use nzbfast_meta::wall;`), so every
+# `crate::wall::...` path in the modules that stayed here resolves
+# unchanged - INCLUDING the slim build, because the wall/wall_slim swap
+# is a cfg inside that crate now rather than a `#[path]` pair here.
+nzbfast-meta = { path = "../nzbfast-meta" }
+# The download engine - the one-pass fetch, decode, settle and tail
+# pipeline - cut out by step 4 of the same plan. Its one module is
+# re-imported under its old name in main.rs and lib.rs
+# (`pub(crate) use nzbfast_engine::get;`) and globbed at both roots, so
+# every `crate::get::...` path and every bare name the CLI shells and
+# serve/ resolve through `use get::*;` is unchanged.
+nzbfast-engine = { path = "../nzbfast-engine" }
+# The daemon layer of serve - the `Daemon` type, its queue and history
+# stores, its settings, its persistence and the background state - cut
+# out by lane 2 of Option C in the same plan. Its 71 units are
+# re-imported under their old names in `src/serve/mod.rs`
+# (`pub(crate) use nzbfast_daemon::daemon;`), so every
+# `crate::serve::<unit>::...` path in the api, tasks and wiring layers
+# that stayed here resolves unchanged.
+nzbfast-daemon = { path = "../nzbfast-daemon" }
+# The background-lane layer of serve - the scheduled and long-running
+# tasks - cut out by lane 3 of Option C in the same plan. It is a SIBLING
+# of nzbfast-api: both stand on nzbfast-daemon and neither names the
+# other, which is what lets cargo check them in parallel. Its one unit is
+# re-imported under its old name in `src/serve/mod.rs`
+# (`pub(crate) use nzbfast_tasks::tasks;`), so every
+# `crate::serve::tasks::...` path in the api and wiring layers resolves
+# unchanged.
+nzbfast-tasks = { path = "../nzbfast-tasks" }
+# The request layer of serve - the JSON API, the SABnzbd-compatible
+# surface and the embedded web pages - cut out by lane 3 of Option C in
+# the same plan. A SIBLING of nzbfast-tasks: neither names the other, so
+# cargo checks them in parallel. Its eight units are re-imported under
+# their old names in `src/serve/mod.rs`
+# (`pub(crate) use nzbfast_api::sabcompat;`), so every
+# `crate::serve::<unit>::...` path in the wiring layer resolves
+# unchanged - INCLUDING the web assets: `dashboard` below forwards to
+# this crate's own feature, and its build.rs writes the OUT_DIR members
+# `assets.rs` reads.
+nzbfast-api = { path = "../nzbfast-api" }
 # `parallel` turns on rars' multithreaded RAR5 block decode (unrar-parity
 # extraction wall speed; members >=16MB fan symbol decode across 4 workers).
 rars = { path = "../../vendor/rars", features = ["parallel"] }
@@ -69,7 +123,7 @@ hex = "0.4"
 # which is fine for a capability URL and is NOT used here).
 getrandom = "0.4"
 # IMDb datasets ratings file is gzip'd TSV (keyless nightly download),
-# and serve/webasset.rs gzips the embedded pages at respond time - so
+# and webasset.rs gzips the embedded pages at respond time - so
 # this is unconditional now (nzbkit already depends on it regardless,
 # so slim builds gain no new crate).
 flate2 = "1"
@@ -162,7 +216,22 @@ default = ["indexer", "dashboard"]
 # existing `#[cfg(feature = "indexer")]` site correct with no second
 # condition on it - indexer implies dashboard, so WALL_HTML exists
 # wherever the shell machinery does.
-indexer = ["nzbkit/indexer", "dep:image", "dashboard"]
+#
+# It FORWARDS to `nzbfast-core/indexer` too: four core modules
+# (identity, interests, ratelimit, xrel) carry single sites of this
+# gate, and forwarding is what keeps them ONE switch rather than two -
+# a slim build turns both off together and `slim-check` compiles what
+# the phones ship.
+indexer = [
+    "nzbkit/indexer",
+    "nzbfast-core/indexer",
+    "nzbfast-meta/indexer",
+    "nzbfast-daemon/indexer",
+    "nzbfast-tasks/indexer",
+    "nzbfast-api/indexer",
+    "dep:image",
+    "dashboard",
+]
 # The browser-facing web UI: the dashboard and wall shells, the user's own
 # stylesheet, the 27 i18n catalogues, the 16 manuals, the favicons and the
 # web manifest - about 11.5 MB of source before build.rs gzips it, and
@@ -182,11 +251,17 @@ indexer = ["nzbkit/indexer", "dep:image", "dashboard"]
 # what it buys is that the dashboard-off configuration is COMPILED BY CI
 # on every push - `slim-check`, and both legs of mobile-targets.yml -
 # rather than being a store-only shape nobody builds until a release.
-dashboard = []
+dashboard = ["nzbfast-api/dashboard"]
 ktls = ["nzbkit/ktls"]
 # Embedded/in-process hosting (the iOS staticlib via crates/nzbfast-ffi).
-# Off by default: src/lib.rs compiles to EMPTY without it, so the lib
-# target this package now carries costs existing builds nothing.
+#
+# It gated the whole of src/lib.rs until the crate-split step 4.5 (2 Sep
+# 2026), which is why that root used to compile to EMPTY in an ordinary
+# build. It does not any more - lib.rs is the package's one root and
+# carries the module tree in every configuration - so what this feature
+# turns on now is the three `embedded_*` entry points at the foot of that
+# file and nothing else. Still off by default, because a desktop build
+# has no host process to be embedded in.
 ffi = []
 # Build-gate for the six heavy [[test]] targets at the bottom of this
 # file (TODO 116b). EMPTY on purpose - it compiles no code in or out;
@@ -196,19 +271,65 @@ ffi = []
 # pr-check.yml pass `--features heavy-tests` where they run them.
 heavy-tests = []
 
-# build.rs gzips the immutable embedded pages (i18n catalogues, manuals)
-# so the binary carries the compressed member rather than 9.0 MB of plain
-# text - see `precompress_pages`. Same crate the daemon already links for
-# the request path, so the lockfile and the dependency tree are unchanged;
-# this only asks for a host build of it.
-[build-dependencies]
-flate2 = "1"
+# NO `flate2` HERE ANY MORE. `precompress_pages` moved to
+# `crates/nzbfast-api/build.rs` with the `include_bytes!` sites that read
+# its output (lane 3 of Option C): `env!("OUT_DIR")` names the OUT_DIR of
+# the package being compiled, so the two halves cannot live apart. What
+# is left in this package's build.rs is the Windows icon, VERSIONINFO
+# and manifest, plus the beta serial, and none of it needs a dependency.
 
 # Signing tooling for the update manifest (keygen + detached sign) lives
 # in examples/update_sign.rs so the daemon and the release pipeline use
 # the exact same ed25519 implementation. getrandom seeds keygen.
 [dev-dependencies]
+# The same crate as the normal dependency above, with its test seams
+# switched on. Six items this crate's tests reach for were `#[cfg(test)]`
+# while the two crates were one, and `cfg(test)` is invisible across a
+# crate boundary whatever the visibility - so they are behind
+# `test-support` now (its own note in nzbfast-core/Cargo.toml lists
+# them). Declared as a DEV dependency so the feature is on whenever a
+# test target is built and off in `cargo build -p nzbfast`, which is the
+# shipped binary.
+nzbfast-core = { path = "../nzbfast-core", features = ["test-support"] }
+# Same crate as the normal dependency above with ITS test seams on:
+# `smart`'s trash-test globals (`trash_globals_steady`,
+# `one_trash_test_at_a_time`, `force_trash_unresponsive`) are
+# `#[cfg(test)]` items that tests_jobs.rs and splitjoin's own tests
+# take, and a `cfg(test)` item is invisible across a crate boundary
+# whatever its visibility.
+nzbfast-unpack = { path = "../nzbfast-unpack", features = ["test-support"] }
+# Same crate as the normal dependency above with ITS test seams on:
+# `testutil::test_daemon` (the fixture every api-layer test builds a
+# Daemon with) and `storecut` (the durable-write fault injection
+# api/queue/custody_tests.rs arms) are `#[cfg(test)]` items, and a
+# `cfg(test)` item is invisible across a crate boundary whatever its
+# visibility. Both are inert until a test in the same process arms
+# them, so the daemon binary an integration test SPAWNS - which
+# carries every dev-dependency feature this package turns on -
+# behaves exactly as the shipped one does.
+nzbfast-daemon = { path = "../nzbfast-daemon", features = ["test-support"] }
+# Same crate as the normal dependency above with ITS test seam on:
+# `par2repair::adopt::disabled_for_screen` reads NZBFAST_TEST_NO_ADOPTION
+# only in a build that carries this feature, which is what lets a lane
+# point the deterministic repeating-payload screen at the whole e2e suite
+# (research/PAYLOAD-TRAP-PATH-DEPENDENT-CENSUS-2026-09-04.md). A DEV
+# dependency, so the feature is on for every test target - including the
+# `nzbfast` binary those targets SPAWN - and off in
+# `cargo build -p nzbfast`, which is the shipped binary. Nothing sets the
+# variable by default; the lever is inert until a lane arms it.
+nzbkit = { path = "../nzbkit", default-features = false, features = ["test-support"] }
 getrandom = "0.4"
+# The posting-layout generator behind the `layouts` test target: a
+# profile in `crates/postfast/catalog/` goes in and a deterministic
+# layout (files, articles, headers, NZB, faults, and the end state the
+# client must reach) comes out. DEV-only on purpose - it is test
+# infrastructure and the shipped binary must not carry the archive
+# writers and the toml parser it pulls in.
+postfast = { path = "../postfast" }
+# Seed-harvest migration tests open the daemon's closed index directly to
+# model a pre-manifest database. This is the same version/features nzbkit's
+# index tests already compile, so it adds no production dependency.
+rusqlite = { version = "0.40.1", features = ["hooks"] }
 # TLS daemon tests (§129 2a): rcgen mints the test certificate (end-entity,
 # basicConstraints CA:FALSE by construction - the CaUsedAsEndEntity trap a
 # hand-run `openssl req -x509` falls into), and rustls is the verifying

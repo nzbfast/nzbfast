@@ -128,6 +128,7 @@ async fn downloads_a_body_over_tls() {
         max_source_ips: None,
         address_family: Default::default(),
         tls_hostname: None,
+        warm_reserve: None,
     };
     // The listener may not be up on the first tick.
     let mut conn = None;
@@ -259,6 +260,7 @@ async fn the_tls_name_override_is_what_the_handshake_verifies_and_announces() {
         port,
         tls: true,
         tls_hostname: tls_hostname.map(str::to_string),
+        warm_reserve: None,
         username: None,
         password: None,
         connections: 1,

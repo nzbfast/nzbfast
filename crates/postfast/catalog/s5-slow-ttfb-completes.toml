@@ -1,0 +1,33 @@
+# S5: dead air before every answer for two articles, on a server that
+# is otherwise healthy.
+
+[layout]
+name = "s5-slow-ttfb-completes"
+seed = 76
+note = """
+The safety arm for every timeout the client tightens. Nothing here is
+lost, damaged or short: two articles simply take 400 ms to start
+arriving, on every request, which is what a cold-storage tier or a
+long-haul route looks like from the client's side. The right behaviour
+is to kill nothing and finish with the post complete.
+
+It is the counterweight to s5-stall-recovers. That row asks the client
+to cut dead air that never ends; this one asks it not to cut dead air
+that does. A budget tuned only against the first turns a slow provider
+into a broken one, and the two rows fail in opposite directions, which
+is the only way a threshold gets pinned from both sides.
+
+400 ms rather than something larger: long enough to be well past a
+localhost round trip and short enough that the row costs under a
+second even when both articles are asked for twice.
+"""
+
+[source]
+files = [{ name = "unhurried.bin", bytes = 120000 }]
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+slow_ttfb = [1, 4]
+slow_ttfb_ms = 400

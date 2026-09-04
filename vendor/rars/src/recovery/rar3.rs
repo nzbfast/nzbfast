@@ -424,9 +424,179 @@ pub fn reconstruct_data_volumes(
     Ok(out)
 }
 
+/// One 512-byte sector of a RAR 3.x embedded recovery record.
+///
+/// The unit is the format's, not a tuning choice: the record stores one
+/// 16-bit tag per sector and one parity sector per group, and
+/// `rar15_40`'s repair path reads both at this stride.
+pub const RECOVERY_SECTOR_LEN: usize = 512;
+
+/// The geometry of one embedded ("Protect+") recovery record.
+///
+/// A RAR 3.x record protects the archive bytes that PRECEDE it, padded
+/// with zeros to a whole number of sectors. It stores a CRC tag per
+/// protected sector, which is how a damaged sector is located, then
+/// `parity_sectors` XOR sectors, sector `k` folding every protected
+/// sector whose index is congruent to `k` modulo `parity_sectors`. One
+/// damaged sector per congruence class is therefore recoverable, and a
+/// second one in the same class is not - which is the whole reason the
+/// percentage matters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewSubRecoveryPlan {
+    /// Sectors the record covers; the last one may be partial and is
+    /// zero-padded for both the tag and the XOR.
+    pub protected_sectors: usize,
+    /// XOR sectors written after the tag table.
+    pub parity_sectors: usize,
+}
+
+impl NewSubRecoveryPlan {
+    /// Bytes the record's data area occupies: the tag table, then the
+    /// parity sectors.
+    pub const fn data_len(self) -> usize {
+        self.protected_sectors * 2 + self.parity_sectors * RECOVERY_SECTOR_LEN
+    }
+}
+
+/// Sizes a record covering `protected_len` bytes at `percent` redundancy.
+///
+/// `percent` is the share of the PROTECTED SECTOR COUNT spent on parity,
+/// floored, with a floor of one sector so a caller that asked for a
+/// record always gets one. That is the same rule the RAR 5 planner uses
+/// (`recovery::rar5::plan_inline_recovery`), deliberately: the two
+/// generations then answer one `recovery_record_pct` the same way, which
+/// is what a catalog row comparing them needs. It is NOT bit-identical
+/// to what `rar` itself picks - measured on one 200,059-byte archive,
+/// `rar 7.23` chose 4/8/12/19/39/78/117/195 parity sectors for
+/// 1/2/3/5/10/20/30/50 percent against this rule's 3/7/11/19/39/78/117/195,
+/// so it rounds rather than floors and shades the estimate by a sector or
+/// two at the bottom of the range. Nothing reads the ratio back: `rar`
+/// and this crate's own repair path both derive the geometry from the
+/// stored counts.
+pub fn plan_newsub_recovery(protected_len: usize, percent: u32) -> Result<NewSubRecoveryPlan> {
+    let protected_sectors = protected_len.div_ceil(RECOVERY_SECTOR_LEN);
+    if protected_sectors == 0 {
+        return Err(Error::InvalidCodewordSize);
+    }
+    let percent = percent.min(100) as usize;
+    if percent == 0 {
+        return Err(Error::InvalidParitySize);
+    }
+    let parity_sectors = (protected_sectors * percent / 100)
+        .max(1)
+        .min(protected_sectors);
+    Ok(NewSubRecoveryPlan {
+        protected_sectors,
+        parity_sectors,
+    })
+}
+
+/// Builds the record's data area over `protected`.
+///
+/// `protected` is the archive prefix the record will sit after, exactly:
+/// a byte more or less shifts every sector and the record repairs
+/// nothing. The tag is `!crc32(sector) & 0xffff`, which is the form
+/// `rar15_40`'s repair path checks against and the form `rar` writes.
+pub fn build_newsub_recovery_data(protected: &[u8], plan: NewSubRecoveryPlan) -> Vec<u8> {
+    let mut out = vec![0u8; plan.data_len()];
+    let (tags, parity) = out.split_at_mut(plan.protected_sectors * 2);
+    for index in 0..plan.protected_sectors {
+        let sector = padded_sector(protected, index);
+        let tag = (!crate::crc32::crc32(&sector) & 0xffff) as u16;
+        tags[index * 2..index * 2 + 2].copy_from_slice(&tag.to_le_bytes());
+        let slot = index % plan.parity_sectors;
+        let row = &mut parity[slot * RECOVERY_SECTOR_LEN..(slot + 1) * RECOVERY_SECTOR_LEN];
+        for (out_byte, byte) in row.iter_mut().zip(sector) {
+            *out_byte ^= byte;
+        }
+    }
+    out
+}
+
+/// Sector `index` of the protected prefix, zero-padded past its end.
+fn padded_sector(protected: &[u8], index: usize) -> [u8; RECOVERY_SECTOR_LEN] {
+    let mut sector = [0u8; RECOVERY_SECTOR_LEN];
+    let start = index * RECOVERY_SECTOR_LEN;
+    if start < protected.len() {
+        let end = (start + RECOVERY_SECTOR_LEN).min(protected.len());
+        sector[..end - start].copy_from_slice(&protected[start..end]);
+    }
+    sector
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{reconstruct_data_volumes, Error, RSCoder8, MAX_PARITY};
+    use super::{
+        build_newsub_recovery_data, plan_newsub_recovery, reconstruct_data_volumes, Error,
+        RSCoder8, MAX_PARITY, RECOVERY_SECTOR_LEN,
+    };
+
+    #[test]
+    fn a_newsub_plan_covers_every_byte_and_spends_the_percent_on_parity() {
+        // A partial trailing sector still counts: the record pads it.
+        let plan = plan_newsub_recovery(1025, 10).unwrap();
+        assert_eq!(plan.protected_sectors, 3);
+        assert_eq!(plan.parity_sectors, 1);
+        assert_eq!(plan.data_len(), 3 * 2 + RECOVERY_SECTOR_LEN);
+
+        // 391 sectors is the geometry `rar 7.23` was measured on; it
+        // rounds where this floors, so 5 percent agrees at 19 and 1
+        // percent does not (rar picked 4).
+        assert_eq!(plan_newsub_recovery(200_059, 5).unwrap().parity_sectors, 19);
+        assert_eq!(plan_newsub_recovery(200_059, 1).unwrap().parity_sectors, 3);
+
+        // The floor of one parity sector: a caller that asked for a
+        // record gets one rather than a header describing nothing.
+        assert_eq!(plan_newsub_recovery(200_059, 0).is_err(), true);
+        assert_eq!(
+            plan_newsub_recovery(200_059, 100).unwrap().parity_sectors,
+            391
+        );
+        assert_eq!(plan_newsub_recovery(1, 1).unwrap().parity_sectors, 1);
+        // Nothing to protect is a refusal, not an empty record.
+        assert!(plan_newsub_recovery(0, 10).is_err());
+    }
+
+    #[test]
+    fn newsub_recovery_data_tags_every_sector_and_folds_it_into_its_group() {
+        let protected: Vec<u8> = (0..2600u32).map(|byte| (byte % 251) as u8).collect();
+        let plan = plan_newsub_recovery(protected.len(), 40).unwrap();
+        assert_eq!(plan.protected_sectors, 6);
+        assert_eq!(plan.parity_sectors, 2);
+        let data = build_newsub_recovery_data(&protected, plan);
+        assert_eq!(data.len(), plan.data_len());
+
+        let (tags, parity) = data.split_at(plan.protected_sectors * 2);
+        let mut padded = protected.clone();
+        padded.resize(plan.protected_sectors * RECOVERY_SECTOR_LEN, 0);
+        for index in 0..plan.protected_sectors {
+            let sector = &padded[index * RECOVERY_SECTOR_LEN..(index + 1) * RECOVERY_SECTOR_LEN];
+            // The tag `rar` writes and this crate's repair path checks:
+            // the low half of the complement of the sector's CRC32.
+            let expected = (!crate::crc32::crc32(sector) & 0xffff) as u16;
+            assert_eq!(
+                u16::from_le_bytes(tags[index * 2..index * 2 + 2].try_into().unwrap()),
+                expected,
+                "sector {index}"
+            );
+        }
+        for slot in 0..plan.parity_sectors {
+            let mut fold = vec![0u8; RECOVERY_SECTOR_LEN];
+            for index in (slot..plan.protected_sectors).step_by(plan.parity_sectors) {
+                for (out, byte) in fold
+                    .iter_mut()
+                    .zip(&padded[index * RECOVERY_SECTOR_LEN..(index + 1) * RECOVERY_SECTOR_LEN])
+                {
+                    *out ^= byte;
+                }
+            }
+            assert_eq!(
+                &parity[slot * RECOVERY_SECTOR_LEN..(slot + 1) * RECOVERY_SECTOR_LEN],
+                &fold[..],
+                "parity slot {slot}"
+            );
+        }
+    }
 
     /// Solve the full Forney decode once per byte offset.
     ///

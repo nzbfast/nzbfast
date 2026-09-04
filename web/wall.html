@@ -111,12 +111,34 @@ body{margin:0;background:var(--bg);color:var(--fg);
   padding:calc(var(--barpy) + var(--tbh,0px)) var(--barpx) var(--barpy);
   background:color-mix(in srgb,var(--bg) 82%,transparent);
   backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
-/* The nav travels as one block and is pushed to the end, so the four
-   pills wrap together onto a second row rather than the last one
-   (manual) being cut off the right edge - which is what happened the
-   moment the wall gained the dashboard's full nav. */
-.bar .nav{display:flex;align-items:center;gap:8px;margin-inline-start:auto;flex-wrap:wrap}
-.bar h1{font-size:16px;margin:0;font-weight:650;white-space:nowrap}
+/* The nav travels as ONE BLOCK, and that is the half of this rule that
+   has always mattered: the four pills wrap together rather than the last
+   one (manual) being cut off, which is what happened the moment the wall
+   gained the dashboard's full nav.
+   What changed is WHERE the block sits. It used to be pushed to the end
+   with margin-inline-start:auto, so the same four buttons - same icons,
+   same labels, same order - were hard LEFT on the dashboard and hard
+   RIGHT here, and appeared to jump across the screen as you navigated.
+   They now sit second, directly after the logo, on both surfaces.
+   `flex:none` is what replaces the auto margin and is load-bearing:
+   `.bar` is a nowrap flex row, so without it the nav SHRINKS and its
+   pills wrap to a second row, making the bar taller at middling widths.
+   The squeeze belongs to the search box, which is the one item built to
+   take it (`#q{flex:1;min-width:120px;max-width:420px}`).
+   Safe under Window Controls Overlay in either position: the WCO arm at
+   the foot of this sheet pads the bar by env(titlebar-area-x) on one
+   side and the computed remainder on the other, so the drag strip is
+   correct whichever edge the platform draws its buttons on, and
+   `.bar a` opts every pill back out of the drag region wherever it
+   sits. */
+.bar .nav{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:wrap}
+/* 19px to MATCH `header h1` on the dashboard, and that is the whole
+   reason for the number: the nav sits directly after this block on both
+   surfaces, so any difference in the logo's width moves the four
+   destinations sideways when you navigate between them. At 16px here
+   against 19px there the pills landed 16px apart; identical type puts
+   them at the same x. The bar has the room (59px tall at rest). */
+.bar h1{font-size:19px;margin:0;font-weight:650;white-space:nowrap}
 .bar h1 a{color:var(--fg);text-decoration:none}
 .tabs{display:flex;gap:2px;background:var(--surface);border:1px solid var(--line);
   border-radius:var(--radius-sm);padding:3px}
@@ -630,7 +652,7 @@ button:active:not(:disabled){transform:scale(.94);filter:brightness(1.35)}
      for "settings" inside a menu called View. Icon-only at this width so
      four destinations cost one short row. */
   .bar{flex-wrap:wrap;row-gap:9px}
-  .bar .nav{order:3;flex:1 1 100%;justify-content:space-between;margin-inline-start:0}
+  .bar .nav{order:3;flex:1 1 100%;justify-content:space-between}
   .bar .nav .pill{flex:1;justify-content:center;display:inline-flex;align-items:center;
     min-height:40px;padding:4px 6px}
   .bar .nav .pill span{display:none}
@@ -699,10 +721,16 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
    height). This page is reached from the dashboard by an ordinary
    same-origin link, so the installed window navigates here in place and
    inherits the display mode - without the rules below the bar's contents
-   sit under whichever row of buttons the platform draws (the nav is
-   margin-inline-start:auto, i.e. hard against the right edge, which is
-   exactly where Windows and Linux put theirs) and the window has no drag
-   handle at all.
+   sit under whichever row of buttons the platform draws, and the window
+   has no drag handle at all. This used to name the nav as the thing at
+   risk, because it was margin-inline-start:auto - hard against the right
+   edge, exactly where Windows and Linux put their buttons. The nav now
+   sits at the START of the bar instead, beside the logo, which is where
+   macOS puts ITS buttons, so the hazard did not go away, it swapped
+   platforms. Nothing here needed changing for that and nothing should:
+   the two padding terms below are computed from env(titlebar-area-x) and
+   the remainder, so they inset the bar by whatever the platform occupies
+   on EITHER side. The rule was never about which end the nav was at.
 
    Everything is inside the query, which matches nowhere else: a plain
    tab, a standalone-mode install, the mac wrapper and every non-Chromium
@@ -754,6 +782,21 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
 
 <div class="bar">
   <h1><a href="/" data-i18n-title="wall.home.title" title="Downloads and status"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-bolt"/></svg> nzbfast</a></h1>
+  <!-- The four destinations sit HERE, directly after the logo, and
+       that position is the point rather than an accident. They used
+       to be the LAST thing in this bar, after the view tabs, the
+       search box, the density control, the zoom slider, four filter
+       toggles and the count - so the same four buttons, with the same
+       icons and the same labels, were hard LEFT on the dashboard and
+       hard RIGHT here. They looked identical and moved across the
+       screen as you navigated, which is the complaint this answers.
+       Keep them second, after the <h1>, on every surface. -->
+  <nav class="nav">
+  <a class="pill" href="/" data-i18n-title="hdr.dash.title" title="Downloads and status"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-dash"/></svg> <span data-i18n="hdr.dash">dashboard</span></a>
+  <a class="pill on" href="/wall" data-i18n-title="hdr.wall.title" title="Poster wall"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wall"/></svg> <span data-i18n="hdr.wall">wall</span></a>
+  <a class="pill" href="/#settings" data-i18n-title="hdr.settings.title" title="Settings"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg> <span data-i18n="hdr.settings">settings</span></a>
+  <a class="pill" href="/manual#wall" target="_blank" rel="noopener" data-i18n-title="hdr.manual.title" title="User manual"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-manual"/></svg> <span data-i18n="hdr.manual">manual</span></a>
+  </nav>
   <!-- 24C: two surfaces, not three zoom levels. Wall = the title-grouped
        poster grid (discover); Releases = the per-release table (search).
        The old grid/dense pair was the SAME wall at two tile sizes - that
@@ -854,12 +897,6 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
     </div>
   </div>
   <span class="count" id="count"></span>
-  <nav class="nav">
-  <a class="pill" href="/" data-i18n-title="hdr.dash.title" title="Downloads and status"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-dash"/></svg> <span data-i18n="hdr.dash">dashboard</span></a>
-  <a class="pill on" href="/wall" data-i18n-title="hdr.wall.title" title="Poster wall"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wall"/></svg> <span data-i18n="hdr.wall">wall</span></a>
-  <a class="pill" href="/#settings" data-i18n-title="hdr.settings.title" title="Settings"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg> <span data-i18n="hdr.settings">settings</span></a>
-  <a class="pill" href="/manual#wall" target="_blank" rel="noopener" data-i18n-title="hdr.manual.title" title="User manual"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-manual"/></svg> <span data-i18n="hdr.manual">manual</span></a>
-  </nav>
 </div>
 <!-- Way back in after "Not now" on the key modal - same contract as the
      dashboard's strip. -->
@@ -1006,7 +1043,7 @@ const DAEMON_LOCALE='__NZBFAST_LOCALE__';
 // left is a search over your indexer accounts. An unreplaced token means
 // "on", the state that hides nothing.
 // The casts are load-bearing for tools/checkjs-gate.py and say something
-// true: serve/webasset.rs rewrites these tokens before the page goes out,
+// true: webasset.rs rewrites these tokens before the page goes out,
 // so what is compared is a string whose value is not known here - without
 // them a checker reads every one of these comparisons as impossible.
 const IDX_ON=(/** @type {string} */('__NZBFAST_INDEX__'))!=='0';
@@ -2138,8 +2175,21 @@ function toggleViewMenu(want){
       // Anchor under the button, right edges aligned, clamped to the window.
       const r=b.getBoundingClientRect();
       m.style.top=(r.bottom+9)+'px';
-      m.style.right=Math.max(8, innerWidth-r.right)+'px';
       m.style.left='auto';
+      m.style.right=Math.max(8, innerWidth-r.right)+'px';
+      // ...and then keep it ON SCREEN, which the line above does not do
+      // on its own. It anchors the panel's RIGHT edge to the button's,
+      // so the panel grows leftward from wherever the button happens to
+      // be - and when the bar wraps, the button is no longer near the
+      // right edge. At 1280 with the nav ahead of it the button sits at
+      // x=372 against a 330px panel, and anything wider than the
+      // button's own offset hangs off the left of the window: visible,
+      // enabled, stable and unclickable, which is exactly how Playwright
+      // reports it ("element is outside of the viewport").
+      // Measured after positioning rather than predicted, because the
+      // panel's width depends on what reflowBar() has moved into it.
+      const mr=m.getBoundingClientRect();
+      if(mr.left<8) m.style.right=Math.max(8, innerWidth-mr.width-8)+'px';
     }
     modalOpen(m);
   } else {

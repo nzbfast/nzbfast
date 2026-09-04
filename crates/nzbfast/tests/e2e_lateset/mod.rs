@@ -35,6 +35,48 @@ use crate::payloads;
 mod chainset;
 mod donorshare;
 
+/// Article size for a LEFTOVER set's packets: big enough that every
+/// volume it produces is ONE article.
+///
+/// The probes below need the leftover set to be readable off disk at
+/// settle, because that is what `get::latesets` runs on. The in-stream
+/// sniff DEFERS a set it did not elect, and a deferral cancels the
+/// volume's STILL-QUEUED articles - so at 40,000-byte articles a
+/// multi-article volume lost whatever had not been queued yet, the
+/// set read back holed, and `apply_nonactivated_disk_sets` reported "a
+/// non-activated recovery set on disk matched nothing here" and graded
+/// nothing. Measured 3 Sep 2026 on this Mac: 5 of 40 runs of x4/x8, and
+/// every one of them a run whose log carried an
+/// `identification deferred N article(s)` line - the passing runs carry
+/// no such line at all. That is the SECOND race behind these reds and
+/// it is independent of the bootstrap election; the CI failure it
+/// produces is the `x4_a_kept_residual...` one, byte-for-byte
+/// (`Charlie.Three.bin 0 bytes`).
+///
+/// One article per volume leaves the deferral nothing to cancel: the
+/// offset-0 article IS the file, and it has already landed by the time
+/// the magic is read off it. Nothing about what the probes grade
+/// changes - the set is still fully obfuscated, still unelected, still
+/// unvouched, still non-activated.
+///
+/// NOT used by `run_x5_24`, and that is a measurement rather than an
+/// oversight. Those probes carry FOUR sets and no named set of their
+/// own, so which one the stream elects is still a race - and a bigger
+/// article makes a volume complete in ONE decode, which SHORTENS the
+/// window in which a smaller volume can demote it. Measured 3 Sep 2026,
+/// 30 runs each on this Mac: `x5_24_control_a_foreign_set_must_never_be_assigned`
+/// took 2 first-attempt failures here and 0 at 40,000. So the x5_24
+/// fixtures keep their article size; the constant is for the probes
+/// whose own set is named and whose only remaining race was the
+/// deferral.
+///
+/// The engine-side gap this steps around is real and is NOT fixed here:
+/// a deferred set's parity is refetched only through the repair's
+/// exact-fit list, which is built per LIVE set that took damage - so a
+/// set the late-set pass needs, behind an undamaged live set, is never
+/// refetched at all.
+const LEFTOVER_VOL_ART: usize = 1_000_000;
+
 /// `par2 create` one named set over `files` with an explicit redundancy
 /// and block size, post every produced `.par2` under hash subjects AND
 /// hash yEnc names, then delete them from the fixture dir. Two calls
@@ -83,6 +125,76 @@ fn add_named_par2_obfuscated(
         std::fs::remove_file(p).unwrap();
     }
     Some(ids)
+}
+
+/// `par2 create` one named set over `files` and post its packets under
+/// their REAL `.par2` names, so the NZB classifies them and the run
+/// activates this set without an election.
+///
+/// The three probes below need one specific set to be the one the stream
+/// activates, and used an obfuscated set plus NZB order to get it.
+/// That is a RACE, not an ordering: an obfuscated set is elected by
+/// `unpack::instream::elect_bootstrap`, the election commits to the
+/// first volume it sniffs, and a par2 index file at these article sizes
+/// is ONE article - so on a box that decodes them serially the winner is
+/// whichever article was decoded first, and on this fleet's 32-core
+/// developer boxes it is whichever pair happened to decode
+/// concurrently. Three different assertions in this module failed on
+/// three different CI shas inside 24 hours because the leftover set won
+/// instead, and the probe then graded `get::residual` (the in-stream
+/// seam) rather than `get::latesets` (this one) - which is the trap the
+/// probes' own comments already warned about, reached from the other
+/// side. Named packets take the election off the table entirely:
+/// `n_par2_slots > 0` makes `SniffCtl::allow_bootstrap` false, so no
+/// sniffed volume can EVER be a bootstrap and the leftover set is
+/// deferred by construction, exactly as it is on a passing run today.
+///
+/// Nothing about the leftover set changes - it stays fully obfuscated,
+/// unvouched and non-activated, which is what these probes grade. Only
+/// the post's OWN set stops being posted in a shape whose outcome the
+/// engine does not promise.
+///
+/// The election race itself is a real defect - see the stated limit on
+/// `unpack::instream::elect_bootstrap`, which carries what it can cost a
+/// live repair.
+fn add_named_par2_plain(
+    fx: &mut Fixture,
+    base: &str,
+    redundancy: u32,
+    block: u64,
+    files: &[&str],
+    art_size: usize,
+) -> bool {
+    let st = Command::new("par2")
+        .arg("create")
+        .arg(format!("-r{redundancy}"))
+        .arg(format!("-s{block}"))
+        .arg("-q")
+        .arg(base)
+        .args(files)
+        .current_dir(&fx.dir)
+        .status();
+    match st {
+        Ok(s) if s.success() => {}
+        _ => return false,
+    }
+    let mut par2s: Vec<PathBuf> = std::fs::read_dir(&fx.dir)
+        .unwrap()
+        .filter_map(|e| {
+            let p = e.unwrap().path();
+            (p.extension().is_some_and(|x| x == "par2")).then_some(p)
+        })
+        .collect();
+    par2s.sort();
+    for p in &par2s {
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        let data = std::fs::read(p).unwrap();
+        let tag = format!("{}-{}", name.replace('.', "_"), fx.nzb_files.len());
+        let segs = make_file_articles(&name, &data, art_size, &tag, &mut fx.articles);
+        fx.nzb_files.push((name, segs));
+        std::fs::remove_file(p).unwrap();
+    }
+    true
 }
 
 /// One `get` run against an in-process mock server, with the output
@@ -339,21 +451,23 @@ async fn x4_a_sibling_adoption_does_not_excuse_a_parity_only_member() {
     }
     let mut fx = Fixture::new("wave5x4");
 
-    // This post's own member and its own recovery set, added FIRST so
-    // that set is the one the stream activates. Without it the leftover
-    // set below is the only set there is, the stream activates THAT,
-    // and the whole probe lands on the in-stream seam
-    // (`get::residual`) instead of this one - measured while building
-    // it: extract renamed the hash to `Not.Ours.One.bin` and the active
-    // repair rebuilt the other member before `latesets` ever ran.
+    // This post's own member and its own recovery set, posted under
+    // REAL `.par2` names so that set is the one the stream activates.
+    // Without it the leftover set below is the only set there is, the
+    // stream activates THAT, and the whole probe lands on the in-stream
+    // seam (`get::residual`) instead of this one - measured while
+    // building it: extract renamed the hash to `Not.Ours.One.bin` and
+    // the active repair rebuilt the other member before `latesets` ever
+    // ran. The named packets are what makes that structural rather than
+    // a race won on NZB order - see `add_named_par2_plain`, and the
+    // three CI reds that named this trap from the other side.
     fx.add_file(
         "Alpha.One.bin",
         &payloads::unique_payload(60_000, 3),
         40_000,
     );
     assert!(
-        add_named_par2_obfuscated(&mut fx, "setmine", 10, 10_000, &["Alpha.One.bin"], 40_000)
-            .is_some(),
+        add_named_par2_plain(&mut fx, "setmine", 10, 10_000, &["Alpha.One.bin"], 40_000),
         "par2 create failed for this post's own set"
     );
 
@@ -378,7 +492,7 @@ async fn x4_a_sibling_adoption_does_not_excuse_a_parity_only_member() {
             100,
             10_000,
             &["Not.Ours.One.bin", "Not.Ours.Two.bin"],
-            40_000,
+            LEFTOVER_VOL_ART,
         )
         .is_some(),
         "par2 create failed for the leftover set"
@@ -459,17 +573,17 @@ async fn x4_a_kept_residual_still_accounts_for_the_shortfall_beside_an_adoption(
     let mut fx = Fixture::new("wave5x4c");
     let mut chaos = Chaos::default();
 
-    // This post's own member and set, added first so THIS is what the
-    // stream activates - see the probe above for what happens without
-    // it.
+    // This post's own member and set, posted under real `.par2` names so
+    // THIS is what the stream activates - see the probe above for what
+    // happens without it, and `add_named_par2_plain` for why the naming
+    // and not the order is what settles it.
     fx.add_file(
         "Alpha.One.bin",
         &payloads::unique_payload(60_000, 3),
         40_000,
     );
     assert!(
-        add_named_par2_obfuscated(&mut fx, "setmine", 10, 10_000, &["Alpha.One.bin"], 40_000)
-            .is_some(),
+        add_named_par2_plain(&mut fx, "setmine", 10, 10_000, &["Alpha.One.bin"], 40_000),
         "par2 create failed for this post's own set"
     );
 
@@ -487,7 +601,7 @@ async fn x4_a_kept_residual_still_accounts_for_the_shortfall_beside_an_adoption(
             100,
             10_000,
             &["Leftover.Donor.bin", "Charlie.Three.bin"],
-            40_000,
+            LEFTOVER_VOL_ART,
         )
         .is_some(),
         "par2 create failed for the late set"
@@ -580,18 +694,19 @@ async fn x8_a_disambiguated_leftover_rebuild_is_gated_like_any_other() {
     }
     let mut fx = Fixture::new("wave5x8");
 
-    // This post's own member and its own recovery set, added FIRST so
-    // that set is the one the stream activates - X-4's trap, and
-    // without it the leftover set below is the only set there is and
-    // the probe lands on `get::residual` instead of this seam.
+    // This post's own member and its own recovery set, posted under real
+    // `.par2` names so that set is the one the stream activates - X-4's
+    // trap, and without it the leftover set below is the only set there
+    // is and the probe lands on `get::residual` instead of this seam.
+    // `add_named_par2_plain` carries why the naming does that and the
+    // election could not.
     fx.add_file(
         "Alpha.One.bin",
         &payloads::unique_payload(60_000, 3),
         40_000,
     );
     assert!(
-        add_named_par2_obfuscated(&mut fx, "setmine", 10, 10_000, &["Alpha.One.bin"], 40_000)
-            .is_some(),
+        add_named_par2_plain(&mut fx, "setmine", 10, 10_000, &["Alpha.One.bin"], 40_000),
         "par2 create failed for this post's own set"
     );
 
@@ -607,7 +722,7 @@ async fn x8_a_disambiguated_leftover_rebuild_is_gated_like_any_other() {
             100,
             10_000,
             &["Not.Ours.Dup.bin", "NOT.OURS.DUP.BIN"],
-            40_000,
+            LEFTOVER_VOL_ART,
         )
         .is_some(),
         "par2 create failed for the leftover set"

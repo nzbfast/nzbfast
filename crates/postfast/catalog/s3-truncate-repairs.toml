@@ -1,0 +1,40 @@
+# S3: a body cut off mid-payload and the connection closed behind it.
+
+[layout]
+name = "s3-truncate-repairs"
+seed = 74
+note = """
+A short article, which is not the same fault as a corrupt one. The
+bytes that did arrive are correct; there are simply not enough of them,
+and the connection goes away rather than finishing the response. A
+client has to notice the shortfall against the article's own declared
+size - never against what the segment map claimed, which a hostile or
+careless poster writes - and then requeue or repair.
+
+Paired with a recovery set because the truncation is permanent on this
+server: the same request is answered the same short way every time, so
+there is no re-ask that helps and the parity is the only route.
+
+ONE RECOVERY BLOCK AND THEREFORE ONE VOLUME, which is the row's own
+scar. Cutting a body off closes the connection, and a reconnect
+requeues whatever was in flight, so a set with several volumes leaves
+how many of them the run pulls to the run - and the end state of a row
+must not have a degree of freedom in it. Six blocks at 10 % is one
+volume, one truncated article is one bad block, and the arithmetic
+closes exactly. It flaked twice in a loaded full-binary sweep before
+this shape.
+"""
+
+[source]
+files = [{ name = "cut.short.bin", bytes = 120000 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 20000
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+truncate = [3]

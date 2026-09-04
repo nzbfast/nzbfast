@@ -94,6 +94,71 @@ fn release_stems_reduce_every_volume_shape() {
     assert_eq!(st("v1.7z"), "v1.7z");
     assert_eq!(st("Backup.2019.001"), "Backup.2019.001");
     assert_eq!(st("Some.Set.7z.01"), "Some.Set.7z.01");
+    // A CODEC behind a quality token is not a continuation volume.
+    // Every stem here was measured reducing to the commented value on
+    // main at 463a82376, before `release::codec_behind_quality` gated
+    // the cut; `.rar`, `.partNN` and `.par2` are stripped FIRST, so a
+    // packed set loses its codec the same way a bare name does.
+    assert_eq!(
+        st("Some.Movie.2024.1080p.BluRay.x264"), // was "….1080p.BluRay"
+        "Some.Movie.2024.1080p.BluRay.x264"
+    );
+    assert_eq!(
+        st("Some.Movie.2024.1080p.WEB.x265"), // was "….1080p.WEB"
+        "Some.Movie.2024.1080p.WEB.x265"
+    );
+    assert_eq!(
+        st("Show.S01E01.720p.HDTV.x264"), // was "Show.S01E01.720p.HDTV"
+        "Show.S01E01.720p.HDTV.x264"
+    );
+    // The live shapes, from the 2 Sep 2026 census of 1,024,591 posted
+    // names: all four affected releases were packed sets, reached
+    // through the `.rar`/`.partNN` and `.par2`/`.volNNN+NN` cuts.
+    assert_eq!(
+        st("The.Astronaut.Wives.Club.S01E07.720p.HDTV.x264.part13.rar"),
+        "The.Astronaut.Wives.Club.S01E07.720p.HDTV.x264"
+    );
+    assert_eq!(
+        st("Law.and.Order.SVU.S18E01.720p.HDTV.x264.vol127+126.PAR2"),
+        "Law.and.Order.SVU.S18E01.720p.HDTV.x264"
+    );
+    assert_eq!(
+        st("aaf-slings.and.arrows.s02e01.720p.bluray.x264.vol015+16.par2"),
+        "aaf-slings.and.arrows.s02e01.720p.bluray.x264"
+    );
+    // `h264` never reached the arm - 'h' sorts below 'r' - and must not
+    // start now; it is the control for the range itself.
+    assert_eq!(
+        st("Some.Movie.2024.1080p.BluRay.h264"),
+        "Some.Movie.2024.1080p.BluRay.h264"
+    );
+    // THE CONTROL ARM, and it is the whole reason the gate is a
+    // CONJUNCTION rather than either half. A real continuation volume
+    // behind a bare resolution or a bare source still reduces: 208 of
+    // the 2,245 firings in that census were exactly this shape (182
+    // behind a resolution, 26 behind a source), so a quality token
+    // alone must never refuse the cut.
+    assert_eq!(st("Some.Movie.2024.1080p.r07"), "Some.Movie.2024.1080p");
+    assert_eq!(st("Some.Movie.2024.BluRay.r07"), "Some.Movie.2024.BluRay");
+    assert_eq!(st("Show.S01E01.720p.HDTV.r00"), "Show.S01E01.720p.HDTV");
+    // And a 200-volume set still walks the whole r..z range one stem
+    // deep, codec token present and untouched in the middle of it.
+    for v in ["r00", "r99", "s00", "t00", "z99"] {
+        assert_eq!(
+            st(&format!("Show.S01E01.720p.HDTV.x264-GRP.{v}")),
+            "Show.S01E01.720p.HDTV.x264-GRP"
+        );
+    }
+    // Obfuscated posters really do number volumes <letter><3 digits>,
+    // so a codec-shaped tail behind a HASH name stays a volume - both
+    // of these are live rows from the same census. This is why the
+    // codec test alone is not safe either.
+    assert_eq!(
+        st("Archers Amendment 788080908778825.z001"),
+        "Archers Amendment 788080908778825"
+    );
+    assert_eq!(st("Bill 889987062850797.x042"), "Bill 889987062850797");
+    assert_eq!(st("Bill 889987062850797.x264"), "Bill 889987062850797");
 }
 
 #[test]

@@ -141,7 +141,7 @@ pub struct PoolConfig {
     /// link, or is it the line speed a user TYPED into Settings?
     /// `linkpeak::Core::effective` has always answered both questions
     /// and the daemon threw the second away at
-    /// `serve/tasks/runner.rs`, so the pool sized fleets off a number
+    /// `tasks/runner.rs`, so the pool sized fleets off a number
     /// whose provenance it could not see.
     ///
     /// ALL-folded across the fleet, like `line_cap_auto` and for the
@@ -150,14 +150,18 @@ pub struct PoolConfig {
     /// about the LINE and the weakest evidence is what the claim is
     /// worth.
     ///
-    /// **Nothing in the shipped rules reads this yet, and that is
-    /// deliberate.** It exists because `fleet_for_supply`'s safety case
-    /// rests entirely on `LINE_CAP_MAX_FLEET` being a rung TODO 208
-    /// measured free - which is what lets that arm run on an anchor it
-    /// cannot prove. Raising the ceiling for the slow-carry regime
-    /// (TODO 275 item 1 part 3) means keeping today's ceiling for a
-    /// typed anchor, and that decision needs this word to be here
-    /// first. Do NOT read it as permission to take the decision.
+    /// **Since 2 Sep 2026 one rule DOES read it** - the second fleet
+    /// ceiling (TODO 275 item 7), through
+    /// `linecap::supply_ceiling`. It exists because
+    /// `fleet_for_supply`'s safety case rests entirely on
+    /// `LINE_CAP_MAX_FLEET` being a rung TODO 208 measured free, which
+    /// is what lets that arm run on an anchor it cannot prove: raising
+    /// the ceiling for the slow-carry regime means keeping today's
+    /// ceiling for a typed anchor, and this word is what makes the two
+    /// separable. It is the ONE thing it licenses. Anything else
+    /// branching on it is a second decision and wants its own
+    /// measurement - see `supply_ceiling`'s doc for what this word does
+    /// and does not prove.
     pub line_anchor_measured: bool,
     /// Shared pool-level speed limiter; None = unlimited.
     pub rate: Option<Arc<RateLimit>>,
@@ -169,6 +173,33 @@ pub struct PoolConfig {
     /// pool (see MemBudget::inflight_cap). Over it, workers stop topping
     /// up their pipeline beyond one request in flight. 0 = uncapped.
     pub inflight_cap: u64,
+    /// TODO 275 item 10: the extractor's held-span ceiling in bytes
+    /// (`MemBudget::holds_cap`), which the fleet governor reads as a
+    /// CONSUMER-pressure signal. 0 = no claim, and the gate is inert.
+    ///
+    /// The fleet buys a REORDER WINDOW, and a sequential consumer has
+    /// to buffer everything that arrives out of order. Measured 2 Sep
+    /// 2026 on a 10 GbE cold route: at 100 sockets the holds ledger
+    /// pins at its cap and the job runs 3.31x longer per GB than the
+    /// same job at 50, where holds reach a quarter of the cap. So the
+    /// pool needs the ceiling to know when it is close to it - see
+    /// `Shared::line_cap_tick`, which is the only reader.
+    ///
+    /// A process-wide budget rather than this job's share, like the
+    /// gauge it is compared against.
+    pub holds_cap: u64,
+    /// The ledger [`inflight_cap`](Self::inflight_cap) is compared
+    /// against: `None` = this pool alone, `Some` = shared with every
+    /// other pool holding the same handle.
+    ///
+    /// The cap is a slice of ONE process budget, so the charge has to
+    /// be shared by everything drawing on that budget or the ceiling is
+    /// per pipeline and there are two of them at every queue boundary
+    /// (TODO 313 item 1 - see [`crate::pool::WireCharge`]). Production
+    /// passes [`crate::pool::process_wire_charge`]; `None` keeps a
+    /// private counter, which is the identical number for a run that is
+    /// the only pipeline in its process.
+    pub wire_charge: Option<std::sync::Arc<crate::pool::WireCharge>>,
     /// Connections that outlive this run (see [`crate::warmpool`]).
     /// None = the old behaviour, connect per run and QUIT at the end,
     /// which is still right for a one-shot CLI `get`.
@@ -190,6 +221,18 @@ pub struct PoolConfig {
     /// clones the download's configs cannot land a post-processing pool
     /// in the download's own class and starve itself.
     pub lease_class: handoff::LeaseClass,
+    /// TODO 313 items 2 and 10: this pool's seat in a queue SPILL - the
+    /// shared gate the daemon's governor opens for a live episode, and
+    /// which side of it this run is on. `None` is every pool that is
+    /// not on that path at all, which is the CLI, every test that does
+    /// not opt in, and every job on an install with `queue_spill` off.
+    ///
+    /// Nothing here is a second connection budget: what a run may hold
+    /// is still [`Self::lease`]'s answer and nobody else's. This only
+    /// decides whether a HEAD's parked worker gives its permit back
+    /// while it is parked, and whether a LANE may hand a socket over
+    /// before its own queue is dry.
+    pub spill: Option<handoff::SpillSeat>,
     /// Per-run latch the caller awaits to start the next job: latched
     /// the first time a primary worker finds itself idle after queue-dry.
     pub handoff: Option<Arc<handoff::HandoffSignal>>,
@@ -261,6 +304,18 @@ pub struct PoolConfig {
     /// stay eligible (last-resort/only-source). Per-server, never
     /// OR-folded; wired from the server's block_account setting.
     pub block_account: bool,
+    /// TODO 313 item 7: how many EXTRA sockets a temporary surge may
+    /// hold across the whole fleet while a stuck article has no idle
+    /// connection to be raced on. 0 = OFF, which is every install
+    /// today; `shipped()` deliberately does not set it.
+    ///
+    /// MAX-folded across the fleet by `pool::surge::Surge::new` and
+    /// clamped there to [`super::SURGE_MAX_CLAMP`], because it is a
+    /// WHOLE-FLEET socket allowance in the same currency as the fleet
+    /// cap - one server asking for it is the fleet asking for it. Wired
+    /// from settings.json `surge_conns` (env NZBFAST_SURGE), never from
+    /// a per-server row.
+    pub surge_max: usize,
     /// §96.5 mid-run block cap: bytes this server may still spend on
     /// THIS run (its prepaid block minus the lifetime already billed),
     /// seeded by the daemon at fleet build. When the run's own
@@ -459,13 +514,13 @@ pub struct PoolConfig {
     /// None everywhere but the `get` pipeline, which points it at the
     /// job's own extractor. What reads it and why nothing else can
     /// answer the question in time is
-    /// [`crate::extract::LossDoubt`]'s own doc: the extractor's
+    /// [`crate::lossdoubt::LossDoubt`]'s own doc: the extractor's
     /// terminal-verdict flag is the drop-behind trim's veto, and it
     /// lands after the pile has built, so a chase under the holds park
     /// can drop a prefix a repair then needs. A store and nothing more -
     /// the pool never reads it back, and a `None` here is exactly the
     /// behaviour every caller had before the field existed.
-    pub loss_doubt: Option<Arc<crate::extract::LossDoubt>>,
+    pub loss_doubt: Option<Arc<crate::lossdoubt::LossDoubt>>,
 }
 
 impl Default for PoolConfig {
@@ -487,6 +542,7 @@ impl Default for PoolConfig {
             live_target: None,
             lease: None,
             lease_class: handoff::LeaseClass::Download,
+            spill: None,
             handoff: None,
             line_cap_fleet: 0,
             line_cap_auto: false,
@@ -497,6 +553,8 @@ impl Default for PoolConfig {
             rate: None,
             oracle: None,
             inflight_cap: 0,
+            holds_cap: 0,
+            wire_charge: None,
             warm: None,
             tail_fanout: false,
             tail_taper: false,
@@ -507,6 +565,7 @@ impl Default for PoolConfig {
             stall_live: true,
             peak_arrivals: true,
             block_account: false,
+            surge_max: 0,
             budget_bytes: None,
             hedge: false,
             ttfb_hedge: false,

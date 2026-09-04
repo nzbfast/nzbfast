@@ -1,0 +1,46 @@
+# S1 plus P4: one article the server refuses, and a set with enough
+# parity to put it back.
+
+[layout]
+name = "s1-missing-2pct-repairs"
+seed = 11
+note = """
+The control arm for the whole serve-time plane: a fault the client is
+expected to absorb without the user ever knowing. 2 % of twenty
+articles rounds to well under one, and the generator floors a
+percentage at one article rather than at zero - a fault plan that
+damaged nothing would leave this row green over the clean layout it
+was written from, which is the rubber stamp the catalog exists to
+refuse.
+
+The arithmetic is deliberate and is why the sizes are these. The block
+size is the article size, so the one refused article is exactly one
+damaged block, and 10 % over six blocks is exactly one recovery block:
+the set can rebuild it and has nothing to spare. A profile that let the
+creator derive its block size would be measuring par2gen's derivation
+rather than the repair.
+
+EXACT FIT IS THE POINT, not thrift. par2gen writes one recovery block
+per volume, so a set with slack leaves how many volumes the run pulls
+to the run, and an end state must not have a degree of freedom in it.
+With need and supply equal, every volume the layout carries is a
+volume the repair must read.
+
+The parity volumes are part of the end state HERE and not in a clean
+row: a run that has to repair fetches them, and a run that does not
+must not. Both halves are requirements.
+"""
+
+[source]
+files = [{ name = "repairable.bin", bytes = 120000 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 20000
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+missing_pct = 2.0

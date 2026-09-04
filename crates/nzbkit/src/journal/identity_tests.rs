@@ -553,3 +553,86 @@ fn a_multi_fragment_article_hashes_in_volume_order() {
     );
     assert_eq!(restored.dropped_unauthenticated, (0, 0));
 }
+
+/// X5-03 residue, the MATERIALIZED half: a `D` record whose slot has
+/// demoted is authenticated as plain identity, and a missing commitment
+/// refuses there too.
+///
+/// TWO D SHAPES REACH `article_authentic` and they arrive by different
+/// routes, so the residue needs a pin each. This is the one that costs
+/// nothing: after `record_materialized` the record's articles are no
+/// longer crypto at the per-article loop - the crypto gate is not
+/// consulted, the fragments are read from the volume, and the
+/// authenticity question is asked of them exactly as it is of an `R`
+/// record. STATED PLAINLY because it was tried as the whole answer
+/// first: `crypto` is FALSE here, so this pin cannot see a regression
+/// that skips the check for crypto articles specifically - a `!*crypto`
+/// guard on the authenticity call leaves it green. That shape is pinned
+/// by `extract::crypto::crypto_tests`'
+/// `journal_d_without_a_commitment_refetches_as_unauthenticated`, which
+/// needs the full password-bearing run to get a D article PAST the
+/// crypto gate.
+///
+/// What this one is worth on its own: the demoted path has its own
+/// commitment rule (the `M` rewrite makes the fragments name the volume
+/// at their volume offsets), and nothing else pins that a record which
+/// arrives there without a commitment is refused rather than admitted
+/// on the length its `M` line implies.
+///
+/// BOTH ARMS, on fixtures that differ ONLY in the commitment - the
+/// control this file's header asks for.
+#[test]
+fn a_d_record_with_no_commitment_refetches_as_unauthenticated() {
+    for commit in [false, true] {
+        let (_scratch, out, _outside) = dirs(if commit { "x503dok" } else { "x503dnone" });
+        let nzb = b"<nzb>x503d</nzb>";
+        std::fs::write(out.join("vol.rar"), payload(10_000, 9)).unwrap();
+        let frags = [Frag {
+            file: "secret.mkv".to_string(),
+            file_off: 2_000,
+            vol_off: 1_000,
+            len: 3_000,
+        }];
+        // The commitment a materialized slot implies: after the `M`
+        // rewrite the fragments name the VOLUME at their volume
+        // offsets, so the bytes to hash are the reconstruction's.
+        let crc = commit.then(|| {
+            let rewritten = [Frag {
+                file: "vol.rar".to_string(),
+                file_off: 1_000,
+                vol_off: 1_000,
+                len: 3_000,
+            }];
+            frags_crc(&out, &rewritten).unwrap()
+        });
+        {
+            let (j, _) = Journal::open(&out, nzb).unwrap();
+            j.record_placed_crypto(0, "<d@x>", None, "vol.rar", 10_000, &frags, &[true], crc);
+            j.record_materialized(0, "vol.rar", 10_000);
+            j.flush();
+        }
+        let resume = Journal::open(&out, nzb).unwrap().1;
+        let restored = restore(&out, &resume, None);
+
+        // Whichever way it goes, the crypto gate is not what answered:
+        // this record restores as plain identity, and a `dropped_crypto`
+        // here would mean the fixture never reached the question.
+        assert_eq!(restored.dropped_crypto, 0, "commit={commit}");
+        if commit {
+            assert!(
+                restored.ids.contains("<d@x>"),
+                "the control must still be admitted - a gate that refuses \
+                 everything produces the refusal below too"
+            );
+            assert_eq!(restored.dropped_unauthenticated, (0, 0));
+        } else {
+            assert!(
+                !restored.ids.contains("<d@x>"),
+                "a D record with no commitment must refetch, exactly as \
+                 the R record above does - the refusal is inherited from \
+                 the shared loop and this is what observes it"
+            );
+            assert_eq!(restored.dropped_unauthenticated, (1, 3_000));
+        }
+    }
+}

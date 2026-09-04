@@ -97,9 +97,10 @@ async fn an_engineered_crc32_collision_across_two_sfv_entries_declines_both() {
 ///   is joined (`PathBuf::push` DISCARDS the base for a prefixed
 ///   piece), and is refused on every platform rather than mapped.
 /// * mixed separators - a Windows MultiPar `VIDEO_TS\VTS_01_1.VOB` is
-///   a TREE and must land as one. See
-///   `a_directory_tree_in_filedesc_names_lands_intact` for the
-///   forward-slash control; the backslash spelling had no row.
+///   a TREE and must land as one. The forward-slash control is the
+///   catalog profile `p3-filedesc-tree` (it was the e2e row
+///   `a_directory_tree_in_filedesc_names_lands_intact` until chip 08
+///   ported it); the backslash spelling had no row.
 #[tokio::test(flavor = "multi_thread")]
 async fn hostile_filedesc_name_forms_land_contained_and_sanitized() {
     if !have_par2() {

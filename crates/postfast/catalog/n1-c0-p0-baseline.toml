@@ -1,0 +1,44 @@
+# The neutral row: every plane at its default selection.
+#
+# Nothing in this file selects a plane; it exists to state what the
+# defaults ARE, so that every other profile can be read as a diff from
+# this one, and so that a bug in the plain path is caught by a profile
+# rather than by a profile that also does five other things.
+
+[layout]
+name = "n1-c0-p0-baseline"
+seed = 1
+note = """
+The all-neutral layout, and the control arm for the whole catalog: N1
+descriptive wire names, C0 no container, P0 no recovery set, the
+encoding defaults, a faithful NZB, no generation-time and no serve-time
+faults. Two descriptive files, one of them under a directory, so the
+row covers a multi-file post and not only a single file at the root.
+
+The directory does NOT come back, and the row pins that on purpose:
+with no container and no recovery set nothing in this layout carries a
+relative path (an ordinary post puts the basename on the wire, and the
+tree is out-of-band by construction), so the client must end with the
+two files flat. That is the correct requirement rather than a gap - a
+tree that was posted nowhere cannot be recovered by anybody - and tree
+materialisation is the recovery plane's to prove, from the FileDesc
+packets that do carry it.
+
+If this row fails, no other row's failure means anything yet.
+"""
+
+[source]
+files = [
+    { name = "baseline.bin", bytes = 1048576 },
+    { name = "sample/baseline-sample.bin", bytes = 65536 },
+]
+
+[expect]
+complete = true
+
+[expect.ladder]
+# No claim. A descriptive-name layout never asks identification to
+# climb, so there is no rung to assert; chip 09's census is what fills
+# a real rung in here, and guessing one now would be a claim nothing
+# measured.
+reaches = ""

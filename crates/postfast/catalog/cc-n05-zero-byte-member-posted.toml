@@ -1,0 +1,52 @@
+# P5, the other shape: the empty member IS on the wire, as one lone
+# `=ybegin size=0` article, and the set that names it is opaque too.
+
+[layout]
+name = "cc-n05-zero-byte-member-posted"
+seed = 151
+note = """
+Expresses bench/capability-corpus leg n05-zerobyte-posted.
+
+p5-zero-byte-member is the half where the placeholder is DESCRIBED and
+never posted. This is the other half, and the two are not variations of
+one row: here the empty file really was uploaded, so the client meets an
+article that decodes to nothing and has to pair it with the descriptor
+rather than mint a second copy beside it. A client that materialises
+the member from the FileDesc without noticing the arrived article ends
+with the file twice, once under its real name and once under its token,
+and the oracle grades the exact output tree so that shows up as a name
+the profile does not carry.
+
+`zero_byte_member` is deliberately NOT set: the flag means described and
+unposted, and leaving it off over a `bytes = 0` source is what selects
+the posted shape. The two spellings differ by one line and mean opposite
+things, which is why this row exists beside p5 rather than replacing it.
+
+The set rides under opaque names (P2) because the corpus leg does, so
+nothing in the post announces itself: the client has to sniff the set,
+read the descriptors and then pair the empty article by content, and
+content for an empty file is the MD5 of no bytes at all.
+"""
+
+[source]
+files = [
+    { name = "Real.Movie.2026.mkv", bytes = 100000 },
+    { name = "VTS_02_0.VOB", bytes = 0 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+names = "opaque"
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -70,6 +70,41 @@ pub(crate) fn adoption_is_the_premise(dir: &Path, why: &str) {
 /// under a `current_dir` of the same directory.
 const ADOPTION_MARKER: &str = ".adoption-is-the-premise";
 
+/// The environment variable [`census_dump`] reads, and the answer to
+/// 13c.1's own complaint about the census that motivated this guard.
+///
+/// That census (`research/E2E-PARITY-BUDGET-CENSUS-2026-08-30.md`) was
+/// taken with a temporary patch to `run_get_win` that dumped every
+/// child's log, the patch was deleted, and re-deriving the same table
+/// three days later therefore meant re-inventing the instrument. The
+/// 4 Sep path-dependence sweep needed it a second time
+/// (`research/PAYLOAD-TRAP-PATH-DEPENDENT-CENSUS-2026-09-04.md`), which
+/// is two lanes' worth of evidence that this belongs in the tree rather
+/// than in somebody's working copy.
+///
+/// It prints, to stderr, every mechanism line a run produced, tagged
+/// with the fixture directory the guard read them from - so
+/// `--success-output immediate` over a PASSING suite yields the
+/// rebuilt/adopted table by fixture, which is the one thing the guard
+/// itself cannot tell you (it is silent on every sound row by design).
+pub(crate) const CENSUS_ENV: &str = "NZBFAST_TEST_ADOPT_CENSUS";
+
+/// Dump this run's repair mechanism lines when [`CENSUS_ENV`] is set.
+/// Inert otherwise, and it decides nothing: no assertion reads it.
+fn census_dump(log: &str, sibling: &Path) {
+    if std::env::var_os(CENSUS_ENV).is_none() {
+        return;
+    }
+    for line in log.lines() {
+        if line.contains("block(s) rebuilt")
+            || line.contains("block(s) adopted")
+            || line.contains("adopted,")
+        {
+            eprintln!("[adopt-census] {} | {}", sibling.display(), line.trim());
+        }
+    }
+}
+
 /// **The forward guard on the repeating-payload trap** (31 Aug 2026,
 /// follow-up 13c.1; the decision and its numbers are in
 /// `research/PAYLOAD-TRAP-GATE-DECISION-2026-08-31.md`).
@@ -115,6 +150,7 @@ const ADOPTION_MARKER: &str = ".adoption-is-the-premise";
 /// hash-named copy of the same file is on disk and harvesting it is the
 /// point), and the census read every such fixture by hand.
 pub(crate) fn refuse_a_solve_that_solved_nothing(log: &str, sibling: &Path) {
+    census_dump(log, sibling);
     let excused = sibling
         .parent()
         .is_some_and(|d| d.join(ADOPTION_MARKER).exists());
@@ -551,11 +587,11 @@ fn cfg_test_item(
 mod guard_tests {
     use super::*;
 
-    /// `crates/nzbfast/src/repair.rs`'s in-place report: the adoption
+    /// `crates/nzbfast-unpack/src/repair.rs`'s in-place report: the adoption
     /// clause is OMITTED at zero, so absent legitimately means none.
     const IN_PLACE: &str = "[repair] repair complete in 53.69ms ✔ (native, in place: \
          0 block(s) rebuilt across 1 file(s), 1 recreated, 1000 block(s) adopted from a.001, a.002)";
-    /// `crates/nzbfast/src/unpack.rs`'s report, which always prints it.
+    /// `crates/nzbfast-unpack/src/unpack.rs`'s report, which always prints it.
     const UNPACKED: &str = "[par2] repaired ✔ (0 block(s) rebuilt, 12 adopted, 2 file(s) patched)";
 
     #[test]
@@ -612,9 +648,9 @@ mod guard_tests {
     /// this population survives the one drift the log-side parser cannot
     /// see - a spelling that drops the vocabulary altogether.
     const REPORT_SITES: &[(&str, usize)] = &[
-        ("nzbfast/src/get/settle/noset.rs", 1),
-        ("nzbfast/src/repair/nativepass.rs", 1),
-        ("nzbfast/src/unpack.rs", 2),
+        ("nzbfast-engine/src/get/settle/noset.rs", 1),
+        ("nzbfast-unpack/src/repair/nativepass.rs", 1),
+        ("nzbfast-unpack/src/unpack.rs", 2),
     ];
 
     /// The production files with a logging macro whose TEXT says
@@ -646,11 +682,25 @@ mod guard_tests {
     /// day is what a size-gate ceiling does to a roster keyed on file
     /// paths; keep the counts as the thing being asserted and let the
     /// paths follow the code.
+    ///
+    /// AND A THIRD TIME on 2 Sep 2026, for the same reason again: the
+    /// crate-split step 3 cut moved `repair` and `unpack` wholesale into
+    /// `crates/nzbfast-unpack`. Another pure move - no count changed,
+    /// only the crate name in front of `src/` - and the scan below had
+    /// to learn the third crate to keep seeing them at all.
+    ///
+    /// AND A FOURTH, hours later: step 4 of the same plan moved `get`
+    /// into `crates/nzbfast-engine`, taking the no-set site with it. A
+    /// pure move again, and the fourth in two days, which is the
+    /// standing lesson of a roster keyed on file paths: assert the
+    /// COUNTS, let the paths follow the code, and add the crate to
+    /// `all_sources` in the same edit or the scan reports the site GONE
+    /// rather than moved.
     const REBUILT_LINES: &[(&str, usize)] = &[
-        ("nzbfast/src/get/settle/noset.rs", 1),
-        ("nzbfast/src/repair.rs", 1),
-        ("nzbfast/src/repair/nativepass.rs", 1),
-        ("nzbfast/src/unpack.rs", 2),
+        ("nzbfast-engine/src/get/settle/noset.rs", 1),
+        ("nzbfast-unpack/src/repair.rs", 1),
+        ("nzbfast-unpack/src/repair/nativepass.rs", 1),
+        ("nzbfast-unpack/src/unpack.rs", 2),
     ];
 
     /// The one production helper that spells the successful repair's
@@ -659,16 +709,28 @@ mod guard_tests {
     /// writing the words out, so the pin follows it one hop.
     const CLAUSE_FN: &str = "adopted_from_clause";
 
-    /// Both crates' source, every Rust file under `src`.
+    /// Every first-party crate's source, every Rust file under `src`.
+    ///
+    /// DERIVED FROM THE WORKSPACE MANIFEST, not listed here, since 3 Sep
+    /// 2026. This was a hand roster of crate names, and it failed BY
+    /// NAME with a zero reached-count at three crate cuts running
+    /// (nzbfast-unpack, nzbfast-engine, nzbkit-base): each time a pure
+    /// move took a site into a crate the list did not know, the count
+    /// arm reported the site GONE, and the fix was to add the name. A
+    /// list is a gate that cannot see the next member - the same rule
+    /// `tools/teardown-order-gate.py`'s scratch roster learned the same
+    /// week (d65325446). The root `Cargo.toml`'s `[workspace] members`
+    /// is the one declaration a new crate cannot land without, so the
+    /// scan reads it: every member under `crates/` is walked, `vendor/`
+    /// is not (nothing in a vendored fork prints a `RepairReport`), and
+    /// [`the_scan_reaches_every_crate_on_disk`] pins the two lists to
+    /// each other so a crate directory that never joined the workspace
+    /// is a refusal rather than a silent miss. The floor stays as the
+    /// belt: a scan that loses its tree reaches far fewer files.
     fn all_sources() -> Vec<std::path::PathBuf> {
         let mut out = Vec::new();
-        for c in ["nzbfast", "nzbkit"] {
-            let src = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("crates/nzbfast has a parent")
-                .join(c)
-                .join("src");
-            rust_sources(&src, &mut out);
+        for c in workspace_crates() {
+            rust_sources(&c.join("src"), &mut out);
         }
         assert!(
             out.len() > 200,
@@ -676,6 +738,98 @@ mod guard_tests {
             out.len()
         );
         out
+    }
+
+    /// The `crates/` root: this file's manifest dir is `crates/nzbfast`.
+    fn crates_root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/nzbfast has a parent")
+            .to_path_buf()
+    }
+
+    /// Every `[workspace] members` entry under `crates/`, as absolute
+    /// directories, read from the root manifest. A manifest this cannot
+    /// read (no `members = [`, no closing `]`) is a refusal, never an
+    /// empty roster: FAILING TO FIND IS FAILING.
+    fn workspace_crates() -> Vec<std::path::PathBuf> {
+        let crates = crates_root();
+        let root = crates.parent().expect("crates/ has a parent");
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+            .expect("the root Cargo.toml is readable");
+        let members = members_under_crates(&manifest);
+        assert!(
+            members.len() >= 6,
+            "only {} workspace members under crates/ read out of the root \
+             manifest - the parser has lost the list, not the tree: {members:?}",
+            members.len()
+        );
+        members.iter().map(|m| root.join(m)).collect()
+    }
+
+    /// The `crates/...` entries of the root manifest's `[workspace]
+    /// members` array, in file order. Pure so the selftest can hand it
+    /// a manifest of its own.
+    fn members_under_crates(manifest: &str) -> Vec<String> {
+        let at = manifest
+            .find("members = [")
+            .expect("root Cargo.toml has a `members = [` array");
+        let body = &manifest[at + "members = [".len()..];
+        let close = body.find(']').expect("the members array closes");
+        body[..close]
+            .lines()
+            .map(|l| {
+                l.split('#')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(',')
+            })
+            .filter(|l| !l.is_empty())
+            .map(|l| l.trim_matches('"').to_string())
+            .filter(|l| l.starts_with("crates/"))
+            .collect()
+    }
+
+    /// THE PIN ON THE ROSTER ITSELF: the manifest's `crates/` members
+    /// and the `crates/*/src` directories on disk are the same set. A
+    /// crate cut tomorrow lands in both or in neither; a directory that
+    /// joined the tree without joining the workspace, or a member whose
+    /// directory has gone, is a refusal here rather than a site the
+    /// scan above quietly never reached.
+    #[test]
+    fn the_scan_reaches_every_crate_on_disk() {
+        let from_manifest: std::collections::BTreeSet<String> = workspace_crates()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let on_disk: std::collections::BTreeSet<String> = std::fs::read_dir(crates_root())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().join("src").is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            from_manifest, on_disk,
+            "the root manifest's crates/ members and the crates/*/src \
+             directories on disk disagree - a crate is on one side only"
+        );
+        assert!(from_manifest.contains("nzbfast") && from_manifest.contains("nzbkit-base"));
+    }
+
+    /// The manifest reader's own pin: comments, trailing commas and the
+    /// vendor/ entries are handled, and a manifest without the array is
+    /// a panic, not an empty roster.
+    #[test]
+    fn the_manifest_reader_reads_members_and_refuses_none() {
+        let m = "[workspace]\nmembers = [\n    \"crates/a\",\n    \
+                 # a comment\n    \"crates/b-c\", # trailing\n    \"vendor/x\",\n]\n";
+        assert_eq!(members_under_crates(m), vec!["crates/a", "crates/b-c"]);
+        assert!(
+            std::panic::catch_unwind(|| members_under_crates("[workspace]\nresolver = \"2\"\n"))
+                .is_err(),
+            "a manifest with no members array must refuse, not return empty"
+        );
     }
 
     /// Every source file that is TEST code: attached by a

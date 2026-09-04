@@ -365,6 +365,98 @@ async fn a_refused_rename_still_materializes_the_descriptors_own_path() {
     assert!(moved == data, "payload not byte-exact\n{log}");
 }
 
+/// X6-05, the sibling above reached through the OTHER arm: the gate
+/// ACCEPTS the descriptor's name, the rename runs - and
+/// `PublishedNames::claim` pushes it onto a `{slot:03}-` form, so the
+/// file lands somewhere the descriptor never declared. The pairing loop
+/// marked it landed on the strength of the rename alone, the name left
+/// the missing list, it was never charged so it never reached `unpriced`,
+/// and the finish-time re-read had nothing to look for: rc=0 with the
+/// structure file a player opens absent from its declared path.
+///
+/// The contest here is W4-17's file/directory topology clash, and it is
+/// chosen over a fold twin on purpose - a twin needs a case-insensitive
+/// volume to bite, and this bites on every filesystem. Two valid
+/// FileDesc members that share no complete string: the real payload is a
+/// flat member named `VIDEO_TS`, published as a LEAF by the settle pass
+/// before this tier runs, and the placeholder is `VIDEO_TS/VTS_02_0.VOB`
+/// underneath it. `free_for` refuses the placeholder because an ANCESTOR
+/// of it is somebody's leaf, `claim` disambiguates, the rename succeeds,
+/// and nothing is recorded in `failed` - so `unlanded_why` cannot see it
+/// either. The empty slot is posted under a hash subject, which is what
+/// keeps `filedesc_name_is_better` on the accepted side.
+///
+/// Both halves are asserted: the payload leaf must survive untouched
+/// (nothing here may truncate a real file for a member that claims no
+/// bytes) AND the job must not report success while the placeholder's
+/// own path holds nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_accepted_rename_disambiguated_elsewhere_must_not_green_the_job() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    // A flat member that is also the placeholder's parent directory.
+    // `stem_is_a_name("VIDEO_TS")` is true (two tokens), so the settle
+    // pass really does rename the payload onto it.
+    const ANCESTOR: &str = "VIDEO_TS";
+    const PLACEHOLDER: &str = "VIDEO_TS/VTS_02_0.VOB";
+    let mut fx = Fixture::new("emptydescdisamb");
+    let data = payload(600_000, 67);
+    fx.add_file_renamed_by_par2(ANCESTOR, "Rq83wKp2Zn5", &data, 40_000);
+    assert!(add_par2_obfuscated_with_empty(
+        &mut fx,
+        20,
+        &[ANCESTOR],
+        PLACEHOLDER,
+        40_000
+    ));
+    // The empty file, posted under a HASH subject - the accepted arm's
+    // own shape, so the gate lets the descriptor's name win the rename.
+    let art = nzbkit::yenc::encode("n0ByTeQq7wX", 0, Some((1, 1)), 1, &[]);
+    fx.articles
+        .insert("<n0bytedisamb-1@mock>".to_string(), art.clone());
+    fx.nzb_files.push((
+        "n0ByTeQq7wX".to_string(),
+        vec![("n0bytedisamb-1@mock".to_string(), art.len() as u64, 1)],
+    ));
+
+    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+    let (log, ok) = tokio::task::spawn_blocking({
+        let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
+        move || run_get(&cfg, &nzb, &out, &[])
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        std::fs::read(out.join(ANCESTOR)).unwrap_or_default() == data,
+        "the real payload at the placeholder's ancestor name was destroyed or \
+         never landed - a zero-length descriptor must never cost a file that \
+         carries bytes\n{log}"
+    );
+    let own = std::fs::symlink_metadata(out.join(PLACEHOLDER));
+    assert!(
+        !own.is_ok_and(|m| m.is_file() && m.len() == 0),
+        "the fixture is void: {PLACEHOLDER} really did land at its own path, so \
+         the claim never disambiguated\n{log}"
+    );
+    assert!(
+        !ok,
+        "the job reported success with {PLACEHOLDER} published somewhere else \
+         under a disambiguated name - a zero-length member charges no damage, so \
+         its absence from its OWN path was invisible to the verdict\n{log}"
+    );
+    // Pinned by REASON and not only by rc, the same way W4-09's arm is.
+    assert!(
+        log.contains("never delivered") && log.contains(PLACEHOLDER),
+        "the verdict must name the member it is failing for:\n{log}"
+    );
+}
+
 /// X6-04 (CONFIRMED red at `5ecf41e10`, 31 Aug 2026): the materialize
 /// arm's `AlreadyExists` probe used `std::fs::metadata`, which FOLLOWS a
 /// symlink. A symlink preplanted at the descriptor's own path, pointing

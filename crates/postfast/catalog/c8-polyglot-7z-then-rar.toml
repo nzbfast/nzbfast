@@ -1,0 +1,56 @@
+# C8 + C12 + C9 + C1: the mirror of c8-polyglot-rar-then-7z.
+
+[layout]
+name = "c8-polyglot-7z-then-rar"
+seed = 119
+note = """
+The same two formats behind the same launcher stub, in the opposite
+order: a complete 7z archive holding the payload, then a complete RAR5
+archive holding `second-archive.bin`.
+
+THIS ROW IS A CONTROL ARM AND IS NOT WORTH MUCH ALONE. Its partner,
+`c8-polyglot-rar-then-7z`, carries the argument for the end state at
+full length and is where a reader should start. What this row adds is
+the one question that row cannot answer about itself: whether the client
+settled on the earlier archive because it was EARLIER, or because it was
+a RAR. A format preference answers both rows with the same family. The
+positional rule answers them differently, and this is the half that says
+so, which is why deleting it would leave a green row proving less than
+it looks.
+
+So the end state here is the 7z's payload and `second-archive.bin` must
+be absent, for the same reason and by the same rule: the client must
+produce what running the self-extractor would produce, and the stub
+launches what is appended directly behind it.
+
+Two things this row measured that its partner did not.
+
+The vendored 7z reader requires the signature at offset 0
+(`sevenz_rust2::ArchiveReader` answers `BadSignature([77, 90, ..])`, the
+`MZ` of our own stub), where `rars` scans for one. The generator's
+round-trip check used to hand the reader the stubbed bytes and lean on
+that scan, so `leading_bytes` on a 7z kind failed at generation with a
+message naming a WRITER defect for a reader limitation, and nothing
+refused the shape. `read_the_set_back` now steps over the prefix it
+wrote instead of scanning past it, which is the honest reading anyway:
+this stage knows how long its own stub is.
+
+The SFX prefix was also being applied to only one of the two copies of
+the volume set the container plane keeps, and `wrap` posts the other one
+whenever a nesting level is damaged. That is fixed in the same commit;
+no catalog row selected both, so nothing was red.
+"""
+
+[source]
+files = [{ name = "otherway.bin", bytes = 24000 }]
+
+[container]
+kind = "7z-stored"
+leading_bytes = 4096
+polyglot = "rar"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

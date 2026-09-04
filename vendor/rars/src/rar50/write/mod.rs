@@ -3,10 +3,13 @@ pub use crate::codec::rar50::Rar50FilterKind as FilterKind;
 use crate::codec::rar50::{EncodeOptions, Unpack50Encoder};
 use crate::crypto::rar50::{Rar50Cipher, Rar50Keys};
 use crate::recovery::rar5::build_structural_inline_recovery_data_with_progress;
+use crate::write_entropy::{Entropy, EntropyScope};
 use crate::write_progress::{ProgressReporter, WorkTracker};
 use crate::{WriteOperation, WriteProgress, WriteProgressEvent};
 
 mod filter_policy;
+pub mod reference;
+pub mod rev;
 mod volume;
 #[cfg(test)]
 use filter_policy::encode_member_with_filter_policy;
@@ -21,7 +24,8 @@ use filter_policy::{
 };
 use volume::{
     write_compressed_volume_set_impl, write_encrypted_compressed_volume_set_impl,
-    write_encrypted_stored_volumes_impl, write_stored_volumes_impl,
+    write_encrypted_stored_volume_set_impl, write_encrypted_stored_volumes_impl,
+    write_stored_volume_set_impl, write_stored_volumes_impl,
 };
 
 const MAX_MATCH_CANDIDATES_DEFAULT: usize = 256;
@@ -35,6 +39,10 @@ pub struct WriterOptions {
     pub features: crate::FeatureSet,
     pub compression_level: Option<u8>,
     pub dictionary_size: Option<u64>,
+    /// Where the encryption salt and the initialisation vectors come
+    /// from. [`Entropy::Os`] by default; see [`Entropy::Seeded`] before
+    /// changing it.
+    pub entropy: Entropy,
 }
 
 impl WriterOptions {
@@ -44,7 +52,18 @@ impl WriterOptions {
             features,
             compression_level: None,
             dictionary_size: None,
+            entropy: Entropy::Os,
         }
+    }
+
+    /// Chooses where the writer draws its encryption salt and
+    /// initialisation vectors.
+    ///
+    /// Leave it alone for a real archive. [`Entropy::Seeded`] is for
+    /// reproducible test generation and weakens what it feeds.
+    pub const fn with_entropy(mut self, entropy: Entropy) -> Self {
+        self.entropy = entropy;
+        self
     }
 
     pub const fn with_compression_level(mut self, level: u8) -> Self {
@@ -65,6 +84,7 @@ impl Default for WriterOptions {
             features: crate::FeatureSet::store_only(),
             compression_level: None,
             dictionary_size: None,
+            entropy: Entropy::Os,
         }
     }
 }
@@ -178,8 +198,10 @@ pub struct Rar50VolumeWriter<'a> {
 #[derive(Debug, Clone)]
 enum Rar50VolumeEntries<'a> {
     Stored(StoredEntry<'a>),
+    StoredSet(&'a [StoredEntry<'a>]),
     Compressed(&'a [CompressedEntry<'a>]),
     EncryptedStored(EncryptedStoredEntry<'a>),
+    EncryptedStoredSet(&'a [EncryptedStoredEntry<'a>]),
     EncryptedCompressed(&'a [EncryptedCompressedEntry<'a>]),
 }
 
@@ -226,6 +248,21 @@ impl<'a> Rar50VolumeWriter<'a> {
         self
     }
 
+    /// A split STORED set holding SEVERAL members.
+    ///
+    /// [`Self::stored_entry`] splits ONE member across the volumes,
+    /// which is the shape a single big file makes. This arm takes a
+    /// slice the way [`Self::compressed_entries`] already does, so a
+    /// set can carry several files with only the member that lands on
+    /// a volume boundary actually split - the commonest layout a
+    /// poster puts on the wire, and the one nothing here could emit
+    /// before (nzbfast-local change, 4 Sep 2026; see
+    /// vendor/rars/VENDORING.md).
+    pub fn stored_entries(mut self, entries: &'a [StoredEntry<'a>]) -> Self {
+        self.entries = Some(Rar50VolumeEntries::StoredSet(entries));
+        self
+    }
+
     pub fn compressed_entries(mut self, entries: &'a [CompressedEntry<'a>]) -> Self {
         self.entries = Some(Rar50VolumeEntries::Compressed(entries));
         self
@@ -233,6 +270,19 @@ impl<'a> Rar50VolumeWriter<'a> {
 
     pub fn encrypted_stored_entry(mut self, entry: EncryptedStoredEntry<'a>) -> Self {
         self.entries = Some(Rar50VolumeEntries::EncryptedStored(entry));
+        self
+    }
+
+    /// A split ENCRYPTED STORED set holding SEVERAL members.
+    ///
+    /// [`Self::encrypted_stored_entry`] splits ONE member across the
+    /// volumes and was the only encrypted STORED volume arm, which is
+    /// why an encrypted multi-member split set used to be emitable
+    /// compressed and not stored - `::encrypted_compressed_entries` has
+    /// always taken a slice. This is the missing plural (nzbfast-local
+    /// change, 4 Sep 2026; see vendor/rars/VENDORING.md).
+    pub fn encrypted_stored_entries(mut self, entries: &'a [EncryptedStoredEntry<'a>]) -> Self {
+        self.entries = Some(Rar50VolumeEntries::EncryptedStoredSet(entries));
         self
     }
 
@@ -260,6 +310,10 @@ impl<'a> Rar50VolumeWriter<'a> {
     }
 
     pub fn finish(self) -> Result<Vec<Vec<u8>>> {
+        // Held for the whole archive: the salt and IV draws below read
+        // it back off this thread. Never `let _ =`, which would drop it
+        // here and put the writer back on OS entropy.
+        let _entropy = EntropyScope::install(self.options.entropy);
         let max_payload_per_volume = self.max_payload_per_volume.ok_or(Error::InvalidHeader(
             "RAR 5 volume payload size is required",
         ))?;
@@ -278,7 +332,17 @@ impl<'a> Rar50VolumeWriter<'a> {
                 entries.len(),
             ),
             Rar50VolumeEntries::Stored(entry) => (false, entry.data.len() as u64, 1),
+            Rar50VolumeEntries::StoredSet(entries) => (
+                false,
+                entries.iter().map(|entry| entry.data.len() as u64).sum(),
+                entries.len(),
+            ),
             Rar50VolumeEntries::EncryptedStored(entry) => (false, entry.data.len() as u64, 1),
+            Rar50VolumeEntries::EncryptedStoredSet(entries) => (
+                false,
+                entries.iter().map(|entry| entry.data.len() as u64).sum(),
+                entries.len(),
+            ),
         };
         let total_work = if compressed && self.options.features.solid {
             match &entries {
@@ -314,6 +378,12 @@ impl<'a> Rar50VolumeWriter<'a> {
                 max_payload_per_volume,
                 self.recovery_percent,
             ),
+            Rar50VolumeEntries::StoredSet(entries) => write_stored_volume_set_impl(
+                entries,
+                self.options,
+                max_payload_per_volume,
+                self.recovery_percent,
+            ),
             Rar50VolumeEntries::Compressed(entries) => write_compressed_volume_set_impl(
                 entries,
                 self.options,
@@ -327,6 +397,14 @@ impl<'a> Rar50VolumeWriter<'a> {
                 max_payload_per_volume,
                 self.recovery_percent,
             ),
+            Rar50VolumeEntries::EncryptedStoredSet(entries) => {
+                write_encrypted_stored_volume_set_impl(
+                    entries,
+                    self.options,
+                    max_payload_per_volume,
+                    self.recovery_percent,
+                )
+            }
             Rar50VolumeEntries::EncryptedCompressed(entries) => {
                 write_encrypted_compressed_volume_set_impl(
                     entries,
@@ -464,6 +542,9 @@ impl<'a> Rar50Writer<'a> {
     }
 
     pub fn finish(self) -> Result<Vec<u8>> {
+        // See the note on Rar50VolumeWriter::finish: this must outlive
+        // every draw the archive makes.
+        let _entropy = EntropyScope::install(self.options.entropy);
         let progress = self.progress;
         let compressed = self.members.first().is_some_and(|member| {
             matches!(
@@ -1982,8 +2063,10 @@ struct HeaderEncryptionKeys {
 
 fn header_encryption_keys(password: &[u8]) -> Result<HeaderEncryptionKeys> {
     let mut salt = [0u8; 16];
-    getrandom::fill(&mut salt)
-        .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption salt"))?;
+    crate::write_entropy::fill(
+        &mut salt,
+        "RAR 5 writer could not generate encryption salt",
+    )?;
     let keys = Rar50Keys::derive(password, salt, 0).map_err(super::map_rar50_crypto_error)?;
     Ok(HeaderEncryptionKeys { keys, salt })
 }
@@ -2256,10 +2339,11 @@ fn encrypted_payload(
 ) -> Result<EncryptedStoredPayload> {
     let mut salt = [0u8; 16];
     let mut iv = [0u8; 16];
-    getrandom::fill(&mut salt)
-        .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption salt"))?;
-    getrandom::fill(&mut iv)
-        .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption IV"))?;
+    crate::write_entropy::fill(
+        &mut salt,
+        "RAR 5 writer could not generate encryption salt",
+    )?;
+    crate::write_entropy::fill(&mut iv, "RAR 5 writer could not generate encryption IV")?;
     let keys = Rar50Keys::derive(password, salt, 0).map_err(super::map_rar50_crypto_error)?;
 
     let mut encrypted_data = packed_data.to_vec();
@@ -2887,8 +2971,7 @@ fn encrypted_header_block(
 ) -> Result<Vec<u8>> {
     let header = block_header_image(header_type, flags, data_size, type_specific, extra)?;
     let mut iv = [0u8; 16];
-    getrandom::fill(&mut iv)
-        .map_err(|_| Error::InvalidHeader("RAR 5 writer could not generate encryption IV"))?;
+    crate::write_entropy::fill(&mut iv, "RAR 5 writer could not generate encryption IV")?;
     let padded_len = header.len().checked_add(15).ok_or(Error::InvalidHeader(
         "RAR 5 encrypted header size overflows",
     ))? & !15;

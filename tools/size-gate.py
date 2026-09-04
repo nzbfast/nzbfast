@@ -8,18 +8,26 @@ naming it. The 3 Aug offender list missed it because a naive brace counter
 died on the first string literal containing a brace. This gate exists so the
 §106 splits stay split.
 
-Semantics:
-  - Every `.rs` file under crates/ (fuzz dirs excluded) must stay under
-    FILE_CEILING raw lines; every PRODUCTION function must stay under
-    FN_CEILING lines. Test functions are reported but not gated - a table
-    of cases is allowed to be long.
-  - Today's offenders are allow-listed in BASELINE with their measured
-    size. An entry's limit is its recorded size plus 2% slack, so ordinary
-    feature work does not trip it while regrowth does. A false-refusal-prone
-    gate gets switched off - that is the fmt-hook lesson.
-  - The list only shrinks. When a target drops back under the ceiling the
-    gate FAILS until its entry is deleted, in the same commit as the split.
-    That is the ratchet.
+Semantics (recalibrated 31 Aug 2026 - the note above BASELINE_FILES has
+the measurements; research/DEV-TOOLCHAIN-REVIEW-2026-08-31.md the review):
+  - Every PRODUCTION `.rs` file under crates/ (fuzz dirs excluded) must
+    stay under FILE_CEILING raw lines. A file that is WHOLLY test code
+    (under tests/ or benches/, or a `#[cfg(test)] mod foo;` target) gets
+    TEST_FILE_CEILING instead - the argument that already exempts test
+    functions, one level up: a table of cases is allowed to be long.
+  - Every PRODUCTION function must stay under FN_CEILING lines. Test
+    functions are reported but not gated.
+  - A target that cannot come under its ceiling in one commit is
+    allow-listed in BASELINE at its measured size, with a comment naming
+    the split debt. An entry's limit is its recorded size plus a FLAT
+    slack (BASELINE_SLACK / FN_BASELINE_SLACK), so ordinary feature work
+    does not trip it while regrowth does. ADDING an entry is legal - the
+    pressure valve that keeps a mid-feature ceiling cross from forcing a
+    split under time pressure. A false-refusal-prone gate gets switched
+    off - that is the fmt-hook lesson.
+  - The recorded numbers only move DOWN. When a target drops back under
+    its ceiling the gate FAILS until its entry is deleted, in the same
+    commit as the split. That is the ratchet, and it is unchanged.
 
 Test scope is resolved properly (inline `#[cfg(test)]` blocks AND
 `#[cfg(test)] mod foo;` making the whole of foo.rs test code) - same
@@ -29,14 +37,15 @@ counting has already produced one wrong scorecard round.
 `--headroom` exists because `--list` cannot answer the question the recurring
 split chips actually ask. It sorts by SIZE, so a function at 500 of 500 ranks
 below one at 400 of 9,000, and it prints neither the limit nor which KIND of
-ceiling a target is under - and those two regimes behave OPPOSITELY when you
-split. A flat-ceiling file converts a split line for line into headroom; a
-BASELINED one does not convert at all, because the ratchet re-centres the same
-2% on the smaller number. On 31 Aug 2026 a chip paired
-`tests/e2e_norar/mod.rs` (flat, 97 free - a split bought 457 lines) with
-`tests/daemon.rs` (baselined, 181 free - no split can buy more than ~50, and
-LESS the bigger the split) as one problem, and the second half of it was not
-buildable. They were never one problem.
+ceiling a target is under - and the two regimes still split differently. A
+flat-ceiling file converts a split line for line into headroom; a BASELINED
+one resets to the flat slack constant however big the cut is, so the real win
+there is driving the target under its own ceiling and DELETING the entry.
+(Under the pre-31-Aug 2% slack the regimes behaved OPPOSITELY - the gain
+SHRANK as the split grew - which is how a 31 Aug 2026 chip paired
+`tests/e2e_norar/mod.rs` (flat) with `tests/daemon.rs` (baselined) as one
+problem and half of it was not buildable. The flat-slack recalibration
+retired that trap.)
 
 Usage:
     tools/size-gate.py            # gate: exit 1 on any violation
@@ -53,543 +62,63 @@ import re
 import sys
 
 CRATES = "crates"
-FILE_CEILING = 3000  # raw lines; the worst competitor file is ~5,400
+FILE_CEILING = 4000  # production .rs raw lines; the worst competitor file is ~5,400
+TEST_FILE_CEILING = 12000  # whole-file test code - append-heavy case tables
 FN_CEILING = 500  # production function lines; rustnzb ships zero over 500
-SLACK = 1.02  # ordinary feature work must not trip an allow-listed entry
+BASELINE_SLACK = 200  # FLAT slack on a baselined file entry (was 2% of itself)
+FN_BASELINE_SLACK = 50  # FLAT slack on a baselined fn entry
 
-# Measured 4 Aug 2026 (post-v1.0.16). Delete each entry as its target is
-# split - the gate refuses stale entries, so deletion is enforced, not hoped.
+# The baseline is the RATCHET half of the gate: a target that cannot come
+# under its ceiling in one commit is recorded at its measured size, its
+# limit is that size plus a FLAT slack, and the recorded number only ever
+# moves DOWN. An entry whose target drops under its own ceiling REDS the
+# gate until the entry is deleted, so burn-down is enforced, not hoped.
+#
+# RECALIBRATED 31 Aug 2026, a deliberate decision recorded in
+# research/DEV-TOOLCHAIN-REVIEW-2026-08-31.md. Four changes, and the
+# measurements that forced them:
+#   * Whole-file TEST code gets its own ceiling (TEST_FILE_CEILING), on
+#     the argument this gate already accepted for functions - "a table of
+#     cases is allowed to be long". The two eternal entries here were both
+#     test files (tests/daemon.rs at 9,132 after four split rounds,
+#     tests/e2e.rs at 6,280 after three) with ~10,000 lines still to move
+#     at one hand-read subject seam per round, forever. Both entries are
+#     GONE under the test ceiling. Their split history - which seams were
+#     taken, which were deliberately left, and why - is in this file's own
+#     git log and in research/SIZE-GATE-BASELINED-MARGINS-2026-08-29.md.
+#   * The production FILE_CEILING moved 3,000 -> 4,000. The census behind
+#     it: ~114 commits in the 30 days to 31 Aug existed ONLY to satisfy
+#     this gate, and the files with the LEAST headroom were the MOST
+#     edited (serve/daemon.rs: 42 lines free, 133 commits in 14 days;
+#     pool.rs: 44 free, 87 commits) - at that churn a split bought days.
+#     The worst competitor file is ~5,400 lines, so the yardstick holds.
+#   * Slack became FLAT (BASELINE_SLACK) instead of 2% of the entry's own
+#     size. The 2% rule was measurably perverse: cutting MORE lines bought
+#     LESS headroom, so re-baselining after any split left ~70-130 lines
+#     whatever the effort, and seam size was dictated by the gate rather
+#     than by design (nntp.rs: 776 lines moved where ~400 covered the
+#     problem). Under flat slack a split+ratchet resets free to the same
+#     constant however big the cut is.
+#   * ADDING an entry is now legal - the pressure valve. Crossing a
+#     ceiling mid-feature is answered by a one-line entry at the measured
+#     size WITH a comment naming the split debt, instead of by stopping
+#     the feature to split under time pressure. The ratchet is unchanged:
+#     entries only move down, stale entries red, and the split still
+#     happens - as designed work on a chosen seam, on its own schedule.
 BASELINE_FILES = {
-    # path (relative to repo root): raw lines measured
-    # serve/mod.rs was here at 13,837, then 12,988, then 13,310. Phase 4
-    # moved its flat free functions out to sibling modules and dispersed
-    # its 4,800-line inline `mod tests`; it is 852 lines now, so its entry
-    # is GONE. Nothing is left to grandfather.
-    # 11,803, then 12,429 after the 8 Aug §129 burst. Two concurrent
-    # sessions split it at different seams and both landed: the
-    # mid-download password and prefer_external_unrar tests went to
-    # tests/daemon_unpackroute/, the five M11 playback rigs to
-    # tests/stream_live/. 10,678 with both, so the entry ratchets DOWN.
-    # ...and 11,146 after the #34 SAB-parity round. What a credential may
-    # do - the full key, the add-only nzbkey, and the bootstrap hatch
-    # between them - is one subject and six tests, and moved whole to
-    # tests/daemon_authkey/. 10,466. Regrown to 10,699 through the §99
-    # try-order and §100 retry merges; the four passworded-archive legs -
-    # set_password after the fact, the passwords file consulted at
-    # completion, the ENOSPC republish, and the prompt that must not
-    # leave the archive packed - are one subject and moved whole to
-    # tests/daemon_password/. 10,030.
-    # Still 10,030 on 29 Aug 2026 - 68 lines of margin, and the narrowest
-    # of the two entries left after that day's round took the other four
-    # off (research/SIZE-GATE-BASELINED-MARGINS-2026-08-29.md). Nothing
-    # about 68 was safe: pool.rs went from 31 lines of margin to ONE
-    # inside two hours the same day while an ordinary module landed from
-    # another lane, and this file has already crossed its own ceiling by
-    # MERGE ARITHMETIC between two lanes who each saw a green gate on
-    # their own branch. The remaining 134 inline tests do NOT cluster by
-    # name - grouping every one by its first two name segments gives a
-    # long tail whose largest group is THREE - so the seam was found by
-    # reading what they are ABOUT, which is how all 37 existing children
-    # were found. WHAT A CLIENT SEES is one subject: the daemon carries
-    # TWO client vocabularies over one queue (the SABnzbd-compatible API
-    # and the NZBGet JSON-RPC one), and four of the six legs were written
-    # because those two had drifted apart - which client type the user
-    # happened to configure decided whether a documented verb worked at
-    # all (the priority write that releases a duplicate hold,
-    # `change_cat`, the idle edge a lifecycle hook listens for). The
-    # other two pin the payload SHAPE each side's parser expects, key by
-    # key and with the type that side sends. All six moved whole to
-    # tests/daemon_facade/, byte-identical, no helper following them: the
-    # fourteen top-level helpers in daemon.rs are each still reached by
-    # what stayed, so nothing became dead code. 9,132, which is 182 lines
-    # of margin rather than 68. THE ENTRY STAYS: the flat ceiling is
-    # 3,000 and this file is three times that, so no single seam can
-    # delete it - the pattern here is a subject per round, ratcheting,
-    # for a long while yet. The bigger remaining seams a reading turned
-    # up and this round did NOT take, named so the next lane does not
-    # rediscover them as oversights: WHAT SURVIVES A RESTART (~890 lines
-    # over six tests) and THE ARCHIVE SHAPES THE DAEMON MEETS (~790, four
-    # of them contiguous at the zip payload posts).
-    "crates/nzbfast/tests/daemon.rs": 9132,
-    # 7471 when first measured; two concurrent 5 Aug sessions landed
-    # test growth (one-pass rigs + the round-6 crc-retry pricing leg).
-    # 7,746 by 29 Aug 2026 - 47 lines of margin, the NARROWEST in this
-    # table once daemon.rs had ratcheted, and the busier of the two by a
-    # long way: 29 commits touched this file on origin/main in the seven
-    # days to 29 Aug. It was held off deliberately while the
-    # red-e2e-ffad4ab3 red was open (two of its tests were the subject),
-    # so a size split would not put two lanes in one file; that red
-    # landed in b92b74927 and both formerly-failing tests were re-run
-    # green before this seam was cut, rather than taking the ledger's
-    # word for it.
-    # Unlike daemon.rs the names here DO cluster a little - encrypted_
-    # store (5), kill9_resume (4), store_rar (4), par_only (4) - but the
-    # seam taken is a subject none of those spell: A POST WHOSE PAR2
-    # FILES DO NOT ANNOUNCE THEMSELVES. Its recovery volumes carry no
-    # `.par2` extension and no findable name, so nothing can be
-    # classified from the NZB and the offset-0 magic sniff has to
-    # reclassify each slot in-stream. Public issue #9 is where it starts
-    # (a repairable download failed while SABnzbd repaired it), #14 is
-    # the resume half (a journal-completed head never re-decodes, so run
-    # 2 recognises restored volumes by reading their first bytes off
-    # disk) and #23 is the coverage rule that came out of it. The last
-    # three legs are the MIRROR of the same question - payload that
-    # looks like PAR2 to the sniff and is not, which must be un-deferred
-    # and delivered byte-exact rather than recreated from recovery
-    # blocks - and belong with it rather than beside the named-PAR2 legs
-    # they happened to sit next to. Nine tests and one private fixture
-    # builder, 862 contiguous lines, moved whole to
-    # tests/e2e_sniffedpar2/. `par2_shaped_payload_fixture` went with
-    # them because it is defined AND used entirely inside the block; the
-    # three helpers a reader would expect to follow - `incompressible`,
-    # `sevenz_container`, `sevenz_store_container` - deliberately did
-    # NOT, because e2e_resume, e2e_chaseresume, e2e_tar and e2e_zipsplit
-    # reach them through `super::` and moving them would respell a path
-    # in four sibling files. 6,888.
-    # THE ENTRY STAYS, and the arithmetic says how long for: the flat
-    # ceiling is 3,000, so 3,888 lines have still to leave, and an
-    # entry's slack is 2% of ITSELF - which is the thing to understand
-    # before sizing the next seam. Cutting MORE does not buy more
-    # margin, it buys less (862 lines here leaves 137; a 1,600-line cut
-    # would have left 123), so the only reason to cut deep is distance
-    # from 3,000, never headroom. A subject per round.
-    # The other seams read and NOT taken, named so the next lane does
-    # not rediscover them as oversights: THE NON-RAR CONTAINERS AT THE
-    # TOP LEVEL (7z and zip, ~786 contiguous lines at what is now
-    # ~4,500) - a clean subject, and the reason it was passed over is
-    # that its three helpers above are shared with four siblings, so the
-    # block is three ranges rather than one; and THE ENCRYPTED ARCHIVES
-    # (~400 contiguous plus scattered legs).
-    # 6,280 by 31 Aug 2026. It had regrown from 6,888 to sit at 7,025
-    # against a 7,025 limit - ZERO headroom - and that is not a margin,
-    # it is a wall: a module declaration is ONE line, so the next lane to
-    # add an `e2e_*` child reddens `size-gate` AND `check` on main for
-    # everyone, exactly as `4839d3dd8` did on 30 Aug. Eighteen chips were
-    # dispatched on 31 Aug and at least eight are in the norar/repair
-    # families, so this was taken as its own claimed commit ahead of
-    # them rather than left for whichever lane happened to trip it.
-    # The seam is THE NON-RAR CONTAINERS AT THE TOP LEVEL - the first of
-    # the two the previous round read and deliberately passed over - and
-    # its subject is one question end to end: what the chase does when
-    # the outermost thing on the wire is a container the RAR reader
-    # cannot open. Thirteen tests over both formats: single file, byte-
-    # split set (`.7z.001`, `.zip.001` and the bare-numeric hjsplit
-    # shape), a store RAR wrapping a zip, the retention-cap trim and the
-    # demote that must land identically when the trim cannot happen, the
-    # damaged post that materializes and repairs on disk, the encrypted
-    # zip the chase decrypts in stream, and the zip it DECLINES. 748
-    # lines to tests/e2e_containers/, one `mod` line back.
-    # THREE RANGES RATHER THAN ONE, which is why the previous round named
-    # this seam and left it: `incompressible`, `sevenz_container` and
-    # `sevenz_store_container` are defined INSIDE the block and are
-    # reached through `super::` by e2e_chaseresume, e2e_resume, e2e_tar
-    # and e2e_zipsplit, so they stayed put - moving them would respell a
-    # path in four sibling files to buy about fifty lines. They now sit
-    # together where the block used to be, beside the other shared
-    # fixture builders.
-    # A PURE MOVE: no test body changed, and the name set was compared
-    # mechanically before and after - the only difference is the
-    # `e2e_containers::` prefix on those thirteen.
-    # THE ENTRY STAYS, and the arithmetic is unchanged from the note
-    # below: the flat ceiling is 3,000, so 3,280 lines have still to
-    # leave, and an entry's slack is 2% of ITSELF - cutting deeper buys
-    # LESS margin, not more. A subject per round. The seam left for the
-    # next round is THE ENCRYPTED ARCHIVES (~400 contiguous at what is
-    # now ~5,540 - the RAR5 store and `-hp` sidecar password probes and
-    # the probe miss - plus scattered legs around `enc_store`).
-    "crates/nzbfast/tests/e2e.rs": 6280,
-    # 7165 when first measured, 7375, then 7629 after the 8 Aug burst.
-    # Two concurrent sessions emptied it in turn, both on the
-    # cleanup_mode_tests pattern: `trash_tests` + `out_umask_tests` to
-    # smart/, then the 3,268-line inline `mod tests` to smart/tests.rs
-    # + sweep_rename_tests.rs (one file of them would have been over
-    # the ceiling on its own). 3,966 with both.
-    # Regrown to 4,023 by 29 Aug 2026 - 22 lines under its own limit,
-    # and out of test code to move: both rounds above emptied an inline
-    # `mod tests`, and what is left is production. So this round takes
-    # the first of two production seams. PUTTING A FINISHED JOB WHERE IT
-    # BELONGS - `move_tree`'s rename, the staged copy it falls back to
-    # across filesystems, `copy_tree`, the background-I/O demotion a NAS
-    # copy runs under, the two error wrappers that name the failing
-    # syscall, the collision reservation and the fsync ladder - is one
-    # subject end to end and moved whole to smart/movetree.rs. The
-    # surviving smart.rs names exactly ONE thing in it (`move_tree`, from
-    # `tv_organize`), which is what made it a seam rather than a slice;
-    # the five public doors are re-exported so no caller changed, and the
-    # nine items smart/tests.rs reaches took `pub(super)`. 3,370 with it,
-    # still over the ceiling, so a SECOND seam went in the same commit:
-    # WHAT A FINISHED JOB'S FILES END UP CALLED, AND WHERE - `tv_organize`
-    # and `tv_rename`, the three doors that give a name to a payload that
-    # arrived without a usable one, and the four private helpers that
-    # exist only for those five - to smart/filing.rs. The two are one
-    # commit rather than the one-seam-per-commit shape daemon.rs's
-    # burn-down used, and the reason is mechanical: this checkout is
-    # shared and there is no safe way to stage half of one file, so
-    # splitting the commit would have meant a smart.rs in the index that
-    # matched neither the tree nor its own baseline. What a filed episode
-    # is CALLED - EpisodeTitles, FiledTail, filed_bases, the
-    # length-fitting - deliberately stayed behind: that is the vocabulary
-    # and the delete path reads it too.
-    # 2,772 - UNDER THE 3,000 CEILING, SO ITS ENTRY IS GONE, with 228
-    # lines of margin rather than the ~67 that re-baselining after either
-    # seam alone would have bought. The trash half (remove_user_* through
-    # `delete_to_trash`, ~850 lines) is the obvious next seam and was NOT
-    # taken: it moves the `TRASH` process-global and `mod deferred_trash`
-    # across a module-unit boundary, which is a tools/test-global-gate.py
-    # question rather than a size one, and the entry is off without it.
-    # The narrative above is kept rather than deleted with the entry,
-    # exactly as serve/tasks.rs's and daemon.rs's are.
-    # One repair rode along: `move_tree`'s doc comment had been stranded
-    # above `MOVE_SEQ` by an earlier hoist, and it is a shape
-    # tools/doc-gate.py cannot see - the two blocks ABUT with no blank
-    # line between them, so its scanner reads one block, not two.
-    # 7081 when first measured; peaked at 10,828 during the fault/tuner
-    # campaign. TODO 113 ratchet: the payout/safety rigs moved to
-    # pool/rig_tests.rs (their own child module), 10,828 -> 7,855, then
-    # the session_loop split (1,084 -> 461, its fn entry deleted) paid
-    # ~170 lines of extraction overhead (signatures + docs): 8,011.
-    # 8,282 after the §114 consumer-steer graduation merged over the
-    # split (note_decoded seam + handed/steer-inbox plumbing; its rigs
-    # live in rig_tests.rs, which absorbs the test growth), 8,492 after
-    # the 8 Aug burst. The remaining inline `mod tests` - 2,443 lines,
-    # a third of the file - moved to pool/inline_tests.rs: 6,051.
-    # That left ONE line of margin under the limit, so the very next
-    # commit to touch the file (§129 3g's response fence) put it back over
-    # at 6,421, then 6,483 through the merge. Out of test code to move, so
-    # this round took the production seam instead: one worker's whole
-    # session lifecycle - dial, pipeline, read, and the dozen ways a
-    # session ends - is 1,791 contiguous lines and moved whole to
-    # pool/session.rs. 4,698, which is margin measured in hundreds of
-    # lines rather than one. Regrown to 5,010 through the §146 tail
-    # give-up + shipped-PoolConfig merges; the M11 QueueControl handle
-    # (struct + whole impl) moved bodily to pool/queue.rs: 4,224. Regrown
-    # to 4,350; the tail dup race and the B3 in-flight wire budget - how
-    # the pool spends EXTRA wire on an article somebody else already
-    # holds, and the bound on how much wire may be in flight - are the
-    # tail of `impl Shared` and moved whole to pool/hedge.rs: 3,946.
-    # Regrown to 4,121. This time the whole tail of the file below
-    # `fetch_all_sharded` - the worker task, the spare filler, the
-    # read-stall note, and every way a run is sealed or a work item
-    # requeued/failed - is one subject (sealing) and moved whole to
-    # pool/runlife.rs: 3,677. Regrown to 3,745 - five lines of margin -
-    # so the Providers-card cap gauge could not land without a split:
-    # everything the pool REPORTS rather than does (the per-server
-    # gauges, the event ring, the two refusal records) is one subject
-    # and moved whole to pool/livestats.rs: 3,365. Regrown to 3,432 -
-    # its whole 2% of slack, so the §166-class handoff CLAIM counter
-    # (26 Aug 2026) could not land without a split: `WorkerLife`, one
-    # worker's lifetime in the fleet's two head-counts, moved whole to
-    # pool/runlife.rs, which already owns `worker` (holds one for its
-    # whole life) and `note_server_dark` (what both of its exits call):
-    # 3,389.
-    # Regrown to 3,455 by 29 Aug 2026 - ONE line under the limit, so the
-    # next line anyone added to it reddened main. Fifteen rounds of this
-    # file have taken a BEHAVIOUR seam out of `impl Shared`; the seam
-    # left is not behaviour at all. `PoolConfig` is 406 lines of struct,
-    # 80 of `Default` and 57 of `shipped()` - every knob the pool has,
-    # its neutral posture and the one the daemon actually runs - with no
-    # method that does work and no reference to any private pool item
-    # except the type names in its own fields. It moved whole to
-    # pool/config.rs and is re-exported, so `pool::PoolConfig` is spelled
-    # exactly as it always was. `ConnTarget` stayed behind deliberately:
-    # its own doc says the target is STATE and not configuration, and a
-    # module named for the second must not quietly acquire the first.
-    # 2,919 - UNDER THE 3,000 CEILING, SO ITS ENTRY IS GONE, which is
-    # what a 543-line seam buys and a smaller one could not: an entry's
-    # slack is 2% of ITSELF, so re-baselining at 3,455 would have handed
-    # the next lane 69 lines and the same tripwire. The narrative above
-    # is kept rather than deleted with the entry, exactly as
-    # serve/tasks.rs's and daemon.rs's are.
-    # rig_tests.rs was here at 2,988 (born in the TODO 113 split of the
-    # pool's payout/safety rigs), then 3,125 when the §114 consumer-steer
-    # rigs replaced the pool-gate ones, then 3,372 through the §129
-    # fault campaign. Cut where its own subject changes: every leg that
-    # runs MORE THAN ONE fault at a time - the gauntlet matrix, the
-    # fight legs, early fanout, the hedge/dup races, live-target
-    # parking, the 3g fence - is pool/fault_rigs.rs now. 1,988 lines,
-    # under the ceiling, so its entry is GONE. The two shared rig
-    # helpers are `pub(super)` and imported by path: a sibling cfg(test)
-    # mod is not in scope through `use super::*`, but it is reachable by
-    # name, so no third testkit module was needed.
-    # 6,192, then 6,480 after the 8 Aug burst. Its 3,018-line inline
-    # `mod tests` moved out and split at its own nested-one-pass banner
-    # (mod_tests.rs + nested_tests.rs, neither big enough to want an
-    # entry of its own): 3,467. Regrown to 3,550 on 13 Aug by the §160
-    # plain-member repair and §156.1 chase-spill appends, past the slack.
-    # Its instrumentation is one subject and left whole: the latched
-    # shape bits with their token/English rendering and the nested
-    # prevalence tally are extract/shape.rs now (326 lines, no entry of
-    # its own): 3,242. Regrown to 3,302 - four lines of margin - so §94 A's
-    # slot-owned name preclaim could not land without a split: the posted
-    # file-NAMING rules (release_stem, vol_sort_key, is_final_file/name and
-    # their FINAL_FILE_EXTS list) are pure functions over names with no
-    # extractor state, one subject, and moved whole to extract/names.rs
-    # (re-exported, so no caller changed): 3,196. Three lines of margin
-    # again by 22 Aug (3,261 on a merged tree), so the delivery side of
-    # `impl Extractor` - the plain write-through and name claim, forwarded
-    # and routed delivery, the pending-queue flushes, the header stash and
-    # the tail-prefetch promote - moved whole to extract/deliver.rs as a
-    # second impl block: 2,712, under the ceiling, so its entry is GONE.
-    # Regrown to 2,982 by 23 Aug - eighteen lines of margin, the tripwire
-    # shape again - so the half deliver.rs names in its own first sentence
-    # came out next: ROUTING, meaning piece-base resolution for split
-    # continuations, the intersection of an arriving span with the
-    # mapper's parsed data areas, the per-entry destination decision and
-    # the writer/group bookkeeping it needs, is extract/routing.rs now
-    # (643 lines, a third impl block, no entry of its own): 2,357. Seven
-    # of its ten methods are called from sibling modules or the parent
-    # and took `pub(super)`; nothing else changed.
-    # serve/tasks.rs was here at 6,400 (6,056 when first measured, then
-    # 6,213 from pre-gate concurrent work) and the 8 Aug merges took it to
-    # 6,723 - past the slack, the only file-level offender left on main.
-    # It has no inline `mod tests` to give up, so five PRODUCTION seams
-    # came out whole to serve/tasks/: the metadata lanes (enrich.rs), the
-    # watch folder and its six failure states (watchfolder.rs), index
-    # upkeep either side of the scan loop (indexer.rs), the stall tracker
-    # + slow-job watchdog (stall.rs), and connection tuning (tuner.rs).
-    # 2,684 lines now - under the ceiling, so its entry is GONE. Both of
-    # its fn entries below keep their path: spawn_download_worker and
-    # spawn_index_scan stayed in the parent.
-    # 5946 when first measured; pre-gate concurrent sessions landed 6106,
-    # and the 5 Aug session union 6231 (event taxonomy, 5ab52b20), which
-    # the §129 mover lane then owed a lowering it could not safely take
-    # (the boot() extraction was rewriting the file at that moment). It
-    # reached 6,465 instead. Two clusters of `impl Daemon` came out to
-    # SIBLING modules, so `pub(super)` still means "pub in serve" and no
-    # call site moved: what a finished job is called (out_dir,
-    # rename_style, job_suffix, episode_titles, resolve_identity,
-    # finalize_names) is serve/naming.rs, and the Daemon half of the
-    # mover (move_dest_root, mover_enqueue/process, identify_video,
-    # relocate_completed) went to serve/mover.rs beside the lanes that
-    # call it. 5,570 - margin measured in hundreds of lines, which is
-    # the lesson of the pool.rs round. Regrown to 5,714 through the D3
-    # search-log and §73 preview merges; the whole `enqueue` add path
-    # moved to daemon_enqueue.rs (a daemon child, the daemon_index
-    # shape): 5,266. Regrown to 5,473; two more children on that same
-    # shape took every way a job is sent round again (the M32 auto-retry
-    # cooldown, the manual retry, and the move-retry ladder under both)
-    # to daemon_retry.rs, and the queue on disk - save_queue out,
-    # load_queue back - to daemon_persist.rs: 4,910. Regrown to 5,018;
-    # two more children on the same shape took what each provider has
-    # COST us (bytes billed per server per UTC day, the reliability
-    # tally, and the §96.5 block-account arithmetic on top of both) to
-    # daemon_usage.rs, and what the daemon does with connections when
-    # nothing is downloading (the warm pool, the idle-release policy,
-    # and the offline switch over the top) to daemon_idle.rs: 4,630.
-    # Regrown to 4,748 - past the slack this time, and caught at a merge
-    # rather than in the commit that spent the margin. TWO sessions then
-    # split it in parallel; the lanes turned out to be disjoint (no
-    # function moved twice, and daemon.rs auto-merged), so both are kept
-    # rather than one backed out. How a JOB stops running is one subject
-    # end to end (will_auto_retry, the failure report, the sidecar abort,
-    # the delete quarantine, park into history, note_queue_idle,
-    # save_giveup) and moved whole to daemon_park.rs, a seventh child on
-    # the daemon_index shape. How the DAEMON stops is the other - the
-    # graceful wind-down shared by mode=shutdown and SIGTERM/SIGINT, the
-    # signal handlers over it, and the pause timer that stops the queue
-    # only for a while (armed, persisted, restored across a restart) -
-    # and moved whole to daemon_shutdown.rs, an eighth. Those are free
-    # functions rather than a second `impl Daemon`, so that one is
-    # re-exported from daemon.rs and every call site still names it
-    # unqualified. 3,783 with both, still over the ceiling: entry stays.
-    # ...and 3,859 by 24 Aug 2026, one line over its own limit, which is
-    # what a file sitting at 3,857 does the moment anyone adds a field to
-    # the Daemon struct - the §282 hunt's was the two lines that tripped
-    # it, and any other lane's next two would have. What the UI says
-    # about a server granting no sessions (server_down_secs, the
-    # ServerOutage row, row_outage's token and the server_outages census)
-    # is one subject, owes nothing to the Daemon struct it was sitting
-    # beside, and moved whole to outage.rs - a ninth child on the
-    # daemon_index shape, re-exported so every call site still names it
-    # unqualified. 3,764, so the entry ratchets DOWN.
-    # ...and regrown to 3,821, which left 18 lines of headroom - under
-    # one ordinary function, and the state that let this file cross on
-    # 25 Aug by MERGE ARITHMETIC rather than by anyone's commit.
-    # 68df57712 combined two sides at 3,837 and 3,810, BOTH legitimately
-    # under the ceiling, into 3,849; every author ran this gate and saw
-    # green, truthfully, on the tree they held, and no lane could have
-    # seen that red from its own branch. Written up in
-    # research/SIZE-GATE-DAEMON-RS-2026-08-25.md, whose sharper lesson is
-    # that the gate belongs INSIDE the fetch/merge/push retry loop,
-    # because on a main taking a push every ~90 s the merge that ships is
-    # not the merge you tested. WHEN INDEX MAINTENANCE MAY RUN is one
-    # subject asked at three ranges - the two "is this a moment for it"
-    # predicates, the VACUUM disk-space verdict, and the arm/abort
-    # rendezvous that stands down a statement ALREADY executing, which
-    # the other two structurally cannot reach - and all three moved to
-    # daemon_maint.rs, by two lanes an hour apart who could not see each
-    # other (ae6d4e5a6 took the rendezvous, the follow-on took the rest
-    # into the same module rather than beside it). 3,608.
-    # WORTH READING BEFORE THE NEXT LANE REACHES FOR THIS LINE: an
-    # entry's slack is 2% of ITSELF, so re-baselining after a split buys
-    # about 70 lines and NO cohesive split of any size buys more while
-    # the entry exists. Real headroom is DELETING the entry, which needs
-    # the file under FILE_CEILING - about 600 lines further. The seams
-    # are there and none of them is a shave: category/dir routing
-    # (CatMeta, cat_list, register_cat, cat_dir, base_out_dir,
-    # dir_claim), the auto-speed ceiling with the live rate and cpu
-    # readings, the bounded index read pool at the top of the file, and
-    # suspend/pause. Each is its own module on this same seam.
-    # THAT BURN-DOWN IS UNDER WAY, one seam per commit so a lost push
-    # race is re-merged on a small diff rather than a huge one. The
-    # BOUNDED READ POOL went first and did not become a new child: its
-    # types exist for `index_read_acquire`, which has lived in
-    # daemon_index.rs since that module was split off, and nothing else
-    # in the tree names `Reader`, `IndexReader` or `IndexReadState`. So
-    # they moved INTO daemon_index.rs, which costs daemon.rs no `mod`
-    # declaration back and makes three of the four types module-private
-    # where a sibling module would have had to widen them. 3,518.
-    # Then WHICH CATEGORY A JOB IS, AND WHICH DIRECTORY IT LANDS IN to
-    # daemon_cats.rs - the offered set and its defaults, the
-    # per-category overrides, `cat_dir`/`base_out_dir`, and the
-    # `dir_claim` a candidate path is tested against. One module and not
-    # two because the routing half READS the category half: a category's
-    # `dir` override is the entire difference between `cat_dir` and
-    # `out_dir().join(category)`, and computing the second where the
-    # first was meant is what silently re-parented every renamed payload
-    # out of the folder the user configured. 3,351.
-    # Then HOW FAST THE LINE IS RUNNING, WHAT IT COSTS AND WHAT CEILING
-    # IS IMPOSED ON IT to daemon_speed.rs - `current_speed_bps`,
-    # `cpu_pct`, the `set_speed_ceiling*` door every manual/API/schedule
-    # cap goes through, and `auto_speed_step` with its four constants.
-    # One module because the halves are WIRED: the AIMD governor
-    # deliberately bypasses `set_speed_ceiling_from` so its per-second
-    # steps cannot flood the event ring or bump `queue_rev` on a hot
-    # path, a claim stated twice in that method and checkable only
-    # against the governor, which is now on the same screen. 3,217.
-    # Then WINDING DOWN THE RUNNING TRANSFER WITHOUT ENDING THE JOB to
-    # daemon_suspend.rs. Its own child and not folded into either
-    # neighbour: daemon_park is how a job stops FOR GOOD, daemon_shutdown
-    # is how the DAEMON stops plus the queue-wide pause timer, and this
-    # is per-JOB and reversible - the job stays in the queue and resumes
-    # from the article journal. Five of its seven callers (the pause
-    # button, the *arr remote, the scheduler, the slow-disk hold, the
-    # idle-release policy) are in neither of those files. 3,076.
-    # And finally MAY A BACKGROUND INDEX PASS RUN RIGHT NOW, AND HOW
-    # DOES IT SAY WHY NOT to daemon_indexgate.rs - the two per-source
-    # stand-down reasons, the phrase the log prints, the cheap
-    # is-a-download-imminent both reasons share, whether anything wants
-    # the database open, and `begin_index_job`, which is the WRITE end
-    # of the same rendezvous: it raises the very counter both reasons
-    # read. 2,945.
-    # UNDER THE 3,000 CEILING, SO ITS ENTRY IS GONE - which is the whole
-    # point of the six commits above and the thing a further split of
-    # any size could not buy. An entry's slack is 2% of ITSELF, so
-    # re-baselining after a split leaves ~70 lines of headroom whatever
-    # the split's SIZE, and daemon.rs spent a year regrowing into that
-    # 70 and crossing again, most recently by MERGE ARITHMETIC between
-    # two lanes who each saw a green gate on their own branch
-    # (research/SIZE-GATE-DAEMON-RS-2026-08-25.md). It is now held to
-    # the same ceiling as every other file and stops being special.
-    # The narrative above is kept rather than deleted with the entry,
-    # exactly as serve/tasks.rs's is: it is the record of which subject
-    # went where, and the next lane reaching for this file needs it.
-    # ONE FURTHER SEAM WENT THE SAME DAY, for margin rather than for the
-    # entry: WHICH OF THE USER'S INDEXER ACCOUNTS A BACKGROUND LANE
-    # SPEAKS TO, to daemon_indexref.rs. Crossing at 2,945 left 55 lines
-    # under the ceiling, and 55 is inside the range two ordinary lanes
-    # add between them - which is the merge arithmetic this whole
-    # burn-down exists to stop, arriving through the plain ceiling
-    # instead of through a baseline. 2,820: margin measured in hundreds,
-    # which is the lesson of the pool.rs round.
-    # 5,150, then 5,397 after the 8 Aug burst. The inline `mod tests`
-    # (the repair math and the mapped driver) moved to
-    # par2repair/inline_tests.rs, beside unit_tests.rs: 4,206. Regrown
-    # to 4,337 through the 133.1 self-prove and Codex-sweep merges;
-    # `impl Reconstructor` moved whole to par2repair/reconstruct.rs
-    # (a child of the defining module, so the private fields stay in
-    # scope): 3,791. Then extra-file adoption - the candidate walk, the
-    # whole-file fast path and the sliding scan - went the same way to
-    # par2repair/adopt.rs when R2 fanned it out across candidates:
-    # 3,596. Still over the ceiling, so the entry stays, ratcheted.
-    # Regrown to 3,662 by 29 Aug 2026 - FIVE lines under its own limit,
-    # which refused an unrelated 32-line addition that day; the two
-    # recovery-slice finders went to par2repair/slices.rs (cca7c1f42) to
-    # get that commit in at all, and that bought ten lines. This round is
-    # the fix rather than the stopgap. THE GF(2^16) ARITHMETIC - folding
-    # present slices into syndromes (fold_chunk_tiled/_multi, the tile
-    # geometry constants, fold_parallel, FeedBatch, fold_batches) and
-    # inverting the repair matrix (invert_vandermonde and the
-    # Gauss-Jordan pair behind it) - moved whole to par2repair/linalg.rs.
-    # The pairing was already in the tree: `bench_fold` and `bench_invert`
-    # are the crate's two benchmark doors, one per half, and
-    # examples/par2_fold_bench.rs drives both; they are re-exported, so no
-    # example changed. Neither half opens a file, parses a packet or knows
-    # what a recovery set is.
-    # WHICH ENGINE computes the syndromes stayed behind, deliberately -
-    # the NTT gates, the divergence probe, `run_with_ntt_fallback` and the
-    # `FAST_PAR_*` process-globals are a policy question answered before
-    # any arithmetic runs, and moving them would move a contested global
-    # (tools/test-global-gate.py's `FAST_PAR_TRIPPED` family) across a
-    # module-unit boundary for no size reason.
-    # 2,868 - UNDER THE 3,000 CEILING, SO ITS ENTRY IS GONE. The narrative
-    # above is kept rather than deleted with the entry, exactly as
-    # serve/tasks.rs's and daemon.rs's are.
-    # rar.rs was here at 4,088 and reached 4,363 as the shatter-fold and
-    # fuzz-crash rounds landed. Its inline `mod tests` (1,255 lines) moved
-    # to rar/tests.rs beside v4_header_tests.rs, and the fixture writers
-    # (a public module, its `nzbkit::rar::fixtures` path unchanged) to
-    # rar/fixtures.rs. 2,494, under the ceiling, so its entry is GONE.
-    # 3688 when first measured; the 20 Aug takedown-classifier round
-    # pushed it past the slack, so `mod compress_tests` (518 lines)
-    # moved whole to nntp/compress_tests.rs, the unit_tests pattern.
-    # 3339 with it, so the entry ratchets DOWN.
-    # By 26 Aug 2026 it had regrown into the last line of that slack -
-    # 3,405 against a 3,405 limit, so the unsafe-policy ratchet (TODO 307
-    # item 3) could not add a three-line `// SAFETY:` note to
-    # `set_keepalive` without reddening this gate. `mod capped_read_tests`
-    # (68 lines) moved out-of-line to nntp/capped_read_tests.rs, which is
-    # the pattern the five `mod *_tests;` declarations at the foot of that
-    # file already are. 3,349 with the note in. The baseline stays 3339:
-    # it is the recorded low and only ever goes down.
-    # Regrown to 3,396 by 29 Aug 2026 - NINE lines under its own limit,
-    # the tightest of the six baselined files, on a file taking a couple
-    # of commits a day. Both rounds above bought that margin by moving
-    # TEST code, and there was no third `mod *_tests` big enough to buy
-    # it again, so this one took the production seam instead: everything
-    # about the TLS SESSION rather than about NNTP - the suite and
-    # trust-anchor policy (aes_accelerated/is_chacha/is_aes128/
-    # tls_provider), the extra-CA path and the root store, the shared
-    # `ClientConfig` cache keyed on both, the handshake ladder, the
-    # `probe_tls` diagnostic, and the Linux kernel offload with its
-    # `probe_tls` diagnostic - moved whole to nntp/tls.rs, beside the
-    # tlswire.rs that already owns the socket UNDER rustls, and the Linux
-    # kernel offload with its `KtlsWire` to nntp/ktls.rs beside it.
-    # `Connection` reached into that whole 776-line region exactly three
-    # times (tls_full_host, mark_tls_full_host, tls_handshake), which is
-    # what made it one subject rather than a slice: those three took
-    # `pub(super)` and the three PUBLIC doors (set_extra_ca,
-    # shared_tls_client_config, probe_tls) are re-exported, so no caller
-    # anywhere changed. THE KERNEL OFFLOAD IS ITS OWN CHILD and not a
-    # block inside tls.rs, which is a judgement worth keeping: it is one
-    # platform and one cargo feature, so the `#[cfg]` moves to the `mod`
-    # declaration and every item inside sheds its own copy - and folding
-    # it in instead put `KtlsWire::new` in a file whose only other `fn
-    # new` it was, which is a shape tools/cfg-symbol-gate.py mis-resolves
-    # (its same-file arm does not look at the qualifier, so every
-    # `OnceLock::new()` and `Arc::new()` in the file then reads as a
-    # linux-only call). Reported separately; the seam here is the better
-    # one either way. 2,628 -
-    # UNDER THE 3,000 CEILING, SO ITS ENTRY IS GONE, which is the whole
-    # point of taking a 776-line seam rather than a 400-line one: an
-    # entry's slack is 2% of ITSELF, so re-baselining at 3,396 would have
-    # bought 67 lines and left the next lane exactly where this one was.
-    # The narrative is kept rather than deleted with the entry, exactly
-    # as serve/tasks.rs's and daemon.rs's are: it is the record of which
-    # subject went where.
-    # release.rs was here at 3,505 and reached 3,586 as the dark-verdict
-    # and year-is-an-extension rounds landed. Its inline `mod tests` was
-    # 1,427 lines - nearly half the file - and moved whole to
-    # release_tests.rs (the mock.rs pattern). 2,159, under the ceiling,
-    # so its entry is GONE.
-    # extract/crypto.rs was here at 3,365 and reached 3,502. Its inline
-    # `mod tests` moved to extract/crypto_tests.rs, leaving 2,112 - under
-    # the ceiling, so its entry is GONE.
-    # repair.rs was here at 3,305 and reached 3,362 - nine lines of slack
-    # left. The recovery-volume side-fetch driver (its own banner in the
-    # module doc: the side pool, the volume consumer, the two helpers
-    # that price a volume) moved to repair/sidefetch.rs with its tests,
-    # leaving 2,909 - under the ceiling, so its entry is GONE too.
+    # "path/relative/to/repo/root.rs": raw lines measured (gate arithmetic,
+    # which reads one HIGHER than `wc -l` - measure with the gate).
+    # Every entry carries a comment naming the debt and the intended seam.
+    #
+    # EMPTY since 4 Sep 2026. The one entry it held, container.rs at 4,037,
+    # was paid off the same day by the split its comment named: the inline
+    # `mod tests` moved to crates/postfast/src/container/tests.rs, taking
+    # the production file to 2,090 lines with its whole ceiling free. The
+    # valve worked as designed - four lanes were live in that file the
+    # afternoon it crossed, and none of them had to stop and split under
+    # time pressure. It is the ratchet that made the entry temporary:
+    # a listed target that falls under its ceiling REDS until the entry is
+    # deleted, so the split and the delete land together or not at all.
 }
 
 BASELINE_FNS = {
@@ -597,7 +126,7 @@ BASELINE_FNS = {
     # spawn_download_worker was here at 688, then 719, then 770 from
     # pre-gate concurrent work, and reached 831 as the §154 no-servers
     # hold and the §96.5 block-account budgets landed inside it. Three
-    # self-contained stretches of the loop moved to serve/tasks/runner.rs:
+    # self-contained stretches of the loop moved to tasks/runner.rs:
     # the M14g guard ladder (`download_guards`, which sleeps on the
     # caller's behalf and answers `only_force` or "do not pick"), the
     # per-job hub hand-over (`reset_hub_for_job`), and the figures read at
@@ -615,7 +144,7 @@ BASELINE_FNS = {
     # is GONE.
     # spawn_index_scan was here at 582 and reached 648 - the §131 spot
     # legs landed inside it. Four self-contained blocks of its pass moved
-    # to serve/tasks/indexer.rs, where the rest of the index upkeep
+    # to tasks/indexer.rs, where the rest of the index upkeep
     # already lives: the Spotnet scan + promote leg (spot_pass), the
     # category reconcile (reclassify_pending_rows), the retention prune
     # and planner-statistics refresh (retention_and_statistics), and the
@@ -630,49 +159,43 @@ BASELINE_FNS = {
 # authority, which is exactly the class of defect the split chips already
 # hit by computing these by hand. Both return the same expression main()
 # used before, unchanged, plus the name of the regime it came from.
-def file_limit(path):
+def file_limit(path, is_test):
     """(limit, kind) for a file. kind is 'flat' or 'baselined'."""
     if path in BASELINE_FILES:
-        return int(BASELINE_FILES[path] * SLACK), "baselined"
-    return FILE_CEILING, "flat"
+        return BASELINE_FILES[path] + BASELINE_SLACK, "baselined"
+    return (TEST_FILE_CEILING if is_test else FILE_CEILING), "flat"
 
 
 def fn_limit(key):
     """(limit, kind) for a `path::name` production function key."""
     if key in BASELINE_FNS:
-        return int(BASELINE_FNS[key] * SLACK), "baselined"
+        return BASELINE_FNS[key] + FN_BASELINE_SLACK, "baselined"
     return FN_CEILING, "flat"
 
 
-def split_gain(size, free, kind, ceiling):
+def split_gain(size, free, kind, ceiling, slack):
     """Headroom a split can BUY, at its very best. None means 'line for line'.
-
-    This is the whole point of the report and it is not symmetric.
 
     FLAT: the limit is a constant, so every line removed is a line of
     headroom gained, without bound. None.
 
-    BASELINED: the house convention on every historical entry is to ratchet
-    the baseline down to the file's new exact size in the same commit as the
-    split (daemon.rs: 11,803 -> 11,590 -> 11,517 -> 10,466 -> 10,030 ->
-    9,132). So after cutting k lines the new free is
-    `int((size-k)*SLACK) - (size-k)`, which is MAXIMISED AT k=0 and falls
-    from there - the gain is best for the smallest possible split, which is
-    the tell that splitting is not a lever at all here. Returns that maximum
-    minus what is already free, so 0 means a split buys nothing.
-
-    The one escape is driving the target under the flat ceiling outright, at
-    which point the entry is deleted and the regime changes; `to_flat` in the
+    BASELINED: the house convention is to ratchet the baseline down to the
+    target's new exact size in the same commit as the split, so after ANY
+    cut the new free is exactly the flat slack. Returns slack - free (floor
+    0): what a split+ratchet buys over doing nothing. Under the pre-31-Aug
+    2% rule this number SHRANK as the split grew - measured in
+    research/SIZE-GATE-BASELINED-MARGINS-2026-08-29.md, and the rule was
+    retired for it. The real escape is unchanged: drive the target under
+    its own ceiling outright, which deletes the entry; `to_flat` in the
     row says how many lines that is.
     """
     if kind != "baselined":
         return None
-    best = int(size * SLACK) - size
     if size <= ceiling:
-        # Already under the flat ceiling: the gate refuses the stale entry
+        # Already under its ceiling: the gate refuses the stale entry
         # rather than applying it, so there is nothing to model.
         return None
-    return best - free
+    return max(0, slack - free)
 
 
 CFG_TEST = re.compile(r"\s*#\[cfg\(test\)\]")
@@ -856,7 +379,7 @@ def collect():
                 if cand in contents:
                     test_files.add(cand)
 
-    files_out = []  # (path, raw_lines)
+    files_out = []  # (path, raw_lines, whole_file_is_test)
     fns_out = []  # (path, name, line_1based, span, is_test)
     for p, text in contents.items():
         # NB: this reads one HIGHER than `wc -l` on newline-terminated
@@ -868,10 +391,10 @@ def collect():
         # same number but feeds `#[cfg(test)]` scope resolution and
         # never reaches the ceiling. Do not "fix" either: the scope
         # resolver is what --selftest pins.
-        files_out.append((p, text.count("\n") + 1))
         whole_file_is_test = (
             f"{os.sep}tests{os.sep}" in p or f"{os.sep}benches{os.sep}" in p or p in test_files
         )
+        files_out.append((p, text.count("\n") + 1, whole_file_is_test))
         mask = test_line_mask(clean[p])
         for name, start, span in functions(clean[p]):
             is_test = whole_file_is_test or (start < len(mask) and mask[start])
@@ -896,7 +419,7 @@ def largest_prod_fns(fns):
     return out
 
 
-def _row(label, size, limit, kind, ceiling):
+def _row(label, size, limit, kind, ceiling, slack):
     free = limit - size
     return {
         "label": label,
@@ -904,9 +427,14 @@ def _row(label, size, limit, kind, ceiling):
         "limit": limit,
         "free": free,
         "kind": kind,
-        "gain": split_gain(size, free, kind, ceiling),
+        # The row's OWN ceiling - files carry two (production and test)
+        # since the 31 Aug recalibration, so the note under a baselined
+        # row must name the one that actually deletes its entry.
+        "ceiling": ceiling,
+        "slack": slack,
+        "gain": split_gain(size, free, kind, ceiling, slack),
         # Lines that would have to come off for a baselined target to drop
-        # under the flat ceiling, which DELETES its entry and changes the
+        # under its ceiling, which DELETES its entry and changes the
         # regime. None where that does not apply.
         "to_flat": (size - ceiling) if kind == "baselined" and size > ceiling else None,
     }
@@ -918,11 +446,20 @@ def headroom_rows(files, fns):
     Ascending, so line 1 is the thing about to redden main. `--list` sorts
     by SIZE, which ranks a 500-of-500 function below a 400-of-9,000 one.
     """
-    frows = [_row(p, n, *file_limit(p), FILE_CEILING) for p, n in files]
+    frows = [
+        _row(
+            p + ("  [test]" if t else ""),
+            n,
+            *file_limit(p, t),
+            TEST_FILE_CEILING if t else FILE_CEILING,
+            BASELINE_SLACK,
+        )
+        for p, n, t in files
+    ]
     nrows = []
     for key, (span, line) in largest_prod_fns(fns).items():
         p, name = key.rsplit("::", 1)
-        nrows.append(_row(f"{p}:{line}  {name}", span, *fn_limit(key), FN_CEILING))
+        nrows.append(_row(f"{p}:{line}  {name}", span, *fn_limit(key), FN_CEILING, FN_BASELINE_SLACK))
     # Deterministic: tightest first, then biggest, then by name.
     def keyf(r):
         return (r["free"], -r["size"], r["label"])
@@ -933,18 +470,18 @@ def headroom_rows(files, fns):
 HEADROOM_LEGEND = """  The two ceilings are different IN KIND, not in degree. Read this before
   pricing any split, and never pair a tight flat row with a tight baselined
   one as though they were one problem.
-  flat      = the {ceiling:,}-line ceiling. A split converts LINE FOR LINE into
+  flat      = the {ceiling} ceiling. A split converts LINE FOR LINE into
               headroom: take N lines out and there are N more.
-  baselined = the limit is the recorded baseline x {slack}, and the house ratchet
-              re-centres that same 2% on the new size, so a split does NOT
-              convert. The `^` note under each such row is the MOST any split
-              can buy, and it SHRINKS as the split grows - the gain is
-              maximised by the smallest possible split, which is the tell that
-              splitting is not a lever here. {remedy}"""
+  baselined = the limit is the recorded baseline + {slack} flat slack, and the
+              house ratchet re-centres on the new size, so a split+ratchet
+              resets free to +{slack} however big the cut is. The `^` note
+              under each such row is what that buys over doing nothing. The
+              real win is driving the target under its own ceiling, which
+              DELETES the entry. {remedy}"""
 
 FILE_REMEDY = (
     "Send new rows to a child\n              module instead (tests/daemon.rs already has 39), or drive the\n"
-    "              file under the flat ceiling outright, which deletes the entry."
+    "              file under its ceiling outright, which deletes the entry."
 )
 FN_REMEDY = (
     "Lift self-contained stretches out to\n              sibling functions until the body is under the flat ceiling, which\n"
@@ -981,7 +518,7 @@ def narrowest_line(frows, nrows):
     return "  narrowest: " + "; ".join(bits) + "  (`--headroom` for the rest)"
 
 
-def print_headroom(title, rows, top, ceiling, remedy):
+def print_headroom(title, rows, top, ceiling_desc, slack, remedy):
     print(f"=== {title} (headroom ascending) ===")
     print("     free      size     limit  used  ceiling")
     shown = rows[:top]
@@ -1001,16 +538,20 @@ def print_headroom(title, rows, top, ceiling, remedy):
             f"{r['kind']:<9}  {r['label']}"
         )
         if r["kind"] == "baselined":
-            gain = "buys nothing" if not r["gain"] else f"buys at most +{r['gain']:,}, and less the bigger it is"
+            gain = (
+                "buys nothing"
+                if not r["gain"]
+                else f"buys at most +{r['gain']:,} (free resets to the flat +{r['slack']:,})"
+            )
             flat = (
-                f"; {r['to_flat']:,} lines takes it under the {ceiling:,} ceiling and deletes the entry"
+                f"; {r['to_flat']:,} lines takes it under its {r['ceiling']:,} ceiling and deletes the entry"
                 if r["to_flat"]
                 else ""
             )
             print(f"             ^ a split+ratchet {gain}{flat}")
     if cut:
         print(f"  ({len(cut)} baselined row(s) shown from below the fold - see the legend)")
-    print(HEADROOM_LEGEND.format(ceiling=ceiling, slack=SLACK, remedy=remedy))
+    print(HEADROOM_LEGEND.format(ceiling=ceiling_desc, slack=slack, remedy=remedy))
 
 
 def report_headroom(top=25):
@@ -1025,9 +566,18 @@ def report_headroom(top=25):
             file=sys.stderr,
         )
         return 1
-    print_headroom("files closest to their ceiling", frows, top, FILE_CEILING, FILE_REMEDY)
+    print_headroom(
+        "files closest to their ceiling",
+        frows,
+        top,
+        f"{FILE_CEILING:,}-line production (or {TEST_FILE_CEILING:,}-line whole-file-test)",
+        BASELINE_SLACK,
+        FILE_REMEDY,
+    )
     print()
-    print_headroom("production fns closest to their ceiling", nrows, top, FN_CEILING, FN_REMEDY)
+    print_headroom(
+        "production fns closest to their ceiling", nrows, top, f"{FN_CEILING:,}-line", FN_BASELINE_SLACK, FN_REMEDY
+    )
     print(f"\n  ({len(frows):,} files, {len(nrows):,} production fns scored)")
     return 0
 
@@ -1117,16 +667,17 @@ HEADROOM_FN_FLOOR = 4000
 # baselines to score it against. Sizes are chosen so both regimes appear and
 # so ordering is unambiguous.
 HEADROOM_FIXTURE_FILES = [
-    ("crates/a/flat_tight.rs", 2990),  # flat, 10 free
-    ("crates/a/flat_roomy.rs", 100),  # flat, 2,900 free
-    ("crates/a/based.rs", 9184),  # baselined 9,132 -> limit 9,314, 130 free
+    ("crates/a/flat_tight.rs", 3990, False),  # flat production, 10 free of 4,000
+    ("crates/a/flat_roomy.rs", 1100, False),  # flat production, 2,900 free
+    ("crates/a/tests/table.rs", 11950, True),  # whole-file TEST, 50 free of 12,000
+    ("crates/a/based.rs", 9184, False),  # baselined 9,132 -> limit 9,332, 148 free
 ]
 HEADROOM_FIXTURE_BASE = {"crates/a/based.rs": 9132}
 
 # Number of assertions in selftest_headroom(). Printed on a green run so a
 # case deleted to quiet a mutation shows up in the output - the count is the
 # only thing that can report an arm removed rather than fixed.
-HEADROOM_CASES = 27
+HEADROOM_CASES = 29
 
 # Same convention, for selftest_argv() below.
 ARGV_CASES = 6
@@ -1165,50 +716,65 @@ def selftest_headroom():
         BASELINE_FNS.clear()
         BASELINE_FNS.update({"crates/a/x.rs::big": 700})
         check(
-            file_limit("crates/a/flat.rs") == (3000, "flat"),
-            f"file_limit on an unlisted file gave {file_limit('crates/a/flat.rs')}, wanted (3000, 'flat')",
+            file_limit("crates/a/flat.rs", False) == (4000, "flat"),
+            f"file_limit on an unlisted production file gave {file_limit('crates/a/flat.rs', False)}, "
+            "wanted (4000, 'flat')",
         )
         check(
-            file_limit("crates/a/based.rs") == (9314, "baselined"),
-            f"file_limit on a baselined file gave {file_limit('crates/a/based.rs')}, wanted (9314, 'baselined')",
+            file_limit("crates/a/tests/t.rs", True) == (12000, "flat"),
+            f"file_limit on a whole-file test gave {file_limit('crates/a/tests/t.rs', True)}, "
+            "wanted (12000, 'flat') - the 31 Aug test carve-out",
+        )
+        check(
+            file_limit("crates/a/based.rs", False) == (9332, "baselined"),
+            f"file_limit on a baselined file gave {file_limit('crates/a/based.rs', False)}, "
+            "wanted (9332, 'baselined') - base 9,132 + the flat 200",
         )
         check(
             fn_limit("crates/a/x.rs::small") == (500, "flat"),
             f"fn_limit on an unlisted fn gave {fn_limit('crates/a/x.rs::small')}, wanted (500, 'flat')",
         )
         check(
-            fn_limit("crates/a/x.rs::big") == (714, "baselined"),
-            f"fn_limit on a baselined fn gave {fn_limit('crates/a/x.rs::big')}, wanted (714, 'baselined')",
+            fn_limit("crates/a/x.rs::big") == (750, "baselined"),
+            f"fn_limit on a baselined fn gave {fn_limit('crates/a/x.rs::big')}, "
+            "wanted (750, 'baselined') - base 700 + the flat 50",
         )
 
-        # 2. THE ASYMMETRY, which is the whole reason this mode exists.
+        # 2. THE TWO REGIMES, which is the whole reason this mode exists.
         # Flat converts line for line, so there is no bound to model.
         check(
-            split_gain(2990, 10, "flat", FILE_CEILING) is None,
+            split_gain(3990, 10, "flat", FILE_CEILING, BASELINE_SLACK) is None,
             "split_gain on a flat target must be None (line for line), not a number",
         )
-        # Baselined: size 9,184 with 130 free can reach int(9184*1.02)-9184 =
-        # 183 by ratcheting alone, so a split buys at most 53.
+        # Baselined: a split+ratchet resets free to the flat slack, so with
+        # 130 free it buys 200 - 130 = 70, whatever the size of the cut.
         check(
-            split_gain(9184, 130, "baselined", FILE_CEILING) == 53,
+            split_gain(9184, 130, "baselined", FILE_CEILING, BASELINE_SLACK) == 70,
             f"split_gain(9184, 130, baselined) gave "
-            f"{split_gain(9184, 130, 'baselined', FILE_CEILING)}, wanted 53",
+            f"{split_gain(9184, 130, 'baselined', FILE_CEILING, BASELINE_SLACK)}, wanted 70",
         )
-        # ...and it SHRINKS as the split grows. This is the falsifiable form
-        # of the finding: a bigger split is a WORSE outcome, which is why
-        # splitting a baselined target is not a lever at all. Each split is
-        # modelled by ratcheting the baseline to the post-split size, which
-        # is what every historical entry in BASELINE_FILES actually did.
-        gains = [int((9184 - k) * SLACK) - (9184 - k) for k in (0, 500, 1000, 2000)]
+        # ...and it is CONSTANT in the size of the target. This is the
+        # falsifiable form of the 31 Aug recalibration: under the retired 2%
+        # rule these three differed (and FELL as the split grew, measured in
+        # research/SIZE-GATE-BASELINED-MARGINS-2026-08-29.md), so a revert
+        # to proportional slack fails this case by producing three numbers.
+        gains = [split_gain(s, 130, "baselined", FILE_CEILING, BASELINE_SLACK) for s in (9184, 6000, 4500)]
         check(
-            gains[0] > gains[1] > gains[2] > gains[3],
-            f"the split-gain curve must FALL as the split grows; measured {gains}",
+            gains == [70, 70, 70],
+            f"split_gain must be the constant slack minus free, independent of size; measured {gains}",
         )
-        # A baselined target already under the flat ceiling has a stale entry
-        # the gate refuses outright, so there is nothing to model.
+        # A target already sitting on MORE free than the slack gains nothing
+        # from a ratchet - the floor is 0, never a negative "gain".
         check(
-            split_gain(100, 2, "baselined", FILE_CEILING) is None,
-            "split_gain on a baselined target under the flat ceiling must be None",
+            split_gain(9184, 250, "baselined", FILE_CEILING, BASELINE_SLACK) == 0,
+            f"split_gain with free above the slack gave "
+            f"{split_gain(9184, 250, 'baselined', FILE_CEILING, BASELINE_SLACK)}, wanted 0",
+        )
+        # A baselined target already under its ceiling has a stale entry the
+        # gate refuses outright, so there is nothing to model.
+        check(
+            split_gain(100, 2, "baselined", FILE_CEILING, BASELINE_SLACK) is None,
+            "split_gain on a baselined target under its ceiling must be None",
         )
 
         # 3. The row builder, over a fixture corpus with EXACT counts and
@@ -1226,17 +792,24 @@ def selftest_headroom():
             ("crates/a/y.rs", "dup", 400, 480, False),
         ]
         frows, nrows = headroom_rows(HEADROOM_FIXTURE_FILES, fixture_fns)
-        check(len(frows) == 3, f"headroom_rows built {len(frows)} file rows over a 3-file fixture")
+        check(len(frows) == 4, f"headroom_rows built {len(frows)} file rows over a 4-file fixture")
         check(
             [r["label"] for r in frows]
-            == ["crates/a/flat_tight.rs", "crates/a/based.rs", "crates/a/flat_roomy.rs"],
-            f"file rows are not sorted by free ascending: {[r['label'] for r in frows]}",
+            == [
+                "crates/a/flat_tight.rs",
+                "crates/a/tests/table.rs  [test]",
+                "crates/a/based.rs",
+                "crates/a/flat_roomy.rs",
+            ],
+            f"file rows are not sorted by free ascending (test rows scored on their own ceiling): "
+            f"{[r['label'] for r in frows]}",
         )
         check(
-            [(r["free"], r["kind"]) for r in frows] == [(10, "flat"), (130, "baselined"), (2900, "flat")],
+            [(r["free"], r["kind"]) for r in frows]
+            == [(10, "flat"), (50, "flat"), (148, "baselined"), (2900, "flat")],
             f"file row free/kind wrong: {[(r['free'], r['kind']) for r in frows]}",
         )
-        check(frows[1]["to_flat"] == 6184, f"to_flat on the baselined row is {frows[1]['to_flat']}, wanted 6184")
+        check(frows[2]["to_flat"] == 5184, f"to_flat on the baselined row is {frows[2]['to_flat']}, wanted 5184")
         check(len(nrows) == 3, f"headroom_rows built {len(nrows)} fn rows over a fixture with 3 production fns")
         check(
             nrows[0]["free"] == 3 and "tight" in nrows[0]["label"],
@@ -1258,17 +831,17 @@ def selftest_headroom():
         # so cutting it off at the fold hides the class the reader came for.
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            print_headroom("t", frows, 1, FILE_CEILING, FILE_REMEDY)
+            print_headroom("t", frows, 1, "4,000-line", BASELINE_SLACK, FILE_REMEDY)
         text = buf.getvalue()
         check("crates/a/based.rs" in text, "a baselined row below the fold was dropped from the report")
         check("flat_roomy" not in text, "a FLAT row below the fold was printed - only baselined rows are rescued")
-        check("buys at most +53" in text, "the baselined row printed no split-gain note")
+        check("buys at most +52" in text, "the baselined row printed no split-gain note")
 
         # 5a. The narrowest line the GATE itself prints. This is the only
         # margin most lanes ever see - nobody runs --list on a push.
         line = narrowest_line(frows, nrows)
         check(
-            line is not None and "crates/a/flat_tight.rs 10 free of 3,000" in line,
+            line is not None and "crates/a/flat_tight.rs 10 free of 4,000" in line,
             f"narrowest_line did not name the tightest file: {line!r}",
         )
         check(
@@ -1281,8 +854,8 @@ def selftest_headroom():
         # reads as "at the limit" with ten lines still to spend.
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            print_headroom("t", [frows[0]], 5, FILE_CEILING, FILE_REMEDY)
-        check("100%" not in buf.getvalue(), "used% rounded 2,990 of 3,000 up to 100 - it must floor")
+            print_headroom("t", [frows[0]], 5, "4,000-line", BASELINE_SLACK, FILE_REMEDY)
+        check("100%" not in buf.getvalue(), "used% rounded 3,990 of 4,000 up to 100 - it must floor")
     finally:
         BASELINE_FILES.clear()
         BASELINE_FILES.update(saved_f)
@@ -1314,7 +887,7 @@ def selftest_headroom():
         f"the headroom floors must be positive; they are "
         f"{HEADROOM_FILE_FLOOR} and {HEADROOM_FN_FLOOR}",
     )
-    labelled = {r["label"] for r in frows if r["kind"] == "baselined"}
+    labelled = {r["label"].split("  [")[0] for r in frows if r["kind"] == "baselined"}
     check(
         labelled == set(BASELINE_FILES),
         f"baselined file rows {sorted(labelled)} do not match BASELINE_FILES {sorted(BASELINE_FILES)}",
@@ -1486,8 +1059,8 @@ def main():
 
     if "--list" in sys.argv:
         print("=== largest files (raw lines) ===")
-        for p, n in sorted(files, key=lambda x: -x[1])[:25]:
-            print(f"  {n:7,}  {p}")
+        for p, n, t in sorted(files, key=lambda x: -x[1])[:25]:
+            print(f"  {n:7,}  {p}" + ("  [test]" if t else ""))
         print("\n=== longest production functions ===")
         prod = [f for f in fns if not f[4]]
         for p, name, line, span, _ in sorted(prod, key=lambda x: -x[3])[:25]:
@@ -1508,9 +1081,9 @@ def main():
 
     errors = []
 
-    seen_files = {p: n for p, n in files}
-    for p, n in sorted(files):
-        limit, _kind = file_limit(p)
+    seen_files = {p: (n, t) for p, n, t in files}
+    for p, n, t in sorted(files):
+        limit, _kind = file_limit(p, t)
         if n > limit:
             errors.append(
                 f"file {p} is {n:,} raw lines (limit {limit:,})"
@@ -1519,11 +1092,14 @@ def main():
     for p, base in sorted(BASELINE_FILES.items()):
         if p not in seen_files:
             errors.append(f"baseline entry for missing file {p} - delete the entry")
-        elif seen_files[p] <= FILE_CEILING:
-            errors.append(
-                f"{p} is now {seen_files[p]:,} lines, under the {FILE_CEILING:,} ceiling - "
-                "delete its baseline entry (the list only shrinks)"
-            )
+        else:
+            n, t = seen_files[p]
+            own = TEST_FILE_CEILING if t else FILE_CEILING
+            if n <= own:
+                errors.append(
+                    f"{p} is now {n:,} lines, under its {own:,} ceiling - "
+                    "delete its baseline entry (the recorded numbers only move down)"
+                )
 
     prod_fns = largest_prod_fns(fns)
     for key, (span, line) in sorted(prod_fns.items()):
@@ -1559,10 +1135,13 @@ def main():
     for e in errors:
         print(f"  {e}", file=sys.stderr)
     print(
-        "\n  New code must stay under the ceilings. If a listed target was just\n"
-        "  split, delete its baseline entry in the same commit. Do not raise a\n"
-        "  baseline number to make this pass - the splits are TODO 106 and the\n"
-        "  numbers only go down.",
+        "\n  New code should stay under the ceilings, and a split at a real seam\n"
+        "  is the first choice. If the work in hand cannot absorb one, ADD a\n"
+        "  baseline entry at the measured size with a comment naming the split\n"
+        "  debt - that is the pressure valve, legal since the 31 Aug 2026\n"
+        "  recalibration. The ratchet is unchanged: recorded numbers only move\n"
+        "  DOWN, and a listed target that drops under its ceiling reds until\n"
+        "  its entry is deleted, in the same commit as the split.",
         file=sys.stderr,
     )
     return 1

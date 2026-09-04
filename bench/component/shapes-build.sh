@@ -34,6 +34,11 @@ b rep    rep.bin   -m3
 b big    mixed.bin -m3 -v125m
 b enc    mixed.bin -m3 "-hp$PW"
 b r7dict mixed.bin -m3 -md128m
+# Usenet-shaped legs (2 Sep 2026): the census shapes, 50 MB volumes.
+b storev    rand.bin  -m0 -v50m
+b encstore  rand.bin  -m0 -v50m "-hp$PW"
+b encstorep rand.bin  -m0 -v50m "-p$PW"
+b bigv      mixed.bin -m3 -v50m
 
 echo
 echo "== corpus"

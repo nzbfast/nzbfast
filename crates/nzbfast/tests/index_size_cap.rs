@@ -47,9 +47,39 @@ fn http(port: u16, req: &str) -> String {
     out.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
 }
 
+/// One JSON API call, with a `busy` refusal WAITED OUT rather than read
+/// as this call's own answer.
+///
+/// The single door every call in this file goes through, which is why
+/// the wait lives here rather than at [`settle_index`] alone. That one
+/// waits out the daemon's STARTUP index open and says nothing about any
+/// later call: the read pool can saturate at any instant
+/// (`INDEX_READ_CONNS`), and a WRITE - `index_evict_now`,
+/// `index_shrink_to` - is refused whenever the write mutex is still
+/// held after `HTTP_INDEX_WAIT`. Both answer HTTP 200 with
+/// `{"status": false, "busy": true, ...}` and no payload field, which
+/// every assertion below would read as the eviction having done
+/// nothing. `wall.rs` learned this the expensive way on 3 Sep 2026 -
+/// its own write assertions went on flaking for a day after its reads
+/// were fixed.
+///
+/// A refused write is safe to repeat: `index_write_checked`'s `Err`
+/// means the mutex was never taken, so nothing was written.
 fn api(port: u16, q: &str) -> serde_json::Value {
-    let body = http(port, &format!("/api?output=json&{q}"));
-    serde_json::from_str(&body).unwrap_or_else(|e| panic!("bad JSON for {q:?}: {e}\n{body}"))
+    let started = std::time::Instant::now();
+    loop {
+        let body = http(port, &format!("/api?output=json&{q}"));
+        let v: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("bad JSON for {q:?}: {e}\n{body}"));
+        if v["busy"] != true {
+            return v;
+        }
+        assert!(
+            started.elapsed() < SETTLE_BUDGET,
+            "the index was still busy after {SETTLE_BUDGET:?}: {q}\n{body}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn over(number: u64, subject: &str, msgid: &str, date: i64) -> OverEntry {

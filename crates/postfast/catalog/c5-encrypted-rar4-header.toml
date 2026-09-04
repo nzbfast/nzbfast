@@ -1,0 +1,36 @@
+# C5 on the older generation: a header-encrypted RAR4 archive.
+
+[layout]
+name = "c5-encrypted-rar4-header"
+seed = 115
+note = """
+The fourth corner of the encryption matrix: both generations, both
+modes. Header encryption on RAR 4 gates the file list the same way it
+does on RAR 5, and the two do it with different ciphers and different
+key derivations - see c4-encrypted-rar4-data.
+
+This row is UNSPLIT deliberately, and the generator refuses the split
+version by name: `rar15_40::write::write_header_encrypted_split_volumes`
+is reached only from the stored-volume writer, so a header-encrypted
+RAR4 volume set is stored-only, and the refusal says so rather than
+emitting a shape whose failure would be about the writer instead of
+about the client.
+"""
+
+[source]
+files = [{ name = "sealed-rar4.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+version = "rar4"
+encryption = "header"
+password = "layout-fixture-pw"
+
+[nzb]
+meta_password = true
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

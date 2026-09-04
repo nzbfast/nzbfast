@@ -7,7 +7,7 @@
 //! It also keeps daemon.rs under the size gate.
 //!
 //! It shipped with ZERO tests. Three code hits tree-wide -
-//! `m_feed_preview` in `serve/api/servers.rs`, its dispatch arm, and
+//! `m_feed_preview` in `api/servers.rs`, its dispatch arm, and
 //! the dashboard's own `apiPost('feed_preview', ...)` - and nothing
 //! held any of them to anything, so every part of the reply shape the
 //! editor renders was free to move.

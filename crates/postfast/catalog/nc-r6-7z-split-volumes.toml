@@ -1,0 +1,54 @@
+# C12 + C2 + P1: a split 7z set, which is the first container row in
+# this catalog that is not a RAR archive at all.
+
+[layout]
+name = "nc-r6-7z-split-volumes"
+seed = 171
+note = """
+The nested corpus's `r6-7z-split` leg: a 7z archive posted as copy
+(stored) split volumes with a PAR2 set beside it. It was one of the
+eight legs that round could not express, under gap H1 - `ContainerKind`
+was `none`, `rar-stored`, `rar-compressed` and nothing else, so no
+profile could name a container format but RAR.
+
+The half of H1 that was expensive turned out not to be. The report
+said a vendored 7z or zip writer was a dependency decision; for 7z it
+was already made, because `vendor/sevenz-rust2` has been in the tree
+for a year and carries a complete writer behind its own `compress`
+feature - the same feature the two nzbkit crates already turn on for
+their dev-dependencies. ZIP, and so the corpus's `r5-zip` leg, is
+still a real decision: nothing in this repo writes one.
+
+A multi-volume 7z is not a RAR volume set. It is the finished archive
+CUT into fixed-size pieces named `.7z.001`, `.7z.002`, ..., and only
+part one carries a signature - concatenating them gives the archive
+back byte for byte. So `volume_bytes` means bytes of ARCHIVE per part
+on this kind, where on a rar kind it means payload bytes per volume;
+that difference is the format's rather than the generator's, and the
+generator refuses the two keys that only make sense on the other side
+(`volume_style`, which is C11's spelling of an ordering the 7z parts
+carry in the index, and `volume_names = "opaque"`, which would ask for
+a set nothing could reassemble because a part past the first has no
+header to recognise).
+
+The end state is the payload file and the PAR2 index. The parts are
+spent by the unpack the way an archive's volumes always are, and a
+clean run never fetches the parity.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 24000 }]
+
+[container]
+kind = "7z-stored"
+volume_bytes = 8000
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -1,0 +1,35 @@
+# E5: a whole second copy of the article, appended after =yend.
+
+[layout]
+name = "e5-second-block-after-yend"
+seed = 15
+note = """
+M4-84 by name. Before that rule, lines after the first =yend kept
+flowing into the decoder because the header state was still open, so a
+poster's signature, or a second concatenated block with no header of
+its own, silently GREW the slot - measured at double length, with
+nothing to notice it whenever no length or CRC gate was declared. Per
+the yEnc spec the article ends at its trailer; bytes after it describe
+nothing and may not decide what lands on disk.
+
+The trailing arm here is the sharp one: not furniture but a complete
+second copy of the article's own block, which a decoder that does not
+stop would decode as real payload at real offsets and write twice. The
+quieter signature arm is covered by the encoder's unit tests, which
+assert both arms decode to the same bytes the clean article does.
+
+Multi-part, so every article carries the tail rather than one.
+"""
+
+[source]
+files = [{ name = "Doubled.Tail.bin", bytes = 40960 }]
+
+[encoding]
+trailing = "article"
+article_bytes = 8192
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

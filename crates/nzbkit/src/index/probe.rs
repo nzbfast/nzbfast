@@ -65,7 +65,9 @@ fn probe7z_pick_sql_with(pin: &str) -> String {
                          WHERE f.release_id=releases.id
                            AND (lower(f.filename) GLOB '*.7z'
                              OR lower(f.filename) GLOB '*.7z.[0-9][0-9][0-9]'
-                             OR lower(f.filename) GLOB '*.7z.[0-9][0-9][0-9][0-9]'))
+                             OR lower(f.filename) GLOB '*.7z.[0-9][0-9][0-9][0-9]'
+                             OR lower(f.filename) GLOB '*.rar'
+                             OR lower(f.filename) GLOB '*.r[0-9][0-9]'))
           ORDER BY first_posted DESC LIMIT ?2",
         probe7z_band_sql()
     )
@@ -96,7 +98,10 @@ impl Index {
     /// drains with whatever budget is left over.
     ///
     /// The SQL narrows to the probe-worthy band (obfuscation-scored,
-    /// unnamed, multi-file, big enough, carrying a `.7z`-family file);
+    /// unnamed, multi-file, big enough, carrying a `.7z`- or RAR-family
+    /// file - the RAR globs joined 1 Sep 2026, when the live residue map
+    /// showed the 7z band probed clean and 158 complete tv/movie RAR
+    /// rows at junk>=70 that no probe had ever touched);
     /// the stem check narrows to ACTUAL semantic obfuscation - R6's
     /// sample caught a real named mkv at junk>=70, and renaming a
     /// readable post from its own archive would be pure loss.
@@ -549,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn pick_wants_obfuscated_7z_rows_only() {
+    fn pick_wants_obfuscated_archive_rows_only() {
         let d = dir("pick");
         let mut ix = open(&d);
         let a = seed_release(
@@ -573,8 +578,9 @@ mod tests {
             900_000_001,
             72,
         );
-        // Obfuscated but RAR: not this recipe's shape.
-        seed_release(
+        // Obfuscated and RAR: this lane's shape too since the RAR arm
+        // (1 Sep 2026) - it was the invisible half of the residue.
+        let r = seed_release(
             &mut ix,
             "n1iY94U6fTpMVY9GPDxx",
             &[
@@ -595,11 +601,18 @@ mod tests {
             50_000_001,
             90,
         );
-        let picks = ix.probe7z_pick(1_000_000, 10).unwrap();
+        let mut picks: Vec<i64> = ix
+            .probe7z_pick(1_000_000, 10)
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        picks.sort_unstable();
+        let mut want = vec![a, r];
+        want.sort_unstable();
         assert_eq!(
-            picks.iter().map(|c| c.id).collect::<Vec<_>>(),
-            vec![a],
-            "only the obfuscated single-7z row is probe-worthy"
+            picks, want,
+            "the obfuscated 7z and RAR rows are probe-worthy; the readable trap and the tiny row are not"
         );
         teardown(&d, ix);
     }
@@ -616,6 +629,32 @@ mod tests {
                 (&format!("{BLOB}.7z.002"), 400_000_000, &["<e2@x>"]),
             ],
             900_000_000,
+            85,
+        );
+        let picks = ix.probe7z_pick(1_000_000, 10).unwrap();
+        assert_eq!(picks.iter().map(|c| c.id).collect::<Vec<_>>(), vec![rid]);
+        teardown(&d, ix);
+    }
+
+    /// The RAR arm of the background lane: a hash-stem release whose
+    /// data is a `.partNN.rar` set is probe-worthy exactly like a 7z
+    /// one. Measured on the live index before the arm existed: 158
+    /// complete tv/movie rows at junk>=70 in this shape, every one
+    /// with probe_tries=0, and zero unprobed 7z rows left - the 7z
+    /// band was clean and the RAR band was invisible to the pick.
+    #[test]
+    fn rar_volumes_match_the_shape_glob() {
+        let d = dir("rarshape");
+        let mut ix = open(&d);
+        let rid = seed_release(
+            &mut ix,
+            BLOB,
+            &[
+                (&format!("{BLOB}.part01.rar"), 500_000_000, &["<r1@x>"]),
+                (&format!("{BLOB}.part02.rar"), 400_000_000, &["<r2@x>"]),
+                (&format!("{BLOB}.par2"), 50_000, &["<r3@x>"]),
+            ],
+            900_050_000,
             85,
         );
         let picks = ix.probe7z_pick(1_000_000, 10).unwrap();

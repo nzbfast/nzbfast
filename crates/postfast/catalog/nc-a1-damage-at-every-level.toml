@@ -1,0 +1,107 @@
+# C15 + C13 + C10 + F8 at three depths at once: every level poisoned,
+# and every level carrying its own answer to it.
+
+[layout]
+name = "nc-a1-damage-at-every-level"
+seed = 177
+note = """
+The nested corpus's `a1-damage-every-level` leg, from its apocalypse
+tier: 64 bytes poisoned at three levels, each level carrying its own
+recovery. The corpus posts the PAR2 for the outer set, packs a PAR2 for
+the middle level inside the outer archive, and puts a RAR recovery
+record inside the innermost one - three different mechanisms, at three
+depths, answering three different faults.
+
+This row is the capstone of the container plane and it selects four
+gaps at once. H2 gives it a stack whose levels are not all alike (the
+recovery record sits at ONE depth and nowhere else). H4 gives a level
+a PAR2 set of its own, packed into the level above beside the archive
+it covers. H5 puts a damage span on a level's archive rather than on a
+`[source]` file, written after that level's own recovery data was cut
+over the clean bytes. And the posted `[recovery]` set is the ordinary
+plane, covering the volumes.
+
+Read it from the outside in:
+
+- The POSTED volumes are damaged by nothing here. The corpus poisons
+  its outer archive too, and this row does not, because that half is
+  `[fault] corrupt_headers` (F3) - a different plane over a different
+  archive, repaired by the posted set, and `f3-corrupt-archive-header`
+  is already that row. Stacking it here would make a failure ambiguous
+  between four repairs.
+- The middle level (`movie.inner2.rar`) is poisoned, and the PAR2 set
+  packed beside it inside the outer archive is what fixes it. Nothing
+  in the NZB mentions that set.
+- The innermost level (`movie.inner1.rar`) is poisoned too, and it
+  carries a RAR recovery record of its own - C10 at ONE depth of a
+  stack, which is the shape a single `[container]` table could not
+  state.
+
+**The three mechanisms are NESTED and not independent, and it is worth
+knowing which one actually does the work.** The innermost archive is a
+member of the middle one, so poisoning it changes the middle archive's
+bytes as well - and the set packed beside the middle archive covers
+those bytes. Measured on this row: `nzbfast get` reports `nested set:
+repaired (2 block(s) rebuilt, 1 file(s) patched)` and both faults are
+answered by that one set, without the recovery record being read. The
+record is what would answer if the packed set were gone too, which is
+the ladder the corpus's apocalypse tier is built around. Any row of
+this shape has that property, the corpus's own included: recovery data
+at a level covers everything below that level as a matter of physics.
+
+The ordering is what makes each fault a real question: every level's
+recovery data is cut over that level's CLEAN bytes and the damage is
+written afterwards, over a copy that goes on the wire. Data cut over
+already-damaged bytes would describe the damage, agree with it, and ask
+the client to repair nothing. And a deeper level's damage has to
+SURVIVE every level built over it - the archive at each level is
+written from the damaged copy below rather than from a clean one, which
+this lane got wrong for one run and pinned with
+`container::tests::deeper_damage_survives_the_levels_above_it`. Nothing
+downstream could have caught it: the payload lands either way, which is
+exactly what an absent fault looks like from the output tree.
+
+The packed set is not part of the end state. A level's own recovery
+data is spent by the repair it exists for, the same way the posted
+parity volumes are spent by theirs, and a `.par2` left in a user's
+output directory after a successful repair is a leftover rather than a
+deliverable.
+
+The spans sit well past each archive's header so every fault is a DATA
+fault the recovery data repairs.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 14000
+
+[[container.inner]]
+kind = "rar-stored"
+recovery_pct = 30
+
+[[container.inner]]
+kind = "rar-stored"
+recovery_record_pct = 20
+
+[[fault.corrupt_payload]]
+inner_level = 0
+at = 9000
+bytes = 64
+
+[[fault.corrupt_payload]]
+inner_level = 1
+at = 9000
+bytes = 64
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

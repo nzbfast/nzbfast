@@ -52,6 +52,21 @@ awk -v tokfile="$TOKENS" '
     print substr($0, n + length("__NZBFAST_UI_TOKENS__"))
     next
   }
+  # The app-nav marker is DROPPED, not filled. An offline manual is
+  # opened over file:// from a DMG or an installed program folder, where
+  # "/", "/wall" and "/#settings" resolve against the filesystem root and
+  # every one of them is broken. The in-app copy gets the nav folded in
+  # by crates/nzbfast/build.rs instead; here the line simply goes. It is
+  # an HTML comment, so this is belt and braces - it would render as
+  # nothing either way - but the guard below refuses ANY surviving
+  # __NZBFAST_ marker, and that guard is worth more than the one line it
+  # costs to keep it honest.
+  index($0, "<!--__NZBFAST_APP_NAV__-->") {
+    n = index($0, "<!--__NZBFAST_APP_NAV__-->")
+    printf "%s", substr($0, 1, n - 1)
+    print substr($0, n + length("<!--__NZBFAST_APP_NAV__-->"))
+    next
+  }
   { print }
 ' "$SRC" > "$DEST"
 

@@ -26,6 +26,10 @@ import androidx.compose.ui.unit.dp
  * phone told the engine about itself. Everything the desktop dashboard
  * does beyond that stays on the desktop.
  *
+ * The version card is the second of them since 4 Sep 2026, and it is
+ * here because a dismissed update banner has to stay findable: waving the
+ * banner away is meant to cost the banner and not the news.
+ *
  * The bottom card is a READOUT and not a set of knobs, deliberately. The
  * numbers are derived (TODO 281 AN4, DeviceProfile) and the point of
  * showing them is that a phone-shaped default is a claim about the device
@@ -35,6 +39,8 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun SettingsScreen(
     sourceLabel: String,
+    appVersion: String,
+    updateVersion: String?,
     exportFolder: String?,
     pauseOnMetered: Boolean,
     freeText: String,
@@ -42,6 +48,7 @@ fun SettingsScreen(
     onPickExportFolder: () -> Unit,
     onClearExportFolder: () -> Unit,
     onPauseOnMetered: (Boolean) -> Unit,
+    onOpenReleases: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
     Column(
@@ -58,6 +65,30 @@ fun SettingsScreen(
                 Text("Downloading from", style = MaterialTheme.typography.titleMedium)
                 Text(sourceLabel, style = MaterialTheme.typography.bodyMedium)
                 TextButton(onClick = onDisconnect) { Text("Change") }
+            }
+        }
+
+        // The version row, and the only place a dismissed update notice
+        // can be found again. It says what this app IS before it says
+        // what is out, because "which version am I on" is the question a
+        // bug report needs answered and there was nowhere on the phone
+        // that answered it.
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Version", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (appVersion.isEmpty()) "This app" else "nzbfast $appVersion",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                if (updateVersion != null) {
+                    Text(
+                        "nzbfast $updateVersion is out. This app does not install " +
+                            "updates, so the new version is a download from the " +
+                            "releases page.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                OutlinedButton(onClick = onOpenReleases) { Text("Open releases page") }
             }
         }
 

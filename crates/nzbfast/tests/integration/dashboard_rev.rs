@@ -256,9 +256,13 @@ fn history_survives_restart_in_its_own_file() {
         let d = serve(&dir);
         let h = api(d.port, "mode=history");
         assert_eq!(slots(&h).len(), 2, "legacy rows visible after boot: {h}");
-        // The split happened: history has its own file, queue.json no
-        // longer carries the array. (Poll briefly - the migration runs
-        // at load, but give a slow CI disk a beat.)
+        // The split happened: history has its own file and queue.json no
+        // longer carries the array. Since §7a it does not carry the
+        // QUEUE either - the same load retires the whole snapshot to
+        // `queue.json.premigrate` once its rows reach `queue.jsonl` - so
+        // an absent queue.json is the strongest form of "the array is
+        // gone", and the read below reads it as one. (Poll briefly - the
+        // migration runs at load, but give a slow CI disk a beat.)
         let spool = dir.join(".spool");
         let mut split = false;
         for _ in 0..50 {

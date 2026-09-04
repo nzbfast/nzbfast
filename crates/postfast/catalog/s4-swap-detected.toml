@@ -1,0 +1,50 @@
+# S4: the split-brain server - a request answered with a different
+# article's body, valid in every way except identity.
+
+[layout]
+name = "s4-swap-detected"
+seed = 75
+note = """
+Seen live as "downloads complete but never verify". A storage backend
+serves mismatched content: the body is a well formed yEnc article, its
+own pcrc32 PASSES, and it is simply not the article that was asked
+for. Every check that looks at the bytes in isolation says yes. The
+only thing that gives it away is the article's declared identity - its
+yEnc part number and offset - and a client that places bytes by the
+segment's position in the map rather than by what the article says
+about itself writes the wrong bytes at the right length and calls the
+job clean.
+
+Paired with a recovery set because the swap is permanent on this
+server, like a corrupt article and unlike a stall: every copy from it
+is the same wrong copy, so the parity is the only route once the
+mismatch is noticed. What the row asserts is the end state - the right
+bytes under the right name - which a client that never noticed cannot
+reach.
+
+A swap costs ONE block or TWO, and the set carries two so that either
+answer repairs. The wrong body decodes at ITS OWN declared offset, so
+it lands on the partner's block and leaves this article's block never
+written - and the partner's own correct copy, when it arrives, may
+overwrite the damage or may already have arrived. Which of the two the
+verifier finds is the order two bodies landed in, which is the
+client's business and not a requirement, so the row states neither: it
+states the end state, and both routes reach it.
+
+The partner is drawn from the seed rather than named: which OTHER
+article arrives is not the point, only that it is not this one.
+"""
+
+[source]
+files = [{ name = "split.brain.bin", bytes = 120000 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+block_bytes = 20000
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+swap = [1]

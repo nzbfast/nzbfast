@@ -814,6 +814,25 @@ impl AuthState {
             .compare_exchange(0, now_ms(), Ordering::Relaxed, Ordering::Relaxed);
     }
 
+    /// Has this server refused us a session for CAPACITY this run -
+    /// too many connections, or too many source addresses?
+    ///
+    /// The latch [`AuthState::note`] sets, read rather than written.
+    /// Set once and never cleared, deliberately: it is used by TODO 275
+    /// item 7's ceiling stand-down, where the question is "has this
+    /// account told us at any point that it will not grant more", and a
+    /// latch that a single granted session cleared would let the fleet
+    /// climb straight back into the refusal it just took.
+    ///
+    /// It does NOT separate a connection cap from a source-address one,
+    /// unlike `DialGate::arm` next door, and that is right for this
+    /// reader while it is wrong for that one: pacing DIALS answers a
+    /// question about sockets, but "should this fleet keep asking for
+    /// more sockets" is answered no by either sentence.
+    pub(super) fn capacity_refused(&self) -> bool {
+        self.capacity_capped.load(Ordering::Relaxed)
+    }
+
     /// A session was granted: bank the episode and stop the clock.
     fn mark_up(&self) {
         let at = self.down_since.swap(0, Ordering::Relaxed);
@@ -1061,6 +1080,9 @@ struct Shared {
     /// successor's workers wait on, and this run's idle latch.
     leases: Vec<Option<handoff::LeaseSeat>>,
     handoff: Option<Arc<handoff::HandoffSignal>>,
+    /// TODO 313: this run's seat in a spill episode, `None` off the
+    /// daemon's spill path entirely. See [`handoff::SpillSeat`].
+    spill: Option<handoff::SpillSeat>,
     /// Flips to true the moment every article is terminal. Workers blocked
     /// mid-read on slow connections select on this - without it, a tail
     /// duplicate's win is worthless because the pool still waits for the
@@ -1381,6 +1403,13 @@ struct Shared {
     /// charge/release trivially symmetric; actual sizes only skew the
     /// throttle point, never the balance.
     inflight_body_bytes: AtomicU64,
+    /// The SHARED half of the same charge: the ledger this pool's
+    /// bytes are added to and `wire_over_cap` reads, one per set of
+    /// pipelines drawing on the same memory budget (see [`WireCharge`]).
+    /// Own count and ledger move together on every path, so the ledger
+    /// is the sum of the live pools' counts; a pool given no ledger by
+    /// its config owns a private one, which is the same number.
+    wire: Arc<WireCharge>,
     /// Per-server windowed throughput signal (M7b.2 steering, see the
     /// `steer` module): a delivered-byte accumulator decayed with a
     /// ~10 s half-life, and the ms-since-start stamp of its last fold
@@ -1412,6 +1441,23 @@ struct Shared {
     sat: saturation::Saturation,
     /// TODO 208 item 1: the in-run line-aware shed (`pool::linecap`).
     line_cap: linecap::LineCap,
+    /// TODO 313 item 7: the temporary surge dial (`pool::surge`). Its
+    /// loans are added into the fleet cap's own per-server `want`, so
+    /// the two writers to a `ConnTarget` never disagree about the
+    /// number in force.
+    surge: surge::Surge,
+    /// Workers holding a live session with an EMPTY pipeline, sitting
+    /// in `session::idle_turn` - a connection the shipped hedge can put
+    /// on a stale article for free.
+    ///
+    /// The surge's defining gate reads it: this arm exists ONLY for the
+    /// case `pick_dup` cannot reach, and with an idle connection
+    /// available that picker is both cheaper and already shipped.
+    /// Maintained by `surge::IdleConn`, a guard rather than a pair of
+    /// bumps - `idle_turn` has an exit that retires the worker, and a
+    /// decrement missed there would leave the gauge permanently over,
+    /// which switches the surge off for the rest of the run.
+    idle_conns: AtomicUsize,
     /// §5.7 block-account mask: servers whose bytes are never spent
     /// speculatively, whatever their level.
     block_bits: u32,
@@ -1505,6 +1551,7 @@ mod dialgate;
 // every one of its descendants exactly as the private ones were.
 pub mod handoff;
 mod hedge;
+pub use hedge::{WireCharge, install_process_wire_charge, process_wire_charge};
 
 // TODO 106: the per-server observation ledger - the §96.5 block latch,
 // the TTFB EWMA, the session-end and 430-attribution tallies, the flap
@@ -1517,10 +1564,12 @@ mod serverledger;
 // TODO 106: work selection - the per-worker routing identity and the
 // pick itself - came out whole to pool/nextwork.rs. A glob, as
 // `session`'s own is, so its callers there and in the test modules are
-// unchanged; `MAX_SERVERS` is re-exported because `crate::config` names
-// it as `crate::pool::MAX_SERVERS`.
+// unchanged; `MAX_SERVERS` is DECLARED in `crate::config` (which
+// enforces it at load) and re-exported here so
+// `crate::pool::MAX_SERVERS` and `nzbkit::pool::MAX_SERVERS` are
+// both unchanged.
 mod nextwork;
-pub use nextwork::MAX_SERVERS;
+pub use crate::config::MAX_SERVERS;
 use nextwork::*;
 
 // TODO 94 item E: held-bytes backpressure - the per-file park the
@@ -1536,6 +1585,13 @@ mod saturation;
 // nzbfast::get::fleet applies, and the in-run shed that walks live
 // targets down to it once the §202 gauge has read the line.
 pub mod linecap;
+
+// TODO 313 item 7: the temporary surge dial - the ACTOR on the stale
+// bound `hedge` already computes, for the case existing hedging cannot
+// reach because no connection is idle to hedge onto. Moves the same
+// `ConnTarget`s the fleet cap above does, through the same apply.
+mod surge;
+pub use surge::{SURGE_MAX_CLAMP, SURGE_MAX_DEFAULT};
 
 // Windowed per-server speed signals for steering and racing (M7b.2) -
 // see the module doc. Inherent `impl Shared` methods, so no glob needed;
@@ -1790,6 +1846,7 @@ impl Shared {
             tail_started: std::sync::Mutex::new(None),
             leases: handoff::LeaseSeat::seats(servers),
             handoff: servers.iter().find_map(|(_, c)| c.handoff.clone()),
+            spill: servers.iter().find_map(|(_, c)| c.spill.clone()),
             finished: tokio::sync::watch::Sender::new(false),
             aborted: AtomicBool::new(false),
             draining: AtomicBool::new(false),
@@ -1856,6 +1913,16 @@ impl Shared {
             dup_futile: (0..n_servers).map(|_| AtomicU64::new(u64::MAX)).collect(),
             dup_futile_gen: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
             inflight_body_bytes: AtomicU64::new(0),
+            // Every server in one pool carries the same ledger (the
+            // fleet builder sets it once for the whole fleet), so the
+            // first one that has it speaks for the pool; a fleet with
+            // none - a one-shot CLI `get`, a library caller, a test -
+            // gets a private ledger, which is what a lone pipeline's
+            // per-pool counter always was.
+            wire: servers
+                .iter()
+                .find_map(|(_, c)| c.wire_charge.clone())
+                .unwrap_or_else(WireCharge::new),
             srv_rate_val: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
             srv_rate_at: (0..n_servers).map(|_| AtomicU64::new(u64::MAX)).collect(),
             srv_art_ms: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
@@ -1866,6 +1933,8 @@ impl Shared {
             sat: saturation::Saturation::new(servers),
             race_escape: servers.iter().any(|(_, c)| c.race_escape),
             line_cap: linecap::LineCap::new(servers),
+            surge: surge::Surge::new(servers),
+            idle_conns: AtomicUsize::new(0),
             block_bits: steer::block_bits(servers),
             budget_bytes: servers
                 .iter()
@@ -1880,9 +1949,17 @@ impl Shared {
 
     /// NZBFAST_POOL_DEBUG=1: dump unresolved queue/inflight state from a
     /// worker's idle branch, at most once per 5 s. Diagnostic only.
+    ///
+    /// `now` is offset by the throttle so the FIRST dump is never
+    /// swallowed: with `LAST` starting at 0 and a bare elapsed-seconds
+    /// clock, every dump in the pool's first five seconds read as
+    /// "within 5 s of the last one" and was dropped - which is exactly
+    /// the window a hang at startup would want diagnosed (and what
+    /// `dump_state_survives_a_held_queue_and_then_prints_it` had to
+    /// sleep 5.1 s to get past).
     fn debug_dump_idle(&self) {
         static LAST: AtomicU64 = AtomicU64::new(0);
-        let now = self.start.elapsed().as_secs();
+        let now = self.start.elapsed().as_secs() + 5;
         let last = LAST.load(Ordering::Relaxed);
         if now < last + 5
             || LAST

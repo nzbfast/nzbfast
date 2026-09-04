@@ -1,0 +1,57 @@
+# C2 + P1: the corpus's baseline leg, and the first profile to put
+# SEVERAL files in ONE split store set.
+
+[layout]
+name = "nc-r1-split-stored-set-of-three-files"
+seed = 161
+note = """
+The nested corpus's `r1-depth1-store` leg: a stored RAR5 set split into
+volumes with a PAR2 set beside it, carrying three files directly - a
+feature, a sample, and a small text sidecar. Its README calls it the
+shape every client automates, and it is the commonest layout on the
+wire.
+
+It is here because it was the last shape in that corpus this generator
+could not emit at all, and the reason was not a schema hole: no writer
+in `rars` built it. `Rar50VolumeWriter::stored_entry`,
+`::encrypted_stored_entry`, `rar15_40::write::write_stored_volumes` and
+`::write_compressed_volumes` each split ONE member across the volumes,
+and only `::compressed_entries` took a slice, so a split STORE set
+holding more than one file had no emitter and `crate::container`
+refused it by name rather than approximating it. Gap H0 of
+research/POSTFAST-VS-NESTED-CORPUS-2026-09-03.md; closed 4 Sep 2026 by
+`Rar50VolumeWriter::stored_entries`, made in the fork at ~/Claude/rars
+and synced into vendor/rars, and checked against unrar 7.23 as well as
+against our own reader.
+
+Three files and not one on purpose, and the sizes are picked so the
+members do NOT align with the volume cut: the middle file straddles a
+boundary and the sidecar starts mid-volume. A set whose members each
+happened to fill a volume would pass without a split flag ever being
+written, and would prove nothing about the arm this row exists for.
+
+The end state is the three payload files and the PAR2 index. The
+volumes are spent by the unpack and a clean run never fetches the
+parity.
+"""
+
+[source]
+files = [
+    { name = "feature.bin", bytes = 24000 },
+    { name = "sample.bin", bytes = 3000 },
+    { name = "notes.txt", bytes = 300 },
+]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 8000
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

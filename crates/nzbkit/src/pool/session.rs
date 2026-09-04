@@ -597,6 +597,28 @@ pub(super) async fn read_one(
     tokio::pin!(suspect_timer);
     let mut suspect_armed = prebyte_mark_armed;
     let mut suspect_fired = false;
+    // TODO 313 item 7: the surge dial's only arming path.
+    //
+    // Everything else in this pool that could tick rides delivered
+    // bytes (`note_srv_bytes`, and the fleet cap's own governor with
+    // it), and the regime the surge exists for is the one where NOTHING
+    // is delivering - so a surge armed there would be switched off in
+    // exactly its own regime. A read in progress is the one thing that
+    // is still happening when a socket is stuck, so the wake-up rides
+    // it: a timer at the SHARED staleness bound, re-armed on each fire
+    // so a read that stays stuck keeps the loan's deadline enforced.
+    //
+    // The timer is a wake-up ticket and nothing more - every gate,
+    // including whether this read's own article is actually stale, is
+    // re-asked in `Shared::surge_tick` against the in-flight map. It is
+    // never armed with the mechanism off, so a shipped install pays
+    // nothing for it.
+    let surge_armed = shared.surge_armed();
+    let surge_timer = tokio::time::sleep(match surge_armed {
+        true => shared.hedge_stale_bound(),
+        false => Duration::from_secs(0),
+    });
+    tokio::pin!(surge_timer);
     let read = {
         let read_fut = async {
             // Echoed-id enforcement: this read is attributed to the
@@ -743,6 +765,16 @@ pub(super) async fn read_one(
         loop {
             tokio::select! {
                 r = &mut read_fut => break Some(r),
+                // TODO 313 item 7: a stuck read's periodic wake-up.
+                // Re-armed rather than one-shot, because the loan's
+                // deadline has to be enforced by SOMETHING while the
+                // socket stays silent, and this is the only thing still
+                // running when it does.
+                _ = &mut surge_timer, if surge_armed => {
+                    shared.surge_tick(shared.run_ms());
+                    let next = tokio::time::Instant::now() + shared.hedge_stale_bound();
+                    surge_timer.as_mut().reset(next);
+                }
                 // TTFB-suspicion: fires at most once per read.
                 // Racing the status line's arrival is benign -
                 // a mark on an article that completes a moment
@@ -1674,10 +1706,16 @@ pub(super) async fn done_before_dial(
 /// behaviour, and the ORDER, are unchanged and load-bearing.
 ///
 /// Returns false when this worker is done and the caller must return.
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn pre_dial_gates(
     cfg: &PoolConfig,
     idx: usize,
     admit: &mut Option<Admitted>,
+    // This worker's lease permit, held across sessions by `worker` and
+    // borrowed here so the live-target park below can GIVE IT BACK
+    // during a spill episode. `None` for a pool with no lease, which is
+    // the CLI and every test that does not opt in.
+    permit: &mut Option<crate::pool::handoff::Permit>,
     session_failures: u32,
     pending_backoff: &mut Option<Duration>,
     finished: &mut tokio::sync::watch::Receiver<bool>,
@@ -1716,9 +1754,57 @@ pub(super) async fn pre_dial_gates(
     if let Some(t) = &cfg.live_target
         && admit.is_none()
     {
+        // TODO 313 item 2: while a spill episode is live, a HEAD's
+        // parked worker gives its lease permit back for as long as it
+        // is parked - and that is the whole of what turns a
+        // `ConnTarget` walk-down into a socket the QUEUE can use.
+        //
+        // Without it the walk-down stops at this run's own accounting:
+        // the worker parks holding no connection but still holding the
+        // account's permit, so `HostLease` reads the fleet as fully
+        // subscribed and a job started behind this one blocks in
+        // `acquire` on a slot that is standing empty. (The initial park
+        // in `runlife::worker` has no such problem - it happens BEFORE
+        // the permit is taken. It is only the mid-run re-park, which is
+        // the one a walk-down produces, that holds one.)
+        //
+        // Gated on the episode rather than done unconditionally, even
+        // though a parked worker holding a permit is over-counting in
+        // every case: outside a spill nothing is waiting on the lease
+        // mid-run, so releasing would change no outcome and would put a
+        // new re-acquire in the path of the TODO 112 walker and the
+        // line-cap governor, both of which shed and raise on their own
+        // schedule. One trigger, one behaviour.
+        let gave_back = cfg
+            .spill
+            .as_ref()
+            .is_some_and(|sp| sp.open_as(crate::pool::handoff::SpillRole::Head))
+            && permit.take().is_some();
         match wait_for_slot(t, idx, finished, shared).await {
             Some(a) => *admit = Some(a),
             None => return false,
+        }
+        // Re-admitted: take a permit again before this worker goes
+        // anywhere near a dial. It parks as this run's OWN waiter for
+        // exactly as long as the lease counts it
+        // (`Shared::own_lease_waiters`), so the head can never read its
+        // own reclaim as a successor and shed to itself - and from the
+        // SPILLED LANE's side this park is precisely the reclaim
+        // signal, a `Download`-class waiter that `LeaseClass::Spill`
+        // must stand behind.
+        if gave_back && let Some(l) = &cfg.lease {
+            let _parked = shared.park_on_lease(idx);
+            tokio::select! {
+                // As RECLAIM and not as this pool's own class: this is
+                // the head asking for a socket it lent, which is the one
+                // acquire a spilled lane must stand behind. See
+                // `LeaseClass::Reclaim` for why an ordinary parked
+                // download may not carry that meaning.
+                p = l.acquire_as(crate::pool::handoff::LeaseClass::Reclaim) => {
+                    *permit = Some(p)
+                }
+                _ = crate::pool::runlife::run_over(finished, shared) => return false,
+            }
         }
     }
     // Session-level pacing (see `session_backoff_delay`). Armed by the
@@ -2437,6 +2523,13 @@ pub(super) async fn session_loop(
     // only after a shed, dropped by every `return` so the next parked
     // worker is promoted in this one's place (F-22).
     mut admit: Option<Admitted>,
+    // The account lease permit `worker` acquired, borrowed for this
+    // worker's whole session life. Handed in rather than kept there so
+    // that the live-target park inside [`pre_dial_gates`] can release
+    // and re-take it during a spill episode (TODO 313 item 2); every
+    // other path leaves it exactly where it was, and `worker` still
+    // owns it and still drops it on every exit.
+    permit: &mut Option<crate::pool::handoff::Permit>,
     // A parked connection already claimed (and validated) by `worker`
     // before the ramp; used for the first session instead of dialling.
     mut preclaimed: Option<Connection>,
@@ -2492,6 +2585,7 @@ pub(super) async fn session_loop(
             cfg,
             ctx.idx,
             &mut admit,
+            permit,
             session_failures,
             &mut pending_backoff,
             &mut finished,
@@ -2691,6 +2785,13 @@ pub(super) async fn session_loop(
                 // no unread responses queued on this socket and the next
                 // job can pick it up mid-conversation. Every other exit
                 // from this loop abandons in-flight responses and closes.
+                // TODO 313 item 7: this worker holds a live session
+                // with nothing in flight - the connection the shipped
+                // hedge can put on a stale article for free, and the
+                // one whose ABSENCE is the surge dial's defining gate.
+                // Held across the whole idle turn, guard-shaped because
+                // `IdleTurn::Retire` leaves this function outright.
+                let _idle = crate::pool::surge::IdleConn::hold(&shared);
                 match idle_turn(cfg, server, ctx, &shared, conn, &mut quiet_since).await {
                     IdleTurn::Keep(c) => conn = c,
                     IdleTurn::Retire => return,

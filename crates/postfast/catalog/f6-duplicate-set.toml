@@ -1,0 +1,44 @@
+# F6: two recovery sets describing the SAME post, under two base names.
+
+[layout]
+name = "f6-duplicate-set"
+seed = 31
+note = """
+The competing-set shape, and the one two-set row that is not P9. P9 is
+two sets over DISJOINT halves of one post and the generator refuses
+them the moment they overlap; this is the overlap on purpose. It is
+everywhere in the wild - a re-post that brought its own set, an
+obfuscated set beside a descriptive one, a second poster covering the
+same files - and the failure it guards against is a client that picks
+one description of the post and treats the other as an intruder.
+
+WHAT IT ASSERTS TODAY. A clean download with two sets over one payload
+ends with the payload ONCE, under its real name, and with both
+indexes. Nothing is filed twice, nothing is quarantined as a stranger,
+and the run does not go non-zero over a set it did not need.
+
+WHAT IT DOES NOT ASSERT, and why the arithmetic makes that honest. Two
+sets built from the same members with the same block size produce
+recovery blocks at the same exponents, so the second set is a COPY of
+the first's parity and not more of it. Two sets never repair damage one
+could not; what they insure against is losing the parity itself. A row
+for that arm needs a fault that damages ONE of the two sets - the wire
+cannot do it, because an article the server refuses removes the whole
+recovery FILE from the output tree and the expectation is derived from
+the layout rather than from what a server withheld. It is a
+generation-time fault that targets a named set, and it is not built.
+"""
+
+[source]
+files = [{ name = "twice.described.bin", bytes = 120000 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 20000
+
+[fault]
+duplicate_set = true
+
+[encoding]
+article_bytes = 20000

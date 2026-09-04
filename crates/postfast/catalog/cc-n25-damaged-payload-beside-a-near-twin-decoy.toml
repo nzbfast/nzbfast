@@ -1,0 +1,63 @@
+# G1 and G2 together: a damaged covered payload beside an UNCOVERED
+# decoy that shares its length and its whole head window.
+
+[layout]
+name = "cc-n25-damaged-payload-beside-a-near-twin-decoy"
+seed = 2501
+note = """
+Expresses bench/capability-corpus leg n25-near-twin-decoy, the first
+row that needed both new properties at once.
+
+The decoy matches the payload on both halves of the live matcher's key
+- same length, same first 16 KiB - and the payload's posted copy is
+spoiled past the head. So the two cheap ways to resolve a wire file are
+both poisoned in the same post: content-matching pairs the decoy to the
+descriptor just as well as the payload, and whole-file evidence over
+the payload's posted bytes matches nothing at all, because those bytes
+are wrong.
+
+WHAT THE ROW ASSERTS, and the second half is the one that bites. The
+payload repairs byte-exact under its FileDesc name, AND the decoy
+survives byte-exact under the token it was posted under. A client that
+resolved the ambiguity by deleting the decoy, or by filing it under the
+payload's name, would lose bytes this post carried - so this is a row
+about not being too clever as much as about being clever enough.
+
+The decoy is uncovered on purpose (P8), which is what makes it a decoy
+rather than a second member: no descriptor names it, so the token IS
+its real name and the expectation says so.
+
+PARITY, per the catalog README's rule: 200,000 bytes at a 32,768-byte
+block is 7 slices and the set covers only the payload, so
+redundancy_pct = 10 is ceil(0.7) = 1 recovery block. The span at 100,000
+lies wholly inside slice 3, so exactly one block is lost and the one
+volume that exists is the one the repair spends.
+"""
+
+[source]
+files = [
+    { name = "Genuine.Payload.mkv", bytes = 200000, zero_head = 20000 },
+    { name = "Same.Head.Decoy.bin", bytes = 200000, zero_head = 20000 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 32768
+names = "filedesc-only"
+covers = ["Genuine.Payload.mkv"]
+
+[encoding]
+article_bytes = 50000
+
+[fault]
+corrupt_payload = [{ file = "Genuine.Payload.mkv", at = 100000, bytes = 64 }]
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

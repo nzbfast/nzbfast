@@ -191,13 +191,13 @@ jobs:
         run: |
           mkdir -p coverage-table
           cargo llvm-cov report --locked --json \
-            --ignore-filename-regex 'nzbkit/src/(mock|mock_tls|sysbench|benchserve)\.rs$' \
+            --ignore-filename-regex 'nzbkit[a-z-]*/src/(mock|mock_tls|sysbench|benchserve)\.rs$' \
             | jq -r '.data[0].files[]
                 | [.filename,
                    .summary.lines.count,
                    (.summary.lines.count - .summary.lines.covered)]
                 | @tsv' \
-            | sed 's#.*/crates/#crates/#' | grep '^crates/nzbkit/' > coverage-table/new.tsv
+            | sed 's#.*/crates/#crates/#' | grep '^crates/nzbkit' > coverage-table/new.tsv
           if [ -s coverage-table/prev.tsv ]; then
             echo "== nzbkit files whose MISSED lines grew since the previous run =="
             awk -F'\t' 'NR==FNR { prevmiss[$1]=$3; prevtotal[$1]=$2; next }
@@ -215,9 +215,28 @@ jobs:
           mv coverage-table/new.tsv coverage-table/prev.tsv
       # if: always() so a breach of one floor never hides the other
       # crate's measurement - the nightly that caught nzbkit under 84
-      # also needed the bins figure, and got neither.
-      - name: nzbfast bin coverage (floor 46, measured 47.90)
+      # also needed the lib figure, and got neither.
+      #
+      # `--bins` measured 0.00% (red bb58ba4e, 3 Sep 2026) and stayed
+      # red for hours with nobody on it - not a coverage regression, a
+      # target that stopped meaning anything. Crate-split step 4.5
+      # (2 Sep) made `crates/nzbfast/src/lib.rs` carry the module tree
+      # and turned `main.rs` into a shim (CLAUDE.md "Build and test"),
+      # so `--bins` runs main.rs's own unit tests - zero of them - and
+      # reports coverage over main.rs's 3 lines alone, floor 46 or not.
+      # `--lib` is the target that now holds the code. Re-baselined
+      # (clean `target/llvm-cov-target`, `RUSTFLAGS=""` - this machine's
+      # `.cargo/config.toml` path remap breaks cargo-llvm-cov's
+      # package-scoping and pulls vendor/rars into the total, verified
+      # against nzbkit's own floor step the same way): 25.36% lines, a
+      # small honest number for what is left in this crate after the
+      # split - CLI wiring, the serve/ HTTP glue, a few command bodies -
+      # with the daemon's own bulk of logic and its own coverage now
+      # living in nzbfast-daemon and its siblings, ungated here. Floor
+      # 23 keeps ~2.4pp of margin under a single fresh reading with no
+      # trend history yet; never raise or lower it off one more sample.
+      - name: nzbfast lib coverage (floor 23, measured 25.36)
         if: always()
         env:
           NZBFAST_NO_ENRICH: "1"
-        run: cargo llvm-cov --locked -p nzbfast --bins --fail-under-lines 46
+        run: cargo llvm-cov --locked -p nzbfast --lib --fail-under-lines 23

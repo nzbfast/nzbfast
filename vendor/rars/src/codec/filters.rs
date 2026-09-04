@@ -145,14 +145,21 @@ pub(crate) fn delta_decode(
     Ok(out)
 }
 
-/// Delta-decode `data` into `out`, which is resized to `data.len()` and
-/// fully rewritten. The decode cannot run in place - it walks the source
-/// serially and the destination by a stride of `channels`, so a byte it
-/// has yet to read may already have been overwritten - but the buffer it
-/// needs does not have to be a fresh one. Every RAR 5 filter block used
-/// to allocate and zero its own; the decoders now carry one across the
-/// whole member. (nzbfast-local change, 20 Aug 2026 - re-apply on the
-/// next rars re-sync, see vendor/rars/VENDORING.md.)
+/// Delta-decode `data` into `out`, whose initialized length is grown or
+/// truncated to `data.len()` and then fully rewritten. The decode cannot
+/// run in place - it walks the source serially and the destination by a
+/// stride of `channels`, so a byte it has yet to read may already have
+/// been overwritten - but the buffer it needs does not have to be a fresh
+/// one. Every RAR 5 filter block used to allocate and zero its own; the
+/// decoders now carry one across the whole member. Keeping the initialized
+/// prefix also avoids zero-filling
+/// bytes that the channel reconstruction immediately overwrites.
+/// Each channel validates one contiguous source slice, then a strided
+/// destination iterator performs the byte loop without loop-carried source
+/// and destination indexes. This preserves malformed-input handling without
+/// paying for source validation on every byte.
+/// (nzbfast-local change, 20 Aug and 3 Sep 2026 - re-apply on the next
+/// rars re-sync, see vendor/rars/VENDORING.md.)
 pub(crate) fn delta_decode_into(
     data: &[u8],
     channels: usize,
@@ -165,22 +172,29 @@ pub(crate) fn delta_decode_into(
     if channels > 32 {
         return Err(Error::InvalidData(messages.invalid_channels));
     }
-    out.clear();
-    out.resize(data.len(), 0);
-    let mut src = 0usize;
-    for channel in 0..channels {
-        let mut prev = 0u8;
-        let mut dest = channel;
-        while dest < out.len() {
-            let byte = *data
-                .get(src)
-                .ok_or(Error::InvalidData(messages.truncated_source))?;
-            prev = prev.wrapping_sub(byte);
-            out[dest] = prev;
-            src += 1;
-            dest += channels;
-        }
+    if out.len() < data.len() {
+        out.resize(data.len(), 0);
+    } else {
+        out.truncate(data.len());
     }
+    let mut encoded = data;
+    for channel in 0..channels.min(out.len()) {
+        let count = (out.len() - channel).div_ceil(channels);
+        let channel_data = encoded
+            .get(..count)
+            .ok_or(Error::InvalidData(messages.truncated_source))?;
+        let mut prev = 0u8;
+        for (dest, &byte) in out[channel..]
+            .iter_mut()
+            .step_by(channels)
+            .zip(channel_data)
+        {
+            prev = prev.wrapping_sub(byte);
+            *dest = prev;
+        }
+        encoded = &encoded[count..];
+    }
+    debug_assert!(encoded.is_empty());
     Ok(())
 }
 
@@ -228,6 +242,22 @@ mod tests {
         data.extend_from_slice(&[0xe9, 0xf0, 0xff, 0xff, 0xff]);
         data.extend_from_slice(b" suffix");
         data
+    }
+
+    fn reference_delta_decode(data: &[u8], channels: usize) -> Vec<u8> {
+        let mut out = vec![0; data.len()];
+        let mut src = 0usize;
+        for channel in 0..channels {
+            let mut prev = 0u8;
+            let mut dest = channel;
+            while dest < out.len() {
+                prev = prev.wrapping_sub(data[src]);
+                out[dest] = prev;
+                src += 1;
+                dest += channels;
+            }
+        }
+        out
     }
 
     fn reference_e8e9_encode(data: &mut [u8], file_offset: u32, include_e9: bool) {
@@ -388,30 +418,34 @@ mod tests {
         );
     }
 
-    /// The scratch-reusing decode must be byte-identical to the
-    /// allocating one, INCLUDING when the buffer it is handed is longer
-    /// than the block and full of somebody else's bytes - which is
+    /// The scratch-reusing decode must be byte-identical to an independent
+    /// scalar reconstruction, INCLUDING when the buffer it is handed is
+    /// longer than the block and full of somebody else's bytes - which is
     /// exactly what the second and every later block of a member sees.
     #[test]
-    fn delta_decode_into_matches_the_allocating_decode_on_a_dirty_buffer() {
+    fn delta_decode_into_matches_scalar_on_a_dirty_buffer() {
         let mut scratch = Vec::new();
-        for channels in 1..=8usize {
+        for channels in 1..=32usize {
             for len in [0usize, 1, 5, 31, 64, 257, 4096] {
                 // Deterministic pseudo-random bytes: a filter block is
                 // arbitrary compressed output, not a pattern.
                 let data: Vec<u8> = (0..len)
                     .map(|i| ((i as u32).wrapping_mul(2_654_435_761) >> 13) as u8)
                     .collect();
-                let expected = delta_decode(&data, channels, DeltaErrorMessages::generic());
-                // Leave the previous block's answer (and then some) in
-                // the buffer, so a decode that failed to rewrite every
-                // byte would read back the stale one.
-                scratch.clear();
-                scratch.resize(len + 997, 0xa5);
-                let actual =
+                let expected = reference_delta_decode(&data, channels);
+                // Exercise growth, exact reuse, and truncation. All
+                // initialized bytes are dirty so a decode that failed to
+                // rewrite even one byte would read back the stale one.
+                for initial_len in [len.saturating_sub(1), len, len + 997] {
+                    scratch.clear();
+                    scratch.resize(initial_len, 0xa5);
                     delta_decode_into(&data, channels, DeltaErrorMessages::generic(), &mut scratch)
-                        .map(|()| scratch.clone());
-                assert_eq!(actual, expected, "channels={channels} len={len}");
+                        .unwrap();
+                    assert_eq!(
+                        scratch, expected,
+                        "channels={channels} len={len} initial_len={initial_len}"
+                    );
+                }
             }
         }
     }

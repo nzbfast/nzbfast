@@ -289,7 +289,7 @@ run_operator() { # $1 leg $2 client $3 tree (the client's whole base)
     [[ ${OPERATOR:-1} == 1 ]] || return
     local pfx=$OUTROOT/$1/op.$2
     [[ -d $3 ]] || { log "OP $1 $2 passes=0 outcome=no-tree"; return; }
-    python3 "$HERE/operator.py" --tree "$3" --manifest "$MANIFEST" \
+    python3 "$HERE/operator_passes.py" --tree "$3" --manifest "$MANIFEST" \
         --max-passes ${OP_MAX_PASSES:-6} --json "$pfx.json" > /dev/null 2>"$pfx.err"
     if [[ -s $pfx.json ]]; then
         log "OP $1 $2 passes=$(jq -r '.passes' $pfx.json) op_wall_s=$(jq -r '.total_seconds' $pfx.json) op_hiwater_mb=$(jq -r '.hiwater_mb // "na"' $pfx.json) op_rd_mb=$(jq -r '.disk_read_mb // "na"' $pfx.json) op_wr_mb=$(jq -r '.disk_write_mb // "na"' $pfx.json) op_cpu_s=$(jq -r '.cpu_s // "na"' $pfx.json) repairs=$(jq -r '.repairs' $pfx.json) extracts=$(jq -r '.extracts' $pfx.json) outcome=$(jq -r '.outcome' $pfx.json)"

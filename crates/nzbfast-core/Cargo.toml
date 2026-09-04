@@ -1,0 +1,89 @@
+[package]
+name = "nzbfast-core"
+version = "1.4.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The nzbfast bin's bottom layer: the modules nothing above them depends on"
+
+[lints]
+workspace = true
+
+# The layer's whole point is that it depends on nzbkit and on nothing
+# else of ours, so a change above it cannot make this unit recompile.
+# `tools/modgraph.py --check` is what holds that: a `crate::` edge from
+# a core module up into the unpack/meta/engine/bin layers is a refusal
+# there, and there is no `nzbfast` line here for one to resolve through.
+[dependencies]
+nzbkit = { path = "../nzbkit", default-features = false }
+# `unpackprog` reads the extraction walk off `rars::Archive` handles.
+rars = { path = "../../vendor/rars", features = ["parallel"] }
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.150"
+ureq = "2"
+# `notify`'s webhook signing (X-NzbFast-Signature) and `manifest`'s
+# update-payload digests.
+sha2 = "0.11"
+hmac = "0.13"
+hex = "0.4"
+# 0.10 to MATCH nzbkit, for the same reason nzbfast pins it there: the
+# download path hashes with md-5 0.10 and a second implementation would
+# be a different measurement.
+md-5 = "0.10"
+crc32fast = "1.5.0"
+libc = "0.2"
+# `notify`'s native SMTP client TLS. Names the aws-lc-rs provider
+# explicitly, because the tree links both aws-lc-rs and ring and a bare
+# builder() panics at run time.
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+# `setup`'s interactive password prompt.
+rpassword = "7"
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+# `logging` builds the process subscriber. Same feature set as the bin
+# had when this module lived there - `fmt` + `registry` only, no
+# `env-filter` (see logging.rs).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry"] }
+
+# GetDiskFreeSpaceExW for `diskfree`, and the quota ledger's local
+# midnight. Same crate and version the rest of the workspace links.
+#
+# `Win32_Security` is `sandbox`'s and carries no security code of its
+# own: `CreateJobObjectW` takes a `SECURITY_ATTRIBUTES` pointer (null,
+# here), and windows-sys gates a function on the features of every type
+# in its signature - so without it the whole JobObjects module compiles
+# and `CreateJobObjectW` alone is simply absent.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[features]
+# Four modules here carry single `#[cfg(feature = "indexer")]` sites
+# (identity, interests, ratelimit, xrel) - the metadata half of what
+# they do. nzbfast's own `indexer` feature FORWARDS to this one, so
+# there is one switch and not two, and a slim build turns both off
+# together. It does NOT pull `dashboard` in the way the bin's does:
+# nothing here serves a browser.
+indexer = ["nzbkit/indexer"]
+# The handful of TEST SEAMS nzbfast's own tests reach into this crate
+# for: `persist::SKIP_FSYNC`, `lanegate::HeavyCpu::unheld`,
+# `streamhub::TailTable::settled`, `netfetch::{SourceOrigin::unwitnessed,
+# OriginBoundResolver}` and `identity::testkit`. They were `#[cfg(test)]`
+# while this was one crate, and a `cfg(test)` item is invisible from
+# another crate whatever its visibility - so the choice at the cut was
+# this feature or deleting the tests that use them.
+#
+# nzbfast turns it on through a DEV-dependency (see its Cargo.toml), so
+# it is on whenever a test target is built and off in `cargo build -p
+# nzbfast`, which is the shipped binary. `SKIP_FSYNC` is why the gate
+# has to reach the READ as well as the declaration: a seam whose cell
+# exists and whose reader does not would leave the test setting a value
+# nothing consults, silently.
+test-support = []

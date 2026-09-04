@@ -36,6 +36,7 @@ import app.nzbfast.mobile.ui.NzbfastTheme
 import app.nzbfast.mobile.ui.PlayerScreen
 import app.nzbfast.mobile.ui.ServerSetupScreen
 import app.nzbfast.mobile.ui.SettingsScreen
+import app.nzbfast.mobile.ui.UpdateBanner
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -104,6 +105,32 @@ class MainActivity : ComponentActivity() {
     private var speedHistory by mutableStateOf(listOf<Double>())
 
     private var pollJob: Job? = null
+
+    /**
+     * The newest nzbfast this install has been told about, when that is
+     * newer than the app itself; null otherwise. Loaded from prefs at
+     * onCreate so a cold start draws the notice without waiting for a
+     * network round trip, and refreshed by [maybeCheckForUpdate].
+     */
+    private var updateVersion by mutableStateOf<String?>(null)
+
+    /** The version whose BANNER the user has waved away. The Settings
+     *  card ignores this - see [UpdateNotice.dismiss]. */
+    private var updateDismissed by mutableStateOf<String?>(null)
+
+    /**
+     * An update check already on the wire.
+     *
+     * The once-a-day gate alone does NOT make this one call: the stored
+     * deadline only moves when the answer comes back, and the two call
+     * sites both fire during the same launch - onCreate reaches
+     * [startPolling] and onStart follows it, microseconds apart, so both
+     * read a deadline neither has written yet. Measured on the emulator,
+     * 4 Sep 2026: two `mode=update_check` lines in the proxy log for one
+     * cold start. Set synchronously before the coroutine is launched,
+     * which is what makes it a latch rather than a second race.
+     */
+    private var updateCheckInFlight = false
 
     /**
      * Free bytes where downloads actually land on THIS phone (TODO 281
@@ -215,6 +242,8 @@ class MainActivity : ComponentActivity() {
             null -> {}
         }
         exportFolder = Settings.exportTree(this)?.let(::treeLabel)
+        updateVersion = UpdateNotice.available(this)
+        updateDismissed = UpdateNotice.dismissed(this)
         watchEngineExits()
         handleIntent(intent)
 
@@ -250,6 +279,7 @@ class MainActivity : ComponentActivity() {
         if (Store.savedMode(this) == Mode.DEVICE && connection != null) {
             startForegroundService(Intent(this, EngineService::class.java))
         }
+        maybeCheckForUpdate()
     }
 
     override fun onStop() {
@@ -536,33 +566,47 @@ class MainActivity : ComponentActivity() {
                             onSave = ::saveNewsServer,
                         )
                     }
-                    is Screen.Home -> androidx.compose.foundation.layout.Box(mod) {
-                        HomeScreen(
-                            snapshot = snapshot,
-                            speedHistory = speedHistory,
-                            statusLine = note,
-                            freeBytesLocal = freeBytes,
-                            // Export copies from a LOCAL path, so it is
-                            // on-device mode only: a remote daemon's
-                            // `storage` names a directory on that machine,
-                            // and a phone opening it would find nothing or,
-                            // worse, something else.
-                            canExport = connection?.mode == Mode.DEVICE && exportFolder != null,
-                            onPlay = ::play,
-                            onPauseJob = { id -> mutate("pause that download") { client?.pauseJob(id) == true } },
-                            onResumeJob = { id -> mutate("resume that download") { client?.resumeJob(id) == true } },
-                            onDeleteJob = { id, files ->
-                                mutate("remove that download") {
-                                    client?.deleteJob(id, deleteFiles = files) == true
-                                }
-                            },
-                            onDeleteHistory = { id, files ->
-                                mutate("remove that entry") {
-                                    client?.deleteHistory(id, deleteFiles = files) == true
-                                }
-                            },
-                            onExport = ::exportJob,
-                        )
+                    is Screen.Home -> androidx.compose.foundation.layout.Column(mod) {
+                        val v = updateVersion
+                        if (v != null && v != updateDismissed) {
+                            UpdateBanner(
+                                version = v,
+                                currentVersion = appVersion(),
+                                onOpenReleases = ::openReleasesPage,
+                                onDismiss = {
+                                    UpdateNotice.dismiss(this@MainActivity, v)
+                                    updateDismissed = v
+                                },
+                            )
+                        }
+                        androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
+                            HomeScreen(
+                                snapshot = snapshot,
+                                speedHistory = speedHistory,
+                                statusLine = note,
+                                freeBytesLocal = freeBytes,
+                                // Export copies from a LOCAL path, so it is
+                                // on-device mode only: a remote daemon's
+                                // `storage` names a directory on that machine,
+                                // and a phone opening it would find nothing or,
+                                // worse, something else.
+                                canExport = connection?.mode == Mode.DEVICE && exportFolder != null,
+                                onPlay = ::play,
+                                onPauseJob = { id -> mutate("pause that download") { client?.pauseJob(id) == true } },
+                                onResumeJob = { id -> mutate("resume that download") { client?.resumeJob(id) == true } },
+                                onDeleteJob = { id, files ->
+                                    mutate("remove that download") {
+                                        client?.deleteJob(id, deleteFiles = files) == true
+                                    }
+                                },
+                                onDeleteHistory = { id, files ->
+                                    mutate("remove that entry") {
+                                        client?.deleteHistory(id, deleteFiles = files) == true
+                                    }
+                                },
+                                onExport = ::exportJob,
+                            )
+                        }
                     }
                     is Screen.Add -> androidx.compose.foundation.layout.Box(mod) {
                         AddScreen(
@@ -581,6 +625,8 @@ class MainActivity : ComponentActivity() {
                             sourceLabel = connection?.let {
                                 if (it.mode == Mode.DEVICE) "This phone" else it.baseUrl
                             } ?: "Not connected",
+                            appVersion = appVersion(),
+                            updateVersion = updateVersion,
                             exportFolder = exportFolder,
                             pauseOnMetered = Settings.pauseOnMetered(this@MainActivity),
                             freeText = freeSpaceLine(),
@@ -609,6 +655,7 @@ class MainActivity : ComponentActivity() {
                                     "Downloads will run on any network."
                                 }
                             },
+                            onOpenReleases = ::openReleasesPage,
                             onDisconnect = ::disconnect,
                         )
                     }
@@ -616,6 +663,81 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    // ---- update notice ----
+
+    /**
+     * This app's own version, as Android knows it. Read from the package
+     * rather than from BuildConfig so no gradle feature has to be turned
+     * on for it; the versionName is the crate's version (app/build.gradle.kts
+     * reads it out of Cargo.toml), so it is the same string the engine
+     * compares against.
+     */
+    private fun appVersion(): String =
+        runCatching { packageManager.getPackageInfo(packageName, 0).versionName }
+            .getOrNull() ?: ""
+
+    /**
+     * Ask the daemon whether a newer nzbfast exists, at most once a day.
+     *
+     * THE CADENCE, and why it is not a timer. The app checks when it
+     * comes to the FOREGROUND and the day's check has not happened yet:
+     * a release comes out a few times a year, so anything faster is a
+     * poll loop over a fact that does not move, and anything on a
+     * schedule of its own would have to wake a phone up to learn nothing.
+     * Foreground is also the only moment the answer can be acted on -
+     * there is no install path, so the whole value of the check is a card
+     * in front of somebody who is looking at the screen.
+     *
+     * The gate is a stored deadline rather than a "last checked" stamp
+     * so that the failure backoff is one number in one place; see
+     * [updateCheckDue] for the clock-moved-backwards arm.
+     *
+     * NOTIFY ONLY. This reads a version string and puts it in a card.
+     */
+    private fun maybeCheckForUpdate() {
+        val cl = client ?: return
+        val now = System.currentTimeMillis()
+        if (updateCheckInFlight || !UpdateNotice.due(this, now)) return
+        updateCheckInFlight = true
+        lifecycleScope.launch {
+            val status = withContext(Dispatchers.IO) {
+                runCatching { cl.updateCheck() }.getOrNull()
+            }
+            val at = System.currentTimeMillis()
+            updateCheckInFlight = false
+            if (status == null) {
+                // Offline, an engine still coming up, a daemon too old to
+                // know the mode, or a refused manifest. None of those is
+                // "up to date", so nothing latched changes and the retry
+                // is the short one.
+                UpdateNotice.recordFailed(this@MainActivity, at)
+                return@launch
+            }
+            UpdateNotice.recordChecked(this@MainActivity, at)
+            // Compared against OUR version, not the daemon's. In device
+            // mode they are the same number; in server mode the daemon
+            // may be older than this app, and its verdict about itself
+            // would be a false alarm here. `current` is the fallback for
+            // a package with no readable versionName, where the daemon's
+            // opinion is better than none.
+            val local = appVersion().ifEmpty { status.current }
+            val v = status.available?.takeIf { updateIsNewer(it, local) }
+            UpdateNotice.setAvailable(this@MainActivity, v)
+            updateVersion = v
+        }
+    }
+
+    /**
+     * Open the releases page in a browser. The ONE outward action this
+     * feature has: no download, no installer intent, and no
+     * REQUEST_INSTALL_PACKAGES permission behind it.
+     */
+    private fun openReleasesPage() {
+        val i = Intent(Intent.ACTION_VIEW, Uri.parse(RELEASES_URL))
+        runCatching { startActivity(i) }
+            .onFailure { note = "No app on this phone can open $RELEASES_URL" }
     }
 
     // ---- settings surface helpers ----
@@ -1078,6 +1200,13 @@ class MainActivity : ComponentActivity() {
     // ---- polling ----
 
     private fun startPolling() {
+        // Here as well as in onStart, and not instead of it: on a cold
+        // start there is no connection to ask yet - device mode is still
+        // proving the engine, server mode has not been loaded - so onStart
+        // alone would skip the check on exactly the launch that opens the
+        // app. Both sites go through the once-a-day gate, so the pair
+        // costs at most one call.
+        maybeCheckForUpdate()
         pollJob?.cancel()
         pollJob = lifecycleScope.launch {
             // Has this poll job ever got an answer? See the failure arm.

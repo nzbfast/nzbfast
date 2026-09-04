@@ -24,6 +24,12 @@ struct ShatterMember {
     first_posted: i64,
     first_seen: i64,
     need_parts: i64,
+    /// The newsgroup, carried for the classify recoveries at the fold's
+    /// UPDATE. The fold unions members across GROUPS on purpose (this
+    /// family rotates the group per article), so there is no single
+    /// group for the set - the kept row's is the right one, because it
+    /// is the group ingest classified that row under.
+    grp: String,
 }
 
 /// Escape for XML - and DROP what XML 1.0 cannot carry at all.
@@ -33,7 +39,7 @@ struct ShatterMember {
 /// makes `/getnzb/<id>.nzb` unparseable to whatever consumes it -
 /// SABnzbd/expat, NZBGet/libxml2, any XML tooling. Escaping cannot help:
 /// `&#1;` is illegal too, and emitting one breaks our own quick-xml
-/// reader. See the twin `esc_xml` in nzbfast's serve/sabcompat.rs.
+/// reader. See the twin `esc_xml` in nzbfast's sabcompat.rs.
 fn xml_escape(s: &str) -> String {
     let clean: String = s
         .chars()
@@ -605,7 +611,7 @@ impl Index {
                 .collect::<rusqlite::Result<_>>()?
             };
             for (_, stem, poster, grp) in cands {
-                let base = crate::extract::release_stem(&stem);
+                let base = crate::names::release_stem(&stem);
                 if base == stem {
                     continue; // not a fragment shape after all
                 }
@@ -677,7 +683,7 @@ impl Index {
         // Keep only true fragments of THIS base (plus the base row).
         let members: Vec<SplitMember> = members
             .into_iter()
-            .filter(|m| m.stem == base || crate::extract::release_stem(&m.stem) == base)
+            .filter(|m| m.stem == base || crate::names::release_stem(&m.stem) == base)
             .collect();
         if members.len() < 2 {
             return Ok(0);
@@ -775,7 +781,41 @@ impl Index {
             .unwrap_or(0);
         let fs = members.iter().map(|m| m.first_seen).min().unwrap_or(now);
         let has_par2 = members.iter().any(|m| m.has_par2);
-        let p = crate::categories::classify(base, &self.custom);
+        // Classified the way INGEST classifies, recoveries included -
+        // the rule every pass that rewrites kind/title_key/junk owes.
+        // `album_fold_merge` is where it was found live, on readable
+        // album stems, and its comment is the reference. The base IS
+        // the stem here, so the recoveries take it twice.
+        //
+        // Measured before adding them, so nobody reads them as a fix
+        // for something that was showing: on THIS pass they are inert.
+        // `recover_media_kind` returns at once when the fed name and
+        // the stem are one string; `recover_kind_from_group` refuses a
+        // stem ending in a plain extension, and `release_stem` keeps
+        // the `.7z`/`.zip` a true split set was split from, so this
+        // base wears one. What is left is the junk>=70 scoping, where
+        // the parse is `Kind::Other` - refused on purpose, a hash must
+        // not become an album - or an obfuscation 70 that dominates
+        // every kind branch of `junk_score`. One week of this
+        // population on the live 65.8M-row index: 1,891 dark rows,
+        // 1,835 ending in `.7z`/`.zip`, every one of them `kind=movie`.
+        // The video-group recovery below is inert for a reason of its
+        // own: it only touches `Kind::Movie`, and a dark row that is
+        // not obfuscated - the only kind its gate lets through - got
+        // its 70 from `Kind::Other`, which it declines.
+        // They stay because the rule then holds by construction rather
+        // than by an arithmetic accident three modules away, and that
+        // accident is the only thing making it true today.
+        let mut p = crate::categories::classify(base, &self.custom);
+        crate::release::recover_media_kind(&mut p, base, base);
+        crate::release::recover_kind_from_group(&mut p, grp, base);
+        // The video-group twin, with the gate ingest asks it behind:
+        // the blob test has to be taken BEFORE the pass, because the
+        // season this rule records would otherwise make that test more
+        // lenient than it was.
+        if !stem_obfuscated(base, &p) {
+            crate::release::recover_episode_from_group(&mut p, grp, base);
+        }
         tx.execute(
             "UPDATE releases
                 SET stem=?2, total_bytes=?3, files=?4, complete=?5, has_par2=?6,
@@ -1125,7 +1165,34 @@ impl Index {
             .filter(|v| *v > 0)
             .min()
             .unwrap_or(0);
-        let p = crate::categories::classify(cstem, &self.custom);
+        // Ingest's recovery chain, so this recomputed score is the one
+        // ingest would have written for the stem the row still wears
+        // (the kept stem is `cstem`, unchanged by the fold, and the
+        // pre_named gate above means no fed name - so the stem is both
+        // arguments, as at every other fold).
+        //
+        // INERT on today's population, and said out loud so nobody
+        // reads it as a fix for a hidden row. The container is admitted
+        // at `junk>=70`, and for a `Kind::Movie` parse the only ways to
+        // reach 70 are `stem_obfuscated` (70) and an .exe (85) - both
+        // kind-INDEPENDENT, and both above every kind branch
+        // `junk_score` has (the largest is 60). So the recovered lane
+        // moves no number this population can carry.
+        // `recover_kind_from_group` is stronger than inert here: it is
+        // dead by this fn's own entry guard, since `cstem` always ends
+        // in `.7z`/`.zip` and the rule declines a plain extension. It
+        // is called anyway because the inertness lives in `junk_score`,
+        // three modules away, and nothing there knows the folds depend
+        // on its branches all sitting below 70.
+        let mut p = crate::categories::classify(cstem, &self.custom);
+        crate::release::recover_media_kind(&mut p, cstem, cstem);
+        crate::release::recover_kind_from_group(&mut p, grp, cstem);
+        // Gate taken BEFORE the pass: `stem_obfuscated`'s second arm is
+        // guarded on `p.season.is_none()`, so asking afterwards judges
+        // the blob by the season the pass just wrote.
+        if !stem_obfuscated(cstem, &p) {
+            crate::release::recover_episode_from_group(&mut p, grp, cstem);
+        }
         tx.execute(
             "UPDATE releases
                 SET total_bytes=?2, files=?3, complete=?4, has_par2=1,
@@ -1174,9 +1241,11 @@ impl Index {
     /// (`junk>=70`, unnamed, and the stem fails
     /// `release::stem_is_a_name` - the ONE shared verdict), a
     /// single-file row, carry a real subject part total, and agree on
-    /// that total; the stem must be at least 16 chars (`LENGTH(stem)
-    /// >= 16` in the statement below) so a generic readable-ish token
+    /// that total; the stem must be at least 12 chars (`LENGTH(stem)
+    /// >= 12` in the statement below) so a generic readable-ish token
     /// ("1917", "Subs") can never bridge two posters' unrelated files.
+    /// That floor was 16 until 1 Sep 2026 - the comment on the statement
+    /// itself carries why it moved and why 12 is the measured bottom.
     /// Members' one-file segment lists are UNIONED by part number (all
     /// rows share the filename, so repointing rows would silently drop
     /// segments).
@@ -1226,13 +1295,22 @@ impl Index {
                 let hi = cursor.saturating_add(SUB_STRIDE).min(call_top);
                 // Cheap SQL prefilter; `stem_is_a_name` is the real test
                 // and runs on the Rust side. files=1 is the shattered
-                // shape (one file row holding one segment).
+                // shape (one file row holding one segment). The length
+                // floor was 16 until 1 Sep 2026, which structurally
+                // excluded 481k dark rows (2.2% of the band) - the
+                // teevee family's stems are commonly 15 characters
+                // (`LgXNckle2TSyKUA`), a whole family one character
+                // under the line. 12 is the measured safe floor: below
+                // it the candidate set starts admitting `)` and
+                // `12345`, which must NOT lose the poster from their
+                // cluster key
+                // (research/SHATTER-FOLD-STARVATION-2026-09-01.md).
                 let cands: Vec<String> = {
                     let mut stmt = self.db.prepare_cached(
                         "SELECT DISTINCT stem FROM releases
                           WHERE id>?1 AND id<=?2 AND junk>=70 AND pre_title=''
                             AND files=1 AND need_parts>0
-                            AND LENGTH(stem) >= 16",
+                            AND LENGTH(stem) >= 12",
                     )?;
                     stmt.query_map([cursor, hi], |r| r.get(0))?
                         .collect::<rusqlite::Result<_>>()?
@@ -1433,7 +1511,8 @@ impl Index {
         loop {
             let members: Vec<ShatterMember> = {
                 let mut stmt = self.db.prepare_cached(
-                    "SELECT r.id, r.has_par2, r.first_posted, r.first_seen, r.need_parts
+                    "SELECT r.id, r.has_par2, r.first_posted, r.first_seen, r.need_parts,
+                            r.grp
                        FROM releases r JOIN files f ON f.release_id=r.id
                       WHERE r.stem=?1 AND r.junk>=70 AND r.pre_title=''
                         AND r.files=1 AND r.need_parts>0 AND f.filename=?2
@@ -1446,6 +1525,7 @@ impl Index {
                         first_posted: r.get(2)?,
                         first_seen: r.get(3)?,
                         need_parts: r.get(4)?,
+                        grp: r.get(5)?,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?
@@ -1498,7 +1578,10 @@ impl Index {
             return Ok(0);
         }
         let need = class[0].need_parts;
-        let keep = class.iter().map(|m| m.id).min().unwrap_or(0);
+        let Some(kept) = class.iter().min_by_key(|m| m.id) else {
+            return Ok(0);
+        };
+        let (keep, keep_grp) = (kept.id, kept.grp.clone());
         let others: Vec<i64> = class
             .iter()
             .map(|m| m.id)
@@ -1608,7 +1691,43 @@ impl Index {
             .unwrap_or(0);
         let fs = class.iter().map(|m| m.first_seen).min().unwrap_or(now);
         let has_par2 = class.iter().any(|m| m.has_par2);
-        let p = crate::categories::classify(stem, &self.custom);
+        // Ingest's recovery chain, against the KEPT row's group, so
+        // this recomputed score is the one ingest would have written
+        // for the stem the row still wears. The members screen on
+        // `pre_title=''`, so there is no fed name and the stem is both
+        // arguments.
+        //
+        // INERT on this population, twice over, and said out loud so
+        // nobody reads it as a fix for a hidden row. The walk skips
+        // every candidate `stem_is_a_name` accepts, so a member's stem
+        // is exactly what `looks_obfuscated` damns - which is
+        // `stem_obfuscated`'s own first arm. So (a) the stem parses to
+        // `Kind::Other`, which both group rules decline on purpose (an
+        // obfuscated stem must not become a book with a hash for a
+        // title) and which the episode gate below declines outright,
+        // and (b) the 70 those members carry is kind-INDEPENDENT and
+        // sits above every kind branch `junk_score` has (the largest is
+        // 60), so no recovered lane could move the number even if one
+        // fired. That closes the `has_exe=false` seam below as well: an
+        // .exe member loses its 85 here, but the blob floor is still
+        // 70. Measured on the live index 2 Sep 2026, before the
+        // Rust-side name filter: 57.9M `other` against 6.02M `movie` in
+        // the SQL band, and of those 6.02M exactly TWO carry an exe -
+        // both `Chainsaw-hrscovers.com` in `alt.binaries.movies`, a
+        // group neither rule vouches for.
+        //
+        // Called anyway because the inertness is arithmetic in
+        // `junk_score` and a predicate in `release`, neither of which
+        // knows the folds depend on it.
+        let mut p = crate::categories::classify(stem, &self.custom);
+        crate::release::recover_media_kind(&mut p, stem, stem);
+        crate::release::recover_kind_from_group(&mut p, &keep_grp, stem);
+        // Gate taken BEFORE the pass: `stem_obfuscated`'s second arm is
+        // guarded on `p.season.is_none()`, so asking afterwards judges
+        // the blob by the season the pass just wrote.
+        if !stem_obfuscated(stem, &p) {
+            crate::release::recover_episode_from_group(&mut p, &keep_grp, stem);
+        }
         tx.execute(
             "UPDATE releases
                 SET total_bytes=?2, files=1, complete=?3, has_par2=?4,

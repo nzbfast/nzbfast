@@ -160,7 +160,7 @@ fn raw_once(port: u16, request: &[u8]) -> std::io::Result<Vec<u8>> {
 /// than the one they were holding.
 ///
 /// Fixed in f8c296359 (27 Jul 2026): the promotion scan in `park_gen`
-/// (serve/daemon_park.rs) collects every held candidate under the queue
+/// (daemon_park.rs) collects every held candidate under the queue
 /// lock and then ranks them with `watchlist::quality_rank`, so "best"
 /// means the same thing here as it does in the watchlist. This test is
 /// what holds it that way.
@@ -342,8 +342,8 @@ async fn b3_duplicate_promotion_prefers_best_held_alternative() {
 // skipped here rather than approximated.
 //
 // 43d9646cf (27 Jul 2026) fixed it by lifting the insertion out into
-// `claim_extra_slot` (serve/job.rs), which refuses to displace a
+// `claim_extra_slot` (job.rs), which refuses to displace a
 // better-ranked occupant of a different stem; `watchlist_pass`
-// (serve/watchlist.rs) now calls that at all three of its extra-slot
+// (crates/nzbfast-daemon/src/watchlist.rs) now calls that at all three of its extra-slot
 // sites. That made the rule reachable without a daemon, and it is covered
-// by the `claim_extra_slot_*` unit tests in serve/job_tests.rs.
+// by the `claim_extra_slot_*` unit tests in job_tests.rs.

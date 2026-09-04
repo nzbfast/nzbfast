@@ -485,6 +485,21 @@ impl QueueControl {
         // items are stashed whole so `requeue` can resurrect them.
         let mut out = Vec::with_capacity(removed.len());
         for w in removed {
+            // TODO 315: this is the FIFTH place a held article's Work
+            // leaves flight for good. A late re-ask waiting in the queue
+            // is an ordinary queued item, so the §146 tail give-up
+            // census, the par-race's straggler set and this sniff's own
+            // covered-slot sweep can all name one - and a Work stashed
+            // in `cancelled` is never walked again by the expiry scan or
+            // by any verdict site, so its slot would stay charged for
+            // the rest of the run. Released BEFORE `claim_done` is
+            // consulted for the same reason as `next_work`'s arm: the
+            // slot is owed back whether or not this call owns the
+            // outcome, and the Work that loses the claim is dropped here
+            // without even being stashed. `requeue` re-charges what it
+            // resurrects, so a cancel/requeue round trip is a no-op on
+            // the budget rather than a refund of somebody else's slot.
+            sh.release_recheck(&w);
             if sh.claim_done(&w.id, w.ord) {
                 sh.complete_one();
                 out.push(w.id.clone());
@@ -650,6 +665,14 @@ impl QueueControl {
         // it was (Fable sweep 15 Aug).
         let mut at = q.iter().take_while(|w| w.promoted).count().min(q.len());
         for w in works {
+            // TODO 315: `cancel` gave this article's late-re-ask slot
+            // back on the way out, so a resurrection has to charge it
+            // again - a queued hold with no charge behind it refunds a
+            // slot another article is holding when it finally goes
+            // terminal, which loosens `recheck_430_max` in the other
+            // direction. Here in the final commit loop, past every
+            // rollback point, so no rollback has to undo it.
+            sh.recharge_recheck(&w);
             if w.promoted {
                 sh.promoted_pending.fetch_add(1, Ordering::AcqRel);
                 q.insert(at, w);
@@ -1298,6 +1321,11 @@ impl QueueControl {
     /// extractor's park counts it against its holds cap, since a park
     /// fired at the cap alone breached it by exactly this much. `None`
     /// with no pool attached.
+    ///
+    /// THIS POOL's charge, deliberately: a concurrent pipeline's wire
+    /// bytes land in that pipeline's slots, not in this run's holds.
+    /// The ledger `wire_over_cap` gates on is the sum over every pool
+    /// sharing the budget and can be larger (`pool::WireCharge`).
     pub fn wire_inflight_bytes(&self) -> Option<u64> {
         let sh = {
             let g = self.shared.lock_ok();

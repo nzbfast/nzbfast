@@ -1,0 +1,49 @@
+# N3: `name=` is present and empty, so the subject is the only name.
+
+[layout]
+name = "n3-empty-yenc-name"
+seed = 3
+note = """
+The yEnc header keeps its `name=` field and states nothing in it, which
+is what a posting tool emits when the name it was handed was empty. The
+subject stays descriptive, and that pairing is the ONLY legal N3 shape:
+the generator refuses `wire = "empty"` beside `subject = "neutral"` by
+name, because with both carriers emptied nothing on the wire says what
+the file is and there is no end state to derive.
+
+TWO FILES, DELIBERATELY. A single-file post could be named by the
+NZB's own `<meta type="name">`, which carries the post name and would
+have made a green row unreadable. Two files with different stems cannot
+both come from one meta, and the meta carries no extension either, so a
+row that lands `Empty.Name.One.bin` and `Empty.Name.Two.bin` cannot have
+got them from there.
+
+WHICH CARRIER THE CLIENT ACTUALLY READS, measured rather than assumed,
+4 Sep 2026. With `[nzb] subject = "differing"` added to this profile the
+row FAILS, and it fails in the shape that identifies the carrier: both
+payloads land as `Decoy.Not.The.Posted.File.1.bin` and `.2.bin`, the
+names the decoy subject spells. So the fallback under an empty `name=`
+is the subject IN THE MAP, and this row is sensitive to it rather than
+passing on some other name source.
+
+That measurement also brackets a precedence rule with an existing row.
+`z5-differing-subject` carries the same decoy map subject over a
+DESCRIPTIVE `name=` and passes, because the yEnc name wins. Here there
+is no yEnc name to win, and the decoy lands. Neither row states the
+rule on its own; the pair does.
+"""
+
+[source]
+files = [
+  { name = "Empty.Name.One.bin", bytes = 24000 },
+  { name = "Empty.Name.Two.bin", bytes = 18000 },
+]
+
+[naming]
+wire = "empty"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -1,0 +1,56 @@
+# G2: two members sharing an all-zero first 16 KiB and a length, so the
+# (length, md5-16k) matcher key collides. 100 % redundancy.
+
+[layout]
+name = "cc-n15-zero-head-twins-r100"
+seed = 1501
+note = """
+Expresses bench/capability-corpus leg n15-twins-r100, and it is the
+first catalog row to select [source] zero_head (gap G2 of
+research/POSTFAST-VS-CAPABILITY-CORPUS-2026-09-03.md).
+
+THE SHAPE. Padded VOBs and disk images begin with a run of zeros. Two
+of them, cut to the same length, therefore agree on both halves of the
+live matcher's key: the length, and the MD5 of the first 16,384 bytes.
+Nothing before the head ends tells the two apart, so a client that
+pairs a wire file to a FileDesc on that key alone has a coin to flip,
+and both names are on the line.
+
+WHY THE HEAD IS 20,000 AND THE BLOCK IS 32,768, which is a rule and not
+a pair of numbers. The head has to clear 16,384 to collide the key at
+all, and it has to stay UNDER the recovery block or the two members
+hand par2gen an identical all-zero block - which is [source] periodic's
+own trap, the one par2cmdline 0.8.1 miscounts. The schema refuses the
+second half by name, so a profile cannot reopen it by accident.
+
+r = 100 here and 10 in cc-n16, which is the pair the corpus keeps and
+the catalog keeps for the same reason: at 100 % even a crossed claim is
+recoverable, and what it costs is a full repair of a post that arrived
+100 % intact. The row asserts the cheap outcome - both names, byte
+exact, no repair - so a client that crossed them and repaired its way
+back would fail on the adopt guard rather than pass quietly.
+"""
+
+[source]
+files = [
+    { name = "Twin.Alpha.vob", bytes = 60000, zero_head = 20000 },
+    { name = "Twin.Beta.vob", bytes = 60000, zero_head = 20000 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 100
+block_bytes = 32768
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 30000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

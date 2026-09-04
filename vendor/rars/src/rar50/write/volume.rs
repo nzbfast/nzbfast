@@ -71,6 +71,87 @@ pub(super) fn write_stored_volumes_impl(
     writer.finish()
 }
 
+/// A split STORED set holding SEVERAL members.
+///
+/// [`write_stored_volumes_impl`] splits ONE member across the volumes.
+/// This one walks a slice through the same [`VolumeSetWriter`] the
+/// compressed set already uses, so members pack end to end and only the
+/// one that lands on a volume boundary carries the split flags. That is
+/// the shape a poster makes with `rar a -v50M set.rar a.mkv b.nfo`, and
+/// nothing here could emit it before (nzbfast-local change, 4 Sep 2026 -
+/// see vendor/rars/VENDORING.md).
+///
+/// The whole-file CRC rides the LAST fragment of each member and the
+/// blake2sp hash record rides a member that was not split at all, both
+/// exactly as the compressed set's stored arm does: a split stored
+/// member with no checksum anywhere extracts corrupt bytes as a success.
+pub(super) fn write_stored_volume_set_impl(
+    entries: &[StoredEntry<'_>],
+    options: WriterOptions,
+    max_data_per_volume: usize,
+    recovery_percent: Option<u64>,
+) -> Result<Vec<Vec<u8>>> {
+    if recovery_percent.is_some() {
+        validate_recovery_options(options)?;
+    } else {
+        validate_options(options)?;
+    }
+    if options.features.archive_comment {
+        return Err(Error::UnsupportedFeature {
+            version: options.target,
+            feature: "RAR 5 volume comments",
+        });
+    }
+    if max_data_per_volume == 0 {
+        return Err(Error::InvalidHeader(
+            "RAR 5 volume payload size must be non-zero",
+        ));
+    }
+    if entries.is_empty() {
+        return Err(Error::InvalidHeader(
+            "RAR 5 stored volume writer needs at least one entry",
+        ));
+    }
+    for entry in entries {
+        validate_entry(entry)?;
+        if entry.data.is_empty() {
+            return Err(Error::InvalidHeader(
+                "RAR 5 volume writer needs a non-empty payload",
+            ));
+        }
+    }
+
+    let mut writer = VolumeSetWriter::new(
+        max_data_per_volume,
+        options.features.solid,
+        None,
+        recovery_percent,
+    );
+    for entry in entries {
+        writer.write_member(
+            entry.data.len(),
+            |out, start, end, split_before, split_after| {
+                write_stored_entry_fragment(
+                    out,
+                    entry,
+                    &entry.data[start..end],
+                    entry.data.len() as u64,
+                    (!split_after).then_some(crc32(entry.data)),
+                    split_before,
+                    split_after,
+                )
+            },
+        )?;
+    }
+    let volumes = writer.finish()?;
+    if volumes.len() < 2 {
+        return Err(Error::InvalidHeader(
+            "RAR 5 volume writer needs at least two volumes",
+        ));
+    }
+    Ok(volumes)
+}
+
 pub(super) fn write_compressed_volume_set_impl(
     entries: &[CompressedEntry<'_>],
     options: WriterOptions,
@@ -295,6 +376,94 @@ pub(super) fn write_encrypted_stored_volumes_impl(
     }
 
     writer.finish()
+}
+
+/// A split ENCRYPTED STORED set holding SEVERAL members.
+///
+/// [`write_encrypted_stored_volumes_impl`] splits ONE member across the
+/// volumes. This one walks a slice through the same [`VolumeSetWriter`]
+/// the encrypted compressed set already uses, so an encrypted split set
+/// stops being compressed-only: each member is encrypted on its own key
+/// material and only the member landing on a volume boundary carries the
+/// split flags (nzbfast-local change, 4 Sep 2026 - see
+/// vendor/rars/VENDORING.md).
+pub(super) fn write_encrypted_stored_volume_set_impl(
+    entries: &[EncryptedStoredEntry<'_>],
+    options: WriterOptions,
+    max_encrypted_per_volume: usize,
+    recovery_percent: Option<u64>,
+) -> Result<Vec<Vec<u8>>> {
+    if recovery_percent.is_some() {
+        validate_encrypted_recovery_options(options)?;
+    } else {
+        validate_encrypted_options(options)?;
+    }
+    if options.features.archive_comment {
+        return Err(Error::UnsupportedFeature {
+            version: options.target,
+            feature: "RAR 5 volume comments",
+        });
+    }
+    if max_encrypted_per_volume == 0 {
+        return Err(Error::InvalidHeader(
+            "RAR 5 encrypted volume payload size must be non-zero",
+        ));
+    }
+    if entries.is_empty() {
+        return Err(Error::InvalidHeader(
+            "RAR 5 encrypted stored volume writer needs at least one entry",
+        ));
+    }
+    for entry in entries {
+        validate_encrypted_entry(entry)?;
+        if entry.data.is_empty() {
+            return Err(Error::InvalidHeader(
+                "RAR 5 encrypted volume writer needs a non-empty payload",
+            ));
+        }
+    }
+
+    let mut payloads = Vec::with_capacity(entries.len());
+    for entry in entries {
+        payloads.push(encrypted_stored_payload(entry.data, entry.password)?);
+    }
+
+    let password = header_encryption_password(entries.iter().map(|entry| entry.password))?;
+    let header_keys = if options.features.header_encryption {
+        Some(header_encryption_keys(password)?)
+    } else {
+        None
+    };
+
+    let mut writer = VolumeSetWriter::new(
+        max_encrypted_per_volume,
+        options.features.solid,
+        header_keys.as_ref(),
+        recovery_percent,
+    );
+    for (entry, encrypted) in entries.iter().zip(&payloads) {
+        writer.write_member(
+            encrypted.data.len(),
+            |out, start, end, split_before, split_after| {
+                write_encrypted_stored_entry_fragment_with_header_keys(
+                    out,
+                    entry,
+                    &encrypted.data[start..end],
+                    encrypted,
+                    split_before,
+                    split_after,
+                    header_keys.as_ref().map(|keys| &keys.keys),
+                )
+            },
+        )?;
+    }
+    let volumes = writer.finish()?;
+    if volumes.len() < 2 {
+        return Err(Error::InvalidHeader(
+            "RAR 5 encrypted volume writer needs at least two volumes",
+        ));
+    }
+    Ok(volumes)
 }
 
 pub(super) fn write_encrypted_compressed_volume_set_impl(

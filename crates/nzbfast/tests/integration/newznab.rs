@@ -148,7 +148,7 @@ const SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 /// test asserts on the exact d3 search-miss readout - a non-empty probe
 /// query showed up in it as a third, unwanted miss the first time this
 /// was tried. `note_search` returns immediately on an empty query
-/// (`crates/nzbfast/src/serve/searchlog.rs`'s own early-out), so this
+/// (`crates/nzbfast-daemon/src/searchlog.rs`'s own early-out), so this
 /// settles the seam without writing anything the readout would see.
 fn settle_index(port: u16, key: &str) {
     let started = std::time::Instant::now();
@@ -170,14 +170,46 @@ fn settle_index(port: u16, key: &str) {
     }
 }
 
+/// One JSON API call, with a `busy` refusal WAITED OUT rather than read
+/// as this call's own answer.
+///
+/// [`settle_index`] waits out the daemon's STARTUP index open and says
+/// nothing about any later call. This file's two WRITES -
+/// `mode=search_log_clear` and `mode=wall_fix` - are refused whenever
+/// the write mutex is still held after `HTTP_INDEX_WAIT`, which answers
+/// `{"status": false, "busy": true, ...}` where the assertions want
+/// `"status":true`. `wall.rs` went on flaking for a day on exactly that
+/// after its READ half was fixed (3 Sep 2026), so the write half is
+/// covered here before it is seen rather than after.
+///
+/// A refused write is safe to repeat: `index_write_checked`'s `Err`
+/// means the mutex was never taken, so nothing was written.
+fn api_settled(what: &str, send: impl Fn() -> (u16, String)) -> serde_json::Value {
+    let started = std::time::Instant::now();
+    loop {
+        let (code, body) = send();
+        assert_eq!(code, 200, "{what}: {body}");
+        let v: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|e| panic!("{what}: {e}\n{body}"));
+        if v["busy"] != true {
+            return v;
+        }
+        assert!(
+            started.elapsed() < SETTLE_BUDGET,
+            "the index was still busy after {SETTLE_BUDGET:?}: {what}\n{body}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// Block until the search-miss readout accounts for `want` searches,
 /// and hand back the body that said so.
 ///
 /// `Daemon::search_log_tick` drains the in-memory search buffer into
-/// the table on its own timer (`crates/nzbfast/src/serve/tasks.rs`, one
+/// the table on its own timer (`crates/nzbfast-tasks/src/tasks.rs`, one
 /// second here through the documented debug seam), at a phase no caller
 /// controls, and `m_search_misses`
-/// (`crates/nzbfast/src/serve/api/index.rs`) serves the TABLE and never
+/// (`crates/nzbfast-api/src/api/index.rs`) serves the TABLE and never
 /// the buffer. So a tick landing between two of this file's requests
 /// publishes a readout that is real, current and PARTIAL.
 ///
@@ -1280,8 +1312,9 @@ async fn searches_that_miss_reach_the_d3_readout() {
         // below is the one carrying the weight: `clear_search_log` reports
         // `IndexBusy` rather than a clear it did not do, so a busy index
         // fails there instead of passing quietly.
-        let (_, body) = http_get(port, "/api?mode=search_log_clear&apikey=sekrit&output=json");
-        assert!(body.contains("\"status\":true"), "{body}");
+        let q = "/api?mode=search_log_clear&apikey=sekrit&output=json";
+        let v = api_settled(q, || http_get(port, q));
+        assert_eq!(v["status"], true, "{v}");
         let (_, body) = http_get(
             port,
             "/api?mode=search_misses&apikey=sekrit&output=json&days=365",
@@ -2219,22 +2252,17 @@ async fn a_wall_identity_correction_drops_the_superseded_tvdb_id() {
 
         // A human presses a candidate in the wall's fix-match list: this
         // card is not Cat Show, it is Dog Show. The provider id moves.
-        let (code, body) = http_post_json(
-            port,
-            "/api?mode=wall_fix",
-            &format!(
-                "{{\"key\":{},\"kind\":\"tv\",\"title\":\"Dog Show\",\"year\":0,\
-                  \"meta\":{{\"id\":888,\"provider\":\"tvmaze\",\"overview\":\"\",\
-                  \"rating\":0,\"genres\":\"\",\"poster_url\":\"\",\"backdrop_url\":\"\",\
-                  \"imdb\":\"\",\"air_date\":\"\"}}}}",
-                serde_json::to_string(&key).unwrap()
-            ),
+        let fix = format!(
+            "{{\"key\":{},\"kind\":\"tv\",\"title\":\"Dog Show\",\"year\":0,\
+              \"meta\":{{\"id\":888,\"provider\":\"tvmaze\",\"overview\":\"\",\
+              \"rating\":0,\"genres\":\"\",\"poster_url\":\"\",\"backdrop_url\":\"\",\
+              \"imdb\":\"\",\"air_date\":\"\"}}}}",
+            serde_json::to_string(&key).unwrap()
         );
-        assert_eq!(code, 200, "{body}");
-        assert!(
-            body.contains("\"status\":true"),
-            "the fix was refused: {body}"
-        );
+        let v = api_settled("mode=wall_fix", || {
+            http_post_json(port, "/api?mode=wall_fix", &fix)
+        });
+        assert_eq!(v["status"], true, "the fix was refused: {v}");
 
         // The superseded id must no longer name this card. Answering
         // with it is the fault: Sonarr asked about the series that
@@ -2382,6 +2410,202 @@ async fn newznab_deep_paging_has_no_overlap_and_no_gaps() {
             TOTAL,
             "paging walk only covered {} of {TOTAL} seeded releases (gap)",
             seen.len()
+        );
+    })
+    .await
+    .unwrap();
+}
+/// The ingest drop census, over the wire (`mode=index_drops`).
+///
+/// The four `ingest_drop_*` counters were written for a day with NOTHING
+/// outside a unit test reading one, while 5.8M no-filename drops piled up
+/// on the live index and the no-filename admission decision they were
+/// taken for could not be made from any shipped surface. This is the
+/// surface, so this is the test that says it answers.
+///
+/// It pins the two things a reader could get wrong: the two families are
+/// reported apart (`gen_depth` is a pass-budget surplus that re-arrives on
+/// the next scan, so it is NOT in `dropped_total`), and a counter that has
+/// never fired reads as a zero rather than as a missing field.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ingest_drop_census_answers_over_the_api() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-nndrop-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        ix.ingest(
+            "alt.binaries.teevee",
+            &[
+                // Two fully-obfuscated subjects: a bare token, no quotes,
+                // no name.ext. Both are dropped and both are counted.
+                over(1, "aGVsbG8gb2JmdXNjYXRlZA (1/50)", "<o1@x>", 700_000),
+                over(2, "bm8gbmFtZSBoZXJlIGVpdGhlcg (2/50)", "<o2@x>", 700_000),
+                over(
+                    3,
+                    "\"Kept.Show.S01E01.1080p.rar\" yEnc (1/1)",
+                    "<a1@x>",
+                    1000,
+                ),
+            ],
+            1_700_000_000,
+        )
+        .unwrap();
+    }
+
+    let d = serve(&dir, id_suite_daemon(&dir, &db)).await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        settle_index(port, "");
+        // The pool can still answer `busy` on any single request - that
+        // is the contract, and it is why this mode reports it rather
+        // than rendering known-nonzero totals as zeroes. Wait for an
+        // answer instead of asserting on the first one.
+        let started = std::time::Instant::now();
+        let body = loop {
+            let (code, body) = http_get(port, "/api?mode=index_drops&output=json");
+            assert_eq!(code, 200, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            if v["busy"] != true {
+                break v;
+            }
+            assert!(
+                started.elapsed() < SETTLE_BUDGET,
+                "the census never answered in {SETTLE_BUDGET:?}:\n{body}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        assert_eq!(body["index_enabled"], true, "{body}");
+        let c = &body["census"];
+        assert_eq!(c["dropped"]["no_filename"], 2, "{body}");
+        assert_eq!(
+            c["dropped"]["empty_stem"], 0,
+            "a counter that never fired is a zero, not an absent field: {body}"
+        );
+        assert_eq!(c["dropped_total"], 2, "{body}");
+        assert_eq!(
+            c["over_budget"]["gen_depth"], 0,
+            "the surplus family is reported apart from the drops: {body}"
+        );
+        assert_eq!(
+            c["window_known"], true,
+            "an index that started counting on its first batch knows its window: {body}"
+        );
+        // The generation-depth census rides the same mode, BESIDE the
+        // two drop families and never inside them: `slots` is not a
+        // drop and `rows` counts generation rows MINTED, so folding
+        // either into `dropped_total` would be the same category error
+        // the two families above are kept apart to avoid.
+        let g = &c["gen_depth"];
+        assert_eq!(
+            g["slots"].as_object().map(|o| o.len()),
+            Some(0),
+            "a batch that clashed nowhere has no depth to report: {body}"
+        );
+        assert_eq!(c["dropped_total"], 2, "gen_depth must not reach it: {body}");
+        assert!(
+            g["buckets"].as_array().is_some_and(|b| b[0] == "0002"),
+            "the bucket vocabulary is served in order even when empty: {body}"
+        );
+        // Two censuses, two independently stamped windows - which is
+        // why this one carries its own rather than sharing the flag
+        // above. Here they genuinely differ: the drops counted on the
+        // first batch, the depth census counted nothing at all.
+        assert_eq!(
+            g["window_known"], false,
+            "a census that has never counted must not borrow the other's window: {body}"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+/// `mode=corr_confirm_stats`'s `per_day` is the budget the lane will
+/// ACTUALLY spend, not the floor constant.
+///
+/// It reported `CONFIRM_PER_DAY` (24) until 2 Sep 2026. That was right
+/// while 24 was the ceiling; the 1 Sep ruling made the ceiling derived
+/// from the reference account's own quotas - up to 400 on an unmetered
+/// account - and this line was not moved with it, so an operator
+/// watching `spent_today` against it would have seen the lane sail past
+/// its stated limit by up to 16x. Found by reading the surface right
+/// after switching the lane on and noticing it disagreed with the
+/// daemon's own "up to 400 lookup(s)/day" switch-on line.
+///
+/// Also pins the inert case as `null` rather than a number: with no
+/// resolvable account the lane spends nothing, and naming a budget
+/// nothing can spend is the same lie in the other direction.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_confirm_budget_readout_is_the_derived_one_not_the_floor() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-nnconfbud-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    let db = dir.join("index.db");
+    let d = serve(&dir, id_suite_daemon(&dir, &db)).await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        let enc = |s: &str| {
+            s.bytes()
+                .map(|b| match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        (b as char).to_string()
+                    }
+                    _ => format!("%{b:02X}"),
+                })
+                .collect::<String>()
+        };
+        let stats = |port: u16| -> serde_json::Value {
+            let (code, body) = http_get(port, "/api?mode=corr_confirm_stats&output=json");
+            assert_eq!(code, 200, "{body}");
+            serde_json::from_str(&body).unwrap_or_default()
+        };
+
+        // No account named: the lane is inert and says so with a null
+        // budget, not with the floor.
+        let v = stats(port);
+        assert_eq!(v["source_state"], "none", "{v}");
+        assert!(
+            v["per_day"].is_null(),
+            "an unpointed lane must not advertise a budget: {v}"
+        );
+
+        // A metered account: 80% of the binding quota, well clear of
+        // both the floor (24) and the unlimited number (400), so this
+        // cannot pass by coincidence.
+        let entry = r#"[{"name":"ref","url":"http://127.0.0.1:1/api","apikey":"k","hits_per_day":1000,"grabs_per_day":250}]"#;
+        let (code, body) = http_get(
+            port,
+            &format!("/api?mode=config&name=indexers&value={}&output=json", enc(entry)),
+        );
+        assert_eq!(code, 200, "{body}");
+        let (code, body) = http_get(
+            port,
+            "/api?mode=config&name=corr_confirm_source&value=ref&output=json",
+        );
+        assert_eq!(code, 200, "{body}");
+
+        let v = stats(port);
+        assert_eq!(v["source_state"], "ok", "{v}");
+        assert_eq!(
+            v["per_day"], 200,
+            "grabs bind at 250, so the budget is 200 - not the floor, not 400: {v}"
+        );
+
+        // An account that exists but is turned off resolves to nothing,
+        // so the budget goes back to null rather than staying stale.
+        let off = r#"[{"name":"ref","url":"http://127.0.0.1:1/api","apikey":"k","enabled":false,"hits_per_day":1000,"grabs_per_day":250}]"#;
+        let (code, body) = http_get(
+            port,
+            &format!("/api?mode=config&name=indexers&value={}&output=json", enc(off)),
+        );
+        assert_eq!(code, 200, "{body}");
+        let v = stats(port);
+        assert_eq!(v["source_state"], "disabled", "{v}");
+        assert!(
+            v["per_day"].is_null(),
+            "a disabled account spends nothing: {v}"
         );
     })
     .await

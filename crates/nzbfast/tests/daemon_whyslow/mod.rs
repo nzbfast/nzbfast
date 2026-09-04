@@ -342,7 +342,7 @@ async fn a_history_record_from_before_the_field_reads_as_absent() {
 /// setting seeds the pool's gauges, `whyslow::feed` reads them off
 /// `pool_live`, `classify` reaches the fleet arm, the majority window
 /// publishes it, and the queue payload carries the four receipts. The
-/// unit tests in serve/whyslow.rs pin the decision core in both
+/// unit tests in whyslow.rs pin the decision core in both
 /// directions; nothing before this drove the whole chain.
 ///
 /// The rig HAS to be a slow mock rather than a plain mockserve run,
@@ -547,7 +547,7 @@ async fn the_knee_verdict_is_produced_end_to_end_on_a_running_daemon() {
         - 8 * 86_400;
     // `v` and `limit` are LOAD-BEARING on the daemon path and are what
     // separate this fixture from the pure `get::fleet` one, which never
-    // starts a daemon. `serve/tasks/tuner.rs` runs
+    // starts a daemon. `tasks/tuner.rs` runs
     // `conntune::reopen_for_install` at startup, and that sweep RETIRES
     // every pre-v2 entry (suspect, `checked: 0`) and also reopens a knee
     // measured under a ceiling the user has since raised. Without the

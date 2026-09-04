@@ -25,8 +25,8 @@ cd /tmp/winget-pkgs
 git checkout -b nzbfast-<version>
 mkdir -p manifests/n/nzbfast/nzbfast/<version>
 cp <repo>/packaging/winget/manifests/<version>/*.yaml manifests/n/nzbfast/nzbfast/<version>/
-git -c user.name=nzbfast -c user.email=releases@nzbfast.com add manifests/n/nzbfast/nzbfast/<version>
-git -c user.name=nzbfast -c user.email=releases@nzbfast.com commit -m "New version: nzbfast.nzbfast version <version>"
+git -c user.name=nzbfast -c user.email=307209046+nzbfast@users.noreply.github.com add manifests/n/nzbfast/nzbfast/<version>
+git -c user.name=nzbfast -c user.email=307209046+nzbfast@users.noreply.github.com commit -m "New version: nzbfast.nzbfast version <version>"
 git push origin nzbfast-<version>
 gh pr create --repo microsoft/winget-pkgs --title "New version: nzbfast.nzbfast version <version>" --body "..."
 ```
@@ -37,6 +37,19 @@ the release account) automates the whole PR; komac is cross-platform.
 
 Notes:
 
+- **The commit author email is the `nzbfast` account's GitHub noreply
+  address, and that is load-bearing rather than cosmetic.** It was
+  `releases@nzbfast.com` until 1 Sep 2026, and nzbfast.com is
+  deliberately unwired (TODO 736) - so that address is attached to no
+  GitHub account, `author.login` reads NULL on every commit, and the
+  policy bot cannot match the PR to the signed CLA. Measured: `Needs-CLA`
+  was re-applied to EVERY new PR and a human had to re-assert the
+  agreement by comment each time (#417149, #423063, #423649). The noreply
+  form always resolves to the account, needs no mailbox and no
+  verification step, and publishes no real inbox into a Microsoft repo's
+  permanent history. Do NOT "tidy" it back to a domain address, and do
+  not put a real inbox here instead. Untested until the next PR - the
+  first submission after 1 Sep 2026 is what proves it.
 - The manifests cannot be validated end-to-end from this Mac
   (`winget validate` and the install test need Windows); the repo's CI
   is the real gate, so watch the PR checks rather than assuming.

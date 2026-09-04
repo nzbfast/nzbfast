@@ -1,0 +1,47 @@
+# P9: two independent recovery sets in one post.
+
+[layout]
+name = "p9-two-sets"
+seed = 9
+note = """
+Two sets, disjoint members, separate base names, in one post. It is
+what a poster produces by par2-ing two releases into one upload, and
+what a repost produces when a second set is added beside the first
+rather than replacing it.
+
+The row is about ROUTING. A client that treats every .par2 article in a
+job as one set gets a set whose Main packet lists members it has no
+descriptors for and whose recovery slices are indexed against the wrong
+input geometry, and the failure mode is a verify that reports damage on
+an undamaged post. Both files are posted under tokens, so each one's
+real name is recoverable only from the set that actually describes it -
+crossing them would file each under the other's name and the oracle
+would say so.
+
+Index-only sets (0 % redundancy) rather than sets with parity: routing
+is a naming question, so the row keeps the parity out of it and stays
+cheap enough to run on every push.
+"""
+
+[source]
+files = [
+    { name = "First.Release.mkv", bytes = 49152 },
+    { name = "Second.Release.mkv", bytes = 32768 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+covers = ["First.Release.mkv"]
+second_covers = ["Second.Release.mkv"]
+
+[encoding]
+article_bytes = 20000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

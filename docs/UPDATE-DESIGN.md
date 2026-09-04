@@ -42,14 +42,53 @@ report, no telemetry. Turning the check off entirely is a setting.
    download server says can influence acceptance; transport security is
    not the trust anchor, the signature is.
 
-3. **Anti-rollback serial.** The signed body carries a monotonic
-   `serial`. Clients persist the highest serial they have ever seen, so
-   a replayed old-but-validly-signed manifest is recognisable as stale.
-   The serial is compared only against the client's own stored value,
-   never against the clock, so a machine with a wrong clock cannot lock
-   itself out. Absent or unparseable serials hold the ratchet rather
-   than clearing it. Current status: clients record and warn;
-   enforcement turns on once field data shows serials arriving intact.
+3. **Anti-rollback serial, enforced.** The signed body carries a
+   monotonic `serial`. Clients persist the highest serial they have ever
+   seen and refuse any manifest that fails to beat it, so a replayed
+   old-but-validly-signed manifest is recognised as stale and no update
+   is offered from it. The serial is compared only against the client's
+   own stored value, never against the clock, so a machine with a wrong
+   clock cannot lock itself out. The exact rules:
+
+   - A **higher** serial is accepted and becomes the new floor.
+   - The **same** serial is accepted and writes nothing. This is the
+     ordinary six-hourly re-check.
+   - A **lower** serial is refused.
+   - A **missing or unparseable** serial is refused once this install has
+     already seen a real one, and accepted before that. A channel that
+     has shown it emits serials cannot then drop one, because a manifest
+     without a serial is indistinguishable from a replay of one that
+     predates them, and accepting it would make stripping the field the
+     way around the whole mechanism. An install that has never seen a
+     serial has no floor to duck under and nothing to refuse, which is
+     what keeps a serial-less private mirror working.
+
+   A refused manifest never lowers the stored floor, whatever it
+   contains, and never takes down a banner an earlier accepted manifest
+   raised. Feeding an install junk can therefore stop it learning
+   something new; it cannot make it forget something true.
+
+   Shipped read-only from 28 Jul 2026 and enforcing from 2 Sep 2026. The
+   gap was deliberate: enforcement had to arrive after a release cycle of
+   evidence that serials really do turn up. That evidence is public and
+   checkable - `serial` is present in every manifest from v1.0.11 to
+   v1.3.1 and strictly increases across all 26 of them.
+
+   **Resetting the floor.** The ratchet is one-way and local, with no
+   server-side reset, so a wrong serial published once would wedge the
+   channel on every install that recorded it and no later release could
+   unwedge it. The way out is deliberately a local one: stop nzbfast,
+   delete the `"update_serial_seen"` line from `settings.json` in the
+   config folder, and start it again. Every refusal message prints that
+   file's real path. This is the reset you need if you point `update_url`
+   at your own channel whose serials do not line up with ours.
+
+   It is not exposed as a setting, and that is the safety argument for
+   enforcing at all. The API is reachable over the LAN, so a settable
+   reset would let the network lower an install's rollback floor, which
+   is the attack the ratchet exists to stop. Needing a shell on the
+   machine and a stopped daemon is the property that makes the escape
+   hatch safe.
 
 4. **Version comparison.** A manifest advertising a version at or below
    the running one is not an update, whatever it is signed with.

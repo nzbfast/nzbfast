@@ -1,0 +1,50 @@
+# C4: a data-encrypted RAR5 archive, unlocked from the NZB.
+
+[layout]
+name = "c4-encrypted-rar5-data"
+seed = 104
+note = """
+The first encrypted row in this catalog, and the one that proves the
+whole password path rather than only the archive.
+
+The archive's DATA is encrypted and its headers are not, so the file
+list is readable without the password and the bytes are not. That is
+the commonest encrypted shape on the wire and the weaker of the two:
+a client can see what it is about to fail to extract.
+
+WHERE THE PASSWORD COMES FROM is the half of this row worth reading.
+The oracle passes no command-line flag and writes the NZB under a fixed
+name, so neither of the client's other two password sources can reach
+it - the flag is not given and the {{...}} filename convention has no
+filename to live in. `[nzb] meta_password` is the only carrier left,
+and it puts the password in <meta type="password"> in the NZB's head,
+which is where every real indexer puts one. So a green row here says
+the client read the meta, derived the key and landed the bytes; a row
+that passed with the meta removed would be saying the archive was never
+encrypted at all, which is what the container plane's own control arm
+pins.
+
+The salt is SEEDED, which is what makes this row expressible at all.
+Both RAR generations draw their key salt from OS entropy by default and
+still do for anything real; a catalog profile opts into a seeded source
+so one profile and one seed give one archive on every machine, and an
+archive written that way has no secrecy - it is a fixture, and the
+password below is furniture.
+"""
+
+[source]
+files = [{ name = "locked.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+encryption = "data"
+password = "layout-fixture-pw"
+
+[nzb]
+meta_password = true
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

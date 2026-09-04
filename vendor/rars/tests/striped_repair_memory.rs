@@ -11,6 +11,10 @@
 //! allocations too and failed whenever the suite was busy. Cargo gives each
 //! test target its own process, and this target holds exactly one test, so
 //! the only thing allocating during the measurement is the repair.
+//!
+//! test-target-gate: measures the process's own RSS and needs a process
+//! holding exactly one test - as a shared-binary test it flaked whenever
+//! the suite was busy
 
 use rars::recovery::rar5::{make_encoder_matrix, repair_shards_striped, Gf16, StripeRepairPlan};
 

@@ -151,9 +151,9 @@ fn a_completed_history_row_stops_a_watched_nzb_being_ingested_again() {
     );
     // ...and nothing was queued behind it.
     std::thread::sleep(std::time::Duration::from_millis(500));
-    let queued = std::fs::read_to_string(dir.join(".spool/queue.json")).unwrap_or_default();
+    let queued = crate::harness::stored_queue_text(&dir);
     assert!(
-        !queued.contains("\"origin\": \"watch\""),
+        !queued.contains("\"origin\":\"watch\""),
         "the release was enqueued despite already being in history\n{queued}"
     );
 
@@ -248,16 +248,11 @@ fn recursive_watch_uses_the_first_subfolder_as_the_category() {
     // The job may be in the QUEUE or already in HISTORY when we look:
     // this config has no servers, so the runner's next pick (a 500 ms
     // tick) dials, fails the job with "config has no servers" and parks
-    // it to .spool/history.jsonl - queue.json then holds an empty queue
-    // array. The category rides the record to history unchanged, so
+    // it to .spool/history.jsonl - the queue store then holds no live
+    // rows. The category rides the record to history unchanged, so
     // read both; on a fast box the park wins the race often enough to
     // flake CI (seen on windows-unit as "got []").
-    let queued: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join(".spool/queue.json")).unwrap())
-            .unwrap();
-    let mut cats: Vec<String> = queued["queue"]
-        .as_array()
-        .unwrap()
+    let mut cats: Vec<String> = crate::harness::stored_queue(&dir)
         .iter()
         .map(|j| j["category"].as_str().unwrap_or_default().to_string())
         .collect();

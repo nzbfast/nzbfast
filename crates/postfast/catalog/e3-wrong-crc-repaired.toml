@@ -1,0 +1,51 @@
+# E3: one article's CRC does not describe its bytes, and the recovery
+# set is what makes the row gradeable.
+
+[layout]
+name = "e3-wrong-crc-repaired"
+seed = 13
+note = """
+The question E3 asks is whether the client TRUSTS the CRC an article
+carries. The sharp form is one poisoned article inside an otherwise
+healthy post: a client that checks refuses that article and needs the
+set to fill the hole, and a client that does not check writes corrupt
+bytes and completes green over them. Both answers are visible here and
+they differ, which is what makes it a row rather than an observation.
+
+Why the recovery set is not optional to it. The generator poisons
+exactly one article, in the first file, and that file is always
+payload - the recovery files are appended after it - so the set can
+never be the thing that was poisoned. Without a set the end state
+would be a file with a hole in it, which the oracle grades byte for
+byte and no profile can declare; with one, the correct end state is
+the payload intact, which is exactly what a passing row should mean.
+A post where EVERY article carried a bad CRC would be a post nobody
+could download, and a row whose only possible outcome is failure is
+not a row about trust.
+
+The parity is cut to the block, deliberately. The poisoned article is
+8192 bytes, which is two 4096-byte PAR2 blocks, and the set carries
+exactly two recovery blocks in two volumes - so the repair MUST fetch
+both and "every volume arrives" is forced by arithmetic rather than
+observed. With spare parity the client chooses which volumes to pull,
+and a row naming particular volume files would be pinning that choice
+by accident and would go red the day it improved. See expects_repair
+in crates/postfast/src/layout.rs.
+"""
+
+[source]
+files = [{ name = "Poisoned.Feature.mkv", bytes = 65536 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 12
+
+[encoding]
+part_crc = "wrong"
+article_bytes = 8192
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

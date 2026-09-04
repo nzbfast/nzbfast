@@ -72,6 +72,21 @@ pub const NESTED_MAX_DEPTH_HARD_CEILING: usize = 64;
 /// out of step with its twin in silence, which is exactly how the disk
 /// site came to charge a stored layer that the stream site did not.
 ///
+/// THE RULE IS SHARED; THE PREMISE IS NOT, and that sentence read as
+/// promising more than it delivered until 1 Sep 2026. What the two
+/// sites do not share is how they establish "PROVEN to store
+/// everything": `rar::volume_is_store_only` reads a whole file off
+/// disk and demands `m.complete`, and says so at length. The stream
+/// site has no such file - `Extractor::ensure_child` must build the
+/// child the instant the first inner file routes, which is long before
+/// the volume's end header arrives - so requiring completeness there
+/// would not make the exemption stricter, it would delete it, and with
+/// it the store-ladder win `nested_depth_cap_materializes` pins. It
+/// grants on FIRST evidence and REVOKES instead: a compressed entry
+/// parsing behind the stored one lowers the child's cap back and
+/// switches the child off if the unraised cap does not reach it
+/// (`Extractor::revoke_store_raise`).
+///
 /// Saturating rather than wrapping: `cap` comes from a daemon setting a
 /// user types, and `usize::MAX + 1` is not a deeper ladder.
 pub fn nested_cap_after_store_layer(cap: usize) -> usize {
@@ -248,6 +263,41 @@ pub(super) fn sevenz_trim_env_off() -> bool {
 /// Pure parse of the trim escape-hatch value (same rationale as
 /// [`nested_env_off_value`]).
 pub(super) fn sevenz_trim_env_off_value(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+/// Escape hatch for the one-pass 7z DIRECT MAP (TODO 37 step 4): with it
+/// set, a Copy-coded container keeps decoding through the worker and its
+/// frontier buffer instead of routing its members straight to their
+/// outputs - the behaviour audit round 12 measured. Latched at
+/// construction. See `extract::sevenz_map` for what the map does and
+/// which shapes decline it on their own.
+pub(super) fn sevenz_direct_env_off() -> bool {
+    sevenz_direct_env_off_value(std::env::var("NZBFAST_NO_7Z_DIRECT").ok().as_deref())
+}
+
+/// Pure parse of the direct-map escape-hatch value (same rationale as
+/// [`nested_env_off_value`]).
+pub(super) fn sevenz_direct_env_off_value(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+/// Escape hatch for the one-pass ZIP DIRECT MAP: with it set, a stored
+/// zip container keeps streaming through the worker and its frontier
+/// buffer instead of routing its entries straight to their outputs - the
+/// behaviour audit round 16 measured on the disk path and left unmeasured
+/// in-stream. Latched at construction. The zip twin of
+/// [`sevenz_direct_env_off`], deliberately its OWN switch so a round can
+/// A/B both arms out of ONE binary without also turning the 7z map off.
+/// See `extract::zip_map` for what the map does and which shapes decline
+/// it on their own.
+pub(super) fn zip_direct_env_off() -> bool {
+    zip_direct_env_off_value(std::env::var("NZBFAST_NO_ZIP_DIRECT").ok().as_deref())
+}
+
+/// Pure parse of the zip direct-map escape-hatch value (same rationale as
+/// [`nested_env_off_value`]).
+pub(super) fn zip_direct_env_off_value(v: Option<&str>) -> bool {
     v == Some("1")
 }
 
@@ -489,6 +539,20 @@ impl Extractor {
         self.inner.lock_ok().sevenz_trim_on = on;
     }
 
+    /// 7z direct-map gate (see `NZBFAST_NO_7Z_DIRECT`, latched at
+    /// construction). Set it BEFORE the first span: the map is decided
+    /// once, when the container's end header parses.
+    pub fn set_sevenz_direct(&self, on: bool) {
+        self.inner.lock_ok().sevenz_direct_on = on;
+    }
+
+    /// ZIP direct-map gate (see `NZBFAST_NO_ZIP_DIRECT`, latched at
+    /// construction). Set it BEFORE the first span: the map is decided
+    /// once, when the container's central directory parses.
+    pub fn set_zip_direct(&self, on: bool) {
+        self.inner.lock_ok().zip_direct_on = on;
+    }
+
     /// RAR chase drop-behind trim gate (see `NZBFAST_NO_RAR_TRIM`,
     /// latched at construction). Same discipline as
     /// [`Self::set_sevenz_trim`]: safe to flip mid-download, but tests
@@ -577,6 +641,28 @@ impl Extractor {
     /// miss it).
     pub fn set_verify_gate(&self, gate: Arc<crate::live::VerifyGate>) {
         self.inner.lock_ok().verify_gate = Some(gate);
+    }
+
+    /// Install the "no PAR2 set can ever claim a slot of this job"
+    /// predicate (see [`NoParityHook`]). Root only, like the gate it
+    /// stands beside; a child's trim is already unvouched-and-free.
+    ///
+    /// Without one, a job whose set carries NO parity keeps the whole
+    /// vouch: the gate handle is attached unconditionally on the
+    /// download path, so `engaged_mark` answers `None` for the life of
+    /// the run and every byte the drop-behind decides to release is
+    /// SPILLED into the volume files instead. Measured 3 Sep 2026 on a
+    /// 1.87 GB set: 48,149 of 48,151 passes decided DROP and 0 dropped,
+    /// 1.6-1.8 GB of extra device writes and up to 1.36 GB of extra peak
+    /// footprint against the identical set with parity beside it
+    /// (`research/RAR-PERF-AUDIT-2026-09-02.md`, rounds 18 and 34; round
+    /// 34 is the fix, and measures it back at 1.55-1.69 GB of writes and
+    /// up to 1.35 GB of peak with the parity shape unmoved).
+    pub fn set_no_parity_hook(&self, hook: crate::extract::NoParityHook) {
+        if self.depth != 0 {
+            return;
+        }
+        self.inner.lock_ok().no_parity = Some(hook);
     }
 
     /// This slot's verified-block watermark, as [`VerifyGate::engaged_mark`]

@@ -442,6 +442,11 @@ fn pack_rar(
     for (name, data, _) in &payloads {
         std::fs::write(dir.join(name), data)?;
     }
+    // sandbox-seam-gate: `nzbfast chaos-serve` is the developer fixture
+    // builder and not a daemon path. `rar` packs a corpus this process
+    // synthesised itself a few statements above, in a temp directory it
+    // created; there are no poster bytes here for a policy to hold back, and
+    // the binary is named by RAR_BIN, set by whoever ran the subcommand.
     let mut cmd = std::process::Command::new(&bin);
     cmd.current_dir(&dir)
         .arg("a")
@@ -503,6 +508,10 @@ fn add_par2(
     for (name, data, _) in payloads {
         std::fs::write(dir.join(name), data)?;
     }
+    // sandbox-seam-gate: the same fixture builder as `pack_rar` above.
+    // `par2 create` reads only the payloads this process just wrote into a
+    // temp directory of its own, under an explicit developer subcommand the
+    // daemon never reaches, with the binary named by PAR2_BIN.
     let mut cmd = std::process::Command::new(&bin);
     cmd.current_dir(&dir)
         .arg("create")

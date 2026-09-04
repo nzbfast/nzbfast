@@ -6,6 +6,16 @@
 //!   nzbserve build <legdir>              write <legdir>/<leg>.nzb
 //!   nzbserve serve <legdir> [--port N]   serve the leg over NNTP (plain
 //!            [--line-mbps N]             TCP, no auth) until killed
+//!            [--article-size N]
+//!
+//! `--article-size` sets the decoded payload bytes per article (default
+//! `ART_SIZE`, ~700 KB, which is what a typical real post uses). It is
+//! part of the article LAYOUT, so `build` and `serve` must be given the
+//! same value or the message ids in the NZB name articles the server
+//! does not have. Added 3 Sep 2026 for the small-articles regime lane
+//! (`research/RAR-PERF-AUDIT-2026-09-02.md` round 23): per-article
+//! costs in the one-pass path are invisible at 700 KB and show at
+//! ~100 KB, where a GB is 10,000 articles instead of 1,500.
 //!
 //! `--line-mbps` paces the whole server to N MB/s, so a loopback rig can
 //! reproduce a real line rate instead of this host's. Added 21 Aug for a
@@ -34,6 +44,7 @@ use std::path::{Path, PathBuf};
 use nzbkit::mock::{Chaos, MockServer, make_file_articles};
 
 /// Article payload size; ~700 KB decoded matches typical real posts.
+/// The default for `--article-size`.
 const ART_SIZE: usize = 700_000;
 
 struct LegFile {
@@ -178,7 +189,7 @@ fn read_yenc_lies(legdir: &Path, files: &mut [LegFile]) {
 
 /// Build articles + NZB for a leg. Deterministic: same files in, same
 /// message ids and same NZB out.
-fn build_leg(legdir: &Path) -> BuiltLeg {
+fn build_leg(legdir: &Path, art_size: usize) -> BuiltLeg {
     let mut files = read_dir_sorted(&legdir.join("post"), false);
     files.extend(read_dir_sorted(&legdir.join("ghost"), true));
     assert!(!files.is_empty(), "no files under {}/post", legdir.display());
@@ -209,13 +220,13 @@ fn build_leg(legdir: &Path) -> BuiltLeg {
             Some((size_lie, total_lie)) => make_lying_file_articles(
                 &f.name,
                 &f.data,
-                ART_SIZE,
+                art_size,
                 &idtag,
                 size_lie,
                 total_lie,
                 &mut articles,
             ),
-            None => make_file_articles(&f.name, &f.data, ART_SIZE, &idtag, &mut articles),
+            None => make_file_articles(&f.name, &f.data, art_size, &idtag, &mut articles),
         };
         if f.ghost {
             for (id, _, _) in &segs {
@@ -251,7 +262,10 @@ fn nzb_path(legdir: &Path) -> PathBuf {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: nzbserve build <legdir> | nzbserve serve <legdir> [--port N]";
+    let usage = "usage: nzbserve build <legdir> [--article-size N] | \
+                 nzbserve serve <legdir> [--port N] [--line-mbps N] [--article-size N] \
+                 [--corrupt-nth N] \
+                 [--corrupt-match SUBSTR]";
     let (mode, legdir) = match (args.first().map(String::as_str), args.get(1)) {
         (Some(m @ ("build" | "serve")), Some(d)) => (m, PathBuf::from(d)),
         _ => {
@@ -261,6 +275,9 @@ fn main() {
     };
     let mut port: u16 = 11901;
     let mut line_mbps: u64 = 0;
+    let mut art_size: usize = ART_SIZE;
+    let mut corrupt_nth: Option<usize> = None;
+    let mut corrupt_match: Option<String> = None;
     let mut it = args.iter().skip(2);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -276,19 +293,61 @@ fn main() {
                     .and_then(|p| p.parse().ok())
                     .unwrap_or_else(|| panic!("--line-mbps needs a number"));
             }
+            // Layout, not transport: `build` and `serve` must be given
+            // the same value, or the ids in the NZB name articles this
+            // server never made.
+            "--article-size" => {
+                art_size = it
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .filter(|n| *n > 0)
+                    .unwrap_or_else(|| panic!("--article-size needs a positive number of bytes"));
+            }
+            // Damage, for a leg that must REPAIR rather than merely
+            // arrive. One article of one file is served with a byte
+            // flipped, so its yEnc CRC fails and PAR2 has to rebuild
+            // that block - the smallest real damage there is, and
+            // narrower than ghosting a whole file into `ghost/`
+            // (which is a wholly-missing volume). The article is named
+            // by its position in the leg's own sorted article list, so
+            // the same value picks the same article on every run of the
+            // same leg and a base/candidate pair is damaged identically.
+            "--corrupt-nth" => {
+                corrupt_nth = it
+                    .next()
+                    .and_then(|p| p.parse::<usize>().ok())
+                    .map(Some)
+                    .unwrap_or_else(|| panic!("--corrupt-nth needs an article index"));
+            }
+            // The same damage, naming the article by CONTENT instead of
+            // by position - the first sorted id containing this
+            // substring. Prefer it: an index has to be derived from a
+            // list, and the obvious list (the ids in the NZB) is not
+            // this one, so a caller deriving "the first payload
+            // article" from the NZB picked a PAR2 article twice in a
+            // row. The server holds the authoritative list, so it does
+            // the picking.
+            "--corrupt-match" => {
+                corrupt_match = Some(
+                    it.next()
+                        .unwrap_or_else(|| panic!("--corrupt-match needs a substring"))
+                        .clone(),
+                );
+            }
             other => panic!("unknown arg {other:?}\n{usage}"),
         }
     }
 
-    let built = build_leg(&legdir);
+    let built = build_leg(&legdir, art_size);
     let nzb_file = nzb_path(&legdir);
     std::fs::write(&nzb_file, &built.nzb).expect("write nzb");
     println!(
-        "[nzbserve] {}: {} files, {:.1} MB decoded, {} articles ({} ghosted), nzb: {}",
+        "[nzbserve] {}: {} files, {:.1} MB decoded, {} articles of {} B ({} ghosted), nzb: {}",
         legdir.display(),
         built.n_files,
         built.total_bytes as f64 / 1048576.0,
         built.articles.len(),
+        art_size,
         built.missing.len(),
         nzb_file.display()
     );
@@ -302,7 +361,35 @@ fn main() {
         .build()
         .unwrap();
     rt.block_on(async move {
-        let chaos = Chaos { missing: built.missing, ..Chaos::default() };
+        // Sorted, so "article N" is the same article on every run: the
+        // article map is a HashMap and its iteration order is not.
+        let mut ids: Vec<&String> = built.articles.keys().collect();
+        ids.sort();
+        let chosen = match (&corrupt_match, corrupt_nth) {
+            (Some(m), _) => Some(
+                ids.iter()
+                    .position(|a| a.contains(m.as_str()))
+                    .unwrap_or_else(|| panic!("--corrupt-match {m:?} matched no article")),
+            ),
+            (None, Some(n)) => {
+                assert!(
+                    n < ids.len(),
+                    "--corrupt-nth {n} past the leg's {} articles",
+                    ids.len()
+                );
+                Some(n)
+            }
+            (None, None) => None,
+        };
+        let corrupt: HashSet<String> = match chosen {
+            None => HashSet::new(),
+            Some(n) => {
+                let id = ids[n].to_string();
+                println!("[nzbserve] corrupting article {n} of {}: {id}", ids.len());
+                HashSet::from([id])
+            }
+        };
+        let chaos = Chaos { missing: built.missing, corrupt, ..Chaos::default() };
         let srv = MockServer::start_bound(
             &format!("127.0.0.1:{port}"),
             built.articles,

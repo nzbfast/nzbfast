@@ -1,0 +1,50 @@
+# P3 plus N8: a directory tree that exists in the FileDesc names and
+# nowhere else.
+
+[layout]
+name = "p3-filedesc-tree"
+seed = 7
+note = """
+Ports e2e_norar's a_directory_tree_in_filedesc_names_lands_intact.
+
+An ordinary post puts the BASENAME on the wire, so a tree is out-of-band
+by construction and a recovery set is the only thing that carries it.
+Both files are posted under tokens; both FileDesc packets say
+VIDEO_TS/..., and the client must end with the tree rather than two
+flat files. This row was red from 30 Aug 2026 until the relpath
+preservation ruling landed (fd455c01b), and the flattened spelling
+appearing beside the tree is exactly what it would catch.
+
+names = "filedesc-only" is the P3 selection: the set is the ONLY place
+a real name exists, so the wire has to be opaque - the generator
+refuses the combination otherwise, because a descriptive wire beside it
+would quietly make this a P1 row that happened to pass.
+
+The recovery files themselves are still announced under their own
+names. That is deliberate and is what makes P3 a row at all: a client
+that cannot find the set has nothing, so hiding the set as well would
+test whether packets can be sniffed, which is P2's question and P10's.
+"""
+
+[source]
+files = [
+    { name = "VIDEO_TS/VTS_01_1.VOB", bytes = 120000 },
+    { name = "VIDEO_TS/VTS_01_0.BUP", bytes = 8000 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

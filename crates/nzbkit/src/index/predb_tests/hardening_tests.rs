@@ -329,7 +329,7 @@ fn a_quality_bump_rerun_keeps_names_applied_after_ingest() {
     // migration body re-parses every row from scratch.
     ix.db
         .execute(
-            "DELETE FROM kv WHERE k IN ('quality_v9','quality_v9_cursor')",
+            "DELETE FROM kv WHERE k IN ('quality_v10','quality_v10_cursor')",
             [],
         )
         .unwrap();
@@ -337,13 +337,84 @@ fn a_quality_bump_rerun_keeps_names_applied_after_ingest() {
     let ix = Index::open(&d.join("index.db")).unwrap();
     let stamped: String = ix
         .db
-        .query_row("SELECT v FROM kv WHERE k='quality_v9'", [], |r| r.get(0))
+        .query_row("SELECT v FROM kv WHERE k='quality_v10'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(stamped, "1", "the re-run completed");
     assert_eq!(
         snap(&ix),
         before,
         "a retro re-parse must reproduce the applied-name answer, not the stem's"
+    );
+    teardown(&d, ix);
+}
+
+/// The other half of the seam's contract, and the one it was breaking:
+/// a release named HERE must be indistinguishable from one named at
+/// ingest, so the naming pass owes ingest's whole classification chain
+/// and not two thirds of it.
+///
+/// A spot title names the WORK and drops the file's format marker, so
+/// an audiobook arrives here as an evidence-free movie. Ingest answers
+/// that with the group prior (2 Sep 2026) and files it as a book at
+/// junk 0; this seam did not, and wrote junk 60 - hidden by the wall's
+/// default - over a row that had just gained a real name. It is
+/// one-way, too: `pre_title=''` is in both the SELECT and the UPDATE's
+/// WHERE, so a row named wrongly here is never re-judged here again.
+///
+/// The bump re-run at the end is the actual invariant: the retro pass
+/// and the naming seam must agree, whichever ran first.
+#[test]
+fn the_naming_seam_owes_ingests_group_recovery_too() {
+    let d = dir("vbump-namedgrp");
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    ix.ingest(
+        "alt.binaries.mp3.audiobooks",
+        &[over(
+            r#""b6V2qR8mL4pC7xN9zH3k.part01.rar" yEnc (1/1)"#,
+            "p@x",
+            "ab1",
+            231 << 20,
+        )],
+        1000,
+    )
+    .unwrap();
+    let rid = ix.search("", 10).unwrap()[0].id;
+    assert!(
+        ix.apply_named(
+            rid,
+            "Perry Rhodan 3390 - Die Stunde der Deponentin (Ungekuerzt)",
+            "spot",
+            2000,
+        )
+        .unwrap()
+    );
+    let snap = |ix: &Index| -> (i64, String, String) {
+        ix.db
+            .query_row(
+                "SELECT junk, title_key, kind FROM releases WHERE id=?1",
+                [rid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    let named = snap(&ix);
+    assert_eq!(named.2, "book", "the group says book: {named:?}");
+    assert!(named.0 < 50, "and a book in a book group shows: {named:?}");
+    assert!(named.1.starts_with("bk:perry rhodan"), "{named:?}");
+
+    // And the retro pass reaches the same answer from the same row.
+    ix.db
+        .execute(
+            "DELETE FROM kv WHERE k IN ('quality_v10','quality_v10_cursor')",
+            [],
+        )
+        .unwrap();
+    drop(ix);
+    let ix = Index::open(&d.join("index.db")).unwrap();
+    assert_eq!(
+        snap(&ix),
+        named,
+        "the naming seam and the quality backfill must not disagree"
     );
     teardown(&d, ix);
 }

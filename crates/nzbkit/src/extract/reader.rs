@@ -146,13 +146,45 @@ impl Extractor {
     }
 
     pub fn read_at(&self, slot: usize, off: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.read_at_inner(slot, off, buf, false)
+    }
+
+    /// [`Extractor::read_at`], with every deferred pread it plans held
+    /// to the coverage its destination can still vouch for AT READ TIME
+    /// - a range that has gone (or is not yet) written fails rather
+    /// than preading a sparse hole and returning the zeros as data.
+    ///
+    /// This is what the MAPPED arm below uses for its own deferred
+    /// destination reads, and the reason it exists: that arm resolves a
+    /// member's destination under the routing lock and reads after
+    /// releasing it, so its "this span is covered" claim is 0.3-1.3 ms
+    /// stale by the time the pread lands. A direct-map promote inside
+    /// that window served a whole zip member as zeros, the self-prove
+    /// prefix hasher committed the digest, and a mapped repair that had
+    /// already SUCCEEDED was thrown away on an MD5 a full reread passes
+    /// (research/MEASURED-2026-09-03-zip-mapped-damaged-container-races.md,
+    /// "Race 2").
+    ///
+    /// It is NOT what a plain slot read takes. Uncovered plain reads are
+    /// legitimate and load-bearing: a damaged block reads back as zeros
+    /// on purpose, which is how it fails its CRC and gets repaired.
+    pub fn read_covered_at(&self, slot: usize, off: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.read_at_inner(slot, off, buf, true)
+    }
+
+    fn read_at_inner(&self, slot: usize, off: u64, buf: &mut [u8], guard: bool) -> io::Result<()> {
         // Plan under the lock (header bytes are memcpy'd right away),
         // pread after releasing it - the mapped-repair path reads
         // thousands of blocks concurrently and must not serialize every
         // disk read behind the extractor lock. Child reads defer the same
         // way; the child plans under its own lock and reads lock-free.
         enum Plan {
-            W(Arc<FileWriter>, usize, usize, u64),
+            /// The trailing flag is the coverage guard: true means the
+            /// pread must refuse a hole rather than serve its zeros
+            /// (see [`Extractor::read_covered_at`]). Always true for a
+            /// mapped destination, whose claim is stale by the time it
+            /// executes; otherwise inherited from the caller.
+            W(Arc<FileWriter>, usize, usize, u64, bool),
             C(Arc<Extractor>, usize, usize, usize, u64),
             /// Plaintext-once output: posted bytes come from the
             /// re-encrypt shim + cipher stashes, not a raw pread.
@@ -171,7 +203,7 @@ impl Extractor {
             match s.mode {
                 SlotMode::Plain | SlotMode::RarFallback => {
                     let w = s.writer.as_ref().ok_or_else(nofile)?;
-                    reads.push(Plan::W(w.clone(), 0, buf.len(), off));
+                    reads.push(Plan::W(w.clone(), 0, buf.len(), off, guard));
                 }
                 SlotMode::Rar => {
                     let m = s.mapper.as_ref().ok_or_else(nofile)?;
@@ -224,11 +256,16 @@ impl Extractor {
                                     len as usize,
                                     base + piece_off,
                                 )),
+                                // Guarded unconditionally: this claim
+                                // is made under the routing lock and
+                                // consumed after it is released, which
+                                // is the whole of Race 2.
                                 None => reads.push(Plan::W(
                                     w,
                                     span_off as usize,
                                     len as usize,
                                     base + piece_off,
+                                    true,
                                 )),
                             },
                             Some(Dest::Child(c, cs)) => reads.push(Plan::C(
@@ -265,7 +302,7 @@ impl Extractor {
                     if off < base {
                         let w = s.writer.as_ref().ok_or_else(nofile)?;
                         let n = (base.min(end) - off) as usize;
-                        reads.push(Plan::W(w.clone(), 0, n, off));
+                        reads.push(Plan::W(w.clone(), 0, n, off, guard));
                     }
                     if end > base {
                         let from = base.max(off);
@@ -320,11 +357,21 @@ impl Extractor {
         }
         for r in reads {
             match r {
-                Plan::W(w, buf_start, len, file_off) => {
-                    w.read_at(&mut buf[buf_start..buf_start + len], file_off)?;
+                Plan::W(w, buf_start, len, file_off, guard) => {
+                    let b = &mut buf[buf_start..buf_start + len];
+                    if guard {
+                        w.read_covered_at(b, file_off)?;
+                    } else {
+                        w.read_at(b, file_off)?;
+                    }
                 }
+                // A mapped member's child read is ALWAYS coverage-checked,
+                // on the child's own lock at the moment of the read: the
+                // routing decision that picked this child is stale by now
+                // (Race 2). The child recurses with the guard on, so a
+                // grandchild hole cannot come back as zeros either.
                 Plan::C(c, cs, buf_start, len, file_off) => {
-                    c.read_at(cs, file_off, &mut buf[buf_start..buf_start + len])?;
+                    c.read_covered_at(cs, file_off, &mut buf[buf_start..buf_start + len])?;
                 }
                 Plan::X(cs, w, buf_start, len, file_off) => {
                     cs.read_posted(&w, file_off, &mut buf[buf_start..buf_start + len])?;
@@ -906,17 +953,41 @@ impl Extractor {
         off: u64,
         len: u64,
     ) -> Option<(String, u64)> {
+        self.materialized_volumes().span_on_disk(slot, off, len)
+    }
+
+    /// Every slot whose volume file is MATERIALIZED, captured under ONE
+    /// routing-lock acquisition, so a caller with many spans to ask
+    /// about pays one acquisition instead of one per span.
+    ///
+    /// WHY THIS EXISTS. `flush_pending_r` (the download's held-article
+    /// join) asked [`Self::materialized_span_on_disk`] once per PARKED
+    /// article, and on a set of thousands of small stored members
+    /// `parked` grows to about the member count - so one sweep took the
+    /// routing lock a couple of thousand times in a burst, while holding
+    /// the `pending_r` mutex that all eight decode threads queue on at
+    /// the top of their own flush. Round 26 of
+    /// research/RAR-PERF-AUDIT-2026-09-02.md read that pair as the two
+    /// largest waits in the profile (1,723 samples on `pending_r` and
+    /// 252 inside this call). Nothing here needs the routing lock held
+    /// ACROSS the queries: the answer rests on the writer's own coverage
+    /// map, which carries its own synchronisation, and a writer Arc
+    /// captured under the lock stays the slot's writer for the life of
+    /// the file. Coverage read a moment later can only have GROWN, and
+    /// growing is the direction that keeps an article parked rather than
+    /// vouching for a byte that is not there.
+    pub fn materialized_volumes(&self) -> MaterializedVolumes {
         let inner = self.inner.lock_ok();
-        let s = inner.slots.get(slot)?;
-        if !matches!(s.mode, SlotMode::RarFallback) {
-            return None;
+        MaterializedVolumes {
+            out_dir: self.out_dir.clone(),
+            writers: inner
+                .slots
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| matches!(s.mode, SlotMode::RarFallback))
+                .filter_map(|(i, s)| s.writer.as_ref().map(|w| (i, w.clone())))
+                .collect(),
         }
-        let w = s.writer.as_ref()?;
-        // `covered` and not a walk over `covered_intervals`: the map is
-        // kept sorted and MERGED, so a gap-free span is contained in one
-        // interval by construction.
-        w.covered(off, len)
-            .then(|| (out_name_of(&self.out_dir, &w.current_path()), w.size))
     }
 
     /// (file name, size) of the slot's on-disk file - what the journal
@@ -995,12 +1066,13 @@ impl Extractor {
         // cap bounds only what is RESERVED, and never below `cur`, so a
         // resumed file keeps every byte it already holds.
         let cap = inner.limits.prealloc_cap();
-        let w = Arc::new(FileWriter::create_resume_under(
-            &self.out_dir,
-            file_name,
-            size.max(cur),
-            cap,
-        )?);
+        let w = Arc::new(
+            FileWriter::create_resume_under(&self.out_dir, file_name, size.max(cur), cap)?
+                // Round 44's feeding signal - see
+                // `Extractor::set_feeding`. An adopted writer is fed by
+                // the same download as every other.
+                .with_feeding(self.feeding.clone()),
+        );
         for &(off, len) in spans {
             w.note_written(off, len);
         }
@@ -1445,6 +1517,32 @@ impl Extractor {
     }
 }
 
+/// A snapshot of the extractor's MATERIALIZED volume writers, taken
+/// under one routing-lock acquisition by
+/// [`Extractor::materialized_volumes`]. Ask it as many spans as you
+/// like: every query below runs off the writer's own coverage map, with
+/// no extractor lock involved.
+pub struct MaterializedVolumes {
+    out_dir: PathBuf,
+    writers: HashMap<usize, Arc<FileWriter>>,
+}
+
+impl MaterializedVolumes {
+    /// The volume file `slot`'s bytes `[off, off+len)` are verbatim in,
+    /// and its size - or `None` when this slot's volume is not
+    /// materialized, or the range is not (yet) all written. See
+    /// [`Extractor::materialized_span_on_disk`] for the full contract
+    /// this answers; the safe direction is `None`.
+    pub fn span_on_disk(&self, slot: usize, off: u64, len: u64) -> Option<(String, u64)> {
+        let w = self.writers.get(&slot)?;
+        // `covered` and not a walk over `covered_intervals`: the map is
+        // kept sorted and MERGED, so a gap-free span is contained in one
+        // interval by construction.
+        w.covered(off, len)
+            .then(|| (out_name_of(&self.out_dir, &w.current_path()), w.size))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1547,6 +1645,63 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("film.mkv")).unwrap(), total);
         assert!(!dir.join("x.part2.rar").exists(), "no volume materialized");
         assert!(!dir.join("x.part3.rar").exists(), "no volume materialized");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The mapped read path must never hand out a sparse hole as data.
+    ///
+    /// It did, and it cost a completed repair: the arm resolves a
+    /// member's destination under the routing lock and preads after
+    /// releasing it, so a direct-map promote inside that ~1 ms window
+    /// served a whole zip member as zeros. The self-prove prefix hasher
+    /// read those zeros, committed the digest, and the mapped repair
+    /// declined on a whole-file MD5 that a full reread passes
+    /// (research/MEASURED-2026-09-03-zip-mapped-damaged-container-races.md,
+    /// "Race 2").
+    ///
+    /// The RACE is not what is pinned here - it is a sub-millisecond
+    /// window and a probabilistic test would be worse than none. What is
+    /// pinned is the property the race exploited and that the fix makes
+    /// unconditional: a mapped range whose destination cannot vouch for
+    /// the bytes FAILS, whatever put the hole there.
+    #[test]
+    fn mapped_read_refuses_a_hole_rather_than_serving_its_zeros() {
+        let dir = tmpdir("mapped-hole");
+        let data = payload(150_000, 4);
+        let vol = fixtures::rar5_volume(&[("inner.bin", 150_000, &data, false, false)]);
+        let ex = Extractor::new(&dir, 1, true);
+        // Every article but the one covering 60_000..66_000, so the
+        // mapped member's destination has a real hole in its middle
+        // while the map itself still spans the whole volume.
+        const ART: usize = 6000;
+        const SKIP: usize = 60_000;
+        let mut i = 0;
+        while i < vol.len() {
+            let e = (i + ART).min(vol.len());
+            if i != SKIP {
+                ex.write(0, "v.rar", vol.len() as u64, i as u64, &vol[i..e])
+                    .unwrap();
+            }
+            i = e;
+        }
+        assert!(
+            !ex.covered(0, SKIP as u64, ART as u64),
+            "the hole really is a hole"
+        );
+        let mut buf = vec![0xAAu8; ART];
+        let err = ex
+            .read_at(0, SKIP as u64, &mut buf)
+            .expect_err("a mapped read over a hole must fail, not return zeros");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+        assert!(
+            err.to_string().contains("refusing to serve a hole"),
+            "the refusal must come from the DESTINATION's coverage check, \
+             not from a map that happened not to span the range: {err}"
+        );
+        // ...and the ranges either side, which ARE covered, still serve.
+        let mut ok = vec![0u8; ART];
+        ex.read_at(0, (SKIP - ART) as u64, &mut ok).unwrap();
+        assert_eq!(&ok[..], &vol[SKIP - ART..SKIP]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

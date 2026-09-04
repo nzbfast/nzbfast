@@ -76,6 +76,14 @@ impl Extractor {
                     c
                 }
             };
+            // TODO 37 step 4: the container was direct-mapped while this
+            // part was still unclassified - take the map, not a
+            // frontier. A false here (no map, or a part size that does
+            // not fit the split) falls through to the frontier exactly
+            // as before.
+            if self.direct_attach(inner, slot, &ctl, idx)? {
+                return Ok(true);
+            }
             return self.sevenz_join_set(inner, slot, ctl, idx);
         }
         let Some(head) = usize::try_from(archive_base)
@@ -147,6 +155,7 @@ impl Extractor {
                     worker: Mutex::new(None),
                     sink_slots: Mutex::new(Vec::new()),
                     outcome: Mutex::new(None),
+                    direct: Mutex::new(None),
                 });
                 if !key.is_empty() {
                     inner.sevenz_sets.insert(key.clone(), c.clone());
@@ -424,6 +433,33 @@ impl Extractor {
             None => sevenz_rust2::Password::empty(),
         };
         let mut reader = sevenz_rust2::ArchiveReader::new(src, pw)?;
+        // TODO 37 step 4: the direct map, at the seam between the parse
+        // and the first payload read - the coder chains are known and not
+        // one payload byte has been decoded. If every folder is Copy, the
+        // whole container is handed to the stored-member routing path and
+        // this worker is finished; see `extract::sevenz_map` for the
+        // argument and for every shape that declines. A decline (either
+        // half) simply keeps decoding, below.
+        //
+        // AHEAD of `arm_trim`, and that ORDER is load-bearing. Arming the
+        // trim first opens a window - the routing thread can read
+        // `trim_ok` and spill a part's consumed prefix into that part's
+        // own `.7z.NNN` file - between the arm and the promote taking the
+        // routing lock. A container promoted after such a spill has bytes
+        // the re-feed will not find (they left the frontier) and a
+        // truncated archive on disk that nothing deletes: `sevenz_finish`
+        // calls `drop_slot_file` only for members still in `SevenZ` mode,
+        // and a promoted set has none. Deciding the map first means
+        // `trim_ok` is never true for a container that goes this way, so
+        // the window does not exist rather than being narrow.
+        if let Some(members) = sevenz_map::plan(reader.archive(), ctl.archive_base, total)
+            && let Some(ex) = me.upgrade()
+            && ex
+                .direct_promote(ctl, members, ChaseFormat::SevenZ)
+                .map_err(|e| sevenz_rust2::Error::Other(e.to_string().into()))?
+        {
+            return Ok(());
+        }
         // Drop-behind is decided HERE and only here, between the parse
         // and the first payload read: the coder chains come from the end
         // header, so they are all known before a single payload byte is
@@ -1126,6 +1162,7 @@ impl SevenZCtl {
             worker: Mutex::new(None),
             sink_slots: Mutex::new(Vec::new()),
             outcome: Mutex::new(None),
+            direct: Mutex::new(None),
         }
     }
 }
@@ -1257,6 +1294,14 @@ pub(super) struct SevenZCtl {
     pub(super) sink_slots: Mutex<Vec<usize>>,
     /// The worker's exit status, set exactly once before it returns.
     pub(super) outcome: Mutex<Option<Result<(), String>>>,
+    /// TODO 37 step 4: the container's DIRECT MAP, once the end header
+    /// has proved every folder is Copy and every registered part has
+    /// been converted to a mapped volume (`extract::sevenz_map`).
+    /// Published under the routing lock after the last install, so a
+    /// part classifying later either sees a complete map and takes it,
+    /// or sees None and joins the frontier as before. `None` forever on
+    /// every container the map declines.
+    pub(super) direct: Mutex<Option<Arc<Vec<DirectMember>>>>,
 }
 
 #[cfg(test)]
@@ -1558,7 +1603,7 @@ mod tests {
     fn sevenz_bomb_header_demotes_at_the_gate() {
         let arch = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/sevenz/bomb-container.7z"
+            "/../nzbkit-base/tests/fixtures/sevenz/bomb-container.7z"
         ))
         .unwrap();
         let outer = store_outer("inner.7z", &arch);
@@ -2162,6 +2207,9 @@ mod tests {
         let dir = tmpdir("7z-split-trim");
         let ex = Arc::new(Extractor::new(&dir, 3, true));
         ex.anchor();
+        // Copy fixture: the direct map would take it and there would be
+        // nothing to trim - see `sevenz_trim_streams_an_archive_over_the_cap`.
+        ex.set_sevenz_direct(false);
         ex.set_holds_cap(1); // floors at 8 MB, against a 24 MB container
         let chunk = 256 << 10;
         let put = |i: usize, off: usize, end: usize| {
@@ -2379,6 +2427,15 @@ mod tests {
         let dir = tmpdir("7z-trim-stream");
         let ex = Arc::new(Extractor::new(&dir, 1, true));
         ex.anchor();
+        // The drop-behind trim is a CHASE mechanism, and since the 7z
+        // direct map (TODO 37 step 4, `extract::sevenz_map`) a Copy
+        // container never chases - its members route straight to their
+        // outputs, so there is nothing retained to trim. These fixtures
+        // are Copy because Copy is the only codec whose decode keeps up
+        // with a paced test feed; the trim is reached here by turning
+        // the map off, and in production by every container the map
+        // declines (LZMA2, BZip2, PPMd, encrypted, BCJ2).
+        ex.set_sevenz_direct(false);
         ex.set_holds_cap(1); // floors at 8 MB, so the archive is 3x the cap
         let high_base = feed_paced_tail_first(&ex, 0, "big.7z", &arch, 256 << 10, 2 << 20, 0);
         let rep = ex.finish().unwrap();
@@ -2415,6 +2472,9 @@ mod tests {
         let dir = tmpdir("7z-trim-demote");
         let ex = Arc::new(Extractor::new(&dir, 1, true));
         ex.anchor();
+        // Copy fixture: the direct map would take it and there would be
+        // nothing to trim - see `sevenz_trim_streams_an_archive_over_the_cap`.
+        ex.set_sevenz_direct(false);
         ex.set_holds_cap(1);
         // Stop short of the end so the chase cannot complete, then feed
         // the remainder and demote: the archive must still be exact.
@@ -2475,6 +2535,9 @@ mod tests {
         let dir = tmpdir("7z-trim-readback");
         let ex = Arc::new(Extractor::new(&dir, 1, true));
         ex.anchor();
+        // Copy fixture: the direct map would take it and there would be
+        // nothing to trim - see `sevenz_trim_streams_an_archive_over_the_cap`.
+        ex.set_sevenz_direct(false);
         ex.set_holds_cap(1);
         let chunk = 256 << 10;
         let high_base = feed_paced_tail_first(&ex, 0, "big.7z", &arch, chunk, 2 << 20, 4);
@@ -2529,6 +2592,9 @@ mod tests {
         let dir = tmpdir("7z-trim-gate");
         let ex = Arc::new(Extractor::new(&dir, 1, true));
         ex.anchor();
+        // Copy fixture: the direct map would take it and there would be
+        // nothing to trim - see `sevenz_trim_streams_an_archive_over_the_cap`.
+        ex.set_sevenz_direct(false);
         assert!(
             ex.inner.lock().unwrap().sevenz_trim_on,
             "gate must default on"
@@ -2575,6 +2641,9 @@ mod tests {
         let dir = tmpdir("7z-trim-rewrite");
         let ex = Arc::new(Extractor::new(&dir, 1, true));
         ex.anchor();
+        // Copy fixture: the direct map would take it and there would be
+        // nothing to trim - see `sevenz_trim_streams_an_archive_over_the_cap`.
+        ex.set_sevenz_direct(false);
         ex.set_holds_cap(1);
         let chunk = 256 << 10;
         let high_base = feed_paced_tail_first(&ex, 0, "big.7z", &arch, chunk, 2 << 20, 4);
@@ -2654,6 +2723,9 @@ mod tests {
         let dir = tmpdir("7z-trim-dup-refeed");
         let ex = Arc::new(Extractor::new(&dir, 1, true));
         ex.anchor();
+        // Copy fixture: the direct map would take it and there would be
+        // nothing to trim - see `sevenz_trim_streams_an_archive_over_the_cap`.
+        ex.set_sevenz_direct(false);
         ex.set_holds_cap(1);
         let chunk = 256 << 10;
         let high_base = feed_paced_tail_first(&ex, 0, "big.7z", &arch, chunk, 2 << 20, 4);

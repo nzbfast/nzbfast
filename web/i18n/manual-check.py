@@ -310,6 +310,23 @@ def selftest():
             for x in hard + warn:
                 print('      ', x, file=sys.stderr)
             bad += 1
+    # An unknown flag must be a REFUSAL naming it, never a silent skip that
+    # falls through to the ordinary clean gate verdict about a request
+    # nobody honoured - the shape reproduced live on size-gate.py 31 Aug 2026.
+    for args, want_bad in (
+        (['--this-flag-does-not-exist'], True),
+        ([], False),
+        (['--selftest'], False),
+    ):
+        got_bad = unrecognised_argv(args) is not None
+        if got_bad != want_bad:
+            print(
+                f'  selftest FAIL: unrecognised_argv({args!r}) flagged={got_bad},'
+                f' wanted {want_bad}',
+                file=sys.stderr,
+            )
+            bad += 1
+
     if bad:
         print(f'\nmanual-check: {bad} selftest case(s) failed - the census is '
               'not doing its job.', file=sys.stderr)
@@ -319,9 +336,32 @@ def selftest():
     return 0
 
 
+KNOWN_FLAGS = {'--selftest'}
+
+
+def unrecognised_argv(argv):
+    """First arg outside the known set, or None."""
+    for a in argv:
+        if a not in KNOWN_FLAGS:
+            return a
+    return None
+
+
 def main():
     if '--selftest' in sys.argv:
         return selftest()
+
+    bad_arg = unrecognised_argv(sys.argv[1:])
+    if bad_arg is not None:
+        print(
+            f'manual-check: unrecognised argument {bad_arg!r} - known flags '
+            'are --selftest, or no args for the gate. A stale checkout may '
+            'be missing a flag this script now supports - merge '
+            'origin/main.',
+            file=sys.stderr,
+        )
+        return 1
+
     en_path = os.path.join(ROOT, 'docs', 'MANUAL.html')
     with open(en_path, encoding='utf-8') as f:
         en = f.read()

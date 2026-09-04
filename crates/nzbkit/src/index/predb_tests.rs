@@ -75,6 +75,32 @@ fn tpre(title: &str, category: &str, size: u64, date: i64) -> PreLine {
     }
 }
 
+/// A weak background pre for a correlation window: sizeless, section
+/// blank and a title that classifies to nothing, so it scores near the
+/// bottom and is vetoed by nothing.
+///
+/// It exists to make the auto tier's runner-up margin do real work. A
+/// window holding exactly ONE candidate has no runner-up, and until
+/// 2 Sep 2026 the gate read that as a margin of the raw score and
+/// passed every time - so every auto-apply assertion in this suite,
+/// and all 76 auto pairs of the calibration corpus, were proving a
+/// clause that could not fail. `predb_corr::margin_clears` refuses the
+/// empty case now, and the tests carry a field the way a real window
+/// does: 14 days at the feed's own rate is 13k-67k pres, and
+/// `corr_eval` keeps every SIZELESS one whatever the size band, so a
+/// one-candidate window is a test artefact, never production.
+fn bgpre(tag: &str, date: i64) -> PreLine {
+    PreLine {
+        kind: PreKind::New,
+        title: format!("Filler.Item.{tag}"),
+        category: String::new(),
+        size: 0,
+        date,
+        source: "PRE".into(),
+        ..Default::default()
+    }
+}
+
 // Phase 2 and the hardening round that followed it, out for the size
 // gate (TODO 106). Each child resolves to predb_tests/<name>.rs because
 // this module is reached by a plain `mod predb_tests;`, not a `#[path]`,

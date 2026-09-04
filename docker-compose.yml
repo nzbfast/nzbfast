@@ -45,6 +45,50 @@ services:
       # Where finished downloads land. See the volumes note below before
       # changing it: this path and the mapping under it have to agree.
       - NZBFAST_OUT=/data/usenet
+    # Hardening. Every line here was measured against this image on a real
+    # Docker engine, including a download run end to end, because the
+    # obvious spelling of it does not work: `cap_drop: [ALL]` on its own
+    # stops the container dead at
+    #   error: failed switching to "1000:1000": operation not permitted
+    # The entrypoint starts as root so it can adopt the ownership of your
+    # bind mounts, then drops to an unprivileged uid with `gosu` before the
+    # daemon ever runs, and dropping every capability takes away the two it
+    # needs to do that. So the capabilities below are added back by name and
+    # nothing else is: it is the smallest set that still lets the entrypoint
+    # hand your folders to your own user.
+    #
+    #   SETUID, SETGID   the privilege drop itself
+    #   CHOWN            give a freshly created bind mount to PUID/PGID
+    #   FOWNER           chmod the config file to 0600 once it is theirs
+    #   DAC_OVERRIDE     read and fix up a /config a previous run left
+    #                    owned by somebody else
+    #
+    # What that removes, relative to the fourteen Docker grants by default:
+    # NET_RAW (raw sockets), MKNOD, SETPCAP, SETFCAP, SYS_CHROOT, KILL,
+    # FSETID, AUDIT_WRITE and NET_BIND_SERVICE. The daemon itself runs with
+    # no capabilities at all either way.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    # Nothing in the container is setuid, so this costs nothing and closes
+    # the route a setuid binary would give an escape.
+    security_opt:
+      - no-new-privileges:true
+    #
+    # A read-only root filesystem is available and needs a scratch mount to
+    # go with it. Measured: the container starts, adopts the folders, picks
+    # up an .nzb and finishes a download with these three lines uncommented.
+    # Not measured: an unpack of a large archive set, and a long-running
+    # index. Uncomment if you want it and watch the first unpack.
+    # read_only: true
+    # tmpfs:
+    #   - /tmp
+    #   - /run
     volumes:
       # ./ paths are anchored to THIS FILE's folder (not where you run the
       # command from). The config volume IS your install - settings, API

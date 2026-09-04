@@ -1,0 +1,46 @@
+# Z6: a post stamped thirty days before the articles were written.
+
+[layout]
+name = "z6-backdated"
+seed = 26
+note = """
+The <file date> is what per-server retention routing decides on: a
+server whose window cannot cover the post's age must not be asked for
+its bodies at all (M14e). Thirty days is the same backdate
+retention_routes_old_post_around_short_server uses in
+crates/nzbfast/tests/e2e.rs, against a ten-day server, so a profile
+that pairs this date with such a server exercises that decision rather
+than an invented one. The oldmiss profile in the torture corpus is the
+same idea with a much older stamp.
+
+WHAT THIS ROW REACHES TODAY, stated plainly rather than implied. The
+oracle gives every mock server retention_days: 0, unlimited, so no
+routing decision is armed and what is pinned here is the narrower and
+still real property: a backdated map is an ordinary map, the date
+reaches the client as the file states it, and the age of a post does
+not change the bytes that come back.
+
+The 430 half - an old post against a short-retention server, where
+"gone" and "never there" are the same status code and the difference is
+the date - needs two things this profile cannot select. It needs a
+[serve] table, which the generator refuses until the fault plane
+lands, and it needs the runner to give a server a retention window,
+which is a dial in the oracle rather than in a profile. When both
+exist, this row grows a [serve] missing set and a short server, and
+becomes the retention row it is named for.
+"""
+
+[source]
+files = [{ name = "Aged.Feature.mkv", bytes = 32768 }]
+
+[encoding]
+article_bytes = 8192
+
+[nzb]
+date = "old"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

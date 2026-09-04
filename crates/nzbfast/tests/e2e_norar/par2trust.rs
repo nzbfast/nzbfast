@@ -1,5 +1,5 @@
 //! What a PAR2 packet is allowed to assert about a file - the two rows
-//! of cursor's third extreme pass that live under `crates/nzbkit/src/par2.rs`.
+//! of cursor's third extreme pass that live under `crates/nzbkit-base/src/par2.rs`.
 //!
 //! M4-37: an IFSC whose entry count disagrees with the FileDesc used to
 //! be DROPPED, which left the file with no per-block evidence at all.

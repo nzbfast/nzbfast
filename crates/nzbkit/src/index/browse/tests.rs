@@ -642,7 +642,7 @@ fn browse_filters_sorts_and_backfills() {
 }
 
 /// Codec / audio / dynamic range land on ingest, and rows indexed
-/// before those columns existed get them from the quality_v9 re-parse
+/// before those columns existed get them from the quality_v10 re-parse
 /// on the next open - the whole point of bumping the version key.
 #[test]
 fn codec_audio_hdr_stored_and_backfilled() {
@@ -679,12 +679,12 @@ fn codec_audio_hdr_stored_and_backfilled() {
         ix.db
             .execute_batch(
                 "UPDATE releases SET vcodec='', acodec='', hdr='';
-                 DELETE FROM kv WHERE k='quality_v9';",
+                 DELETE FROM kv WHERE k='quality_v10';",
             )
             .unwrap();
     }
     let ix = Index::open(&db).unwrap();
-    assert_eq!(ix.kv_get("quality_v9").as_deref(), Some("1"));
+    assert_eq!(ix.kv_get("quality_v10").as_deref(), Some("1"));
     let r = &ix.search("", 10).unwrap()[0];
     assert_eq!(
         (r.vcodec.as_str(), r.acodec.as_str(), r.hdr.as_str()),

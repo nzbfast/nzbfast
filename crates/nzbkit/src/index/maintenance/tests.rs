@@ -1289,3 +1289,94 @@ fn split_merge_rewrites_the_unicode_stem_fold_with_the_stem() {
     assert_eq!(got, want, "the fold follows the stem the merge wrote");
     teardown(&d, ix);
 }
+
+/// The rule the album fold hit live (`album_fold_merge`): a pass that
+/// rewrites `kind`, `title_key` or `junk` on an existing row is doing
+/// ingest's job and owes ingest's classification recoveries. This
+/// merge rewrites all three, off a base stem no member wore.
+///
+/// The set here is the shape this pass actually meets: a dark split
+/// container in a BOOK group. The fragment stems end `.001`, which is
+/// no plain extension, so ingest recovered them to the lane the group
+/// vouches for; the base keeps the `.7z` those fragments were split
+/// from, which IS a plain extension, so the same recovery declines it
+/// and the merged row lands on the fall-through lane. That divergence
+/// is measured and deliberately left alone: the merged row is a
+/// junk-70 obfuscated container either way, hidden on every wall.
+///
+/// What this test pins is the rule - the merged row is classified and
+/// scored exactly as ingest classifies and scores the stem it now wears.
+#[test]
+fn a_merged_split_set_is_classified_the_way_ingest_classifies_it() {
+    let d = std::env::temp_dir().join(format!("nzbfast-splitkind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    let grp = "alt.binaries.audiobooks";
+    let base = "Deliver.Us.From.Evil.gUSbVwIDqhrR.7z";
+    for part in ["001", "002"] {
+        let stem = format!("{base}.{part}");
+        let mut p = crate::categories::classify(&stem, &ix.custom);
+        crate::release::recover_media_kind(&mut p, &stem, &stem);
+        crate::release::recover_kind_from_group(&mut p, grp, &stem);
+        let junk = junk_score(&stem, &p, 700_000_000, false);
+        assert!(junk >= 70, "the fragment must be in this pass's band");
+        ix.db
+            .execute(
+                "INSERT INTO releases(stem, poster, grp, total_bytes, files, complete,
+                                      has_par2, first_posted, first_seen, kind, junk,
+                                      title_key, stem_fold)
+                 VALUES(?1, 'p@x', ?2, 700000000, 1, 1, 0, 4600, 5000, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    stem,
+                    grp,
+                    kind_str(&p.kind),
+                    junk,
+                    p.key,
+                    crate::index::fold::stored(&stem)
+                ],
+            )
+            .unwrap();
+        let rid = ix.db.last_insert_rowid();
+        ix.db
+            .execute(
+                "INSERT INTO files(release_id, filename, total_parts, bytes)
+                 VALUES(?1, ?2, 1, 700000000)",
+                rusqlite::params![rid, stem],
+            )
+            .unwrap();
+    }
+    let was: String = ix
+        .db
+        .query_row("SELECT kind FROM releases LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(was, "book", "ingest recovered the fragments off the group");
+
+    let (groups, folded, _) = ix.split_merge(6000, crate::index::testutil::WALK).unwrap();
+    assert_eq!((groups, folded), (1, 1));
+
+    let (stem, kind, junk, key, bytes): (String, String, i64, String, i64) = ix
+        .db
+        .query_row(
+            "SELECT stem, kind, junk, title_key, total_bytes FROM releases",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(stem, base, "merged onto the base");
+    let mut want = crate::categories::classify(&stem, &ix.custom);
+    crate::release::recover_media_kind(&mut want, &stem, &stem);
+    crate::release::recover_kind_from_group(&mut want, grp, &stem);
+    if !crate::index::ingest::stem_obfuscated(&stem, &want) {
+        crate::release::recover_episode_from_group(&mut want, grp, &stem);
+    }
+    assert_eq!(kind, kind_str(&want.kind), "the merged lane is ingest's");
+    assert_eq!(key, want.key, "and so is the title key it cards on");
+    assert_eq!(
+        junk,
+        junk_score(&stem, &want, bytes as u64, false),
+        "the merge scored junk against a kind ingest would not have used"
+    );
+    assert!(junk >= 70, "an obfuscated container stays dark either way");
+    teardown(&d, ix);
+}

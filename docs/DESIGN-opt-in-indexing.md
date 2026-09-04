@@ -41,7 +41,7 @@ names) long before `alt.binaries.multimedia.sports`, and "software" is
 PRINTED, which is the point - every surface that offers an interest
 shows the exact groups it will scan, before the user agrees.
 
-Definitions live in `crates/nzbfast/src/interests.rs`. A test asserts no
+Definitions live in `crates/nzbfast-core/src/interests.rs`. A test asserts no
 offered group name contains warez/pw-required/encrypt/erotica: an
 interest has to be defensible in public.
 

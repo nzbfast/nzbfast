@@ -14,6 +14,10 @@
 //! so publishing one inside the lib suite would change the default under
 //! every other extract test sharing that process under plain
 //! `cargo test`.
+//!
+//! test-target-gate: asserts what a VIRGIN process answers before any
+//! `set_process_budget`, which cannot be un-published - even its
+//! partials sibling cannot share the binary under `cargo test`
 
 use nzbkit::extract::Extractor;
 use nzbkit::mem::MemBudget;

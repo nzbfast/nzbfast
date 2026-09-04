@@ -1,0 +1,55 @@
+# C3: a split COMPRESSED set holding two members.
+
+[layout]
+name = "c3-compressed-split-two-members"
+seed = 113
+note = """
+The one multi-member split set this catalog can write, and it is
+compressed because that is the only writer that takes several members:
+`Rar50VolumeWriter::stored_entry`, `::encrypted_stored_entry`,
+`rar15_40::write::write_stored_volumes` and `::write_compressed_volumes`
+each split ONE member across volumes, and only
+`Rar50VolumeWriter::compressed_entries` takes a slice. The generator
+refuses every other spelling of this shape by name.
+
+It was unreachable until `[source] content = "compressible"` landed
+(4 Sep 2026). The escape hatch existed in `container.rs` the whole time
+and bought nothing, because a compressed selection over incompressible
+`[source]` bytes is answered by STORING and refused - so the writer
+that takes several members could never be driven from a profile. This
+row is the first thing to drive it.
+
+Two files, the second under a directory, so the row carries a tree
+across the volume boundary as well: a member split over two volumes and
+a relative path are different facts and this shape holds both. The
+volumes are not in the end state - a successful unpack spends them -
+and the payload has to come back joined, decompressed and under its
+real names.
+
+`c3-compressed-single-volume` is the control arm: same compression, one
+volume, one member. A failure here and a pass there is about the
+volume set; a failure in both is about compression.
+
+The file is named for C3 alone and not for C2, deliberately. C2 is the
+STORED split row - that is what the report's predicate says and what
+the plane means - so a `c2-` prefix here would name a plane this
+profile does not select, which is the mismatch
+`f7-index-absent-names-from-volumes` records from the other side. The
+volume set is real; the ID for a compressed one is C3.
+"""
+
+[source]
+files = [
+    { name = "split.bin", bytes = 60000, content = "compressible" },
+    { name = "sample/split-sample.bin", bytes = 24000, content = "compressible" },
+]
+
+[container]
+kind = "rar-compressed"
+volume_bytes = 8000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -20,10 +20,10 @@
 # `vendor/rars/tests/fixtures/rar15_40/ppmd/escape_64k.bin` (1337 of
 # them) - the second is a PPMd corpus where every byte is the thing under
 # test. `-text` also stops today's Windows checkout injecting 21 CRs into
-# `crates/nzbkit/testdata/spot/free.pt.over.tsv`, a latin-1 Spotnet
+# `crates/nzbkit-base/testdata/spot/free.pt.over.tsv`, a latin-1 Spotnet
 # fixture that git likewise reads as text.
-crates/nzbkit/testdata/**          -text
-crates/nzbkit/tests/fixtures/**    -text
+crates/nzbkit-base/testdata/**     -text
+crates/nzbkit-base/tests/fixtures/** -text
 vendor/rars/tests/fixtures/**      -text
 
 # Same exposure, one directory over: `crates/nzbkit/fuzz/seeds/**` holds

@@ -1,4 +1,4 @@
-use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
+use aes::cipher::{consts::U16, inout::InOutBuf, BlockCipherEncrypt, BlockModeDecrypt, KeyInit, KeyIvInit};
 use aes::Aes256;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -152,6 +152,9 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[derive(ZeroizeOnDrop)]
 pub struct Rar50Cipher {
     cipher: Aes256,
+    /// The decrypt direction, carrying its own chain state across calls.
+    /// `cipher` and `iv` serve the encrypt direction (the writer).
+    decryptor: cbc::Decryptor<Aes256>,
     iv: [u8; 16],
 }
 
@@ -159,6 +162,7 @@ impl Rar50Cipher {
     pub fn new(key: [u8; 32], iv: [u8; 16]) -> Self {
         Self {
             cipher: Aes256::new(&key.into()),
+            decryptor: cbc::Decryptor::<Aes256>::new(&key.into(), &iv.into()),
             iv,
         }
     }
@@ -167,9 +171,18 @@ impl Rar50Cipher {
         if !data.len().is_multiple_of(16) {
             return Err(Error::UnalignedInput);
         }
-        for block in data.chunks_exact_mut(16) {
-            self.decrypt_block(block);
-        }
+        // Through `cbc::Decryptor`, in place, eight blocks per backend
+        // call. CBC decryption has no chain between blocks (plaintext_i =
+        // D(c_i) ^ c_{i-1}), so the mode hands the backend `ParBlocksSize`
+        // blocks at once and the AES pipelines overlap. The old one-block
+        // loop exposed each 14-round latency chain: on an i5-10600KF it
+        // measured 3.15 GB/s against 4.57 for this shape (ECB ceiling
+        // 4.67); on Apple silicon both read ~14 GB/s, the core overlapping
+        // the chains by itself (research/RAR-PERF-AUDIT-2026-09-02.md,
+        // round 2). `InOutBuf::into_chunks` is the safe view of the byte
+        // slice as blocks; the tail is empty by the alignment check above.
+        let (blocks, _tail) = InOutBuf::from(data).into_chunks::<U16>();
+        self.decryptor.decrypt_blocks_inout(blocks);
         Ok(())
     }
 
@@ -190,16 +203,6 @@ impl Rar50Cipher {
         let block: &mut [u8; 16] = block.try_into().expect("AES block size");
         self.cipher.encrypt_block(block.into());
         self.iv.copy_from_slice(block);
-    }
-
-    fn decrypt_block(&mut self, block: &mut [u8]) {
-        let ciphertext: [u8; 16] = block.try_into().expect("AES block size");
-        let block: &mut [u8; 16] = block.try_into().expect("AES block size");
-        self.cipher.decrypt_block(block.into());
-        for (byte, iv_byte) in block.iter_mut().zip(self.iv) {
-            *byte ^= iv_byte;
-        }
-        self.iv = ciphertext;
     }
 }
 

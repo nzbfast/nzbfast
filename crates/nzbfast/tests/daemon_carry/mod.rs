@@ -22,7 +22,14 @@
 //! `CARRY_MAX_ARTICLES` byte cap and the two-rung scaling verdict all
 //! run for real against a provider that really served them. Read that
 //! test's own header for the cost, and for the one thing still NOT
-//! covered here (the 60 s and 90 s timeouts).
+//! covered here (the 60 s and 90 s timeouts). Their BILLING no longer
+//! rides on that: as of 1 Sep 2026 the measure timeout bills from a
+//! counter that outlives the future it cancels, pinned at unit price by
+//! `serve::api::servers::tests::both_probe_timeouts_bill_before_they_refuse`.
+//! That pin covers the carry probe's 90 s measure timeout, the ladder's
+//! own timeout and the ladder's 120 s RE-MEASURE - the last of which the
+//! first cut of the fix left out, so the pointer here was true of the
+//! carry probe and not of the module (corrected the same day).
 //!
 //! The DOOR tests are the rest of this file, and the four things about
 //! it that would fail silently:
@@ -519,7 +526,13 @@ fn id_tee(upstream: std::net::SocketAddr) -> (u16, std::sync::Arc<std::sync::Mut
 /// carry family runs in 6 s. Neither would assert anything about the
 /// carry arithmetic; both assert that a `tokio::time::timeout` the
 /// module already wraps every rung in does what timeouts do. Priced and
-/// declined 28 Aug 2026 - if that judgement is revisited, the shape to
+/// declined 28 Aug 2026 - and what the measure timeout DID assert about
+/// the carry arithmetic, that it dropped a completed rung's bytes
+/// instead of billing them, was found by reading rather than by running
+/// (1 Sep 2026) and is pinned in the unit module instead:
+/// `serve::api::servers::tests::both_probe_timeouts_bill_before_they_refuse`
+/// (all three cancelling timeouts, the ladder's re-measure included)
+/// and its sibling on `ProbeBill`. If that judgement is revisited, the shape to
 /// build is a tee that forwards the greeting and then stops relaying,
 /// so the session establishes and the BODY never lands.
 ///
@@ -577,7 +590,7 @@ async fn the_rungs_run_for_real_against_a_supply_a_real_download_built() {
     // carry that second number out to the page. Seeded here rather than
     // left to the fixture's own download, and the reason is timing: the
     // banked value is written by a ONE-SECOND ticker
-    // (`serve/linecarry.rs`'s `feed`, riding `linkpeak`'s loop) and this
+    // (`linecarry.rs`'s `feed`, riding `linkpeak`'s loop) and this
     // fixture's supply job is ~1 s of loopback transfer on a quiet box,
     // so a run can legitimately finish having never been ticked. An
     // unseeded assertion would be green on a loaded box and red on an

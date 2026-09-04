@@ -252,7 +252,7 @@ slow-timeout = { period = "60s", terminate-after = 15 }
 # that can exhibit this hazard is `FrontierBuffer` and the chase worker,
 # and both live entirely under `crates/nzbkit/src/extract/`: the only
 # mention of `FrontierBuffer` anywhere else in the workspace is one
-# comment in crates/nzbfast/src/repair.rs. So the scope is that module,
+# comment in crates/nzbfast-unpack/src/repair.rs. So the scope is that module,
 # all 349 of its tests across 17 submodules, and NOT a list of the ones
 # that happen to spawn a chase worker today - a list is a gate that
 # cannot see the 350th test, which is exactly how the original wedge
@@ -528,6 +528,61 @@ retries = 0
 [[profile.default.overrides]]
 filter = 'package(nzbfast) and binary(e2e) and test(/_at_shipped_thresholds$/)'
 threads-required = 'num-test-threads'
+
+# `e2e_lateset` CONTENDS WITH ITSELF, and `retries = 1` was laundering
+# every occurrence green. MEASURED 1 Sep 2026 on the dev Mac, the module
+# run BY ITSELF (13 tests, nothing else in the run) with `--retries 0`:
+#
+#     5 of 8 runs failed, 1 to 4 tests each
+#
+# and with this group, 8 of 8 clean. Under the default `retries = 1` the
+# same runs report "13 passed (2 flaky)" and exit 0, which is why this
+# sat unowned since 784f166f1 deferred it and c2a55ec09 only isolated it.
+# Five different tests were seen failing, so it is the MODULE and not one
+# test: x8_a_disambiguated_leftover_rebuild, x4_a_kept_residual,
+# x4_a_sibling_adoption, x5_24_control_a_foreign_set.
+#
+# WHAT ACTUALLY BREAKS is upstream of the assertions: the run dies with
+# "download incomplete: 5 of 9 segment(s) never arrived (0 MB did)". Each
+# of these tests drives a whole get through a MockServer on an ephemeral
+# port with `par2 create` in the fixture, so thirteen of them at once put
+# the client's own timeouts against a box whose cores are gone. The
+# assertion that reports it is then a true statement about a job that
+# never got its bytes.
+#
+# `max-threads` AND NOT `threads-required`, which is the whole reason
+# this is cheap. `threads-required = 'num-test-threads'` makes nextest
+# DRAIN the run before each test - that is what costs the shipped-
+# thresholds trio 556 s of wall in this same binary
+# (research/E2E-SERIALIZATION-COST-2026-08-31.md). A group only bounds
+# its own members, so the other 436 tests keep filling the threads.
+# MEASURED with this block in place: the iteration line
+# (`--test e2e -E 'not test(/_at_shipped_thresholds$/)'`) is 449 tests in
+# 177.9 s at `--retries 0`, against the ~210 s that line was documented
+# at in CLAUDE.md before it. No measurable cost.
+#
+# THIS IS THE CONTAINMENT AND NOT THE CURE, stated so the next lane does
+# not read it as one. The tests are still wall-clock-sensitive; a loaded
+# CI box can starve them with nothing else from this module running. The
+# cure is a fixture that does not race its own mock server, and it is not
+# what this claim bought.
+#
+# ONE CURE WAS TRIED AND REFUTED, recorded so it is not tried twice.
+# Every one of these 13 tests is `#[tokio::test(flavor = "multi_thread")]`
+# with no `worker_threads`, so each spawns a pool the width of the box -
+# 18 here, ~234 threads across the module. Bounding that to
+# `worker_threads = 2` is the obvious cure and it is NOT one. MEASURED
+# over 8 runs at `--retries 0` with this group removed: 3 of 8 runs still
+# failed, against 5 of 8 for the unmodified module and 0 of 8 with the
+# group. It helps and it does not fix, so the starvation is not (only)
+# tokio worker oversubscription and the next lane should look at what the
+# get's own timeouts do when the MockServer's accept loop is late.
+[[profile.default.overrides]]
+filter = 'package(nzbfast) and binary(e2e) and test(/^e2e_lateset::/)'
+test-group = 'lateset-serial'
+
+[test-groups.lateset-serial]
+max-threads = 1
 
 [[profile.default.overrides]]
 filter = 'package(nzbfast) and binary(index_size_cap)'

@@ -345,6 +345,99 @@ async fn a_yenc_majority_does_not_overwrite_a_filedesc_name() {
     }
 }
 
+/// Finding F18 (1 Sep 2026): the sharp shape the test above misses by
+/// ONE fixture token, and the reason a set-claimed slot is now skipped
+/// by name rather than left to the on-disk test.
+///
+/// Same post as `a_yenc_majority_does_not_overwrite_a_filedesc_name`,
+/// with the minority article's yEnc name changed from `a.dat` to
+/// `Real.Name.mkv` - the very name the recovery set's FileDesc declares.
+/// That is not exotic: a FileDesc name IS usually the real name, so a
+/// post whose articles do not all agree (a filler or repost merge, or a
+/// poster whose tool changed names midway) has some article declaring
+/// it.
+///
+/// The on-disk precondition then reads TRUE for the wrong reason. After
+/// the PAR2 rename the file sits under `Real.Name.mkv`, which IS one of
+/// the names the articles declared, so the guard answers "this tier put
+/// that name there" when in fact the MD5 pair did - and the majority,
+/// still `Decoy.mkv` 3-1, walks a set-proved file onto the loser. The
+/// bytes are never lost (`publish_weak_name` declines a collision), but
+/// the job completes with the payload under the decoy and an info line
+/// saying the post's majority decided.
+///
+/// The guard is the `set_reports` gate, which is the same predicate
+/// `sfvname::land_sfv_names` already uses one line above the call: a
+/// report exists exactly for a slot some recovery set claimed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_yenc_majority_does_not_take_a_filedesc_name_it_also_declared() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    for decoy_first in [true, false] {
+        let mut fx = Fixture::new("norarlatchf18");
+        let data = payload(120_000, 97);
+        // The minority article declares the FileDesc name itself - the
+        // one token that separates this row from the test above.
+        add_file_yenc_names(
+            &mut fx,
+            "Real.Name.mkv",
+            "Kp7xRt29ZfV",
+            &data,
+            30_000,
+            |p| {
+                if p == 1 {
+                    "Real.Name.mkv".to_string()
+                } else {
+                    "Decoy.mkv".to_string()
+                }
+            },
+        );
+        assert!(fx.add_par2(20, &["Real.Name.mkv"], 40_000));
+        let first_id = "<Kp7xRt29ZfV-0-1@mock>";
+        assert!(
+            fx.articles.contains_key(first_id),
+            "the first article's id moved - the stall would be a no-op"
+        );
+        let slow: std::collections::HashMap<String, u64> = fx
+            .articles
+            .keys()
+            .filter(|k| {
+                if decoy_first {
+                    *k != first_id
+                } else {
+                    *k == first_id
+                }
+            })
+            .map(|k| (k.clone(), 900))
+            .collect();
+        let chaos = Chaos {
+            slow_ttfb: slow,
+            ..Chaos::default()
+        };
+        let (log, ok, out) = run_norar_chaos(&fx, chaos).await;
+        assert!(ok, "decoy_first={decoy_first}: the post failed:\n{log}");
+        let got = std::fs::read(out.join("Real.Name.mkv")).unwrap_or_else(|e| {
+            panic!(
+                "decoy_first={decoy_first}: the recovery set's own name is \
+                 not what landed - a yEnc-header majority took it back \
+                 because one article had declared it too: {e}\n{log}"
+            )
+        });
+        assert_eq!(
+            got, data,
+            "decoy_first={decoy_first}: wrong bytes under the FileDesc name\n{log}"
+        );
+        assert!(
+            !out.join("Decoy.mkv").exists(),
+            "decoy_first={decoy_first}: the yEnc majority published under \
+             its own name over a set-claimed slot\n{log}"
+        );
+        drop(fx);
+    }
+}
+
 /// GH #63's polarity, and the third of the three guards that keep this
 /// tier from being a way to lose a name.
 ///

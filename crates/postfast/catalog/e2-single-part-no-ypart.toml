@@ -1,0 +1,37 @@
+# E2: the original single-part yEnc form, with no part number anywhere.
+
+[layout]
+name = "e2-single-part-no-ypart"
+seed = 12
+note = """
+Every fixture in this repo, and the posting engine itself, writes the
+MULTI-PART form for every file - part=1 total=1, a =ypart line, a
+pcrc32= trailer - even when the file is one article. The original
+single-part form is legal, is what a single-file post has always been
+allowed to use, and is emitted by nothing this repo tests.
+
+The two are not cosmetic variants of each other in the decoder. The
+bytes are placed off =ypart begin= in one form and off nothing at all
+in the other, and nzbkit::yenc::trailer_gates reads a crc32= on a part
+as ADVISORY and the same field on a non-part as FATAL. So this row
+proves the second door reaches the same file, and it is the only place
+in the catalog that opens it.
+
+article_bytes is above the payload size so the file really is one part;
+the encoder refuses this selection over a multi-part file by name,
+because the single-part form has nowhere to say which part an article
+is and every article would claim to be the whole file.
+"""
+
+[source]
+files = [{ name = "Single.Part.bin", bytes = 24576 }]
+
+[encoding]
+ypart = "absent"
+article_bytes = 65536
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

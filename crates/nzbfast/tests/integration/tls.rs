@@ -121,13 +121,9 @@ fn spawn_daemon(dir: &Path, port: u16, cert: &Path, key: &Path) -> KillOnDrop {
     let log = dir.join("daemon.log");
     let out = std::fs::File::create(&log).unwrap();
     let err = out.try_clone().unwrap();
-    KillOnDrop(
-        tls_cmd(dir, port, cert, key)
-            .stdout(Stdio::from(out))
-            .stderr(Stdio::from(err))
-            .spawn()
-            .unwrap(),
-    )
+    let mut cmd = tls_cmd(dir, port, cert, key);
+    cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+    KillOnDrop(crate::harness::spawn_under_test(&mut cmd))
 }
 
 /// GET `path` over TLS, trusting exactly `ca`; returns (head, body) with

@@ -1,0 +1,31 @@
+# C11: the .rar + .r00 + .r01 spelling of volume order.
+
+[layout]
+name = "c11-stored-split-r00"
+seed = 111
+note = """
+The same three-volume stored set as c2-c11-stored-split-partnn, named
+the OLD way: volume one is `.rar` and the rest are `.r00`, `.r01`. The
+row exists because the two spellings sort differently - `split.r00`
+sorts after `split.rar` by name, and the set's order is the opposite -
+so a client that ordered volumes by filename would pass the .partNN row
+and fail this one. Reading the order out of the volume headers is what
+makes both pass.
+"""
+
+[source]
+files = [{ name = "split.bin", bytes = 30000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 10000
+volume_style = "r00"
+
+[encoding]
+article_bytes = 4000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

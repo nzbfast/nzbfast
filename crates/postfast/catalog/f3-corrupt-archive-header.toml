@@ -1,0 +1,47 @@
+# F3 over C2 plus P1: one flipped byte inside a volume's archive header.
+
+[layout]
+name = "f3-corrupt-archive-header"
+seed = 82
+note = """
+Header recovery. The first bytes of a RAR archive header are its CRC,
+its size, its type and its flags - everything a reader must trust
+before it can find a single file inside - so one flipped byte there
+takes the volume out of service entirely, while the payload behind it
+is untouched. It is the fault a recovery record exists for, and, with
+no recovery record, the fault the PAR2 set has to answer instead.
+
+WHICH volume and which byte are the seed's answer, drawn from the
+fault plane's own stream. A profile cannot name a volume: how many
+there are is the writer's decision, not the profile's, and a row that
+hard-coded "volume 2" would break the day the writer's framing moved
+by a byte. The window is bounded to the first 16 bytes past the
+signature so the damage stays a HEADER fault: wider, and it would
+eventually land in a file's data and become a payload fault wearing
+this row's name.
+
+THE ORDER IS THE ROW, exactly as in f5-short-last-volume: the set is
+cut over the volumes the writer wrote and the byte is flipped
+afterwards, so the set describes what the archive SHOULD say.
+"""
+
+[source]
+files = [{ name = "bad.header.bin", bytes = 90000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 40000
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+
+[encoding]
+article_bytes = 10000
+
+[fault]
+corrupt_headers = true
+
+[expect]
+exits = "nonzero"
+gap = "the flipped header byte is repaired from parity and the payload is re-extracted correctly, and the run still exits non-zero after the materialize-for-repair fallback - the same wrong verdict f5-short-last-volume pins, reached by damaging a header instead of a tail"

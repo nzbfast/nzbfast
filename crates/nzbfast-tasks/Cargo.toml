@@ -1,0 +1,83 @@
+[package]
+name = "nzbfast-tasks"
+version = "1.4.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The nzbfast background-lane layer: the daemon's scheduled and long-running tasks"
+
+[lints]
+workspace = true
+
+# Lane 3 of Option C in
+# research/PLAN-NZBFAST-CRATE-SPLIT-2026-09-01.md: the one unit
+# `tools/modgraph.py`'s `SERVE_LAYERS` puts in the `tasks` layer.
+#
+# IT IS A SIBLING OF `nzbfast-api`, NOT A LAYER UNDER IT, and the
+# ABSENCE of an `nzbfast-api` line below is what holds that from the
+# cargo side (`--serve --check` holds it from the source side). Two
+# crates that do not name each other are checked in PARALLEL, which is
+# the whole point of siblings over a chain and the reason lane 1b broke
+# the twelve cross-layer edges before either crate existed. It must not
+# name `nzbfast` either - that is what keeps the bin the only thing
+# above both.
+#
+# NOTHING HERE EMBEDS A WEB ASSET, same as `nzbfast-daemon` and for the
+# same reason: every `include_str!` / `include_bytes!` of `web/` is in
+# the api layer, so this crate has no build.rs and no `dashboard`
+# feature.
+[dependencies]
+nzbkit = { path = "../nzbkit", default-features = false }
+nzbfast-core = { path = "../nzbfast-core" }
+nzbfast-unpack = { path = "../nzbfast-unpack" }
+nzbfast-meta = { path = "../nzbfast-meta" }
+nzbfast-engine = { path = "../nzbfast-engine" }
+# The layer these lanes drive: every one of them takes an
+# `&Arc<Daemon>`, reads its settings and writes its stores.
+nzbfast-daemon = { path = "../nzbfast-daemon" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+# The watch-folder lane's filesystem notifications.
+notify = "8.2.0"
+libc = "0.2"
+# The indexer lane's per-run capability token comes from the platform
+# CSPRNG, not RandomState.
+getrandom = "0.4"
+hex = "0.4"
+
+# The memory-trim lane calls `mi_collect(true)` directly on the two
+# platforms the bin installs mimalloc as the global allocator for. Same
+# crate and features the bin already links, so the tree gains nothing.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
+
+[features]
+default = []
+# Forwarded from the bin, exactly as the other layer crates forward it:
+# this layer carries the whole indexer lane (the scan loop, the
+# enrichment workers, the scoreboard and the name hunt), and forwarding
+# keeps them ONE switch rather than two, so `slim-check` compiles what
+# the phones ship.
+indexer = [
+    "nzbkit/indexer",
+    "nzbfast-core/indexer",
+    "nzbfast-meta/indexer",
+    "nzbfast-daemon/indexer",
+]
+
+[dev-dependencies]
+# The layers below with their test seams switched on. `cfg(test)` is a
+# property of ONE crate's build, so an item behind it is invisible across
+# a crate boundary whatever its visibility - the same finding steps 2, 3
+# and 4 and lane 2 each met. Every test in here builds its Daemon with
+# `nzbfast_daemon::testutil::test_daemon`.
+nzbfast-core = { path = "../nzbfast-core", features = ["test-support"] }
+nzbfast-unpack = { path = "../nzbfast-unpack", features = ["test-support"] }
+nzbfast-daemon = { path = "../nzbfast-daemon", features = ["test-support"] }
+# The index-scan and quality-lap tests open the daemon's closed index
+# directly. Same version/features nzbkit's index tests already compile,
+# so it adds no production dependency.
+rusqlite = { version = "0.40.1", features = ["hooks"] }

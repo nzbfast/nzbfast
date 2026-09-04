@@ -1,0 +1,65 @@
+# N2 over a payload a container sniffer can recognise.
+
+[layout]
+name = "cc-n03-sniffable-extensionless-payload"
+seed = 203
+note = """
+`bench/capability-corpus` leg n03, the r/usenet field case: an
+extensionless payload posted under a token, with no name source
+anywhere in the post - and, unlike every other opaque row here, real
+container bytes under it. The file is a whole number of MPEG transport
+stream packets with the sync byte on every 188-byte boundary, which is
+what `[source] content = "mpegts"` puts there and what the corpus's own
+ts_payload puts there.
+
+The bytes are the whole point of the row. `n2-opaque-c0-p0` states the
+same shape over seed noise and passes, and passing over noise says only
+that there was nothing to recognise: a client cannot resolve a real
+extension from bytes that sniff as nothing, so the leg's actual
+question - does it resolve a REAL container extension, and never a junk
+one - was never asked. Here it is asked, and the answer required is the
+TOKEN, unchanged and with nothing appended.
+
+That is a requirement rather than an accident, and it is `nzbfast get`'s
+correct answer rather than the whole client's. Sniffing an extension
+onto a nameless payload is a FILING decision, and this engine makes it
+in the daemon's naming pass (`nzbfast_unpack::smart::videoext`, whose
+header draws the same line: a named extension is authoritative and only
+a file naming nothing at all is ever sniffed). A `get` run files
+nothing, so the token stands. What the row forbids is the other two
+outcomes the corpus calls wrong: a junk suffix, and deletion.
+
+The `[source]` name is extensionless because that is the leg - but it
+never reaches the wire, because `[naming] wire = "opaque"` replaces it
+with a token drawn from the seed, and with no recovery set there is no
+out-of-band carrier either. So the name a client sees is a token with
+no extension, which is the shape, and the name in this file is only
+what the payload would have been called.
+
+One file, small, and one plane away from the baseline: an opaque wire
+name over a real container. Nothing else varies, so a failure here is
+about the payload's bytes and not about anything the naming plane did.
+"""
+
+[source]
+# 256 whole 188-byte packets. Sized for the shape and no larger: four
+# packets is the floor the schema enforces, and a few hundred is what
+# makes it a stream rather than a header.
+files = [{ name = "feature", bytes = 48128, content = "mpegts" }]
+
+[naming]
+wire = "opaque"
+
+[encoding]
+# Two articles rather than one, so the row is a multi-part post like
+# the leg it comes from.
+article_bytes = 24064
+
+[expect]
+complete = true
+
+[expect.ladder]
+# No claim. Which rung identification reaches on a nameless post is what
+# the census measures, and a sniffable payload does not change that -
+# `get` does not file, so nothing here promotes a rung.
+reaches = ""

@@ -54,6 +54,56 @@ use super::*;
 /// bytes are in use or are the dead space this constant exists to stop.
 pub const WAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
+/// WAL pages the committing connection lets accumulate before it stops
+/// to checkpoint, in pages (SQLite's default is 1000, so 4 MiB at the
+/// 4 KiB page size this index uses).
+///
+/// **The automatic checkpoint inside `tx.commit()` is the scan-side
+/// ingest's single most expensive site, and the only one whose cost
+/// explodes when the disk is busy.** Profiled 3 Sep 2026 on a hermetic
+/// 2,000,000-header rig (`cargo run -p nzbkit --example
+/// indexscan_bench`, `sample` mid-scan). Three profiles of the SAME
+/// binary at the same sampling point put the checkpoint between
+/// **9.4% and 54.3%** of everything inside `Index::ingest` - the index
+/// size does not move that, disk contention does, and 54.3% is the
+/// reading from a box loaded by other work, which is the condition a
+/// user's machine is normally in. On an uncontended disk the ranking is
+/// the release upsert 25.0%, the aggregate UPDATE 21.9%, this commit
+/// 18.1%, `pick_release_row` 12.7% - and the whole of the subject
+/// parsing and classification 7.5%, which is the finding this audit went
+/// looking for and did not get.
+///
+/// The checkpoint work itself is not waste; the FREQUENCY is. A
+/// checkpoint writes each DISTINCT page the WAL holds exactly once, so a
+/// btree page that a scan pass dirties in fifty consecutive transactions
+/// costs one write-back per checkpoint rather than fifty. Cutting the
+/// checkpoint count coalesces the repeats.
+///
+/// Measured, one binary per arm, five pairs alternating leg by leg,
+/// 800,000 headers at a 20,000 batch, median: **+24.2% headers/s
+/// (20,971 -> 26,046) and a 38.9% shorter per-batch p50 (855 -> 522
+/// ms)**, p90 -26.6%, max -13.1%, user CPU -3.9%, instructions -1.1%.
+/// The checkpoint's own share of ingest falls by a third at two
+/// independent sampling points (9.4 -> 6.0%, 12.9 -> 8.7%). Row set
+/// identical across the arms over the full 2,000,000-header dump. Full
+/// record: `research/INDEXER-SCAN-CPU-AUDIT-2026-09-03.md`.
+///
+/// 4,000 pages (16 MiB) rather than something larger for two reasons,
+/// both measured rather than chosen. It is the live daemon's OWN
+/// observed peak - 4,036 frames, the figure [`WAL_SIZE_LIMIT`] above is
+/// sized against - so it asks for no more WAL space than a real scan
+/// has already been seen to use, and it stays 4x under that limit,
+/// which is what keeps the truncate churn the limit exists to prevent
+/// out of the routine path. It also bounds the one cost that could go
+/// the wrong way: a checkpoint runs inside `Index::ingest`, which the
+/// daemon holds the index mutex across (memory topic
+/// `nzbfast-tail-blocked-on-index-mutex`), so a rarer checkpoint is a
+/// LONGER single hold. In the event it did not go the wrong way - p50,
+/// p90 and max all improved, because there is less checkpoint work in
+/// total - but four times rarer is a trade the measurement can carry
+/// and forty times would not be.
+pub const WAL_AUTOCHECKPOINT_PAGES: i64 = 4_000;
+
 /// Page cache for the shared writer, in MiB. It is one connection, it
 /// holds the compaction and migration transactions, and every chunk
 /// commit used to pay a full fsync against SQLite's 2 MB default on a
@@ -66,8 +116,95 @@ const WRITER_CACHE_MIB: i64 = 256;
 /// open at once and none of them needs the writer's working set.
 const SCRATCH_CACHE_MIB: i64 = 64;
 
-/// The base tables, pragmas aside: everything `CREATE TABLE IF NOT
-/// EXISTS` so it is a no-op on an existing database.
+/// Per-phase stopwatch for [`Index::open`], and the reason it exists.
+///
+/// Nothing had ever timed an index open. Round 21 of
+/// `research/RAR-PERF-AUDIT-2026-09-02.md` timed the daemon's whole boot
+/// (0.115-0.139 s to the first API answer) against an EMPTY index and
+/// said so rather than letting that read as covered - the open is a
+/// ladder of migrations, EXISTS probes and conditional index builds, and
+/// which rung a slow open is stuck on is not derivable from a total. It
+/// is Round 38 of that same file that measured the open, using this, and
+/// the numbers below come from there.
+///
+/// Cost is one `Instant::now()` per rung (eleven), which is tens of
+/// nanoseconds against an open that is milliseconds at its cheapest.
+/// The line is `info!` only past [`OPEN_SLOW_MS`], so an ordinary open -
+/// and the scan loop opens up to eight per group per pass - says nothing
+/// at the default level; `NZBFAST_LOG=debug` prints every one.
+#[derive(Default)]
+struct OpenTrace {
+    laps: Vec<(&'static str, f64)>,
+    last: Option<std::time::Instant>,
+    start: Option<std::time::Instant>,
+}
+
+impl OpenTrace {
+    fn start() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            laps: Vec::with_capacity(12),
+            last: Some(now),
+            start: Some(now),
+        }
+    }
+
+    /// Close the rung named `what` and open the next one.
+    fn lap(&mut self, what: &'static str) {
+        let now = std::time::Instant::now();
+        if let Some(prev) = self.last.replace(now) {
+            self.laps.push((what, (now - prev).as_secs_f64() * 1e3));
+        }
+    }
+
+    /// Emit the line. `path` is logged because a process holds several
+    /// databases open over its life (the index, and a test's scratch
+    /// copies) and a bare duration cannot be attributed to one.
+    fn finish(self, path: &Path, cache_mib: i64) {
+        let Some(start) = self.start else { return };
+        let total = start.elapsed().as_secs_f64() * 1e3;
+        // Slowest first: a slow open is one rung nearly every time, and
+        // the whole point of the line is to name it without a profiler.
+        let mut laps = self.laps;
+        laps.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let detail = laps
+            .iter()
+            .filter(|(_, ms)| *ms >= 0.5)
+            .map(|(what, ms)| format!("{what} {ms:.0} ms"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let detail = if detail.is_empty() {
+            "every phase under 0.5 ms".to_string()
+        } else {
+            detail
+        };
+        if total >= OPEN_SLOW_MS {
+            tracing::info!(
+                target: "index",
+                "open {} in {total:.0} ms (cache {cache_mib} MiB) - {detail}",
+                path.display()
+            );
+        } else {
+            tracing::debug!(
+                target: "index",
+                "open {} in {total:.1} ms (cache {cache_mib} MiB) - {detail}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Above this many milliseconds an `Index::open` is reported at `info!`
+/// rather than `debug!`.
+///
+/// 250 ms is chosen against the measurement rather than by taste: Round
+/// 38 read a fully-migrated open at 1.9-3.2 ms at every size from empty
+/// to 32.7 M releases / 30 GB, and the shapes that are NOT that - a
+/// migration meeting a large table for the first time (3m42s at that
+/// size), a WAL left by an unclean exit (790 ms) - are exactly the ones
+/// worth a line in a user's log.
+const OPEN_SLOW_MS: f64 = 250.0;
+
 fn create_base_schema(db: &Connection, cache_mib: i64) -> rusqlite::Result<()> {
     // Only journal_mode was ever set, so every chunk commit paid a
     // full fsync and the page cache stayed at SQLite's 2 MB default
@@ -97,6 +234,7 @@ fn create_base_schema(db: &Connection, cache_mib: i64) -> rusqlite::Result<()> {
             "PRAGMA auto_vacuum=INCREMENTAL;
              PRAGMA journal_mode=WAL;
              PRAGMA journal_size_limit={WAL_SIZE_LIMIT};
+             PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES};
              PRAGMA synchronous=NORMAL;
              PRAGMA temp_store=MEMORY;
              PRAGMA cache_size=-{};
@@ -447,9 +585,43 @@ fn create_base_schema(db: &Connection, cache_mib: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Additive column migrations (ALTER has no IF NOT EXISTS - failed
-/// re-adds are expected and harmless) plus the predb.pt index/backfill.
+/// The additive half of the schema, in THREE ordered steps.
+///
+/// Split out of one 495-line function on 1 Sep 2026, 5 lines under the
+/// size gate's 500-line fn ceiling and the narrowest margin in the tree
+/// (claim `size-ceiling-additive-migrations`). A migrations list is
+/// append-only by nature, so the next schema change would have reddened
+/// main for whoever pushed it. The seam is the one this function's own
+/// comment already described - columns, then what is derived from them -
+/// not an arbitrary cut to buy lines.
+///
+/// THE ORDER IS LOAD-BEARING AND IS THE REASON THIS ORCHESTRATOR EXISTS
+/// rather than three calls at the call site. Every index and backfill
+/// below reads a column that only [`additive_columns`] guarantees:
+/// `idx_titles_air_backfill` needs `air_tried`, `idx_titles_tvdb_backfill`
+/// needs `tvdb_tried`, `idx_rel_pesto` needs `pesto_ctr_min`,
+/// `idx_rel_visible_posted` needs `junk`, `idx_rel_enc` needs `enc_class`,
+/// and the predb backfill needs `pt`. Creating one before its ALTER is a
+/// silent no-op on a fresh install - `CREATE INDEX IF NOT EXISTS` on a
+/// missing column simply fails and is discarded, exactly like the ALTERs
+/// - so the index would never exist and the query it serves would walk
+/// the table forever with nothing to say so. Do not reorder these three,
+/// and do not call them individually from anywhere else.
 fn additive_migrations(db: &Connection) {
+    additive_columns(db);
+    derived_indexes_and_triggers(db);
+    predb_pt_backfill(db);
+}
+
+/// Step 1: columns added after their table first shipped.
+///
+/// ALTER has no IF NOT EXISTS, so failed re-adds are expected and
+/// harmless - every statement here is fired and its error discarded,
+/// which is what makes the list safe to append to. Nothing in this
+/// function may read a column: it is what GUARANTEES the columns the
+/// other two steps read, and [`additive_migrations`] documents why that
+/// ordering cannot be relaxed.
+fn additive_columns(db: &Connection) {
     // Columns added after the titles table first shipped - ALTER has
     // no IF NOT EXISTS, so failed re-adds are expected and harmless.
     for ddl in [
@@ -599,7 +771,7 @@ fn additive_migrations(db: &Connection) {
         // ties: the release name already carries these, and the parser
         // already read them, but until now they were parsed and thrown
         // away. '' = the name said nothing (or the row predates the
-        // columns and the quality_v9 pass hasn't reached it).
+        // columns and the quality_v10 pass hasn't reached it).
         "ALTER TABLE releases ADD COLUMN vcodec TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE releases ADD COLUMN acodec TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE releases ADD COLUMN hdr TEXT NOT NULL DEFAULT ''",
@@ -743,6 +915,11 @@ fn additive_migrations(db: &Connection) {
         // already scanning, and building an index at open is the
         // whole-table write lock the B1 picker indexes exist to avoid.
         "ALTER TABLE releases ADD COLUMN stem_fold TEXT NOT NULL DEFAULT ''",
+        // Exact external-NZB naming needs a quiet window after the local file
+        // manifest last changed. Kept on the release row, rather than in an
+        // auxiliary per-release table, so enabling the optional proof catalog
+        // cannot grow a second uncharged B-tree across the whole index.
+        "ALTER TABLE releases ADD COLUMN seed_manifest_at INTEGER NOT NULL DEFAULT 0",
         // W7-01..03: the repost table's evidence tier and its
         // ambiguity marker. Rows written before these columns existed
         // default to the weakest tier and uncontested, which is the
@@ -756,6 +933,18 @@ fn additive_migrations(db: &Connection) {
     ] {
         let _ = db.execute(ddl, []);
     }
+}
+
+/// Step 2: the indexes and triggers derived from those columns.
+///
+/// Runs AFTER [`additive_columns`], which is what guarantees the columns
+/// each predicate names; see [`additive_migrations`] for what breaks if
+/// that is reordered. Several of these are PARTIAL indexes whose
+/// predicate is written out verbatim in the matching where-builder, and
+/// each one says so at its own statement - a partial index is reachable
+/// only when the statement's own WHERE implies its predicate, so the two
+/// copies are load-bearing and must not be "tidied" apart.
+fn derived_indexes_and_triggers(db: &Connection) {
     // The three enricher lane queues (N1). Each lane thread asks its
     // own question every 15 s for the life of the daemon, through
     // `with_index` - the write connection and the index write mutex
@@ -916,6 +1105,14 @@ fn additive_migrations(db: &Connection) {
            ON releases(enc_class) WHERE enc_class>0",
         [],
     );
+}
+
+/// Step 3: the predb.pt index and its one-shot backfill.
+///
+/// Last, and after [`additive_columns`] has guaranteed `pt` on every
+/// install. The kv flag is what keeps the UPDATE from re-running on
+/// every open of a large feed table.
+fn predb_pt_backfill(db: &Connection) {
     // The pt index and its one-shot backfill live here, after the
     // ALTER above has guaranteed the column on every install. The
     // kv flag keeps the UPDATE from re-running on every open of a
@@ -1477,7 +1674,7 @@ fn fold_pass(db: &mut Connection, done_key: &str, at_key: &str, prefilter: &str)
 
 /// The one-shot, kv-stamped retroactive backfills (completeness rule,
 /// nsegs, M25 kind/res, M28 FTS + title_key/junk, stem_fold in its two
-/// generations, quality_v9).
+/// generations, quality_v10).
 fn retroactive_backfills(db: &mut Connection, fts: bool) {
     // One-time retroactive recompute after the completeness-rule
     // change (nfiles >= 2 → >= 1): existing rows only re-evaluate
@@ -1687,153 +1884,248 @@ fn retroactive_backfills(db: &mut Connection, fts: bool) {
     // existed - same chunked, time-bounded, cursor-resumed shape, for
     // the same reasons.
     super::pesto::pesto_backfill(db);
-    // quality_v9 (16 Aug, was quality_v8, before that junk_v7): the
-    // bump re-files the book lane. `pdf` became a book marker and a fed
-    // name that dropped its format marker now recovers the kind from
-    // the stem (`release::recover_media_kind`), and NOTHING would have
-    // healed the rows already stored: an e-book named by a Spotnet spot
-    // carries `kind=movie, junk=60`, the naming seam refuses a row whose
-    // pre_title is set, and the custom-category sweep only runs when the
-    // category config changes. Without the bump the fix would apply to
-    // new posts only and every book already indexed would stay hidden.
-    // junk_v6's rules plus a full
-    // re-parse - title_key/kind/res so ROT13 rescues that the parser
-    // newly decodes regroup under their real titles, and now
-    // vcodec/acodec/hdr, which rows indexed before those columns
-    // existed have never carried. The kv key names the CURRENT
-    // version; bumping it re-parses every row exactly once, which is
-    // what backfills the new columns - free, because this pass
-    // already parses every row's effective name. CHUNKED with a
-    // persisted id cursor - the
-    // one-big-tx shape could never win the write lock against
-    // parallel scanners on a live daemon (SQLITE_BUSY → silently
-    // skipped forever). 10k rows per transaction interleaves with
-    // scan ingest; a partial pass resumes from the cursor on the
-    // next open.
+    quality_backfill(db);
+}
+
+/// quality_v10 (2 Sep 2026, was quality_v9 on 16 Aug, quality_v8
+/// before that, junk_v7 before that): the bump re-files the book,
+/// music and anime lanes. Six classifier fixes landed on 2 Sep and
+/// NONE of them could reach a row already stored - the `pdf`/`max`/
+/// edition-number reads (d94b4735c), the group prior (e2f399a57),
+/// the rot13 music and book rescue (633b7baf8), the fansub episode
+/// read (ea2229aa2), the dashed `Show - NNN - Title` episode read
+/// (3f52c0ca4) and the masthead date reading (4724a8f0b). An
+/// audiobook folder in alt.binaries.mp3.audiobooks carries
+/// `kind=movie, junk=60`, the naming seam refuses a row whose
+/// pre_title is set, and the custom-category sweep only runs when
+/// the category config changes. Without the bump every one of those
+/// fixes would apply to new posts only.
+///
+/// Two of the six are GROUP-aware, which is what v10 costs over a
+/// free re-run of v9: the SELECT carries `grp` and the pass runs the
+/// group half of ingest's chain as well as the name half it already
+/// ran.
+///
+/// v9's own reason, kept because the bump inherits it: the book lane
+/// re-file, junk_v6's rules plus a full
+/// re-parse - title_key/kind/res so ROT13 rescues that the parser
+/// newly decodes regroup under their real titles, and now
+/// vcodec/acodec/hdr, which rows indexed before those columns
+/// existed have never carried. The kv key names the CURRENT
+/// version; bumping it re-parses every row exactly once, which is
+/// what backfills the new columns - free, because this pass
+/// already parses every row's effective name. CHUNKED with a
+/// persisted id cursor - the
+/// one-big-tx shape could never win the write lock against
+/// parallel scanners on a live daemon (SQLITE_BUSY → silently
+/// skipped forever). 10k rows per transaction interleaves with
+/// scan ingest; a partial pass resumes from the cursor on the
+/// next open.
+///
+/// TIME-BOUNDED, unlike v9's inline loop, and that is the other half of
+/// what makes a bump safe to take again. This runs inside
+/// `Index::open`, so an unbounded loop re-parses the whole table before
+/// the daemon serves its first request - and v9's loop was unbounded.
+/// MEASURED, release build, 400k synthetic rows with two `files` rows
+/// each so the SELECT's EXISTS probe does real work (the rig is
+/// `qual_bench::time_the_quality_pass`, `--ignored`). Twice, because
+/// the first run was on a box carrying five other worktree builds and
+/// the spread is the interesting part:
+///
+///     load ~39   30.8 s / 400k   =  77.1 s per million rows
+///     load ~23   16.6 s / 400k   =  41.6 s per million rows
+///
+/// So a 67M-row index, which the largest live ones are, is somewhere
+/// between 46 and 86 minutes, and it is CPU that a busy box makes
+/// worse. Stated limits in
+/// both directions: a loaded box inflates the rate, and a 400k-row
+/// scratch index sits entirely in page cache while a live 67M-row one
+/// does not, which deflates it. Neither matters to the decision. What
+/// this is not is borderline: the conclusion survives being wrong by
+/// 4x either way.
+///
+/// So the pass takes the shape of the two backfills above it instead: a
+/// budget per call, the persisted cursor doing the resuming, and a
+/// maintenance leg in the indexer lap
+/// (`passes::quality_backfill_pass`) finishing what the 2 s at open
+/// could not. The heal is therefore gradual rather than instant, which
+/// is the right trade for a re-file of rows that have been mis-filed
+/// since they were indexed: nothing downstream has a deadline on it.
+fn quality_backfill(db: &mut Connection) {
+    quality_backfill_slice(db, std::time::Duration::from_secs(2));
+}
+
+/// One budgeted slice of [`quality_backfill`]. Returns true when the
+/// pass is COMPLETE, so a caller's slice loop can stop early - the same
+/// caught-up contract as `msgid_map_backfill_slice`.
+pub(super) fn quality_backfill_slice(db: &mut Connection, budget: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    let mut complete = false;
     let done: Option<String> = db
-        .query_row("SELECT v FROM kv WHERE k='quality_v9'", [], |r| r.get(0))
+        .query_row("SELECT v FROM kv WHERE k='quality_v10'", [], |r| r.get(0))
         .ok();
-    if done.as_deref() != Some("1") {
-        let _ = (|| -> rusqlite::Result<()> {
-            let mut cursor: i64 = db
-                .query_row("SELECT v FROM kv WHERE k='quality_v9_cursor'", [], |r| {
-                    r.get::<_, String>(0)
-                })
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            loop {
-                // IMMEDIATE, like the nsegs, reclassify and ingest
-                // transactions: this reads a cursor and writes it
-                // back, and a deferred lock upgrade does NOT get the
-                // busy timeout - it returns SQLITE_BUSY at once. A
-                // deferred wrapper here meant a contended pass
-                // abandoned mid-chunk and left the cursor parked.
-                let tx = rusqlite::Transaction::new_unchecked(
-                    db,
-                    rusqlite::TransactionBehavior::Immediate,
-                )?;
-                // The effective name, NOT the raw stem: a row named
-                // after ingest (`apply_named` - predb sweep, spot
-                // promotion, byte probes) derived every classification
-                // column from pre_title, and its stem is an obfuscated
-                // hash. Re-parsing the stem here would clobber the row
-                // back to the junk>=70 no-card answer, and nothing
-                // would ever heal it - the naming seam refuses rows
-                // whose pre_title is already set. Same COALESCE the
-                // ingest and card paths use.
-                let rows: Vec<(i64, String, i64, bool, String)> = {
-                    let mut sel = tx.prepare_cached(&format!(
-                        "SELECT id, COALESCE(NULLIF(pre_title,''), stem),
+    if done.as_deref() == Some("1") {
+        return true;
+    }
+    let _ = (|| -> rusqlite::Result<()> {
+        let mut cursor: i64 = db
+            .query_row("SELECT v FROM kv WHERE k='quality_v10_cursor'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        loop {
+            // IMMEDIATE, like the nsegs, reclassify and ingest
+            // transactions: this reads a cursor and writes it
+            // back, and a deferred lock upgrade does NOT get the
+            // busy timeout - it returns SQLITE_BUSY at once. A
+            // deferred wrapper here meant a contended pass
+            // abandoned mid-chunk and left the cursor parked.
+            let tx =
+                rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+            // The effective name, NOT the raw stem: a row named
+            // after ingest (`apply_named` - predb sweep, spot
+            // promotion, byte probes) derived every classification
+            // column from pre_title, and its stem is an obfuscated
+            // hash. Re-parsing the stem here would clobber the row
+            // back to the junk>=70 no-card answer, and nothing
+            // would ever heal it - the naming seam refuses rows
+            // whose pre_title is already set. Same COALESCE the
+            // ingest and card paths use.
+            // `grp` is the sixth column and the reason this key
+            // is v10: two of the six classifier fixes it heals are
+            // GROUP-aware (`recover_kind_from_group` and
+            // `recover_episode_from_group`), and v9's SELECT could
+            // not feed them. `releases.grp` is NOT NULL in the
+            // original CREATE TABLE and part of the row's UNIQUE
+            // identity, so every row ever written carries it - there
+            // is no era of blank groups for this to no-op over.
+            let rows: Vec<(i64, String, i64, bool, String, String)> = {
+                let mut sel = tx.prepare_cached(&format!(
+                    "SELECT id, COALESCE(NULLIF(pre_title,''), stem),
                                 total_bytes,
                                 EXISTS(SELECT 1 FROM files
                                        WHERE release_id=releases.id AND {EXE_FILE_SQL}),
-                                stem
+                                stem, grp
                          FROM releases WHERE id > ?1 ORDER BY id LIMIT 10000"
-                    ))?;
-                    sel.query_map([cursor], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-                    })?
-                    .collect::<rusqlite::Result<_>>()?
-                };
-                if rows.is_empty() {
-                    tx.execute(
-                        "INSERT INTO kv(k, v) VALUES('quality_v9','1')
+                ))?;
+                sel.query_map([cursor], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?
+            };
+            if rows.is_empty() {
+                tx.execute(
+                    "INSERT INTO kv(k, v) VALUES('quality_v10','1')
                          ON CONFLICT(k) DO UPDATE SET v='1'",
-                        [],
-                    )?;
-                    tx.commit()?;
-                    break;
-                }
-                {
-                    // `parse_release` is CUSTOM-BLIND: `Index::open`
-                    // runs before `set_custom`, by construction (the
-                    // constructor hardcodes an empty category list),
-                    // so this pass cannot know the user's categories.
-                    // Re-parsing a row that `reclassify_custom`
-                    // classified would therefore rewrite kind and
-                    // title_key back to the built-in answer - every
-                    // session of an F1 season collapsing onto one
-                    // movie card, out of the category tab, and losing
-                    // the Custom junk exemption. Worse, it does not
-                    // heal: `reclassify_custom` sees an unchanged
-                    // fingerprint and no cursor and returns Ok(0) on
-                    // every later start.
-                    //
-                    // So the classification columns are written only
-                    // for rows still carrying a built-in kind. The
-                    // rest - the codec/resolution/language backfill
-                    // this pass exists for - is unconditional, and is
-                    // correct for custom rows too, because
-                    // `apply_custom` mutates ONLY kind and key.
-                    // '' is in the list deliberately: a row that has
-                    // never been classified still needs its first
-                    // parse.
-                    let mut upd = tx.prepare_cached(
-                        "UPDATE releases SET langs=?2, res=?3,
+                    [],
+                )?;
+                tx.commit()?;
+                complete = true;
+                return Ok(());
+            }
+            {
+                // `parse_release` is CUSTOM-BLIND: `Index::open`
+                // runs before `set_custom`, by construction (the
+                // constructor hardcodes an empty category list),
+                // so this pass cannot know the user's categories.
+                // Re-parsing a row that `reclassify_custom`
+                // classified would therefore rewrite kind and
+                // title_key back to the built-in answer - every
+                // session of an F1 season collapsing onto one
+                // movie card, out of the category tab, and losing
+                // the Custom junk exemption. Worse, it does not
+                // heal: `reclassify_custom` sees an unchanged
+                // fingerprint and no cursor and returns Ok(0) on
+                // every later start.
+                //
+                // So the classification columns are written only
+                // for rows still carrying a built-in kind. The
+                // rest - the codec/resolution/language backfill
+                // this pass exists for - is unconditional, and is
+                // correct for custom rows too, because
+                // `apply_custom` mutates ONLY kind and key.
+                // '' is in the list deliberately: a row that has
+                // never been classified still needs its first
+                // parse.
+                let mut upd = tx.prepare_cached(
+                    "UPDATE releases SET langs=?2, res=?3,
                                 vcodec=?4, acodec=?5, hdr=?6
                          WHERE id=?1 AND (langs<>?2 OR res<>?3
                                 OR vcodec<>?4 OR acodec<>?5 OR hdr<>?6)",
-                    )?;
-                    let mut upd_class = tx.prepare_cached(
-                        "UPDATE releases SET junk=?2, title_key=?3, kind=?4
+                )?;
+                let mut upd_class = tx.prepare_cached(
+                    "UPDATE releases SET junk=?2, title_key=?3, kind=?4
                          WHERE id=?1
                            AND kind IN ('movie','tv','music','book',
                                         'software','other','')
                            AND (junk<>?2 OR title_key<>?3 OR kind<>?4)",
-                    )?;
-                    for (id, name, bytes, has_exe, stem) in &rows {
-                        let mut p = crate::release::parse_release(name);
-                        // A fed name names the work; the stem names the
-                        // file. Only the file says "book".
-                        crate::release::recover_media_kind(&mut p, name, stem);
-                        upd.execute(rusqlite::params![
-                            id,
-                            p.langs.join(" "),
-                            p.res.as_deref().unwrap_or_default(),
-                            p.vcodec.as_deref().unwrap_or_default(),
-                            p.acodec.as_deref().unwrap_or_default(),
-                            p.hdr.as_deref().unwrap_or_default()
-                        ])?;
-                        upd_class.execute(rusqlite::params![
-                            id,
-                            junk_score(name, &p, *bytes as u64, *has_exe),
-                            p.key,
-                            kind_str(&p.kind)
-                        ])?;
-                    }
-                }
-                cursor = rows.last().unwrap().0;
-                tx.execute(
-                    "INSERT INTO kv(k, v) VALUES('quality_v9_cursor', ?1)
-                     ON CONFLICT(k) DO UPDATE SET v=?1",
-                    [cursor.to_string()],
                 )?;
-                tx.commit()?;
+                for (id, name, bytes, has_exe, stem, grp) in &rows {
+                    let mut p = crate::release::parse_release(name);
+                    // A fed name names the work; the stem names the
+                    // file. Only the file says "book".
+                    crate::release::recover_media_kind(&mut p, name, stem);
+                    // THE SAME CHAIN AS `ingest_pass`, IN THE SAME
+                    // ORDER (custom categories excepted, for the
+                    // reason written below), because a backfill that
+                    // classifies differently from ingest is a second
+                    // classifier: rows would flap between the two
+                    // answers on every scan touch. The group prior
+                    // first (it
+                    // returns early on an episode, so an episode
+                    // invented ahead of it disarms the book/music
+                    // rescue), then the episode read, gated on the
+                    // same obfuscation test for the same reason -
+                    // the season it records would make the blob test
+                    // more lenient than it was.
+                    crate::release::recover_kind_from_group(&mut p, grp, stem);
+                    if !stem_obfuscated(stem, &p) {
+                        crate::release::recover_episode_from_group(&mut p, grp, name);
+                    }
+                    upd.execute(rusqlite::params![
+                        id,
+                        p.langs.join(" "),
+                        p.res.as_deref().unwrap_or_default(),
+                        p.vcodec.as_deref().unwrap_or_default(),
+                        p.acodec.as_deref().unwrap_or_default(),
+                        p.hdr.as_deref().unwrap_or_default()
+                    ])?;
+                    upd_class.execute(rusqlite::params![
+                        id,
+                        junk_score(name, &p, *bytes as u64, *has_exe),
+                        p.key,
+                        kind_str(&p.kind)
+                    ])?;
+                }
             }
-            Ok(())
-        })();
-    }
+            cursor = rows.last().unwrap().0;
+            tx.execute(
+                "INSERT INTO kv(k, v) VALUES('quality_v10_cursor', ?1)
+                     ON CONFLICT(k) DO UPDATE SET v=?1",
+                [cursor.to_string()],
+            )?;
+            tx.commit()?;
+            // The budget is spent BETWEEN chunks, never inside one:
+            // the cursor and the rows it covers are one transaction,
+            // and a slice that stopped mid-chunk would either park
+            // the cursor behind work it had already done or roll the
+            // work back. Same place `msgid_map_backfill_slice`
+            // checks its own deadline, for the same reason.
+            if std::time::Instant::now() >= deadline {
+                return Ok(());
+            }
+        }
+    })();
+    complete
 }
 
 std::thread_local! {
@@ -1852,6 +2144,63 @@ std::thread_local! {
 }
 
 impl Index {
+    /// One budgeted slice of the quality re-classification backfill,
+    /// for the indexer lap's maintenance leg. `Index::open` gets two
+    /// seconds of it; on an index of any size that is a start and not a
+    /// finish, and the lap is what finishes it. Returns true when the
+    /// pass is COMPLETE. See [`quality_backfill`].
+    pub fn quality_backfill_slice(&mut self, budget: std::time::Duration) -> bool {
+        quality_backfill_slice(&mut self.db, budget)
+    }
+
+    /// How far the quality backfill has walked (0 = not started, None =
+    /// finished), so the lap can log its advance rather than leaving it
+    /// visible only in `kv`.
+    pub fn quality_backfill_cursor(&self) -> Option<i64> {
+        if self.kv_get("quality_v10").as_deref() == Some("1") {
+            return None;
+        }
+        Some(
+            self.kv_get("quality_v10_cursor")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+        )
+    }
+
+    /// Put an open index into the state a PRE-BUMP one is in: every
+    /// stored row carrying an older classifier's answer in the three
+    /// classification columns, and the version key un-stamped so
+    /// [`quality_backfill_slice`] has the whole table to walk. Returns
+    /// the rows poisoned.
+    ///
+    /// It exists because that state cannot be reached any other way
+    /// from outside this crate, and a test that cannot reach it cannot
+    /// see the pass run AT ALL - which is exactly how the daemon-side
+    /// lap leg shipped with no coverage. A fresh test index is empty,
+    /// so the very first `Index::open` finds no rows, stamps the key
+    /// and every later call returns at the first kv read. Same reason
+    /// `debug_defer_picker_indexes` exists next door: the honest state
+    /// is unreachable, and the code's own definition of it is cheap to
+    /// write directly.
+    ///
+    /// Un-stamping with `LIKE 'quality_v%'` rather than naming v10, so
+    /// the next version bump does not quietly leave a caller pinning a
+    /// key nothing reads any more.
+    #[doc(hidden)]
+    pub fn debug_stale_classification(&self, kind: &str, junk: i64) -> usize {
+        let n = self
+            .db
+            .execute(
+                "UPDATE releases SET kind=?1, junk=?2, title_key='stale-answer'",
+                rusqlite::params![kind, junk],
+            )
+            .expect("write the stale classification");
+        self.db
+            .execute("DELETE FROM kv WHERE k LIKE 'quality_v%'", [])
+            .expect("un-stamp the quality version");
+        n
+    }
+
     /// See [`OPEN_COUNT`]; counts the calling thread's opens only.
     pub fn open_count() -> u64 {
         OPEN_COUNT.with(|c| c.get())
@@ -1891,6 +2240,7 @@ impl Index {
 
     fn open_with_cache(path: &Path, cache_mib: i64) -> rusqlite::Result<Index> {
         OPEN_COUNT.with(|c| c.set(c.get() + 1));
+        let mut trace = OpenTrace::start();
         let mut db = Connection::open(path)?;
         // Several connections share this db (scan scratch, API queries,
         // wall enricher, IMDb refresher). Without a busy timeout a
@@ -1900,17 +2250,26 @@ impl Index {
         // scan_loop_populates_index_live "flake").
         db.busy_timeout(std::time::Duration::from_secs(10))?;
         segcodec::register(&db)?;
+        trace.lap("connect");
         create_base_schema(&db, cache_mib)?;
+        trace.lap("base schema");
         additive_migrations(&db);
+        trace.lap("additive migrations");
         rebuild_marks_if_needed(&db);
+        trace.lap("marks");
         arrival_counter_and_indexes(&db);
+        trace.lap("arrival");
         picker_indexes(&db);
+        trace.lap("picker indexes");
         let (fts, pre_fts) = ensure_fts(&db);
         let people_fts_ok = ensure_people(&db)?;
         let people_fts = fts && people_fts_ok;
+        trace.lap("fts");
         retroactive_backfills(&mut db, fts);
+        trace.lap("retroactive backfills");
         // M29 availability oracle: (backbone, family, age-bucket) ledger.
         let _ = crate::oracle::ensure_schema(&db);
+        trace.lap("oracle");
         // `EXISTS` rather than a count: this only has to answer "is the
         // feed worth consulting", and on a large predb the count is a
         // full index scan at every open.
@@ -1954,7 +2313,11 @@ impl Index {
             Some("1") => summaries::ensure_schema(&db).is_ok(),
             _ => table_exists(&db, "title_summaries"),
         };
-        Ok(Index {
+        // The predb EXISTS pair, `ensure_named_index` and the summaries
+        // question, together: all four are cheap on a feed-less install
+        // and all four read a table whose size nothing else here bounds.
+        trace.lap("predb probe");
+        let index = Index {
             db,
             gate: None,
             fts,
@@ -1971,7 +2334,48 @@ impl Index {
             wall_window: Self::wall_window_armed(),
             cards_total_memo: Default::default(),
             deadline: Default::default(),
-        })
+        };
+        // Existing prototype catalogs may carry sampled Message-ID claims
+        // from before whole-manifest verification. Upgrade and withdraw those
+        // claims before this writer can serve them, even when background seed
+        // maintenance is paused. Do not install the optional catalog on an
+        // index that never used it.
+        if index.nzb_seed_schema_present()? {
+            index.ensure_nzb_seed_schema()?;
+            // Seeds stored before the strong per-file manifest key existed
+            // carry a legacy MD5 membership key the verifier can never match,
+            // so they replay to `unsafe` forever and can never name a row.
+            // Re-key them in place from evidence already on disk; the marker
+            // makes this a one-shot repair, and it is bounded per open so a
+            // large catalogue cannot stall the writer here. A failure is
+            // propagated for the same reason the schema upgrade above is: a
+            // seed catalogue this writer cannot repair is one it must not
+            // then serve. Each chunk is its own savepoint, so a refusal
+            // leaves the marker unset and the earlier chunks committed.
+            for _ in 0..seed::SEED_REKEY_CHUNKS_PER_OPEN {
+                if index.nzb_seed_legacy_rekey_slice()?.done {
+                    break;
+                }
+            }
+            // What the re-key deliberately leaves behind: a legacy set with
+            // no strong file keys on disk at all cannot express its identity,
+            // so it replays to `unsafe` forever and costs a replay slot every
+            // lap. Delete it, so a later grab of the same NZB re-seeds it
+            // cleanly under a strong key. Same one-shot, bounded, own-marker
+            // shape as the re-key above, and it propagates a failure for the
+            // same reason; every ledger decrement is clamped so a drifted
+            // ledger cannot turn this into a refused open.
+            for _ in 0..seed::SEED_PURGE_CHUNKS_PER_OPEN {
+                if index.nzb_seed_unrepairable_purge_slice()?.done {
+                    break;
+                }
+            }
+            // Open-time DDL cannot stale a reader from this generation.
+            index.ddl.set(false);
+        }
+        trace.lap("seed catalogue");
+        trace.finish(path, cache_mib);
+        Ok(index)
     }
 
     /// TODO 300: whether the wall page's window fast path is armed.
@@ -2555,6 +2959,56 @@ mod tests {
         teardown(&dir, ix);
     }
 
+    /// ...and it must declare how OFTEN it stops to checkpoint, which
+    /// is a different question from how much WAL it keeps and by far
+    /// the more expensive one to get wrong.
+    ///
+    /// SQLite's default is 1,000 pages, and at that setting the
+    /// automatic checkpoint inside `tx.commit()` measured between 9.4%
+    /// and 54.3% of the whole of `Index::ingest` - the spread is disk
+    /// contention, and the top of it is an ordinarily busy machine (3
+    /// Sep 2026 - see [`WAL_AUTOCHECKPOINT_PAGES`]). Delete the pragma
+    /// and this reads back 1000 and the scan loop pays that again.
+    ///
+    /// The upper bound is the interesting half. A checkpoint runs with
+    /// the daemon's index mutex held, so this constant is also the
+    /// ceiling on one uninterruptible hold; and it has to stay well
+    /// under [`WAL_SIZE_LIMIT`], because a routine commit that reaches
+    /// the size limit pays a truncate, which is the churn that limit
+    /// exists to prevent.
+    #[test]
+    fn the_writer_declares_how_often_it_checkpoints() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-wal-auto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.db");
+        let ix = Index::open(&db).unwrap();
+
+        let pages: i64 = ix
+            .db
+            .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            pages, WAL_AUTOCHECKPOINT_PAGES,
+            "the writer is not carrying the autocheckpoint threshold; 1000 is \
+             SQLite's default, which this was measured 24.2% slower than"
+        );
+        // A WAL this threshold allows must still fit inside the size
+        // limit with room to spare, or the cheap checkpoint the raise
+        // buys is paid back as a truncate on the very same commit.
+        let page_size: i64 = ix
+            .db
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            pages * page_size * 2 <= WAL_SIZE_LIMIT,
+            "an autocheckpoint at {pages} pages of {page_size} bytes can reach \
+             {} of the {WAL_SIZE_LIMIT}-byte WAL limit",
+            pages * page_size
+        );
+        teardown(&dir, ix);
+    }
+
     /// `compact` is a single VACUUM over the whole database, so it
     /// leaves behind a WAL as large as the database - this is what put
     /// 28.1 GiB beside the live index. It must hand that back before it
@@ -2720,5 +3174,295 @@ mod tests {
         );
         drop(keepalive);
         teardown(&dir, ix);
+    }
+
+    /// The quality_v10 bump: prove the pass HEALS a stored row rather
+    /// than only classifying a new one.
+    ///
+    /// Five of the six classifier fixes that landed on 2 Sep 2026 ride a
+    /// version bump for free, because they live in `parse_release` and
+    /// `recover_media_kind`, which the pass already ran at v9. The group
+    /// prior and the dashed-episode read cannot: both take the NEWSGROUP,
+    /// and v9's SELECT did not carry it, so a bump without `grp` would
+    /// have left every audiobook and magazine row filed as an
+    /// evidence-free movie at junk 60 - hidden by the wall's default
+    /// hide-at-50 - for good.
+    ///
+    /// Each row is stamped with the answer the v9 chain actually
+    /// produces (asserted, not assumed), so the "before" state is the
+    /// real one and not a hand-written guess at it.
+    ///
+    /// The third row is the control that licenses the second: `Author -
+    /// 04 - Chapter` is the dashed-episode shape to the letter, and it
+    /// must stay a BOOK, because the group is what vouches for the
+    /// reading and a book group vouches for the opposite.
+    #[test]
+    fn the_quality_bump_heals_stored_rows_through_the_group() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-qualv10-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.db");
+        // (stem, group, kind after the bump, title_key after the bump)
+        let cases: [(&str, &str, &str, &str); 4] = [
+            (
+                "Perry Rhodan 3390 - Die Stunde der Deponentin (Ungekuerzt)",
+                "alt.binaries.mp3.audiobooks",
+                "book",
+                "bk:perry rhodan 3390 die stunde der deponentin ungekuerzt",
+            ),
+            (
+                "Bleach - 187 - Ichigo Rages! The Assassin's Secret.mkv",
+                "alt.binaries.multimedia.anime.highspeed",
+                "tv",
+                "t:bleach",
+            ),
+            (
+                "Stephen King - 04 - The Gunslinger",
+                "alt.binaries.e-book",
+                "book",
+                "bk:stephen king 04 the gunslinger",
+            ),
+            (
+                "Dune.Part.Two.2024.2160p.BluRay.x264-GRP.mkv",
+                "alt.binaries.boneless",
+                "movie",
+                "m:dune part two:2024",
+            ),
+        ];
+        {
+            let ix = Index::open(&db).unwrap();
+            for (stem, grp, _, _) in cases {
+                // The v9 chain, verbatim: parse the effective name, then
+                // recover the media kind from the stem. No group.
+                let mut old = crate::release::parse_release(stem);
+                crate::release::recover_media_kind(&mut old, stem, stem);
+                ix.db
+                    .execute(
+                        "INSERT INTO releases(stem, poster, grp, total_bytes,
+                                              first_seen, first_posted,
+                                              kind, title_key, junk)
+                         VALUES(?1, 'p@x', ?2, 2000000000, 100, 100, ?3, ?4, ?5)",
+                        rusqlite::params![
+                            stem,
+                            grp,
+                            kind_str(&old.kind),
+                            old.key,
+                            junk_score(stem, &old, 2_000_000_000, false),
+                        ],
+                    )
+                    .unwrap();
+            }
+            // The three rows this bump exists for were all evidence-free
+            // movies at 60 under v9, which is what the wall hid.
+            let hidden: i64 = ix
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM releases WHERE kind='movie' AND junk>=50",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(hidden, 3, "the v9 answer for these three is a hidden movie");
+            ix.db
+                .execute("DELETE FROM kv WHERE k LIKE 'quality_v%'", [])
+                .unwrap();
+        }
+        let ix = Index::open(&db).unwrap();
+        assert_eq!(ix.kv_get("quality_v10").as_deref(), Some("1"));
+        for (stem, grp, kind, key) in cases {
+            let (got_kind, got_key, got_junk): (String, String, i64) = ix
+                .db
+                .query_row(
+                    "SELECT kind, title_key, junk FROM releases WHERE stem=?1",
+                    [stem],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (got_kind.as_str(), got_key.as_str()),
+                (kind, key),
+                "{stem} in {grp} should have been re-filed by the bump"
+            );
+            assert!(
+                got_junk < 50,
+                "{stem} should be visible after the bump, junk was {got_junk}"
+            );
+        }
+        teardown(&dir, ix);
+    }
+
+    /// The budget half of the same pass: a slice that runs out of time
+    /// must PARK, not finish, and the next one must pick up where it
+    /// stopped rather than starting over.
+    ///
+    /// Pinned with a ZERO budget, the way `msgid_map_backfill_slice`'s
+    /// own test does it, because that is the only budget a loaded box
+    /// cannot accidentally satisfy. Zero still buys one chunk - the
+    /// deadline is checked BETWEEN chunks, since the cursor and the rows
+    /// it covers are one transaction - so with the chunk at 10k rows and
+    /// a handful of rows here, the first call does all the work and
+    /// parks, and the second finds nothing left and stamps the pass
+    /// done. That is exactly the sequence a big index runs thousands of
+    /// times, and the "returns false while rows remain" contract is what
+    /// the indexer lap's slice loop reads to decide whether to call
+    /// again.
+    #[test]
+    fn a_spent_quality_slice_parks_and_the_next_one_resumes() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-qualslice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        for i in 0..3 {
+            ix.db
+                .execute(
+                    "INSERT INTO releases(stem, poster, grp, first_seen, first_posted)
+                     VALUES(?1, 'p@x', 'alt.binaries.mp3.audiobooks', 100, 100)",
+                    [format!("Perry Rhodan 33{i:02} - Die Stunde der Deponentin")],
+                )
+                .unwrap();
+        }
+        ix.db
+            .execute("DELETE FROM kv WHERE k LIKE 'quality_v%'", [])
+            .unwrap();
+        assert_eq!(ix.quality_backfill_cursor(), Some(0), "nothing walked yet");
+
+        assert!(
+            !ix.quality_backfill_slice(std::time::Duration::ZERO),
+            "a spent slice reports the pass INCOMPLETE, or the lap stops calling it"
+        );
+        let parked = ix.quality_backfill_cursor();
+        assert_eq!(parked, Some(3), "one chunk done, cursor persisted");
+        // ...and the work of that chunk landed, not just the cursor.
+        let books: i64 = ix
+            .db
+            .query_row("SELECT COUNT(*) FROM releases WHERE kind='book'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(books, 3, "a parked slice still commits what it did");
+
+        assert!(
+            ix.quality_backfill_slice(std::time::Duration::ZERO),
+            "the resuming slice finds no rows past the cursor and stamps the pass"
+        );
+        assert_eq!(ix.quality_backfill_cursor(), None, "complete");
+        // And a completed pass is free to ask about, every lap, forever.
+        assert!(ix.quality_backfill_slice(std::time::Duration::ZERO));
+        teardown(&dir, ix);
+    }
+}
+
+#[cfg(test)]
+mod qual_bench {
+    use super::*;
+
+    /// The rig behind the number quoted in [`quality_backfill`]: time
+    /// one WHOLE quality pass over N synthetic rows, each with two
+    /// `files` rows so the SELECT's EXISTS probe does real work.
+    ///
+    /// `#[ignore]`d and it asserts NOTHING. It exists so the next lane
+    /// taking a version bump can re-derive the per-million-row rate on
+    /// its own box instead of trusting a comment, and a rig that only
+    /// prints cannot rot into a red on a loaded machine the way a
+    /// timing ASSERTION would. Run it in release - a debug build
+    /// measures the debug parser, which is a different program:
+    ///
+    ///     QUAL_N=400000 cargo test --release -p nzbkit --lib \
+    ///       -- --ignored --nocapture qual_bench
+    ///
+    /// It calls the slice directly with an unreachable budget, because
+    /// `Index::open` deliberately gives the pass only two seconds.
+    #[test]
+    #[ignore]
+    fn time_the_quality_pass() {
+        let n: i64 = std::env::var("QUAL_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200_000);
+        let dir = std::env::temp_dir().join(format!("nzbfast-qualbench-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.db");
+        let shapes: [(&str, &str); 8] = [
+            (
+                "Dune.Part.Two.2024.2160p.UHD.BluRay.REMUX.DV.HDR.HEVC.TrueHD.Atmos-GRP",
+                "alt.binaries.boneless",
+            ),
+            (
+                "[SubsPlease] Frieren - 18 (1080p) [ABCD1234]",
+                "alt.binaries.multimedia.anime.highspeed",
+            ),
+            (
+                "Bleach - 187 - Ichigo Rages! The Assassin's Secret",
+                "alt.binaries.multimedia.anime.highspeed",
+            ),
+            ("Max Brooks - World War Z (epub)", "alt.binaries.e-book"),
+            (
+                "Perry Rhodan 3390 - Die Stunde der Deponentin (Ungekuerzt)",
+                "alt.binaries.mp3.audiobooks",
+            ),
+            ("04-kmfdm-anarchy-web-2026", "alt.binaries.sounds.mp3"),
+            (
+                "The New York Times - 15 August 2026",
+                "alt.binaries.e-book.magazines",
+            ),
+            ("NGKzwg4lCQF_vMr95eoDx2X9NxbLi", "alt.binaries.boneless"),
+        ];
+        {
+            let mut ix = Index::open(&db).unwrap();
+            let tx = ix.db.transaction().unwrap();
+            {
+                let mut st = tx
+                    .prepare(
+                        "INSERT INTO releases(stem, poster, grp, total_bytes,
+                                              first_seen, first_posted)
+                         VALUES(?1, ?2, ?3, ?4, 100, 100)",
+                    )
+                    .unwrap();
+                let mut fs = tx
+                    .prepare(
+                        "INSERT INTO files(release_id, filename, total_parts, bytes)
+                         VALUES(?1, ?2, 10, 1000)",
+                    )
+                    .unwrap();
+                for i in 0..n {
+                    let (stem, grp) = shapes[(i % shapes.len() as i64) as usize];
+                    st.execute(rusqlite::params![
+                        format!("{stem} #{i}"),
+                        format!("p{}@x", i % 977),
+                        grp,
+                        2_000_000_000i64,
+                    ])
+                    .unwrap();
+                    let rid = tx.last_insert_rowid();
+                    fs.execute(rusqlite::params![rid, format!("{stem}.part1.rar")])
+                        .unwrap();
+                    fs.execute(rusqlite::params![rid, format!("{stem}.par2")])
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        let mut ix = Index::open(&db).unwrap();
+        // Un-stamp AFTER the open, not before it: `Index::open` spends
+        // its own 2 s slice on the pass, and doing this the other way
+        // round would leave that work out of the timed region and
+        // understate the rate by however much it got through.
+        ix.db
+            .execute("DELETE FROM kv WHERE k LIKE 'quality_v%'", [])
+            .unwrap();
+        let t0 = std::time::Instant::now();
+        let done = ix.quality_backfill_slice(std::time::Duration::from_secs(86_400));
+        let dt = t0.elapsed();
+        assert!(done, "the rig's budget must cover the whole pass");
+        let per_m = dt.as_secs_f64() / (n as f64) * 1e6;
+        println!(
+            "QUALBENCH rows={n} wall={:.3}s -> {per_m:.1}s per million rows; \
+             67M extrapolates to {:.0}s",
+            dt.as_secs_f64(),
+            per_m * 67.0
+        );
+        drop(ix);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

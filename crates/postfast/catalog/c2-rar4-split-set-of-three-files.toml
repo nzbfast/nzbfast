@@ -1,0 +1,63 @@
+# C2 on the OTHER container generation: several files in ONE split RAR4
+# set.
+
+[layout]
+name = "c2-rar4-split-set-of-three-files"
+seed = 173
+note = """
+The RAR4 twin of nc-r1-split-stored-set-of-three-files: a stored set
+split into volumes carrying three files directly, written by the
+rar15_40 writer instead of the RAR5 one.
+
+It is here because it was a named writer gap until 4 Sep 2026.
+`rar15_40::write::write_stored_volumes` and `::write_compressed_volumes`
+each split ONE member across the volumes, so a RAR4 set holding more
+than one file had no emitter and `crate::container` refused it by name
+rather than approximating it. The plurals are
+`::write_stored_volume_set` and `::write_compressed_volume_set`, made in
+the fork at ~/Claude/rars and hand-ported into vendor/rars.
+
+The RAR4 set needed one thing its RAR5 twin did not. A single member is
+split across EVERY volume, so the split flags alone chain the set and
+the writer never wrote an end-of-archive block. A multi-member set has
+volumes whose last file is complete, and a reader stops at the first of
+those unless an ENDARC block says another volume follows: unrar 7.23
+wrote one member out of three before that flag was added. So this row
+is a chaining test as much as a member-count one.
+
+Three files and not one on purpose, and the sizes are picked so the
+members do NOT align with the volume cut: the middle file straddles a
+boundary and the sidecar starts mid-volume. A set whose members each
+happened to fill a volume would pass without a split flag ever being
+written.
+
+The end state is the three payload files and the PAR2 index. The
+volumes are spent by the unpack and a clean run never fetches the
+parity.
+"""
+
+[source]
+files = [
+    { name = "legacy-feature.bin", bytes = 24000 },
+    { name = "legacy-sample.bin", bytes = 3000 },
+    { name = "legacy-notes.txt", bytes = 300 },
+]
+
+[container]
+kind = "rar-stored"
+version = "rar4"
+volume_bytes = 8000
+volume_style = "r00"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[encoding]
+article_bytes = 4000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

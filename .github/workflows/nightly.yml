@@ -1,8 +1,23 @@
 # Nightly deep CI for the PRIVATE repo. ci-private stays lean on purpose
 # (format + lint + fast unit suites on every push); this picks up the
-# long daemon and e2e suites on a schedule so a regression in them shows
-# up within a day instead of at the next local pre-push run. Gated to
-# the private repo like ci-private.yml (cost rationale in pr-check.yml).
+# long daemon suite and the heavy elapsed-time targets on a schedule so
+# a regression in them shows up within a day instead of at the next
+# local pre-push run. Gated to the private repo like ci-private.yml
+# (cost rationale in pr-check.yml).
+#
+# THE e2e AND DAEMON SUITES ARE NO LONGER ONLY HERE. Since 2 Sep 2026
+# ci-private.yml runs the parallel e2e subset on every push sharded four
+# ways (8m47s of pipeline) and the whole daemon suite sharded six ways
+# (6m40s), both out of one archive. The steps below are KEPT anyway and
+# the duplication is deliberate on three counts: the shipped-threshold
+# e2e tests and the `#[ignore]`d complexity rigs need a box with nothing
+# else on it, which a push job can never promise; `one-process-heavy`
+# runs the daemon tests in ONE process, where cross-test pollution is
+# visible and nextest structurally cannot see it; and a per-push job
+# carries that file's cancellation arithmetic - a commit whose shards
+# were displaced while pending has no verdict of its own, and this is
+# what covers it. Read a red here as "the tip a day ago", exactly as
+# before.
 name: nightly
 on:
   schedule:
@@ -150,6 +165,12 @@ jobs:
       # measurably contention-sensitive and named in
       # research/E2E-SERIALIZATION-COST-2026-08-31.md; `retries = 1`
       # reports them as FLAKY rather than hiding them.
+      # ALSO RUN PER PUSH SINCE 2 Sep 2026, across six `daemon` shards
+      # in ci-private.yml off their own archive. This step runs the same
+      # binary with no filter at all, so the two cannot drift the way a
+      # filtered pair can - what it still buys is the schedule's own
+      # coverage of a commit whose shards were displaced while pending,
+      # and a box with nothing else on it.
       - name: daemon suite
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
@@ -175,6 +196,14 @@ jobs:
       - name: wedge check - daemon
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: python3 tools/wedge-gate.py --junit target/nextest
+      # ALSO RUN PER PUSH SINCE 2 Sep 2026. This exact filter is what
+      # ci-private.yml's `e2e` shards run, four ways off their own
+      # archive - so the two must move together: if the
+      # `_at_shipped_thresholds` suffix is ever renamed, the filter
+      # here, the complementary one below and the one there all change
+      # in the same commit or a whole slice of the binary stops being
+      # run by anything.
+      #
       # SPLIT IN TWO on 31 Aug 2026, and the split IS the speed. Run as
       # one command this suite is 1434 s serial; the same tests in two
       # invocations are 210 s + ~304 s. The reason is not parallelism as
@@ -187,10 +216,12 @@ jobs:
       # as whatever is still in flight: measured, the isolation costs
       # 556 s of wall to execute 304 s of test. Splitting spends that
       # once, at a step boundary, instead of three times mid-run.
-      # Keep the two steps ADJACENT and keep the filters COMPLEMENTARY -
-      # together they are the whole binary, which is what makes this a
-      # scheduling change and not a coverage cut. The full measurement,
-      # including the two hypotheses it refuted, is in
+      # Keep the three e2e steps ADJACENT and keep the filters
+      # COMPLEMENTARY - together they are the whole binary, which is what
+      # makes this a scheduling change and not a coverage cut. It was two
+      # steps until 1 Sep 2026; the third is below and covers what
+      # `#[ignore]` took OUT of this one. The full measurement, including
+      # the two hypotheses it refuted, is in
       # research/E2E-SERIALIZATION-COST-2026-08-31.md.
       - name: e2e suite (parallel)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -210,6 +241,113 @@ jobs:
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test e2e -E 'test(/_at_shipped_thresholds$/)'
       - name: wedge check - e2e (shipped thresholds)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
+      # The third e2e step, and the reason the two above are not the
+      # whole binary any more (claim `e2e-wave5-cost-quiet-box`, 1 Sep
+      # 2026). `e2e_wave5_cost`'s three rows are wall-clock COMPLEXITY
+      # assertions: each times the same work at two input sizes and
+      # asserts the growth RATIO is near-linear (bars 8.0 / 6.0 / 6.0
+      # against ~4.2x on a healthy tree, so 1.4-1.9x of clearance).
+      # Under competing load both timings go noisy and the ratio breaks
+      # on a tree with nothing wrong with it - measured inside a parallel
+      # `--test e2e` run, 6.6x. Two of the three flakes in the 1.3.1
+      # release verification ("447 passed (8 slow, 3 flaky)", laundered
+      # green by `retries = 1`) were rows from that file.
+      #
+      # A `test-group` was tried FIRST and is not the fix, which is the
+      # thing to know before anyone moves this back into the parallel
+      # step: a group holds a test apart from its SIBLINGS, and a ratio
+      # of two timings is sensitive to the whole machine - the other
+      # ~430 tests of this binary included. It still failed. So the rows
+      # are `#[ignore]`d at the site, with the reason on each attribute,
+      # and this step is the quiet box they need: their own step (nothing
+      # else in this job runs beside it) at `--test-threads 1` (so the
+      # three do not measure each other either).
+      #
+      # `[profile.ci]`'s `retries = 1` is KEPT here, and that was the
+      # decision on this step rather than the default. `retries = 1` is
+      # what laundered these rows green in the 1.3.1 release
+      # verification ("3 flaky", exit 0), so `--retries 0` was written
+      # first and then measured OUT: 18 runs of this exact command on
+      # the dev Mac lost x5_17 once, on a healthy tree, because that box
+      # carries other sessions and the row needs only 1.9x of
+      # interference to redden (its own header says so at length). A
+      # nightly step that reds on a healthy tree is a step somebody
+      # switches off.
+      #
+      # A retry is not laundering HERE, and the difference from the
+      # parallel step is the whole reason this one exists. There the
+      # interference was permanent, so a retry hid a standing condition.
+      # Here the step is quiet and single-threaded, and the thing being
+      # caught is DETERMINISTIC: the regressed sorted-`Vec` shape these
+      # bars were derived against measures 8.97x and 9.29x against bars
+      # of 6.0, on every attempt, so it cannot pass a retry. What a
+      # retry absorbs is VM steal, which is noise. Read a "1 flaky" line
+      # here as the box, and a genuine FAIL as a finding: the assertion
+      # messages name the healthy ratio and the regressed one, and the
+      # module header says which knobs may move (TRIALS, the counts) and
+      # which may NOT (the bars).
+      #
+      # THE FILTER IS THE WHOLE IGNORED POPULATION OF THE BINARY, and it
+      # was `test(/^e2e_wave5_cost::/)` for one day (claim
+      # `payout-crc-storm-rig-no-job`, 1 Sep 2026). The narrow filter was
+      # deliberate rather than an oversight: `e2e.rs` holds one other
+      # ignored test, `payout_crc_retry_prices_corrupt_storm_end_to_end`,
+      # a TODO 111 pricing rig that had run in NO job at all, and
+      # sweeping an unrun rig in blind is how the pool rigs above turned
+      # up 5 red BY DESIGN against thresholds a product change had moved
+      # under them (research/IGNORED-POOL-RIGS-RED-2026-08-31.md).
+      #
+      # So it was RUN before it was wired, which is the whole of that
+      # item, and the answer came back the opposite way: it is green,
+      # 10 runs for 10 on a box at load 16-20, and it still prices what
+      # it was written to price. Off 2.14-2.23 s, on 273-282 ms, against
+      # the 2.38 s / 0.28 s recorded when the rig was built on 4 Aug 2026
+      # (research/SPECULATION-EXPERIMENTS-2026-08-04.md section 6a) - a
+      # month and two deliberate changes to this exact seam later. It
+      # also has no threshold to re-price: despite the "measurement"
+      # wording its assertions are FUNCTIONAL (off takes damage and pays
+      # a repair, on finishes clean and does not), and the two walls are
+      # printed, never asserted. Full write-up, including why the
+      # 31 Aug same-server re-ask did not move it, in
+      # research/E2E-IGNORED-PAYOUT-RIG-WIRED-2026-09-01.md.
+      #
+      # With that answered the bare sweep is the better filter, and not
+      # only because it is shorter. It makes the three e2e steps an
+      # EXHAUSTIVE PARTITION of the binary rather than three filters that
+      # happen to leave a gap - non-ignored minus thresholds (449),
+      # non-ignored thresholds (3), ignored (4), summing to the 456 that
+      # `--run-ignored all` lists - so the "together they are the whole
+      # binary" claim above is now literally checkable. And it cannot go
+      # blind to a RENAME: an `-E 'test(=some_exact_name)'` that stops
+      # matching is a green step about tests nobody ran, which is a
+      # failure mode this repo has hit several times. A fourth ignored
+      # test added anywhere in `e2e.rs` is covered the day it lands.
+      #
+      # What that costs, stated: an ignored test landed here red-by-
+      # design reds this step. That is the correct default (the push path
+      # is the default, an exception should be a decision) and it is why
+      # the payout rig was measured first rather than swept in. Name a
+      # rig OUT here, with the product decision that made it
+      # unsatisfiable, exactly as the pool-rigs step above does.
+      #
+      # `retries = 1` above is about the ratio rows; the payout rig is
+      # deterministic (its assertions are functional and its own spread
+      # over 10 runs is under 2.5%), so a retry launders nothing there.
+      - name: e2e suite (ignored rigs - complexity ratios and payout, quiet box)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: >
+          cargo nextest run --profile ci -p nzbfast --locked
+          --features heavy-tests --test e2e
+          --run-ignored only --test-threads 1 --no-capture
+          -E 'binary(e2e)'
+      # Same as the first one above: this job's suites share one junit
+      # path, so each needs its own check before the next overwrites it.
+      - name: wedge check - e2e (ignored rigs)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: python3 tools/wedge-gate.py --junit target/nextest
       # The other half of ci-private's exclusion list. That job runs
@@ -254,8 +392,12 @@ jobs:
       # par2gen at scale: tens of megabytes of GENERATED fixture and a
       # real repair round-trip over thousands of slices, plus the only
       # interop assertion in the tree that runs at that size (par2cmdline
-      # verifying a six-member set we wrote, which is why the par2 install
-      # above is load-bearing for this step too). Heavy for the same
+      # verifying a wide set we wrote, which is why the par2 install
+      # above is load-bearing for this step too - and note ubuntu's
+      # `par2` is 0.8.1, which grades five of the six members: it
+      # predates upstream's empty-file fix and the test says so on
+      # stderr, see `par2_describes_empty_members` in that file). Heavy
+      # for the same
       # reason its neighbours are - it is seconds rather than
       # milliseconds - and NOT because it measures elapsed time: nothing
       # in it is timing-sensitive, so it carries no wall-clock budget to
@@ -270,7 +412,7 @@ jobs:
         env:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
-        run: cargo nextest run --profile ci -p nzbkit --locked --features heavy-tests --test par2gen_large_set
+        run: cargo nextest run --profile ci -p nzbkit-base --locked --features heavy-tests --test par2gen_large_set
       - name: wedge check - par2gen_large_set
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: python3 tools/wedge-gate.py --junit target/nextest
@@ -603,7 +745,12 @@ jobs:
             --test daemon --test e2e --test index_size_cap \
             --test http_wedge --test queue_soak
           cargo test --locked -p nzbkit --features heavy-tests --no-run \
-            --test conn_tuner --test par2gen_large_set
+            --test conn_tuner
+          # par2gen_large_set went down with par2/par2gen/par2repair at the
+          # nzbkit-base cut (3 Sep 2026), so it is a target of that crate
+          # now. One invocation per package, same reason as the two above.
+          cargo test --locked -p nzbkit-base --features heavy-tests --no-run \
+            --test par2gen_large_set
       # Named one at a time rather than swept, for the reason long-suites
       # gives about its own list: a target added to crates/*/tests/
       # tomorrow must inherit "runs on push" from ci-private's
@@ -629,6 +776,17 @@ jobs:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo test --locked -p nzbfast --features heavy-tests --test daemon -- --test-threads=1
+      # `cargo test` skips `#[ignore]`d tests, so none of this binary's
+      # four ignored rigs runs here (1 Sep 2026) - the three
+      # `e2e_wave5_cost::` complexity ratios and
+      # `payout_crc_retry_prices_corrupt_storm_end_to_end`. That is
+      # deliberate and not a coverage cut: this job asks whether one test
+      # leaves process-global state a later one reads, and all four are
+      # graded on wall clock in `long-suites`' own quiet-box step
+      # instead. Do not add `--include-ignored` to get them back - a
+      # one-process serial run of the whole binary is the loudest box in
+      # this workflow, which is the one thing every one of the four is
+      # `#[ignore]`d to stay off.
       - name: e2e - one process, serial
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
@@ -664,21 +822,38 @@ jobs:
         env:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
-        run: cargo test --locked -p nzbkit --features heavy-tests --test par2gen_large_set -- --test-threads=1
-      # POLLUTION-ONLY on purpose, and it differs from the annotations on
-      # `unit-one-process` and `one-process-loaded` for a reason rather
-      # than by drift: every command in this job ends `--test-threads=1`,
-      # so a race between two THREADS on a process-global cannot occur
-      # here at all, and the runner is idle, so a test with a hidden
-      # wall-clock budget will not overrun it. Serial and quiet leaves
-      # exactly one shape, which is the one named below.
+        run: cargo test --locked -p nzbkit-base --features heavy-tests --test par2gen_large_set -- --test-threads=1
+      # THIS ANNOTATION USED TO SAY "POLLUTION-ONLY", AND THAT WAS WRONG -
+      # measured 1 Sep 2026 over the eleven nightlies from 25 Aug, in
+      # research/NIGHTLY-ONE-PROCESS-HEAVY-STANDING-RED-2026-09-01.md.
+      # The old reasoning was that `--test-threads=1` rules out a race
+      # between two THREADS on a process-global, and an idle runner rules
+      # out a test with a hidden wall-clock budget, so serial and quiet
+      # leaves cross-test pollution as the only shape left. The first
+      # half still holds. The SECOND half does not: this runner is four
+      # vCPU and is not the box any of these budgets were written on, and
+      # the eleven-night measurement found no pollution at all. This
+      # job's verdict matched `long-suites`' on TEN of the eleven, and
+      # twelve of its thirteen victims had ALSO lost a first attempt in
+      # `long-suites` THE SAME NIGHT - which is nextest, one process per
+      # test, where cross-test pollution cannot reach them. What this job
+      # was actually reporting for those eleven nights is `long-suites`
+      # minus the retry that launders a flake, which is a real service
+      # and is not the one the annotation named.
+      #
+      # So the annotation leads with the DISCRIMINATOR now. It stays an
+      # `::error` and the pollution branch stays in it, because pollution
+      # is still the shape only this job and `unit-one-process` can see,
+      # and because the one victim that did NOT fail in `long-suites`
+      # (e2e_chaserepair::a_paged_out_wedged_chase_repairs_in_place_too,
+      # 29 Aug) is exactly the shape that branch is for.
       # Gated on the BUILD having succeeded, or a compile error would
       # print an annotation about cross-test pollution, which is a
       # confident answer to a question nobody asked.
       - name: how to read a red run
         if: ${{ failure() && steps.build.outcome == 'success' }}
         run: |
-          echo "::error title=A heavy target failed with its tests sharing one process::If the nextest run of the same target is green on this commit then no individual test is broken: one test in it is leaving process-global state that a later one reads. Do NOT make the victim order-independent - find the polluter. 'tools/pollution-bisect.py -p nzbfast --features heavy-tests --test <target> <the failing test>' names it in minutes."
+          echo "::error title=A heavy target failed with its tests sharing one process::FIRST open 'long-suites' ON THIS RUN and look for the same test. It runs these same seven targets under nextest - one process per test - so a test that also FAILED or went flaky there was not polluted by a neighbour, and a bisect over this job would converge on an innocent. Measured over the eleven nightlies to 1 Sep 2026, that is what twelve of thirteen victims did: research/NIGHTLY-ONE-PROCESS-HEAVY-STANDING-RED-2026-09-01.md. ONLY when 'long-suites' passed the same test on the same run is this cross-test pollution - then do NOT make the victim order-independent, find the polluter: 'tools/pollution-bisect.py -p nzbfast --features heavy-tests --test <target> <the failing test>' names it in minutes."
 
   # ===================================================================
   # THE LOADED ONE-PROCESS RUN. The only job in this repo that can see a
@@ -736,7 +911,7 @@ jobs:
   # ONE LEG PER BINARY, and until 24 Aug 2026 there was one leg and four
   # binaries. That was a deliberate choice about the DENOMINATOR - and it
   # cost this job the exact defect it exists to find.
-  # `nzbfast --bin nzbfast` is ~1750 tests and 56.9 s parallel on a runner
+  # nzbfast's unit binary is ~1750 tests and 56.9 s parallel on a runner
   # (measured in run 32660095310), so a loaded iteration is roughly 95 s
   # and 3000 s buys about thirty of them; nzbkit's lib root is 731 s in
   # that same measurement, so a campaign over it needs its own, much
@@ -782,11 +957,52 @@ jobs:
           # `id` is what tools/one-process-roster.py holds to the
           # workspace; `select` is the cargo target spelling, and the two
           # have to agree by hand because cargo has no `--bin` for a lib.
-          - id: nzbfast:bin/nzbfast
+          #
+          # `min_tests` IS PER LEG, and it must be, because the driver's
+          # own default is 1000 and EIGHT of these ten legs legitimately
+          # run fewer. That default was written when this matrix had two
+          # legs, nzbfast (1,461 tests) and nzbkit (2,753); the 2-3 Sep
+          # crate splits added eight more, every one of them smaller, and
+          # nothing set a floor for them - so the first nightly to run
+          # them refused all eight with "the binary ran N test(s), under
+          # the 1000 floor" (run 33737735769 on 7ec5395d: 59, 141, 224,
+          # 311, 363, 368, 700, 904). The guard was right to refuse - a
+          # floor it cannot meet is exactly how a silently emptied binary
+          # would look - and the fix is the POINTER, so each leg now
+          # carries its own, at roughly 70% of what it measured, with
+          # that measurement in a comment beside it.
+          #
+          # It is a RATCHET: raise it when a leg grows, never lower it to
+          # make a red go away. A leg that has genuinely lost most of its
+          # tests is the thing this number exists to catch, and the way
+          # to tell the two apart is to look at where the tests WENT -
+          # for `nzbfast:lib` below they went to the nzbfast-daemon,
+          # nzbfast-api and nzbfast-tasks legs in this same matrix, which
+          # is why its floor is 40 and not a bug.
+          # THE LIB, not `--bin nzbfast`, since the crate-split step 4.5
+          # (2 Sep 2026): this package had two crate roots and the BIN
+          # was the real one, and now `src/lib.rs` carries the module
+          # tree while `main.rs` is a shim over its `cli_main`. That
+          # move kept all 1,461 tests here and the bin's runs zero of
+          # them, which is why the bin is excused by name at the foot of
+          # this job rather than left as a leg. **The 1,461 is HISTORY
+          # now**: the 3 Sep serve split (lanes 2, 3a, 3b) carried the
+          # daemon, api and tasks layers out to their own crates and
+          # their tests with them, so this binary is 59 tests and
+          # `crates/nzbfast/src` holds 52 `#[test]` attributes. The three
+          # legs that received them are in this matrix.
+          # No features on the `select` for the reason the core leg
+          # below states in reverse: THIS crate's default set is
+          # `indexer, dashboard`, which is exactly what the archive
+          # `unit-one-process` runs resolves, so a bare `--lib` builds
+          # the same binary.
+          - id: nzbfast:lib
             package: nzbfast
-            select: --bin nzbfast
+            select: --lib
             budget: 3000
             timeout: 90
+            # ran 59 on 7ec5395d; see the floor note above the matrix
+            min_tests: 40
           # MEASURED 25 Aug 2026 and the budget is NOT thin, which this
           # comment claimed on an estimate. On a hosted runner
           # `unit-one-process` runs this binary idle in 369.77 s (1833
@@ -817,19 +1033,320 @@ jobs:
             select: --lib
             budget: 9000
             timeout: 240
-    # nzbfast's LIB root is `#![cfg(feature = "ffi")]` at
-    # crates/nzbfast/src/lib.rs, and nothing in default-members turns that
-    # feature on, so without `-p nzbfast-ffi` it compiles to nothing and
-    # the binary carries no tests at all. A loaded campaign over an empty
-    # binary would trip `--min-tests` every night, which is a permanently
-    # red job over nothing.
-    # one-process-uncovered: nzbfast:lib - compiles to nothing without the ffi feature, so it carries no tests to load
+            # ran 1553 on 7ec5395d; see the floor note above the matrix
+            min_tests: 1000
+          # The nzbkit split's lane 2 cut (3 Sep 2026). The leg above
+          # kept the larger half: nzbkit's 2,753 lib tests are 1,553 in
+          # the facade (extract, pool, index) and 1,200 here, and
+          # serially on the dev box this binary is 119.4 s. So the
+          # budget is a THIRD of nzbkit's rather than a match for it -
+          # the campaign is a rate per binary, and a binary that runs in
+          # two minutes buys the same order of iterations from 3000 s
+          # that the facade needs 9000 for. If it stops completing three
+          # iterations, cut the leg with a `one-process-uncovered:` line
+          # rather than leaving it red.
+          #
+          # THE FEATURES ARE ON THE `select` FOR THE REASON THE CORE LEG
+          # BELOW STATES. `test-support` is a dev-dependency switch in
+          # the facade, so a bare `--lib` here builds a SMALLER test
+          # binary than the archive `unit-one-process` runs - renameclaim
+          # and `memgauge::one_gauge_test_at_a_time` are both behind it -
+          # and the two jobs would campaign over different test sets
+          # while reporting the same target name. `indexer` is this
+          # crate's own default and is named for the same reason: so the
+          # line says what it builds.
+          - id: nzbkit-base:lib
+            package: nzbkit-base
+            select: --lib --features indexer,test-support
+            budget: 3000
+            timeout: 90
+            # ran 1200 on 7ec5395d; see the floor note above the matrix
+            min_tests: 800
+          # The crate-split step 2 cut (2 Sep 2026) made this a unit
+          # binary of its own, so `unit-one-process` runs it on every
+          # push and this job owes it a leg.
+          #
+          # THE FEATURES ARE ON THE `select` FOR A REASON. This crate's
+          # own default set is EMPTY - nzbfast forwards its `indexer` to
+          # it, and `test-support` is a dev-dependency switch there - so
+          # a bare `--lib` builds a smaller test binary than the archive
+          # `unit-one-process` runs, and the two jobs would be
+          # campaigning over different test sets while reporting the same
+          # target name. Measured on the dev box with them on: 327 tests,
+          # 7.72 s serial.
+          #
+          # THE SMALLEST BUDGET OF THE THREE, and it is arithmetic rather
+          # than a guess about risk. This binary is ~1/5 of nzbfast's
+          # test count and runs serially in seconds, so 1200 s buys the
+          # same order of iterations the nzbkit leg gets from 9000 - and
+          # the campaign will not start an iteration it cannot finish, so
+          # the timeout is the budget plus one iteration plus the build.
+          # If it stops completing three iterations, cut the leg with a
+          # `one-process-uncovered:` line rather than leaving it red.
+          - id: nzbfast-core:lib
+            package: nzbfast-core
+            select: --lib --features indexer,test-support
+            budget: 1200
+            timeout: 60
+            # ran 363 on 7ec5395d; see the floor note above the matrix
+            min_tests: 250
+          # The crate-split step 3 cut (2 Sep 2026), same reasoning one
+          # layer up. The features are on the `select` for the reason the
+          # core leg states: this crate's default set is EMPTY and
+          # `test-support` is a dev-dependency switch in `nzbfast`, so a
+          # bare `--lib` builds a smaller binary than the archive
+          # `unit-one-process` runs. There is no `indexer` here - unlike
+          # core, nothing in this crate carries that gate, and naming a
+          # feature that does not exist fails the build.
+          #
+          # THE BUDGET IS PROPORTIONAL TO THE CORE LEG'S and measured the
+          # same way: 699 tests, 23.55 s serial on the 32-core dev box
+          # against core's 327 tests and 7.72 s. 1800 s buys ~76 dev
+          # iterations, which is the same order of runner iterations core
+          # gets from 1200 - comfortably above the three-iteration floor
+          # the nzbfast leg's note sets. It is 3x core's test count and
+          # the binary does real file I/O (extraction, filing, trash), so
+          # this is the leg most likely to find an ordering defect that
+          # nextest's process-per-test can never see. If it stops
+          # completing three iterations, cut the leg with a
+          # `one-process-uncovered:` line rather than leaving it red.
+          - id: nzbfast-unpack:lib
+            package: nzbfast-unpack
+            select: --lib --features test-support
+            budget: 1800
+            timeout: 60
+            # ran 700 on 7ec5395d; see the floor note above the matrix
+            min_tests: 500
+          # The crate-split step 3 cut's other half. `--features indexer`
+          # for the core leg's reason and no `test-support`: nothing in
+          # this crate is a test seam another crate reaches, so it has no
+          # such feature to name and naming one that does not exist fails
+          # the build. Without `indexer` the binary is a THIRD of its real
+          # size - six of the twelve modules compile out - so it would be
+          # campaigning over a different test set from the one
+          # `unit-one-process` runs under the same target name.
+          #
+          # THE SMALLEST BUDGET OF THE FOUR, and it is arithmetic: 222
+          # tests, 0.64 s SERIAL on the dev box, against the unpack leg's
+          # 699 and 23.55 s. These are parsers, feed readers and gate
+          # predicates - no file I/O, no timers - so an iteration is
+          # cheap and 600 s buys hundreds of them, far past the
+          # three-iteration floor the nzbfast leg's note sets. If it stops
+          # completing three, cut the leg with a
+          # `one-process-uncovered:` line rather than leaving it red.
+          - id: nzbfast-meta:lib
+            package: nzbfast-meta
+            select: --lib --features indexer
+            budget: 600
+            timeout: 45
+            # ran 224 on 7ec5395d; see the floor note above the matrix
+            min_tests: 150
+          # The crate-split step 4 cut: the `get` download pipeline. No
+          # feature flag at all, and that is measured rather than copied
+          # - this crate declares neither `indexer` nor `test-support`
+          # (nothing in `get` carries an indexer site, and nothing in it
+          # is a test seam another crate reaches), and naming a feature
+          # that does not exist fails the build.
+          #
+          # BUDGET 1200, between core's and unpack's, and it is
+          # arithmetic: 308 tests, 4.37 s SERIAL on the dev box, against
+          # the unpack leg's 699 / 23.55 s at 1800 and the meta leg's
+          # 222 / 0.64 s at 600. A runner is slower than the dev box and
+          # loaded, so budget for well under an order of magnitude of
+          # iterations rather than for one - 1200 s buys dozens, far
+          # past the three-iteration floor the nzbfast leg's note sets.
+          # This is the leg most likely to find a fleet or settle
+          # ordering defect: `MEM_SAMPLER_RUN` and the settle gauges are
+          # process-global, which is precisely what nextest's
+          # process-per-test can never see. If it stops completing
+          # three iterations, cut the leg with a
+          # `one-process-uncovered:` line rather than leaving it red.
+          - id: nzbfast-engine:lib
+            package: nzbfast-engine
+            select: --lib
+            budget: 1200
+            timeout: 50
+            # ran 311 on 7ec5395d; see the floor note above the matrix
+            min_tests: 200
+          # The serve split's lane 2: the daemon layer of serve. BOTH
+          # features on the `select`, for the reason the core leg states
+          # and then some - this crate's default set is EMPTY, `indexer`
+          # is forwarded to it by nzbfast and `test-support` is a
+          # dev-dependency switch there, so a bare `--lib` builds a
+          # binary missing the indexer half of the layer AND the two
+          # seam modules the archive `unit-one-process` compiles. The
+          # two jobs would be campaigning over different test sets under
+          # one target name.
+          #
+          # THE SECOND-LARGEST BUDGET, and it is arithmetic against the
+          # legs above rather than a guess: 904 tests, 65.99 s SERIAL on
+          # the 32-core dev box, against the unpack leg's 699 / 23.55 s
+          # at 1800 and nzbfast's at 3000. 3000 s buys ~45 dev
+          # iterations, which on a slower runner is comfortably past the
+          # three-iteration floor the nzbfast leg's note sets.
+          #
+          # IT IS THE LEG MOST LIKELY TO FIND SOMETHING. `Daemon` is the
+          # shared state of the whole product and this binary is 904
+          # tests over one type's queue, history, settings and
+          # persistence - process-global by construction, which is
+          # exactly the class nextest's process-per-test can never see.
+          # If it stops completing three iterations, cut the leg with a
+          # `one-process-uncovered:` line rather than leaving it red.
+          - id: nzbfast-daemon:lib
+            package: nzbfast-daemon
+            select: --lib --features indexer,test-support
+            budget: 3000
+            timeout: 90
+            # ran 904 on 7ec5395d; see the floor note above the matrix
+            min_tests: 650
+          # The serve split's lane 3: the background-lane layer of serve.
+          # `--features indexer` for the reason the core leg states -
+          # this crate's default set is EMPTY and nzbfast forwards
+          # `indexer` to it, and without the feature the binary is HALF
+          # its real size (72 tests against 142; the whole indexer lane,
+          # the scoreboard and the name hunt compile out), so it would be
+          # campaigning over a different test set from the one the
+          # archive `unit-one-process` runs under the same target name.
+          # There is no `test-support` here: nothing in this crate is a
+          # seam another crate reaches, it only CONSUMES the daemon's,
+          # and naming a feature that does not exist fails the build.
+          #
+          # BUDGET 900, and it is arithmetic against the legs above
+          # rather than a guess: 142 tests, 15.13 s SERIAL on the 32-core
+          # dev box, against the meta leg's 222 / 0.64 s at 600 and the
+          # unpack leg's 699 / 23.55 s at 1800. 900 s buys ~59 dev
+          # iterations, comfortably past the three-iteration floor the
+          # nzbfast leg's note sets even on a slower, loaded runner.
+          #
+          # WHAT IT IS LIKELY TO FIND: every test in here drives a lane
+          # over a shared `Daemon` with tokio timers and stand-down
+          # latches, which is the shape a process-per-test runner cannot
+          # see at all. If it stops completing three iterations, cut the
+          # leg with a `one-process-uncovered:` line rather than leaving
+          # it red.
+          - id: nzbfast-tasks:lib
+            package: nzbfast-tasks
+            select: --lib --features indexer
+            budget: 900
+            timeout: 45
+            # ran 141 on 7ec5395d; see the floor note above the matrix
+            min_tests: 100
+          # The serve split's lane 3, the other half: the request layer of
+          # serve. `--features indexer` for the reason the core leg
+          # states - this crate's default set is EMPTY, nzbfast forwards
+          # `indexer` to it, and that feature PULLS IN `dashboard`, so a
+          # bare `--lib` builds a binary with the whole browser-facing
+          # half and every wall and browse arm compiled out (250 tests
+          # against 371). It would be campaigning over a different test
+          # set from the one the archive `unit-one-process` runs under
+          # the same target name. No `test-support`: nothing in this
+          # crate is a seam another crate reaches, it only CONSUMES the
+          # daemon's, and naming a feature that does not exist fails the
+          # build.
+          #
+          # BUDGET 1500, arithmetic against the legs above: 371 tests,
+          # 15.37 s SERIAL on the 32-core dev box, against the unpack
+          # leg's 699 / 23.55 s at 1800 and the tasks leg's 142 /
+          # 15.13 s at 900. ~97 dev iterations, comfortably past the
+          # three-iteration floor the nzbfast leg's note sets.
+          #
+          # WHAT IT IS LIKELY TO FIND: this binary carries serve's four
+          # big `tests_*` modules, which build a Daemon, drive the whole
+          # request surface against it and assert on process-global
+          # counters (`STORAGE_PROBES`, `KEPT_RETRY_STALL_MS`) and a
+          # two-party delete barrier - the exact class a
+          # process-per-test runner can never see. If it stops
+          # completing three iterations, cut the leg with a
+          # `one-process-uncovered:` line rather than leaving it red.
+          - id: nzbfast-api:lib
+            package: nzbfast-api
+            select: --lib --features indexer
+            budget: 1500
+            timeout: 60
+            # ran 368 on 7ec5395d; see the floor note above the matrix
+            min_tests: 250
+          # The posting-layout generator. Cut 3 Sep 2026 with one
+          # constant and one test, and excused here on that basis; by
+          # the end of that day chips 02 to 10 had taken it to 136, so
+          # the excuse this leg replaces had stopped being true. The
+          # crate is deterministic and seeded by contract - one profile
+          # and one seed give one layout on every machine and every run
+          # - which is an argument for campaigning over it rather than
+          # against: that contract is exactly what a loaded run can
+          # falsify and a process-per-test runner cannot.
+          #
+          # BUDGET 900, arithmetic against the legs above: 136 tests,
+          # 0.91 s SERIAL on the 32-core dev box, against the tasks
+          # leg's 142 / 15.13 s at the same 900. It is the cheapest leg
+          # in the matrix by an order of magnitude, so the budget is
+          # the matrix floor rather than a measurement.
+          #
+          # WHAT IT IS LIKELY TO FIND: `recovery.rs` holds the crate's
+          # only process-global, a `STAGE_SEQ` atomic counter that names
+          # each PAR2 staging directory under `$TMPDIR` alongside the
+          # pid. Uniqueness is correct by construction, and by
+          # construction is what a campaign is for - two stages racing
+          # to the same name, or a stage reading a directory another
+          # test left, is the one shape here that a process-per-test
+          # runner can never see. If it stops completing three
+          # iterations, cut the leg with a `one-process-uncovered:`
+          # line rather than leaving it red.
+          - id: postfast:lib
+            package: postfast
+            select: --lib
+            budget: 900
+            timeout: 45
+            # ran 136 on 8099d6543; see the floor note above the matrix
+            min_tests: 100
+    # nzbfast's BIN root is a SHIM since the crate-split step 4.5
+    # (2 Sep 2026) - `main.rs` sets the allocator and calls
+    # `nzbfast::cli_main()`, and every test in the package belongs to the
+    # lib unit above. So its test binary carries no tests at all, and a
+    # loaded campaign over an empty binary would trip `--min-tests` every
+    # night, which is a permanently red job over nothing. This exclusion
+    # and the `nzbfast:lib` leg above swapped places that day; before it,
+    # the LIB was the empty one (it was `#![cfg(feature = "ffi")]` and
+    # nothing in default-members turns that feature on).
+    # one-process-uncovered: nzbfast:bin/nzbfast - a shim over the lib's cli_main, so it carries no tests to load
     # nzbtray's 23 tests are pure functions in `probe_body` - no timer, no
     # process-global, no I/O - so there is nothing for load to perturb,
     # and the binary runs in well under a second. `unit-one-process` runs
     # it on every push, which is where a pollution or race shape in it
     # would show.
     # one-process-uncovered: nzbtray:bin/nzbtray - 23 pure-function tests, no timer and no process-global for load to perturb
+    # Chip 03 (b50c50bea) then added `src/bin/postfast.rs`, a one-verb
+    # CLI over the same generator, and the roster caught that nothing
+    # covered or excused it - red from that commit, surfaced by the next
+    # push whose run reached this gate. The bin carries ZERO `#[test]`
+    # attributes: `postfast gen` loads a profile, builds a Layout and
+    # writes it, and every assertion about that lives in the lib. So
+    # there is not a test for a loaded campaign to perturb, which is the
+    # same reason `nzbfast:bin/nzbfast` is excused three lines up. This
+    # line is about the BIN only. The `postfast:lib` excuse this note
+    # used to call stale was answered on 3 Sep 2026: that lane read it,
+    # agreed, and replaced the excuse with a real matrix leg above (136
+    # tests, 0.91 s serial), so the LIB is campaigned over and only the
+    # bin is excused. The bin is still worth re-reading if `postfast
+    # gen` ever grows assertions of its own.
+    # one-process-uncovered: postfast:bin/postfast - a one-verb CLI over the lib's generator with zero tests, so a loaded campaign has nothing to run
+    # `parfast`, the par2cmdline-dialect CLI over the PAR2 engine
+    # (chip 13, 3 Sep 2026). BOTH targets excused, and the reason is the
+    # same for each: this crate carries no process-global state and no
+    # timer for load to perturb. Its library is the argument parser, the
+    # verbosity ladder and the help screen - pure functions over a string
+    # and a struct - and the tests over them are pure too, so ordering
+    # and load cannot reach them. Its binary is a shim that reads argv
+    # and calls `parfast::run`. Everything with real state in it - the
+    # slice grid, the fold, the repair solve - lives in nzbkit-base and
+    # is campaigned over by the `nzbkit-base:lib` leg above.
+    #
+    # RE-READ THIS if parfast ever grows a test that touches the
+    # filesystem or the engine in the LIB target. The one test here that
+    # does (the byte-for-byte create comparison against par2cmdline) is
+    # an integration target and not a unit binary, so it is outside this
+    # gate's population either way.
+    # one-process-uncovered: parfast:lib - the parser, the verbosity ladder and the help screen; pure functions with no process-global state or timer for load to perturb
+    # one-process-uncovered: parfast:bin/parfast - a shim that reads argv and calls parfast::run, so it carries no tests to load
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # FIRST, and it needs neither the toolchain nor the cache below, so
@@ -851,6 +1368,88 @@ jobs:
         run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: test deps (par2 for repair fixtures)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq par2
+      # ---------------------------------------------------------------
+      # THE postfast LEG NEEDS A DIFFERENT par2, and the apt one above
+      # reddens it 49 runs out of 49.
+      #
+      # `recovery::tests::par2cmdline_verifies_every_unpatched_set_the_catalog_emits`
+      # is a postfast LIB test, so this campaign draws it - and it asks
+      # the reference tool to verify every set the layout catalog emits.
+      # Ubuntu's par2 is 0.8.1, which cannot verify ANY set describing a
+      # 0-byte member (upstream #128, fixed in 1.0.0), and the catalog
+      # carries three such rows. So the guard meets a tool two majors
+      # too old and fails deterministically: measured on run
+      # 33857298155, 49 of 49 loaded runs red at a 100% rate, which is
+      # not the cross-test pollution this job hunts and would send a
+      # bisect after an innocent.
+      #
+      # ci-private's `unit-one-process` met the same wall on 4 Sep 2026
+      # and answered it with a par2cmdline built from tag and cached at
+      # ~/par2ref/par2 (a19d74376). That commit deliberately left
+      # nightly alone - "the nightly jobs that install par2 install
+      # 0.8.1 on purpose and their assertions name the version they
+      # got" - and this leg is the one place that is not true, because
+      # its assertion is the catalog guard rather than a repair fixture.
+      #
+      # THE TAG IS READ OUT OF ci-private.yml rather than typed again.
+      # A second copy of the version is a second thing to bump, and the
+      # cache key is built from the same two values, so a drifted copy
+      # would also silently stop hitting the warm cache that job fills.
+      # Failing to find is failing: the step refuses if either pin has
+      # moved or been renamed.
+      - name: the pinned par2cmdline reference, per ci-private
+        id: par2pin
+        if: matrix.id == 'postfast:lib'
+        shell: bash
+        run: |
+          set -euo pipefail
+          f=.github/workflows/ci-private.yml
+          tag=$(sed -n 's/^  PAR2REF_TAG: "\(.*\)"$/\1/p' "$f" | head -1)
+          suffix=$(sed -n 's/^  PAR2REF_KEY_SUFFIX: "\(.*\)"$/\1/p' "$f" | head -1)
+          if [ -z "$tag" ] || [ -z "$suffix" ]; then
+            echo "::error::PAR2REF_TAG / PAR2REF_KEY_SUFFIX not found in $f."
+            echo "::error::This leg reads them from there so the version and the cache key"
+            echo "::error::cannot drift from the per-push job that fills that cache."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+      - name: cache the pinned par2cmdline reference
+        id: par2ref
+        if: matrix.id == 'postfast:lib'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/par2ref
+          key: par2cmdline-${{ steps.par2pin.outputs.tag }}-${{ runner.os }}-${{ steps.par2pin.outputs.suffix }}
+      - name: build par2cmdline from tag ${{ steps.par2pin.outputs.tag }}
+        if: matrix.id == 'postfast:lib' && steps.par2ref.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ steps.par2pin.outputs.tag }}" \
+            https://github.com/Parchive/par2cmdline.git "$RUNNER_TEMP/par2src"
+          cd "$RUNNER_TEMP/par2src"
+          ./automake.sh
+          ./configure
+          make -j"$(nproc)"
+          ./par2 --version
+          mkdir -p ~/par2ref
+          cp par2 ~/par2ref/par2
+      # NZBFAST_PAR2_BIN rather than a PATH prepend, for the reason
+      # `unit-one-process` gives: it is explicit in the log and it
+      # cannot be defeated by the apt par2 installed two steps up, which
+      # on THIS job is still on PATH and is still wanted by the other
+      # legs' repair fixtures.
+      - name: point the catalog conformance guard at the pinned reference
+        if: matrix.id == 'postfast:lib'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! "$HOME/par2ref/par2" -V; then
+            echo "::error::the pinned par2cmdline reference is not at ~/par2ref/par2."
+            echo "::error::postfast's catalog conformance guard would meet apt's 0.8.1 instead."
+            exit 1
+          fi
+          echo "NZBFAST_PAR2_BIN=$HOME/par2ref/par2" >> "$GITHUB_ENV"
       - name: dependency cache key
         id: depkey
         run: |
@@ -868,7 +1467,7 @@ jobs:
             target
           key: nightly-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       # Built with EXACTLY the command the campaign then runs, matrix
-      # field for matrix field. `-p nzbfast --bin nzbfast` resolves fewer
+      # field for matrix field. `-p nzbfast --lib` resolves fewer
       # features than `--workspace` does, so a build spelled any other
       # way would leave the run steps quietly compiling a second artifact
       # set - the trap measured at 33 s and a duplicate `target/` in the
@@ -909,7 +1508,8 @@ jobs:
           NZBFAST_REQUIRE_PAR2: "1"
         run: |
           python3 tools/loaded-one-process.py --selftest
-          python3 tools/loaded-one-process.py --budget-seconds ${{ matrix.budget }} -- \
+          python3 tools/loaded-one-process.py --budget-seconds ${{ matrix.budget }} \
+            --min-tests ${{ matrix.min_tests }} -- \
             cargo test --locked -p ${{ matrix.package }} ${{ matrix.select }} -- --test-threads={threads}
       # No `how to read a red run` step, and its absence is the point:
       # the driver writes its own annotations, one per failing test with
@@ -1094,17 +1694,19 @@ jobs:
   # No archive to ride here - `windows-build`'s belongs to ci-private's
   # run - so this builds its own, and `--workspace` is chosen to match
   # what that archive resolves rather than the narrower `-p nzbfast
-  # --bin nzbfast`, which resolves FEWER features and would test a
+  # --lib`, which resolves FEWER features and would test a
   # configuration nothing ships. The two vendored crates are excluded
   # the way `unit-one-process` excludes them: first-party only.
   #
   # nzbfast-ffi is excluded too, and here that is a saving rather than a
-  # rule. It is not a default member precisely because it turns on
-  # nzbfast's `ffi` feature, so including it compiles the whole nzbfast
-  # module tree a SECOND time - and its lib root is that same module
-  # tree, which makes its test binary a near-duplicate sample rather
-  # than new coverage. `unit-one-process` keeps it only because it
-  # selects out of an archive and dropping it would mean maintaining a
+  # rule: it is a staticlib whose own unit root is EMPTY, so linking it
+  # buys no test at all. (Until the crate-split step 4.5 the reason was
+  # bigger - `ffi` gated a second nzbfast crate root, so including this
+  # crate compiled the whole module tree a SECOND time for a test binary
+  # that was a strict duplicate. That root is now the package's only
+  # one and the duplicate is gone.) `unit-one-process` keeps it only
+  # because it selects out of an archive and dropping it would mean
+  # maintaining a
   # name; this job is already naming exclusions, so it pays nothing to
   # drop it, and what is left is the configuration that ships.
   windows-one-process:
@@ -1628,3 +2230,112 @@ jobs:
           rm -rf cargo-deny.tar.gz "cargo-deny-${ver}-x86_64-unknown-linux-musl"
       - name: cargo deny
         run: cargo deny check
+
+  # THE EXTRACTION ROBUSTNESS CORPUS - `tools/robustness/`, scheduled for
+  # the first time on 3 Sep 2026 (research/RAR-PERF-AUDIT-2026-09-02.md
+  # round 43).
+  #
+  # WHY IT IS HERE. The 2-3 September optimisation campaign rewrote the
+  # RAR5 decoder's inner loops and merged 32 vendored commits - Huffman
+  # metadata packed into previously unused LUT bits, unrolled 16-byte
+  # copy strides, a removed "impossible" zero-length branch, an inlined
+  # bit-cache path, a per-worker file-handle cache, a 192 KiB read-ahead
+  # window, a direct source view for small stored members. Every one was
+  # gated on SPEED and on digest-comparing about ten shapes. The defect
+  # class that work creates is SILENT WRONG BYTES, and `fuzz-smoke.yml`
+  # cannot see that class at all: it hunts panics and out-of-bounds, not
+  # incorrect output. This job is the arm that reads the OUTPUT.
+  #
+  # It builds a 44-fixture corpus covering every RAR version, solid,
+  # split, encrypted, recovery records, PAR2 repair at four damage
+  # levels, obfuscated names, nested archives five deep, `.rev` rebuild,
+  # SFX, 7z, zip, and foreign shapes that must be REFUSED cleanly - then
+  # scores byte-identical reproduction against each fixture's own
+  # `expected/`. The corpus is deliberately NOT committed: it is
+  # regenerated here every night, so a fixture cannot rot into agreeing
+  # with a bug.
+  #
+  # NOT ON THE PER-PUSH PATH, deliberately: it needs `rar` and `par2` on
+  # the runner and the generate+score pass is minutes, not seconds.
+  #
+  # THE JOB FAILS ON ANY FAIL. `run.sh` exits non-zero iff FAIL > 0;
+  # XFAIL is a PASS by design (a shape we decline on purpose, scored on
+  # declining it without crashing) and SKIP is not - `unrar` is
+  # installed below precisely so the three legacy RAR1.3/RAR3 fixtures
+  # are SCORED rather than skipped, because "0 scored" is the shape of
+  # every rubber-stamp incident in this repo's history.
+  #
+  # WHEN IT REDS: read the report artifact, not this log. Then check
+  # whether the SAME corpus is red against a PRE-change binary before
+  # blaming the newest commit - that discriminator is what proved on
+  # 3 Sep that all four of the FAILs found that day predated the whole
+  # campaign. Never fix a hit by editing the fixture's `expect` until a
+  # real archive of that shape has been checked by hand.
+  robustness-corpus:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    # Measured on the dev Mac 3 Sep 2026: generate ~40 s, score ~60 s,
+    # release build dominates. Budget for a cold cache and a bad night.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h /
+      - name: toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      # `rar` is the ARCHIVER the corpus is built with and `unrar` is the
+      # reference the three legacy RAR1.3/RAR3 fixtures are scored
+      # against; both are multiverse. `7zip` gives `/usr/bin/7z` and no
+      # `7zz` on noble, which the generator resolves either way.
+      # No `|| true` anywhere here: a missing tool must red the job
+      # loudly, because the alternative is a corpus that silently scores
+      # a smaller set than its name claims.
+      - name: corpus deps (rar, unrar, par2, 7z)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rar unrar par2 7zip
+          rar -? 2>&1 | head -1; unrar 2>&1 | head -1; par2 -h 2>&1 | head -1; 7z | head -2
+      - name: dependency cache key
+        id: depkey
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          echo "hash=$($py tools/dep-cache-key.py)" >> "$GITHUB_OUTPUT"
+      # Restore only, no save - same reason as `one-process-light` above:
+      # other jobs own this key, and a second writer with a different
+      # artifact set behind it decides what everyone restores tomorrow.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nightly-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+      - name: build
+        run: cargo build --release --locked -p nzbfast
+      - name: generate the corpus
+        run: tools/robustness/gen_fixtures.sh "$RUNNER_TEMP/robustness-corpus"
+      # PROVE THE SCORER CAN FAIL, before believing that it passed. This
+      # scores the corpus with a null extractor and demands the
+      # reference-compared fixtures FAIL; on 4 Sep 2026 they PASSED under
+      # exactly that control, because the reference tree was written
+      # inside the directory being hashed and every expected hash was
+      # found by construction. A rubber stamp is invisible from a green
+      # run. It refuses rather than guesses when `unrar` is missing.
+      - name: selftest the scorer
+        run: tools/robustness/run.sh "$RUNNER_TEMP/robustness-corpus" --selftest
+      - name: score it
+        run: |
+          tools/robustness/run.sh "$RUNNER_TEMP/robustness-corpus" \
+            --md robustness-report.md
+      # `always()`, so a RED run publishes the table that says which
+      # fixture and how - which is the whole point of keeping a report.
+      - name: upload the scorecard
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: robustness-report
+          path: robustness-report.md
+          if-no-files-found: warn

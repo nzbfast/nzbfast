@@ -75,6 +75,7 @@ pub(super) fn server(host: &str) -> ServerConfig {
         max_source_ips: None,
         address_family: Default::default(),
         tls_hostname: None,
+        warm_reserve: None,
     }
 }
 
@@ -983,7 +984,6 @@ fn dump_state_survives_a_held_queue_and_then_prints_it() {
     sh.register_inflight(&work("<w@x>"), 0);
     // Detached ctl: a dump on a dead pool is a no-op.
     QueueControl::default().dump_state();
-    std::thread::sleep(Duration::from_millis(5_100));
     {
         // A busy queue must degrade to "lock busy", never block the
         // watchdog that is trying to diagnose a hang.

@@ -890,6 +890,120 @@ fn nested_depth_cap_materializes() {
     std::fs::remove_dir_all(&dir3).unwrap();
 }
 
+/// The store exemption is REVOCABLE: a level that grants a child the
+/// extra depth level a store-only archive buys does not get to keep it
+/// once something at that level is seen to compress.
+///
+/// `Extractor::ensure_child` reads `saw_store && !saw_compressed`, and
+/// both flags are latched in `chase.rs::rar_span` as headers PARSE. The
+/// child is built the instant the first inner file routes, so that read
+/// happens with the level's evidence still arriving: the compressed
+/// entry behind the stored one, or the compressed archive beside the
+/// store-only one, has not been seen yet. The child was built ONCE
+/// (`inner.child.is_none()`), `enabled` had one read site and nothing
+/// revoked it, and `nested_max_depth` on the child was never lowered -
+/// so the raise survived the evidence that contradicted it. One such
+/// level per layer ladders the cap up in step with the depth, all the
+/// way to `NESTED_MAX_DEPTH_HARD_CEILING`: 64 live compressing levels
+/// where the operator configured 5. The extract byte budget does not
+/// cover this - it bounds BYTES, not levels, and every level is a real
+/// extractor with real buffers.
+///
+/// The shape here is two archives at ONE level, which is what the
+/// escalation actually needs, and it is an ordinary release layout
+/// rather than a contrived one: `a.rar` stores its members, `b.rar`
+/// compresses. A single MIXED volume latches the same way and cannot
+/// be used to show it, because `try_attach_chase` refuses a mixed
+/// store/compressed set outright (a "healthy group with mapped
+/// (non-chased) members" demotes) - it still poisons the level's child
+/// for every other group, which is the same defect, just not one an
+/// on-disk assertion can see.
+///
+/// Fed in three parts, in order, and the order IS the case: enough of
+/// `a.rar` to route `filler.bin` and build the child with the raise,
+/// then all of `b.rar` so the compressed latch fires, then the rest of
+/// `a.rar` so `inner.rar` routes into a child that should by then have
+/// been switched off. Correct: `inner.rar` materializes whole.
+/// Buggy: the child keeps the raise, classifies it as a store RAR and
+/// `payload.bin` comes out instead.
+///
+/// `set_nested_max_depth(1)` makes the whole difference one layer wide,
+/// and `anchor` is what lets the ROOT chase `b.rar` at all (the depth-0
+/// chase worker reaches its extractor through `self_weak`, which only
+/// an Arc-owned root has - `top_level_chase_gate_off_materializes`
+/// builds it the same way).
+#[test]
+fn nested_store_raise_is_revoked_by_a_compressed_archive_at_the_same_level() {
+    let payload_bytes = noisy(20_000, 7);
+    let inner_rar = fixtures::rar5_volume(&[(
+        "payload.bin",
+        payload_bytes.len() as u64,
+        &payload_bytes,
+        false,
+        false,
+    )]);
+    // Big enough that the feed can be cut in the middle of its data
+    // area, which is where the child gets built.
+    let filler = payload(300_000, 44);
+    let a_rar = fixtures::rar5_volume(&[
+        ("filler.bin", filler.len() as u64, &filler, false, false),
+        (
+            "inner.rar",
+            inner_rar.len() as u64,
+            &inner_rar,
+            false,
+            false,
+        ),
+    ]);
+    let comp_bytes = noisy(60_000, 133);
+    let b_rar = rars_compressed_volume(&[("comp.bin", &comp_bytes)]);
+    assert_not_store(&b_rar);
+    let cut = 100_000;
+    assert!(
+        cut < a_rar.len() - inner_rar.len(),
+        "cut is past filler.bin"
+    );
+
+    let dir = tmpdir("nestedstorerevoke");
+    let ex = Arc::new(Extractor::new(&dir, 2, true));
+    ex.anchor();
+    ex.set_nested_max_depth(1);
+    let feed_range = |from: usize, to: usize| {
+        for s in (from..to).step_by(7000) {
+            let e = (s + 7000).min(to);
+            ex.write(0, "a.rar", a_rar.len() as u64, s as u64, &a_rar[s..e])
+                .unwrap();
+        }
+    };
+    feed_range(0, cut);
+    for s in (0..b_rar.len()).step_by(7000) {
+        let e = (s + 7000).min(b_rar.len());
+        ex.write(1, "b.rar", b_rar.len() as u64, s as u64, &b_rar[s..e])
+            .unwrap();
+    }
+    feed_range(cut, a_rar.len());
+    let rep = ex.finish().unwrap();
+
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(
+        dir_files(&dir),
+        vec![
+            "comp.bin".to_string(),
+            "filler.bin".to_string(),
+            "inner.rar".to_string(),
+        ],
+        "the compressed archive revoked the store raise, so nothing \
+         below level 1 may be extracted"
+    );
+    // Not just the NAME: `inner.rar` has to be the archive itself,
+    // whole, which is what materializing means here - a name check
+    // alone passes on a truncated or empty file.
+    assert_eq!(std::fs::read(dir.join("inner.rar")).unwrap(), inner_rar);
+    assert_eq!(std::fs::read(dir.join("filler.bin")).unwrap(), filler);
+    assert_eq!(std::fs::read(dir.join("comp.bin")).unwrap(), comp_bytes);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// The bound on the store exemption: a store ladder deeper than
 /// [`NESTED_MAX_DEPTH_HARD_CEILING`] materializes AT the ceiling.
 ///

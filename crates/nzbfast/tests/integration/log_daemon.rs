@@ -80,8 +80,8 @@ fn serve_stamps_its_lines_and_honours_nzbfast_log_over_rust_log() {
     let log = dir.join("daemon.log");
     let out = std::fs::File::create(&log).unwrap();
     let err = out.try_clone().unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-        .env("NZBFAST_NO_ENRICH", "1")
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+    cmd.env("NZBFAST_NO_ENRICH", "1")
         .env("NZBFAST_OPEN", "1")
         .env("NZBFAST_LOG", "warn")
         .env("RUST_LOG", "info")
@@ -95,10 +95,8 @@ fn serve_stamps_its_lines_and_honours_nzbfast_log_over_rust_log() {
         .arg("--out")
         .arg(dir.join("out"))
         .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .spawn()
-        .unwrap();
-    let _child = KillOnDrop(child);
+        .stderr(Stdio::from(err));
+    let _child = KillOnDrop(crate::harness::spawn_under_test(&mut cmd));
 
     let warn = "[finish] ignoring saved queue_finished_action \"teleport\"";
     let mut text = String::new();

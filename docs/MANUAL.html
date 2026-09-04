@@ -104,6 +104,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>User Manual</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -754,6 +755,27 @@ and the <code>.strm</code> pointer embed it for you; minting it (<code>/m3u</cod
 requires the key. Plain byte-serving of an already-active download stays open, and
 keyless installs behave as before.</div>
 
+<p><b>Checking a folder long after it finished.</b> Every download proves a
+checksum for each file it fetches, and the <code>.par2</code> files that carried
+those checksums are cleaned up once it is done, so months later there is normally
+nothing left to check the folder against. nzbfast keeps them instead, in a small
+hidden <code>.nzbfast.manifest</code> beside the files. Settings → Downloading →
+<b>Checking downloads later</b> is where you point it at a finished folder: it
+reads every file, reports what no longer matches, and offers to repair it.
+Repairing is a second, separate click, and it fetches only the damaged part -
+everything still intact is read straight off your disk. The same card's tick
+turns the check file off if you would rather not have one, and
+<code>nzbfast verify</code> on the command line reads it too.</p>
+
+<p>The same <b>Checking downloads later</b> card can also run itself on a
+schedule: its <b>Check finished folders on a schedule</b> switch, off unless
+you turn it on, works through finished folders that have a check file and
+starts repairing whatever no longer matches, without anybody clicking. It
+never runs while a download is active or waiting, and because checking means
+reading every file in a folder from end to end, it costs the disk even when
+nothing turns out to be wrong. Limits next to the switch cap how many repairs
+and how much downloading one check may start.</p>
+
 <h2 id="servers">8 · Usenet servers</h2>
 <p>Settings → <b>Usenet servers</b> is the full editor: add, edit, remove, reorder,
 and switch any server in or out of the pool. Each server has:</p>
@@ -856,6 +878,19 @@ article's own checksum. <i>Lean</i> also skips those article checksums once PAR2
 a file, so damage surfaces a moment later, at its block. In all three the final settle
 pass and any repair use full MD5, and a download with no PAR2 files keeps its article
 checksums.</p>
+<p><b>Fast final check</b> <span class="pill live">live</span> changes the check that
+reads your finished files back from the disk: the settle pass at the end of a download,
+and <code>nzbfast verify</code> on the command line, where <code>--fast</code> is the
+same choice. Normally each file is proved by one digest over the whole file, which is a
+single read on one core however many cores the machine has. With this on, each file is
+proved from the PAR2 set's per-block checksums instead, and those run on every core at
+once. Much faster on a fast local disk, and worth very little on a network share or a
+spinning disk, where the disk is already the limit. It is off unless you ask for it, and
+here is what you agree to when you do: a PAR2 set can carry two records that describe
+different files, and par2cmdline and the other tools call such a set damaged where
+nzbfast then calls it clean. No set built by normal software looks like that, a check of
+the first 16 KiB still refuses every accidental version of it, and a repair proves itself
+the old way whatever this setting says.</p>
 
 <h3>Disk &amp; quota <span class="pill live">live</span></h3>
 <p><b>Minimum free space</b> (pause new jobs below it; 2 GB by default, so a
@@ -1018,7 +1053,7 @@ have added, and the watchlist works off those accounts instead.</div>
 <tr><td>Relay server, Relay channels</td><td>The IRC network carrying the announcements (host or host:port) and the comma-separated channels to listen in. A change takes effect on the next connect, so toggle the feed off and on to apply one immediately.</td></tr>
 <tr><td>Name by correlation</td><td>The live public relays carry no filenames, so most obfuscated posts cannot be matched directly. What an announcement does pin down is when a release appeared and how big it is. This compares announcement timing and size against unnamed posts and, when they fit, suggests the real name on Browse. A suggestion is marked as one, takes your click to apply, and never renames files on disk.</td></tr>
 <tr><td>Apply strong matches automatically</td><td>Off by default, and strict when on: the size must agree tightly, no other announcement may fit nearly as well, and the announcement must pick this post back when checked the other way round. Applied names change only how a release is shown, are marked as inferred, and come back off on their own if a finished download proves one wrong. Everything weaker stays a suggestion.</td></tr>
-<tr><td>Announcement history</td><td>The live feed only hears announcements made after it is switched on. This fetches roughly six months of past ones from a public pre database, politely and once, so posts already in the index can be matched too. Runs in the background for half an hour or so.</td></tr>
+<tr><td>Announcement history</td><td>The live feed only hears announcements made after it is switched on. This fetches recent past ones from predb.net, a public pre database, once, so posts already in the index can be matched too. predb.net asks people not to build their own database out of it, so only the two newest pages of each section are taken, at most 10 requests a minute. Runs in the background for a few minutes.</td></tr>
 </table></div>
 
 <h3>Library, Security, Interface</h3>
@@ -1106,6 +1141,18 @@ A script may leave a helper running in the background when it exits and
 nzbfast will not kill it, but nzbfast does stop reading the script's output
 the moment the script itself finishes: give a backgrounded helper its own
 output redirection, or it will be stopped the first time it tries to print.</p>
+<p>Scripts, and the optional external <code>unrar</code> and <code>par2</code>
+helpers, are run inside a confinement box where the machine offers one:
+<code>sandbox-exec</code> on macOS, <code>bwrap</code> on Linux. A confined script
+keeps full read access and full network access, so notifiers and library tools
+are unaffected; it may write only inside the folders nzbfast already uses (the
+download folder, any move-to destination, the watch folder and the system
+temporary folder). Turn <b>Limit where scripts can write</b> off in
+Settings &rarr; Folders if a script needs to write somewhere else and fails with
+"operation not permitted". Where no confinement is available everything runs
+exactly as it always has - a download never fails for want of it - and the
+Settings row below that switch says which mechanism is in force. Windows has
+none yet.</p>
 <h3>Pre-queue script</h3>
 <p>A second hook runs <em>before</em> a download enters the queue
 (Settings → Folders → Pre-queue script), with SABnzbd's pre-queue contract:
@@ -1480,7 +1527,7 @@ you later set in Settings still wins over it.</div>
 <tr><td><code>nzbfast serve</code></td><td>Run the daemon (dashboard + API + automation). <code>--open</code> opens the browser; <code>--apikey</code> sets the key by hand (<a href="#firstrun-key">§2</a>); <code>--bind</code> chooses the listening address, default <code>0.0.0.0</code> (every interface), <code>127.0.0.1</code> for this machine only. See <code>--help</code> for the full flag list; every dashboard setting has a flag twin.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Download one NZB, full pipeline, no daemon. <code>--preflight</code> aborts early if the post can't complete; <code>--password</code> for encrypted sets.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Availability verdict (COMPLETE / REPAIRABLE / IMPOSSIBLE) without downloading payload.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Verify files against the PAR2 set in a directory.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Verify files against the PAR2 set in a directory. Falls back to the settle manifest when the PAR2 files are gone. Exits 0 when the files check out, 1 when it finds damage; a directory with nothing to check also exits 0 and says so on the error output. <code>--fast</code> proves each file from the set's per-block checksums instead of its whole-file digest, which is much quicker on a fast disk and carries the trade described in <a href="#settings">§9</a>.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>The system benchmark + diversity report, in the terminal.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Scan groups into the index / search it, without the daemon.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Import servers from a SABnzbd ini.</td></tr>

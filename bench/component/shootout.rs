@@ -11,6 +11,12 @@
 //   shootout manifest <payload-dir> <out-file>
 //   shootout race --shapes D --work D --rounds N --tools a,b,c --manifests D
 //                 [--only shape,shape] [--tool-bin name=path ...] [--password P]
+//                 [--reps N] [--layout rotate|mirror] [--settle-ms N]
+//
+// THE PROTOCOL FLAGS EXIST BECAUSE ROTATION ALONE DOES NOT CANCEL THE
+// POSITION EFFECT. See the long comment at the order/settle site below;
+// `--layout mirror --settle-ms N` is the shape that comes out flat on a
+// same-binary A/A, and `--reps N` buys a per-round median.
 //
 // No crates: it has to compile with plain `rustc -O` on a box with no cargo.
 
@@ -254,6 +260,13 @@ const SHAPES: &[Shape] = &[
     Shape { name: "big",    entry: "big.part01.rar",  payload: "mixed", encrypted: false },
     Shape { name: "enc",    entry: "enc.rar",        payload: "mixed", encrypted: true  },
     Shape { name: "r7dict", entry: "r7dict.rar",     payload: "mixed", encrypted: false },
+    // The four usenet-shaped legs added 2 Sep 2026: what the index census
+    // says a release actually looks like (RAR5 store -v50m is 84% of
+    // bytes, encrypted store 14%, -m3 multi-volume most of the rest).
+    Shape { name: "storev",    entry: "storev.part01.rar",    payload: "rand",  encrypted: false },
+    Shape { name: "encstore",  entry: "encstore.part01.rar",  payload: "rand",  encrypted: true  },
+    Shape { name: "encstorep", entry: "encstorep.part01.rar", payload: "rand",  encrypted: true  },
+    Shape { name: "bigv",      entry: "bigv.part01.rar",      payload: "mixed", encrypted: false },
 ];
 
 // ---------------------------------------------------------------- tools
@@ -369,6 +382,9 @@ fn main() {
     let mut work = PathBuf::new();
     let mut manifest = PathBuf::new();
     let mut rounds = 3usize;
+    let mut reps = 1usize;
+    let mut layout = "rotate".to_string();
+    let mut settle_ms = 0u64;
     let mut tools: Vec<String> = Vec::new();
     let mut only: Vec<String> = Vec::new();
     let mut bins: HashMap<String, String> = HashMap::new();
@@ -385,6 +401,9 @@ fn main() {
             "--work" => work = PathBuf::from(val()),
             "--manifest" => manifest = PathBuf::from(val()),
             "--rounds" => rounds = val().parse().unwrap(),
+            "--reps" => reps = val().parse().unwrap(),
+            "--layout" => layout = val(),
+            "--settle-ms" => settle_ms = val().parse().unwrap(),
             "--tools" => tools = val().split(',').map(str::to_string).collect(),
             "--only" => only = val().split(',').map(str::to_string).collect(),
             "--password" => password = val(),
@@ -409,7 +428,17 @@ fn main() {
     }
 
     fs::create_dir_all(&work).unwrap();
-    println!("# rounds={rounds} tools={} threads={threads}", tools.join(","));
+    assert!(layout == "rotate" || layout == "mirror", "--layout rotate|mirror");
+    println!(
+        "# rounds={rounds} reps={reps} layout={layout} settle_ms={settle_ms} tools={} threads={threads}",
+        tools.join(",")
+    );
+
+    // The end of the PREVIOUS leg's timed region, wherever it was in the
+    // schedule. `gap` below is the wall from there to the start of this
+    // leg's, i.e. everything the harness does BETWEEN two timed regions,
+    // which is where the position effect lives.
+    let mut last_leg_end: Option<Instant> = None;
 
     for round in 1..=rounds {
         for sh in SHAPES {
@@ -424,7 +453,8 @@ fn main() {
             let entry = voldir.join(sh.entry);
             let want = expected.get(sh.payload).expect("manifest key");
             // Rotate the tool order by round. THE POSITION IN THE ROUND IS
-            // WORTH ~1.5% AND A FIXED ORDER HANDS ALL OF IT TO THE SAME ARM.
+            // WORTH ~1.5% ON macOS/APFS AND MUCH MORE THAN THAT ELSEWHERE,
+            // AND A FIXED ORDER HANDS ALL OF IT TO THE SAME ARM.
             // Measured 23 Aug 2026 by racing prodrar against a byte-identical
             // COPY of itself, 15 rounds on the solid shape: the arm that ran
             // first won 6 of 15 and its median leg was 1.0165x the second
@@ -442,14 +472,71 @@ fn main() {
             // retires 0.14% FEWER instructions at level cycles and RSS).
             // Rotation is by round index rather than randomised so a rerun
             // of the same command is still the same experiment.
-            let order: Vec<&String> =
+            //
+            // THAT FINDING IS STILL TRUE AND IT IS NOT THE WHOLE STORY, and
+            // the sentence above about APFS tearing down the previous leg's
+            // output is the part that did NOT survive being instrumented.
+            // Round 29 (3 Sep 2026, claim `shootout-position-bias`) put a
+            // clock on everything the harness does BETWEEN two timed regions
+            // and re-ran the A/A on two boxes: a six-core Comet Lake desktop
+            // running Windows 11 on an NTFS NVMe TLC part, and an
+            // Apple-silicon Mac on APFS. Three things it found, none of
+            // which rotation can help with:
+            //
+            //   1. IT IS NOT A POSITION EFFECT. In the same runs where the
+            //      two arms' medians split by 8%, the arm-blind median by
+            //      POSITION is flat to 0.3-2.5%. Rotation balances position,
+            //      so it cannot cancel something that is not position.
+            //   2. IT IS NOT THE TEARDOWN, AND IT IS NOT THIS HARNESS. The
+            //      teardown of a 1 GB output tree measures 85 ms on NTFS and
+            //      25 ms on APFS, and `gap`/`tear`/`fp`/`warm` are identical
+            //      between the fast arm and the slow one to within a few ms.
+            //      The whole difference is inside the timed region.
+            //   3. IT IS A PER-RUN LATCH WITH A RANDOM SIGN, which is why it
+            //      reads as a clean sweep and is therefore trusted. Four
+            //      repeats of one command over two BYTE-IDENTICAL binaries
+            //      read encstorep +9.6% (0/6), +7.0% (0/6), -0.2% (4/6),
+            //      -7.1% (6/6). More rounds do not help: whichever arm falls
+            //      into the unfavourable phase in round 1 stays there.
+            //      Pointing both arms at literally the SAME .exe leaves it at
+            //      full size, so it is not the binary; the sign flips over
+            //      the same two output directory names, so it is not those
+            //      either. What is left is the alternation - two 1 GiB writes
+            //      back to back with no idle between them - and an idle gap
+            //      of 1 s between legs removes it completely.
+            //
+            // Hence --layout and --settle-ms. `mirror` runs the round's order
+            // and then its reverse (A B B A for two arms), so both arms hold
+            // both positions WITHIN one shape's own visit. `--settle-ms`
+            // idles between legs, outside every timed region, which is what
+            // breaks the latch. `--reps` repeats the sequence within a round
+            // so a round yields a median rather than a single sample. All
+            // three default OFF, so a bare `race` is byte-for-byte the old
+            // experiment - and a bare `race` is NOT SEPARABLE below about
+            // +/-8% on a sub-second shape on that Windows box. Use
+            // `--layout mirror --settle-ms 1000` for any two-arm A/B, and run
+            // bench/component/aa-protocol.{sh,ps1} on a box you have not
+            // measured before believing a sub-10% delta from it.
+            let base: Vec<&String> =
                 tools.iter().cycle().skip(round % tools.len()).take(tools.len()).collect();
-            for tool in order {
+            let mut order: Vec<&String> = Vec::new();
+            for _ in 0..reps {
+                order.extend(base.iter().copied());
+                if layout == "mirror" {
+                    order.extend(base.iter().rev().copied());
+                }
+            }
+            for (pos, tool) in order.into_iter().enumerate() {
                 let bin = bins.get(tool).cloned().unwrap_or_else(|| tool.clone());
                 let out = work.join(format!("out-{}-{}", sh.name, tool));
+                if settle_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(settle_ms));
+                }
                 let _ = fs::remove_dir_all(&out);
                 fs::create_dir_all(&out).unwrap();
+                let tw = Instant::now();
                 let warm = prewarm(&voldir).unwrap();
+                let warm_ms = tw.elapsed().as_millis();
                 let Some(mut cmd) =
                     tool_cmd(tool, &bin, &voldir, &entry, &out, &password, sh.encrypted)
                 else {
@@ -458,8 +545,12 @@ fn main() {
                 };
                 cmd.stdout(Stdio::null()).stderr(Stdio::piped()).stdin(Stdio::null());
                 let t0 = Instant::now();
+                let gap_ms = last_leg_end.map(|e| e.elapsed().as_millis()).unwrap_or(0);
                 let res = cmd.output();
+                let t1 = Instant::now();
                 let secs = t0.elapsed().as_secs_f64();
+                last_leg_end = Some(t1);
+                let mut fp_ms = 0u128;
                 let verdict = match res {
                     Err(e) => format!("NO-BINARY({})", first_line(&e.to_string())),
                     Ok(o) if !o.status.success() => format!(
@@ -469,6 +560,7 @@ fn main() {
                     ),
                     Ok(_) => {
                         let got = dir_fingerprint(&out, threads).unwrap_or_default();
+                        fp_ms = t1.elapsed().as_millis();
                         if &got == want {
                             "ok".to_string()
                         } else {
@@ -476,14 +568,16 @@ fn main() {
                         }
                     }
                 };
+                let tt = Instant::now();
+                let _ = fs::remove_dir_all(&out);
+                let tear_ms = tt.elapsed().as_millis();
                 println!(
-                    "LEG {} {tool} {round} {secs:.3} {verdict} warm={}MiB",
+                    "LEG {} {tool} {round} {secs:.3} {verdict} warm={}MiB pos={pos} gap_ms={gap_ms} warm_ms={warm_ms} fp_ms={fp_ms} tear_ms={tear_ms}",
                     sh.name,
                     warm >> 20
                 );
                 use std::io::Write as _;
                 std::io::stdout().flush().ok();
-                let _ = fs::remove_dir_all(&out);
             }
         }
     }

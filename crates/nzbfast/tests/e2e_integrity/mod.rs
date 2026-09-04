@@ -586,10 +586,17 @@ async fn an_under_declared_size_must_not_win_by_arrival_order() {
         eprintln!("w4_11: par2 unavailable - skipping");
         return;
     }
-    let data = payload(120_000, 61);
+    // `unique_payload` at 40%, where this was `payload` at 10% until
+    // 4 Sep 2026. The lying part-2 leaves 668 bad blocks of 2,000
+    // (33.4%) and 10% is 200 recovery blocks, so the `ok` assertion
+    // below was carried by `payload`'s 131,072-byte self-period rather
+    // than by the set - `73 block(s) rebuilt, 595 adopted`. 40% is 800
+    // blocks, 132 clear of the damage
+    // (research/PAYLOAD-TRAP-PATH-DEPENDENT-CENSUS-2026-09-04.md).
+    let data = crate::payloads::unique_payload(120_000, 61);
     let mut fx = Fixture::new("w411lie");
     std::fs::write(fx.dir.join("Real.Name.mkv"), &data).unwrap();
-    assert!(fx.add_par2_obfuscated(10, &["Real.Name.mkv"], 40_000));
+    assert!(fx.add_par2_obfuscated(40, &["Real.Name.mkv"], 40_000));
     std::fs::remove_file(fx.dir.join("Real.Name.mkv")).unwrap();
     // Part 2 lies; parts 1 and 3 tell the truth and are stalled.
     let ids = add_file_with_one_lying_size(&mut fx, "Nq8xTr52Wm", &data, 40_000, 2, 8192);

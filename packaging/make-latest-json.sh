@@ -262,11 +262,15 @@ fi
 #
 # THE ONE WAY THIS GOES WRONG is a serial that goes backwards (a release
 # manager's clock set back, or a manifest rebuilt from an old checkout).
-# Clients ratchet one way and there is no server-side reset, so once
-# enforcement lands, a regressed serial would wedge the update channel on
-# every install that recorded the higher one - permanently, and no later
-# release could fix it. So the last shipped serial is committed here and
-# a regression is fatal at generation time, where it is still cheap.
+# Clients ratchet one way and there is no server-side reset, and since
+# 2 Sep 2026 they ENFORCE it, so a regressed serial wedges the update
+# channel on every install that recorded the higher one - permanently,
+# and no later release can fix it. Recovery is per-install and manual
+# (delete "update_serial_seen" from that machine's settings.json), which
+# most users will never do. So the last shipped serial is committed here
+# and a regression is fatal at generation time, where it is still cheap -
+# this refusal is now the last line of defence for the field, not a
+# pre-emptive one.
 SERIAL_FILE="$ROOT/packaging/update-serial.txt"
 SERIAL=$(date +%s)
 if [ -f "$SERIAL_FILE" ]; then
@@ -352,10 +356,10 @@ fi
 # the supplied key to the ONE key clients actually trust, read out of
 # serve/update.rs so the two cannot drift, BEFORE anything is signed or
 # recorded.
-EXPECTED_PUB=$(grep -A1 'UPDATE_PUBKEY_HEX: &str =' "$ROOT/crates/nzbfast/src/serve/update.rs" \
+EXPECTED_PUB=$(grep -A1 'UPDATE_PUBKEY_HEX: &str =' "$ROOT/crates/nzbfast-daemon/src/update.rs" \
     | grep -o '"[0-9a-f]\{64\}"' | tr -d '"')
 if [ -z "$EXPECTED_PUB" ]; then
-    echo "ERROR: could not read UPDATE_PUBKEY_HEX out of crates/nzbfast/src/serve/update.rs" >&2
+    echo "ERROR: could not read UPDATE_PUBKEY_HEX out of crates/nzbfast-daemon/src/update.rs" >&2
     echo "       (did the constant move or change shape? fix this extraction with it)" >&2
     exit 1
 fi
@@ -367,7 +371,7 @@ if [ "$GOT_PUB" != "$EXPECTED_PUB" ]; then
     echo "" >&2
     echo "ERROR: NZBFAST_UPDATE_SIGNING_KEY is NOT the production update key." >&2
     echo "       it derives  $GOT_PUB" >&2
-    echo "       clients trust $EXPECTED_PUB (serve/update.rs UPDATE_PUBKEY_HEX)" >&2
+    echo "       clients trust $EXPECTED_PUB (nzbfast-daemon/src/update.rs UPDATE_PUBKEY_HEX)" >&2
     echo "       Signing with it would produce a manifest every client rejects" >&2
     echo "       and burn a release serial. Nothing was signed or recorded." >&2
     exit 1

@@ -1,0 +1,51 @@
+# P4 at zero: a recovery set that is only a manifest - names and block
+# checksums, no parity at all.
+
+[layout]
+name = "m4-p4-manifest-only-set"
+seed = 44
+note = """
+Ports e2e_norar's
+a_manifest_only_par2_set_renames_and_verifies_with_zero_recovery
+(Case 16 of the no-RAR family).
+
+The lightest possible full obfuscation, and a real posting practice: a
+poster who wants the names and the verification but does not want to
+pay for redundancy ships the .par2 index alone - FileDesc plus IFSC,
+zero recovery volumes. Kilobytes buy the whole naming and integrity
+story.
+
+Both halves have to work with no recovery blocks anywhere: the payload
+is renamed out of its token into its real name, and every block is
+checked. A client that treats a 0 % set as no set at all files the
+payload under its token and the oracle says so.
+
+The damage half of Case 16 - one corrupt article under this same
+zero-parity set, which must fail cleanly rather than wedge or publish
+rc=0 over known-bad bytes - is NOT here and the old test keeps it. A
+profile can say a run does not complete, but `complete = false` is
+one-sided today (it means success is not required, not that failure is
+required), so a row whose whole point is that the job MUST fail cannot
+be stated in the schema yet. That is the third state the catalog
+README names as the oracle's to grow.
+"""
+
+[source]
+files = [{ name = "Manifest.Only.mkv", bytes = 120000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 0
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

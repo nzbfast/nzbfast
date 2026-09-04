@@ -1,0 +1,47 @@
+# N5: neutral subjects and a poster per article, so the headers carry
+# no name and no linkage between the files of one post.
+
+[layout]
+name = "n5-neutral-headers"
+seed = 4
+note = """
+The obfuscated post's other half. Every article's Subject is a token of
+its own and every From is a token address, so the headers say nothing
+about what the file is and nothing about which file belongs with which.
+There is no release title either, for the same reason: a title shared
+by every article is exactly the cross-file linkage this plane removes.
+The yEnc `name=` still carries the real name, and it is the only thing
+that does.
+
+N5 IS N3'S MIRROR, and the pair is worth reading together. N3 empties
+`name=` and leaves the subject to name the file; this row empties the
+subject and leaves `name=` to. Emptying both is refused by name, so
+between them these two rows cover every arm of the plane the generator
+will emit.
+
+MEASURED, 4 Sep 2026, rather than argued: with `[nzb] meta_name =
+"absent"` added to this profile the row still passes. So the NZB's
+`<meta type="name">` is not what named these files, and the yEnc header
+is. Without that arm a green row here would also be green for a client
+that had never opened an article header at all.
+
+TWO FILES, which is what makes the linkage half of the plane reachable.
+One file has nothing to be linked to; two files with no shared subject
+stem, no shared poster and no title leave the NZB's own `<file>`
+element as the only thing grouping articles into files.
+"""
+
+[source]
+files = [
+  { name = "Neutral.Headers.One.bin", bytes = 24000 },
+  { name = "Neutral.Headers.Two.bin", bytes = 18000 },
+]
+
+[naming]
+subject = "neutral"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

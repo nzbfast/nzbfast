@@ -1,0 +1,45 @@
+# P1 plus N2: the recovery set is the only place the real name exists,
+# and the payload is EXACTLY 16384 bytes.
+
+[layout]
+name = "p1-filedesc-name-16k"
+seed = 5
+note = """
+Ports e2e_norar's a_file_of_exactly_16384_bytes_lands_under_its_filedesc_name.
+
+16384 is the boundary where a PAR2 file id's md5_16k covers the WHOLE
+file, so the identification key (length, md5_16k) and the whole-file
+MD5 describe the same bytes. That is the one length at which a matcher
+that conflated the two would still look right, which is why the row
+exists at this size and not at 16383 or 16385.
+
+The wire carries a token and nothing else; the FileDesc packet carries
+Exact.Head.bin. So the expected end state is the FileDesc name, and the
+token must not survive beside it - a client that filed the payload
+under the token would fail this row on the name list alone.
+
+20 % redundancy rather than an index-only set, so the same profile also
+proves that a set with real recovery volumes still names its members:
+the naming half and the parity half live in the same critical packets
+and a creator that got the volumes right and the names wrong would pass
+an index-only row.
+"""
+
+[source]
+files = [{ name = "Exact.Head.bin", bytes = 16384 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+
+[encoding]
+article_bytes = 6000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

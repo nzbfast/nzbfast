@@ -1,0 +1,48 @@
+# P8: decoy files no set describes, one of them the same length as the
+# covered payload.
+
+[layout]
+name = "m4-p8-uncovered-junk-beside-a-covered-payload"
+seed = 43
+note = """
+Ports e2e_norar's
+uncovered_junk_beside_a_covered_payload_neither_fails_nor_claims
+(Case 21 of the no-RAR family).
+
+p8-partial-coverage states that a partial set does not name what it
+does not cover. This row is the adversarial version of the same fact:
+one of the uncovered files is the SAME LENGTH as the covered payload,
+which is what a decoy aimed at content matching looks like. A client
+that identifies members by length alone files the decoy under the
+covered member's FileDesc name and the real payload under a token, and
+the oracle names both halves of that swap because it grades the exact
+tree.
+
+The third file is small furniture, and its presence is the other half
+of the row: an uncovered file is not junk to be swept, so a client
+that deleted it would fail here too.
+"""
+
+[source]
+files = [
+    { name = "Covered.Real.mkv", bytes = 100000 },
+    { name = "Decoy.Same.Length.bin", bytes = 100000 },
+    { name = "Crumb.bin", bytes = 5000 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+covers = ["Covered.Real.mkv"]
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

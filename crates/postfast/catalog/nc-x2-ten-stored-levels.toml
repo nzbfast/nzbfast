@@ -1,0 +1,97 @@
+# C7 at ten levels, with C14 at every one of them: the corpus's deepest
+# ladder, whole.
+
+[layout]
+name = "nc-x2-ten-stored-levels"
+seed = 161
+note = """
+The nested corpus's `x2-depth10-ladder` leg. Ten stored archives, one
+inside the next, with a sibling file inside every one of them, the
+payload at the bottom and a split set with a PAR2 beside it on the wire
+- so a client has to denest nine times past the posted set before it
+sees a byte of payload, and has to keep going at each step past a level
+that holds something besides an archive.
+
+The row exists for the ruling landed as c0b1c788a and pinned by
+36381cce6: only COMPRESSING layers count against `nested_max_depth`,
+because a stored layer is the same bytes with a header on the front and
+cannot be a decompression bomb. Every level here is stored, so the
+ladder spends none of the cap and must complete at the default. Before
+that ruling this shape stopped at five. `c7-nested-depth-2` proves the
+denesting happens at all; this one proves the cap is not what limits it,
+and the two are different claims.
+
+THE SIBLINGS LANDED 4 SEP 2026, and until then this row carried the
+depth alone and said so. `crate::container` wrote exactly one member
+into each inner level - `read_the_set_back` asserted it level by level,
+because an inner level holding two members would have meant the
+generator had lost count of its own nesting - so a per-level companion
+had no key. That was gap H3, and it was not cosmetic: a client that
+stopped denesting the moment a level held something besides an archive
+would have passed this row and failed the corpus leg. The stack is
+spelled out as ten tables rather than `nested = 9` because the siblings
+are per level: every level extracts into the SAME output directory, so
+one list repeated down the stack would put one name at ten depths and
+nine of them would be overwritten.
+
+`nc-x1-five-levels-with-a-sibling-at-each` is the corpus's shallower
+ladder and the same shape at five.
+
+The payload is small because the shape is the depth: ten archive headers
+over a few kilobytes is the same test as ten over a gigabyte, and every
+profile here runs on every push.
+"""
+
+[source]
+files = [{ name = "bottom.bin", bytes = 4000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 3000
+siblings = [{ name = "level10.txt", bytes = 60 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level9.txt", bytes = 60 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level8.txt", bytes = 60 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level7.txt", bytes = 60 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level6.txt", bytes = 60 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level5.txt", bytes = 60 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level4.txt", bytes = 60 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level3.txt", bytes = 60 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level2.txt", bytes = 60 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level1.txt", bytes = 60 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

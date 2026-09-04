@@ -1,0 +1,58 @@
+# P4 at 100 % + S1 over every volume: nothing of the archive arrives,
+# and the payload still has to.
+
+[layout]
+name = "nc-a2-volumes-rebuilt-from-full-parity"
+seed = 162
+note = """
+The nested corpus's `a2-par-only` leg. A stored RAR set is split into
+three volumes and a PAR2 set with 100 % redundancy is posted beside it -
+and then the server answers 430 for every one of the archive articles,
+permanently. Not one byte of any volume is ever served. The recovery
+set alone carries enough blocks to rebuild the whole set from nothing,
+so the client must reconstruct three WHOLE FILES from parity and then
+unpack what it built.
+
+That is the hardest path PAR2 has. Repairing a damaged file is a
+partial reconstruction with most of the blocks already in hand; this row
+has none of them, and the client has to know from the set's own
+FileDesc packets what the files were called and how long they were
+before it can write a byte.
+
+The volumes are named by POSITION rather than by percentage, and the
+distinction is the row: `missing_pct = 100` would take the recovery
+articles out too and leave a job with nothing at all, which is a
+different test and a much easier one to pass by failing. Positions 0, 1
+and 2 are the three volumes in posting order, and every recovery
+article after them is served correctly.
+
+100 % redundancy is the frugal figure here, not a generous one, and the
+catalog's rule about spare parity is the reason: three lost volumes are
+three whole files of blocks, so nothing smaller can rebuild them and
+every parity volume is spent. They are therefore part of the end state,
+beside the payload and the index, which is what a run that had to
+repair looks like.
+"""
+
+[source]
+files = [{ name = "reconstructed.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 10000
+
+[encoding]
+article_bytes = 12000
+
+[recovery]
+kind = "par2"
+redundancy_pct = 100
+
+[serve]
+missing = [0, 1, 2]
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -1,0 +1,37 @@
+# S2: a permanently damaged article, and the parity that puts it back.
+
+[layout]
+name = "s2-corrupt-repairs"
+seed = 73
+note = """
+The damaged-spool arm: the same bad bytes on every ask, from every
+connection, forever. Re-asking cannot help and the only route to the
+payload is the recovery set - which makes this the row that proves the
+client DETECTS the damage in the first place. An article whose yEnc
+pcrc32 fails and is written out anyway would produce a file that is
+the right length and the wrong bytes, and the run would look clean.
+
+Six blocks at 10 % is one recovery block and one damaged article is one
+bad block, so need and supply are equal and every volume the layout
+carries is one the repair must read - see s1-missing-2pct-repairs for
+why an end state may not leave that to the run.
+
+The position is named rather than drawn, and it is the second article
+of the file rather than its first or last: a client that only checked
+the leading or trailing chunk would pass a row that damaged either
+end.
+"""
+
+[source]
+files = [{ name = "spoiled.bin", bytes = 120000 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 20000
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+corrupt = [1]

@@ -1,0 +1,33 @@
+[package]
+name = "parfast"
+version = "0.90.0-beta.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PAR2 create, verify and repair with par2cmdline's command shape and exit codes, over nzbfast's engine"
+# Whether this crate is published as its own package is an open project
+# decision; this keeps it off crates.io until that is settled either way.
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "parfast"
+path = "src/main.rs"
+
+[dependencies]
+# The facade, not nzbkit-base: `par2`, `par2gen` and `par2repair` are
+# re-exported from it under their old names, and a later lane moving a
+# module between base and the facade must not reach this crate.
+#
+# THIS DEPENDENCY IS THE WHOLE POINT OF THE CRATE. The engine is not
+# copied here and must never be: chip 13's decision D1 is one engine in
+# this workspace, so every PAR2 commit - the AVX-512 fold, the repair
+# race, whatever lands next - reaches this binary on its next build with
+# no sync step. The interim diff-synced copy at ~/Claude/parfast is
+# superseded and its HANDOFF.md says so.
+#
+# `default-features = false` because base's default turns `indexer` on
+# and a PAR2 command-line tool has no business linking sqlite.
+nzbkit = { path = "../nzbkit", default-features = false }

@@ -1,0 +1,48 @@
+# C7: the payload two wrappings down.
+
+[layout]
+name = "c7-nested-depth-2"
+seed = 107
+note = """
+Three archives deep: the posted volume holds one member, which is an
+archive holding one member, which is the archive the payload is in. A
+client that unpacks once has an archive; a client that unpacks twice
+has another; only a pass that keeps going until nothing it produced is
+itself an archive reaches the file.
+
+Depth 2 rather than depth 1 on purpose. A single wrapping is passed by
+an unpack step that simply runs twice, which is a different property
+from denesting until done, and the shapes real posts carry go deeper
+than one.
+
+Every level is STORED, so the row is about the nesting and not about
+decompression. The compressed variants of this shape - the e2e.rs
+`compressed_outer_wrapping_rar_denests_beside_leftovers` fixture among
+them - could not be written as profiles at all until 4 Sep 2026, when
+the two keys they needed landed the same day from different lanes:
+`[[container.inner]]` (C13) lets a level differ from the one above it,
+and `[source] content = "compressible"` gives the RAR writers something
+to shrink. Both directions have rows of their own now -
+`c3-c7-compressed-outer-over-a-stored-inner` and
+`nc-r2c-store-over-a-compressed-inner-level` - so this row is free to
+be only about the nesting, which is what it was always for.
+
+The one direction that still cannot be written is compressed ALL THE
+WAY DOWN, and that is the format rather than the generator: an inner
+compressed archive's output is incompressible, so the level above it
+stores what it cannot shrink and `ContainerError::NothingToCompress`
+refuses the result. Compression composes downwards only.
+"""
+
+[source]
+files = [{ name = "buried.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+nested = 2
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

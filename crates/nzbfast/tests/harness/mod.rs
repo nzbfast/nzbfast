@@ -326,6 +326,41 @@ pub fn wait_until(what: &str, within: std::time::Duration, mut ready: impl FnMut
 const SPAWN_ENOENT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 const SPAWN_ENOENT_GAP: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// Name this test process to the child, so the child can outlive us by
+/// nothing.
+///
+/// **THIS IS THE HALF `KillOnDrop` CANNOT BE.** That guard kills and
+/// reaps on `Drop`, which covers a normal end and a panicking unwind and
+/// is the right thing for both. It cannot cover the case that actually
+/// bit: THIS process dying without unwinding. On 30 Aug 2026 a
+/// `cargo nextest` run on the dev Mac ended that way and left **70
+/// `nzbfast serve` daemons** listening on 127.0.0.1 for three days,
+/// sharing provider accounts and CPU with every lane that ran after. No
+/// destructor in this file runs in that story, so no version of this
+/// file can be the fix; the child has to watch us, and this is where it
+/// is told whom to watch. `crates/nzbfast/src/parentwatch.rs` is the
+/// other end and carries the design.
+///
+/// HERE RATHER THAN IN `spawn_one`, and that is the load-bearing choice.
+/// `spawn_one` is the harness launcher, but it is not the only launcher:
+/// `integration/tls.rs`, `integration/log_daemon.rs` and
+/// `integration/settings_catalogue.rs` each keep a private one for a
+/// documented reason, and the 30 Aug leak set includes daemons from a
+/// private launcher (`nzbfast-setcat-*-restart`) as well as from the
+/// harness. Every spawn of the binary under test now goes through THIS
+/// function - which is also where the cargo-uplift ENOENT grace below
+/// lives, and which those private launchers were missing too - so a
+/// launcher written tomorrow inherits the leash by using the spawn
+/// helper it already had to use.
+///
+/// Setting it for every subcommand rather than only `serve` is
+/// deliberate and free: `nzbfast get` reads the variable and does
+/// nothing with it, and a future long-running subcommand gets the
+/// behaviour without anybody remembering this note.
+fn leash(cmd: &mut Command) {
+    cmd.env("NZBFAST_PARENT_WATCH", std::process::id().to_string());
+}
+
 /// Spawn a command whose program is a cargo-uplifted binary, absorbing
 /// the ENOENT that cargo's own uplift leaves behind.
 ///
@@ -361,6 +396,7 @@ const SPAWN_ENOENT_GAP: std::time::Duration = std::time::Duration::from_millis(1
 /// are all real and none of them goes away by waiting; the one window
 /// this absorbs is the one measured above.
 pub fn spawn_under_test(cmd: &mut Command) -> Child {
+    leash(cmd);
     let deadline = std::time::Instant::now() + SPAWN_ENOENT_GRACE;
     let mut tries = 0u32;
     loop {
@@ -578,7 +614,7 @@ fn wait_ready(child: &mut KillOnDrop, port: u16, log: &Path) -> bool {
 ///
 /// FIRST, the payload is more than its slots. `mode=queue` carries the
 /// `whyslow` diagnostic block, and that block names the LAST job's own
-/// `nzo_id` (`crates/nzbfast/src/serve/whyslow.rs`, the `"nzo_id":
+/// `nzo_id` (`whyslow.rs`, the `"nzo_id":
 /// owner` field), so `q.contains(&id)` reads TRUE against a queue whose
 /// `slots` is `[]` and whose `noofslots` is 0. That is what bit
 /// `daemon_bomb`'s `assert_refused_keeping` on 24 Aug 2026: its "the
@@ -601,7 +637,7 @@ fn wait_ready(child: &mut KillOnDrop, port: u16, log: &Path) -> bool {
 ///
 /// SECOND, and this one breaks POSITIVE assertions and poll predicates
 /// as well, nzo ids are minted `SABnzbd_nzo_nzbfast{n}` off a plain
-/// incrementing counter (`crates/nzbfast/src/serve/daemon_enqueue.rs`,
+/// incrementing counter (`daemon_enqueue.rs`,
 /// and `daemon_persist.rs` on restore). `SABnzbd_nzo_nzbfast1` is a
 /// strict PREFIX of `...nzbfast10` through `19`, and of `...100` up. A
 /// suite that reaches ten jobs therefore has a `contains` that can be
@@ -627,7 +663,7 @@ pub fn queue_slot(payload: &str, nzo: &str) -> serde_json::Value {
 /// `NzbObject.set_priority` applies a state-setting priority as a state
 /// and then calls `set_stateless_priority`, so a client can be written
 /// against those five words. Ours moved to `labels` on 31 Aug 2026 -
-/// see `serve/sabcompat/units.rs::sab_priority_name` and
+/// see `sabcompat/units.rs::sab_priority_name` and
 /// `research/SAB-QUEUE-HISTORY-SHAPE-2026-08-31.md`.
 ///
 /// One helper rather than nine copies of the array walk, so the next
@@ -687,4 +723,34 @@ fn section_slot(payload: &str, section: &str, nzo: &str) -> serde_json::Value {
         .as_array()
         .and_then(|a| a.iter().find(|s| s["nzo_id"] == nzo).cloned())
         .unwrap_or(serde_json::Value::Null)
+}
+
+/// §7a: the durable queue as `.spool/queue.jsonl` holds it, one `Value`
+/// per live record in queue order.
+///
+/// `save_queue` stopped rewriting a whole pretty-printed `queue.json` on
+/// every mutation and now appends the lines that changed, so a test that
+/// wants the DURABLE record - the half no wire form exposes, and the half
+/// a kill leaves behind - reads it through the store's own replay rather
+/// than parsing a snapshot that no longer exists. Reused rather than
+/// re-derived so the tolerance rules (a torn tail, last-line-wins,
+/// tombstones) have exactly one implementation.
+pub fn stored_queue(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    let raw = std::fs::read(dir.join(".spool").join("queue.jsonl")).unwrap_or_default();
+    nzbfast_daemon::queuestore::replay_bytes(&raw)
+        .rows
+        .into_iter()
+        .map(|(_, v, _)| v)
+        .collect()
+}
+
+/// One live queue record by nzo_id, as the store holds it.
+pub fn stored_job(dir: &std::path::Path, nzo: &str) -> Option<serde_json::Value> {
+    stored_queue(dir).into_iter().find(|j| j["nzo_id"] == nzo)
+}
+
+/// The raw bytes of the queue store, for the assertions whose subject is
+/// "does the durable record mention this at all".
+pub fn stored_queue_text(dir: &std::path::Path) -> String {
+    std::fs::read_to_string(dir.join(".spool").join("queue.jsonl")).unwrap_or_default()
 }

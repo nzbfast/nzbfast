@@ -863,7 +863,7 @@ async fn prefer_external_unrar_setting_ignored_for_obfuscated_sets() {
         // warnings were indistinguishable from progress.
         // UNIX ONLY, and the gate is the point rather than an
         // exclusion. The ring is fed by the tee, and there is no tee on
-        // Windows BY DESIGN: `crates/nzbkit/src/logtee.rs` says so in
+        // Windows BY DESIGN: `crates/nzbkit-base/src/logtee.rs` says so in
         // as many words - nothing dup2s the process's own stdio onto a
         // pipe over there, so `RING` is never populated, `active()` is
         // always false, and `mode=log` answers

@@ -1,0 +1,34 @@
+# C10: RAR's own recovery record, inside the archive.
+
+[layout]
+name = "c10-recovery-record"
+seed = 110
+note = """
+A 10 % embedded recovery record - RAR's own repair data, riding in the
+archive as a service block, and nothing to do with the PAR2 set the
+recovery plane builds beside a post. Two independent repair sources for
+one payload is what a real release usually ships, and the client reads
+both.
+
+The row is a CLEAN one: nothing is damaged, so it asserts that a
+recovery record is carried through, mapped and unpacked past without
+being mistaken for payload. What the record can REPAIR belongs with the
+fault planes, which own damage.
+
+This is the RAR5 spelling. The older generation carries a different
+record in a different block, and has its own row since 4 Sep 2026:
+c10-recovery-record-rar4. Read that note for what RAR4 still refuses.
+"""
+
+[source]
+files = [{ name = "protected.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+recovery_record_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

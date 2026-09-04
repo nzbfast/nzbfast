@@ -96,6 +96,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>Manuel utilisateur</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -805,6 +806,31 @@ le générer (<code>/m3u</code>) exige la clé. Le simple service d'octets d'un
 téléchargement déjà actif reste ouvert, et les installations sans clé se comportent
 comme avant.</div>
 
+<p><b>Vérifier un dossier longtemps après.</b> Chaque téléchargement établit une
+somme de contrôle pour chaque fichier récupéré, et les fichiers <code>.par2</code>
+qui portaient ces sommes sont nettoyés une fois terminé : des mois plus tard il ne
+reste donc normalement rien à quoi comparer le dossier. nzbfast les conserve à la
+place, dans un petit fichier caché <code>.nzbfast.manifest</code> à côté des
+données. Réglages → Téléchargement → <b>Vérifier les téléchargements plus tard</b>
+est l'endroit où vous désignez un dossier terminé : il lit chaque fichier, signale
+ce qui ne correspond plus et propose de le réparer. Réparer est un second clic,
+distinct, et cela ne récupère que la partie abîmée - tout ce qui est encore intact
+est lu directement sur votre disque. La case de la même carte désactive le fichier
+de contrôle si vous préférez ne pas en avoir, et
+<code>nzbfast verify</code> en ligne de commande le lit aussi.</p>
+
+<p>La même carte <b>Vérifier les téléchargements plus tard</b> peut aussi se
+déclencher toute seule selon un calendrier : l'interrupteur <b>Vérifier les
+dossiers terminés à intervalles réguliers</b>, désactivé tant que vous ne
+l'activez pas, parcourt alors les dossiers terminés qui possèdent un fichier
+de contrôle et lance une réparation pour tout ce qui ne correspond plus, sans
+que personne ne clique. Il ne tourne jamais pendant qu'un téléchargement est
+en cours ou en attente, et comme vérifier signifie lire chaque fichier d'un
+dossier d'un bout à l'autre, cela coûte au disque même quand rien n'est
+abîmé. Des limites à côté de l'interrupteur plafonnent le nombre de
+réparations et la quantité de téléchargement qu'une vérification peut
+lancer.</p>
+
 <h2 id="servers">8 · Serveurs Usenet</h2>
 <p>Paramètres → <b>Serveurs Usenet</b> est l'éditeur complet : ajouter, modifier, supprimer, réordonner, et faire
 entrer ou sortir n'importe quel serveur du pool. Chaque serveur a :</p>
@@ -922,6 +948,21 @@ processeur lent, et vérifie toujours la somme de contrôle propre à chaque art
 dommage apparaît alors un instant plus tard, au niveau de son bloc. Dans les trois cas
 la passe finale et toute réparation utilisent le MD5 complet, et un téléchargement sans
 fichiers PAR2 garde ses sommes d'articles.</p>
+<p><b>Vérification finale rapide</b> <span class="pill live">live</span> change la
+vérification qui relit vos fichiers terminés depuis le disque : la passe finale à la fin
+d'un téléchargement et <code>nzbfast verify</code> en ligne de commande, où
+<code>--fast</code> est le même choix. Normalement chaque fichier est prouvé par une
+empreinte sur le fichier entier, et c'est une seule lecture sur un seul cœur quel que soit
+le nombre de cœurs de la machine. Avec cette option, chaque fichier est prouvé par les
+sommes de contrôle par bloc du jeu PAR2, et celles-ci tournent sur tous les cœurs à la
+fois. Bien plus rapide sur un disque local rapide, et de peu de valeur sur un partage
+réseau ou un disque à plateaux, où le disque est déjà la limite. Elle est éteinte tant que
+vous ne la demandez pas, et voici ce que vous acceptez alors : un jeu PAR2 peut porter deux
+enregistrements qui décrivent des fichiers différents, et par2cmdline et les autres outils
+appellent un tel jeu endommagé là où nzbfast l'appelle alors sain. Aucun jeu construit par
+un logiciel normal ne ressemble à cela, un contrôle des 16 premiers Kio refuse toujours
+toute version accidentelle de cette forme, et une réparation se prouve à l'ancienne quoi
+que dise ce réglage.</p>
 <h3>Disque &amp; quota <span class="pill live">en direct</span></h3>
 <p><b>Espace libre minimum</b> (met en pause les nouvelles tâches en dessous ; 2 Go par défaut, 0 le désactive),
 <b>quota de téléchargement</b> par jour ou par mois (UTC ; les tâches Forcé le
@@ -1103,7 +1144,7 @@ que vous avez ajoutés, et la liste de suivi travaille sur ces comptes.</div>
 <tr><td>Serveur de relais, Canaux de relais</td><td>Le réseau IRC qui porte les annonces (hôte ou hôte:port) et les canaux à écouter, séparés par des virgules. Un changement prend effet à la connexion suivante : coupez puis rallumez le flux pour l'appliquer tout de suite.</td></tr>
 <tr><td>Nommer par corrélation</td><td>Les relais publics en direct ne portent aucun nom de fichier, donc la plupart des envois obscurcis ne peuvent pas être rapprochés directement. Ce qu'une annonce fixe, en revanche, c'est le moment d'apparition d'une release et sa taille. Ceci compare l'heure et la taille annoncées aux envois sans nom et, quand cela concorde, propose le vrai nom dans Parcourir. Une suggestion est signalée comme telle, demande votre clic, et ne renomme jamais de fichier sur le disque.</td></tr>
 <tr><td>Appliquer automatiquement les correspondances fortes</td><td>Désactivé par défaut, et strict une fois actif : la taille doit concorder étroitement, aucune autre annonce ne doit convenir presque aussi bien, et l'annonce doit choisir cet envoi en retour lors du contrôle inverse. Un nom appliqué ne change que l'affichage, il est marqué comme déduit, et il se retire tout seul si un téléchargement terminé le contredit. Tout ce qui est plus faible reste une suggestion.</td></tr>
-<tr><td>Historique des annonces</td><td>Le flux en direct n'entend que les annonces postérieures à son activation. Ceci récupère environ six mois d'annonces passées auprès d'une base de pres publique, poliment et une seule fois, pour que les envois déjà indexés puissent aussi être rapprochés. Tourne en arrière-plan une demi-heure environ.</td></tr>
+<tr><td>Historique des annonces</td><td>Le flux en direct n'entend que les annonces postérieures à son activation. Ceci récupère une seule fois les annonces passées les plus récentes auprès de predb.net, une base de pres publique, pour que les envois déjà indexés puissent aussi être rapprochés. predb.net demande de ne pas en constituer sa propre base, donc seules les deux pages les plus récentes de chaque section sont prises, au maximum 10 requêtes par minute. Tourne en arrière-plan quelques minutes.</td></tr>
 </table></div>
 
 <h3>Bibliothèque, Sécurité, Interface</h3>
@@ -1188,6 +1229,19 @@ Un script peut laisser un assistant tourner en arrière-plan à sa sortie et
 nzbfast ne le tuera pas, mais nzbfast cesse de lire la sortie du script dès que
 le script lui-même se termine : donnez à un assistant en arrière-plan sa propre
 redirection de sortie, sinon il sera arrêté à sa première tentative d'écrire.</p>
+<p>Les scripts, ainsi que les utilitaires externes facultatifs
+<code>unrar</code> et <code>par2</code>, sont exécutés dans un confinement là où
+la machine en propose un : <code>sandbox-exec</code> sur macOS,
+<code>bwrap</code> sur Linux. Un script confiné conserve un accès complet en
+lecture et au réseau, les notificateurs et les outils de médiathèque ne sont
+donc pas affectés ; il ne peut écrire que dans les dossiers que nzbfast utilise
+déjà (le dossier de téléchargement, toute destination de déplacement, le dossier
+surveillé et le dossier temporaire du système). Désactivez <b>Limiter où les
+scripts peuvent écrire</b> dans Réglages &rarr; Dossiers si un script doit
+écrire ailleurs et échoue avec "operation not permitted". Là où aucun
+confinement n'est disponible, tout s'exécute exactement comme avant - un
+téléchargement n'échoue jamais pour cette raison - et la ligne située sous cet
+interrupteur indique le mécanisme en vigueur. Windows n'en a pas encore.</p>
 <h3>Script pré-file</h3>
 <p>Un second crochet s'exécute <em>avant</em> qu'un téléchargement n'entre dans la
 file (Paramètres → Dossiers → Script pré-file), avec le contrat pre-queue de
@@ -1557,7 +1611,7 @@ les Paramètres garde tout de même la priorité sur elle.</div>
 <tr><td><code>nzbfast serve</code></td><td>Lance le daemon (tableau de bord + API + automatisation). <code>--open</code> ouvre le navigateur ; <code>--apikey</code> fixe la clé à la main (<a href="#firstrun-key">§2</a>) ; <code>--bind</code> choisit l'adresse d'écoute, par défaut <code>0.0.0.0</code> (toutes les interfaces), <code>127.0.0.1</code> pour cette machine seulement. Voir <code>--help</code> pour la liste complète des drapeaux - chaque réglage du tableau de bord a son jumeau en drapeau.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Télécharge un NZB, pipeline complet, sans daemon. <code>--preflight</code> abandonne tôt si le post ne peut pas aboutir ; <code>--password</code> pour les archives chiffrées.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Verdict de disponibilité - COMPLETE / REPAIRABLE / IMPOSSIBLE - sans télécharger la charge utile.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Vérifie les fichiers d'un répertoire contre son jeu PAR2.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Vérifie les fichiers d'un répertoire contre son jeu PAR2. Se rabat sur le manifeste de settle quand les fichiers PAR2 ont disparu. Sort avec 0 quand les fichiers sont sains et avec 1 quand il trouve des dégâts ; un répertoire sans rien à contrôler sort aussi avec 0 et le dit sur la sortie d'erreur. <code>--fast</code> prouve chaque fichier par les sommes de contrôle par bloc du jeu plutôt que par son empreinte sur le fichier entier, ce qui est bien plus rapide sur un disque rapide et comporte le compromis décrit au <a href="#settings">§9</a>.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>Le benchmark système + le rapport de diversité, dans le terminal.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Scanne des groupes dans l'index / le cherche, sans le daemon.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Importe les serveurs depuis un ini SABnzbd.</td></tr>

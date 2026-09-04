@@ -138,7 +138,7 @@ jobs:
         run: |
           mkdir -p corpus/rar_extract corpus/par2_parse corpus/mkv_parse corpus/zip_parse
           mkdir -p corpus/rar_map corpus/rar_recovery_scan corpus/sevenz_name_probe
-          mkdir -p corpus/sevenz_disk_gate
+          mkdir -p corpus/sevenz_disk_gate corpus/remux
           # Every .rar in the rars fixture tree, at ANY depth, into a
           # flat corpus dir under a path-qualified name.
           #
@@ -198,6 +198,11 @@ jobs:
           seed_rars corpus/rar_extract
           cp ../tests/fixtures/par2/*.par2 corpus/par2_parse/ 2>/dev/null || true
           cp ../tests/fixtures/mkv/*.mkv corpus/mkv_parse/ 2>/dev/null || true
+          # remux walks sample tables and block lacing, and a mutator
+          # starting from noise does not reach either: an EBML header is
+          # a 4-byte magic followed by structure. The same fixture the
+          # parse target uses is the cheapest way in.
+          cp ../tests/fixtures/mkv/*.mkv corpus/remux/ 2>/dev/null || true
           cp ../tests/fixtures/zip/*.zip corpus/zip_parse/ 2>/dev/null || true
           # rar_recovery_scan's own gated entry points are seeded from
           # seeds/ below - everything it parses sits behind a CRC64, a
@@ -280,12 +285,26 @@ jobs:
       - name: fuzz burst (60s per target)
         working-directory: crates/nzbkit/fuzz
         run: |
-          set -e
-          # All nineteen targets (sevenz_name_probe runs separately below
-          # with its own rss limit). Targets that land after this list was
-          # last touched belong here too - absence is an accident, not an
-          # exclusion: zip_stream is the chase's call order over an
-          # in-memory source, mediaprobe runs over a file still arriving
+          # No `set -e`: this step used to die on the first crash, which
+          # left every target after it unreached with no record at all -
+          # not "passed", not "skipped", absent from the log entirely.
+          # Measured twice, both times on par2_verify_diff (14th of 18):
+          # each run lost the seven targets below it, `remux` among them
+          # on the run meant to prove it runs at all. Each invocation
+          # below is checked on its own, `failed` collects the names that
+          # crashed, and the step exits non-zero at the end if `failed` is
+          # non-empty - the job still FAILS on any crash, it just no
+          # longer hides what came after it.
+          failed=""
+          # Eighteen targets here; sevenz_name_probe, sevenz_disk_gate
+          # and remux run separately below, each with a malloc ceiling of
+          # its own. That is all twenty-one `[[bin]]` names in
+          # fuzz/Cargo.toml as of 2 Sep 2026 - remux was the one this file
+          # had never named, and it is wired in below rather than added
+          # here. Targets that land after this list was last touched
+          # belong here too - absence is an accident, not an exclusion:
+          # zip_stream is the chase's call order over an in-memory
+          # source, mediaprobe runs over a file still arriving
           # off Usenet before PAR2 has verified anything, pesto_msgid and
           # sevenz_name_probe parse bytes anonymous posters chose, and
           # par2_verify_diff is the only one that fuzzes a VERDICT rather
@@ -302,8 +321,10 @@ jobs:
                    zip_stream mediaprobe pesto_msgid par2_verify_diff \
                    url_authority_diff rar_name_probe audio_tags tar_parse; do
             echo "::group::fuzz $t"
-            cargo +nightly fuzz run "$t" -- \
-              -max_total_time=60 -rss_limit_mb=4096 -timeout=10
+            if ! cargo +nightly fuzz run "$t" -- \
+              -max_total_time=60 -rss_limit_mb=4096 -timeout=10; then
+              failed="$failed $t"
+            fi
             echo "::endgroup::"
           done
           # sevenz_name_probe keeps a deliberately LOW ceiling - but on the
@@ -339,7 +360,7 @@ jobs:
           #
           # Verified able to fire, not just assumed: with encoded_header_bomb
           # stubbed to `false`, the seed fixture
-          # crates/nzbkit/tests/fixtures/sevenz/ppmd-mem-window.bin
+          # crates/nzbkit-base/tests/fixtures/sevenz/ppmd-mem-window.bin
           # aborts immediately as
           # `ERROR: libFuzzer: out-of-memory (malloc(4179881744))` - a 4.18 GB
           # single allocation.
@@ -355,8 +376,10 @@ jobs:
           # Note the 60s burst did NOT find it and the 420s soak did - one
           # more reason a green burst is weak evidence.
           echo "::group::fuzz sevenz_name_probe"
-          cargo +nightly fuzz run sevenz_name_probe -- \
-            -max_total_time=60 -rss_limit_mb=4096 -malloc_limit_mb=128 -timeout=10
+          if ! cargo +nightly fuzz run sevenz_name_probe -- \
+            -max_total_time=60 -rss_limit_mb=4096 -malloc_limit_mb=128 -timeout=10; then
+            failed="$failed sevenz_name_probe"
+          fi
           echo "::endgroup::"
           # sevenz_disk_gate runs the whole-container declared-size gate
           # (start geometry, packed-header decode, content dictionary
@@ -365,9 +388,129 @@ jobs:
           # top out at a 2 MiB header window plus a 2 MiB packed-header
           # decode, so any big single allocation is a finding.
           echo "::group::fuzz sevenz_disk_gate"
-          cargo +nightly fuzz run sevenz_disk_gate -- \
-            -max_total_time=60 -rss_limit_mb=4096 -malloc_limit_mb=128 -timeout=10
+          if ! cargo +nightly fuzz run sevenz_disk_gate -- \
+            -max_total_time=60 -rss_limit_mb=4096 -malloc_limit_mb=128 -timeout=10; then
+            failed="$failed sevenz_disk_gate"
+          fi
           echo "::endgroup::"
+          # remux was the ONE declared target this workflow never named -
+          # the accident the loop's own comment above predicted, found by
+          # diffing the [[bin]] names in fuzz/Cargo.toml against every
+          # target named anywhere in this file
+          # (research/SANDBOX-SCOPING-2026-08.md section 2.5, gap i). It
+          # is not in that loop because it wants a malloc ceiling of its
+          # own: "bounded allocation" is one of the four properties its
+          # header claims, and a fragment it emits is capped at 80 MiB, so
+          # 512 MiB clears the largest legal single allocation six times
+          # over while still catching an unbounded one.
+          #
+          # The ceiling is on MALLOC, not RSS, and the difference is this
+          # target's own history: §73 phase 4 lost its first remux
+          # campaign to `-rss_limit_mb=512` at SEVEN SECONDS, because RSS
+          # is mostly libFuzzer's corpus and ASan's quarantine rather than
+          # anything the remuxer allocated. Measured before wiring it in
+          # here, on 2 Sep 2026 at 8fb0cd74a: a 300 s local burst reached
+          # 278,929 runs with a peak RSS of 247 MB and no crash, OOM or
+          # timeout, which is why this lands as one more green step rather
+          # than as a finding.
+          echo "::group::fuzz remux"
+          if ! cargo +nightly fuzz run remux -- \
+            -max_total_time=60 -rss_limit_mb=4096 -malloc_limit_mb=512 -timeout=10; then
+            failed="$failed remux"
+          fi
+          echo "::endgroup::"
+          # Fail the step now that every target has had its turn - this is
+          # the whole point: a crash must still red the job, it just must
+          # not stop the burst from reaching the targets after it.
+          if [ -n "$failed" ]; then
+            echo "::error::fuzz targets crashed or hung:$failed"
+            exit 1
+          fi
+      # yenc_decode ran once above, on whichever SIMD kernel this runner's
+      # CPU happens to select. That is one of SIX: rapidyenc compiles five
+      # x86 decode kernels plus a scalar one into the shipped binary and
+      # dispatches on runtime CPU detection, and it is the ONLY
+      # memory-unsafe parse code nzbfast ships - about 4,000 lines of
+      # hand-written SIMD C++ (research/SANDBOX-SCOPING-2026-08.md section
+      # 2.5, gap ii, "the single highest-value gap in the list"). The
+      # other four x86 kernels are reached on users' machines and were
+      # reached by nothing here.
+      #
+      # NZBFAST_FUZZ_YENC_KERNEL pins the kernel for a run, through
+      # rapidyenc's own per-kernel setters (crates/nzbkit/csrc/
+      # yenc_kernel_pin.cc). A pin only ever goes DOWN, so a runner covers
+      # everything at or below what its CPU supports - typically generic,
+      # sse2, ssse3, avx and avx2 on a GitHub x86 runner - and a kernel
+      # this CPU cannot run exits 0 immediately rather than re-fuzzing the
+      # detected one under someone else's label. That is why the whole
+      # list is named here rather than a per-runner subset: neon costs
+      # nothing on x86 today and is covered for free the day this moves to
+      # an arm runner. A misspelled name ABORTS, because a silently
+      # skipped kernel is how coverage is lost without anyone noticing.
+      #
+      # Every run PRINTS the kernel actually in force, so the log says
+      # what was covered instead of leaving it to be inferred from the
+      # runner. 45 s each rather than 60 keeps the added cost near four
+      # minutes; the unpinned 60 s run above is untouched, so this is
+      # additive and the existing gate is unchanged.
+      #
+      # `!cancelled()` because this step's coverage has NOTHING to do with
+      # whether the loop above found a crash, and without it the two are
+      # welded together: the loop is one `set -e` shell, so the FIRST target
+      # to crash ends the step and every kernel here is skipped. That is not
+      # hypothetical - run 33678333481, the first run after the per-kernel
+      # step landed and the one meant to prove it works on x86, reported
+      # `fuzz burst: failure` / `one run per SIMD kernel: skipped` because
+      # `par2_verify_diff` (an unrelated target, and the fourteenth of
+      # eighteen) found a real divergence 22 minutes in. Six kernels lost
+      # their run to a bug in a different parser, which is the same silent
+      # loss of coverage this step exists to prevent - a crash anywhere must
+      # not quietly cost the yEnc kernels their run. The job still FAILS on
+      # the loop's failure; this only stops the skip.
+      - name: fuzz burst - yenc_decode, one run per SIMD kernel
+        if: ${{ !cancelled() }}
+        working-directory: crates/nzbkit/fuzz
+        run: |
+          set -e
+          for k in generic sse2 ssse3 avx avx2 vbmi2 neon; do
+            echo "::group::fuzz yenc_decode [kernel $k]"
+            NZBFAST_FUZZ_YENC_KERNEL="$k" cargo +nightly fuzz run yenc_decode -- \
+              -max_total_time=45 -rss_limit_mb=4096 -timeout=10
+            echo "::endgroup::"
+          done
+      # rapidyenc's CRC is a SECOND dispatch with a second CPU probe, a
+      # second `_crc32_isa` and three function pointers of its own
+      # (crc_folding.cc, crc_folding_256.cc, crc_arm.cc, crc_arm_pmull.cc)
+      # - the same class of code as the decode kernels, on the same path,
+      # and until 2 Sep 2026 nothing pinned it either.
+      #
+      # The exhaustive answer-differential lives in a UNIT test
+      # (yenc_simd::tests::every_reachable_crc_kernel_matches_the_oracle),
+      # which runs on every push including the x86 shards where PCLMUL and
+      # VPCLMUL actually live: a CRC branches on no byte VALUE, so its
+      # reachable paths are exactly (start alignment x length residue) and
+      # that test enumerates them. What a unit test CANNOT do is watch for
+      # an out-of-bounds read, and this build has AddressSanitizer - which
+      # is the whole reason for these runs and why they are short. Three
+      # names cover x86; armcrc/armpmull exit 0 here and cost nothing, and
+      # are covered for free the day this moves to an arm runner.
+      #
+      # `!cancelled()` for the reason its decode twin above carries it, one
+      # step further down the chain: this step is skipped when EITHER the
+      # burst loop or the decode-kernel step fails, so without the guard a
+      # crash in any of the eighteen targets silently costs all five CRC
+      # kernels their run too.
+      - name: fuzz burst - yenc_decode, one run per CRC kernel
+        if: ${{ !cancelled() }}
+        working-directory: crates/nzbkit/fuzz
+        run: |
+          set -e
+          for k in generic pclmul vpclmul armcrc armpmull; do
+            echo "::group::fuzz yenc_decode [crc kernel $k]"
+            NZBFAST_FUZZ_CRC_KERNEL="$k" cargo +nightly fuzz run yenc_decode -- \
+              -max_total_time=45 -rss_limit_mb=4096 -timeout=10
+            echo "::endgroup::"
+          done
       # Report what the corpus is costing before saving it. A corpus that
       # accumulates forever eventually evicts itself against the repo-wide
       # 10 GB cache ceiling, and it would do it SILENTLY - the burst would
@@ -419,5 +562,152 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-artifacts
+          path: crates/nzbkit/fuzz/artifacts/
+          if-no-files-found: ignore
+
+  # THE ARM64 LEG, added 2 Sep 2026, and it exists because of what the
+  # first arm64 run of `yenc_decode` under AddressSanitizer found: an
+  # out-of-bounds read in rapidyenc's NEON decode kernel, on a
+  # WELL-FORMED article, three seconds in. It had been shipping to every
+  # Apple user, every arm64 NAS and both phone targets, and nothing here
+  # could see it, because everything above this line runs on x86.
+  #
+  # Three preconditions had to line up before it was findable at all, and
+  # the last two landed the same day (research/YENC-NEON-OVERREAD-2026-09-02.md):
+  # ASan had to reach the `cc`-built C++ (e0dedc105), the decode kernel
+  # had to be pinnable (e0dedc105) - and the run had to happen on an ARM
+  # CPU, which is what this job is. The bug is arm-only: the x86 kernels
+  # load exactly the four bytes the algorithm reserves for
+  # (decoder_sse_base.h), so the ubuntu leg was green over the very same
+  # seed that aborts here.
+  #
+  # WHY NOT A LONGER x86 RUN INSTEAD. That was the other candidate, and
+  # it is measured-and-declined in section 2.5 of
+  # research/SANDBOX-SCOPING-2026-08.md. Every x86 kernel already gets a
+  # pinned run per PR and per night from the job above; what had never
+  # run was an ARCHITECTURE, and that is where the only defect this
+  # module has ever yielded was sitting. Breadth of configuration bought
+  # more than depth on ground already covered, and a rotating
+  # one-kernel-per-night x86 campaign would have cost about 120 minutes a
+  # night to keep re-covering it.
+  #
+  # Scoped as tightly as it can be: ONE target, nightly and on demand
+  # only, never on a pull_request. macOS runner minutes bill at a
+  # multiple of ubuntu's on a private repo, so this is deliberately not a
+  # per-push gate; it is the same slow-moving class the job above is
+  # looking for, on the architecture that job cannot reach.
+  #
+  # The kernel lists are the FULL lists, identical to the two steps
+  # above, not an arm-only subset. A name this CPU cannot run exits 0
+  # immediately and costs a process start, and holding both legs to the
+  # same list means a kernel added to rapidyenc tomorrow is either named
+  # in both places or missing from both - never quietly covered on one
+  # architecture only, which is the failure this whole file is about.
+  fuzz-arm:
+    runs-on: macos-latest
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: nightly toolchain
+        run: rustup toolchain install nightly --profile minimal && rustup default nightly
+      - name: dependency cache key
+        id: depkey
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          echo "hash=$($py tools/dep-cache-key.py)" >> "$GITHUB_OUTPUT"
+      # `runner.os` is in every cache key in this file, so this leg gets
+      # its own namespace for free and cannot collide with the ubuntu
+      # one - which matters more here than usual, since the two build
+      # different object code from the same sources.
+      - name: cache cargo (+ cargo-fuzz binary + fuzz target dir)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            crates/nzbkit/fuzz/target
+          key: fuzz-cargo-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+      - name: install cargo-fuzz
+        # Same guard and same reason as the ubuntu leg: `cargo install`
+        # ERRORS on an existing binary rather than no-opping, so a cache
+        # hit must skip it.
+        run: |
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin/cargo-fuzz"
+          [ -x "$bin" ] || cargo install cargo-fuzz --locked
+      - name: restore fuzz corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/nzbkit/fuzz/corpus
+          key: fuzz-corpus-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ runner.os }}-
+      - name: corpus carried forward (restore check)
+        working-directory: crates/nzbkit/fuzz
+        run: |
+          if [ -d corpus/yenc_decode ]; then
+            printf '%8s  %5s files  corpus/yenc_decode (restored)\n' \
+              "$(du -sh corpus/yenc_decode 2>/dev/null | cut -f1)" \
+              "$(find corpus/yenc_decode -type f | wc -l | tr -d ' ')"
+          else
+            echo "corpus/yenc_decode absent - restore missed, this burst starts COLD"
+          fi
+      # Only this target's seeds. The fixture sweeps in the ubuntu leg
+      # feed the RAR / 7z / zip targets, which this leg does not run.
+      # `crash-8937f376...` in here is the repro for the NEON over-read
+      # above (seeds/README.md), so every run of this job replays the
+      # exact bytes that found it.
+      - name: replay committed seeds - yenc_decode
+        working-directory: crates/nzbkit/fuzz
+        run: |
+          mkdir -p corpus/yenc_decode
+          find seeds/yenc_decode -type f ! -name README.md \
+            -exec cp {} corpus/yenc_decode/ \;
+          find corpus/yenc_decode -type f | wc -l
+      - name: fuzz burst - yenc_decode, one run per SIMD kernel
+        working-directory: crates/nzbkit/fuzz
+        run: |
+          set -e
+          for k in generic sse2 ssse3 avx avx2 vbmi2 neon; do
+            echo "::group::fuzz yenc_decode [kernel $k]"
+            NZBFAST_FUZZ_YENC_KERNEL="$k" cargo +nightly fuzz run yenc_decode -- \
+              -max_total_time=45 -rss_limit_mb=4096 -timeout=10
+            echo "::endgroup::"
+          done
+      - name: fuzz burst - yenc_decode, one run per CRC kernel
+        working-directory: crates/nzbkit/fuzz
+        run: |
+          set -e
+          for k in generic pclmul vpclmul armcrc armpmull; do
+            echo "::group::fuzz yenc_decode [crc kernel $k]"
+            NZBFAST_FUZZ_CRC_KERNEL="$k" cargo +nightly fuzz run yenc_decode -- \
+              -max_total_time=45 -rss_limit_mb=4096 -timeout=10
+            echo "::endgroup::"
+          done
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ always() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            crates/nzbkit/fuzz/target
+          key: fuzz-cargo-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+      - name: corpus size
+        if: always()
+        working-directory: crates/nzbkit/fuzz
+        run: du -sh corpus/yenc_decode 2>/dev/null || true
+      - name: save fuzz corpus
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/nzbkit/fuzz/corpus
+          key: fuzz-corpus-${{ runner.os }}-${{ github.run_id }}
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-arm
           path: crates/nzbkit/fuzz/artifacts/
           if-no-files-found: ignore

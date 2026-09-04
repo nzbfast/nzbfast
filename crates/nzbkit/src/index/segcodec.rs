@@ -88,6 +88,8 @@ const NEXT_NUM: u8 = 2;
 const KIND_RAW: u8 = 0;
 const KIND_HEX: u8 = 1;
 const KIND_B64: u8 = 2;
+/// Bound the amount of stale-row decode work between foreground-work checks.
+const GUARDED_PARSE_CHUNK: usize = 256;
 /// Longest token: the tag keeps its length in six bits.
 const TOKEN_MAX: usize = 63;
 /// A hex run shorter than this is packed 6-bit with its neighbours
@@ -281,9 +283,18 @@ fn put_tokens(out: &mut Vec<u8>, kind: u8, s: &[u8]) {
 }
 
 /// Read one id middle of `mlen` bytes into `into`.
-fn get_middle(r: &mut Reader<'_>, mlen: usize, into: &mut Vec<u8>) -> Option<()> {
+fn get_middle_guarded(
+    r: &mut Reader<'_>,
+    mlen: usize,
+    into: &mut Vec<u8>,
+    keep_going: &mut dyn FnMut() -> bool,
+) -> Option<()> {
     let mut left = mlen;
+    let mut tokens = 0usize;
     while left > 0 {
+        if tokens > 0 && tokens.is_multiple_of(GUARDED_PARSE_CHUNK) && !keep_going() {
+            return None;
+        }
         let tag = r.u8()?;
         let kind = tag >> 6;
         let len = (tag & 0x3f) as usize;
@@ -323,6 +334,7 @@ fn get_middle(r: &mut Reader<'_>, mlen: usize, into: &mut Vec<u8>) -> Option<()>
             _ => return None,
         }
         left -= len;
+        tokens += 1;
     }
     Some(())
 }
@@ -387,7 +399,13 @@ pub fn encode(segs: &[Seg]) -> Vec<u8> {
 
 /// Decode up to `limit` segments of an encoded value. `None` for
 /// anything that is not a well-formed encoding, including JSON.
-fn decode_prefix(raw: &[u8], limit: usize) -> Option<Vec<Seg>> {
+fn decode_prefix_impl_guarded(
+    raw: &[u8],
+    limit: usize,
+    text_limit: usize,
+    strict_utf8: bool,
+    keep_going: &mut dyn FnMut() -> bool,
+) -> Option<Vec<Seg>> {
     let mut r = Reader { buf: raw, at: 0 };
     if r.u8()? != MAGIC {
         return None;
@@ -402,7 +420,11 @@ fn decode_prefix(raw: &[u8], limit: usize) -> Option<Vec<Seg>> {
     let mut prev_num: i64 = 0;
     let mut prev_bytes: u64 = 0;
     let mut id = Vec::new();
-    for _ in 0..want {
+    let mut text_bytes = 0usize;
+    for segment_index in 0..want {
+        if segment_index.is_multiple_of(GUARDED_PARSE_CHUNK) && !keep_going() {
+            return None;
+        }
         let flags = r.u8()?;
         let num = if flags & NEXT_NUM != 0 {
             prev_num + 1
@@ -417,12 +439,23 @@ fn decode_prefix(raw: &[u8], limit: usize) -> Option<Vec<Seg>> {
             r.varint()?
         };
         let mlen = r.varint()? as usize;
+        let id_len = plen.checked_add(mlen)?.checked_add(slen)?;
+        let next_text_bytes = text_bytes.checked_add(id_len)?;
+        if next_text_bytes > text_limit {
+            return None;
+        }
         id.clear();
         id.extend_from_slice(prefix);
-        get_middle(&mut r, mlen, &mut id)?;
+        get_middle_guarded(&mut r, mlen, &mut id, keep_going)?;
         id.extend_from_slice(suffix);
         let num32 = u32::try_from(num).ok()?;
-        out.push((num32, String::from_utf8_lossy(&id).into_owned(), bytes));
+        let id = if strict_utf8 {
+            std::str::from_utf8(&id).ok()?.to_owned()
+        } else {
+            String::from_utf8_lossy(&id).into_owned()
+        };
+        text_bytes = next_text_bytes;
+        out.push((num32, id, bytes));
         prev_num = num;
         prev_bytes = bytes;
     }
@@ -432,11 +465,166 @@ fn decode_prefix(raw: &[u8], limit: usize) -> Option<Vec<Seg>> {
     Some(out)
 }
 
+fn decode_prefix_impl(
+    raw: &[u8],
+    limit: usize,
+    text_limit: usize,
+    strict_utf8: bool,
+) -> Option<Vec<Seg>> {
+    decode_prefix_impl_guarded(raw, limit, text_limit, strict_utf8, &mut || true)
+}
+
+fn decode_prefix(raw: &[u8], limit: usize) -> Option<Vec<Seg>> {
+    decode_prefix_impl(raw, limit, usize::MAX, false)
+}
+
 /// Decode a whole encoded value. `None` for anything that is not a
 /// well-formed encoding, including JSON - use [`parse`] for a value
 /// that may be either.
 pub fn decode(raw: &[u8]) -> Option<Vec<Seg>> {
     decode_prefix(raw, usize::MAX)
+}
+
+struct CappedSegments<'a> {
+    limit: usize,
+    text_limit: usize,
+    keep_going: &'a mut dyn FnMut() -> bool,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for CappedSegments<'_> {
+    type Value = Vec<Seg>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(CappedSegmentsVisitor {
+            limit: self.limit,
+            text_limit: self.text_limit,
+            keep_going: self.keep_going,
+        })
+    }
+}
+
+struct CappedSegmentsVisitor<'a> {
+    limit: usize,
+    text_limit: usize,
+    keep_going: &'a mut dyn FnMut() -> bool,
+}
+
+impl<'de> serde::de::Visitor<'de> for CappedSegmentsVisitor<'_> {
+    type Value = Vec<Seg>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a bounded segment array")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut out = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(self.limit));
+        let mut text_bytes = 0usize;
+        loop {
+            if out.len().is_multiple_of(GUARDED_PARSE_CHUNK) && !(self.keep_going)() {
+                return Err(serde::de::Error::custom("segment parse deferred"));
+            }
+            let Some(segment) = sequence.next_element()? else {
+                break;
+            };
+            if out.len() == self.limit {
+                return Err(serde::de::Error::custom("segment limit exceeded"));
+            }
+            let segment: Seg = segment;
+            text_bytes = text_bytes
+                .checked_add(segment.1.len())
+                .ok_or_else(|| serde::de::Error::custom("segment text limit exceeded"))?;
+            if text_bytes > self.text_limit {
+                return Err(serde::de::Error::custom("segment text limit exceeded"));
+            }
+            out.push(segment);
+        }
+        Ok(out)
+    }
+}
+
+/// Outcome of a bounded candidate-row parse that can yield to foreground work.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum GuardedParse {
+    Complete(Vec<Seg>),
+    Deferred,
+    Invalid,
+}
+
+/// Parse either stored representation without ever retaining more than
+/// `segment_limit` segments. Compact rows also enforce `text_limit` before
+/// allocating each decoded Message-ID and reject invalid UTF-8. JSON rows can
+/// materialize one string before the visitor sees it, so callers must also
+/// bound the raw input size. An over-limit or malformed value returns `None`.
+///
+/// The ordinary index readers use [`parse_bytes`] because their row shape is
+/// already bounded by ingest. Candidate scans over stale rows need this form:
+/// decoding before a compatibility check must not let one unrelated blob
+/// allocate an arbitrarily large segment vector.
+pub fn parse_capped_bytes(raw: &[u8], segment_limit: usize, text_limit: usize) -> Option<Vec<Seg>> {
+    match parse_capped_bytes_guarded(raw, segment_limit, text_limit, &mut || true) {
+        GuardedParse::Complete(out) => Some(out),
+        GuardedParse::Deferred | GuardedParse::Invalid => None,
+    }
+}
+
+/// [`parse_capped_bytes`] with bounded cancellation checks while decoding a
+/// single stored row. A refused guard never exposes a partially decoded list.
+pub(super) fn parse_capped_bytes_guarded(
+    raw: &[u8],
+    segment_limit: usize,
+    text_limit: usize,
+    keep_going: &mut impl FnMut() -> bool,
+) -> GuardedParse {
+    let mut deferred = false;
+    let out = {
+        let mut guarded = || {
+            let allowed = keep_going();
+            deferred |= !allowed;
+            allowed
+        };
+        if !guarded() {
+            None
+        } else {
+            let out = if is_encoded(raw) {
+                decode_prefix_impl_guarded(
+                    raw,
+                    segment_limit.saturating_add(1),
+                    text_limit,
+                    true,
+                    &mut guarded,
+                )
+                .and_then(|out| (out.len() <= segment_limit).then_some(out))
+            } else {
+                let mut deserializer = serde_json::Deserializer::from_slice(raw);
+                serde::de::DeserializeSeed::deserialize(
+                    CappedSegments {
+                        limit: segment_limit,
+                        text_limit,
+                        keep_going: &mut guarded,
+                    },
+                    &mut deserializer,
+                )
+                .ok()
+                .and_then(|out| deserializer.end().ok().map(|()| out))
+            };
+            if out.is_some() && !guarded() {
+                None
+            } else {
+                out
+            }
+        }
+    };
+    if deferred {
+        GuardedParse::Deferred
+    } else {
+        out.map_or(GuardedParse::Invalid, GuardedParse::Complete)
+    }
 }
 
 /// Is this stored value the compact form (as opposed to JSON)?
@@ -791,6 +979,61 @@ mod tests {
         assert_eq!(count_bytes(b"not json"), 0);
         assert_eq!(count_bytes(b"[1, 2"), 0);
         assert_eq!(first_msgid_bytes(b"[]"), None);
+    }
+
+    #[test]
+    fn capped_parse_refuses_both_representations_before_the_extra_segment() {
+        let segs = vec![
+            seg(1, "one@x", 10),
+            seg(2, "two@x", 10),
+            seg(3, "three@x", 10),
+        ];
+        let encoded = encode(&segs);
+        let json = serde_json::to_vec(&segs).unwrap();
+        assert_eq!(parse_capped_bytes(&encoded, 3, 17), Some(segs.clone()));
+        assert_eq!(parse_capped_bytes(&json, 3, 17), Some(segs));
+        assert!(parse_capped_bytes(&encoded, 2, 17).is_none());
+        assert!(parse_capped_bytes(&json, 2, 17).is_none());
+        assert!(parse_capped_bytes(&encoded, 3, 16).is_none());
+        assert!(parse_capped_bytes(&json, 3, 16).is_none());
+
+        let mut invalid_utf8 = encode(&[seg(1, "é", 1)]);
+        let lead = invalid_utf8.iter().position(|byte| *byte == 0xc3).unwrap();
+        invalid_utf8[lead] = 0xff;
+        assert!(decode(&invalid_utf8).is_some(), "legacy decode stays lossy");
+        assert!(parse_capped_bytes(&invalid_utf8, 1, 2).is_none());
+    }
+
+    #[test]
+    fn guarded_capped_parse_defers_inside_both_large_representations() {
+        let segs: Vec<Seg> = (1..=1_024)
+            .map(|number| seg(number, &format!("<guard-{number:04}@x>"), 10))
+            .collect();
+        let encoded = encode(&segs);
+        let json = serde_json::to_vec(&segs).unwrap();
+        for raw in [&encoded[..], &json[..]] {
+            let calls = std::cell::Cell::new(0usize);
+            let parsed = parse_capped_bytes_guarded(raw, segs.len(), usize::MAX, &mut || {
+                calls.set(calls.get() + 1);
+                calls.get() <= 3
+            });
+            assert_eq!(parsed, GuardedParse::Deferred);
+            assert_eq!(calls.get(), 4, "guard was not checked during row decode");
+        }
+    }
+
+    #[test]
+    fn guarded_capped_parse_checks_again_after_a_small_decode() {
+        let segs = vec![seg(1, "<guard@x>", 10)];
+        for raw in [encode(&segs), serde_json::to_vec(&segs).unwrap()] {
+            let calls = std::cell::Cell::new(0usize);
+            let parsed = parse_capped_bytes_guarded(&raw, 1, usize::MAX, &mut || {
+                calls.set(calls.get() + 1);
+                calls.get() <= 2
+            });
+            assert_eq!(parsed, GuardedParse::Deferred);
+            assert_eq!(calls.get(), 3);
+        }
     }
 
     #[test]

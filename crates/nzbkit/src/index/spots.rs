@@ -559,9 +559,7 @@ impl Index {
             // total, same contract as the NZB downloader's.
             let declared = (f.segments.len() + f.dropped_segments) as u32;
             let total = parts.last().map(|(n, _, _)| *n).unwrap_or(0).max(declared);
-            *stems
-                .entry(crate::extract::release_stem(&fname))
-                .or_insert(0) += 1;
+            *stems.entry(crate::names::release_stem(&fname)).or_insert(0) += 1;
             for g in &f.groups {
                 *grps.entry(g.clone()).or_insert(0) += 1;
             }
@@ -2142,6 +2140,43 @@ pub struct Spot {
     pub hashcash_ok: bool,
     /// NZB payload segment ids, cached after the first fetch.
     pub nzb_msgids: Vec<String>,
+}
+
+impl Spot {
+    /// A stored-shaped spot minted by hand, for a test in ANOTHER crate
+    /// that needs rows in the `spots` table without a signed wire scan.
+    ///
+    /// `#[doc(hidden)] pub` for the same reason [`crate::mock`] is: the
+    /// nzbfast resolver's integration suite has to seed a pending
+    /// backlog, and it has no way to. `verified` is `pub(crate)` (it is
+    /// always true for a stored spot, so nothing downstream should be
+    /// branching on it) which makes the struct unconstructable from
+    /// outside; `scan_spots` is the only other door and it demands a
+    /// real RSA signature, which only this crate's own `#[cfg(test)]`
+    /// `make_spot` can mint. Re-widening the field was the alternative
+    /// and is worse: it puts a field that carries no information back on
+    /// the public surface for good, which is precisely what the TODO 103
+    /// item 6 sweep took it off for (f09c67e4e).
+    ///
+    /// Not a production constructor. The insert still goes through
+    /// [`Index::insert_spots`], so a test seeded this way exercises the
+    /// same rows a scan would have written.
+    #[doc(hidden)]
+    pub fn for_test(msgid: &str, title: &str, date: i64) -> Spot {
+        Spot {
+            id: 0,
+            msgid: msgid.to_string(),
+            title: title.to_string(),
+            category: 0,
+            subcats: String::new(),
+            size: 1_048_576,
+            date,
+            spotter_id: String::new(),
+            verified: true,
+            hashcash_ok: true,
+            nzb_msgids: Vec::new(),
+        }
+    }
 }
 
 fn spot_from_row(r: &rusqlite::Row) -> rusqlite::Result<Spot> {

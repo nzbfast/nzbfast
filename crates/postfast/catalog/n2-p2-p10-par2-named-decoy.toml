@@ -1,0 +1,101 @@
+# P10 over P2: the only file in the post that announces itself as parity
+# is the one file that is not parity. A GAP ROW - see [expect].
+
+[layout]
+name = "n2-p2-p10-par2-named-decoy"
+seed = 210
+note = """
+The first row for P10, spec section 7.C (workload W1, "packet sniff",
+matrix rows M4-18/19/28). A post names a file `.par2` and its bytes are
+not a PAR2 set, and what should decide is the packets rather than the
+suffix.
+
+It is `cc-n02-p2-opaque-recovery-names` with ONE plane added, and that
+is deliberate: the payload and the real recovery set ride under tokens
+exactly as they do there, the real set is found by content or not at
+all, and the end state that row asserts is reached. So a failure here
+is the decoy and nothing else, and the two rows are each other's
+control arm.
+
+WHAT THE DECOY IS, and why it is not random bytes. A client decides a
+file is parity on a ladder of rungs: the extension, the packet magic,
+the framing walk, each packet's own MD5 seal, and last whether what the
+packets say adds up to a set. Random bytes under a `.par2` name are
+turned away on the second rung and say nothing about the three above
+it. This decoy carries a genuine Main packet and a genuine Creator
+packet cut from a real creator's index - correct seals, a real
+recovery-set id - then a framing-valid cell whose seal is junk, then
+junk. It clears every rung but the last: the set it declares has no
+FileDesc packet, so it names no member, checks nothing and can rebuild
+nothing. `crate::recovery`'s `create_decoy` argues the shape at length.
+
+WHAT THE ROW MEASURES TODAY, three arms, run 4 Sep 2026 on this same
+profile with only the decoy's bytes changed:
+
+  * The shipped decoy (Main + Creator + junk): the client ACTIVATES it -
+    `[par2] set live: 0 file(s), block size 4096` - and only at settle
+    does the F11 guard catch it, `the activated recovery set names no
+    files (damaged index?)`. By then the real set's volumes have been
+    deferred as recovery data and the payload has been published under
+    its token.
+  * Creator packet only, no Main: `[par2] activation failed (no valid
+    PAR2 Main packet found in the input) - falling back to post-download
+    verify`. The verifier goes off and never comes back.
+  * Junk with no packet magic at all: the same line, the same end state.
+
+So all three are red today and the row's greenness does not yet depend
+on how deep the decoy goes. What the depth buys is the row's value
+AFTER the fix: the second and third arms fail at ACTIVATION, and a fix
+that only retries the sniffed volumes when activation fails would leave
+the shipped arm broken, because there activation SUCCEEDS on a set that
+names nothing. The strongest arm is the one that stays load-bearing.
+
+THE DEFECT THIS PINS. `nzbfast get` classifies by NZB subject, so the
+`.par2`-named decoy is the job's only par2-main slot and the only input
+in-stream activation ever sees; the real set rides under tokens and is
+deferred by the in-stream sniff as recovery data. Whether activation
+then succeeds on a set naming nothing or fails outright, in-stream
+naming is disarmed for the whole job and the settle-time disk pass
+finds the real set too late - it reports the described member missing
+while its bytes sit beside it under a token. A poster who ships one
+`.par2`-named blob therefore costs an obfuscated post every real name
+in it. The fix is engine work in the in-stream activation and settle
+paths, it is not this row's, and it is tracked outside the catalog.
+
+`p3-p10-decoy-beside-an-announced-set` is the same decoy beside a set
+the post ANNOUNCES, and it passes: two sets are adopted, the one that
+names nothing does not stop the one that does, and the decoy lands
+byte-exact. The pair says exactly where the line is.
+"""
+
+[source]
+files = [{ name = "Sniffed.Decoy.2026.mkv", bytes = 120000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+names = "opaque"
+decoy = { name = "extras.par2", bytes = 3072 }
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = false
+# None of the payload arrives under the name the layout carries for it.
+# The bytes DO arrive - every article is served and every article is
+# fetched - and they land under the wire token, which is the client's
+# own answer rather than anything this profile asked for, so it is not
+# written here.
+arrives = []
+# ...and the run reports success anyway, which is why `exits` is
+# written: unset, `complete = false` would expect a non-zero exit and
+# the row would be pinning a failure the client never reports.
+exits = "zero"
+gap = "the `.par2`-named decoy is the job's only par2-main slot, so in-stream activation sees it and nothing else; the real set rides under tokens, is deferred as recovery data, and never names the payload, which lands under its wire token while the run reports success"
+
+[expect.ladder]
+reaches = ""

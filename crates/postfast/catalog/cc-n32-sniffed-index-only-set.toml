@@ -1,0 +1,47 @@
+# P2 and P4-at-zero together: the whole recovery set is ONE index file,
+# and it rides under a token.
+
+[layout]
+name = "cc-n32-sniffed-index-only-set"
+seed = 156
+note = """
+Expresses bench/capability-corpus leg n32-sniffed-index-only.
+
+Total obfuscation at kilobyte cost. Nothing on the wire says par2 and
+nothing says a real name, and the entire out-of-band carrier is a
+single index file of a few kilobytes: no volumes, so no second copy of
+any critical packet, and the client either recognises that one file by
+its packet bytes or the post has no name in it anywhere.
+
+WHY IT IS NOT cc-n02 WITH ONE VALUE CHANGED. There the set has volumes,
+so a client that failed to sniff the index could still meet the same
+FileDesc packets in a volume and finish. Here there is nothing behind
+the index at all, which makes this the row where the sniff is
+load-bearing rather than merely first.
+
+It is also the tightest case of the sweep rule `recovery_is_swept`
+states: the set is one packet-shaped file under a token, the client
+reads its names out and then removes it, so the whole expected output
+tree is the payload. A row where the index survived would be leaving a
+token-named file in the user's output directory.
+"""
+
+[source]
+files = [{ name = "Corpus.Sniffed.Index.mkv", bytes = 120000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 0
+names = "opaque"
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

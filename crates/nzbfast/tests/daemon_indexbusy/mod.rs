@@ -142,6 +142,18 @@ async fn a_held_index_write_mutex_refuses_the_edit_rather_than_parking_the_worke
             j["error"].as_str().unwrap_or("").contains("busy"),
             "the busy reason has to reach the toast: {j}"
         );
+        // ...and said it in a field, not only in prose. THE FLAG IS
+        // THE CONTRACT: a refused write and a refused ARGUMENT were the
+        // same shape - `{"status": false, "error": <sentence>}` - so
+        // nothing but the message text separated "the moment was wrong,
+        // press it again" from "your key was wrong, do not". That cost
+        // `wall_groups_dedupes_and_serves` two days of intermittent
+        // failure under load: its `wall_art` assertion read the busy
+        // refusal as the daemon's real answer, and its sibling compared
+        // the busy SENTENCE against "unknown title key". Every refusal
+        // out of `IndexBusy::refusal` carries `busy` now, reads and
+        // writes alike, and this is what holds it there.
+        assert_eq!(j["busy"], true, "a refused write says so in a field: {j}");
         // Nothing was written. The pooled read answers while the write
         // mutex is held, which is what makes this checkable DURING the
         // hold rather than after it.
@@ -312,6 +324,10 @@ async fn a_held_index_leaves_the_poster_alone_and_bounds_the_blanked_sweep() {
             j["error"].as_str().unwrap_or("").contains("busy"),
             "the busy reason has to reach the toast: {j}"
         );
+        // See the same pair in the rules leg above: the flag is what a
+        // caller can act on, and `m_wall_art`'s own "unknown title key"
+        // is the answer it would otherwise be confused with.
+        assert_eq!(j["busy"], true, "a refused upload says so in a field: {j}");
         assert_eq!(
             std::fs::read(&poster).unwrap(),
             first,
@@ -351,6 +367,7 @@ async fn a_held_index_leaves_the_poster_alone_and_bounds_the_blanked_sweep() {
             v["error"].as_str().unwrap_or("").contains("busy"),
             "the blanked sweep has to say why it refused: {v}"
         );
+        assert_eq!(v["busy"], true, "a refused sweep says so in a field: {v}");
 
         // The hold ends and the retry the toast asks for publishes.
         let held = holder.join().expect("holder thread");
@@ -393,7 +410,7 @@ fn recorded(port: u16) -> Vec<String> {
 /// TODO 166's residue, found on origin/main after the 15 documented
 /// sites had landed: `clear_search_log`. The section audited
 /// `api/wall.rs` and `api/index.rs` and this write lives in
-/// `serve/searchlog.rs`, whose own module note is TODO 166's argument
+/// `crates/nzbfast-daemon/src/searchlog.rs`, whose own module note is TODO 166's argument
 /// verbatim - every search-log write is kept off the write mutex
 /// BECAUSE an HTTP worker must never park on it - and whose only
 /// user-facing door then reached that mutex through the unbounded
@@ -446,19 +463,53 @@ async fn a_held_index_refuses_the_clear_button_but_never_loses_the_privacy_switc
     tokio::task::spawn_blocking(move || {
         // A search nothing can answer, which is exactly what the log is
         // for. It merges in memory and reaches the table on the tick.
+        //
+        // The search is RE-ISSUED on every turn of the loop, and that
+        // is the point of it rather than a detail. `mode=index_search`
+        // records a query only when the read pool actually answered:
+        // on a busy index it returns `{"status":false,"busy":true}` and
+        // deliberately notes nothing - "that is not a miss"
+        // (`m_index_search` in `api/index.rs`, and it is right).
+        // The daemon runs an index lap as it starts (spots plus
+        // maintenance, 3.8 s of work in the failing log below), so on a
+        // loaded box that one search can meet a busy pool - and a loop
+        // that then polled for the record of a search it had already
+        // spent could never succeed, whatever its bound. Re-issuing
+        // makes this bound measure how long the index stays busy,
+        // which is a thing that ends, rather than wait on an event
+        // that was lost. `note_search` merges by query, so repeating
+        // it costs one bucket's counters and no extra row.
+        //
+        // Measured 2 Sep 2026 on a 32-core mac dev box at load
+        // average 20-34, with six copies of this test running against
+        // each other: 3 hard failures in 30 runs before this change,
+        // every one of them "the search log never recorded zzcontrol:
+        // []" at 12.9-14.1 s with an EMPTY table - which is the
+        // signature of the lost search, not of a slow one. That is the
+        // TRY 2 FAIL of run 1 in
+        // research/DAEMON-SUITE-FLAKES-2026-09-02.md.
         let record = |q: &str| {
-            http(
-                port,
-                &format!("/api?mode=index_search&q={q}&output=json"),
-                None,
-            );
+            let mut answer = String::new();
             for _ in 0..40 {
+                answer = http(
+                    port,
+                    &format!("/api?mode=index_search&q={q}&output=json"),
+                    None,
+                );
                 if recorded(port).iter().any(|r| r == q) {
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
-            panic!("the search log never recorded {q}: {:?}", recorded(port));
+            // The last answer goes in the message: a busy verdict here
+            // means the index never freed up inside the bound, and a
+            // successful one means the flush task is the subject. The
+            // failure this replaced printed neither, and cost a
+            // rebuild to tell the two apart.
+            panic!(
+                "the search log never recorded {q}: {:?} - last search answered {answer}",
+                recorded(port)
+            );
         };
         let clear = || {
             let r = http(port, "/api?mode=search_log_clear&output=json", None);
@@ -504,6 +555,7 @@ async fn a_held_index_refuses_the_clear_button_but_never_loses_the_privacy_switc
             j["error"].as_str().unwrap_or("").contains("busy"),
             "the busy reason has to reach the toast: {j}"
         );
+        assert_eq!(j["busy"], true, "a refused clear says so in a field: {j}");
         assert!(
             recorded(port).iter().any(|r| r == "zzresidue"),
             "a refused clear must leave the table alone"

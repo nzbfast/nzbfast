@@ -1,0 +1,60 @@
+# The identical-head family at three-way scale, with damage on top.
+
+[layout]
+name = "cc-n26-three-zero-head-members-one-damaged"
+seed = 2601
+note = """
+Expresses bench/capability-corpus leg n26-triplet-one-damaged.
+
+Three members of one length sharing an all-zero head, so the head-hash
+tier cannot tell any of the three apart, and one of the three posted
+copies is spoiled. Two of them therefore resolve by whole-file evidence
+and the third resolves by nothing at all until its blocks have been
+rebuilt: the damaged copy hashes to a value no descriptor carries, so it
+is the leftover after the other two are claimed rather than a file that
+matched anything.
+
+That ordering is the row. cc-n15 and cc-n16 pose the collision with
+every copy intact; this one takes away the evidence for exactly one of
+them and asks the client to reach the same three names anyway.
+
+SIZES, and why they are not the corpus's. Each member is 60,000 bytes at
+a 32,768-byte block, which is 2 slices each and 6 in the set, so the
+corpus's own 15 % redundancy is ceil(0.9) = 1 recovery block - the one
+the single spoiled block consumes, with none spare. The catalog README
+asks a repairing row to carry exactly that much, so that "the volume
+arrives" is arithmetic rather than a client policy this row would
+otherwise be pinning by accident.
+
+The head is 20,000: over 16,384 so it collides the (length, md5-16k)
+key, and under the 32,768-byte block so no two members hand the creator
+an identical all-zero block.
+"""
+
+[source]
+files = [
+    { name = "Trip.Alpha.vob", bytes = 60000, zero_head = 20000 },
+    { name = "Trip.Beta.vob", bytes = 60000, zero_head = 20000 },
+    { name = "Trip.Gamma.vob", bytes = 60000, zero_head = 20000 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 15
+block_bytes = 32768
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 30000
+
+[fault]
+corrupt_payload = [{ file = "Trip.Gamma.vob", at = 40000, bytes = 64 }]
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

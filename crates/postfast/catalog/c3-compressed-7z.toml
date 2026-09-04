@@ -1,0 +1,58 @@
+# C3 + C12 + C1: the catalog's first genuinely COMPRESSED container.
+
+[layout]
+name = "c3-compressed-7z"
+seed = 172
+note = """
+C3 read U from the day the container plane landed, and the reason was
+never the writer. `ContainerError::NothingToCompress` in
+`crates/postfast/src/container.rs` carries it at full length: the RAR
+writers fall back to STORE per entry whenever compression would not
+shrink an entry, silently, and `[source]` bytes come off the ChaCha
+stream and are incompressible by construction. So
+a `rar-compressed` row would have been a stored archive wearing a C3
+label - green without a byte of decompression having run - and
+`container::wrap` refuses one by name. That refusal still stands, and
+`crates/postfast/src/container.rs` carries both halves under test.
+
+The 7z arm needs none of it. `sevenz-rust2` records ONE content method
+for the archive and never falls back per entry, so an LZMA2 archive
+over incompressible bytes is still an LZMA2 archive: the client has to
+run the decoder to get a byte out of it. The archive comes out LARGER
+than the payload, which is the honest cost of the shape rather than a
+defect, and `crate::sevenz`'s own tests measure it in both directions -
+one asserts an incompressible payload does not shrink, one asserts the
+header still declares LZMA2, and a control asserts the stored arm
+declares COPY so the pair cannot pass over a writer that never emitted
+COPY at all.
+
+So this row is not a workaround for the RAR gap: it is the shape a
+client actually meets, since 7z-in-a-post is LZMA2 by default and copy
+only when a poster asks for it. The RAR half of C3 was waiting on a
+compressibility selection in `[source]`, and that landed the same day
+(claim `postfast-source-content-shape`): `content = "compressible"`
+gives the RAR writers something to shrink, and
+`c3-compressed-single-volume` and `c3-compressed-split-two-members` are
+the rows beside this one. The two arms answer different halves - this
+one is a decoder the client must RUN over bytes that did not shrink,
+those are a writer that actually shrank - so keep both.
+
+The end state is the payload file. No recovery set, deliberately: this
+row is about the decompression path and a set beside it would put a
+verify in front of the question.
+"""
+
+[source]
+files = [
+    { name = "movie.bin", bytes = 24000 },
+    { name = "sample/clip.bin", bytes = 4000 },
+]
+
+[container]
+kind = "7z-compressed"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

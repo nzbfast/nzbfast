@@ -1396,7 +1396,7 @@ mod tests {
     /// checks it.
     #[test]
     fn live_spot_headers_verify() {
-        const FIXTURE: &[u8] = include_bytes!("../testdata/spot/free.pt.over.tsv");
+        const FIXTURE: &[u8] = include_bytes!("../../nzbkit-base/testdata/spot/free.pt.over.tsv");
         // (subject fragment, key source, hashcash, category, key-id)
         let want: [(&str, Option<SpotKeySource>, bool, u8, u8); 9] = [
             // Key-id 2 "personal dispose", self-signed, latin-1 subject.
@@ -1478,7 +1478,7 @@ mod tests {
     /// every other row is signed up to the `|`, so a trailing tag is not.
     #[test]
     fn stored_title_is_the_signed_one() {
-        const FIXTURE: &[u8] = include_bytes!("../testdata/spot/free.pt.over.tsv");
+        const FIXTURE: &[u8] = include_bytes!("../../nzbkit-base/testdata/spot/free.pt.over.tsv");
         let entries: Vec<_> = FIXTURE
             .split(|&b| b == b'\n')
             .filter(|l| !l.starts_with(b"#"))
@@ -1526,7 +1526,7 @@ mod tests {
 
     #[test]
     fn moderation_records_are_not_content() {
-        const FIXTURE: &[u8] = include_bytes!("../testdata/spot/free.pt.over.tsv");
+        const FIXTURE: &[u8] = include_bytes!("../../nzbkit-base/testdata/spot/free.pt.over.tsv");
         let entries: Vec<_> = FIXTURE
             .split(|&b| b == b'\n')
             .filter(|l| !l.starts_with(b"#"))

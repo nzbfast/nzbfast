@@ -68,7 +68,8 @@ has to build with plain `rustc -O --edition 2021` on a box with no cargo:
 ```
 shootout manifest <payload-dir> <manifest-file>
 shootout race --shapes D --work D --manifest F --rounds N --tools a,b,c \
-              [--only shape,...] [--tool-bin name=path ...]
+              [--only shape,...] [--tool-bin name=path ...] \
+              [--reps N] [--layout rotate|mirror] [--settle-ms N]
 ```
 
 Per run it makes a fresh output directory, reads every input byte to warm the
@@ -80,6 +81,30 @@ competitor**, which is why the harness records failures verbatim.
 
 Tools are interleaved inside each round rather than run in blocks, so a machine
 that warms up or throttles part way through affects every tool equally.
+
+**Interleaving is necessary and it is not sufficient, and the three protocol
+flags are why.** Rotating the tool order by round balances how often each arm
+runs first; it removes a position bias only if that bias is the same on every
+shape it is balanced over, and on Windows/NTFS it is not - audit round 25's
+A/A (one binary against a byte-identical copy of itself, six rounds, balanced
+positions) read +5.0% on `storev` and -7.3% on `encstorep`, so the two halves
+did not cancel and a +4 to +7% "regression" on the stored shapes was published
+into round 24 as a finding before the A/A retired it. `--layout mirror` runs
+each round's order and then its reverse, so both arms hold both positions
+inside one shape's own visit; `--settle-ms N` idles between legs, outside every
+timed region, so what a leg inherits from its predecessor is the same for every
+leg rather than a function of position; `--reps N` repeats the sequence inside
+a round so the round yields a median. All three default off, so a bare `race`
+is byte-for-byte the old experiment.
+
+`aa-protocol.sh` (and its Windows twin `aa-protocol.ps1`) runs that A/A under
+each protocol in turn on a given box, and `aa-position.py` reads the LEG lines
+back as "is this box separable at all" rather than "who won": per-arm medians
+over per-round medians, the paired win count that catches a 0/N or N/N sweep,
+the median by position with the arms folded away, and the between-leg
+instrumentation (`gap_ms`, `tear_ms`, `fp_ms`) that lets a position effect be
+attributed rather than guessed at. **Run it on any box before believing a
+sub-10% two-arm delta measured there.**
 
 ## Running the PAR2 race
 
@@ -101,6 +126,54 @@ and compares every repaired volume against the pristine set on every round.
 line 1, then `<volume> <block index>`) to a copy of a pristine set. It is the
 portable twin of the rig's `assemble.ps1`; before it existed only Windows
 could reproduce a map, so the Macs re-rolled damage from a seed instead.
+
+`par2-ifsc-surgery.py` makes the two VERIFY shapes a creator will not write,
+because both need slices the set describes but carries no checksums for -
+`BlockCheck::UNPROVEN` cells. `--keep N` truncates every IFSC packet to its
+first N entries, and the parser pads the grid out with placeholders; `--zero
+A:B` writes the reserved all-zero MD5 into a range of wire entries, which is
+the only way to get an INTERIOR unproven gap rather than an unproven suffix.
+Both reseal the packet MD5. Pair either with a payload whose length disagrees
+with the descriptor (append or truncate a byte) to reach the POSITIONED
+diagnostic path at all: a legal-size member spends its time in the whole-file
+MD5 and never gets there, which is how a verify measurement can miss the code
+it was aimed at. Added 3 Sep 2026 for the verify-lane race in
+`research/PAR2-TWO-LANES-COMPARED-2026-09-03.md`.
+
+## Measuring what a PAR2 pass costs the REST of the box
+
+Every leg above times the PAR2 process. None of them time the machine
+around it, and a 23 GB verify used to pull its whole payload through the
+page cache and evict whatever else was resident. `par2-cache-round.sh`
+measures that half, for the read-side cache policy in
+`crates/nzbkit-base/src/disk/readpolicy.rs`.
+
+`resident.c` is the metric: `mincore(2)`, one bit per page, so the answer
+is a page COUNT of what survived rather than a timed re-read. It reads
+only, and never touches the file it counts.
+
+`par2-cache-round.sh --bin DIR --rig DIR [--ws FILE] --phase evict|warm`
+runs the paired legs. `evict` leaves the payload cold with an unrelated
+working set resident and reports how much of that working set is still
+there afterwards; `warm` leaves the payload resident and reports only the
+wall, which is the "must not regress" arm. Arm order alternates between
+reps and the position is on every row.
+
+**The working set has to be big enough to force the question.** Sized so
+that payload + working set exceeds usable page cache, or the baseline arm
+simply fits and a small eviction is indistinguishable from noise. The
+script does not choose it for you.
+
+**Both arms are one binary**: `NZBFAST_READ_HINTS=0|1` picks the policy at
+run time, and the script refuses a binary that does not carry the knob.
+That is the answer to this directory's most expensive trap (below): a
+candidate that is secretly the baseline.
+
+`readscan.c` is the same read loop in ~90 lines of C - open, read front
+to back, optionally `POSIX_FADV_SEQUENTIAL` and `POSIX_FADV_DONTNEED`
+behind the reader. It exists for a device class whose only representative
+has no compiler and a libc older than any host we build on: `cc -static`
+and it runs there.
 
 ## Running the recovery-record race
 

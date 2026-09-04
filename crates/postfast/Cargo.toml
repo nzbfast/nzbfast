@@ -1,0 +1,142 @@
+[package]
+name = "postfast"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Posting-layout generator: a declarative profile in, a deterministic Usenet layout out, for nzbfast's round-trip oracle"
+# Internal test infrastructure until decision D2 in
+# research/SPEC-POSTING-LAYOUT-TOOLKIT-2026-09-03.md says otherwise.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The facade, not nzbkit-base directly: `mock`, `par2gen`, `yenc` and
+# `nzb` are re-exported from it under their old names, and `post` (the
+# wire-article and NZB emitters this crate mirrors) lives only in the
+# facade. `default-features = false` for the same reason nzbfast gives:
+# base's default turns `indexer` on, and a generator has no business
+# pulling sqlite in.
+nzbkit = { path = "../nzbkit", default-features = false }
+# The archive writers (rar13, rar15_40, rar50). The workspace member is
+# the vendor mirror; the fork at ~/Claude/rars is where a writer change
+# is made and synced in from - never edit vendor/rars/src directly.
+rars = { path = "../../vendor/rars" }
+# H1: the 7z writer, for the container plane's non-RAR arm. NOT a new
+# dependency - `vendor/sevenz-rust2` is already in the tree and already
+# in the lockfile, read by nzbkit, nzbkit-base, nzbfast-unpack and
+# nzbfast. What is new here is the `compress` feature, which is what
+# gates `mod writer` and `mod encoder` in that crate (its src/lib.rs
+# `#[cfg(feature = "compress")]` lines); the two nzbkit crates already
+# turn it on in their DEV-dependencies, so the encoder is code this
+# repo already compiles and tests. `default-features = false` keeps
+# `util` (its std file helpers) and the AES arms out: this crate writes
+# to a `Cursor<Vec<u8>>` and never encrypts, since an encrypted archive
+# is refused for the reproducibility reason `container.rs` states.
+#
+# postfast is `publish = false` test infrastructure that no shipped
+# binary depends on, so the LZMA2 encoder this pulls in through
+# `lzma-rust2/encoder` reaches no release build.
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["compress"] }
+# The `pcrc32` / `crc32` value on a yEnc trailer. The same crate and
+# the same version the engine's own encoder uses, so the neutral frame
+# can be asserted byte-identical to `nzbkit::yenc::encode` rather than
+# merely equivalent.
+# H1's other half: the ZIP writer, for the container plane's third
+# format. THIS ONE IS A NEW DEPENDENCY, which the 7z arm was not, and
+# `research/POSTFAST-VS-NESTED-CORPUS-2026-09-03.md` calls it a real
+# decision rather than a key. What it costs:
+#
+# - MIT, which deny.toml's licence allow-list already carries.
+# - With `default-features = false` the required tree is `crc32fast`,
+#   `indexmap` and `memchr` (all three already in the lockfile for
+#   other reasons) plus `typed-path` (MIT OR Apache-2.0), so ONE new
+#   crate reaches the graph. The default features would have pulled
+#   aes, bzip2, zstd, ppmd, zopfli, deflate64 and `time`; none of them
+#   is wanted here.
+# - `deflate-flate2` is the one compression arm turned on, for the
+#   C3 half. It is `flate2` on its pure-Rust `miniz_oxide` backend,
+#   both of which are already in the lockfile, so the C3 arm costs no
+#   crate at all.
+# - It reaches no shipped binary: postfast is `publish = false` test
+#   infrastructure that nothing in the product depends on, which is the
+#   same argument that made the 7z arm cheap and holds here unchanged.
+#
+# **`time` MUST stay off, and `crate::zip` does not rely on that
+# alone.** Without it `zip::DateTime::default_for_write()` is the
+# constant 1980-01-01 rather than the clock (its two `#[cfg]` arms in
+# the crate's `datetime.rs`), which is what makes a written archive
+# reproducible. Feature unification is a workspace-wide question and
+# nothing here can promise no future crate turns `time` on, so
+# `crate::zip::write_archive` sets the timestamp EXPLICITLY and
+# `container.rs`'s `wrapping_twice_is_byte_identical` is the assertion
+# either way.
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+crc32fast = "1"
+serde = { version = "1", features = ["derive"] }
+# 1.x since 3 Sep 2026 (dependabot #58). No source change: this crate
+# only ever calls `toml::from_str` and names `toml::de::Error`, both
+# unchanged, and it never SERIALISES, so the 1.1 spec's round-trip
+# changes have no surface here. Every catalog profile still parses
+# (`layout::tests::every_catalog_profile_generates_and_round_trips`).
+# This is NOT the shipped product's config format - nzbfast's config is
+# JSON - so a toml major cannot reach a user's settings file.
+toml = "1"
+# One seeded generator for every random choice a layout makes (names,
+# tokens, fault picks), so a profile plus a seed is byte-reproducible.
+# Never the OS entropy `nzbkit::post::random_token` draws from.
+#
+# 0.10 since 3 Sep 2026 (dependabot #58), across two breaking
+# boundaries. The stream did NOT move - `rng.rs` freezes the actual
+# bytes for three seeds now, and they are the same on 0.8.7/0.3.1 as on
+# 0.10.2/0.10.0 - because this crate never touched the surface 0.9 and
+# 0.10 rewrote: no `thread_rng`, no `gen_range` (`below` does its own
+# rejection sampling for exactly this reason), and ChaCha8 rather than
+# `StdRng`. The whole port was `RngCore` -> `TryRng` in one impl block.
+#
+# It does NOT remove rand 0.8 from the tree: rsa -> num-bigint-dig
+# still pins it, so the lockfile carries both (a `multiple-versions`
+# warn in deny.toml, not a failure). The bump buys the maintained
+# branch, not a smaller build.
+rand = "0.10"
+rand_chacha = "0.10"
+
+[features]
+default = []
+# THE DISTRIBUTION GATE, spec section 12 of
+# research/SPEC-POSTING-LAYOUT-TOOLKIT-2026-09-03.md.
+#
+# `postfast post` uploads. The generator and the oracle ship nothing, but
+# a posting tool is a separately gated deliverable that follows the
+# standing process for a legal read before public release, and that read
+# has not come back. So the network half of `src/post.rs` compiles ONLY
+# under this feature, the feature is OFF by default, and it is passed by
+# NO CI job and NO documented build line. Do not add it to one.
+#
+# Without it the verb still exists and refuses with `post::GATE`,
+# exiting 2. That is deliberate: a verb that disappeared would read as a
+# packaging accident rather than as a decision somebody made.
+#
+# The one test it enables drives `nzbkit::mock::MockServer` on loopback.
+# Nothing in this crate has ever posted to a live server.
+live-post = ["dep:tokio", "dep:sha2"]
+
+# Both only for the gated half: the async runtime the POST/IHAVE path
+# and the verify pool run on, and the hash the verify compares with (the
+# same comparator `nzbfast post --verify` uses). Optional, so a default
+# build links neither.
+[dependencies.tokio]
+version = "1"
+features = ["rt-multi-thread", "macros", "time"]
+optional = true
+
+[dependencies.sha2]
+version = "0.11"
+optional = true
+
+[dev-dependencies]
+# The mock server's config fixtures are JSON, the same shape
+# `nzbfast post`'s own tests build one from.
+serde_json = "1"

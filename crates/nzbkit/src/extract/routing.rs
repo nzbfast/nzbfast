@@ -309,7 +309,7 @@ impl Extractor {
                             // sniff journaled nothing and refetched
                             // entirely on resume.
                             if inner.refeed_active {
-                                inner.late_placements.push(LatePlacement {
+                                inner.push_late(LatePlacement {
                                     slot,
                                     frag: Frag {
                                         // The out_dir-RELATIVE name, as
@@ -561,7 +561,9 @@ impl Extractor {
             } else {
                 FileWriter::create_under(&self.out_dir, &out, total, cap)?
             }
-            .with_budget(budget),
+            .with_budget(budget)
+            // Round 44's feeding signal - see `Extractor::set_feeding`.
+            .with_feeding(self.feeding.clone()),
         );
         inner.inner_writers.insert(out.clone(), w.clone());
         if let Some(gk) = gkey
@@ -798,7 +800,26 @@ impl Extractor {
             // demoted on the retention cap "partly on
             // disk" when every byte of it went to disk.
             self.shape.note(self.depth, SH_7Z);
-            self.chase_span(inner, slot, offset, data)?;
+            // TODO 37 step 4: a continuation part joining a
+            // container that is ALREADY direct-mapped comes
+            // back mapped, not chased - it has no frontier
+            // to feed, and routing this span into the
+            // impossible arm of `chase_span` is exactly the
+            // silent byte loss that arm debug-asserts on.
+            if matches!(inner.slots[slot].mode, SlotMode::Rar) {
+                routed_rar = true;
+                self.rar_span(
+                    inner,
+                    slot,
+                    offset,
+                    data,
+                    Some((&mut *jobs, &mut *fwd)),
+                    repair,
+                    article_crc,
+                )?;
+            } else {
+                self.chase_span(inner, slot, offset, data)?;
+            }
         } else if self.try_attach_zip(inner, slot, data)? {
             // One-pass zip (phase 2): the same claim
             // discipline as 7z - only the FORMAT is

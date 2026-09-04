@@ -3,7 +3,7 @@
 //!
 //! The sibling of `holds_cap_default.rs` (TODO 260) and pinned for the
 //! same reason, one tier down. It is not a live memory bug: the only
-//! production verifier is built by `crates/nzbfast/src/get/vrig.rs`,
+//! production verifier is built by `crates/nzbfast-engine/src/get/vrig.rs`,
 //! which already passes `budget.partials_cap()`. It is the same latent
 //! trap - `set_process_budget` is the knob every other memory consumer
 //! reads implicitly, so a rig that pins a small budget and then builds a
@@ -15,6 +15,10 @@
 //! so publishing one inside the lib suite would change the default under
 //! every other verify test sharing that process under plain
 //! `cargo test`.
+//!
+//! test-target-gate: asserts what a VIRGIN process answers before any
+//! `set_process_budget`, which cannot be un-published - even its holds
+//! sibling cannot share the binary under `cargo test`
 
 use nzbkit::live::LiveVerifier;
 use nzbkit::mem::MemBudget;

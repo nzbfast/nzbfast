@@ -23,6 +23,17 @@
 //! written, so "all three agree" cannot be satisfied by all three being
 //! wrong together. Any future path that answers a verdict from a
 //! different piece of metadata fails on the first inconsistent set.
+//!
+//! `Pass1Out` is a TRI-state, and the assertions below are written
+//! around that: `md5_unfinished` says the whole-file digest stopped at
+//! the first block the IFSC denied, so `clean`/`intact` false there is
+//! "not proven" rather than "disproven". Under it this target asserts
+//! the shape of the contract (the flag only ever withholds a positive,
+//! it is only ever raised over a denied block, and the bitmap is exact
+//! anyway) instead of the FileDesc verdicts. The H7 direction - a
+//! satisfied IFSC laundering bytes the FileDesc MD5 denies into a
+//! "clean" - is unreachable through that flag by construction, and
+//! stays fully pinned.
 
 use crc32fast::Hasher as Crc32;
 use libfuzzer_sys::fuzz_target;
@@ -110,11 +121,22 @@ fn blocks_of(data: &[u8], bs: usize, n: usize) -> Vec<BlockCheck> {
 /// What the verify paths MUST say, computed from the bytes on disk and
 /// the metadata as generated - deliberately a plain re-statement of the
 /// contract, not a second call into the code under test.
+///
+/// The presence bitmap comes back whenever the set HAS an IFSC list,
+/// including for a file the FileDesc MD5 proves clean - `verify_pass1`
+/// drops the bitmap in that case, and folding that in is the caller's
+/// job, because a result whose FileDesc verdict was WITHHELD carries
+/// the bitmap and still has to match it.
+///
+/// Presence is a TWO-part rule and both halves are restated below: the
+/// slice's declared bytes must all be on disk and its padded CRC32 must
+/// match, AND the entry must be a real one - an all-zero MD5 is
+/// `BlockCheck::UNPROVEN` and vouches for nothing.
 fn oracle(disk: &[u8], file: &Par2File, bs: usize) -> (bool, bool, Option<Vec<bool>>) {
     let decl = file.length as usize;
     let clean = disk.len() >= decl && md5_of(&disk[..decl]) == file.md5;
     let intact = clean && disk.len() == decl;
-    if clean || file.blocks.is_empty() {
+    if file.blocks.is_empty() {
         return (clean, intact, None);
     }
     let n_slices = decl.div_ceil(bs);
@@ -131,6 +153,21 @@ fn oracle(disk: &[u8], file: &Par2File, bs: usize) -> (bool, bool, Option<Vec<bo
             let Some(check) = file.blocks.get(i) else {
                 return false;
             };
+            // An all-zero MD5 is RESERVED - it is `BlockCheck::UNPROVEN`,
+            // the placeholder a SHORT IFSC packet is padded out with, and
+            // it must never read as proven over any bytes at all. The
+            // CRC32 beside it is not the guard (every u32 is somebody's
+            // CRC32), so a wire entry spelling that MD5 is unproven too,
+            // whatever its CRC field says: `crc_matches` answers false
+            // before it ever looks. Restated here rather than called, so
+            // the oracle stays a statement of the contract rather than a
+            // second call into the code under test. Missing this cost a
+            // 30.7M-execution campaign its first crash (2 Sep 2026, and
+            // libFuzzer got there by SOLVING the CRC32 comparison with
+            // its CMP instrumentation, then zeroing the MD5 beside it).
+            if check.md5 == [0u8; 16] {
+                return false;
+            }
             let mut slice = disk[off..off + declared].to_vec();
             slice.resize(bs, 0);
             let mut crc = Crc32::new();
@@ -260,16 +297,57 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(par.intact, serial.intact, "intact disagrees");
     assert_eq!(par.present, serial.present, "presence bitmap disagrees");
 
-    // 2. The post-repair self-prove asks the same question as `intact`
-    //    and must not answer it differently.
-    assert_eq!(self_prove, serial.intact, "md5_matches vs intact");
-
-    // 3. And all of them against the bytes actually written, so a shared
-    //    wrong premise cannot pass by agreeing with itself.
     let (want_clean, want_intact, want_present) = oracle(&disk, &file, bs);
-    assert_eq!(serial.clean, want_clean, "clean vs the FileDesc MD5");
-    assert_eq!(serial.intact, want_intact, "intact vs the FileDesc MD5");
-    assert_eq!(serial.present, want_present, "presence vs the IFSC CRC32s");
+
+    // 2. The post-repair self-prove rereads the file on its own and
+    //    must answer the bytes that are actually there. Stated against
+    //    the oracle rather than against `serial.intact`, because those
+    //    two are only required to agree where the verify pass finished
+    //    asking the question - see 3.
+    assert_eq!(self_prove, want_intact, "md5_matches vs the bytes on disk");
+
+    // 3. And the verify verdicts against those same bytes, so a shared
+    //    wrong premise cannot pass by agreeing with itself.
+    //
+    //    `md5_unfinished` (2 Sep 2026, `7f195ff27`) is the tri-state:
+    //    the whole-file digest stops at the first block the IFSC
+    //    denies, because the self-prove after the patch rehashes those
+    //    bytes anyway, so `clean`/`intact` are then answered on IFSC
+    //    evidence alone and mean "not proven". `repair_dir_set_inner`
+    //    finishes the digest before the one verdict that can turn on it
+    //    - a shortfall - is declared. So under the flag the FileDesc
+    //    verdicts are not this target's to check; what is, is that the
+    //    flag stays a WITHHOLDING and nothing more.
+    if serial.md5_unfinished {
+        assert!(
+            !serial.clean && !serial.intact,
+            "md5_unfinished may only withhold a positive verdict"
+        );
+        assert!(
+            serial.resume.is_some(),
+            "md5_unfinished without a snapshot to finish the digest from"
+        );
+        // Only ever raised over a block the IFSC actually denied: a
+        // digest stopped anywhere else would be dropping the FileDesc
+        // proof for nothing.
+        assert!(
+            want_present
+                .as_ref()
+                .is_some_and(|p| p.iter().any(|&ok| !ok)),
+            "the digest stopped without a block the IFSC denied"
+        );
+        // The bitmap is still fully decided, and still by the CRC32s.
+        assert_eq!(
+            serial.present, want_present,
+            "presence vs the IFSC CRC32s (digest cut short)"
+        );
+    } else {
+        assert_eq!(serial.clean, want_clean, "clean vs the FileDesc MD5");
+        assert_eq!(serial.intact, want_intact, "intact vs the FileDesc MD5");
+        // A clean file is the one shape that drops the bitmap.
+        let want = if want_clean { None } else { want_present };
+        assert_eq!(serial.present, want, "presence vs the IFSC CRC32s");
+    }
 
     // 4. The resumed self-prove (TODO 133.1) is the same proof as the
     //    full one. On the unpatched file the snapshot's prefix state

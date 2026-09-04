@@ -93,7 +93,7 @@ pub fn rar_aes_decrypt(p: &[u8]) {
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use md5::{Digest, Md5};
+use crate::md5fast::{Digest, Md5};
 
 use crate::config::ServerConfig;
 use crate::nntp::Connection;
@@ -765,12 +765,20 @@ fn ladder_supply_for(peak_gbps: f64, conns: usize, secs_per_step: u64) -> usize 
 /// target provider is known to hold (design doc 12.1). The synthetic
 /// probe group undermeasured a provider 17x, so this function no longer
 /// discovers its own.
+///
+/// `on_step` is handed each rung the instant it settles, and exists for
+/// ONE reason: every caller wraps this future in a `tokio::time::
+/// timeout`, and a timeout DROPS the future and the `out` vec inside it,
+/// so a rung that already went on the wire against the user's account
+/// was unrecoverable on that arm and went unbilled (F21, 1 Sep 2026).
+/// A caller that does not bill passes a closure that does nothing.
 pub async fn remeasure(
     server: &ServerConfig,
     mut ids: Vec<String>,
     rungs: &[usize],
     peak_gbps: f64,
     secs_per_step: u64,
+    on_step: impl Fn(&LadderStep),
 ) -> Result<Vec<LadderStep>, Box<dyn std::error::Error + Send + Sync>> {
     use crate::pool::PoolConfig;
     if ids.is_empty() {
@@ -793,13 +801,18 @@ pub async fn remeasure(
         };
         let (gbps, per, granted, saturated) =
             timed_fetch_multi(vec![(server.clone(), cfg)], slice, per_step, secs_per_step).await;
-        out.push(LadderStep {
+        let step = LadderStep {
             connections: c,
             granted: granted.first().copied().unwrap_or(0),
             gbps,
             bytes: per.first().copied().unwrap_or(0),
             saturated,
-        });
+        };
+        // Announced BEFORE the push and before the next rung's await,
+        // so a caller's timeout firing between rungs cannot be the
+        // reason a rung that ran went unrecorded.
+        on_step(&step);
+        out.push(step);
     }
     Ok(out)
 }
@@ -1190,7 +1203,7 @@ pub struct SystemReport {
     /// reader somewhere that cannot help. Empty unless the caller holds
     /// a link observation AND the measurement reached its ceiling -
     /// filled in by the daemon, which is the side that probes the link
-    /// (`measured_note` in `crates/nzbfast/src/serve/locallink.rs`).
+    /// (`measured_note` in `crates/nzbfast-daemon/src/locallink.rs`).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub network_link: String,
 }

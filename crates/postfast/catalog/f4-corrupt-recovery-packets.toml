@@ -1,0 +1,48 @@
+# F4: packets inside the recovery set that no reader will accept, and a
+# repair that has to happen anyway.
+
+[layout]
+name = "f4-corrupt-recovery-packets"
+seed = 41
+note = """
+Packet-level resilience. A PAR2 packet carries its own MD5 over its set
+id, type and body, so a packet whose bytes moved and whose checksum did
+not is exactly the "skip this one" case every reader has - and a set is
+built to survive it, because the critical packets are repeated in every
+file and the recovery slices are one equation each. What this row pins
+is that a set with unreadable packets in it is still a set: the client
+skips what it cannot verify, uses what is left, and repairs.
+
+THE DAMAGE IS NOT RESEALED, and that is what makes it damage rather
+than an edit. Resealing would produce a set that says something
+different and says it validly, which is a naming row (P6) and not this
+one.
+
+WHY THE ROW ALSO REFUSES AN ARTICLE. Corrupt packets alone do not make
+a client open a volume: the payload arrives clean, the index verifies
+it, and nothing needs rebuilding, so the row would prove that damaged
+parity is never read. Pairing it with one refused article is what puts
+the damaged set on the repair path, which is where the resilience it
+claims actually has to hold.
+
+Which packets is the seed's answer, drawn from the fault plane's own
+stream. A profile that named them would be pinning the creator's packet
+ORDER, which is par2gen's business and not a layout.
+"""
+
+[source]
+files = [{ name = "packets.bin", bytes = 400000 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+block_bytes = 20000
+
+[fault]
+corrupt_recovery_packets = 2
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+missing = [3]

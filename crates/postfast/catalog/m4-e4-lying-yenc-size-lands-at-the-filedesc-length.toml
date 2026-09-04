@@ -1,0 +1,49 @@
+# E4 with a recovery set beside it: the yEnc header overstates the
+# file, and the FileDesc length is what the client must land on.
+
+[layout]
+name = "m4-e4-lying-yenc-size-lands-at-the-filedesc-length"
+seed = 45
+note = """
+Ports e2e_norar's lying_yenc_size_lands_at_the_filedesc_length
+(finding F5).
+
+The `=ybegin size=` field overstates the file while every =ypart range
+stays true, so the slot is preallocated at the DECLARED size and the
+real bytes fill only the head of it. Until 30 Aug 2026 nothing
+truncated the slot back and the published file was the payload plus a
+tail of zeros, at rc=0 with verify green - a wrong file that every
+check agreed with. Settle now holds the published length to the
+FileDesc length once every covered block has verified, so the landed
+file is byte-exact.
+
+WHY THIS IS NOT e4-declared-total-long, which selects the same
+`declared_size`. That row has NO recovery set, so the declared total is
+the only length statement in the post and the client has nothing to
+check it against; its note records what the engine does with the one
+yEnc field it already treats as untrusted. Here a set covers the file,
+so there IS a second length, cross-checked by an MD5 pair, and the
+requirement is that the checked one wins. Same selection, different
+question, and the pairing is what makes either answer legible.
+"""
+
+[source]
+files = [{ name = "Liar.Size.bin", bytes = 120000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 40000
+declared_size = "long"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -1,0 +1,50 @@
+# C10 on the older generation: a RAR4 embedded recovery record.
+
+[layout]
+name = "c10-recovery-record-rar4"
+seed = 1110
+note = """
+The same selection as c10-recovery-record one archive generation back,
+and it is a different record rather than the same one in an older
+container. RAR5 stores recovery data as an `RR` service block holding
+Reed-Solomon parity over the archive. RAR4 stores it as a `Protect+`
+NEWSUB block that carries a 16-bit tag per 512-byte sector, then XOR
+parity sectors, sector k folding every protected sector congruent to k;
+one damaged sector per congruence class is recoverable and a second in
+the same class is not. A client that reads one and not the other passes
+exactly one of these two rows, which is why both are here.
+
+The writer landed 4 Sep 2026. Before it the rar15_40 entry points
+validated against a feature set with recovery_record off, so no RAR4
+archive could carry a record and this row's selection was refused by
+name. What is still refused is a record over a SPLIT rar4 set (rar puts
+one record in every volume, over that volume's own bytes, and the
+volume writers have no such plan) and over a header-encrypted rar4
+archive (the record would be written in the clear and no reader accepts
+it that way). Both are refused by name, at the shape, not emitted
+without the record.
+
+Interoperability is not assumed from the fact that bytes were written:
+`rar 7.23` finds this record on an archive built here, names the
+damaged sector and rebuilds it byte-exact
+(research/RAR4-RECOVERY-RECORD-2026-09-04.md).
+
+The row is a CLEAN one, exactly as its RAR5 twin is: nothing is
+damaged, so it asserts the record is carried through, mapped and
+unpacked past without being read as payload. What the record can
+REPAIR belongs with the fault planes, which own damage.
+"""
+
+[source]
+files = [{ name = "protected-rar4.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+version = "rar4"
+recovery_record_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

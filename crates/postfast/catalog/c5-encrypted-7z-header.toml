@@ -1,0 +1,59 @@
+# C5 + C12 + C3: a header-encrypted 7z, where the file list itself needs
+# the password.
+
+[layout]
+name = "c5-encrypted-7z-header"
+seed = 182
+note = """
+`c4-encrypted-7z-data` with ONE selection changed: `encryption =
+"header"` rather than `"data"`. Everything else is the same archive, so
+what this row adds over that one is exactly the difference between C4 and
+C5 and nothing else.
+
+That difference is where the password is ANSWERED. A data-encrypted 7z
+has a readable end header, so a client parses the archive, lists its
+members and their sizes, and discovers the password question only when it
+pulls the bytes. A header-encrypted one seals the header itself, so the
+key is needed to learn that the archive holds `movie.bin` at all - and
+the 7z end header is at the TAIL of the file, which is where the client
+answers it (`nzbfast_unpack::rarfix::sevenz::open_sevenz` says so in its
+own header: "a wrong or missing key fails here, having read one header's
+worth of bytes off the last part").
+
+So a green row here is a claim the C4 row cannot make: the client read
+the meta password BEFORE it could name a single member, and used it on
+the header rather than only on the content.
+
+Watch the writer's default if you touch this. `ArchiveWriter`'s
+`encrypt_header` starts TRUE, so a data-encrypted profile that failed to
+spell out `set_encrypt_header(false)` would emit a header-encrypted
+archive and the C4 row above would silently be a second C5.
+`crate::sevenz`'s `only_the_header_arm_seals_the_header` is the pin, and
+it reads the two archives' headers rather than trusting the selection.
+
+The password is furniture, and travels in the clear in the NZB head.
+
+MEASURED the same way as the C4 row and on the same day: with
+`meta_password = false` the run reports "inner 7z is encrypted (no
+password)" and ends with the payload sealed.
+
+The end state is the payload file, and there is no recovery set for the
+reason `c4-encrypted-7z-data` gives.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 16000 }]
+
+[container]
+kind = "7z-compressed"
+encryption = "header"
+password = "sevenz-fixture-pw"
+
+[nzb]
+meta_password = true
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

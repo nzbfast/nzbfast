@@ -1,0 +1,37 @@
+# S5: two articles that hang, one after the status line and one before
+# it, and a job that finishes anyway.
+
+[layout]
+name = "s5-stall-recovers"
+seed = 61
+note = """
+The stall watchdog's row, and the one damage plane whose right answer
+is a CLEAN download. Neither article is lost or spoiled: the server
+hangs on the first request for each and serves it whole on the next, so
+a client that cuts the dead air and re-asks ends with the post
+complete, no parity fetched and nothing to repair. A client that waits
+out a read timeout instead ends with the same bytes and a much longer
+run, which is why this row asserts the end state and not a duration -
+a wall-clock assertion here would report a loaded box as the defect.
+
+The two shapes are deliberately both present. `stall` hangs AFTER the
+status line, so the client has a reply and then silence; `stall_pre`
+hangs BEFORE it, which is dead air a flat read timeout waits out in
+full and an adaptive TTFB budget cuts short. They are different code
+paths on the client and a row that drove only one would leave the other
+uncovered.
+
+The positions are named rather than drawn: this row is about two
+PARTICULAR articles, one in the middle of a file and one at its end,
+and a percentage could not say that.
+"""
+
+[source]
+files = [{ name = "patient.bin", bytes = 120000 }]
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+stall = [2]
+stall_pre = [5]

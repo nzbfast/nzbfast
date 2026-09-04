@@ -681,7 +681,7 @@ async fn a_volume_name_cannot_credit_more_blocks_than_its_bytes_have_room_for() 
 /// differs between the two fixtures.
 ///
 /// It was a total loss on origin/main `632096f71` and the log is in
-/// `crates/nzbfast/src/repair/volpayload.rs`: the file is never fetched
+/// `crates/nzbfast-unpack/src/repair/volpayload.rs`: the file is never fetched
 /// at ALL, because `build_fetch_plan` skips a non-bootstrap
 /// `Par2Volume` before a slot exists, so every rescue in
 /// `get/settle.rs` is blind to it by construction - `all 0 files
@@ -881,5 +881,327 @@ async fn a_genuinely_lost_file_still_fails_without_buying_the_whole_set() {
     assert!(
         vol_kept.iter().any(|&n| n > 0),
         "the declined candidate's bytes did not survive the quarantine\n{log}"
+    );
+}
+
+/// The volume-payload rescue's PUBLISHED file on a job that then FAILS.
+///
+/// `repair/volpayload.rs` renames a proven candidate to the FileDesc's
+/// name, and that file has no slot and came out of no archive - so both
+/// arms of `get/tail/disposition.rs`'s quarantine are blind to it.
+/// Whether it should be held was decided by nothing having looked until
+/// 31 Aug 2026; the ruling and its two control measurements are on
+/// `get/settle/repair.rs`'s `unproven_rescues`.
+///
+/// THE POST: two files the set covers and nothing supplies by name. The
+/// first is posted under a recovery volume's name, so the rescue can buy
+/// and prove it; the second is on disk for `par2 create` and on no
+/// article anywhere, so it is a total loss and the set stays short. The
+/// rescue therefore fires, publishes ONE file, and the job still fails -
+/// which is the state under test.
+///
+/// The payloads are `unique_payload` and not `payload`, deliberately:
+/// at this geometry par2 picks a 152-byte block, and `payload`'s
+/// period-512 bytes repeat enough for the adoption scan to harvest the
+/// LOST file out of the rescued one's blocks and repair the post. That
+/// is a real and desirable behaviour; it just leaves no failing job to
+/// test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rescued_payload_survives_a_failed_job() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("norarvolkeep");
+    let data = payloads::unique_payload(150_000, 96);
+    fx.add_file_obfuscated(
+        "abc123.vol000+50.par2",
+        "Rescued.Payload.mkv",
+        &data,
+        40_000,
+    );
+    std::fs::write(
+        fx.dir.join("Gone.Payload.mkv"),
+        payloads::unique_payload(150_000, 97),
+    )
+    .unwrap();
+    assert!(add_par2_named(
+        &mut fx,
+        "testset",
+        &["Rescued.Payload.mkv", "Gone.Payload.mkv"],
+        40_000,
+        false
+    ));
+    let (log, ok, out) = run_norar(&fx).await;
+    // THE PREMISE, in both halves: the rescue really did publish, and
+    // the job really did fail. Either one moving makes every assertion
+    // below vacuous.
+    assert!(
+        log.contains("is payload the recovery set covers"),
+        "the rescue never published, so this row is not testing a \
+         published file\n{log}"
+    );
+    assert!(
+        !ok,
+        "the post that must stay unrepairable was repaired - this row's \
+         premise has moved\n{log}"
+    );
+    let got = std::fs::read(out.join("Rescued.Payload.mkv")).unwrap_or_else(|e| {
+        let tree: Vec<String> = out_tree(&out)
+            .into_iter()
+            .map(|(n, b)| format!("{n:?} ({} bytes)", b.len()))
+            .collect();
+        panic!(
+            "the failing finish withheld a file the recovery set's own MD5 \
+             proves byte-exact - its honest twin, posted under its own name, \
+             is left in place by held_downloaded_files: {e}; tree: {tree:?}\n{log}"
+        )
+    });
+    assert!(got == data, "the spared file is not byte-exact\n{log}");
+    assert!(
+        !out.join(format!(
+            "Rescued.Payload.mkv{}",
+            nzbkit::journal::PARTIAL_SUFFIX
+        ))
+        .exists(),
+        "the proven file was renamed aside as well as left in place\n{log}"
+    );
+}
+
+/// The CONTROL ARM for the pin above, and the whole of why its answer is
+/// "leave it": the same failing post with the surviving payload posted
+/// under its OWN name, so it gets a slot and `held_downloaded_files`
+/// judges it instead. It is left in place - a stably plain file the job
+/// can prove whole IS its own deliverable (TODO 159 item 1). If this
+/// ever starts being withheld, the rescued file's spare loses its
+/// argument and both rulings have to be re-taken together.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_honest_twin_of_a_rescued_payload_is_spared_the_same_way() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("norarvoltwin");
+    let data = payloads::unique_payload(150_000, 96);
+    fx.add_file("Rescued.Payload.mkv", &data, 40_000);
+    std::fs::write(
+        fx.dir.join("Gone.Payload.mkv"),
+        payloads::unique_payload(150_000, 97),
+    )
+    .unwrap();
+    assert!(add_par2_named(
+        &mut fx,
+        "testset",
+        &["Rescued.Payload.mkv", "Gone.Payload.mkv"],
+        40_000,
+        false
+    ));
+    let (log, ok, out) = run_norar(&fx).await;
+    assert!(!ok, "the control post was expected to fail\n{log}");
+    assert!(
+        std::fs::read(out.join("Rescued.Payload.mkv")).is_ok_and(|g| g == data),
+        "the slotted twin was withheld, so the rescued file's spare no \
+         longer matches the ordinary route\n{log}"
+    );
+}
+
+/// The CONSERVATIVE arm, and the one that decides the rescue's own
+/// proof is not enough on its own: a candidate that lost ONE middle
+/// article still passes `identify` - the length is right because the
+/// last article writes at its own offset, and md5-16k reads the intact
+/// first article - so it is PUBLISHED under a real payload name with a
+/// zero-filled hole in it. Measured 31 Aug 2026: 150,000 bytes, 40,452
+/// of them zero.
+///
+/// That is exactly the false artifact `quarantine_partials` exists to
+/// prevent, so the failing finish must hold it. The proof that separates
+/// it from the pin above is the recovery set's OWN whole-file MD5, asked
+/// after the repair has had its turn - see `unproven_rescues`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_holed_rescued_payload_does_not_survive_a_failed_job() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("norarvolholed");
+    let data = payloads::unique_payload(150_000, 96);
+    fx.add_file_obfuscated(
+        "abc123.vol000+50.par2",
+        "Rescued.Payload.mkv",
+        &data,
+        40_000,
+    );
+    std::fs::write(
+        fx.dir.join("Gone.Payload.mkv"),
+        payloads::unique_payload(150_000, 97),
+    )
+    .unwrap();
+    assert!(add_par2_named(
+        &mut fx,
+        "testset",
+        &["Rescued.Payload.mkv", "Gone.Payload.mkv"],
+        40_000,
+        false
+    ));
+    // Article 3 of 4, so the hole lands past the first 16 KiB and the
+    // fourth article still writes at its own offset: the file keeps the
+    // exact length the FileDesc declares.
+    let mut missing = HashSet::new();
+    missing.insert("<abc123_vol000+50_par2-0-3@mock>".to_string());
+    let (log, ok, out) = run_norar_chaos(
+        &fx,
+        Chaos {
+            missing,
+            ..Chaos::default()
+        },
+    )
+    .await;
+    // THE PREMISE, in two halves. The refusal has to have LANDED on the
+    // candidate - the message-id above is built from the fixture's own
+    // tag scheme, and a scheme that moved would leave this row quietly
+    // testing an undamaged file - and the rescue has to have published
+    // it anyway. If either stops being true the row is testing nothing,
+    // and the fix is NOT to delete it: see the module header of
+    // repair/volpayload.rs for why declining to publish a holed
+    // candidate is a regression rather than a tightening.
+    assert!(
+        log.contains("(1 article failures)"),
+        "the refused article was never requested, so the candidate is \
+         not holed and this row is not testing the disposition\n{log}"
+    );
+    assert!(
+        log.contains("is payload the recovery set covers"),
+        "the holed candidate was never published, so this row is not \
+         testing the disposition\n{log}"
+    );
+    assert!(!ok, "a post with a holed payload reported success\n{log}");
+    let held = out.join(format!(
+        "Rescued.Payload.mkv{}",
+        nzbkit::journal::PARTIAL_SUFFIX
+    ));
+    let bare = out.join("Rescued.Payload.mkv");
+    assert!(
+        !bare.exists(),
+        "a holed file the rescue published is still wearing a real \
+         payload name in a failed job's directory - an *arr importing on \
+         name and size takes it\n{log}"
+    );
+    assert!(
+        held.exists(),
+        "the holed file was neither left nor held - its bytes are the \
+         only resume state a retry has\n{log}"
+    );
+    // The HOLE is the point: a byte-exact file must not reach this arm,
+    // which is what the pin above is for.
+    let got = std::fs::read(&held).unwrap();
+    assert!(
+        got.len() == 150_000 && got.iter().filter(|&&b| b == 0).count() > 30_000,
+        "the held file is not the holed candidate this row is about \
+         ({} bytes)\n{log}",
+        got.len()
+    );
+}
+
+/// F5 (1 Sep 2026): the SAME holed rescue, on the RETRY. The disposition
+/// the row above pins has to hold on every attempt, not only on the one
+/// that happened to run the rescue.
+///
+/// The retry closes the loop the wrong way round. `get/plan.rs` restores
+/// every `*.nzbfast-partial` unconditionally at the head of an attempt
+/// (`unquarantine_partials`, before `Journal::open`), so the holed
+/// payload is back under `Rescued.Payload.mkv` before settle runs;
+/// `repair/volpayload.rs`'s `absent_files` then sees that name OCCUPIED,
+/// the rescue does not re-arm, and the names it published ON THIS CALL
+/// are none. Judged off that list alone - which is what
+/// `unproven_rescues` did until this row - the second attempt held
+/// nothing, and a 150,000-byte file with a 40 KB zero hole wore a real
+/// payload name in a failed job's directory again, which is exactly what
+/// an *arr imports on name and size. The population is disk state now,
+/// so the answer is the same on attempt 2 as on attempt 1.
+///
+/// THE WHOLE CONTENT OF THIS ROW IS THE SECOND RUN against the same
+/// output directory. The premises are the ones the pin above spells,
+/// re-read after it; if they stop holding, the row is testing nothing
+/// and the fix is not to delete it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_holed_rescued_payload_does_not_survive_the_retry_of_a_failed_job() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("norarvolholedretry");
+    let data = payloads::unique_payload(150_000, 96);
+    fx.add_file_obfuscated(
+        "abc123.vol000+50.par2",
+        "Rescued.Payload.mkv",
+        &data,
+        40_000,
+    );
+    std::fs::write(
+        fx.dir.join("Gone.Payload.mkv"),
+        payloads::unique_payload(150_000, 97),
+    )
+    .unwrap();
+    assert!(add_par2_named(
+        &mut fx,
+        "testset",
+        &["Rescued.Payload.mkv", "Gone.Payload.mkv"],
+        40_000,
+        false
+    ));
+    // Article 3 of 4, as next door: the hole lands past the first 16 KiB
+    // and the fourth article still writes at its own offset, so the file
+    // keeps the exact length the FileDesc declares and `identify`
+    // publishes it.
+    let holed = || {
+        let mut missing = HashSet::new();
+        missing.insert("<abc123_vol000+50_par2-0-3@mock>".to_string());
+        Chaos {
+            missing,
+            ..Chaos::default()
+        }
+    };
+    let bare = fx.dir.join("out").join("Rescued.Payload.mkv");
+    let held = fx.dir.join("out").join(format!(
+        "Rescued.Payload.mkv{}",
+        nzbkit::journal::PARTIAL_SUFFIX
+    ));
+
+    let (log1, ok1, _out) = run_norar_chaos(&fx, holed()).await;
+    assert!(
+        log1.contains("is payload the recovery set covers"),
+        "attempt 1 never published the holed candidate, so there is \
+         nothing for attempt 2 to be about\n{log1}"
+    );
+    assert!(!ok1, "attempt 1 reported success\n{log1}");
+    assert!(
+        held.exists() && !bare.exists(),
+        "attempt 1 did not reach the state this row retries from\n{log1}"
+    );
+
+    // ATTEMPT 2, same output directory - the retry path the daemon and
+    // the resume both take.
+    let (log2, ok2, _out) = run_norar_chaos(&fx, holed()).await;
+    assert!(
+        !ok2,
+        "the retry of an unrepairable post reported success\n{log2}"
+    );
+    assert!(
+        !bare.exists(),
+        "the retry left the holed file wearing a real payload name - \
+         the disposition only fired on the attempt that ran the \
+         rescue\n{log2}"
+    );
+    assert!(
+        held.exists(),
+        "the retry neither left nor held the holed file - its bytes are \
+         the only resume state a third attempt has\n{log2}"
+    );
+    let got = std::fs::read(&held).unwrap();
+    assert!(
+        got.len() == 150_000 && got.iter().filter(|&&b| b == 0).count() > 30_000,
+        "the held file is not the holed candidate this row is about \
+         ({} bytes)\n{log2}",
+        got.len()
     );
 }

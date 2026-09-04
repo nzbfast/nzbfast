@@ -1,0 +1,38 @@
+# Z5: the map's subject names one file and the wire names another.
+
+[layout]
+name = "z5-differing-subject"
+seed = 25
+note = """
+The <file subject> is where most clients in the world look first for a
+filename, and it is written by whoever made the map rather than by
+whoever made the post. Here it names Decoy.Not.The.Posted.File, in the
+same quoted-filename convention every downloader parses, while the
+yEnc name= line on every article says Real.Feature.mkv.
+
+The requirement is the wire's name. The subject is a label; the
+=ybegin name= is part of the bytes the poster actually uploaded, and it
+is the only one of the two that arrived with the payload. A client that
+took the subject would file this post under a name nothing in it
+carries - which is the failure this row exists to catch, and the reason
+the decoy stem is unlike any generated name so it cannot match by
+accident.
+
+The wire is byte-identical to the faithful row's, so any difference is
+the map having been believed.
+"""
+
+[source]
+files = [{ name = "Real.Feature.mkv", bytes = 32768 }]
+
+[encoding]
+article_bytes = 8192
+
+[nzb]
+subject = "differing"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

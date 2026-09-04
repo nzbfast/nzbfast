@@ -44,13 +44,26 @@ RUN touch crates/nzbkit/src/lib.rs crates/nzbfast/src/main.rs \
          target/release/nzbfast
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
-# unrar (non-free) matches the real unrar the desktop bundles embed -
-# unrar-free chokes on too many real-world RAR sets.
+# unrar (non-free) is the real unrar, and unrar-free chokes on too many
+# real-world RAR sets. This line used to say it "matches the real unrar
+# the desktop bundles embed"; they embed nothing. packaging/
+# INSTALLER-SPEC.md item 5 is explicit - "no unrar or par2 binary
+# shipped at all" - so this image is the ONLY place the external unrar
+# is present by default, and everywhere else it is a tool the operator
+# installed. Corrected 2 Sep 2026.
+#
+# NO p7zip-full. Both images installed it and NOTHING invoked it: 7z has
+# been native since the sevenz-rust2 integration and the only
+# `tools::resolve` callers ask for unrar and par2. Dropped 2 Sep 2026 as
+# pure attack-surface removal (TODO 314, appendix A of
+# research/SANDBOX-SCOPING-2026-08.md). Do not put it back to "support
+# 7z" - that would be adding a C++ parser for a format we already read
+# in safe Rust.
 RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
         /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        unrar p7zip-full ca-certificates tini curl gosu \
+        unrar ca-certificates tini curl gosu \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/nzbfast /usr/local/bin/nzbfast
 # The symbol sidecar, where gdb's debuglink search looks for it

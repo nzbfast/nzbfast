@@ -121,6 +121,9 @@ fn sevenz_trim_spills_off_the_routing_lock() {
     let dir = tmpdir("7z-trim-offlock");
     let ex = Arc::new(Extractor::new(&dir, 1, true));
     ex.anchor();
+    // Copy fixture: the direct map would take it and there would be
+    // nothing to trim - see `sevenz_trim_streams_an_archive_over_the_cap`.
+    ex.set_sevenz_direct(false);
     ex.set_holds_cap(1); // floors at 8 MB, so the archive is 3x the cap
     let high_base = feed_paced_tail_first(&ex, 0, "big.7z", &arch, 256 << 10, 2 << 20, 0);
     assert!(
@@ -236,6 +239,9 @@ fn a_failed_spill_keeps_the_prefix_in_ram() {
     let dir = tmpdir("7z-trim-enospc");
     let ex = Arc::new(Extractor::new(&dir, 1, true));
     ex.anchor();
+    // Copy fixture: the direct map would take it and there would be
+    // nothing to trim - see `sevenz_trim_streams_an_archive_over_the_cap`.
+    ex.set_sevenz_direct(false);
     ex.set_holds_cap(1);
     let n = arch.len();
     let chunk = 256 << 10;

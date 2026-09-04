@@ -1,0 +1,37 @@
+# C6: a split set whose volume names say nothing at all.
+
+[layout]
+name = "c6-opaque-volume-names"
+seed = 106
+note = """
+Reassembly from the CONTENT. Three volumes of one stored set, each
+under its own independent token with a `.bin` extension: no shared
+stem, no part number, no `.rar`, and nothing in any name saying the
+three belong together or which order they go in. It is the obfuscated
+post this product exists to handle, and the shape the naming plane's
+opaque row cannot reach on its own - N2 obscures what a file is called,
+and this obscures that a set is a set.
+
+The volume order lives only in the RAR volume headers, so a client that
+grouped by stem or ordered by name has nothing to work with. That is
+the whole row, and it is why the profile refuses to also carry a
+volume_style: a style is how a DESCRIPTIVE set spells its order, and
+selecting both would be two answers to one question.
+"""
+
+[source]
+files = [{ name = "opaque-set.bin", bytes = 30000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 10000
+volume_names = "opaque"
+
+[encoding]
+article_bytes = 4000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

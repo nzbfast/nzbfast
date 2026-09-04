@@ -18,8 +18,10 @@
 //! pool/session.rs and the sibling test modules resolve through their
 //! own `use super::*` exactly as they did before; only `ServerCtx`, its
 //! fields, `ctx_for` and `next_work` widened to `pub(super)`, and
-//! `MAX_SERVERS` is re-exported by the parent because `crate::config`
-//! names it as `crate::pool::MAX_SERVERS`.
+//! `MAX_SERVERS` is declared in `crate::config`, which is what
+//! ENFORCES it at load, and re-exported by the parent so
+//! `crate::pool::MAX_SERVERS` and `nzbkit::pool::MAX_SERVERS` are
+//! both unchanged.
 
 use super::*;
 
@@ -36,14 +38,6 @@ pub(super) struct ServerCtx {
     /// Tier (M14e Level): >0 = fill server, gated in next_work.
     pub(super) level: u32,
 }
-
-/// How many servers the routing bitmasks can represent.
-///
-/// Every routing decision - `tried_430`, retention, live/fail/required/group -
-/// is a `u32` keyed by server index, so there is no bit for index 32 and
-/// beyond. Enforced at config load (`Config::load`), which is what makes
-/// [`server_bit`] total in practice.
-pub const MAX_SERVERS: usize = 32;
 
 pub(super) fn ctx_for(servers: &[(ServerConfig, PoolConfig)], si: usize) -> ServerCtx {
     let me = &servers[si].0;
@@ -141,6 +135,11 @@ pub(super) async fn next_work(
     // its engine 35 s at 6 MB/s while far-ahead bytes broke the cap.
     // Not a dry queue either - no tail latch, no dup fan-out.
     let mut parked_kept: Vec<Work> = Vec::new();
+    // The park's liveness floor in its authoritative form, read ONCE per
+    // scan and off every park lock (`FilePark::set` takes its own maps
+    // and then this one, so holding this across `defers` would be
+    // AB/BA). See `FilePark::defers`.
+    let pool_idle = shared.park.is_on() && shared.inflight.lock_ok().is_empty();
     let parked_past = {
         let mut q = shared.queue.lock().await;
         // TODO 114 consumer steer: adopt any steered requeues parked
@@ -220,7 +219,7 @@ pub(super) async fn next_work(
                 || (endgame && pipe.payload > 0 && w.tried_430 != 0)
             {
                 q.push_back(w);
-            } else if shared.park.defers(&w) {
+            } else if shared.park.defers(&w, pool_idle) {
                 parked_kept.push(w);
             } else if w.promoted
                 && w.tried_430 == 0

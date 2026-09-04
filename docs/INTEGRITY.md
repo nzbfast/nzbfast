@@ -19,25 +19,25 @@ them depending on how it was received and which verify mode is active.
    trailer CRC32 over its decoded bytes. The decoder enforces it before the
    bytes are handed to the verifier as a "fresh" span. A span that reaches the
    verifier through `on_data` is asserting that this check already passed
-   (`crates/nzbkit/src/live.rs:312` documents the `Src::Fresh` contract;
+   (`crates/nzbkit-base/src/live.rs:312` documents the `Src::Fresh` contract;
    `:103`-`:104` define `Src::Fresh` as "Decoder-fresh, article CRC passed").
 
 2. **In-stream PAR2 block CRC32 (IFSC).** As decoded spans stream in, each PAR2
    block fully contained in a span is checked against the IFSC packet's per-block
-   CRC32 (`crates/nzbkit/src/live.rs:767` `check_block_crc`). Blocks that straddle
+   CRC32 (`crates/nzbkit-base/src/live.rs:767` `check_block_crc`). Blocks that straddle
    article boundaries accumulate in bounded per-file partial buffers and are
    checked once complete (`:411`-`:439`).
 
 3. **In-stream PAR2 block MD5 (IFSC).** In full mode, the same in-stream blocks
    are checked against the IFSC MD5 as well as the CRC32
-   (`crates/nzbkit/src/live.rs:752` `check_block`: "MD5 + CRC32 must both match").
+   (`crates/nzbkit-base/src/live.rs:752` `check_block`: "MD5 + CRC32 must both match").
 
 4. **Settle-time read-back, full MD5 + CRC32.** Any block not claimed in-stream
    (a span decoded before the PAR2 set activated, a boundary block whose neighbor
    article never arrived, a partial spilled because the memory budget was full, a
    missing article) is read back from disk at slot-settle time and checked with
    the full `check_block` (MD5 + CRC32), never the CRC-only path
-   (`crates/nzbkit/src/live.rs:621`). For a file whose PAR2 set carries no IFSC
+   (`crates/nzbkit-base/src/live.rs:621`). For a file whose PAR2 set carries no IFSC
    packet at all, settle computes a whole-file MD5 against the FileDesc MD5 as the
    only block-granularity check available (`:585`-`:595`, `src_md5` at `:799`).
 
@@ -45,9 +45,9 @@ them depending on how it was received and which verify mode is active.
    missing (`damage > 0` at `crates/nzbfast/src/main.rs:2273`), the repair path
    re-reads the whole file from disk and recomputes, independently of every
    in-stream verdict, both the per-block MD5 + CRC32 and the whole-file MD5
-   (`crates/nzbkit/src/par2repair.rs:1591`-`:1602`). Repair output is accepted
+   (`crates/nzbkit-base/src/par2repair.rs:1591`-`:1602`). Repair output is accepted
    only when the recomputed whole-file MD5 equals the FileDesc MD5
-   (`par2repair.rs:1602`, and `crates/nzbkit/src/par2.rs:390` for the standalone
+   (`par2repair.rs:1602`, and `crates/nzbkit-base/src/par2.rs:390` for the standalone
    `verify_file` equivalent). This layer does not trust anything the live
    verifier decided.
 
@@ -55,7 +55,7 @@ them depending on how it was received and which verify mode is active.
 
 There are three verify modes, selected by `--verify` (default `fast`) or the
 daemon setting. The dispatch is a single line: fast verify picks `check_block_crc`,
-otherwise `check_block` (`crates/nzbkit/src/live.rs:457`); lean additionally lets
+otherwise `check_block` (`crates/nzbkit-base/src/live.rs:457`); lean additionally lets
 CRC-only claims stand for spans the decoder did not vouch for.
 
 | Layer | full | fast (default) | lean |
@@ -74,25 +74,112 @@ CRC-only claims stand for spans the decoder did not vouch for.
   differently-aligned spans** (the article boundary and the PAR2 block boundary
   do not coincide). MD5 is the throughput floor at roughly 0.6 to 0.8 GB/s/core
   versus 10+ GB/s/core for hardware CRC32
-  (`crates/nzbkit/src/live.rs:29`, `:186`-`:188`), which is why skipping the
+  (`crates/nzbkit-base/src/live.rs:29`, `:186`-`:188`), which is why skipping the
   in-stream MD5 is worth doing on fast links.
 - **lean (opt-in, slow-CPU boost)**: for files a PAR2 set covers, the upstream
   decoder is told to skip the per-article yEnc CRC32 as well
-  (`on_data_unverified`, `crates/nzbkit/src/live.rs:335`; `Src::Lean` at `:105`).
+  (`on_data_unverified`, `crates/nzbkit-base/src/live.rs:335`; `Src::Lean` at `:105`).
   In-stream integrity then rests on the **single** PAR2 block CRC32. Layers 4 and
   5 are unchanged: this is documented in the code as an explicit contract
   ("Settle read-back and repair remain the final authority. Only meaningful with
-  fast verify on", `crates/nzbkit/src/live.rs:244`-`:252`).
+  fast verify on", `crates/nzbkit-base/src/live.rs:244`-`:252`).
 
 Two facts hold in all three modes and matter for the analysis below:
 
 - A block **claimed OK in-stream is never re-read at settle**. Settle read-back
-  only touches blocks still in `Pending` state (`crates/nzbkit/src/live.rs:598`).
+  only touches blocks still in `Pending` state (`crates/nzbkit-base/src/live.rs:598`).
   So in fast and lean modes, a CRC32-only claim on a clean job is the last word
   for that block unless repair runs.
 - Repair runs **only when there is damage** (`main.rs:2273`). On a fully clean
   job, no whole-file MD5 backstop executes for blocks that were claimed OK
   in-stream by CRC32 alone.
+
+## After the download: the settle manifest
+
+The five layers above all run while the job is in flight. They end when it does,
+and the `.par2` files that carried the evidence are on the default cleanup list -
+so a folder a user comes back to in a year has no PAR2 set to be checked against,
+and every verify path in the tree gates on one being present.
+
+nzbfast therefore writes the evidence down at the settle seam instead of
+discarding it. A completed job leaves a `.nzbfast.manifest` beside its payload
+(`crates/nzbfast-core/src/manifest.rs:71` for the name,
+`crates/nzbfast/src/serve/postproc.rs` `settle_manifest_and_deferred_par2_sweep`
+for the write). It has two sources, and they are worth telling apart:
+
+- **For a file the PAR2 set covered**, it copies the set's own data rather than
+  recomputing anything: the FileDesc whole-file MD5, the first-16k MD5 and the
+  IFSC per-block CRC32, read off the parsed set that is still in memory at that
+  moment and dropped a few lines later. That half costs serialization only.
+- **For a file the set never covered** - the extracted film from an archive
+  post, which is the only file most users keep - `grid_from_disk`
+  (`crates/nzbfast-core/src/manifest.rs:998`) READS it and computes a CRC32
+  block grid, so it is an ordinary payload entry rather than a name-and-length
+  stub. That half costs one pass over those bytes. Recovery data and archive
+  material a later sweep may legitimately take are deliberately left out of it
+  (`the_grid_pass_leaves_recovery_and_archive_material_alone`).
+
+What it is worth, stated exactly:
+
+- **What it checks, exactly, because it is not identical to a PAR2 verify.**
+  `Manifest::verify` (`crates/nzbfast-core/src/manifest.rs:540`, `check_entry` at
+  `:570`) re-reads the whole file and computes the per-block CRC32 (last block
+  zero-padded arithmetically, the same convention
+  `nzbkit::par2::verify_file_streaming` uses) plus the **whole-file MD5**, and a
+  file passes only if both agree. It does NOT carry the IFSC per-block MD5, so a
+  BLOCK-level verdict here rests on CRC32 alone where full-mode PAR2 verification
+  has MD5 as well. What it has that a clean fast-mode job does not is the
+  whole-file MD5 running unconditionally over every byte: per the two facts above,
+  on a clean job no whole-file MD5 backstop executes at all. So the manifest is
+  weaker per block and stronger per file than a full-mode verify, and a re-check
+  years later is a real check rather than a formality.
+- **It cannot repair anything by itself.** There are no recovery slices in it,
+  only checksums. It convicts, and a repair then needs the post fetched again -
+  which is what the dashboard's *Checking downloads later* card and
+  `mode=heal_start` do, adopting every intact byte off the disk and fetching only
+  the damaged remainder.
+- **Extracted output is covered, but by a grid and not a digest.** Until 2 Sep
+  2026 it was presence-only, which meant the one file most users keep could not
+  be convicted at all. It now carries a CRC32 grid computed off the disk, so a
+  flipped byte is `Damaged` with the block named. It has NO whole-file MD5,
+  which is why `FileStatus::Damaged`'s `md5_ok` is an `Option`: `None` means
+  "no digest was recorded", a different statement from "it did not match", and
+  a damage report must not render it as an MD5 mismatch. What is left in
+  `PresentUnverified` is now narrow - a file the grid pass could not read, and
+  archive material a later sweep may take.
+- **A consumed archive volume is not damage either.** A `.par2` or a volume the
+  unpack tail legitimately ate reports as `SourceGone` and is excluded from the
+  damage set, or every extracted job would report as broken.
+
+`nzbfast verify DIR` reads the manifest when, and only when, there is no PAR2 set
+left to read (`crates/nzbfast/src/main.rs:1340`); PAR2 stays the first choice
+because it can repair as well as judge. Damage exits 1 on both arms. A directory
+with neither exits 0 and says on stderr that nothing was checked, because a
+finished job whose recovery files the cleanup default already removed is the
+normal state of a folder somebody points `verify` at, and convicting it would
+fail every such folder.
+
+The manifest is written for every completed job by default (Settings →
+Downloading → **Checking downloads later**). Turning it off is supported and
+loses exactly this layer: the download itself is verified identically either way.
+
+The same card carries the SCHEDULED sweep (`crates/nzbfast/src/serve/healauto.rs`),
+which verifies library folders against their manifests on a cadence and repairs
+what they convict with nobody clicking. It is OFF by default and its three
+ceilings are surfaced beside the switch rather than buried, because an unattended
+road that can spend a metered line is only as safe as the bounds a user can read:
+hours between sweeps (weekly), repairs one sweep may start (four, hard-capped at
+the clicked road's own `MAX_HEAL_JOBS`), and bytes one sweep may commit to
+(20 GB, and 0 means "start nothing" rather than "no limit"). The byte ceiling is
+charged the WHOLE size of each post rather than the damaged remainder, so a
+ceiling honoured in the worst case is honoured in every case; for an
+archive-post folder that worst case IS the ordinary case, because the damaged
+folder holds the extracted file while a fresh post's PAR2 set describes the
+volumes, so nothing on disk can be adopted. The sweep also declines two targets
+the clicked road still offers - a post no longer on record here (repairing it
+would mean an indexer search for a copy nobody has compared to the disk) and a
+post of unknown size (nothing for the byte ceiling to charge) - and counts both
+in its log line as left for the manual road.
 
 ## Collision math and the residual
 

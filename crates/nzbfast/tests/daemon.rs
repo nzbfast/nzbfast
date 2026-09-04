@@ -59,6 +59,10 @@ mod daemon_donor;
 mod daemon_carry;
 mod daemon_ladder;
 
+// The connection-ladder door refusing a live download (sibling dir,
+// size gate).
+mod daemon_connladder;
+
 /// §296: the per-file early publish, as a measured A/B - episode 1 at
 /// the destination while episode 3 is still on the wire, against the
 /// same pack downloaded with the arm off.
@@ -91,6 +95,13 @@ mod daemon_repairhist;
 // The settle manifest: a completed job's checksums survive PAR2
 // cleanup and convict later damage (sibling dir).
 mod daemon_manifest;
+// §310 stage 2's ECONOMICS: a heal fetches only the damaged remainder,
+// measured as a two-leg A/B off the mock's body ledger (sibling dir).
+mod daemon_heal;
+// DEV-ONLY NZBFAST_DEV_WEB_DIR: the pages served from disk instead of
+// from the binary, and invisible when it is unset (sibling dir, size
+// gate).
+mod daemon_devweb;
 // `GET /metrics`: the Prometheus body, parsed the way a scraper parses
 // it, plus the credential rule and its opt-out switch (sibling dir).
 mod daemon_metrics;
@@ -2749,7 +2760,7 @@ async fn slow_single_server_job_deferred() {
 /// # It names the arm that speaks, and that is not decoration
 ///
 /// `came back missing` is the phrase all THREE post-is-gone arms in
-/// `serve/tasks/stall.rs` share, deliberately: this test asserts on it
+/// `tasks/stall.rs` share, deliberately: this test asserts on it
 /// to tell a refusal verdict from a dead-server one, which is what the
 /// 14 Aug incident turned on. The cost of that is that it cannot say
 /// WHICH arm spoke - and round A's finding F12 (27 Aug 2026) measured
@@ -7300,6 +7311,42 @@ async fn the_three_plain_relay_formats_reach_the_feed_table() {
     let _log = d.stop();
 }
 
+/// Whether a `rar` on PATH can CREATE an archive, not merely start.
+///
+/// The guard this replaced ran `rar -inul` and asked whether the process
+/// started, which every `rar` answers yes to - including one that cannot
+/// write. That mattered the moment there WAS such a binary: substituting
+/// `rarfast` for `rar` (research/CLI-SUBSTITUTION-2026-09-03.md, finding
+/// G3) put a `rar` on PATH whose `a` command refused, and this test could
+/// not skip on it because the guard had already said the tool was there.
+/// So the probe is the thing the test needs: build a one-file archive in
+/// a scratch directory and check a file came out.
+fn rar_can_create() -> bool {
+    let dir = std::env::temp_dir().join(format!(
+        "nzbfast-rarprobe-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let ok = std::fs::write(dir.join("probe.txt"), b"probe\n").is_ok()
+        && Command::new("rar")
+            .current_dir(&dir)
+            .args(["a", "-y", "-m0", "-idq", "probe.rar", "probe.txt"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        && dir.join("probe.rar").is_file();
+    let _ = std::fs::remove_dir_all(&dir);
+    ok
+}
+
 /// Nested zip through the DAEMON, on a REAL archive pair.
 ///
 /// The unit and e2e coverage for the depth lift builds its containers
@@ -7315,14 +7362,8 @@ async fn the_three_plain_relay_formats_reach_the_feed_table() {
 /// (nzbkit) and `store_rar_wrapped_zip_extracts_one_pass` (e2e).
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_zip_in_a_real_store_rar_extracts_through_the_daemon() {
-    if Command::new("rar")
-        .arg("-inul")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_err()
-    {
-        eprintln!("skipping: rar not installed");
+    if !rar_can_create() {
+        eprintln!("skipping: no rar that can create an archive");
         return;
     }
     let dir = std::env::temp_dir().join(format!("nzbfast-nestedzip-{}", std::process::id()));
@@ -8123,6 +8164,24 @@ async fn whyslow_block_rides_the_queue_payload() {
                 assert!(w["post_unix"].is_i64(), "{q}");
                 assert!(w["missing_pct"].is_number(), "{q}");
                 assert!(w["missing_backbones"].is_u64(), "{q}");
+                // ...and TODO 275 item 7's pair, read just as
+                // unconditionally: the ceiling the in-run governor may
+                // walk this fleet's cap to, and whether a provider's
+                // capacity refusal has taken it back off the table.
+                // This is the ONLY place either is read off a LIVE
+                // pool rather than a `Tick` the unit rig built. Its
+                // reach is stated rather than assumed: it holds the
+                // SHAPE - a key that stopped being shipped, or shipped
+                // as the wrong type, reddens here - and it does not
+                // hold the VALUE, because the fixture has one dead
+                // server and refuses nothing, so a read replaced by a
+                // constant would pass. The values are the pool's own
+                // fault rigs (`linecap_rigs::a_capacity_refusal_*`),
+                // which cannot see this side of the wire. Closing the
+                // gap needs a rig that drives a real pool into a
+                // capacity refusal and then reads this payload back.
+                assert!(w["fleet_ceiling"].is_u64(), "{q}");
+                assert!(w["fleet_refused"].is_boolean(), "{q}");
                 // ...and the same verdict reaches the shareable report,
                 // which is the artefact someone actually sends. It was
                 // the one place a live diagnosis never appeared.
@@ -8281,7 +8340,7 @@ async fn the_finishing_tail_is_named_and_never_borrows_the_next_job_s_bar() {
         // §91: every poll's header `sizeleft` beside the sum of the
         // `mbleft` values it is the total of.
         let mut header_vs_rows: Vec<(f64, f64)> = Vec::new();
-        for _ in 0..4000 {
+        for poll in 0..4000 {
             let body = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
             let v: serde_json::Value = match serde_json::from_str(
                 body.split("\r\n\r\n").nth(1).unwrap_or(&body),
@@ -8324,9 +8383,34 @@ async fn the_finishing_tail_is_named_and_never_borrows_the_next_job_s_bar() {
             if let Some(hdr) = sab_size_bytes(v["queue"]["sizeleft"].as_str().unwrap_or("")) {
                 header_vs_rows.push((hdr, rows));
             }
-            let h = http(port, "/api?mode=history&apikey=sekrit&output=json", None);
-            if h.matches("\"Completed\"").count() >= 2 {
-                break;
+            // Termination only, and deliberately NOT once per sample.
+            //
+            // Assertion (2) below needs a sample to land inside the
+            // named tail phase, and that phase is milliseconds wide, so
+            // what this loop is really doing is racing the queue's own
+            // finishing window. Measured 1 Sep 2026 on an 18-core box,
+            // this test ALONE in its process (so no neighbour can be
+            // blamed) at load averages from 15 to 100, which moved the
+            // number not at all: with the history GET on every iteration
+            // the whole run caught the named phase 1-3 times in ~400
+            // polls, and CI's 1 Sep run caught it ZERO times and
+            // hard-failed. The history call is HALF
+            // the round trips per iteration and answers a question that
+            // changes once, so paying it every time bought nothing and
+            // cost half the sample rate. Every 8th iteration instead:
+            // named samples 1-3 -> 4-8 at the shipped cadence, and the
+            // interval at which the run starts failing moves from 12 ms
+            // to 25 ms. It is a WIDER margin, not an unconditional one -
+            // at 50 ms the row still fails 6/6, and the honest read is
+            // that this assertion samples a production window nothing
+            // holds open for it. Full sweep and the reasoning it settles
+            // (this row is load sensitivity, not cross-test pollution):
+            // research/NIGHTLY-ONE-PROCESS-HEAVY-STANDING-RED-2026-09-01.md
+            if poll % 8 == 0 {
+                let h = http(port, "/api?mode=history&apikey=sekrit&output=json", None);
+                if h.matches("\"Completed\"").count() >= 2 {
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(4));
         }

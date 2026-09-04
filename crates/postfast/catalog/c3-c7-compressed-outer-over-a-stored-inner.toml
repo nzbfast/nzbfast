@@ -1,0 +1,48 @@
+# C3 + C7 + C13: the posted volume is COMPRESSED, the level inside it
+# is stored.
+
+[layout]
+name = "c3-c7-compressed-outer-over-a-stored-inner"
+seed = 174
+note = """
+`c7-nested-depth-2`'s note named this shape as the one it could not
+write - the e2e.rs `compressed_outer_wrapping_rar_denests_beside_leftovers`
+fixture, a compressed wrapper around a stored archive - and it is
+written here. It took the same two keys `nc-r2c-store-over-a-compressed-inner-level`
+took, `[[container.inner]]` (C13) and `[source] content` (G8), and it
+is the other direction: r2c compresses the INNER level, this one
+compresses the OUTER.
+
+That is a different question and not a symmetry. r2c asks whether a
+client that has already unpacked one level runs the decompressor on the
+next. This asks whether it runs it on the POSTED volume, before it
+knows there is a second level at all - and then, having decompressed,
+notices that what came out is itself an archive and keeps going.
+
+The composition works in this direction because a stored archive of
+compressible bytes is still mostly those bytes, so the outer level has
+something to shrink. It does NOT work the other way round with both
+levels compressed: an inner compressed archive's output is
+incompressible, the outer level stores what it cannot shrink, and
+`ContainerError::NothingToCompress` refuses it. Compression composes
+downwards only, and that is a fact about the format rather than a limit
+of this generator.
+
+No recovery set: this row is about the two decompression decisions and
+a set beside it would put a verify in front of them.
+"""
+
+[source]
+files = [{ name = "buried.bin", bytes = 60000, content = "compressible" }]
+
+[container]
+kind = "rar-compressed"
+
+[[container.inner]]
+kind = "rar-stored"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

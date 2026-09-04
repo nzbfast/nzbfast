@@ -467,6 +467,7 @@ fn chase_volume_set_cases() {
     healthy_chase_never_pages_on_a_loss_it_does_not_own();
     a_hole_ahead_of_the_engine_pages_beyond_it_and_still_resumes();
     a_trim_drops_only_what_the_verifier_vouched_for();
+    a_set_with_no_parity_at_all_drops_what_it_cannot_vouch_for();
     a_nested_chase_over_the_cap_spills_its_trim_and_streams();
     an_outer_breach_relieves_the_child_chase_before_demoting_the_group();
     a_top_level_breach_relieves_the_chase_before_demoting_a_volume();
@@ -733,6 +734,193 @@ fn a_trim_drops_only_what_the_verifier_vouched_for() {
         assert_eq!(&std::fs::read(dir.join("F.bin")).unwrap(), f);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+/// A set with NO PARITY AT ALL drops what no verifier will ever vouch
+/// for - once, and only once, the run can prove no verifier ever will.
+///
+/// The §94 B gate handle is attached unconditionally on the download
+/// path, so `engaged_mark` answers `None` two ways that mean opposite
+/// things: "a set is live and has not reached these bytes yet" and "no
+/// set exists". The case above pins the first; this pins the second,
+/// which cost 1.6-1.8 GB of device writes and up to 1.36 GB of peak
+/// footprint on a 1.87 GB set before `Extractor::parity_ruled_out`
+/// (measured 3 Sep 2026: 48,149 of 48,151 passes decided DROP and 0
+/// dropped).
+///
+/// THREE ARMS, because the fix is a conjunction and each half has to be
+/// shown to be load-bearing on its own:
+///
+/// - no hook at all: the vouch stands, exactly as it did. Every test,
+///   the standalone CLI extract and every child level take this arm.
+/// - a hook that says parity is still possible: the vouch stands.
+/// - a hook that rules parity out, with every slot's head in: the
+///   prefix drops, and the file still comes out byte-exact.
+///
+/// The head census is the fourth arm and lives in
+/// `parity_is_only_ruled_out_once_every_head_has_landed` next door - it
+/// needs a slot that never gets a head, which this fixture cannot have
+/// (the junk slots that eat the budget are allocated PAST the census
+/// on purpose, since a slot minted after the job opened has no cell in
+/// it - see `Inner::heads_seen`).
+fn a_set_with_no_parity_at_all_drops_what_it_cannot_vouch_for() {
+    let (f, vols, names) = chase_volume_set();
+    let headroom = 3 * vols[0].len();
+    for arm in ["no hook", "parity still possible", "parity ruled out"] {
+        let dir = tmpdir(&format!("chase-noparity-{}", arm.replace(' ', "-")));
+        // Sized to the VOLUMES alone; the three budget-eating junk
+        // slots are minted after, so they are outside the census.
+        let ex = Arc::new(Extractor::new(&dir, vols.len(), true));
+        ex.anchor();
+        for _ in 0..3 {
+            ex.alloc_slot();
+        }
+        ex.set_holds_cap(1);
+        let gate = crate::live::VerifyGate::new(vols.len() + 3);
+        ex.set_verify_gate(gate.clone());
+        ex.set_verify_gate_waits(false);
+        match arm {
+            "no hook" => {}
+            "parity still possible" => ex.set_no_parity_hook(Arc::new(|| false)),
+            _ => ex.set_no_parity_hook(Arc::new(|| true)),
+        }
+        eat_budget_to(&ex, vols.len(), headroom, 143);
+        // EVERY VOLUME'S HEAD FIRST, which is what a real download does
+        // and what the census is written against: an interior span on
+        // an unclassified slot promotes that slot's offset-0 article by
+        // name, so the heads of a posted set land in the first
+        // round-trips rather than one per volume as the set is
+        // consumed. `feed_chase_volumes_paced` below re-sends each of
+        // these chunks in its shuffled order; a duplicate span of
+        // identical bytes is the resume replay's ordinary case.
+        for (index, vol) in vols.iter().enumerate() {
+            let head = &vol[..7000.min(vol.len())];
+            ex.write(index, &names[index], vol.len() as u64, 0, head)
+                .unwrap();
+        }
+        let trimmed = feed_chase_volumes_paced(&ex, names, vols, 7000, 2);
+        let rep = ex.finish().unwrap();
+        assert!(rep.fallbacks.is_empty(), "{arm}: {:?}", rep.fallbacks);
+        assert!(trimmed > 0, "{arm}: nothing was ever trimmed");
+        if arm == "parity ruled out" {
+            assert!(
+                ex.chase_dropped_bytes() > 0,
+                "{arm}: a set no verifier can ever claim must drop,                  or the whole item is dead"
+            );
+        } else {
+            assert_eq!(
+                ex.chase_dropped_bytes(),
+                0,
+                "{arm}: an unvouched prefix dropped while parity was                  still possible - the settle read-back would find a hole"
+            );
+        }
+        // The bytes are the point either way: dropping is only ever a
+        // saving if the file still comes out right.
+        assert_eq!(&std::fs::read(dir.join("F.bin")).unwrap(), f);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// The head census, on its own: parity is ruled out only once EVERY
+/// slot the job opened with has had its offset-0 span reach the
+/// extractor, and the answer LATCHES.
+///
+/// That threshold is the whole safety argument. A par2 volume is
+/// identified from its offset-0 bytes and nowhere else, so "nothing has
+/// been sniffed" means "nothing ever will be" exactly when every head
+/// is in - and not one span earlier. A slot whose head never arrives (a
+/// missing article, a sample-skipped file, a donated one) holds the
+/// census open for the whole run, which is the same answer the loss
+/// veto in `rar_trim_set` already gives that job.
+#[test]
+fn parity_is_only_ruled_out_once_every_head_has_landed() {
+    let dir = tmpdir("parity-ruled-out-census");
+    let ex = Arc::new(Extractor::new(&dir, 3, true));
+    ex.anchor();
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let a = asked.clone();
+    ex.set_no_parity_hook(Arc::new(move || {
+        a.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
+    }));
+    let head = payload(4_000, 9);
+    let ruled_out = |ex: &Extractor| Extractor::parity_ruled_out(&mut ex.inner.lock_ok());
+
+    assert!(!ruled_out(&ex), "no head has landed");
+    assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 0);
+    for slot in 0..2 {
+        ex.write(slot, &format!("p{slot}.bin"), 4_000, 0, &head)
+            .unwrap();
+        assert!(!ruled_out(&ex), "slot {slot}: one head still outstanding");
+    }
+    // A span that is NOT offset 0 is not a head, however much of the
+    // file it covers.
+    ex.write(2, "p2.bin", 8_000, 4_000, &head).unwrap();
+    assert!(!ruled_out(&ex), "an interior span is not a classification");
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the hook must not be asked while the census is open"
+    );
+
+    ex.write(2, "p2.bin", 8_000, 0, &head).unwrap();
+    assert!(ruled_out(&ex), "every head is in and the hook says yes");
+    let once = asked.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(once, 1, "asked exactly once");
+    // LATCHED: the answer is final, so the hot path stops asking.
+    assert!(ruled_out(&ex));
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::Relaxed),
+        once,
+        "a latched answer must not re-ask the hook"
+    );
+    let _ = ex.finish();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The two arms the fixture above cannot reach: no hook installed at
+/// all (every test, the standalone CLI extract, every child level), and
+/// a hook that says parity is still possible. Both keep the vouch,
+/// whatever the census says.
+#[test]
+fn without_a_hook_or_with_a_negative_one_parity_is_never_ruled_out() {
+    for hook in [None, Some(false)] {
+        let dir = tmpdir(&format!("parity-ruled-out-{hook:?}"));
+        let ex = Arc::new(Extractor::new(&dir, 1, true));
+        ex.anchor();
+        if let Some(answer) = hook {
+            ex.set_no_parity_hook(Arc::new(move || answer));
+        }
+        let head = payload(4_000, 9);
+        ex.write(0, "p0.bin", 4_000, 0, &head).unwrap();
+        assert!(
+            !Extractor::parity_ruled_out(&mut ex.inner.lock_ok()),
+            "{hook:?}: the census is full but nothing has ruled parity out"
+        );
+        let _ = ex.finish();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// A CHILD never rules parity out from its own hook, because it must
+/// never be given one: a child's slots are inner members of an outer
+/// archive, outside any root PAR2 set, and its `verify_gate` is `None`
+/// for that same reason - so its trim is already unvouched-and-free and
+/// a hook there would be a second answer to a settled question.
+#[test]
+fn a_child_extractor_refuses_a_no_parity_hook() {
+    let dir = tmpdir("parity-ruled-out-child");
+    // extractor-anchor-gate: this root is never written to. The row is
+    // the hook INSTALL, and its whole assertion is that the child
+    // refused one - there is no span, no container and so no chase for
+    // an anchor to open at depth 0.
+    let child = Arc::new(Extractor::new_nested_for_tests(&dir, 1));
+    child.set_no_parity_hook(Arc::new(|| true));
+    assert!(
+        child.inner.lock_ok().no_parity.is_none(),
+        "a child took a hook it has no business answering"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The drop ceiling, as arithmetic rather than as a race (TODO 214).

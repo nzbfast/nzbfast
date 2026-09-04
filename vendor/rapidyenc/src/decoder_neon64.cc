@@ -132,7 +132,25 @@ HEDLEY_ALWAYS_INLINE void do_decode_neon(const uint8_t* src, long& len, unsigned
 				if(isRaw && !searchEnd) {
 					tmpData2 = vld1q_u8(src+i + 2 + sizeof(uint8x16_t)*3);
 				} else {
-					nextData = vld1q_u8(src+i + sizeof(uint8x16_t)*4); // only 32-bits needed, but there doesn't appear a nice way to do this via intrinsics: https://stackoverflow.com/questions/46910799/arm-neon-intrinsics-convert-d-64-bit-register-to-low-half-of-q-128-bit-regis
+					// nzbfast local patch (2 Sep 2026), see VENDOR.txt and
+					// research/YENC-NEON-OVERREAD-2026-09-02.md. Upstream loads a
+					// whole 16-byte vector here for the 4 bytes it needs (its own
+					// comment says so, and blames the intrinsic set). Only lanes
+					// 0..3 of nextData are ever read - every use is
+					// vextq_u8(dataD, nextData, n) with n <= 4 - while
+					// _do_decode_simd's lenBuffer reserves exactly 3 + isRaw = 4
+					// readable bytes past the SIMD region. So the wide load read up
+					// to 12 bytes past the caller's buffer. It is width-aligned and
+					// so cannot fault, but it is an out-of-bounds read all the
+					// same, and AddressSanitizer aborts on it: with ASan reaching
+					// the C++ from 2 Sep 2026 it made yenc_decode unfuzzable on
+					// arm64, on the first well-formed article. vld1q_lane_u32 is
+					// the intrinsic the comment wanted; the x86 kernels already
+					// load exactly 4 (decoder_sse_base.h, _mm_cvtsi32_si128).
+					nextData = vreinterpretq_u8_u32(vld1q_lane_u32(
+						(const uint32_t*)(src+i + sizeof(uint8x16_t)*4),
+						vdupq_n_u32(0), 0
+					));
 					tmpData2 = vextq_u8(dataD, nextData, 2);
 				}
 				uint8x16_t cmpCrA = vceqq_u8(dataA, vdupq_n_u8('\r'));

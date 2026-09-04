@@ -5,7 +5,7 @@
 //! Hoisted out of `crypto.rs` on 22 Aug 2026 because the legacy decrypt
 //! pass this walk was gathering jobs for sat nine lines under the size
 //! gate's 500-line function ceiling (TODO 106 pattern, as
-//! `check_sweep.rs`, `fleet_knobs.rs` and `extract/names.rs`). That pass
+//! `check_sweep.rs`, `fleet_knobs.rs` and `nzbkit-base/src/names.rs`). That pass
 //! was deleted under TODO 27 phase 3 on 23 Aug 2026, once every
 //! encrypted store shape - RAR4 and check-less RAR5 included - took the
 //! plaintext-once route; what survives here is the adjudication it

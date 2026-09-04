@@ -1,0 +1,58 @@
+# The capstone: a tree, a 0-byte placeholder, a sniffed set at 10 %, and
+# a same-length zero-head VOB pair, all in one post.
+
+[layout]
+name = "cc-n29-zero-head-dvd-drill"
+seed = 2901
+note = """
+Expresses bench/capability-corpus leg n29-zero-head-dvd-drill, the
+corpus's own capstone and the shape a real padded-VOB DVD post has.
+
+Four hard properties at once, none of which is new here on its own:
+N8's directory tree in the FileDesc names, P5's described-and-unposted
+0-byte BUP, P2's set posted under tokens so every file of it has to be
+recognised by content, and the zero-head pair whose (length, md5-16k)
+key collides. cc-n31 carries the first two at zero redundancy and
+cc-n15 carries the last; this is the row that says they hold together,
+which is the only question a capstone asks.
+
+WHY THE COMBINATION IS HARDER THAN ITS PARTS. Nothing in the post
+announces itself. The payload rides under tokens, the recovery set rides
+under tokens too, so the client has to sniff PAR2 packets to find the
+descriptors at all - and the descriptors are then the sole source of the
+tree, of both VOB names, and of an empty file that was never posted.
+Get the VOB pairing wrong and two correct files land under each other's
+names inside a correct directory, which is the failure mode that looks
+most like success.
+
+An opaque set is swept, so no `.par2` is part of the end state: every
+file of it is packet-shaped under a token, which is exactly what
+`nzbfast get`'s leftover sweep removes. The expected tree is the two
+VOBs and the empty BUP, and nothing else.
+"""
+
+[source]
+files = [
+    { name = "VIDEO_TS/VTS_01_1.VOB", bytes = 100000, zero_head = 20000 },
+    { name = "VIDEO_TS/VTS_01_2.VOB", bytes = 100000, zero_head = 20000 },
+    { name = "VIDEO_TS/VTS_01_0.BUP", bytes = 0 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 32768
+names = "opaque"
+zero_byte_member = true
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -1,0 +1,55 @@
+# The minimum-overhead recipe: one PAR2 INDEX, no parity at all, buying
+# a directory tree, a 0-byte placeholder and full verification.
+
+[layout]
+name = "cc-n31-index-only-tree-placeholder"
+seed = 154
+note = """
+Expresses bench/capability-corpus leg n31-index-only-tree.
+
+Three planes at once, and the point is the combination rather than any
+one of them: P4 at zero redundancy (m4-p4-manifest-only-set), N8 as a
+tree in the FileDesc names (p3-filedesc-tree), and P5's described-but
+-unposted placeholder (p5-zero-byte-member). Each has its own row; none
+of them says what happens when a client has to materialise a whole DVD
+structure out of a few kilobytes of index with no recovery block to
+fall back on.
+
+WHAT MAKES IT A REQUIREMENT rather than a demonstration: with
+redundancy at zero there is nothing to repair FROM, so every name, every
+directory and the empty file all have to come out of the descriptors,
+and the run has to stay clean while doing it. A client that reached for
+parity here would be reaching for parity that was never posted.
+
+The corpus calls this the complete post-bare-land-perfect recipe, and
+its cost is the reason: no container bytes, no unpack pass, no recovery
+spend, and the client still lands a verified tree.
+
+The index arrives and there are no volumes to skip, so the expected
+output tree is the payload plus the one `.par2` file.
+"""
+
+[source]
+files = [
+    { name = "VIDEO_TS/VTS_02_1.VOB", bytes = 120000 },
+    { name = "VIDEO_TS/VTS_02_0.IFO", bytes = 24000 },
+    { name = "VIDEO_TS/VTS_02_0.BUP", bytes = 0 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 0
+names = "filedesc-only"
+zero_byte_member = true
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -139,7 +139,22 @@ static uint32_t crc_fold(const unsigned char *src, long len, uint32_t initial) {
 		}
 		
 		if(len != 0) {
-			partial_fold(len, &crc0, &crc1, _mm256_load_si256((__m256i *)src));
+			/* 1..31 bytes left and `src` is 32-byte aligned, so the
+			 * aligned 32-byte load this used to do read up to 31 bytes
+			 * PAST the end of the buffer. It cannot fault (32 divides
+			 * the page size) and partial_fold() masks the surplus out,
+			 * so the CRC was always right - but it is an out-of-bounds
+			 * read, and this is the one AddressSanitizer caught: the
+			 * scheduled fuzz smoke's yenc_decode burst died here on the
+			 * vpclmul kernel (run 33719528482, 3 Sep 2026), reproducer
+			 * seeds/yenc_decode/crash-d94c80b4149bae0e461b8c0d86d2f5757efdf9cf.
+			 * The `len < 32` path above already uses this bounded form,
+			 * so zero-filling makes no new claim about what
+			 * partial_fold ignores. Local change against
+			 * upstream rapidyenc - see ../VENDOR.txt. */
+			__m256i crc_tail = _mm256_setzero_si256();
+			memcpy(&crc_tail, src, (size_t)len);
+			partial_fold(len, &crc0, &crc1, crc_tail);
 		}
 	}
 	

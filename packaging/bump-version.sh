@@ -3,6 +3,13 @@
 #
 # One command to move every version reference in lockstep:
 #   crates/nzbfast/Cargo.toml   (source of truth)
+#   crates/nzbfast-core/Cargo.toml (the bin's bottom layer, split out 2 Sep 2026)
+#   crates/nzbfast-unpack/Cargo.toml (the extraction/repair/filing layer, split out 2 Sep 2026)
+#   crates/nzbfast-meta/Cargo.toml (the search/index-scan/metadata layer, split out 2 Sep 2026)
+#   crates/nzbfast-engine/Cargo.toml (the get download pipeline, split out 2 Sep 2026)
+#   crates/nzbfast-daemon/Cargo.toml (serve's daemon layer, split out 2 Sep 2026)
+#   crates/nzbfast-tasks/Cargo.toml (serve's background lanes, split out 2 Sep 2026)
+#   crates/nzbfast-api/Cargo.toml (serve's request layer, split out 2 Sep 2026)
 #   crates/nzbtray/Cargo.toml   (installer stamps both exes)
 #   website/download*.html      (16 locales, version-pinned button URLs)
 #   (NOT the homebrew formula - see bump-tap.sh, it needs published shas)
@@ -40,6 +47,13 @@ bump_toml() {
 }
 
 bump_toml "$ROOT/crates/nzbfast/Cargo.toml"
+bump_toml "$ROOT/crates/nzbfast-core/Cargo.toml"
+bump_toml "$ROOT/crates/nzbfast-unpack/Cargo.toml"
+bump_toml "$ROOT/crates/nzbfast-meta/Cargo.toml"
+bump_toml "$ROOT/crates/nzbfast-engine/Cargo.toml"
+bump_toml "$ROOT/crates/nzbfast-daemon/Cargo.toml"
+bump_toml "$ROOT/crates/nzbfast-tasks/Cargo.toml"
+bump_toml "$ROOT/crates/nzbfast-api/Cargo.toml"
 bump_toml "$ROOT/crates/nzbtray/Cargo.toml"
 
 # The Homebrew formula is NOT bumped here. It needs the sha256 of each
@@ -49,7 +63,7 @@ bump_toml "$ROOT/crates/nzbtray/Cargo.toml"
 # release is published, and pushes it to the tap.
 
 if command -v cargo >/dev/null 2>&1; then
-    (cd "$ROOT" && cargo update -q -p nzbfast -p nzbtray 2>/dev/null) || true
+    (cd "$ROOT" && cargo update -q -p nzbfast -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbtray 2>/dev/null) || true
 fi
 
 # Website download buttons are version-pinned (asset filenames inside
@@ -57,7 +71,7 @@ fi
 # release publish or the live site 404s - all locales, one pass. There is
 # no partial failure mode: the whole page breaks at once, in all sixteen
 # locales, the instant the new release becomes `latest`.
-TOUCHED="crates/nzbfast/Cargo.toml crates/nzbtray/Cargo.toml"
+TOUCHED="crates/nzbfast/Cargo.toml crates/nzbfast-core/Cargo.toml crates/nzbfast-unpack/Cargo.toml crates/nzbfast-meta/Cargo.toml crates/nzbfast-engine/Cargo.toml crates/nzbfast-daemon/Cargo.toml crates/nzbfast-tasks/Cargo.toml crates/nzbfast-api/Cargo.toml crates/nzbtray/Cargo.toml"
 [ -f "$ROOT/Cargo.lock" ] && TOUCHED="$TOUCHED Cargo.lock"
 pages=0
 bad=0
@@ -95,7 +109,7 @@ fi
 
 echo ""
 echo "bumped to $NEW ($STAGED):"
-grep -Hn '^version' "$ROOT/crates/nzbfast/Cargo.toml" "$ROOT/crates/nzbtray/Cargo.toml"
+grep -Hn '^version' "$ROOT/crates/nzbfast/Cargo.toml" "$ROOT/crates/nzbfast-core/Cargo.toml" "$ROOT/crates/nzbfast-unpack/Cargo.toml" "$ROOT/crates/nzbfast-meta/Cargo.toml" "$ROOT/crates/nzbfast-engine/Cargo.toml" "$ROOT/crates/nzbfast-daemon/Cargo.toml" "$ROOT/crates/nzbfast-tasks/Cargo.toml" "$ROOT/crates/nzbfast-api/Cargo.toml" "$ROOT/crates/nzbtray/Cargo.toml"
 echo "  website/download*.html      $pages locale page(s) -> nzbfast-$NEW-*"
 echo ""
 echo "These are ONE commit. The website pages are version-pinned download"

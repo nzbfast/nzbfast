@@ -1,0 +1,65 @@
+# P10 over P3: a `.par2`-named decoy beside a recovery set the post
+# announces, and the set is the only place a real name exists.
+
+[layout]
+name = "p3-p10-decoy-beside-an-announced-set"
+seed = 211
+note = """
+The half of P10 the client gets right, and the reason the plane needs
+two rows rather than one.
+
+The payload rides under a token and its real name lives only in a
+FileDesc packet, exactly as in `p3-filedesc-tree`; the recovery set is
+announced under its own `.par2` names, and one more `.par2` name in the
+post carries the decoy - a genuine Main packet and a genuine Creator
+packet, then a framing-valid cell whose seal is junk, then junk.
+`crate::recovery`'s `create_decoy` says why the bytes are that and not
+noise.
+
+Measured 4 Sep 2026: the client adopts BOTH - `[par2] set live: 2 sets,
+1 file(s), block size 4096` - and the set that names nothing does not
+stop the set that does. The payload lands under its FileDesc name.
+
+TWO THINGS THE END STATE ASSERTS, and both are the decoy's:
+
+  * `Announced.Decoy.2026.mkv` is there, byte-exact. The only carrier of
+    that name is the real set's FileDesc packet, so the client had to
+    keep reading past a `.par2` file that describes nothing.
+  * `extras.par2` is there, byte-exact. A client that believed the
+    extension would have treated it as furniture: eager-skipped it as
+    parity, spent it in a verify, or swept it away with the rest of the
+    recovery data. It is none of those, so it is somebody's file and it
+    is published like one.
+
+WHAT WOULD ALSO MAKE THIS GREEN, which is the question the catalog
+README asks of every row. Not much: drop the decoy and this is
+`p3-filedesc-tree` with one member, which passes. What the decoy adds is
+the second assertion above and the first one's route - and the sibling
+row is the proof that the addition is not free. `n2-p2-p10-par2-named-
+decoy` moves ONE plane, the real set from announced to token-named, and
+the same decoy then takes the whole job's naming down. So the line is
+not "the client sniffs packets" but "the client sniffs packets when
+something else already announced a set", and these two rows are where
+that reads.
+"""
+
+[source]
+files = [{ name = "Announced.Decoy.2026.mkv", bytes = 120000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+names = "filedesc-only"
+decoy = { name = "extras.par2", bytes = 3072 }
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

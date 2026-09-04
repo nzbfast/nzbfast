@@ -1,7 +1,8 @@
 # Mobile client API contract (playback contract v1, FROZEN)
 
 The endpoint list the native mobile clients use. Rows 1-15 are the P0
-surface; rows 16-17 are the frozen v1 additions. This file
+surface; rows 16-17 are the frozen v1 additions, and row 18 is the
+update notice (Android, 4 Sep 2026). This file
 is the single shared contract: the Android Compose app (here) and the
 iOS SwiftUI shell both build against it. Rows below marked "iOS" are
 used by that client only. Sources are cited as
@@ -237,6 +238,33 @@ Both shells, in step:
   it); pause-on-metered stays open - it is on-device-engine work
   (connectivity callbacks driving the local daemon), not a player
   change.
+
+## Row 18 (`mode=update_check`) - the update notice (2026-09-04)
+
+| # | call | notes |
+|---|------|-------|
+| 18 | `GET /api?mode=update_check` | `{"status":true,"current":"<the daemon's version>","available":"<newer version>"|null,"manifest":{...}|null}`. `available` is null when the daemon is already on the newest published release; `{"status":false,"error":"..."}` when the check did not answer - an unreachable channel, or a manifest the daemon REFUSED (bad signature, failed anti-rollback ratchet). Both of those are read as "ask again soon", never as up to date. api/system.rs:1284. |
+
+NOTIFY ONLY on both sides. The daemon has had no apply path since
+self-update was removed in 1.0.5, and the app has none either: Android
+cannot replace its own package without REQUEST_INSTALL_PACKAGES, which
+this app does not hold and will not ask for. The notice is a card with a
+link to https://github.com/nzbfast/nzbfast/releases.
+
+Called at most once a day, when the app comes to the foreground. It is
+the one call in this client that makes the daemon reach out to the
+internet, and the answer changes a few times a year, so it is
+deliberately not on the poll.
+
+The app compares `available` against ITS OWN version as well, because
+`available` is the daemon's comparison against the daemon: in on-device
+mode those are the same number (the APK's versionName is read out of
+crates/nzbfast/Cargo.toml at build time, and the bundled engine is built
+from it), but in server mode a daemon older than the app would otherwise
+tell a current app it is out of date. The mirror image is a known and
+accepted gap: a stale APK pointed at an up-to-date daemon gets
+`available: null` and learns nothing, and closing it would need a new
+daemon field rather than a client change.
 
 ## Row 3 (`mode=history`) is still read, for one field
 

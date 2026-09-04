@@ -1,0 +1,56 @@
+# Z1: the map names a release the post does not contain, and the
+# recovery set names the file that it does.
+
+[layout]
+name = "z1-lying-meta-name"
+seed = 21
+note = """
+The map's <meta type="name"> states Nothing.In.This.Post.2026.1080p-DECOY,
+which is not a file in this post, not a subject, and not a yEnc name.
+The wire carries a token; the FileDesc packet carries the real name.
+So the two disagree outright and the row asks which one the client
+gives authority to.
+
+The requirement is the FileDesc name. A recovery set's descriptor is a
+statement about BYTES, cross-checked by a whole-file MD5 pair; a
+<meta> element is a line in a map anybody can write, evidence about
+nothing. The decoy name must therefore appear nowhere in the output
+tree, and the payload must land under Feature.Main.mkv.
+
+WHAT THIS ROW DOES NOT PIN, because it is easy to think it does.
+research/POST-SETTLE-NAME-AUTHORITY-2026-08-31.md measured, and
+nzbkit::release::adopt_proved_identity then landed, a rule about the
+JOB name in the daemon's finalize_names: where a PAR2-proved release
+name and the parse of the .nzb-supplied job name contradict on title or
+year, the proved one wins. The oracle drives nzbfast get, which has no
+filing step and no finalize_names at all, so this row is about the FILE
+name and says nothing about the folder a daemon would file the job
+into. Different layers, and neither is evidence for the other.
+
+names = "filedesc-only" so the set really is the only place the real
+name exists; a descriptive wire beside it would make this a row that
+passed without ever consulting the set.
+"""
+
+[source]
+files = [{ name = "Feature.Main.mkv", bytes = 65536 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 16384
+
+[nzb]
+meta_name = "lying"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

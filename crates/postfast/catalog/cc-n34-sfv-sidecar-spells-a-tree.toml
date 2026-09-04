@@ -1,0 +1,47 @@
+# G4 carrying STRUCTURE: the sidecar's entries are relative paths, so
+# the lightest name source in the post is also the only tree carrier.
+
+[layout]
+name = "cc-n34-sfv-sidecar-spells-a-tree"
+seed = 3401
+note = """
+Expresses bench/capability-corpus leg n34-sfv-tree.
+
+cc-n21-sfv-sidecar-is-the-only-name-source poses the flat case; this is
+the same recipe with directories in the sidecar's entries. An ordinary
+post puts the BASENAME on the wire and nothing carries the directory
+part at all - `crate::naming`'s header states that and it is why a
+tree-less opaque row expects flat files - so a sidecar spelling
+`Album.Disc1/track01.flac` is the whole of what puts the tree back.
+
+That makes it the cheapest tree carrier there is. A PAR2 set's FileDesc
+packets do the same job for kilobytes and a recovery pass; two lines of
+text do it here, with no parity anywhere in the post.
+
+The client puts a sidecar name through the same member-name policy a
+PAR2 FileDesc path goes through, which is what makes the two rows agree
+about trees - so a change that flattened one would fail this row and
+p3-filedesc-tree together rather than only one of them.
+"""
+
+[source]
+files = [
+    { name = "Album.Disc1/track01.flac", bytes = 50000 },
+    { name = "Album.Disc1/track02.flac", bytes = 40000 },
+]
+
+[naming]
+wire = "opaque"
+
+[companion]
+sfv = true
+sfv_name = "album-set.sfv"
+
+[encoding]
+article_bytes = 20000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

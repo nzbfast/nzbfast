@@ -1,0 +1,59 @@
+# C4 + C2 + Z2 + P1: an encrypted volume set whose password exists in
+# exactly one place, the NZB head.
+
+[layout]
+name = "nc-a4-encrypted-volumes-named-only-by-the-meta"
+seed = 179
+note = """
+The nested corpus's `a4-meta-password` leg: AES-encrypted RAR volumes
+with a PAR2 set beside them, and the password riding only in the NZB's
+`<meta type="password">`.
+
+It was one of the two legs the 3 Sep round refused ON PURPOSE, and the
+refusal was right at the time: both RAR generations drew their key salt
+from OS entropy, so one profile emitted different bytes on every run and
+the catalog walk failed on noise that carried no meaning. `rars::Entropy`
+and the seeded per-level source landed on 4 Sep (1f46a2011, 4a48321c9)
+and the refusal went with them, so this leg is an ordinary row now.
+
+There is no second carrier and that is the row. `nzbfast get` reads an
+archive password from a flag, from this meta, or from the `{{...}}`
+convention in the NZB FILENAME; the oracle passes no flag and writes the
+NZB under a fixed name, so the meta is the only thing in the post that
+can open the archive. A client that ignores it lands nothing.
+
+It is deliberately NOT a chain: one level, one password, announced.
+`c4-password-chain-two-levels` is the shape where a second password
+rides inside the first archive, and `nc-a3-three-encrypted-levels` is
+the corpus's own three-level version of it. This row is the floor those
+two stand on - if the meta is not read, neither of them can work either,
+and a failure here says which of the two claims broke.
+
+The password is furniture and travels in the clear in the NZB head,
+which is the point of the shape and why nothing real goes here.
+
+The end state is the payload file and the PAR2 index. The volumes are
+spent by the unpack and a clean run never fetches the parity.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+encryption = "data"
+password = "meta-only-fixture-pw"
+volume_bytes = 10000
+
+[nzb]
+meta_password = true
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

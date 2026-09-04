@@ -10,9 +10,9 @@ use crate::scratch;
 use nzbkit::live::LiveVerifier;
 use nzbkit::par2::verify_file_blocks;
 
-const MAIN: &[u8] = include_bytes!("../fixtures/par2/testset.par2");
-const ALPHA: &[u8] = include_bytes!("../fixtures/par2/alpha.bin");
-const BETA: &[u8] = include_bytes!("../fixtures/par2/beta.bin");
+const MAIN: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/testset.par2");
+const ALPHA: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/alpha.bin");
+const BETA: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/beta.bin");
 
 /// Deterministic PRNG (no deps).
 struct Rng(u64);

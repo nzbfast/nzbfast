@@ -40,6 +40,7 @@ async fn queue_control_promotes_to_front_preserving_order() {
             max_source_ips: None,
             address_family: Default::default(),
             tls_hostname: None,
+            warm_reserve: None,
         },
         PoolConfig::default(),
     )];

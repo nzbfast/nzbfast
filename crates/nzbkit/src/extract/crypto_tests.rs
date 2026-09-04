@@ -954,6 +954,123 @@ fn instream_journal_restores_posted_bytes_for_resume() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// X5-03 residue: a D article that PASSES the crypto gate and carries
+/// NO commitment refuses as UNAUTHENTICATED, not as crypto.
+///
+/// The behaviour is inherited rather than written: `article_authentic`
+/// opens with "`None` is a refusal, not a pass" and the per-article loop
+/// has no separate `D` branch. Nothing observed the inheritance, because
+/// every D fixture in the tree passes a real commitment - and a fixture
+/// that simply drops the password does not reach the question at all:
+/// the crypto gate `continue`s on `dropped_crypto` one branch earlier,
+/// which is what `journal_d_without_e_refetches` and the no-password arm
+/// of the test above already pin. So this needs the FULL crypto run,
+/// with the password, and one article's commitment withheld.
+///
+/// WHY THE TWO COUNTERS MATTER ENOUGH TO PIN: phase A has already
+/// re-encrypted and written this article's plaintext-once fragments by
+/// the time phase B refuses it. That work is discarded harmlessly, but
+/// "we could not re-encrypt this" and "these bytes are not vouched for"
+/// are different facts about a user's disk and the resume banner counts
+/// them separately. A regression that let the crypto gate answer first
+/// would be invisible to every other test here.
+///
+/// A MATERIALIZED D RECORD DOES NOT SUBSTITUTE, and that was tried
+/// first: after `record_materialized` the same record restores as plain
+/// identity, so `crypto` is false at the loop and a `!*crypto` mutation
+/// on the authenticity call leaves such a pin green. This one goes red.
+#[test]
+fn journal_d_without_a_commitment_refetches_as_unauthenticated() {
+    let dir = tmpdir("d-uncommitted");
+    let plain = payload(2_300_005, 87);
+    let f = fixtures::encrypt_file("hunter2", &plain, 77);
+    let vol =
+        fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
+    let art = 50_000usize;
+    let n_arts = vol.len().div_ceil(art);
+
+    let (journal, _) = crate::journal::Journal::open(&dir, b"nzb-x").unwrap();
+    // The one article whose commitment is withheld, and the bytes its
+    // fragments cover - `dropped_unauthenticated` counts fragment
+    // lengths, so the fixture has to hand back the number rather than
+    // assume the article size.
+    let mut uncommitted: Option<(String, u64)> = None;
+    let mut committed: Vec<String> = Vec::new();
+    {
+        let ex = Extractor::new(&dir, 1, true);
+        ex.set_password("hunter2");
+        let mut pending: Vec<(String, Vec<Frag>, u32)> = Vec::new();
+        for i in 0..n_arts - 2 {
+            let s = i * art;
+            let e = (s + art).min(vol.len());
+            let id = format!("<a{i}@t>");
+            let crc = crc32fast::hash(&vol[s..e]);
+            let p = ex
+                .write(0, "v.rar", vol.len() as u64, s as u64, &vol[s..e])
+                .unwrap();
+            match p {
+                Persist::PlacedCrypto(frags) => pending.push((id, frags, crc)),
+                Persist::Placed(_) => panic!("crypto span must journal as D, not R"),
+                Persist::No | Persist::Held(_) => {}
+            }
+            pending.retain(|(id, frags, crc)| {
+                if ex.crypto_span_on_disk(frags) {
+                    let ev = ex.drain_crypto_events();
+                    journal.record_crypto_events(&ev);
+                    // THE FIRST one to settle goes in without its crc -
+                    // first rather than last so the articles after it
+                    // are the control, proving the run itself is sound
+                    // and that only this record was refused.
+                    let commit = if uncommitted.is_none() {
+                        uncommitted = Some((id.clone(), frags.iter().map(|f| f.len).sum::<u64>()));
+                        None
+                    } else {
+                        committed.push(id.clone());
+                        Some(*crc)
+                    };
+                    journal.record_placed_crypto(
+                        0,
+                        id,
+                        ex.slot_file_info(0),
+                        "v.rar",
+                        vol.len() as u64,
+                        frags,
+                        &ex.crypto_frag_mask(frags),
+                        commit,
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+    drop(journal);
+    let (id, bytes) = uncommitted.expect("one article journalled without a commitment");
+    assert!(!committed.is_empty(), "and the rest are the control");
+
+    let (_j2, resume) = crate::journal::Journal::open(&dir, b"nzb-x").unwrap();
+    let restored = crate::journal::restore(&dir, &resume, Some("hunter2"));
+    for c in &committed {
+        assert!(restored.ids.contains(c), "{c} must still restore");
+    }
+    assert!(
+        !restored.ids.contains(&id),
+        "a D article with no commitment must refetch"
+    );
+    assert_eq!(
+        restored.dropped_unauthenticated,
+        (1, bytes),
+        "and it is the UNAUTHENTICATED counter that moves"
+    );
+    assert_eq!(
+        restored.dropped_crypto, 0,
+        "not the crypto one - this article passed the crypto gate and \
+         was refused one branch later"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A D record without its E facts (torn journal tail, or a file
 /// whose params line was lost) must refetch, never guess.
 #[test]
@@ -1048,20 +1165,20 @@ fn encrypted_without_password_materializes_volume() {
 /// volume files left behind.
 #[test]
 fn real_rar_fixtures_extract_and_decrypt() {
-    let secret = include_bytes!("../../testdata/rar5/secret.bin").to_vec();
+    let secret = include_bytes!("../../../nzbkit-base/testdata/rar5/secret.bin").to_vec();
     let cases: Vec<(&str, Vec<(&str, &[u8])>)> = vec![
         (
             "store",
             vec![(
                 "enc-store.rar",
-                include_bytes!("../../testdata/rar5/enc-store.rar"),
+                include_bytes!("../../../nzbkit-base/testdata/rar5/enc-store.rar"),
             )],
         ),
         (
             "hdrs",
             vec![(
                 "enc-hdrs.rar",
-                include_bytes!("../../testdata/rar5/enc-hdrs.rar"),
+                include_bytes!("../../../nzbkit-base/testdata/rar5/enc-hdrs.rar"),
             )],
         ),
         (
@@ -1069,15 +1186,15 @@ fn real_rar_fixtures_extract_and_decrypt() {
             vec![
                 (
                     "enc-vols.part1.rar",
-                    include_bytes!("../../testdata/rar5/enc-vols.part1.rar"),
+                    include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part1.rar"),
                 ),
                 (
                     "enc-vols.part2.rar",
-                    include_bytes!("../../testdata/rar5/enc-vols.part2.rar"),
+                    include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part2.rar"),
                 ),
                 (
                     "enc-vols.part3.rar",
-                    include_bytes!("../../testdata/rar5/enc-vols.part3.rar"),
+                    include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part3.rar"),
                 ),
             ],
         ),
@@ -1116,20 +1233,20 @@ fn real_rar_fixtures_extract_and_decrypt() {
 /// RAR5 gets: exact payload, no volume left on disk.
 #[test]
 fn real_rar4_fixtures_extract_and_decrypt() {
-    let secret = include_bytes!("../../testdata/rar4/secret.bin").to_vec();
+    let secret = include_bytes!("../../../nzbkit-base/testdata/rar4/secret.bin").to_vec();
     let cases: Vec<(&str, Vec<(&str, &[u8])>)> = vec![
         (
             "store",
             vec![(
                 "enc-store.rar",
-                include_bytes!("../../testdata/rar4/enc-store.rar"),
+                include_bytes!("../../../nzbkit-base/testdata/rar4/enc-store.rar"),
             )],
         ),
         (
             "hdrs",
             vec![(
                 "enc-hdrs.rar",
-                include_bytes!("../../testdata/rar4/enc-hdrs.rar"),
+                include_bytes!("../../../nzbkit-base/testdata/rar4/enc-hdrs.rar"),
             )],
         ),
         (
@@ -1137,15 +1254,15 @@ fn real_rar4_fixtures_extract_and_decrypt() {
             vec![
                 (
                     "enc-vols.part1.rar",
-                    include_bytes!("../../testdata/rar4/enc-vols.part1.rar"),
+                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-vols.part1.rar"),
                 ),
                 (
                     "enc-vols.part2.rar",
-                    include_bytes!("../../testdata/rar4/enc-vols.part2.rar"),
+                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-vols.part2.rar"),
                 ),
                 (
                     "enc-vols.part3.rar",
-                    include_bytes!("../../testdata/rar4/enc-vols.part3.rar"),
+                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-vols.part3.rar"),
                 ),
             ],
         ),
@@ -1154,15 +1271,15 @@ fn real_rar4_fixtures_extract_and_decrypt() {
             vec![
                 (
                     "enc-hdr-vols.part1.rar",
-                    include_bytes!("../../testdata/rar4/enc-hdr-vols.part1.rar"),
+                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-hdr-vols.part1.rar"),
                 ),
                 (
                     "enc-hdr-vols.part2.rar",
-                    include_bytes!("../../testdata/rar4/enc-hdr-vols.part2.rar"),
+                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-hdr-vols.part2.rar"),
                 ),
                 (
                     "enc-hdr-vols.part3.rar",
-                    include_bytes!("../../testdata/rar4/enc-hdr-vols.part3.rar"),
+                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-hdr-vols.part3.rar"),
                 ),
             ],
         ),
@@ -1640,19 +1757,19 @@ fn a_failed_rekey_refeed_leaves_no_stashed_span_charged() {
 /// it; the fixture and the gate it exercises are unchanged.
 #[test]
 fn real_rar_split_fixture_verifies() {
-    let secret = include_bytes!("../../testdata/rar5/secret.bin").to_vec();
+    let secret = include_bytes!("../../../nzbkit-base/testdata/rar5/secret.bin").to_vec();
     let vols: Vec<(&str, &[u8])> = vec![
         (
             "enc-vols.part1.rar",
-            include_bytes!("../../testdata/rar5/enc-vols.part1.rar"),
+            include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part1.rar"),
         ),
         (
             "enc-vols.part2.rar",
-            include_bytes!("../../testdata/rar5/enc-vols.part2.rar"),
+            include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part2.rar"),
         ),
         (
             "enc-vols.part3.rar",
-            include_bytes!("../../testdata/rar5/enc-vols.part3.rar"),
+            include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part3.rar"),
         ),
     ];
     let dir = tmpdir("enc-split-fixture");
@@ -1682,7 +1799,8 @@ fn real_rar_split_fixture_verifies() {
 /// `checkless_encrypted_store_set_wrong_password_demotes_not_publishes`.
 #[test]
 fn real_rar_split_damaged_ciphertext_fails() {
-    let mut part2 = include_bytes!("../../testdata/rar5/enc-vols.part2.rar").to_vec();
+    let mut part2 =
+        include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part2.rar").to_vec();
     // Inside part2's data area (data_off 119, data_len 1790) - headers
     // and the stored check stay intact, only ciphertext is damaged.
     part2[119 + 800] ^= 0xff;
@@ -1690,12 +1808,12 @@ fn real_rar_split_damaged_ciphertext_fails() {
         let vols: Vec<(&str, &[u8])> = vec![
             (
                 "enc-vols.part1.rar",
-                include_bytes!("../../testdata/rar5/enc-vols.part1.rar"),
+                include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part1.rar"),
             ),
             ("enc-vols.part2.rar", &part2),
             (
                 "enc-vols.part3.rar",
-                include_bytes!("../../testdata/rar5/enc-vols.part3.rar"),
+                include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part3.rar"),
             ),
         ];
         let dir = tmpdir("enc-split-damaged");
@@ -2174,4 +2292,171 @@ fn the_ciphertext_route_latch_keys_on_the_tree_relative_name() {
     let rep2 = ex2.finish().unwrap();
     assert!(rep2.decrypted.is_empty(), "{:?}", rep2.decrypted);
     std::fs::remove_dir_all(&dir2).unwrap();
+}
+
+/// Build a [`CryptoState`] for `f` straight from its key material, the
+/// way `crypto_for` does once the header has been mapped - the harness
+/// for driving `ingest` directly, with no extractor around it.
+fn direct_state(f: &fixtures::EncFile, plain_crc: u32, out: &str) -> CryptoState {
+    let keys = rarcrypt::derive_keys(&f.password, &f.salt, f.lg2_count).unwrap();
+    CryptoState::new(
+        keys.aes(),
+        f.iv,
+        f.plain_len,
+        Some(CrcGate {
+            stored: plain_crc,
+            hash_key: None,
+        }),
+        true,
+        true,
+        out.to_string(),
+        Arc::new(Mutex::new(Vec::new())),
+    )
+}
+
+/// Shuffle `0..n` deterministically from `seed`.
+fn shuffled(n: usize, seed: u64) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut state = seed;
+    for i in (1..idx.len()).rev() {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        idx.swap(i, (state >> 33) as usize % (i + 1));
+    }
+    idx
+}
+
+/// RAR perf audit 2 Sep 2026 item 3: `ingest` plans and commits under
+/// the per-file mutex but runs the AES and the pwrite of an article's
+/// body OUTSIDE it, so N decode threads landing spans of ONE encrypted
+/// member no longer serialise behind one core of decrypt. The invariant
+/// that must survive is the one the whole module exists for: spans
+/// arrive in any order, on any thread, and the seams between them are
+/// resolved from retained cipher slivers - so the plaintext is
+/// byte-exact, the composed CRC verifies, and the posted-bytes shim
+/// still reproduces the ciphertext. Article sizes from all-seams (17
+/// bytes) to article-sized; threads share the file and interleave
+/// freely.
+#[test]
+fn concurrent_shuffled_ingest_of_one_member_is_byte_exact() {
+    for (len, art, threads, seed) in [
+        (120_003usize, 17usize, 4usize, 1u64),
+        (120_003, 33, 8, 2),
+        (900_007, 4096, 8, 3),
+        (3_500_003, 7000, 6, 4),
+        (3_500_003, 70_000, 16, 5),
+    ] {
+        let dir = tmpdir(&format!("conc-ingest-{art}-{threads}"));
+        let plain = payload(len, 61);
+        let f = fixtures::encrypt_file("hunter2", &plain, 23);
+        let cs = Arc::new(direct_state(&f, crc32fast::hash(&plain), "movie.mkv"));
+        let w =
+            Arc::new(crate::disk::FileWriter::create(&dir.join("movie.mkv"), len as u64).unwrap());
+        let cipher = Arc::new(f.cipher.clone());
+        let order = shuffled(cipher.len().div_ceil(art), seed);
+        let hs: Vec<_> = (0..threads)
+            .map(|t| {
+                let (cs, w, cipher) = (cs.clone(), w.clone(), cipher.clone());
+                let mine: Vec<usize> = order.iter().copied().skip(t).step_by(threads).collect();
+                std::thread::spawn(move || {
+                    for i in mine {
+                        let s = i * art;
+                        let e = (s + art).min(cipher.len());
+                        cs.ingest(&w, s as u64, &cipher[s..e]).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        assert!(
+            cs.complete(),
+            "art={art} threads={threads}: not one seamless run"
+        );
+        assert_eq!(cs.crc_verdict(), Some(true), "art={art} threads={threads}");
+        assert!(cs.covers(0, cs.cipher_len));
+        assert!(cs.plain_on_disk(0, cs.cipher_len));
+        assert_eq!(
+            std::fs::read(dir.join("movie.mkv")).unwrap(),
+            plain,
+            "plaintext wrong at art={art} threads={threads}"
+        );
+        let mut posted = vec![0u8; cipher.len()];
+        cs.read_posted(&w, 0, &mut posted).unwrap();
+        assert_eq!(posted, *cipher, "shim must reproduce the posted bytes");
+        drop(w);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// Micro-benchmark for the audit item above, ignored by default: drives
+/// `ingest` from N threads with shuffled article-sized spans of one
+/// encrypted stored member into a real output file and prints wall and
+/// throughput. `NZBKIT_CRYPTO_BENCH_MIB` (default 1024) sizes the
+/// member; `NZBKIT_CRYPTO_BENCH_THREADS` (default `1,8`) lists the arms.
+/// Run in release: `cargo test --release -p nzbkit --lib -- --ignored
+/// --nocapture crypto_ingest_bench`.
+#[test]
+#[ignore]
+fn crypto_ingest_bench() {
+    let mib: usize = std::env::var("NZBKIT_CRYPTO_BENCH_MIB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024);
+    let arms: Vec<usize> = std::env::var("NZBKIT_CRYPTO_BENCH_THREADS")
+        .unwrap_or_else(|_| "1,8".to_string())
+        .split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect();
+    let art = 716_800usize;
+    let len = mib * (1 << 20) + 3;
+    // Pseudo-random plaintext (xorshift64): incompressible, cheap.
+    let mut plain = vec![0u8; len];
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    for chunk in plain.chunks_mut(8) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        chunk.copy_from_slice(&x.to_le_bytes()[..chunk.len()]);
+    }
+    let plain_crc = crc32fast::hash(&plain);
+    let f = fixtures::encrypt_file("benchpw", &plain, 9);
+    drop(plain);
+    let cipher = Arc::new(f.cipher.clone());
+    let dir = tmpdir("crypto-ingest-bench");
+    for &threads in &arms {
+        for rep in 0..3 {
+            let cs = Arc::new(direct_state(&f, plain_crc, "bench.bin"));
+            let w = Arc::new(
+                crate::disk::FileWriter::create(&dir.join("bench.bin"), len as u64).unwrap(),
+            );
+            let order = shuffled(cipher.len().div_ceil(art), 7 + rep as u64);
+            let t0 = std::time::Instant::now();
+            let hs: Vec<_> = (0..threads)
+                .map(|t| {
+                    let (cs, w, cipher) = (cs.clone(), w.clone(), cipher.clone());
+                    let mine: Vec<usize> = order.iter().copied().skip(t).step_by(threads).collect();
+                    std::thread::spawn(move || {
+                        for i in mine {
+                            let s = i * art;
+                            let e = (s + art).min(cipher.len());
+                            cs.ingest(&w, s as u64, &cipher[s..e]).unwrap();
+                        }
+                    })
+                })
+                .collect();
+            for h in hs {
+                h.join().unwrap();
+            }
+            let wall = t0.elapsed();
+            assert!(cs.complete());
+            assert_eq!(cs.crc_verdict(), Some(true));
+            println!(
+                "BENCH threads={threads} rep={rep} wall={:.3}s {:.2} GB/s",
+                wall.as_secs_f64(),
+                len as f64 / wall.as_secs_f64() / 1e9
+            );
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }

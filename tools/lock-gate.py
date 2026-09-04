@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Refuse new poison-intolerant lock sites in production code. TODO 102b.
 
-`crates/nzbkit/src/sync.rs` exists because a panicking worker used to take the
+`crates/nzbkit-base/src/sync.rs` exists because a panicking worker used to take the
 whole daemon down with it: every other thread touching the same mutex inherited
 the poison and panicked in turn. `lock_ok()` / `read_ok()` / `write_ok()`
 recover the guard instead, and the 1 Aug sweep converted ~1,000 sites to them.
@@ -24,7 +24,7 @@ one line at a time, and rustfmt breaks a long method chain across lines, so
 them. The gate printed "0 poison-intolerant lock sites in production" from the
 day it landed and that zero was false: 99 sites matched the split shape on
 22 Aug 2026, ~80 of them production, including `sab_warnings` in
-`crates/nzbfast/src/serve/sabcompat.rs` - request-path code polled by
+`crates/nzbfast-api/src/sabcompat.rs` - request-path code polled by
 `mode=status`, exactly what the gate was built to cover. A lane that ran the
 documented gates, read the zero and shipped was trusting nothing. The matcher
 now runs over the whole file text with `\\s*` (which includes `\\n`) between the
@@ -60,7 +60,7 @@ Usage:
 
 `.lock().expect("...")` was added on 22 Aug 2026 as well: nothing in
 production used it at the time (the only three sites were test-scoped, in
-crates/nzbkit/src/nntp/unit_tests.rs, where `.expect()` is the right call), so
+crates/nzbkit-base/src/nntp/unit_tests.rs, where `.expect()` is the right call), so
 this is about refusing the first new one, not a sweep.
 """
 
@@ -278,7 +278,7 @@ def test_line_mask(lines):
     `#[cfg(test)] mod lane_tests;` open no block at all, so a brace-only
     scanner ran on to the next `{` it could find - which is the body of
     whatever production function came NEXT - and masked it as test code.
-    That is how `pause_int` in serve/sabcompat.rs (the SAB `pause_int`
+    That is how `pause_int` in sabcompat.rs (the SAB `pause_int`
     field, on every `mode=queue`) and `move_dest_root` in serve/mover.rs
     read as test scope on 22 Aug 2026.
     """
@@ -737,7 +737,7 @@ def main():
         "  the panic, only .lock_ok() does.\n"
         "\n  A poisoned lock means another thread panicked. Inheriting that panic\n"
         "  is what took the whole daemon down before the 1 Aug sweep. See the\n"
-        "  module docs in crates/nzbkit/src/sync.rs.\n"
+        "  module docs in crates/nzbkit-base/src/sync.rs.\n"
         "\n  In tests .unwrap() / .expect() are correct and this gate ignores it - a test SHOULD\n"
         "  die on a poisoned lock.",
         file=sys.stderr,

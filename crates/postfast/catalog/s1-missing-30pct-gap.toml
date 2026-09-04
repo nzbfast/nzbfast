@@ -1,0 +1,48 @@
+# S1 past what the parity can cover: a declared gap, and the one row in
+# the catalog that pins a failure rather than a success.
+
+[layout]
+name = "s1-missing-30pct-gap"
+seed = 12
+note = """
+The twin of s1-missing-2pct-repairs and the reason that row means
+something. Same payload, same set, same 10 % of parity - and six
+articles refused instead of one, which is three times more damage than
+two recovery blocks can rebuild. The client cannot win this one, and
+the row exists to say so in words rather than to leave the plane
+looking covered because its easy case passes.
+
+WHAT THE ROW ASSERTS. `beyond.bin` is NOT in the output tree: the
+engine renames an unverified payload aside so nothing imports it, and
+a row that listed the renamed spelling would be pinning the engine's
+own furniture as though a profile had asked for it. So `arrives` is
+empty, and the assertion is that the payload is absent under the name
+the layout carries. The day a client can rebuild six blocks from two,
+this row goes red and the gap text below is what tells the next reader
+to delete the override rather than widen it.
+
+THE GAP IS NOT A DEFECT. Nothing here is repairable by any client: the
+post genuinely does not carry the parity. What is pinned is the
+BEHAVIOUR at the edge - an honest non-zero verdict, the bytes kept for
+a retry, nothing filed under a real name that was never verified - and
+that is a requirement the catalog had no row for until this one.
+"""
+
+[source]
+files = [{ name = "beyond.bin", bytes = 400000 }]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 20000
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+missing_pct = 30.0
+
+[expect]
+complete = false
+arrives = []
+gap = "30 % of the articles are refused and the set carries 10 % of parity, so six blocks are needed and two exist: the payload cannot be rebuilt by any client and is quarantined rather than filed"

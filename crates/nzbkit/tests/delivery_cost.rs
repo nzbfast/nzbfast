@@ -29,7 +29,7 @@
 //! so the file drops onto a pre-fusion tree unchanged - the R9 rule.
 //!
 //! ```sh
-//! cargo test -p nzbkit --release --test delivery_cost -- --ignored --nocapture --test-threads=1
+//! cargo test -p nzbkit --release --features heavy-tests --test delivery_cost -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! `--test-threads=1` matters: the legs measure process-wide CPU and

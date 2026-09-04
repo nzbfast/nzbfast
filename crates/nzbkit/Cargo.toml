@@ -6,13 +6,20 @@ license.workspace = true
 repository.workspace = true
 description = "Engine library for nzbfast: NZB parsing, yEnc codec, NNTP pool, scheduler"
 
-[build-dependencies]
-cc = "1"
-
 [lints]
 workspace = true
 
 [dependencies]
+# THE LAYER BELOW. Every module this crate does not declare itself comes
+# from here and is re-exported at the root under its old name, so every
+# `nzbkit::<module>::` path in the workspace - and in the DETACHED fuzz
+# workspace, which names the same paths - resolves unchanged. See
+# src/lib.rs and nzbkit-base/Cargo.toml for the cut.
+#
+# `default-features = false` is load-bearing: base's own default turns
+# `indexer` on, and a slim build of this crate must not get it back
+# through the dependency. The feature forwards explicitly below.
+nzbkit-base = { path = "../nzbkit-base", default-features = false }
 # Events only - nzbkit is a library and installs no subscriber. The
 # binary does that (nzbfast::logging), so nzbkit's [pool] / [par2] lines
 # reach the same log pane as everything else, stamped the same way. No
@@ -20,6 +27,10 @@ workspace = true
 # `log` compatibility are both unused here.
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 memchr = "2"
+# Only `BufMut::limit`, so a body read can land in a `Vec`'s spare
+# capacity through `read_buf` without a `set_len` of our own (already
+# compiled: tokio's io-util pulls it).
+bytes = "1"
 quick-xml = "0.42"
 thiserror = "2"
 crc32fast = "1"
@@ -74,9 +85,17 @@ sha2 = "0.11"
 argon2 = "0.6"
 chacha20poly1305 = "0.11"
 # FF1 (NIST SP 800-38G) needs arbitrary-precision Feistel halves: a
-# radix-253 control line is a ~hundred-digit number. Already in the
-# lockfile transitively (0.4.8), so this adds an edge, not a crate.
-num-bigint = "0.4"
+# radix-253 control line is a ~hundred-digit number.
+#
+# WAS an edge and not a crate while this said "0.4": der-parser pulls
+# num-bigint 0.4 transitively and cargo unified the two. The 3 Sep 2026
+# bump to 0.5 (dependabot #58) ended that - der-parser is still on 0.4,
+# so the lockfile now carries BOTH and this dependency costs a real
+# crate compile. Taken anyway: 0.5 is where the arithmetic fixes land,
+# `ff1.rs` is the only caller, and the NIST FF1-AES256 vectors in its
+# tests pass identically on either. `[bans] multiple-versions = "warn"`
+# in deny.toml is what keeps that duplicate from being a gate failure.
+num-bigint = "0.5"
 # Nested one-pass phase 2: the chasing decompressor drives the vendored
 # RAR engine's streaming reader over still-arriving inner volumes.
 rars = { path = "../../vendor/rars" }
@@ -92,6 +111,15 @@ sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256
 # ~25% faster than the portable soft path - a slow-x86 win (docker
 # amd64, old desktops). md5-asm has a compile_error! on Windows (both
 # MSVC and mingw) and md-5 falls back to soft off-x86, hence the gate.
+#
+# WINDOWS IS NO LONGER SOFT, so do not read the gate above as saying it
+# is (3 Sep 2026). nzbkit-base's `md5fast` module carries a Rust
+# inline-assembly MD5 block function - LLVM assembles it, so it builds
+# under MSVC where this C crate cannot - and `md5fast::Md5` is the alias
+# every payload-hashing site in the workspace uses: the assembly on
+# Windows x86-64, `md5::Md5` verbatim everywhere else, which is what
+# keeps this entry load-bearing. Measured +28.7% on an i5-10600KF.
+# That module's header is the full story.
 [target.'cfg(all(target_arch = "x86_64", not(target_os = "windows")))'.dependencies]
 md-5 = { version = "0.10", features = ["asm"] }
 
@@ -116,14 +144,9 @@ md-5 = { version = "0.10", features = ["asm"] }
 # still gets soft SHA-256, because cpufeatures answers a flat `false`
 # there whichever sha2 major asks it.
 
-# Kernel TLS (TODO §70), Linux only and off by default. Nothing links it
-# unless the `ktls` feature is built in AND `NZBFAST_KTLS=1` is set at
-# run time, so the shipped binary is byte-identical to one built without
-# it. Pinned to the aws-lc-rs provider - the same one `tls_provider`
-# names, or the secrets it extracts would come from a second copy of
-# rustls' crypto stack.
-[target.'cfg(target_os = "linux")'.dependencies]
-ktls = { version = "6.0", default-features = false, features = ["aws_lc_rs"], optional = true }
+# The kTLS optional dependency was here until the nzbkit-base cut and is
+# nzbkit-base's now, with the `nntp` module that names it; the `ktls`
+# feature below is a forward.
 
 # FSCTL_SET_SPARSE for the Windows write path (disk.rs): out-of-order
 # positioned writes into a set_len file make NTFS zero-fill everything
@@ -148,19 +171,41 @@ default = ["indexer"]
 # oracle - sqlite's only consumers. Slim builds (phones, small boxes)
 # disable it and the whole bundled-sqlite C build drops out of the
 # binary. Queue/history are JSON and unaffected.
-indexer = ["dep:rusqlite"]
+indexer = ["nzbkit-base/indexer", "dep:rusqlite"]
 # Off by default: the receive path this replaces is the one every
 # platform shares, and kTLS only exists on Linux.
-ktls = ["dep:ktls"]
-# Build-gate for the elapsed-time [[test]] target at the bottom of this
-# file (TODO 116b). EMPTY on purpose - it compiles no code in or out;
-# its only effect is whether cargo builds the targets that name it in
-# required-features. Per-push CI does not pass it, so those targets stop
-# paying link time and disk there; nightly.yml (their home) passes
-# `--features heavy-tests` where it runs them.
-heavy-tests = []
+# `nntp` is base, so the optional dependency is declared THERE and this is
+# a pure forward. ci-private's `ktls-check` job still says
+# `-p nzbkit --features ktls` and still reaches the code.
+ktls = ["nzbkit-base/ktls"]
+# Build-gate for the [[test]] targets at the bottom of this file
+# (TODO 116b): the two elapsed-time suites and, since 1 Sep 2026, the
+# three hand-run allocator rigs. EMPTY on purpose - it compiles no code
+# in or out; its only effect is whether cargo builds the targets that
+# name it in required-features. Per-push CI does not pass it, so those
+# targets stop paying link time and disk there; nightly.yml passes
+# `--features heavy-tests` where it runs the suites (the rigs are all
+# `#[ignore]`d and run by hand only).
+# Forwards to base as well: `par2gen_large_set` came down with `par2gen`,
+# and CLAUDE.md's clippy gate passes `--features nzbkit/heavy-tests`.
+heavy-tests = ["nzbkit-base/heavy-tests"]
+# Forwards the layer below's test seam so a crate ABOVE this facade can
+# reach it. `nzbkit-base/test-support` is what compiles
+# `par2repair::adopt::disabled_for_screen`'s env read - the deterministic
+# repeating-payload screen - into a build, and the `nzbfast` test binaries
+# spawn the `nzbfast` BINARY, which resolves its nzbkit through the
+# package's own dependency graph rather than through this crate's
+# dev-dependencies. So `nzbfast` turns it on with a DEV dependency of its
+# own and `cargo build -p nzbfast` still never sees it.
+test-support = ["nzbkit-base/test-support"]
 
 [dev-dependencies]
+# The layer below with ITS test seam on: `journal`'s tests take
+# `renameclaim::never_renames_over_a_neighbour`, and a `cfg(test)` item is
+# invisible from another crate whatever its visibility. Through a DEV
+# dependency, so `cargo build -p nzbkit` never sees it - the same
+# arrangement nzbfast-core's and nzbfast-unpack's `test-support` use.
+nzbkit-base = { path = "../nzbkit-base", default-features = false, features = ["test-support"] }
 # `hooks` is what gives the compact-abort test `progress_handler`, the
 # only way to fire an interrupt from inside the rewrite's own VM loop
 # rather than betting on a timer. It is a code gate (`hooks = []`
@@ -190,6 +235,33 @@ sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256
 # auto-advances past CONNECT_TIMEOUT instead of sleeping 20 s for real).
 tokio = { version = "1", features = ["test-util"] }
 
+# Two examples reach `nzbkit::index`, which is `indexer`-gated in
+# `src/lib.rs`, and an example is a TARGET: `--all-targets` builds it in
+# every configuration, so without this gate the slim line
+# (`cargo check -p nzbkit --no-default-features --all-targets`, the
+# configuration every phone build starts from) was red from the day the
+# examples landed until 3 Sep 2026. `required-features` is the one tool
+# for a target; the five integration-test MODULES with the same need
+# carry `#[cfg(feature = "indexer")]` on their `mod` lines instead
+# (tests/integration/main.rs says why). Never widen the production cfg
+# to satisfy either.
+[[example]]
+name = "indexscan_bench"
+required-features = ["indexer"]
+
+[[example]]
+name = "sidecar_fold_walk"
+required-features = ["indexer"]
+
+# Landed 3 Sep 2026 (bf6d69922) WITHOUT this gate, which took slim-check
+# leg 2 red on main until it was found by chip 13 running the acceptance
+# suite. `index_open_bench` names `nzbkit::index`, which does not exist
+# under `--no-default-features`, and the slim job builds `--all-targets`
+# precisely so an example cannot hide a mistake behind a plain check.
+[[example]]
+name = "index_open_bench"
+required-features = ["indexer"]
+
 # conn_tuner races a throttled mock over a connection ladder - an
 # elapsed-time suite whose home is nightly.yml, not the push path. The
 # `required-features` gate (TODO 116b) is what keeps per-push CI from
@@ -204,12 +276,31 @@ tokio = { version = "1", features = ["test-util"] }
 name = "conn_tuner"
 required-features = ["heavy-tests"]
 
-# par2gen at scale - tens of megabytes of generated fixture and seconds
-# of Reed-Solomon per case, and nightly builds DEBUG, where this crate's
-# GF(2^16) fold is ~40x slower than release. Same `required-features`
-# gate and the same reason: per-push CI must not BUILD it. Its own header
-# prices every fixture. Run locally with:
-#   cargo test --release -p nzbkit --test par2gen_large_set --features heavy-tests
+# `par2gen_large_set` was here until the nzbkit-base cut and is now
+# `crates/nzbkit-base`'s: `par2`, `par2gen` and `par2repair` are all base,
+# so the suite went down with the code it exercises. Same
+# `required-features` gate there.
+
+# The three hand-run allocator rigs. Every test in them is `#[ignore]`d
+# and NO CI job runs `--run-ignored` against them, so before this gate
+# each was pure link cost on every push - a full 12-16 MB nzbkit-graph
+# link, twice (Linux + Windows legs), for zero tests run. Same
+# `required-features` gate as above; the per-push clippy gate passes
+# `--features nzbkit/heavy-tests --all-targets`, so they are still
+# type-checked and linted on every push - clippy does not link. They
+# cannot fold into `integration` instead: each installs a
+# `#[global_allocator]` counting wrapper, which would sit under every
+# integration test. Audit and measurements:
+# research/TEST-BINARY-FOLD-AUDIT-2026-09-01.md. Each file's own header
+# carries its run line (now with `--features heavy-tests`).
 [[test]]
-name = "par2gen_large_set"
+name = "delivery_cost"
+required-features = ["heavy-tests"]
+
+[[test]]
+name = "lzma_dict_window_rss"
+required-features = ["heavy-tests"]
+
+[[test]]
+name = "nested_container_buffer_rss"
 required-features = ["heavy-tests"]

@@ -108,7 +108,29 @@ def insert(lang, en, check_only):
     print(f'{lang}: ported')
 
 
+KNOWN_FLAGS = {'--check'}
+
+
+def unrecognised_argv(argv):
+    """First flag-shaped arg outside the known set, or None. A bare locale
+    code (e.g. `fr`) is a positional target and never flag-shaped."""
+    for a in argv:
+        if a.startswith('-') and a not in KNOWN_FLAGS:
+            return a
+    return None
+
+
 def main():
+    bad_arg = unrecognised_argv(sys.argv[1:])
+    if bad_arg is not None:
+        print(
+            f"port.py: unrecognised argument {bad_arg!r} - known flags are "
+            "--check, a locale code, or no args to port all locales. A "
+            "stale checkout may be missing a flag this script now supports "
+            "- merge origin/main.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     check_only = '--check' in sys.argv
     en = blocks(os.path.join(HERE, 'en.html'))
     langs = [a for a in sys.argv[1:] if not a.startswith('-')] or LANGS

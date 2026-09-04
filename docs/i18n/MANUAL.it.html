@@ -96,6 +96,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>Manuale utente</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -769,6 +770,29 @@ incorporano per te; per coniarlo (<code>/m3u</code>) serve la chiave. Il semplic
 servizio dei byte di un download già attivo resta aperto, e le installazioni senza
 chiave si comportano come prima.</div>
 
+<p><b>Controllare una cartella molto dopo.</b> Ogni download dimostra un checksum
+per ciascun file che scarica, e i file <code>.par2</code> che portavano quei
+checksum vengono ripuliti a fine lavoro: mesi dopo, di norma, non resta nulla con
+cui confrontare la cartella. nzbfast li conserva invece in un piccolo file nascosto
+<code>.nzbfast.manifest</code> accanto ai dati. In Impostazioni → Download →
+<b>Controllare i download in seguito</b> gli indichi una cartella completata: legge
+ogni file, segnala ciò che non corrisponde più e propone di ripararlo. Riparare è un
+secondo clic, separato, e scarica solo la parte danneggiata - tutto ciò che è ancora
+integro viene letto direttamente dal tuo disco. La spunta nella stessa scheda
+disattiva il file di controllo se preferisci non averlo, e
+<code>nzbfast verify</code> da riga di comando lo legge a sua volta.</p>
+
+<p>La stessa scheda <b>Controllare i download in seguito</b> può anche
+attivarsi da sola a intervalli regolari: l'interruttore <b>Controllare le
+cartelle completate a intervalli regolari</b>, disattivato finché non lo
+attivi, passa allora in rassegna le cartelle completate che hanno un file di
+controllo e avvia una riparazione per tutto ciò che non corrisponde più,
+senza che nessuno clicchi. Non parte mai mentre un download è in corso o in
+attesa, e poiché controllare significa leggere ogni file di una cartella da
+cima a fondo, questo costa al disco anche quando non c'è nulla di rotto. I
+limiti accanto all'interruttore stabiliscono quante riparazioni e quanto
+download può avviare un controllo.</p>
+
 <h2 id="servers">8 · Server Usenet</h2>
 <p>Impostazioni → <b>Server Usenet</b> è l'editor completo: aggiungere, modificare, rimuovere, riordinare e far
 entrare o uscire dal pool qualsiasi server. Ogni server ha:</p>
@@ -878,6 +902,20 @@ e verifica comunque il checksum proprio di ogni articolo. <i>Ridotto</i> salta a
 quei checksum degli articoli quando PAR2 copre un file: il danno emerge un attimo dopo,
 al suo blocco. In tutti e tre la passata finale e ogni riparazione usano MD5 completo, e
 uno scaricamento senza file PAR2 mantiene i checksum degli articoli.</p>
+<p><b>Controllo finale rapido</b> <span class="pill live">live</span> cambia il
+controllo che rilegge dal disco i tuoi file completati: la passata finale alla fine di uno
+scaricamento e <code>nzbfast verify</code> da riga di comando, dove <code>--fast</code> è
+la stessa scelta. Di norma ogni file è provato da un'impronta sull'intero file, ed è una
+sola lettura su un solo core per quanti core abbia la macchina. Con questa opzione ogni
+file è provato dalle somme di controllo per blocco del set PAR2, e quelle girano su tutti i
+core insieme. Molto più veloce su un disco locale rapido, e di poco valore su una cartella
+di rete o un disco a piatti, dove il disco è già il limite. È spenta finché non la chiedi,
+ed ecco a cosa acconsenti quando lo fai: un set PAR2 può portare due registrazioni che
+descrivono file diversi, e par2cmdline e gli altri strumenti chiamano danneggiato un set
+simile dove nzbfast lo chiama allora integro. Nessun set costruito da software normale ha
+quella forma, un controllo dei primi 16 KiB rifiuta ancora ogni versione accidentale di
+essa, e una riparazione si prova alla vecchia maniera qualunque cosa dica questa
+impostazione.</p>
 <h3>Disco e quota <span class="pill live">live</span></h3>
 <p><b>Spazio libero minimo</b> (sotto la soglia i nuovi job vanno in pausa; 2 GB per impostazione predefinita, 0 lo disattiva),
 <b>quota di download</b> per giorno o mese (UTC; i job Forza la ignorano),
@@ -1053,7 +1091,7 @@ per gli account indexer che hai aggiunto, e la watchlist lavora su quegli accoun
 <tr><td>Server relay, Canali relay</td><td>La rete IRC che porta gli annunci (host o host:porta) e i canali da ascoltare, separati da virgole. Una modifica ha effetto alla connessione successiva: spegni e riaccendi il feed per applicarla subito.</td></tr>
 <tr><td>Assegna il nome per correlazione</td><td>I relay pubblici dal vivo non portano nomi di file, quindi la maggior parte dei post offuscati non si può ricondurre direttamente. Quello che un annuncio fissa è quando una release è comparsa e quanto è grande. Questo confronta ora e dimensione annunciate con i post senza nome e, quando combaciano, propone il nome vero in Sfoglia. Un suggerimento è segnalato come tale, richiede il tuo clic e non rinomina mai file su disco.</td></tr>
 <tr><td>Applica automaticamente le corrispondenze forti</td><td>Spento per impostazione predefinita, e severo quando è acceso: la dimensione deve combaciare strettamente, nessun altro annuncio deve adattarsi quasi altrettanto bene, e l'annuncio deve riscegliere questo post nella verifica inversa. Un nome applicato cambia solo come la release viene mostrata, è marcato come dedotto e si ritira da solo se un download concluso lo smentisce. Tutto ciò che è più debole resta un suggerimento.</td></tr>
-<tr><td>Storico degli annunci</td><td>Il feed dal vivo sente solo gli annunci successivi all'accensione. Questo recupera circa sei mesi di annunci passati da un database pre pubblico, con garbo e una volta sola, così anche i post già indicizzati possono essere ricondotti. Gira in background per una mezz'ora circa.</td></tr>
+<tr><td>Storico degli annunci</td><td>Il feed dal vivo sente solo gli annunci successivi all'accensione. Questo recupera una sola volta gli annunci passati più recenti da predb.net, un database pre pubblico, così anche i post già indicizzati possono essere ricondotti. predb.net chiede di non costruirci sopra un proprio database, quindi vengono prese solo le due pagine più recenti di ogni sezione, al massimo 10 richieste al minuto. Gira in background per qualche minuto.</td></tr>
 </table></div>
 
 <h3>Libreria, Sicurezza, Interfaccia</h3>
@@ -1136,6 +1174,19 @@ Uno script può lasciare un helper in esecuzione in background quando esce e
 nzbfast non lo ucciderà, ma nzbfast smette di leggere l'output dello script
 nel momento in cui lo script stesso finisce: dai a un helper in background una sua
 redirezione dell'output, o verrà fermato la prima volta che prova a stampare.</p>
+<p>Gli script, e gli strumenti esterni facoltativi <code>unrar</code> e
+<code>par2</code>, vengono eseguiti dentro un confinamento dove la macchina ne
+offre uno: <code>sandbox-exec</code> su macOS, <code>bwrap</code> su Linux. Uno
+script confinato mantiene pieno accesso in lettura e pieno accesso alla rete,
+quindi i notificatori e gli strumenti per la libreria non sono toccati; può
+scrivere soltanto nelle cartelle che nzbfast già usa (la cartella dei download,
+qualsiasi destinazione di spostamento, la cartella sorvegliata e la cartella
+temporanea di sistema). Disattiva <b>Limita dove gli script possono scrivere</b>
+in Impostazioni &rarr; Cartelle se uno script deve scrivere altrove e fallisce
+con "operation not permitted". Dove non è disponibile alcun confinamento tutto
+gira esattamente come ha sempre fatto - un download non fallisce mai per questo -
+e la riga sotto quell'interruttore dice quale meccanismo è in vigore. Windows
+non ne ha ancora uno.</p>
 <h3>Script pre-coda</h3>
 <p>Un secondo hook gira <em>prima</em> che un download entri in coda
 (Impostazioni → Cartelle → Script pre-coda), con il contratto pre-queue di SABnzbd:
@@ -1492,7 +1543,7 @@ su di essa.</div>
 <tr><td><code>nzbfast serve</code></td><td>Esegue il daemon (dashboard + API + automazione). <code>--open</code> apre il browser; <code>--apikey</code> imposta la chiave a mano (<a href="#firstrun-key">§2</a>); <code>--bind</code> sceglie l'indirizzo di ascolto, predefinito <code>0.0.0.0</code> (ogni interfaccia), <code>127.0.0.1</code> solo per questa macchina. Vedi <code>--help</code> per l'elenco completo dei flag - ogni impostazione della dashboard ha il suo gemello flag.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Scarica un NZB, pipeline completa, senza daemon. <code>--preflight</code> interrompe subito se il post non può completarsi; <code>--password</code> per i set cifrati.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Verdetto di disponibilità - COMPLETE / REPAIRABLE / IMPOSSIBLE - senza scaricare il payload.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Verifica i file contro il set PAR2 in una directory.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Verifica i file contro il set PAR2 in una directory. Ripiega sul manifest di settle quando i file PAR2 non ci sono più. Esce con 0 quando i file risultano integri e con 1 quando trova danni; una directory senza nulla da controllare esce comunque con 0 e lo dichiara sull'uscita di errore. <code>--fast</code> prova ogni file con le somme di controllo per blocco del set invece che con la sua impronta sull'intero file, il che è molto più veloce su un disco rapido e porta con sé il compromesso descritto al <a href="#settings">§9</a>.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>Il benchmark di sistema + il report di diversità, nel terminale.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Scansiona gruppi nell'indice / lo interroga, senza daemon.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Importa i server da un ini di SABnzbd.</td></tr>

@@ -1,0 +1,42 @@
+# C9: a launcher stub in front of the archive.
+
+[layout]
+name = "c9-leading-bytes-sfx-stub"
+seed = 109
+note = """
+A self-extractor: 4 KiB of program, then the archive. The file is named
+`.exe` and opens with a structurally valid PE header, because both
+halves are what the client actually reads - `nzbkit::sfx` gates the
+scan on the extension AND on the file BEGINNING with a program (M4-101:
+a data file that merely contains an archive must be delivered whole,
+not carved), and it walks e_lfanew rather than trusting the `MZ`.
+
+So the row is the signature scan: the archive is not at offset 0, its
+own name says nothing about where it is, and the client has to find it.
+The stub is zeros behind its header, which is also load-bearing - a
+stub carrying a second RAR signature would be found first, and the row
+would be measuring the decoy instead of the payload.
+
+Single volume, and the split set is refused by name - but not for the
+reason this note gave until 4 Sep 2026. There is no carved remainder to
+pair: the one-pass router starts the volume mapper at the stub's offset
+and copies nothing. A split set completes. It is refused because the
+row could not PROVE anything - measured, it completes with the first
+volume renamed `.rar` too, so nothing about it would depend on the stub
+being found. This row does not have that hole: the same control fails
+it, because a lone stubbed `.rar` is never opened at all. See
+research/POSTFAST-SFX-SPLIT-END-STATE-2026-09-04.md.
+"""
+
+[source]
+files = [{ name = "selfextract.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+leading_bytes = 4096
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

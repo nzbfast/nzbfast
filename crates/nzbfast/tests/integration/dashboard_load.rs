@@ -403,7 +403,7 @@ fn five_tabs_cannot_starve_the_pool() {
     // WARM `/` FIRST, and this is not a convenience - without it the
     // first sample below measures something that is not contention at
     // all. `/` is served out of a per-process cache (`SHELL_CACHE` in
-    // serve/webasset.rs), so the first request for it pays a one-time
+    // webasset.rs), so the first request for it pays a one-time
     // build - the substitutions over 1.4 MB of HTML, an FNV over the
     // result and a level-6 deflate of that - and every request after it
     // is a cache hit. That build is a fixed process-lifetime constant.

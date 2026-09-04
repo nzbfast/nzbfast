@@ -164,6 +164,10 @@ pub(super) struct CryptoState {
     pub(super) out_name: String,
     pub(super) events: CryptoEventSink,
     pub(super) st: Mutex<CryptoSt>,
+    /// Signalled whenever an in-flight body (see `CryptoSt::inflight`)
+    /// commits or abandons; `patch` waits on it so a repair never
+    /// rewrites a range whose first decrypt is still off the lock.
+    settled: Condvar,
 }
 
 #[derive(Default)]
@@ -184,6 +188,53 @@ pub(super) struct CryptoSt {
     /// the last block byte-exactly.
     pub(super) tail_pad: Vec<u8>,
     pub(super) tail_done: bool,
+    /// Cipher ranges an `ingest` has PLANNED but not yet committed: the
+    /// AES and the pwrite of an article's body run off this lock (RAR
+    /// perf audit 2 Sep 2026 item 3), and until the run lands here the
+    /// range is invisible to every reader - not arrived, exactly as it
+    /// was while the whole ingest sat inside the lock - and a second
+    /// arrival for the same bytes clips to what is left. Disjoint from
+    /// each other and from `runs`.
+    pub(super) inflight: Vec<(u64, u64)>,
+}
+
+/// One decryptable body an `ingest` planned under the lock: decrypt
+/// `full` bytes of the caller's buffer at cipher offset `at`, chained
+/// from `chain`. Everything the lock had to decide; nothing the AES
+/// needs it for.
+struct Body {
+    chain: [u8; 16],
+    at: u64,
+    full: usize,
+}
+
+/// What a body's decrypt + write established, for the commit: `n`
+/// plaintext bytes at `at` are on disk, hashed to `crc` when the CRC
+/// runs are kept, and `pad` is the final block's beyond-`unp` plaintext
+/// when the body reached the end of the stream.
+struct Landed {
+    at: u64,
+    n: usize,
+    crc: Option<u32>,
+    pad: Option<Vec<u8>>,
+}
+
+/// A novel range's plan: the run it becomes (slivers already copied out
+/// of the cipher, so the body can be decrypted in place afterwards) and
+/// the body still to decrypt, if its bytes allowed one.
+struct FreshPlan {
+    start: u64,
+    body: Option<Body>,
+    run: CryptoRun,
+}
+
+thread_local! {
+    /// Per-thread scratch for [`CryptoState::ingest`]: the article's
+    /// cipher is copied here once and decrypted IN PLACE, so the per-
+    /// article cost is one memcpy into warm pages rather than a fresh
+    /// zero-filled `Vec` per span. Taken out and put back rather than
+    /// borrowed, so a re-entrant call simply allocates its own.
+    static INGEST_SCRATCH: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
 }
 
 /// One contiguous ciphertext run. Plaintext has been written for
@@ -232,28 +283,20 @@ impl CryptoState {
             out_name,
             events,
             st: Mutex::new(CryptoSt::default()),
+            settled: Condvar::new(),
         }
     }
 
-    /// Decrypt the full blocks of `cipher` (absolute cipher offset `at`,
-    /// 16-aligned), chained from `chain` (= cipher block [at-16, at), or
-    /// the IV at offset 0). Writes the plaintext (clipped to unp; final-
-    /// block padding goes to tail_pad), extends the CRC runs, captures
-    /// checkpoints. Returns the decrypted byte count (a multiple of 16)
-    /// - the caller keeps the partial remainder as tail cipher.
-    pub(super) fn advance(
-        &self,
-        st: &mut CryptoSt,
-        w: &FileWriter,
-        chain: [u8; 16],
-        at: u64,
-        cipher: &[u8],
-        overwrite_crc: bool,
-    ) -> io::Result<u64> {
+    /// The under-the-lock half of a decrypt: journal the chain anchor
+    /// for this decrypt boundary and capture the stride checkpoints from
+    /// the CIPHERTEXT (before an in-place decrypt destroys it). Returns
+    /// the decryptable byte count of `cipher` (a multiple of 16; 0 when
+    /// there is nothing to do, and then nothing was journaled).
+    fn plan_advance(&self, st: &mut CryptoSt, chain: [u8; 16], at: u64, cipher: &[u8]) -> usize {
         debug_assert_eq!(at % 16, 0);
         let full = cipher.len() - cipher.len() % 16;
         if full == 0 {
-            return Ok(0);
+            return 0;
         }
         // Journal a chain anchor for THIS decrypt boundary: every
         // decrypted region then begins at a journaled K, which is what
@@ -283,13 +326,22 @@ impl CryptoState {
             });
             c += CRYPTO_CHUNK;
         }
-        let mut buf = cipher[..full].to_vec();
-        rarcrypt::CbcStream::new(&self.key, &chain).decrypt(&mut buf);
+        full
+    }
+
+    /// The off-the-lock half: decrypt `buf` (the body's `full` cipher
+    /// bytes) IN PLACE and write the plaintext, clipped to `unp`. Reads
+    /// only immutable state, so any number of threads run it for one
+    /// file at once; the caller commits what it returns under the lock.
+    fn decrypt_write(&self, w: &FileWriter, body: &Body, buf: &mut [u8]) -> io::Result<Landed> {
+        debug_assert_eq!(buf.len(), body.full);
+        let at = body.at;
+        rarcrypt::CbcStream::new(&self.key, &body.chain).decrypt(buf);
         // Clip the on-disk write (and the CRC) to the plaintext length;
         // the padding beyond unp only ever lives in tail_pad.
-        let plain_end = (at + full as u64).min(self.unp);
-        if plain_end > at {
-            let n = (plain_end - at) as usize;
+        let plain_end = (at + body.full as u64).min(self.unp);
+        let n = plain_end.saturating_sub(at) as usize;
+        if n > 0 {
             // NEVER `write_article_at` here, and not by oversight. This
             // is an IN-PLACE TRANSFORM: the range being written already
             // holds this file's CIPHERTEXT, which the article-delivery
@@ -299,28 +351,144 @@ impl CryptoState {
             // of the repair path, which patches rebuilt blocks over the
             // damaged ones; both keep the plain door on purpose.
             w.write_at(at, &buf[..n])?;
-            if self.track_plain {
-                if overwrite_crc {
-                    st.plain.overwrite(at, &buf[..n]);
-                } else {
-                    st.plain.add(at, &buf[..n]);
-                }
+        }
+        // The CRC is per-byte work too, so it is hashed here and only
+        // FILED under the lock.
+        let crc = (self.track_plain && n > 0).then(|| crc32fast::hash(&buf[..n]));
+        let pad = (at + body.full as u64 == self.cipher_len)
+            .then(|| buf[(self.unp - at) as usize..].to_vec());
+        Ok(Landed { at, n, crc, pad })
+    }
+
+    /// File what [`Self::decrypt_write`] landed: extend (or, for a
+    /// repair, overwrite) the CRC runs and capture the tail padding.
+    /// `plain` is the landed plaintext, still in the caller's buffer.
+    fn commit_landed(&self, st: &mut CryptoSt, landed: &Landed, plain: &[u8], overwrite_crc: bool) {
+        debug_assert_eq!(plain.len(), landed.n);
+        if self.track_plain && landed.n > 0 {
+            if overwrite_crc {
+                st.plain.overwrite(landed.at, plain);
+            } else if !landed
+                .crc
+                .is_some_and(|crc| st.plain.add_run(landed.at, landed.n as u64, crc))
+            {
+                // A run already touches this range (only a re-feed of
+                // bytes a seam decrypted could): clip and hash the rest.
+                st.plain.add(landed.at, plain);
             }
         }
-        if at + full as u64 == self.cipher_len {
-            st.tail_pad = buf[(self.unp - at) as usize..].to_vec();
+        if let Some(pad) = &landed.pad {
+            st.tail_pad = pad.clone();
             st.tail_done = true;
             self.events.lock_ok().push(CryptoJournalEvent::TailPad {
                 name: self.out_name.clone(),
                 pad: st.tail_pad.clone(),
             });
         }
+    }
+
+    /// Decrypt the full blocks of `cipher` (absolute cipher offset `at`,
+    /// 16-aligned), chained from `chain` (= cipher block [at-16, at), or
+    /// the IV at offset 0), entirely under the lock: the seam path
+    /// (`merge_at`, a few bytes) and the repair path (`patch_locked`,
+    /// cold). Writes the plaintext (clipped to unp; final-block padding
+    /// goes to tail_pad), extends the CRC runs, captures checkpoints.
+    /// Returns the decrypted byte count (a multiple of 16) - the caller
+    /// keeps the partial remainder as tail cipher. An article body takes
+    /// the split route in [`Self::ingest_in_place`] instead.
+    pub(super) fn advance(
+        &self,
+        st: &mut CryptoSt,
+        w: &FileWriter,
+        chain: [u8; 16],
+        at: u64,
+        cipher: &[u8],
+        overwrite_crc: bool,
+    ) -> io::Result<u64> {
+        let full = self.plan_advance(st, chain, at, cipher);
+        if full == 0 {
+            return Ok(0);
+        }
+        let body = Body { chain, at, full };
+        let mut buf = cipher[..full].to_vec();
+        let landed = self.decrypt_write(w, &body, &mut buf)?;
+        self.commit_landed(st, &landed, &buf[..landed.n], overwrite_crc);
         Ok(full as u64)
     }
 
-    /// Build a standalone run for novel cipher `[at, at+cipher.len())`,
-    /// decrypting whatever its own bytes allow. Neighbor seams are the
+    /// Plan a standalone run for novel cipher `[at, at+cipher.len())`:
+    /// which of its bytes decrypt from its own bytes, chained from what,
+    /// and the run they become. The slivers are copied out here, so the
+    /// body may be decrypted in place afterwards. Neighbor seams are the
     /// caller's job (`merge_at`).
+    fn plan_fresh(&self, st: &mut CryptoSt, at: u64, cipher: &[u8]) -> FreshPlan {
+        let end = at + cipher.len() as u64;
+        let head_only = |p: u64, head: Vec<u8>| FreshPlan {
+            start: at,
+            body: None,
+            run: CryptoRun {
+                end,
+                p_lo: p,
+                p_hi: p,
+                head,
+                tail: Vec::new(),
+            },
+        };
+        if at == 0 {
+            let full = self.plan_advance(st, self.iv, 0, cipher);
+            if full == 0 {
+                return head_only(0, cipher.to_vec());
+            }
+            return FreshPlan {
+                start: at,
+                body: Some(Body {
+                    chain: self.iv,
+                    at: 0,
+                    full,
+                }),
+                run: CryptoRun {
+                    end,
+                    p_lo: 0,
+                    p_hi: full as u64,
+                    head: Vec::new(),
+                    tail: cipher[full - 16..].to_vec(),
+                },
+            };
+        }
+        // First decryptable block needs its full predecessor block, so
+        // it starts one block past the first aligned boundary in-range.
+        let p_lo = at.next_multiple_of(16) + 16;
+        let decryptable = end.min(self.cipher_len).saturating_sub(p_lo);
+        if decryptable < 16 {
+            return head_only(at, cipher.to_vec());
+        }
+        let off = (p_lo - at) as usize;
+        let chain: [u8; 16] = cipher[off - 16..off].try_into().unwrap();
+        let full = self.plan_advance(st, chain, p_lo, &cipher[off..]);
+        if full == 0 {
+            return head_only(at, cipher.to_vec());
+        }
+        FreshPlan {
+            start: at,
+            body: Some(Body {
+                chain,
+                at: p_lo,
+                full,
+            }),
+            run: CryptoRun {
+                end,
+                p_lo,
+                p_hi: p_lo + full as u64,
+                head: cipher[..off].to_vec(),
+                tail: cipher[off + full - 16..].to_vec(),
+            },
+        }
+    }
+
+    /// Build a standalone run for novel cipher `[at, at+cipher.len())`,
+    /// decrypting whatever its own bytes allow - the all-under-the-lock
+    /// form of [`Self::plan_fresh`], for `merge_at`'s rebuild of two
+    /// undecrypted slivers. Neighbor seams are the caller's job.
     pub(super) fn fresh_run(
         &self,
         st: &mut CryptoSt,
@@ -328,61 +496,14 @@ impl CryptoState {
         at: u64,
         cipher: &[u8],
     ) -> io::Result<CryptoRun> {
-        let end = at + cipher.len() as u64;
-        if at == 0 {
-            let done = self.advance(st, w, self.iv, 0, cipher, false)?;
-            return Ok(if done == 0 {
-                CryptoRun {
-                    end,
-                    p_lo: 0,
-                    p_hi: 0,
-                    head: cipher.to_vec(),
-                    tail: Vec::new(),
-                }
-            } else {
-                CryptoRun {
-                    end,
-                    p_lo: 0,
-                    p_hi: done,
-                    head: Vec::new(),
-                    tail: cipher[(done - 16) as usize..].to_vec(),
-                }
-            });
+        let plan = self.plan_fresh(st, at, cipher);
+        if let Some(body) = &plan.body {
+            let off = (body.at - at) as usize;
+            let mut buf = cipher[off..off + body.full].to_vec();
+            let landed = self.decrypt_write(w, body, &mut buf)?;
+            self.commit_landed(st, &landed, &buf[..landed.n], false);
         }
-        // First decryptable block needs its full predecessor block, so
-        // it starts one block past the first aligned boundary in-range.
-        let p_lo = at.next_multiple_of(16) + 16;
-        let decryptable = end.min(self.cipher_len).saturating_sub(p_lo);
-        if decryptable < 16 {
-            return Ok(CryptoRun {
-                end,
-                p_lo: at,
-                p_hi: at,
-                head: cipher.to_vec(),
-                tail: Vec::new(),
-            });
-        }
-        let chain: [u8; 16] = cipher[(p_lo - 16 - at) as usize..(p_lo - at) as usize]
-            .try_into()
-            .unwrap();
-        let done = self.advance(st, w, chain, p_lo, &cipher[(p_lo - at) as usize..], false)?;
-        Ok(if done == 0 {
-            CryptoRun {
-                end,
-                p_lo: at,
-                p_hi: at,
-                head: cipher.to_vec(),
-                tail: Vec::new(),
-            }
-        } else {
-            CryptoRun {
-                end,
-                p_lo,
-                p_hi: p_lo + done,
-                head: cipher[..(p_lo - at) as usize].to_vec(),
-                tail: cipher[(p_lo + done - 16 - at) as usize..].to_vec(),
-            }
-        })
+        Ok(plan.run)
     }
 
     /// Merge the run ending at `mid` with the run starting at `mid`,
@@ -517,12 +638,109 @@ impl CryptoState {
     /// Ingest posted cipher for `[at, at+data.len())` - the in-stream
     /// write path. Duplicate/overlapping re-feeds clip to novel
     /// sub-ranges (posted bytes for a range never change outside repair,
-    /// which goes through `patch`).
+    /// which goes through `patch`). The bytes are copied into a
+    /// per-thread scratch and handed to [`Self::ingest_in_place`]; a
+    /// caller that owns its buffer should call that directly.
     pub(super) fn ingest(&self, w: &FileWriter, at: u64, data: &[u8]) -> io::Result<()> {
+        let mut buf = INGEST_SCRATCH.take();
+        buf.clear();
+        buf.extend_from_slice(data);
+        let r = self.ingest_in_place(w, at, &mut buf);
+        INGEST_SCRATCH.set(buf);
+        r
+    }
+
+    /// [`Self::ingest`] over a buffer the caller lets us DESTROY: each
+    /// novel range's body is decrypted in place and its plaintext written
+    /// from there.
+    ///
+    /// Three phases, and only the first and last hold the per-file lock:
+    /// 1. PLAN (locked): clip to the sub-ranges no run and no in-flight
+    ///    body already owns, decide each one's chain block, decryptable
+    ///    extent and slivers, capture its checkpoints, and mark it
+    ///    in-flight.
+    /// 2. DECRYPT + WRITE (unlocked): the AES and the pwrite, which is
+    ///    all of the per-byte work. N decode threads landing spans of one
+    ///    encrypted member run this side by side; before 2 Sep 2026 they
+    ///    queued behind one core of it (RAR perf audit item 3).
+    /// 3. COMMIT (locked): file the CRC and tail padding, insert the run,
+    ///    resolve the seams to whatever neighbors landed meanwhile
+    ///    (`merge_at`, a few bytes each), release the in-flight mark.
+    ///
+    /// Reordering stays correct because a body's chain block is always
+    /// its OWN range's previous cipher block (or the IV at 0), never a
+    /// neighbor's, so nothing planned in 1 depends on state 2 could
+    /// race; and a range in flight reads as not-yet-arrived to every
+    /// observer, which is exactly what it read as while the whole ingest
+    /// sat inside the lock.
+    pub(super) fn ingest_in_place(
+        &self,
+        w: &FileWriter,
+        at: u64,
+        data: &mut [u8],
+    ) -> io::Result<()> {
+        let end = at + data.len() as u64;
+        let plans: Vec<FreshPlan> = {
+            let mut st = self.st.lock_ok();
+            let st = &mut *st;
+            let novel = Self::novel_ranges(st, at, end);
+            let mut plans = Vec::with_capacity(novel.len());
+            for (s, e) in novel {
+                let plan = self.plan_fresh(st, s, &data[(s - at) as usize..(e - at) as usize]);
+                st.inflight.push((s, e));
+                plans.push(plan);
+            }
+            plans
+        };
+        if plans.is_empty() {
+            return Ok(());
+        }
+        // Off the lock.
+        let mut landed: Vec<Option<Landed>> = Vec::with_capacity(plans.len());
+        let mut failed: Option<io::Error> = None;
+        for p in &plans {
+            match &p.body {
+                Some(body) => {
+                    let off = (body.at - at) as usize;
+                    match self.decrypt_write(w, body, &mut data[off..off + body.full]) {
+                        Ok(l) => landed.push(Some(l)),
+                        Err(e) => {
+                            failed = Some(e);
+                            break;
+                        }
+                    }
+                }
+                None => landed.push(None),
+            }
+        }
         let mut st = self.st.lock_ok();
         let st = &mut *st;
-        let end = at + data.len() as u64;
-        // Novel sub-ranges vs existing runs.
+        // The marks come off whatever happened, in the same lock hold
+        // that inserts the runs, so no observer sees a range that is
+        // neither in flight nor landed.
+        st.inflight
+            .retain(|&(s, _)| !plans.iter().any(|p| p.start == s));
+        self.settled.notify_all();
+        if let Some(e) = failed {
+            // Whatever did land is on disk without a run to claim it; a
+            // re-feed simply does it again. The job is failing anyway.
+            return Err(e);
+        }
+        for (p, l) in plans.into_iter().zip(landed) {
+            if let (Some(l), Some(body)) = (&l, &p.body) {
+                let off = (body.at - at) as usize;
+                self.commit_landed(st, l, &data[off..off + l.n], false);
+            }
+            let (s, e) = (p.start, p.run.end);
+            st.runs.insert(s, p.run);
+            self.merge_at(st, w, s)?;
+            self.merge_at(st, w, e)?;
+        }
+        Ok(())
+    }
+
+    /// The sub-ranges of `[at, end)` no run and no in-flight body owns.
+    fn novel_ranges(st: &CryptoSt, at: u64, end: u64) -> Vec<(u64, u64)> {
         let mut novel: Vec<(u64, u64)> = Vec::new();
         let mut cur = at;
         for (&s, r) in st.runs.range(..end) {
@@ -541,13 +759,24 @@ impl CryptoState {
         if cur < end {
             novel.push((cur, end));
         }
-        for (s, e) in novel {
-            let run = self.fresh_run(st, w, s, &data[(s - at) as usize..(e - at) as usize])?;
-            st.runs.insert(s, run);
-            self.merge_at(st, w, s)?;
-            self.merge_at(st, w, e)?;
+        // Subtract the in-flight bodies (few, unsorted).
+        for &(fs, fe) in &st.inflight {
+            let mut out = Vec::with_capacity(novel.len() + 1);
+            for (s, e) in novel {
+                if fe <= s || fs >= e {
+                    out.push((s, e));
+                    continue;
+                }
+                if s < fs {
+                    out.push((s, fs));
+                }
+                if fe < e {
+                    out.push((fe, e));
+                }
+            }
+            novel = out;
         }
-        Ok(())
+        novel
     }
 
     /// Whether the PLAINTEXT for cipher range `[at, at+len)` is fully on
@@ -660,8 +889,26 @@ impl CryptoState {
     /// the CRC runs (the stale-CRC-across-repair problem CrcRuns solves
     /// for the outer volumes).
     pub(super) fn patch(&self, w: &FileWriter, at: u64, data: &[u8]) -> io::Result<()> {
+        let end = at + data.len() as u64;
         let holes = {
             let mut st = self.st.lock_ok();
+            // A body still decrypting off the lock owns its range until
+            // it commits: rewriting under it would be undone by its
+            // pwrite. Wait it out (bounded - a body that died with its
+            // thread has released its mark on the way out, but never
+            // wedge a repair on a bug here).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while st.inflight.iter().any(|&(s, e)| s < end && at < e) {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let (g, _) = self
+                    .settled
+                    .wait_timeout(st, deadline - now)
+                    .unwrap_or_else(|e| e.into_inner());
+                st = g;
+            }
             self.patch_locked(&mut st, w, at, data)?
         };
         // Ranges nobody had yet are ordinary posted bytes wherever they

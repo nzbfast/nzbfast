@@ -1,0 +1,65 @@
+# C14 + C13 + C7 + C1: a five-level stored ladder with a sibling file
+# at every level.
+
+[layout]
+name = "nc-x1-five-levels-with-a-sibling-at-each"
+seed = 175
+note = """
+The nested corpus's `x1-depth5-ladder` leg: five stored levels, and a
+sibling file inside every one of them beside the archive below it.
+
+The depth half was already portable - `nc-x2-ten-stored-levels` carries
+it at ten - and the siblings were gap H3. `crate::container` wrote
+exactly one member into each inner level and `read_the_set_back`
+asserted it level by level on purpose, so a companion at any depth had
+no key at all. That difference is not cosmetic: a client that stopped
+denesting the moment a level held something besides an archive would
+pass a sibling-free ladder and fail this leg and x2 both, which is what
+the pass-1 report said and what this row now checks.
+
+`siblings` is the key, and it is per level rather than one list
+repeated down the stack. Every level extracts into the SAME output
+directory, so a repeated list would put one name at five depths and
+four of them would be overwritten - the schema refuses two files that
+would land under one name for that reason. `[container] siblings` is
+therefore the outermost level's alone even under `nested = N`, and a
+ladder is written with an inner table per level, each naming its own.
+
+The sibling goes into its level AFTER the archive below it, so the
+first member of a level is still the archive. A fixture that put the
+sibling first would agree with a client that reads only the first
+member, which is the client this row exists to catch.
+
+The end state is the payload file and all five siblings, flat: an
+archive entry with no directory in its name lands at the top of the
+output tree, and the five levels are spent by the five unpacks.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 20000 }]
+
+[container]
+kind = "rar-stored"
+siblings = [{ name = "level5.txt", bytes = 90 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level4.txt", bytes = 90 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level3.txt", bytes = 90 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level2.txt", bytes = 90 }]
+
+[[container.inner]]
+kind = "rar-stored"
+siblings = [{ name = "level1.txt", bytes = 90 }]
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

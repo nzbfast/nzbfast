@@ -15,7 +15,7 @@
 //! landing it whole would have reddened main.
 //!
 //! They are the SURFACE half. The mechanism has its own unit tests next
-//! to it in `crates/nzbkit/src/disk/relpath.rs`, which is where the
+//! to it in `crates/nzbkit-base/src/disk/relpath.rs`, which is where the
 //! ancestor-symlink hold-out and the three open modes are pinned; these
 //! four assert the same three refusals through the constructors the
 //! download and extraction paths actually call, because the defect was

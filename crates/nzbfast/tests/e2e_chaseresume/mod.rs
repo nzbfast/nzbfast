@@ -56,7 +56,23 @@ async fn forfeited_arm(tag: &str, container: &str, hatch: bool) -> String {
     let cfg = fx.write_config(&[&srv]);
     let nzb = fx.write_nzb();
     let out = fx.dir.join("out");
-    let mut env: Vec<(&str, &str)> = vec![("NZBFAST_NO_7Z_TRIM", "1")];
+    // The two DIRECT MAP hatches ride beside the trim hatch and for the
+    // same reason: a mapped container routes its members straight to
+    // their outputs and never retains a frontier, so there is no chase
+    // to forfeit and no partial to resume from. `NZBFAST_NO_7Z_DIRECT`
+    // covers a Copy 7z (TODO 37 step 4, `nzbkit::extract::sevenz_map`)
+    // and `NZBFAST_NO_ZIP_DIRECT` a stored zip (`nzbkit::extract::zip_map`,
+    // which is why the line "the zip leg always does" that stood here
+    // is gone - since the zip map it does not). Both arms still describe
+    // a real forfeit: every container the maps decline (LZMA2,
+    // encrypted, BCJ2, deflate) reaches it, and a STORED container is
+    // what the fixture builds because a stored container is the one
+    // whose decode keeps up with a paced feed.
+    let mut env: Vec<(&str, &str)> = vec![
+        ("NZBFAST_NO_7Z_TRIM", "1"),
+        ("NZBFAST_NO_7Z_DIRECT", "1"),
+        ("NZBFAST_NO_ZIP_DIRECT", "1"),
+    ];
     if hatch {
         env.push(("NZBFAST_NO_CHASE_RESUME", "1"));
     }

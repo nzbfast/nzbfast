@@ -1,0 +1,52 @@
+# C3 + C12 + C1: a DEFLATED zip, the second format on this plane whose
+# compressed arm is real rather than a label.
+
+[layout]
+name = "c3-compressed-zip"
+seed = 182
+note = """
+The `zip-compressed` arm, graded, for the reason its stored twin is:
+`crate::container` emits it, so something has to prove the client
+actually inflates rather than that the generator wrote a header.
+
+C3 is the storage MODE and C12 is the FORMAT, so this row selects both,
+and it is the third C3 row rather than a replacement for either. The
+three answer different halves. `c3-compressed-single-volume` is a RAR
+writer that really shrank something, which needs `[source] content =
+"compressible"` to be true at all. `c3-compressed-7z` is a decoder the
+client must RUN over bytes that did not shrink. This one is the zip
+half of the second: the method is recorded per ENTRY in both the local
+header and the central directory, and the zip writer does not fall back
+to Stored for an entry it could not shrink - which is the 7z property
+and not the RAR one, where a silently stored entry would make a C3 row
+green with no decompression having happened.
+
+So the archive comes out LARGER than its payload here, and
+`crates/postfast/src/zip.rs` measures that in both directions:
+`deflate_over_incompressible_bytes_still_declares_deflate` asserts the
+size and the declared method, and `the_stored_arm_declares_stored` is
+the control, because without it "compressed is not Stored" would pass
+over a writer that never emitted Stored at all.
+`container::refuse_a_compressed_archive_that_stored` asks the same
+question at generation, per entry rather than per archive, so a writer
+that stored ONE member of several is a partial C3 and is caught.
+
+The end state is both payload files. No recovery set, deliberately, for
+the reason `c3-compressed-7z` gives: this row is about the inflate path
+and a set beside it would put a verify in front of the question.
+"""
+
+[source]
+files = [
+    { name = "movie.bin", bytes = 20000 },
+    { name = "sample/clip.bin", bytes = 4000 },
+]
+
+[container]
+kind = "zip-compressed"
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

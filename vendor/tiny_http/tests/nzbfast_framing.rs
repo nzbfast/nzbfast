@@ -6,6 +6,10 @@
 //! header string parses. The leading-whitespace case in particular passed the
 //! strict header tests the whole time, because the connection parser trimmed
 //! the line before handing it over.
+//!
+//! test-target-gate: the vendored fork's only tests/ target - the only
+//! fold destination is upstream's lib, judged not worth the fork churn
+//! (research/TEST-BINARY-FOLD-AUDIT-2026-09-01.md, the UNCLEAR verdict)
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -840,7 +844,11 @@ fn conflicting_content_lengths_do_not_become_a_second_request() {
         smuggled
     );
     let reply = send_raw_tolerant(&addr, wire.as_bytes());
-    assert!(reply.starts_with("HTTP/1.1 400"), "expected refusal, got: {reply:?}");
+    assert!(
+        reply.starts_with("HTTP/1.1 400"),
+        "expected refusal, got: {:?}",
+        reply
+    );
     assert_eq!(
         reply.matches("HTTP/1.1 ").count(),
         1,
@@ -858,6 +866,7 @@ fn identical_repeated_content_lengths_are_still_served() {
     let reply = send_raw_tolerant(&addr, wire);
     assert!(
         reply.starts_with("HTTP/1.1 200"),
-        "identical repeats must still be served: {reply:?}"
+        "identical repeats must still be served: {:?}",
+        reply
     );
 }

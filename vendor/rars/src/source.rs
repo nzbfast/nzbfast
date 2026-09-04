@@ -6,6 +6,182 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 
+// Consecutive tiny file-backed payloads share one forward window. This turns
+// thousands of positional reads into a few larger reads while leaving normal
+// compressed/STORE ranges untouched. The 8 KiB admission cap avoids read
+// amplification on medium members; 192 KiB was the best cross-shape window
+// with at most about 1.5 MiB retained by the eight-worker pool.
+// (nzbfast-local change, 2 Sep 2026 - re-apply on the next rars re-sync,
+// see vendor/rars/VENDORING.md.)
+#[cfg(any(unix, windows))]
+const READ_AHEAD_WINDOW: usize = 192 * 1024;
+const READ_AHEAD_RANGE_MAX: usize = 8 * 1024;
+
+/// One positional file handle retained by an extraction worker.
+///
+/// `ArchiveSource::File` deliberately stores only a path: keeping one file
+/// open per parsed volume would exhaust descriptor limits on large sets. An
+/// extraction worker, however, normally reads many member ranges from the
+/// same volume in succession. Retaining exactly one handle here removes an
+/// open + seek pair per member while keeping descriptor use bounded by the
+/// worker count rather than the volume count.
+/// (nzbfast-local change, 2 Sep 2026 - re-apply on the next rars re-sync,
+/// see vendor/rars/VENDORING.md.)
+#[derive(Debug, Default)]
+pub(crate) struct RangeReaderCache {
+    #[cfg(any(unix, windows))]
+    file: Option<(Arc<PathBuf>, Arc<File>)>,
+    #[cfg(any(unix, windows))]
+    read_ahead: Option<ReadAheadWindow>,
+}
+
+#[cfg(any(unix, windows))]
+#[derive(Debug)]
+struct ReadAheadWindow {
+    start: u64,
+    valid: usize,
+    eof: bool,
+    data: Arc<Vec<u8>>,
+}
+
+/// A complete small range that can be consumed without copying it through a
+/// temporary `Read` buffer. Memory sources borrow their archive bytes; file
+/// sources keep the read-ahead allocation alive through an `Arc`.
+/// (nzbfast-local change, 3 Sep 2026 - re-apply on the next rars re-sync;
+/// see vendor/rars/VENDORING.md.)
+pub(crate) enum SmallRangeView<'a> {
+    Memory(&'a [u8]),
+    #[cfg(any(unix, windows))]
+    File {
+        data: Arc<Vec<u8>>,
+        range: Range<usize>,
+    },
+}
+
+impl SmallRangeView<'_> {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Memory(data) => data,
+            #[cfg(any(unix, windows))]
+            Self::File { data, range } => &data[range.clone()],
+        }
+    }
+}
+
+impl RangeReaderCache {
+    #[cfg(any(unix, windows))]
+    fn file(&mut self, path: &Arc<PathBuf>) -> Result<Arc<File>> {
+        let reuse = self
+            .file
+            .as_ref()
+            .is_some_and(|(cached, _)| cached.as_ref() == path.as_ref());
+        if !reuse {
+            self.file = Some((Arc::clone(path), Arc::new(File::open(path.as_ref())?)));
+            self.read_ahead = None;
+        }
+        Ok(Arc::clone(
+            &self.file.as_ref().expect("file cache just populated").1,
+        ))
+    }
+
+    /// Drop the retained descriptor before a progress callback promises the
+    /// caller that a volume can be deleted and its disk space reclaimed.
+    pub(crate) fn clear(&mut self) {
+        #[cfg(any(unix, windows))]
+        {
+            self.file = None;
+            self.read_ahead = None;
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    fn read_ahead_range(
+        &mut self,
+        path: &Arc<PathBuf>,
+        range: Range<usize>,
+    ) -> Result<ReadAheadFileRangeReader> {
+        let file = self.file(path)?;
+        let start = range.start as u64;
+        let end = range.end as u64;
+        if let Some(window) = &self.read_ahead {
+            let window_end = window.start.saturating_add(window.valid as u64);
+            if start >= window.start && (end <= window_end || window.eof) {
+                return Ok(ReadAheadFileRangeReader {
+                    data: Arc::clone(&window.data),
+                    data_start: window.start,
+                    data_len: window.valid,
+                    pos: start,
+                    end,
+                });
+            }
+        }
+
+        // The usual extraction walk has dropped the previous reader before
+        // asking for the next range. Reclaim that allocation when it is
+        // uniquely held; an overlapping reader simply makes this fall back
+        // to a fresh buffer. Keep the allocation at the window size and track
+        // the valid prefix separately so a refill overwrites it without a
+        // repeated zero-fill.
+        let mut data = self
+            .read_ahead
+            .take()
+            .and_then(|window| Arc::try_unwrap(window.data).ok())
+            .filter(|data| data.len() == READ_AHEAD_WINDOW)
+            .unwrap_or_else(|| vec![0u8; READ_AHEAD_WINDOW]);
+        let required = range.len();
+        let mut eof = false;
+        // Try the whole window first so the ordinary case stays one syscall.
+        // If that wider speculative read fails, retry only the selected
+        // range below: an error outside `required` must not reject readable
+        // member bytes.
+        let mut filled = match positional_read(&file, start, &mut data) {
+            Ok(0) => {
+                eof = true;
+                0
+            }
+            Ok(read) => read,
+            Err(_) => 0,
+        };
+        while filled < required {
+            let offset = start.checked_add(filled as u64).ok_or(Error::TooShort)?;
+            let read = positional_read(&file, offset, &mut data[filled..required])?;
+            if read == 0 {
+                eof = true;
+                break;
+            }
+            filled += read;
+        }
+        // The selected range keeps the ordinary reader's error semantics;
+        // bytes after it are only a performance hint. A bad sector or
+        // transient failure in that speculative tail must not make an
+        // otherwise readable member fail, and must not be cached as EOF.
+        while !eof && filled < data.len() {
+            let Some(offset) = start.checked_add(filled as u64) else {
+                break;
+            };
+            match positional_read(&file, offset, &mut data[filled..]) {
+                Ok(0) => eof = true,
+                Ok(read) => filled += read,
+                Err(_) => break,
+            }
+        }
+        let data = Arc::new(data);
+        self.read_ahead = Some(ReadAheadWindow {
+            start,
+            valid: filled,
+            eof,
+            data: Arc::clone(&data),
+        });
+        Ok(ReadAheadFileRangeReader {
+            data,
+            data_start: start,
+            data_len: filled,
+            pos: start,
+            end,
+        })
+    }
+}
+
 /// A byte source whose contents may still be arriving.
 ///
 /// Reads BLOCK until the requested offset is populated instead of reporting
@@ -116,6 +292,72 @@ impl ArchiveSource {
                     end: range.end as u64,
                 }))
             }
+        }
+    }
+
+    /// [`Self::range_reader`] using an extraction worker's single cached
+    /// handle for file-backed archives. Memory and growing-stream sources
+    /// retain their ordinary reader shapes.
+    pub(crate) fn range_reader_cached(
+        &self,
+        range: Range<usize>,
+        cache: &mut RangeReaderCache,
+    ) -> Result<Box<dyn Read + Send + '_>> {
+        if range.start > range.end {
+            return Err(Error::TooShort);
+        }
+        #[cfg(any(unix, windows))]
+        if let Self::File(path) = self {
+            if !range.is_empty() && range.len() <= READ_AHEAD_RANGE_MAX {
+                return Ok(Box::new(cache.read_ahead_range(path, range)?));
+            }
+            return Ok(Box::new(PositionalFileRangeReader {
+                file: cache.file(path)?,
+                pos: range.start as u64,
+                end: range.end as u64,
+            }));
+        }
+        self.range_reader(range)
+    }
+
+    /// Return a complete small range in its existing backing storage when
+    /// possible. This is the zero-copy counterpart of
+    /// [`Self::range_reader_cached`] for one-shot consumers such as a tiny
+    /// unencrypted STORE member. Streams retain the blocking reader path.
+    pub(crate) fn small_range_view_cached<'a>(
+        &'a self,
+        range: Range<usize>,
+        cache: &mut RangeReaderCache,
+    ) -> Result<Option<SmallRangeView<'a>>> {
+        if range.start > range.end {
+            return Err(Error::TooShort);
+        }
+        if range.is_empty() || range.len() > READ_AHEAD_RANGE_MAX {
+            return Ok(None);
+        }
+        match self {
+            Self::Memory(data) => data
+                .get(range)
+                .map(SmallRangeView::Memory)
+                .map(Some)
+                .ok_or(Error::TooShort),
+            #[cfg(any(unix, windows))]
+            Self::File(path) => {
+                let reader = cache.read_ahead_range(path, range)?;
+                let data_end = reader.data_start.saturating_add(reader.data_len as u64);
+                if reader.end > data_end {
+                    return Err(short_range().into());
+                }
+                let start = usize::try_from(reader.pos - reader.data_start)
+                    .map_err(|_| Error::TooShort)?;
+                let end = usize::try_from(reader.end - reader.data_start)
+                    .map_err(|_| Error::TooShort)?;
+                Ok(Some(SmallRangeView::File {
+                    data: reader.data,
+                    range: start..end,
+                }))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -327,6 +569,77 @@ struct BlockingRangeReader {
     source: Arc<dyn BlockingRangeSource>,
     pos: u64,
     end: u64,
+}
+
+/// Range reader over a retained descriptor. Each wrapper tracks its own
+/// logical cursor and supplies that explicit offset on every read. Extraction
+/// owns one cache per session or worker rather than sharing it between workers.
+#[cfg(any(unix, windows))]
+struct PositionalFileRangeReader {
+    file: Arc<File>,
+    pos: u64,
+    end: u64,
+}
+
+#[cfg(any(unix, windows))]
+struct ReadAheadFileRangeReader {
+    data: Arc<Vec<u8>>,
+    data_start: u64,
+    data_len: usize,
+    pos: u64,
+    end: u64,
+}
+
+#[cfg(any(unix, windows))]
+impl Read for ReadAheadFileRangeReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.end.saturating_sub(self.pos);
+        if remaining == 0 || buf.is_empty() {
+            return Ok(0);
+        }
+        let offset =
+            usize::try_from(self.pos.saturating_sub(self.data_start)).unwrap_or(usize::MAX);
+        let available = self.data_len.saturating_sub(offset);
+        if available == 0 {
+            return Err(short_range());
+        }
+        let take = buf
+            .len()
+            .min(available)
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        buf[..take].copy_from_slice(&self.data[offset..offset + take]);
+        self.pos += take as u64;
+        Ok(take)
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl Read for PositionalFileRangeReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.end.saturating_sub(self.pos);
+        if remaining == 0 || buf.is_empty() {
+            return Ok(0);
+        }
+        let take = buf
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let read = positional_read(&self.file, self.pos, &mut buf[..take])?;
+        if read == 0 {
+            return Err(short_range());
+        }
+        self.pos += read as u64;
+        Ok(read)
+    }
+}
+
+#[cfg(unix)]
+fn positional_read(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+fn positional_read(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buf, offset)
 }
 
 impl Read for BlockingRangeReader {
@@ -624,11 +937,242 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
             assert_eq!(out, b"0123");
         }
+        let mut cache = RangeReaderCache::default();
+        let mut reader = file_source.range_reader_cached(0..8, &mut cache).unwrap();
+        let mut out = Vec::new();
+        let error = reader
+            .read_to_end(&mut out)
+            .expect_err("a cached truncated volume must not read as a clean end");
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(out, b"0123");
+        drop(reader);
+        let error = match file_source.small_range_view_cached(0..8, &mut cache) {
+            Err(error) => error,
+            Ok(_) => panic!("a cached truncated view must not look complete"),
+        };
+        assert!(matches!(
+            error,
+            Error::Io(error) if error.kind == std::io::ErrorKind::UnexpectedEof
+        ));
         // And the copy walk, which routes through the same guarded reader.
         let mut sink = Vec::new();
         file_source
             .copy_range_to(0..8, &mut sink)
             .expect_err("a truncated volume must not copy as complete");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn cached_file_ranges_reuse_one_handle_with_independent_cursors() {
+        let dir = std::env::temp_dir().join(format!(
+            "rars-cached-ranges-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path: Arc<PathBuf> = dir.join("ranges.rar").into();
+        std::fs::write(path.as_ref(), b"0123456789").unwrap();
+        let source = ArchiveSource::File(Arc::clone(&path));
+        let mut cache = RangeReaderCache::default();
+
+        let first_handle = cache.file(&path).unwrap();
+        let second_handle = cache.file(&path).unwrap();
+        assert!(Arc::ptr_eq(&first_handle, &second_handle));
+
+        let mut empty = source.range_reader_cached(3..3, &mut cache).unwrap();
+        assert_eq!(empty.read(&mut [0u8; 1]).unwrap(), 0);
+        drop(empty);
+        assert!(
+            cache.read_ahead.is_none(),
+            "an empty member must not trigger a whole read-ahead window"
+        );
+
+        let mut left = source.range_reader_cached(1..5, &mut cache).unwrap();
+        let first_window = Arc::clone(&cache.read_ahead.as_ref().unwrap().data);
+        let mut right = source.range_reader_cached(6..10, &mut cache).unwrap();
+        assert!(Arc::ptr_eq(
+            &first_window,
+            &cache.read_ahead.as_ref().unwrap().data,
+        ));
+        let mut left_out = [0u8; 4];
+        let mut right_out = [0u8; 4];
+        right.read_exact(&mut right_out).unwrap();
+        assert_eq!(&right_out, b"6789");
+
+        drop((right, first_handle, second_handle));
+        let old_handle = cache.file(&path).unwrap();
+        let old_handle_weak = Arc::downgrade(&old_handle);
+        drop(old_handle);
+        let other_path: Arc<PathBuf> = dir.join("other.rar").into();
+        std::fs::write(other_path.as_ref(), b"other").unwrap();
+        let other_handle = cache.file(&other_path).unwrap();
+        assert!(
+            old_handle_weak.upgrade().is_none(),
+            "switching volumes must release the cached descriptor"
+        );
+        assert!(
+            cache.read_ahead.is_none(),
+            "switching volumes must discard read-ahead bytes from the old file"
+        );
+        left.read_exact(&mut left_out).unwrap();
+        assert_eq!(
+            &left_out, b"1234",
+            "a live reader owns its old-volume window across a cache switch"
+        );
+        drop((left, first_window));
+
+        let other_handle_weak = Arc::downgrade(&other_handle);
+        drop(other_handle);
+        cache.clear();
+        assert!(
+            other_handle_weak.upgrade().is_none(),
+            "a progress watermark must release the cached descriptor"
+        );
+        assert!(cache.read_ahead.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn small_file_range_view_keeps_exact_cached_bytes_alive() {
+        let dir = std::env::temp_dir().join(format!(
+            "rars-small-range-view-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path: Arc<PathBuf> = dir.join("ranges.rar").into();
+        std::fs::write(path.as_ref(), b"0123456789").unwrap();
+        let source = ArchiveSource::File(path);
+        let mut cache = RangeReaderCache::default();
+
+        let view = source
+            .small_range_view_cached(2..7, &mut cache)
+            .unwrap()
+            .expect("small file range has a direct view");
+        assert_eq!(view.as_slice(), b"23456");
+        drop(view);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn small_memory_range_view_borrows_exact_bytes() {
+        let bytes: Arc<[u8]> = Arc::from(&b"0123456789"[..]);
+        let source = ArchiveSource::Memory(Arc::clone(&bytes));
+        let mut cache = RangeReaderCache::default();
+        let view = source
+            .small_range_view_cached(3..8, &mut cache)
+            .unwrap()
+            .expect("small memory range has a direct view");
+        assert_eq!(view.as_slice(), b"34567");
+        assert!(source
+            .small_range_view_cached(0..READ_AHEAD_RANGE_MAX + 1, &mut cache)
+            .unwrap()
+            .is_none());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn cached_read_ahead_keeps_live_ranges_and_reuses_an_idle_allocation() {
+        let dir = std::env::temp_dir().join(format!(
+            "rars-read-ahead-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path: Arc<PathBuf> = dir.join("ranges.rar").into();
+        let bytes: Vec<u8> = (0..READ_AHEAD_WINDOW * 3 + 32)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        std::fs::write(path.as_ref(), &bytes).unwrap();
+        let source = ArchiveSource::File(Arc::clone(&path));
+        let mut cache = RangeReaderCache::default();
+
+        let mut first = source.range_reader_cached(7..23, &mut cache).unwrap();
+        let first_allocation = cache.read_ahead.as_ref().unwrap().data.as_ptr();
+        let second_start = READ_AHEAD_WINDOW + 5;
+        let mut second = source
+            .range_reader_cached(second_start..second_start + 16, &mut cache)
+            .unwrap();
+        let second_allocation = cache.read_ahead.as_ref().unwrap().data.as_ptr();
+        assert_ne!(
+            first_allocation, second_allocation,
+            "a live reader must retain its original bytes across a refill"
+        );
+
+        let mut first_out = [0u8; 16];
+        let mut second_out = [0u8; 16];
+        second.read_exact(&mut second_out).unwrap();
+        first.read_exact(&mut first_out).unwrap();
+        assert_eq!(&first_out, &bytes[7..23]);
+        assert_eq!(&second_out, &bytes[second_start..second_start + 16]);
+        drop((first, second));
+
+        assert_eq!(
+            Arc::strong_count(&cache.read_ahead.as_ref().unwrap().data),
+            1
+        );
+        let idle_allocation = cache.read_ahead.as_ref().unwrap().data.as_ptr();
+        let third_start = READ_AHEAD_WINDOW * 2 + 9;
+        let mut third = source
+            .range_reader_cached(third_start..third_start + 16, &mut cache)
+            .unwrap();
+        assert_eq!(
+            idle_allocation,
+            cache.read_ahead.as_ref().unwrap().data.as_ptr(),
+            "an idle cache should refill its existing allocation"
+        );
+        let mut third_out = [0u8; 16];
+        third.read_exact(&mut third_out).unwrap();
+        assert_eq!(&third_out, &bytes[third_start..third_start + 16]);
+
+        drop(third);
+        let past_end = bytes.len() + 7;
+        let mut beyond = source
+            .range_reader_cached(past_end..past_end + 16, &mut cache)
+            .unwrap();
+        let error = beyond
+            .read_to_end(&mut Vec::new())
+            .expect_err("a wholly out-of-file cached range must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        drop(beyond);
+
+        let mut backward = source.range_reader_cached(11..27, &mut cache).unwrap();
+        let mut backward_out = [0u8; 16];
+        backward.read_exact(&mut backward_out).unwrap();
+        assert_eq!(&backward_out, &bytes[11..27]);
+        drop(backward);
+
+        cache.clear();
+        let mut at_cap = source
+            .range_reader_cached(0..READ_AHEAD_RANGE_MAX, &mut cache)
+            .unwrap();
+        assert!(
+            cache.read_ahead.is_some(),
+            "a range exactly at the eligibility cap should use read-ahead"
+        );
+        let mut at_cap_out = vec![0u8; READ_AHEAD_RANGE_MAX];
+        at_cap.read_exact(&mut at_cap_out).unwrap();
+        assert_eq!(&at_cap_out, &bytes[..READ_AHEAD_RANGE_MAX]);
+        drop(at_cap);
+
+        cache.clear();
+        let direct_end = READ_AHEAD_RANGE_MAX + 1;
+        let mut direct = source
+            .range_reader_cached(0..direct_end, &mut cache)
+            .unwrap();
+        assert!(
+            cache.read_ahead.is_none(),
+            "ranges above the eligibility cap must bypass read-ahead"
+        );
+        let mut direct_out = vec![0u8; direct_end];
+        direct.read_exact(&mut direct_out).unwrap();
+        assert_eq!(&direct_out, &bytes[..direct_end]);
+        drop(direct);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

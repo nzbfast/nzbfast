@@ -1,6 +1,6 @@
 //! Update-manifest signing tool. The daemon verifies `latest.json` against an
 //! ed25519 public key baked into the binary (see UPDATE_PUBKEY_HEX in
-//! serve/update.rs); this tool holds the *private* half, which never lives in
+//! update.rs); this tool holds the *private* half, which never lives in
 //! the repo or on a build server - it stays offline with the release manager.
 //!
 //!   keygen [out.hex]                -> fresh keypair. With a path, the PRIVATE

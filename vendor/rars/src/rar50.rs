@@ -19,6 +19,15 @@ pub use extract::{
     extract_volume_sequence_to, extract_volume_sequence_to_with_progress, extract_volumes_to,
     extract_volumes_to_with_progress, extract_volumes_to_with_redirections,
 };
+pub use write::reference::{
+    assemble, assemble_with_recovery, comment_header, member_header, write_reference_stored, write_reference_stored_volumes, ReferenceBlock,
+    ReferenceFragment, ReferenceVolumeSet, ReferenceHash,
+    ReferenceLayout, ReferenceMember, ReferenceQuickOpen, RAR5_SIGNATURE,
+};
+pub use write::rev::{
+    data_volume_matches, default_recovery_volume_count, max_recovery_volume_count,
+    percent_recovery_volume_count, write_rev_volumes, RevSet,
+};
 pub use write::{
     ArchiveMetadataEntry, CompressedEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry,
     EncryptedStoredEntry, EncryptedStoredEntryWithServices, EncryptedStoredServiceEntry,
@@ -54,6 +63,7 @@ const MHEXTRA_LOCATOR_RECOVERY: u64 = 0x0002;
 
 const FHEXTRA_CRYPT: u64 = 0x01;
 const FHEXTRA_HASH: u64 = 0x02;
+const FHEXTRA_HTIME: u64 = 0x03;
 const FHEXTRA_REDIR: u64 = 0x05;
 const FHEXTRA_SUBDATA: u64 = 0x07;
 const MHEXTRA_ARCHIVE_METADATA: u64 = 0x02;
@@ -72,6 +82,15 @@ pub struct Archive {
     /// whole archive. Only [`Archive::parse_stream_incremental`] ever
     /// sets it; [`Archive::enumerate_rest`] clears it.
     pending: Option<PendingWalk>,
+    /// What the walk did with a data area running past the end of the
+    /// file, kept so a resumed walk uses the policy the parse was opened
+    /// with rather than the default.
+    tail: TailPolicy,
+    /// The walk ended at the end of the FILE rather than at an END
+    /// record: the archive was cut short. Only a tolerant parse can
+    /// report this - a strict one refuses the archive instead. See
+    /// [`Archive::has_truncated_tail`].
+    truncated_tail: bool,
 }
 
 /// A header walk stopped at the arrival frontier, with what resuming it
@@ -181,6 +200,20 @@ pub struct BlockHeader {
     // source-absolute so SFX-prefixed archives can be read directly.
     pub header_range: Range<usize>,
     pub data_range: Range<usize>,
+}
+
+impl BlockHeader {
+    /// Whether this block's data area was cut short by the end of the
+    /// file.
+    ///
+    /// `data_size` is what the header DECLARES; `data_range` is what the
+    /// file actually holds, and a tolerant-tail parse
+    /// (`ArchiveReadOptions::rar50_tolerant_tail`) clamps the second to
+    /// the first when an archive stops mid-member. Every other parse
+    /// refuses such an archive, so this is false everywhere else.
+    pub fn data_is_truncated(&self) -> bool {
+        self.data_size.unwrap_or(0) > (self.data_range.end - self.data_range.start) as u64
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,14 +476,18 @@ impl Archive {
         options: crate::ArchiveReadOptions<'_>,
     ) -> Result<Self> {
         let data: Arc<[u8]> = Arc::from(input.to_vec().into_boxed_slice());
-        Self::parse_shared(data, options.password)
+        Self::parse_shared(data, options.password, TailPolicy::from_options(&options))
     }
 
     pub fn parse_owned_with_options(
         input: Vec<u8>,
         options: crate::ArchiveReadOptions<'_>,
     ) -> Result<Self> {
-        Self::parse_shared(Arc::from(input.into_boxed_slice()), options.password)
+        Self::parse_shared(
+            Arc::from(input.into_boxed_slice()),
+            options.password,
+            TailPolicy::from_options(&options),
+        )
     }
 
     pub fn parse_with_password(input: &[u8], password: Option<&[u8]>) -> Result<Self> {
@@ -475,12 +512,20 @@ impl Archive {
         path: impl AsRef<Path>,
         options: crate::ArchiveReadOptions<'_>,
     ) -> Result<Self> {
-        Self::parse_path_with_password(path, options.password)
+        Self::parse_path_inner(path, options.password, TailPolicy::from_options(&options))
     }
 
     pub fn parse_path_with_password(
         path: impl AsRef<Path>,
         password: Option<&[u8]>,
+    ) -> Result<Self> {
+        Self::parse_path_inner(path, password, TailPolicy::Strict)
+    }
+
+    fn parse_path_inner(
+        path: impl AsRef<Path>,
+        password: Option<&[u8]>,
+        tail: TailPolicy,
     ) -> Result<Self> {
         let path = Arc::new(path.as_ref().to_path_buf());
         let mut file = File::open(path.as_ref())?;
@@ -503,6 +548,7 @@ impl Archive {
             ArchiveSource::File(path),
             password,
             &mut Rar50KeyCache::default(),
+            tail,
         )
     }
 
@@ -511,7 +557,12 @@ impl Archive {
         signature: ArchiveSignature,
         options: crate::ArchiveReadOptions<'_>,
     ) -> Result<Self> {
-        Self::parse_path_with_signature_and_password(path, signature, options.password)
+        Self::parse_path_with_signature_in_session(
+            path,
+            signature,
+            options,
+            &mut Rar50KeyCache::default(),
+        )
     }
 
     pub fn parse_path_with_signature_and_password(
@@ -522,7 +573,7 @@ impl Archive {
         Self::parse_path_with_signature_in_session(
             path,
             signature,
-            password,
+            crate::ArchiveReadOptions::with_optional_password(password),
             &mut Rar50KeyCache::default(),
         )
     }
@@ -535,9 +586,11 @@ impl Archive {
     pub(crate) fn parse_path_with_signature_in_session(
         path: impl AsRef<Path>,
         signature: ArchiveSignature,
-        password: Option<&[u8]>,
+        options: crate::ArchiveReadOptions<'_>,
         key_cache: &mut Rar50KeyCache,
     ) -> Result<Self> {
+        let password = options.password;
+        let tail = TailPolicy::from_options(&options);
         if signature.family != ArchiveFamily::Rar50Plus {
             return Err(Error::UnsupportedSignature);
         }
@@ -555,10 +608,15 @@ impl Archive {
             ArchiveSource::File(path),
             password,
             key_cache,
+            tail,
         )
     }
 
-    fn parse_shared(input: Arc<[u8]>, password: Option<&[u8]>) -> Result<Self> {
+    fn parse_shared(
+        input: Arc<[u8]>,
+        password: Option<&[u8]>,
+        tail: TailPolicy,
+    ) -> Result<Self> {
         let sig = find_archive_start(&input, SFX_SCAN_LIMIT).ok_or(Error::UnsupportedSignature)?;
         if sig.family != ArchiveFamily::Rar50Plus {
             return Err(Error::UnsupportedSignature);
@@ -569,6 +627,7 @@ impl Archive {
             sig.offset,
             ArchiveSource::Memory(Arc::clone(&input)),
             password,
+            tail,
         )?;
         parsed.sfx_offset = sig.offset;
         Ok(parsed)
@@ -579,6 +638,7 @@ impl Archive {
         sfx_offset: usize,
         source: ArchiveSource,
         password: Option<&[u8]>,
+        tail: TailPolicy,
     ) -> Result<Self> {
         if !input.starts_with(RAR50_SIGNATURE) {
             return Err(Error::UnsupportedSignature);
@@ -586,15 +646,25 @@ impl Archive {
 
         let archive_len = input.len();
         let mut key_cache = Rar50KeyCache::default();
+        let mut truncated_tail = false;
         let (main, blocks, _) = parse_archive_blocks(
             archive_len,
             password,
             &mut key_cache,
-            |offset| parse_block_header_bytes(input, offset, archive_len, sfx_offset),
+            |offset| parse_block_header_bytes(input, offset, archive_len, sfx_offset, tail),
             |offset, keys| {
-                parse_encrypted_block_header_bytes(input, offset, archive_len, sfx_offset, keys)
+                parse_encrypted_block_header_bytes(
+                    input,
+                    offset,
+                    archive_len,
+                    sfx_offset,
+                    keys,
+                    tail,
+                )
             },
             None,
+            tail,
+            &mut truncated_tail,
         )?;
 
         Ok(Self {
@@ -603,6 +673,8 @@ impl Archive {
             blocks,
             source,
             pending: None,
+            tail,
+            truncated_tail,
         })
     }
 
@@ -698,20 +770,24 @@ impl Archive {
             return Err(Error::UnsupportedSignature);
         }
         let password = options.password;
+        let tail = TailPolicy::from_options(&options);
         let mut key_cache = Rar50KeyCache::default();
         // Clamped to the declared length: a source reporting more arrived
         // than the volume holds must not lift the stop above the walk's
         // own bound.
         let arrived = move || frontier.known_len().min(expected_len) as usize;
+        let mut truncated_tail = false;
         let (main, blocks, pending) = parse_archive_blocks(
             archive_len,
             password,
             &mut key_cache,
-            |offset| read_block_header_from_source(&source, offset, archive_len, 0),
+            |offset| read_block_header_from_source(&source, offset, archive_len, 0, tail),
             |offset, keys| {
-                read_encrypted_block_header_from_source(&source, offset, archive_len, 0, keys)
+                read_encrypted_block_header_from_source(&source, offset, archive_len, 0, keys, tail)
             },
             incremental.then_some(&arrived as &dyn Fn() -> usize),
+            tail,
+            &mut truncated_tail,
         )?;
 
         Ok(Self {
@@ -720,6 +796,12 @@ impl Archive {
             blocks,
             source,
             pending,
+            tail,
+            // An incremental walk stops at the arrival frontier, which is
+            // not a truncation: it reports itself through `pending` and
+            // `is_partially_enumerated`, and the walk never reaches the
+            // no-END-record arm while it is pending.
+            truncated_tail,
         })
     }
 
@@ -728,6 +810,19 @@ impl Archive {
     /// [`Self::parse_stream_incremental`]; false for every other parse.
     pub fn is_partially_enumerated(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// Did the archive END before its END record - a partial download, a
+    /// half-copied file, a member whose data area runs past the last
+    /// byte?
+    ///
+    /// Always false unless the parse was opened with
+    /// `ArchiveReadOptions::rar50_tolerant_tail`, because without it such
+    /// an archive is refused rather than enumerated. When it is true the
+    /// blocks before the cut are complete and usable; the last one may be
+    /// short, which [`BlockHeader::data_is_truncated`] answers per block.
+    pub fn has_truncated_tail(&self) -> bool {
+        self.truncated_tail
     }
 
     /// Finish a walk [`Self::parse_stream_incremental`] stopped early,
@@ -777,6 +872,8 @@ impl Archive {
             _ => return Ok(()),
         };
         let source = &self.source;
+        let tail = self.tail;
+        let mut truncated_tail = self.truncated_tail;
         let mut key_cache = Rar50KeyCache::default();
         let mut blocks = std::mem::take(&mut self.blocks);
         let walked = walk_archive_blocks(
@@ -785,9 +882,9 @@ impl Archive {
             password,
             &mut key_cache,
             pending.header_keys.as_deref(),
-            |offset| read_block_header_from_source(source, offset, archive_len, 0),
+            |offset| read_block_header_from_source(source, offset, archive_len, 0, tail),
             |offset, keys| {
-                read_encrypted_block_header_from_source(source, offset, archive_len, 0, keys)
+                read_encrypted_block_header_from_source(source, offset, archive_len, 0, keys, tail)
             },
             arrived,
             &mut blocks,
@@ -795,8 +892,11 @@ impl Archive {
             // a bounded resume reads it unconditionally and lets the
             // frontier stop the walk only after it.
             arrived.is_some(),
+            tail,
+            &mut truncated_tail,
         );
         self.blocks = blocks;
+        self.truncated_tail = truncated_tail;
         let stopped = walked?;
         debug_assert!(
             arrived.is_some() || stopped.is_none(),
@@ -809,6 +909,7 @@ impl Archive {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn parse_file_backed(
         file: &mut File,
         archive_len: usize,
@@ -816,6 +917,7 @@ impl Archive {
         source: ArchiveSource,
         password: Option<&[u8]>,
         key_cache: &mut Rar50KeyCache,
+        tail: TailPolicy,
     ) -> Result<Self> {
         let signature = read_exact_at(file, sfx_offset, RAR50_SIGNATURE.len())?;
         if signature != *RAR50_SIGNATURE {
@@ -823,12 +925,19 @@ impl Archive {
         }
 
         let file_cell = std::cell::RefCell::new(file);
+        let mut truncated_tail = false;
         let (main, blocks, _) = parse_archive_blocks(
             archive_len,
             password,
             key_cache,
             |offset| {
-                read_block_header_at(&mut file_cell.borrow_mut(), offset, archive_len, sfx_offset)
+                read_block_header_at(
+                    &mut file_cell.borrow_mut(),
+                    offset,
+                    archive_len,
+                    sfx_offset,
+                    tail,
+                )
             },
             |offset, keys| {
                 read_encrypted_block_header_at(
@@ -837,9 +946,12 @@ impl Archive {
                     archive_len,
                     sfx_offset,
                     keys,
+                    tail,
                 )
             },
             None,
+            tail,
+            &mut truncated_tail,
         )?;
 
         Ok(Self {
@@ -848,6 +960,8 @@ impl Archive {
             blocks,
             source,
             pending: None,
+            tail,
+            truncated_tail,
         })
     }
 
@@ -861,6 +975,24 @@ impl Archive {
 
     fn range_reader(&self, range: Range<usize>) -> Result<Box<dyn Read + Send + '_>> {
         self.source.range_reader(range)
+    }
+
+    fn range_reader_cached(
+        &self,
+        range: Range<usize>,
+        cache: &mut crate::source::RangeReaderCache,
+    ) -> Result<Box<dyn Read + Send + '_>> {
+        self.source.range_reader_cached(range, cache)
+    }
+
+    fn small_range_view_cached<'a>(
+        &'a self,
+        range: Range<usize>,
+        cache: &mut crate::source::RangeReaderCache,
+    ) -> Result<Option<crate::source::SmallRangeView<'a>>> {
+        // nzbfast-local change, 3 Sep 2026 - re-apply on the next rars
+        // re-sync; see vendor/rars/VENDORING.md.
+        self.source.small_range_view_cached(range, cache)
     }
 
     /// [`Self::range_reader`] with no borrow of this archive - the growing
@@ -1500,8 +1632,15 @@ pub fn verify_rev5_payload(
 /// its metadata declares.
 pub type Rev5DataSources<'a> = [Option<&'a dyn crate::recovery::stream::RangeSource>];
 
-/// Receives rebuilt volume bytes as `(slot, offset, bytes)`, in ascending
-/// offset order per slot, clipped to the slot's real file size.
+/// Receives rebuilt volume bytes as `(rebuilt, offset, bytes)`, in
+/// ascending offset order per volume, clipped to that volume's real file
+/// size.
+///
+/// **`rebuilt` is a position in the returned `Vec<usize>`, not a slot
+/// index.** It counts the MISSING volumes in slot order, so a set whose
+/// slots 1 and 3 are gone reports 0 and 1 here and `[1, 3]` on return.
+/// The two coincide only when slot 0 is the first one missing, which is
+/// exactly often enough to hide the difference in a test.
 pub type Rev5RebuildSink<'a> = dyn FnMut(usize, u64, &[u8]) -> Result<()> + 'a;
 
 /// One recovery volume feeding a streaming REV reconstruction.
@@ -1516,9 +1655,11 @@ pub struct Rev5RecoverySource<'a> {
 ///
 /// `intact[i]` is the on-disk volume already verified against slot `i`, or
 /// `None` when that slot must be rebuilt. Rebuilt bytes arrive through
-/// `write(slot_index, offset, bytes)` in ascending offset order, clipped to
-/// the slot's real file size so the code word's zero padding is not written
-/// out. Nothing is retained between stripes.
+/// `write(rebuilt, offset, bytes)` in ascending offset order, clipped to
+/// the volume's real file size so the code word's zero padding is not
+/// written out - and `rebuilt` indexes the RETURNED vector rather than
+/// the slots, per [`Rev5RebuildSink`]. Nothing is retained between
+/// stripes.
 ///
 /// Returns the slot indices that were rebuilt. The caller must CRC-verify
 /// each one against its metadata before publishing it.
@@ -1871,6 +2012,23 @@ fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeade
                     data: input[data.start + hash_type_len..data.end].to_vec(),
                 });
             }
+            FHEXTRA_HTIME => {
+                // The header's own `mtime` field is only ever written by
+                // a Unix `rar`; WinRAR puts the times in THIS record as
+                // Windows FILETIMEs and leaves the flag clear, so an
+                // archive made on Windows had no modification time at
+                // all here until 3 Sep 2026. Found by the rarfast unrar
+                // conformance leg, whose Windows listings came back with
+                // an empty date column; it also means a file extracted
+                // from such an archive had no timestamp to restore.
+                //
+                // Filled only when the header field was absent, so an
+                // archive that carries both keeps the value every
+                // existing caller already saw.
+                if file.mtime.is_none() {
+                    file.mtime = parse_file_time_record(input, data)?;
+                }
+            }
             FHEXTRA_REDIR => {
                 file.redirection = Some(parse_file_redirection_record(input, data)?);
             }
@@ -1881,6 +2039,63 @@ fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeade
         }
         Ok(())
     })
+}
+
+/// Reads the modification time out of a RAR 5 file-time extra record.
+///
+/// The record is a flags vint and then the times that are present, in
+/// the order modification, creation, access. `flags & 1` selects the
+/// format: set means Unix seconds in a `u32` each, clear means a Windows
+/// `FILETIME` in a `u64` each. `flags & 0x10` adds a `u32` of
+/// nanoseconds per Unix-format time AFTER the seconds, which is skipped
+/// here because the field this fills is whole seconds.
+///
+/// Returns `None` rather than an error when the record carries no
+/// modification time: the other two clocks are legal on their own, and a
+/// record we cannot use is not a malformed archive.
+fn parse_file_time_record(input: &[u8], range: Range<usize>) -> Result<Option<u32>> {
+    const TIME_UNIX_FORMAT: u64 = 0x0001;
+    const TIME_HAS_MTIME: u64 = 0x0002;
+
+    let (flags, flags_len) = read_vint_at(input, range.start, range.end)?;
+    if flags & TIME_HAS_MTIME == 0 {
+        return Ok(None);
+    }
+    let start = range.start + flags_len;
+    if flags & TIME_UNIX_FORMAT != 0 {
+        let end = start.checked_add(4).ok_or(Error::TooShort)?;
+        if end > range.end {
+            return Err(Error::TooShort);
+        }
+        return Ok(Some(read_u32_at(input, start)?));
+    }
+    let end = start.checked_add(8).ok_or(Error::TooShort)?;
+    if end > range.end {
+        return Err(Error::TooShort);
+    }
+    Ok(filetime_to_unix_seconds(read_u64_le_at(input, start)?))
+}
+
+/// A Windows `FILETIME` - 100-nanosecond ticks since 1601-01-01 UTC - as
+/// Unix seconds, or `None` when it falls outside the `u32` range the
+/// RAR 5 header field uses.
+fn filetime_to_unix_seconds(filetime: u64) -> Option<u32> {
+    /// Seconds between the FILETIME epoch and the Unix epoch.
+    const FILETIME_UNIX_EPOCH_SECONDS: u64 = 11_644_473_600;
+    const TICKS_PER_SECOND: u64 = 10_000_000;
+    u32::try_from((filetime / TICKS_PER_SECOND).checked_sub(FILETIME_UNIX_EPOCH_SECONDS)?).ok()
+}
+
+fn read_u32_at(input: &[u8], at: usize) -> Result<u32> {
+    let bytes = input.get(at..at + 4).ok_or(Error::TooShort)?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_u64_le_at(input: &[u8], at: usize) -> Result<u64> {
+    let bytes = input.get(at..at + 8).ok_or(Error::TooShort)?;
+    let mut value = [0_u8; 8];
+    value.copy_from_slice(bytes);
+    Ok(u64::from_le_bytes(value))
 }
 
 fn parse_file_redirection_record(input: &[u8], range: Range<usize>) -> Result<FileRedirection> {
@@ -2103,6 +2318,7 @@ fn read_array_at<const N: usize>(input: &[u8], pos: &mut usize, end: usize) -> R
 /// instead of blocking there. That is the whole of what makes a chase
 /// over a volume larger than its retention budget possible - see
 /// [`Archive::parse_stream_incremental`], the only caller that passes it.
+#[allow(clippy::too_many_arguments)]
 fn parse_archive_blocks<F, G>(
     archive_len: usize,
     password: Option<&[u8]>,
@@ -2110,6 +2326,8 @@ fn parse_archive_blocks<F, G>(
     mut read_block: F,
     mut read_encrypted_block: G,
     arrived: Option<&dyn Fn() -> usize>,
+    tail: TailPolicy,
+    truncated: &mut bool,
 ) -> Result<(MainHeader, Vec<Block>, Option<PendingWalk>)>
 where
     F: FnMut(usize) -> Result<ParsedBlockHeader>,
@@ -2151,6 +2369,8 @@ where
         arrived,
         &mut blocks,
         false,
+        tail,
+        truncated,
     )?;
     let pending = stopped.map(|from| PendingWalk {
         from,
@@ -2178,6 +2398,8 @@ fn walk_archive_blocks<F, G>(
     arrived: Option<&dyn Fn() -> usize>,
     blocks: &mut Vec<Block>,
     read_first: bool,
+    tail: TailPolicy,
+    truncated: &mut bool,
 ) -> Result<Option<usize>>
 where
     F: FnMut(usize) -> Result<ParsedBlockHeader>,
@@ -2196,11 +2418,27 @@ where
             }
         }
         first = false;
-        let parsed = if let Some(keys) = header_keys {
-            read_encrypted_block(pos, keys).map_err(|error| error.at_archive_offset(pos))?
+        let read = if let Some(keys) = header_keys {
+            read_encrypted_block(pos, keys)
         } else {
-            read_block(pos).map_err(|error| error.at_archive_offset(pos))?
+            read_block(pos)
         };
+        let parsed = match read {
+            Ok(parsed) => parsed,
+            // A header the file no longer holds in full ends a tolerant
+            // walk where the bytes end, rather than failing the archive:
+            // the members already enumerated are what the caller came
+            // for. Only a short read is forgiven - a bad CRC or a
+            // malformed field still refuses, on either policy.
+            Err(error) if tail == TailPolicy::Tolerant && error.is_short_read() => {
+                *truncated = true;
+                return Ok(None);
+            }
+            Err(error) => return Err(error.at_archive_offset(pos)),
+        };
+        if parsed.tail_clamped {
+            *truncated = true;
+        }
         let next = parsed.next_offset;
         match parsed.block.header_type {
             HEAD_FILE => {
@@ -2225,13 +2463,20 @@ where
             }
             HEAD_END => {
                 blocks.push(Block::End(parsed.block));
-                break;
+                return Ok(None);
             }
             _ => blocks.push(Block::Unknown(parsed.block)),
         }
         pos = next;
     }
 
+    // Off the end with no END record: the archive stops mid-set even
+    // when the last data area happened to land exactly on the last byte,
+    // which is the same truncation as a clamped range and the reference
+    // reports it the same way.
+    if tail == TailPolicy::Tolerant {
+        *truncated = true;
+    }
     Ok(None)
 }
 
@@ -2265,12 +2510,42 @@ where
     Ok(())
 }
 
+/// What the header walk does with a block whose declared data area runs
+/// past the end of the archive.
+///
+/// `Strict` is the default and the only policy any caller had before
+/// `ArchiveReadOptions::rar50_tolerant_tail`: the block is refused, and
+/// because the refusal is attributed to that block's own header offset
+/// the whole archive reads as not-RAR. `Tolerant` clamps the data range
+/// to the bytes the file holds and ends the walk there. Both keep every
+/// range the parse hands out inside the file, which is what the check
+/// exists for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailPolicy {
+    Strict,
+    Tolerant,
+}
+
+impl TailPolicy {
+    fn from_options(options: &crate::ArchiveReadOptions<'_>) -> Self {
+        if options.rar50_tolerant_tail {
+            Self::Tolerant
+        } else {
+            Self::Strict
+        }
+    }
+}
+
 struct ParsedBlockHeader {
     block: BlockHeader,
     header: Vec<u8>,
     type_specific_range: Range<usize>,
     extra_range: Range<usize>,
     next_offset: usize,
+    /// The declared data area ran past the end of the archive and
+    /// `data_range` was clamped to what the file holds. Only ever true
+    /// under [`TailPolicy::Tolerant`].
+    tail_clamped: bool,
 }
 
 fn parse_block_header_bytes(
@@ -2278,6 +2553,7 @@ fn parse_block_header_bytes(
     offset: usize,
     archive_len: usize,
     sfx_offset: usize,
+    tail: TailPolicy,
 ) -> Result<ParsedBlockHeader> {
     let remaining = archive_len.checked_sub(offset).ok_or(Error::TooShort)?;
     if remaining < 5 {
@@ -2310,6 +2586,7 @@ fn parse_block_header_bytes(
         sfx_offset,
         header_crc,
         header_total,
+        tail,
     )
 }
 
@@ -2319,6 +2596,7 @@ fn parse_encrypted_block_header_bytes(
     archive_len: usize,
     sfx_offset: usize,
     keys: &Rar50Keys,
+    tail: TailPolicy,
 ) -> Result<ParsedBlockHeader> {
     let remaining = archive_len.checked_sub(offset).ok_or(Error::TooShort)?;
     if remaining < 32 {
@@ -2363,6 +2641,7 @@ fn parse_encrypted_block_header_bytes(
         sfx_offset,
         header_crc,
         disk_header_len,
+        tail,
     )
 }
 
@@ -2371,6 +2650,7 @@ fn read_block_header_at(
     offset: usize,
     archive_len: usize,
     sfx_offset: usize,
+    tail: TailPolicy,
 ) -> Result<ParsedBlockHeader> {
     let remaining = archive_len.checked_sub(offset).ok_or(Error::TooShort)?;
     if remaining < 5 {
@@ -2397,6 +2677,7 @@ fn read_block_header_at(
         sfx_offset,
         header_crc,
         header_total,
+        tail,
     )
 }
 
@@ -2406,6 +2687,7 @@ fn read_encrypted_block_header_at(
     archive_len: usize,
     sfx_offset: usize,
     keys: &Rar50Keys,
+    tail: TailPolicy,
 ) -> Result<ParsedBlockHeader> {
     let remaining = archive_len.checked_sub(offset).ok_or(Error::TooShort)?;
     if remaining < 32 {
@@ -2448,6 +2730,7 @@ fn read_encrypted_block_header_at(
         sfx_offset,
         header_crc,
         disk_header_len,
+        tail,
     )
 }
 
@@ -2460,6 +2743,7 @@ fn read_block_header_from_source(
     offset: usize,
     archive_len: usize,
     sfx_offset: usize,
+    tail: TailPolicy,
 ) -> Result<ParsedBlockHeader> {
     let remaining = archive_len.checked_sub(offset).ok_or(Error::TooShort)?;
     if remaining < 5 {
@@ -2486,6 +2770,7 @@ fn read_block_header_from_source(
         sfx_offset,
         header_crc,
         header_total,
+        tail,
     )
 }
 
@@ -2495,6 +2780,7 @@ fn read_encrypted_block_header_from_source(
     archive_len: usize,
     sfx_offset: usize,
     keys: &Rar50Keys,
+    tail: TailPolicy,
 ) -> Result<ParsedBlockHeader> {
     let remaining = archive_len.checked_sub(offset).ok_or(Error::TooShort)?;
     if remaining < 32 {
@@ -2537,6 +2823,7 @@ fn read_encrypted_block_header_from_source(
         sfx_offset,
         header_crc,
         disk_header_len,
+        tail,
     )
 }
 
@@ -2547,6 +2834,7 @@ fn parse_block_header_image(
     sfx_offset: usize,
     header_crc: u32,
     disk_header_len: usize,
+    tail: TailPolicy,
 ) -> Result<ParsedBlockHeader> {
     let header_total = header.len();
     let (decoded_header_size, header_size_len) = read_vint_at(&header, 4, header_total)?;
@@ -2577,13 +2865,21 @@ fn parse_block_header_image(
         .map(|size| usize_from_u64(size, "RAR 5 data size overflows usize"))
         .transpose()?
         .unwrap_or(0);
-    let next_offset = offset
+    let declared_next = offset
         .checked_add(disk_header_len)
         .and_then(|pos| pos.checked_add(data_len))
         .ok_or(Error::InvalidHeader("RAR 5 data size overflows usize"))?;
-    if next_offset > archive_len {
+    // A data area running past the end of the file is a truncated
+    // archive under one policy and a hostile length under the other, and
+    // the bytes look identical, so the CALLER decides. Strict refuses,
+    // which is every caller that has not asked otherwise; tolerant
+    // clamps to the file and lets the walk end here. Neither ever hands
+    // out a range the file does not hold.
+    let tail_clamped = declared_next > archive_len;
+    if tail_clamped && tail == TailPolicy::Strict {
         return Err(Error::TooShort);
     }
+    let next_offset = declared_next.min(archive_len);
     let type_specific_start = reader.pos;
     let data_start = sfx_offset
         .checked_add(offset)
@@ -2592,6 +2888,14 @@ fn parse_block_header_image(
     let data_end = data_start
         .checked_add(data_len)
         .ok_or(Error::InvalidHeader("RAR 5 data size overflows usize"))?;
+    // The header itself was already proved to fit, so `data_start` is
+    // inside the file and the clamp cannot invert the range. `data_size`
+    // keeps the DECLARED length - a listing prints what the archive says
+    // the member is, and the gap between the two is what
+    // `BlockHeader::data_is_truncated` reads.
+    let data_end = data_end
+        .min(sfx_offset.saturating_add(archive_len))
+        .max(data_start);
 
     Ok(ParsedBlockHeader {
         block: BlockHeader {
@@ -2609,6 +2913,7 @@ fn parse_block_header_image(
         type_specific_range: type_specific_start..type_specific_end,
         extra_range: type_specific_end..header_total,
         next_offset,
+        tail_clamped,
     })
 }
 
@@ -2808,6 +3113,225 @@ fn decode_compression_info(raw: u64) -> Result<CompressionInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A RAR 5 file-time extra record written by WinRAR: a Windows
+    /// FILETIME, not Unix seconds, and the header's own mtime flag left
+    /// clear beside it. Reading only the header field is what left every
+    /// archive made on Windows with no modification time at all, so this
+    /// pins the format that fills it.
+    #[test]
+    fn a_windows_filetime_record_reads_back_as_unix_seconds() {
+        // 2001-09-09 01:46:40 UTC, the fixture instant, as a FILETIME.
+        let filetime: u64 = (1_000_000_000 + 11_644_473_600) * 10_000_000;
+        let mut record = vec![0x02]; // flags: mtime present, FILETIME format
+        record.extend_from_slice(&filetime.to_le_bytes());
+        let end = record.len();
+        assert_eq!(
+            parse_file_time_record(&record, 0..end).expect("parsed"),
+            Some(1_000_000_000)
+        );
+    }
+
+    /// The Unix half of the same record, which a `rar` built for Linux or
+    /// macOS writes when it writes the record at all.
+    #[test]
+    fn a_unix_seconds_record_reads_back_unchanged() {
+        let mut record = vec![0x03]; // flags: mtime present, Unix format
+        record.extend_from_slice(&1_000_000_000_u32.to_le_bytes());
+        let end = record.len();
+        assert_eq!(
+            parse_file_time_record(&record, 0..end).expect("parsed"),
+            Some(1_000_000_000)
+        );
+    }
+
+    /// A record carrying only the creation and access times is legal and
+    /// is not an error: it simply has no modification time to give.
+    #[test]
+    fn a_record_without_a_modification_time_is_none_rather_than_an_error() {
+        let record = vec![0x0c]; // ctime and atime present, mtime absent
+        assert_eq!(parse_file_time_record(&record, 0..1).expect("parsed"), None);
+    }
+
+    /// A truncated record is refused rather than read past its end.
+    #[test]
+    fn a_short_time_record_is_refused() {
+        let record = vec![0x02, 0x00, 0x00];
+        assert!(parse_file_time_record(&record, 0..record.len()).is_err());
+    }
+
+    /// A two-member stored archive, and the byte length at which the
+    /// second member's data area has begun but not ended - the shape a
+    /// partially downloaded RAR has, and the one the reference `unrar`
+    /// lists while this engine refused the whole file.
+    fn archive_cut_inside_its_last_member() -> (Vec<u8>, usize) {
+        let first = vec![b'a'; 64];
+        let second = vec![b'b'; 4096];
+        let entries = [
+            crate::rar50::write::StoredEntry {
+                name: b"first.txt",
+                data: &first,
+                mtime: Some(1_000_000_000),
+                attributes: 0,
+                host_os: 0,
+            },
+            crate::rar50::write::StoredEntry {
+                name: b"second.bin",
+                data: &second,
+                mtime: Some(1_000_000_000),
+                attributes: 0,
+                host_os: 0,
+            },
+        ];
+        let whole = crate::rar50::write::Rar50Writer::new(
+            crate::rar50::write::WriterOptions::default(),
+        )
+        .stored_entries(&entries)
+        .finish()
+        .expect("wrote the fixture archive");
+        // Half of the second member's payload: past its header, short of
+        // its end, so the END record is gone with it.
+        let cut = whole.len() - second.len() / 2;
+        (whole[..cut].to_vec(), cut)
+    }
+
+    /// The default is unchanged, and deliberately so: the bound that
+    /// refuses a data area running past the end of the file is what stops
+    /// a hostile length driving a read past the end of a mapping, and the
+    /// fuzz corpus exercises it.
+    #[test]
+    fn a_cut_archive_is_still_refused_without_the_option() {
+        let (cut, _) = archive_cut_inside_its_last_member();
+        let error = Archive::parse(&cut).expect_err("refused");
+        assert!(
+            error.is_short_read(),
+            "expected a short-read refusal, got {error}"
+        );
+    }
+
+    /// With the option on, the members that DID arrive are enumerated,
+    /// the archive says its tail was cut, and the short member says so
+    /// too. This is the whole user-visible point: a partially downloaded
+    /// RAR lists what it has instead of reading as not-RAR.
+    #[test]
+    fn a_cut_archive_lists_its_surviving_members_under_the_option() {
+        let (cut, cut_len) = archive_cut_inside_its_last_member();
+        let archive = Archive::parse_with_options(
+            &cut,
+            crate::ArchiveReadOptions::new().with_rar50_tolerant_tail(true),
+        )
+        .expect("enumerated");
+        assert!(archive.has_truncated_tail());
+        let names: Vec<Vec<u8>> = archive.files().map(|f| f.name.clone()).collect();
+        assert_eq!(names, vec![b"first.txt".to_vec(), b"second.bin".to_vec()]);
+        let files: Vec<&FileHeader> = archive.files().collect();
+        // The member that arrived whole is untouched, and reports itself
+        // that way - a caller must be able to tell the two apart.
+        assert!(!files[0].block.data_is_truncated());
+        assert_eq!(files[0].unpacked_size, 64);
+        // The short one keeps its DECLARED size (a listing prints what
+        // the archive claims the member is) and a data range clamped to
+        // the bytes the file holds.
+        assert!(files[1].block.data_is_truncated());
+        assert_eq!(files[1].unpacked_size, 4096);
+        assert!(files[1].block.data_range.end <= cut_len);
+        assert!(files[1].block.data_range.start < files[1].block.data_range.end);
+        // No END record survived the cut, and none is invented.
+        assert!(!archive
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::End(_))));
+    }
+
+    /// Every range a tolerant parse hands out lies inside the file. This
+    /// is the property the strict check exists for, and keeping it is why
+    /// the option is a CLAMP rather than a removal of the bound.
+    #[test]
+    fn a_tolerant_parse_never_hands_out_a_range_past_the_end() {
+        let (cut, cut_len) = archive_cut_inside_its_last_member();
+        for len in (16..cut.len()).step_by(97).chain([cut_len - 1, cut_len]) {
+            let Ok(archive) = Archive::parse_with_options(
+                &cut[..len],
+                crate::ArchiveReadOptions::new().with_rar50_tolerant_tail(true),
+            ) else {
+                continue;
+            };
+            for block in &archive.blocks {
+                let header = match block {
+                    Block::File(file) | Block::Service(file) => &file.block,
+                    Block::End(block) | Block::Unknown(block) => block,
+                };
+                assert!(
+                    header.data_range.end <= len && header.data_range.start <= header.data_range.end,
+                    "block data range {:?} escapes a {len}-byte archive",
+                    header.data_range
+                );
+                assert!(header.header_range.end <= len);
+            }
+        }
+    }
+
+    /// A cut that lands INSIDE a header, rather than inside a data area,
+    /// ends the walk the same way: the members behind it are kept.
+    #[test]
+    fn a_cut_inside_a_header_keeps_the_members_behind_it() {
+        let (cut, _) = archive_cut_inside_its_last_member();
+        // The first member's data ends well before the second member's
+        // header does, so a cut a few bytes into that header leaves one
+        // whole member and half a header.
+        let first_end = Archive::parse_with_options(
+            &cut,
+            crate::ArchiveReadOptions::new().with_rar50_tolerant_tail(true),
+        )
+        .expect("enumerated")
+        .files()
+        .next()
+        .expect("a first member")
+        .block
+        .data_range
+        .end;
+        let archive = Archive::parse_with_options(
+            &cut[..first_end + 4],
+            crate::ArchiveReadOptions::new().with_rar50_tolerant_tail(true),
+        )
+        .expect("enumerated");
+        assert!(archive.has_truncated_tail());
+        assert_eq!(archive.files().count(), 1);
+    }
+
+    /// A whole, well-formed archive reads identically under both
+    /// policies, and does NOT claim a truncated tail. Without this the
+    /// option could be "always report truncation" and every test above
+    /// would still pass.
+    #[test]
+    fn a_whole_archive_is_unchanged_by_the_option() {
+        let data = vec![b'a'; 512];
+        let entries = [crate::rar50::write::StoredEntry {
+            name: b"whole.bin",
+            data: &data,
+            mtime: Some(1_000_000_000),
+            attributes: 0,
+            host_os: 0,
+        }];
+        let whole = crate::rar50::write::Rar50Writer::new(
+            crate::rar50::write::WriterOptions::default(),
+        )
+        .stored_entries(&entries)
+        .finish()
+        .expect("wrote the fixture archive");
+        let strict = Archive::parse(&whole).expect("parsed");
+        let tolerant = Archive::parse_with_options(
+            &whole,
+            crate::ArchiveReadOptions::new().with_rar50_tolerant_tail(true),
+        )
+        .expect("parsed");
+        assert!(!tolerant.has_truncated_tail());
+        assert_eq!(strict.blocks, tolerant.blocks);
+        assert!(tolerant
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::End(_))));
+    }
 
     /// The parse-scoped key cache must hand back the same keys `derive` would
     /// have produced, hit on a repeated (salt, kdf count), and keep distinct

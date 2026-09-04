@@ -390,7 +390,10 @@ const PACE_CHUNK: usize = 64 * 1024;
 const PACE_GAP: Duration = Duration::from_millis(100);
 /// How long one socket read waits before the loop looks at its flags,
 /// and the outer bound on a response that never ends.
-const POLL: Duration = Duration::from_secs(2);
+// 250 ms, not seconds: a timed-out read is `continue`, so this is only
+// how long a stop flag waits to be noticed, and at 2 s it was six
+// seconds of every held response's teardown.
+const POLL: Duration = Duration::from_millis(250);
 const POLL_CAP: Duration = Duration::from_secs(300);
 
 /// A held `/stream` range response, driven from its own thread.

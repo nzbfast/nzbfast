@@ -1,0 +1,34 @@
+# S6: a first server that has lost a third of the post, and a second
+# that has all of it.
+
+[layout]
+name = "s6-second-server-fills"
+seed = 51
+note = """
+Multi-server fill, with NO recovery set on purpose. Every other
+damage row in this catalog is answered by parity; this one has none,
+so the only thing that can complete the job is the second server. If
+the fill did not happen the row could not pass by any other route,
+which is what makes it a test of the fill rather than of the repair.
+
+Thirty percent of a twelve-article post is four articles the first
+server answers 430 to, permanently - not once, so a retry against the
+same backbone can never help either. The second server is neutral: it
+carries the same post and answers correctly, which is what a second
+provider IS.
+
+The client's config lists the two in this order, so the first server
+is the one it dials first and the second is the fill. That ordering is
+the runner's, from `[[serve.second]]`'s own order.
+"""
+
+[source]
+files = [{ name = "filled.bin", bytes = 240000 }]
+
+[encoding]
+article_bytes = 20000
+
+[serve]
+missing_pct = 30.0
+
+[[serve.second]]

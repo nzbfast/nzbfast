@@ -1,0 +1,62 @@
+# C13 + C12 + C3 + C2 + C7 + P1: a split RAR set whose one member is a
+# compressed 7z, which is two formats in one stack.
+
+[layout]
+name = "nc-r3-rar-volumes-over-a-7z"
+seed = 173
+note = """
+The nested corpus's `r3-rar-wrap-7z` leg: a stored RAR volume set with a
+PAR2 set beside it, and the single member those volumes carry is a 7z
+archive compressed with LZMA2, holding the payload.
+
+It needed two gaps closed. H1 gave the catalog a container format that
+is not RAR; H2 gave it a stack whose levels are not all alike, because
+`wrap` used to hand the ONE `[container]` table to every level, so kind,
+version and `recovery_record_pct` were uniform all the way down and a
+7z between two RARs could not be stated at all.
+
+`[[container.inner]]` is that key, written OUTERMOST-INNER FIRST - the
+level just below the posted set, then the one below that. Outermost
+first because that is how the shape is named everywhere else: the
+corpus calls a leg `x3-mixed-7z-rar-store` for RAR over 7z over RAR
+over the payload, and a profile that listed the chain backwards would
+be one more thing for a reader to get wrong. It REPLACES `nested`
+rather than joining it, and writing both is refused by name.
+
+An inner level carries only what an unsplit inner archive can have: a
+kind, a RAR generation and its own recovery-record percent. The volume
+split, the volume naming and the SFX prefix belong to the outermost
+level by definition, and an inner table naming one of them is refused
+by name rather than accepted and applied nowhere.
+
+The compressed level is real decompression rather than a label. The
+7z writer records ONE content method for the archive and never falls
+back to store per entry the way the RAR writers do, so LZMA2 over
+`[source]`'s incompressible bytes is still an archive the client must
+run the decoder over - it comes out slightly bigger than its payload,
+which is the honest cost of the shape.
+
+The end state is the payload file and the PAR2 index. The RAR volumes
+are spent by the first unpack, the 7z is consumed by the second, and a
+clean run never fetches the parity.
+"""
+
+[source]
+files = [{ name = "movie.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 10000
+
+[[container.inner]]
+kind = "7z-compressed"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -232,7 +232,7 @@ Object.assign(out, {
   'err.no such server': 'no such server',
   'err.unknown server index': 'unknown server index',
   'err.connect timed out (12 s)': 'connect timed out (12 s)',
-  // The two delete arms in serve/api/queue/payload.rs. Both answer a
+  // The two delete arms in api/queue/payload.rs. Both answer a
   // request that matched no row, and both used to answer it with no
   // `error` at all - which the dashboard's three bulk delete controls
   // read as success and reported in green. They are two sentences and
@@ -261,7 +261,7 @@ Object.assign(out, {
   // IndexBusy::message() (serve/daemon_index.rs): the two transient
   // "ask again" answers from the index read path. The read handlers have
   // emitted them since they shipped; TODO 166 widened their reach to
-  // every user-WRITE handler in serve/api/wall.rs and serve/api/index.rs
+  // every user-WRITE handler in api/wall.rs and api/index.rs
   // (wall_fix, wall_art, wall_refresh, wall_merge, wall_hide/unhide,
   // wall_rule_add/del, wall_suggest_no, pre_assign, pre_reject,
   // rar_name), which is when 27 locales showing English became worth

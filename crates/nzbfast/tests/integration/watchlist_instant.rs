@@ -149,6 +149,9 @@ fn daemon_cmd(dir: &Path, cfg: &Path, db: &Path, port: u16) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
     c.env("NZBFAST_OPEN", "1")
         .env("NZBFAST_NO_ENRICH", "1")
+        // The production floor under index_tip_secs is 5 s; these legs
+        // wait out "N tip ticks", so the floor is the whole of their cost.
+        .env("NZBFAST_TEST_TIP_FLOOR_SECS", "1")
         .arg("--config")
         .arg(cfg)
         .arg("serve")
@@ -168,7 +171,7 @@ fn daemon_cmd(dir: &Path, cfg: &Path, db: &Path, port: u16) -> Command {
 /// [`watching`] with the tip watcher at its 5 s floor - what every case
 /// about the tip leg wants.
 async fn watching(dir: &Path, mock: &MockServer, items: &str) -> Daemon {
-    watching_tip(dir, mock, items, 5).await
+    watching_tip(dir, mock, items, 1).await
 }
 
 /// A daemon watching a live group on `mock`, with `items` as the
@@ -205,8 +208,8 @@ async fn watching_tip(dir: &Path, mock: &MockServer, items: &str, tip_secs: u64)
     )
     .unwrap();
     // index_enabled: the local leg needs the database open at all.
-    // index_tip_secs at its 5 s floor so a tick is a test's worth of
-    // waiting rather than the 20 s default. The periodic watchlist pass
+    // index_tip_secs at 1 s - the floor is lowered to 1 by the test hook
+    // daemon_cmd sets - so a tick is a second rather than the 20 s default. The periodic watchlist pass
     // is 60 s and is NOT configurable - which is exactly what makes
     // these assertions about the instant path and not about it.
     //
@@ -417,7 +420,7 @@ async fn a_post_still_going_up_is_not_grabbed_until_it_is_complete() {
         // Two tip ticks' worth of silence. The release is in the index
         // and matches the item; grabbing it now would download half a
         // file and call it an episode.
-        std::thread::sleep(std::time::Duration::from_secs(13));
+        std::thread::sleep(std::time::Duration::from_secs(3));
         let seen = grabbed(port);
         assert!(
             !seen.contains("Wanted.Show.S01E02"),
@@ -481,7 +484,7 @@ async fn the_quality_ladder_still_applies_on_the_instant_path() {
             SEEDED_MARK + 10,
             "Wanted.Show.S01E03.720p.HDTV.x264-GRP",
         ));
-        std::thread::sleep(std::time::Duration::from_secs(13));
+        std::thread::sleep(std::time::Duration::from_secs(3));
         let seen = grabbed(port);
         assert!(
             !seen.contains("720p.HDTV"),

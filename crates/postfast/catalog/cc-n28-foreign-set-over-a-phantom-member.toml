@@ -1,0 +1,57 @@
+# G7: a complete recovery set beside the real one, covering a file this
+# post never carried.
+
+[layout]
+name = "cc-n28-foreign-set-over-a-phantom-member"
+seed = 2801
+note = """
+Expresses bench/capability-corpus leg n28-foreign-set-decoy.
+
+Two self-consistent PAR2 sets ride in one post. The first covers the
+payload and is ordinary. The second is complete, sealed and correct in
+every particular, and the single member it describes was never posted -
+the poisoned or misfiled set that turns up in the wild when somebody
+uploads one release's `.par2` files beside another release's articles.
+
+THE QUESTION IS A NEGATIVE ONE, which is why the row is worth having
+and why it is easy to get accidentally right and then lose. The foreign
+set must not fail the job: a client that treats "a described member did
+not arrive" as a job-level verdict marks a post failed that is in fact
+complete. And it must not invent the phantom: nothing may appear on
+disk under a name only a foreign descriptor mentions, however plausible
+that name looks beside the payload.
+
+Distinct from P5's placeholder, which is also described and unposted.
+A P5 member has no bytes, so materialising it is correct and
+cc-n31-index-only-tree-placeholder asserts that it happens. A phantom
+has 400,000 bytes the post never carried, so materialising anything
+under its name is a defect rather than a courtesy. The two rows are the
+two halves of one rule, and the schema refuses a 0-byte phantom by name
+so an author cannot write one into the other.
+
+The set is announced (P3 names the payload from FileDesc packets and
+the `.par2` files keep their own names), so both indexes are part of
+the expected tree and neither set's parity volumes are: nothing here is
+damaged, so no volume is ever opened.
+"""
+
+[source]
+files = [{ name = "Actual.Payload.mkv", bytes = 120000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 15
+names = "filedesc-only"
+phantom_covers = [{ name = "Phantom.File.bin", bytes = 400000 }]
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

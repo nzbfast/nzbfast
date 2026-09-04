@@ -96,6 +96,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>Handleiding</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -760,6 +761,28 @@ in; het uitgeven ervan (<code>/m3u</code>) vereist de sleutel. Het gewone byte-s
 van een al actieve download blijft open, en installaties zonder sleutel gedragen zich
 als vanouds.</div>
 
+<p><b>Een map lang na afloop controleren.</b> Elke download bewijst een
+controlesom voor elk bestand dat hij ophaalt, en de <code>.par2</code>-bestanden
+die die controlesommen droegen worden na afloop opgeruimd - maanden later is er dus
+normaal gesproken niets meer om de map mee te vergelijken. nzbfast bewaart ze in
+plaats daarvan, in een klein verborgen <code>.nzbfast.manifest</code> naast de
+bestanden. Bij Instellingen → Downloaden → <b>Downloads later controleren</b> wijs
+je een voltooide map aan: het leest elk bestand, meldt wat niet meer klopt en biedt
+aan het te repareren. Repareren is een tweede, aparte klik, en het haalt alleen het
+beschadigde deel op - alles dat nog heel is wordt rechtstreeks van je schijf
+gelezen. Het vinkje in dezelfde kaart zet het controlebestand uit als je het liever
+niet hebt, en <code>nzbfast verify</code> op de opdrachtregel leest het ook.</p>
+
+<p>Dezelfde kaart <b>Downloads later controleren</b> kan zichzelf ook volgens
+een schema controleren: de schakelaar <b>Voltooide mappen volgens een schema
+controleren</b>, uit tenzij je hem aanzet, loopt dan de voltooide mappen met
+een controlebestand langs en start een reparatie voor alles wat niet meer
+klopt, zonder dat iemand klikt. Hij draait nooit terwijl een download bezig
+is of staat te wachten, en omdat controleren betekent dat elk bestand in een
+map van begin tot eind wordt gelezen, kost dat de schijf ook als er niets
+stuk is. Limieten naast de schakelaar begrenzen hoeveel reparaties en
+hoeveel download een controle mag starten.</p>
+
 <h2 id="servers">8 · Usenet-servers</h2>
 <p>Instellingen → <b>Usenet-servers</b> is de volledige editor: toevoegen, bewerken, verwijderen, herordenen en elke
 server in of uit de pool halen. Elke server heeft:</p>
@@ -869,6 +892,20 @@ controleert nog steeds de eigen controlesom van elk artikel. <i>Zuinig</i> slaat
 artikelcontrolesommen ook over zodra PAR2 een bestand dekt: schade komt dan een moment
 later boven, bij het blok. In alle drie gebruiken de afsluitende ronde en elke reparatie
 volledige MD5, en een download zonder PAR2-bestanden houdt zijn artikelcontrolesommen.</p>
+<p><b>Snelle eindcontrole</b> <span class="pill live">live</span> verandert de
+controle die je voltooide bestanden weer van de schijf leest: de afsluitende ronde aan het
+eind van een download en <code>nzbfast verify</code> op de opdrachtregel, waar
+<code>--fast</code> dezelfde keuze is. Normaal wordt elk bestand bewezen met één afdruk
+over het hele bestand, en dat is één leesbeurt op één kern hoeveel kernen de machine ook
+heeft. Met dit aan wordt elk bestand bewezen met de controlegetallen per blok uit de
+PAR2-set, en die draaien op alle kernen tegelijk. Veel sneller op een snelle lokale schijf,
+en weinig waard op een netwerkmap of een draaiende schijf, waar de schijf toch al de grens
+is. Hij staat uit zolang je er niet om vraagt, en dit is waar je dan mee instemt: een
+PAR2-set kan twee vermeldingen dragen die verschillende bestanden beschrijven, en
+par2cmdline en de andere gereedschappen noemen zo'n set beschadigd waar nzbfast hem dan
+schoon noemt. Geen set die door normale software is gebouwd ziet er zo uit, een controle
+van de eerste 16 KiB weigert nog steeds elke onbedoelde versie ervan, en een reparatie
+bewijst zichzelf op de oude manier wat deze instelling ook zegt.</p>
 <h3>Schijf &amp; quotum <span class="pill live">live</span></h3>
 <p><b>Minimale vrije ruimte</b> (pauzeer nieuwe taken eronder; standaard 2 GB, 0 schakelt het uit), <b>downloadquotum</b>
 per dag of maand (UTC; taken met Geforceerd negeren het), <b>geheugenlimiet</b> - het
@@ -1041,7 +1078,7 @@ de indexer-accounts die je hebt toegevoegd, en de watchlist werkt op die account
 <tr><td>Relayserver, Relaykanalen</td><td>Het IRC-netwerk dat de aankondigingen draagt (host of host:poort) en de kanalen om mee te luisteren, door komma's gescheiden. Een wijziging gaat in bij de volgende verbinding: zet de feed uit en weer aan om hem meteen toe te passen.</td></tr>
 <tr><td>Benoemen via correlatie</td><td>De publieke live-relays dragen geen bestandsnamen, dus de meeste versluierde berichten laten zich niet direct koppelen. Wat een aankondiging wel vastlegt, is wanneer een release verscheen en hoe groot die is. Dit vergelijkt aangekondigde tijd en grootte met naamloze berichten en stelt bij een passende match de echte naam voor in Bladeren. Een suggestie is als zodanig gemarkeerd, vraagt om je klik en hernoemt nooit bestanden op schijf.</td></tr>
 <tr><td>Sterke overeenkomsten automatisch toepassen</td><td>Standaard uit, en streng als hij aanstaat: de grootte moet nauw kloppen, geen andere aankondiging mag bijna even goed passen, en de aankondiging moet dit bericht bij de omgekeerde controle terugkiezen. Een toegepaste naam verandert alleen de weergave, is gemarkeerd als afgeleid en verdwijnt vanzelf als een voltooide download hem weerlegt. Al het zwakkere blijft een suggestie.</td></tr>
-<tr><td>Aankondigingsgeschiedenis</td><td>De live-feed hoort alleen aankondigingen van na het aanzetten. Dit haalt ongeveer zes maanden aan eerdere aankondigingen op uit een publieke pre-database, netjes en eenmalig, zodat ook al geïndexeerde berichten gekoppeld kunnen worden. Draait een half uur of zo op de achtergrond.</td></tr>
+<tr><td>Aankondigingsgeschiedenis</td><td>De live-feed hoort alleen aankondigingen van na het aanzetten. Dit haalt eenmalig de nieuwste eerdere aankondigingen op bij predb.net, een publieke pre-database, zodat ook al geïndexeerde berichten gekoppeld kunnen worden. predb.net vraagt om er geen eigen database uit op te bouwen, dus worden alleen de twee nieuwste pagina's van elke sectie opgehaald, hoogstens 10 verzoeken per minuut. Draait een paar minuten op de achtergrond.</td></tr>
 </table></div>
 
 <h3>Bibliotheek, Beveiliging, Interface</h3>
@@ -1123,6 +1160,18 @@ nzbfast zal die niet stoppen, maar nzbfast stopt wel met het lezen van de uitvoe
 van het script op het moment dat het script zelf klaar is: geef een helper op de
 achtergrond zijn eigen uitvoeromleiding, anders wordt hij gestopt zodra hij voor
 het eerst iets probeert te printen.</p>
+<p>Scripts, en de optionele externe hulpprogramma's <code>unrar</code> en
+<code>par2</code>, draaien binnen een afscherming waar de machine er een biedt:
+<code>sandbox-exec</code> op macOS, <code>bwrap</code> op Linux. Een afgeschermd
+script houdt volledige leestoegang en volledige netwerktoegang, dus melders en
+mediatheekgereedschap blijven ongemoeid; het mag alleen schrijven in de mappen
+die nzbfast toch al gebruikt (de downloadmap, elke verplaatsbestemming, de
+bewaakte map en de tijdelijke systeemmap). Zet <b>Beperk waar scripts mogen
+schrijven</b> uit in Instellingen &rarr; Mappen als een script ergens anders
+moet schrijven en faalt met "operation not permitted". Waar geen afscherming
+beschikbaar is draait alles precies zoals altijd - een download mislukt daar
+nooit door - en de regel onder die schakelaar zegt welk mechanisme van kracht
+is. Windows heeft er nog geen.</p>
 <h3>Pre-queue-script</h3>
 <p>Een tweede haak draait <em>voordat</em> een download de wachtrij ingaat
 (Instellingen → Mappen → Pre-queue-script), met SABnzbd's pre-queue-contract:
@@ -1475,7 +1524,7 @@ sleutel die je later in Instellingen instelt wint er nog steeds van.</div>
 <tr><td><code>nzbfast serve</code></td><td>Draai de daemon (dashboard + API + automatisering). <code>--open</code> opent de browser; <code>--apikey</code> stelt de sleutel met de hand in (<a href="#firstrun-key">§2</a>); <code>--bind</code> kiest het luisteradres, standaard <code>0.0.0.0</code> (elke interface), <code>127.0.0.1</code> voor alleen deze machine. Zie <code>--help</code> voor de volledige vlaggenlijst; elke dashboardinstelling heeft een vlag als tweelingbroer.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Download één NZB, volledige pipeline, zonder daemon. <code>--preflight</code> breekt vroeg af als de post niet compleet kán zijn; <code>--password</code> voor versleutelde sets.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Beschikbaarheidsoordeel - COMPLETE / REPAIRABLE / IMPOSSIBLE - zonder payload te downloaden.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Verifieer bestanden tegen de PAR2-set in een map.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Verifieer bestanden tegen de PAR2-set in een map. Valt terug op het settle-manifest als de PAR2-bestanden weg zijn. Sluit af met 0 als de bestanden kloppen en met 1 bij schade; een map zonder iets om te controleren sluit ook af met 0 en meldt dat op de foutuitvoer. <code>--fast</code> bewijst elk bestand met de controlegetallen per blok van de set in plaats van met de afdruk over het hele bestand, wat op een snelle schijf veel vlotter is en de afweging uit <a href="#settings">§9</a> meebrengt.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>De systeembenchmark + het diversiteitsrapport, in de terminal.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Scan groepen de index in / doorzoek hem, zonder de daemon.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Importeer servers uit een SABnzbd-ini.</td></tr>

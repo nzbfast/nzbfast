@@ -80,6 +80,62 @@ impl GroupPark {
     }
 }
 
+/// Count one dispatch of `id` against `group`, EXACTLY once.
+///
+/// The books here are an identity, not a tally: `GroupPark::inflight` is
+/// by construction the number of ids [`FilePark::counted`] maps to that
+/// group. Both increments go through here so neither can break it.
+///
+/// A second increment for an id the group already owns is the failure
+/// this exists to refuse. It leaves a count no retirement can ever
+/// match - `note_left` decrements once per id, because that is where the
+/// ownership entry is removed - so the group's `inflight` never comes
+/// back to zero, `GroupPark::full` is true forever whatever the
+/// allowance says, and the one-article liveness floor at the top of it
+/// never fires again. The group starves for the rest of the run. That is
+/// the 3 Sep 2026 wedge, measured on a loopback rig at a holds cap 37x
+/// under the set: one leg in thirty ran 195 s, exited 1 with no payload,
+/// and its dump showed `inflight=0` in the POOL's own in-flight map with
+/// the park still stepping past every candidate.
+///
+/// The reachable double is the re-seed: [`FilePark::set`] seeds a file
+/// from the in-flight map the first time that file is parked, and a file
+/// released from a group that SURVIVES (a partial release - the other
+/// files keep it alive, so `counted` is not drained) is seeded again if
+/// it later rejoins. Its articles are still owned by that same group, so
+/// the seed counted them twice.
+///
+/// An id owned by a DIFFERENT live group moves with its ownership rather
+/// than being left stranded there: `counted` is the only record of which
+/// increment a retirement will pay off, so the two must not disagree.
+fn count_one(
+    groups: &mut HashMap<u32, GroupPark>,
+    counted: &mut HashMap<Arc<str>, u32>,
+    id: Arc<str>,
+    group: u32,
+) {
+    if !groups.contains_key(&group) {
+        return;
+    }
+    match counted.insert(id, group) {
+        // Already this group's: its increment is already standing.
+        Some(prev) if prev == group => {}
+        Some(prev) => {
+            if let Some(g) = groups.get_mut(&prev) {
+                g.inflight = g.inflight.saturating_sub(1);
+            }
+            if let Some(g) = groups.get_mut(&group) {
+                g.inflight += 1;
+            }
+        }
+        None => {
+            if let Some(g) = groups.get_mut(&group) {
+                g.inflight += 1;
+            }
+        }
+    }
+}
+
 pub(super) struct FilePark {
     /// Parked file -> its group id.
     files: std::sync::Mutex<HashMap<u32, u32>>,
@@ -99,6 +155,8 @@ pub(super) struct FilePark {
     /// Candidates stepped past because their group was at its
     /// allowance (diagnostics; monotonic).
     deferred: AtomicU64,
+    /// Deferrals the pool-idle floor refused (diagnostics; monotonic).
+    floor_rescues: AtomicU64,
 }
 
 impl FilePark {
@@ -110,6 +168,7 @@ impl FilePark {
             counted: std::sync::Mutex::new(HashMap::new()),
             next_group: AtomicU64::new(1),
             deferred: AtomicU64::new(0),
+            floor_rescues: AtomicU64::new(0),
         }
     }
 
@@ -137,20 +196,26 @@ impl FilePark {
                     .iter()
                     .find_map(|file| f.get(file).copied())
                     .unwrap_or_else(|| self.next_group.fetch_add(1, Ordering::Relaxed) as u32);
-                let entry = g.entry(group).or_insert(GroupPark { allow, inflight: 0 });
-                entry.allow = allow;
+                g.entry(group)
+                    .or_insert(GroupPark { allow, inflight: 0 })
+                    .allow = allow;
                 let mut seeded: Vec<Arc<str>> = Vec::new();
                 for &file in files {
                     if f.insert(file, group).is_none() {
-                        let ids = inflight_of(file);
-                        entry.inflight += ids.len() as u32;
-                        seeded.extend(ids);
+                        seeded.extend(inflight_of(file));
                     }
                 }
                 if !seeded.is_empty() {
+                    // Through `count_one` and NOT a `+= ids.len()`: a
+                    // file that rejoins a group it was released from
+                    // (the group outlived the release, so `counted`
+                    // still owns its articles) is seeded a second time,
+                    // and the flat add counted those articles twice -
+                    // the increment that can never be paid off. See
+                    // `count_one`.
                     let mut c = self.counted.lock_ok();
                     for id in seeded {
-                        c.insert(id, group);
+                        count_one(&mut g, &mut c, id, group);
                     }
                 }
             }
@@ -193,7 +258,23 @@ impl FilePark {
 
     /// Should `next_work` step past this candidate? True only for an
     /// unpromoted article of a parked group that is at its allowance.
-    pub(super) fn defers(&self, w: &Work) -> bool {
+    ///
+    /// `pool_idle` is the pool's OWN in-flight map being empty, read once
+    /// per scan by the caller. It is the authoritative form of the
+    /// liveness floor `GroupPark::full` estimates with a paired counter,
+    /// and it has the last word over it. The module header states that
+    /// floor as a rule - "a parked group with NOTHING in flight is
+    /// always admitted one article, whatever its allowance" - and a rule
+    /// that keeps a whole download alive must not rest on an estimate:
+    /// one unpaired increment makes the estimate permanently non-zero
+    /// and turns a throughput dip into a deadlock (3 Sep 2026: a leg ran
+    /// 195 s and exited with no payload, `inflight=0` in the map with
+    /// this predicate still true). `count_one` is what keeps the
+    /// estimate exact; this is what stops an exactness bug ever costing
+    /// a download again. The map cannot lie, and a snapshot that goes
+    /// stale can only admit ONE extra article - which is the floor
+    /// itself.
+    pub(super) fn defers(&self, w: &Work, pool_idle: bool) -> bool {
         if !self.is_on() || w.promoted || w.file == u32::MAX {
             return false;
         }
@@ -205,6 +286,20 @@ impl FilePark {
             .lock_ok()
             .get(&group)
             .is_some_and(GroupPark::full);
+        if busy && pool_idle {
+            // LOUD, once per run. A rescue means this park's own count
+            // and the pool's in-flight map disagree about whether
+            // anything is on the wire, which is a pairing bug and never
+            // a tuning question - and the 3 Sep 2026 wedge cost a day
+            // precisely because the same disagreement was silent.
+            if self.floor_rescues.fetch_add(1, Ordering::Relaxed) == 0 {
+                warn!(
+                    target: "pool",
+                    "held-bytes park: admitted a parked article the allowance refused -                      the pool has nothing in flight, so the park's own count is stale"
+                );
+            }
+            return false;
+        }
         if busy {
             self.deferred.fetch_add(1, Ordering::Relaxed);
         }
@@ -224,11 +319,13 @@ impl FilePark {
         if w.dup {
             return;
         }
-        if let Some(group) = self.group_of(w.file)
-            && let Some(g) = self.groups.lock_ok().get_mut(&group)
-        {
-            g.inflight += 1;
-            self.counted.lock_ok().insert(w.id.clone(), group);
+        if let Some(group) = self.group_of(w.file) {
+            // `groups` then `counted`, the same order `set` takes them
+            // in - `note_left` is the one that must take neither while
+            // holding the other (see its own note).
+            let mut g = self.groups.lock_ok();
+            let mut c = self.counted.lock_ok();
+            count_one(&mut g, &mut c, w.id.clone(), group);
         }
     }
 
@@ -255,6 +352,33 @@ mod tests {
 
     fn work(file: u32, promoted: bool) -> Work {
         named("<x@mock>", file, promoted)
+    }
+
+    /// THE BOOKS ARE AN IDENTITY: every group's `inflight` is the number
+    /// of ids `counted` maps to it. `count_one` is what enforces it and
+    /// this is what the rig checks after every path - a drift either way
+    /// is a real defect, and the UPWARD one wedges the group for the
+    /// rest of the run (see `count_one`).
+    fn books_balance(p: &FilePark) {
+        let g = p.groups.lock_ok();
+        let c = p.counted.lock_ok();
+        for (&group, park) in g.iter() {
+            let owned = c.values().filter(|&&x| x == group).count() as u32;
+            assert_eq!(
+                park.inflight, owned,
+                "group {group}: inflight {} against {owned} owned id(s)",
+                park.inflight
+            );
+        }
+        // And nothing may be owned by a group that no longer exists -
+        // a release drains ownership, so a straggler entry would give
+        // some later group a decrement it never earned.
+        for (id, group) in c.iter() {
+            assert!(
+                g.contains_key(group),
+                "{id} still owned by the departed group {group}"
+            );
+        }
     }
 
     fn named(id: &str, file: u32, promoted: bool) -> Work {
@@ -285,45 +409,51 @@ mod tests {
         let p = FilePark::new();
         let a = named("<a@mock>", 3, false);
         let b = named("<b@mock>", 5, false);
-        assert!(!p.defers(&work(3, false)), "nothing parked: never defers");
+        assert!(
+            !p.defers(&work(3, false), false),
+            "nothing parked: never defers"
+        );
         // Room for two bodies.
         p.set(&[3, 5], Some(2 * EST_BODY_BYTES), |_| Vec::new());
         assert!(p.is_on());
         assert!(!p.is_throttling());
-        assert!(!p.defers(&work(3, false)));
+        assert!(!p.defers(&work(3, false), false));
         p.note_pick(&a);
         assert!(
-            !p.defers(&work(5, false)),
+            !p.defers(&work(5, false), false),
             "one body in flight, room for two"
         );
         p.note_pick(&b);
-        assert!(p.defers(&work(3, false)), "at the allowance: stepped past");
+        assert!(
+            p.defers(&work(3, false), false),
+            "at the allowance: stepped past"
+        );
         assert!(p.is_throttling());
         assert_eq!(p.deferred(), 1);
         // Other files and promoted articles are never parked.
-        assert!(!p.defers(&work(4, false)));
-        assert!(!p.defers(&work(3, true)));
-        assert!(!p.defers(&work(u32::MAX, false)));
+        assert!(!p.defers(&work(4, false), false));
+        assert!(!p.defers(&work(3, true), false));
+        assert!(!p.defers(&work(u32::MAX, false), false));
         // A refreshed allowance reopens admission; a zero allowance
         // still admits one when nothing is in flight.
         p.set(&[3, 5], Some(3 * EST_BODY_BYTES), |_| Vec::new());
-        assert!(!p.defers(&work(3, false)));
+        assert!(!p.defers(&work(3, false), false));
         p.set(&[3, 5], Some(0), |_| Vec::new());
-        assert!(p.defers(&work(3, false)));
+        assert!(p.defers(&work(3, false), false));
         p.note_left(&a);
         p.note_left(&b);
         assert!(
-            !p.defers(&work(3, false)),
+            !p.defers(&work(3, false), false),
             "nothing in flight: the liveness floor"
         );
         // A late joiner lands in the same group and shares its count.
         p.note_pick(&named("<c@mock>", 3, false));
         p.set(&[7, 3], Some(0), |_| Vec::new());
-        assert!(p.defers(&work(7, false)));
+        assert!(p.defers(&work(7, false), false));
         // Release clears everything.
         p.set(&[3, 5, 7], None, |_| Vec::new());
         assert!(!p.is_on());
-        assert!(!p.defers(&work(3, false)));
+        assert!(!p.defers(&work(3, false), false));
         assert!(p.groups.lock_ok().is_empty());
         assert!(p.counted.lock_ok().is_empty(), "release drains ownership");
     }
@@ -341,14 +471,14 @@ mod tests {
                 Vec::new()
             }
         });
-        assert!(p.defers(&work(3, false)));
+        assert!(p.defers(&work(3, false), false));
         p.note_left(&named("<s1@mock>", 3, false));
-        assert!(!p.defers(&work(3, false)));
+        assert!(!p.defers(&work(3, false), false));
         // Re-parking the same file does not seed it twice.
         p.set(&[3], Some(2 * EST_BODY_BYTES), |_| {
             vec![Arc::from("<never@mock>")]
         });
-        assert!(!p.defers(&work(3, false)));
+        assert!(!p.defers(&work(3, false), false));
         // The other seeded article still owns its own decrement, so the
         // count comes all the way back to zero and the group cannot
         // hang behind a leaked increment.
@@ -386,16 +516,155 @@ mod tests {
         p.note_pick(&a); // before the park: uncounted
         p.set(&[3], Some(EST_BODY_BYTES), |_| Vec::new()); // A is not on the map yet
         p.note_pick(&b); // after the park: counted
-        assert!(p.defers(&work(3, false)), "one body of room, B holds it");
+        assert!(
+            p.defers(&work(3, false), false),
+            "one body of room, B holds it"
+        );
         p.note_left(&a);
         assert!(
-            p.defers(&work(3, false)),
+            p.defers(&work(3, false), false),
             "A was never counted and must not subtract B"
         );
         assert_eq!(p.groups.lock_ok()[&1].inflight, 1);
         // B's own retirement still reopens the floor.
         p.note_left(&b);
-        assert!(!p.defers(&work(3, false)));
+        assert!(!p.defers(&work(3, false), false));
+    }
+
+    /// THE WEDGE (3 Sep 2026). A file released from a group that
+    /// SURVIVES the release - its siblings keep it alive, so `counted`
+    /// is not drained - and then rejoining it is seeded from the
+    /// in-flight map a SECOND time. Before `count_one` the seed's flat
+    /// `+= ids.len()` counted those articles twice, and only one
+    /// retirement per id can ever come back: the group's count never
+    /// reached zero again, `full()` stayed true whatever the allowance,
+    /// and the one-article liveness floor never fired. Measured as a
+    /// 195 s leg that exited 1 with no payload, `inflight=0` in the
+    /// pool's own map, the chase parked 100% at a hole.
+    #[test]
+    fn a_file_rejoining_a_surviving_group_is_not_seeded_twice() {
+        let p = FilePark::new();
+        let on_the_wire = |file: u32| {
+            if file == 3 {
+                vec![Arc::from("<a@mock>")]
+            } else {
+                Vec::new()
+            }
+        };
+        p.set(&[3, 5], Some(EST_BODY_BYTES * 4), on_the_wire);
+        assert_eq!(p.groups.lock_ok()[&1].inflight, 1);
+        books_balance(&p);
+        // File 3 stops chasing: a PARTIAL release. File 5 keeps group 1
+        // alive, so file 3's article is still owned by it.
+        p.set(&[3], None, |_| Vec::new());
+        assert_eq!(p.groups.lock_ok()[&1].inflight, 1, "the group survives");
+        books_balance(&p);
+        // ... and rejoins. The refresh always names the WHOLE parked
+        // set, so the rejoin finds group 1 through file 5.
+        p.set(&[5, 3], Some(EST_BODY_BYTES * 4), on_the_wire);
+        books_balance(&p);
+        p.note_left(&named("<a@mock>", 3, false));
+        assert_eq!(
+            p.groups.lock_ok()[&1].inflight,
+            0,
+            "one article, one increment, one decrement"
+        );
+        assert!(
+            !p.defers(&work(5, false), false),
+            "and the liveness floor is back"
+        );
+        books_balance(&p);
+    }
+
+    /// The same identity from the other side: a second PICK of an id the
+    /// group already owns cannot double-count it either. No production
+    /// path re-picks a counted original today (every requeue deregisters
+    /// first), which is exactly why this is a pin and not a bug report -
+    /// a new requeue path that forgot its `note_left` would otherwise
+    /// wedge the group instead of merely over-admitting.
+    #[test]
+    fn a_second_pick_of_a_counted_article_counts_once() {
+        let p = FilePark::new();
+        let a = named("<a@mock>", 3, false);
+        p.set(&[3], Some(0), |_| Vec::new());
+        p.note_pick(&a);
+        p.note_pick(&a);
+        assert_eq!(p.groups.lock_ok()[&1].inflight, 1);
+        books_balance(&p);
+        p.note_left(&a);
+        assert_eq!(p.groups.lock_ok()[&1].inflight, 0);
+        books_balance(&p);
+    }
+
+    /// THE RIG the wedge asked for: drive a parked group through every
+    /// path that can put an article into the pool's in-flight map or
+    /// take it out again, and assert the count comes back to zero after
+    /// each. The pool-side pairing is audited in
+    /// `crates/nzbkit/src/pool/hedge.rs` (`deregister_inflight`,
+    /// `deregister_inflight_done`) and `session.rs` (the 430 path in
+    /// `handle_missing`); all three funnel into `note_left`, which is
+    /// what this drives - a dup is never counted at all, so its own
+    /// retirement is a no-op here by construction.
+    #[test]
+    fn every_retirement_path_returns_the_count_to_zero() {
+        let p = FilePark::new();
+        // Seeded (the articles already on the wire when the file parks).
+        p.set(&[3], Some(EST_BODY_BYTES * 8), |_| {
+            vec![Arc::from("<seed@mock>")]
+        });
+        // Picked after the park.
+        let picked = named("<pick@mock>", 3, false);
+        p.note_pick(&picked);
+        // A dup rides its original's entry and is never counted.
+        let mut dup = named("<pick@mock>", 3, false);
+        dup.dup = true;
+        p.note_pick(&dup);
+        assert_eq!(p.groups.lock_ok()[&1].inflight, 2);
+        books_balance(&p);
+        // A late joiner: same group, seeded from its own wire.
+        p.set(&[3, 4], Some(EST_BODY_BYTES * 8), |file| {
+            if file == 4 {
+                vec![Arc::from("<join@mock>")]
+            } else {
+                Vec::new()
+            }
+        });
+        assert_eq!(p.groups.lock_ok()[&1].inflight, 3);
+        books_balance(&p);
+        // Retire all three, once each, however they left the map.
+        for id in ["<seed@mock>", "<pick@mock>", "<join@mock>"] {
+            p.note_left(&named(id, 3, false));
+            books_balance(&p);
+        }
+        assert_eq!(p.groups.lock_ok()[&1].inflight, 0);
+        // A dup's retirement subtracts nothing (its pick added nothing).
+        p.note_left(&dup);
+        assert_eq!(p.groups.lock_ok()[&1].inflight, 0);
+        // And a release drains the ownership map with the group.
+        p.set(&[3, 4], None, |_| Vec::new());
+        assert!(p.groups.lock_ok().is_empty());
+        assert!(p.counted.lock_ok().is_empty());
+        books_balance(&p);
+    }
+
+    /// The authoritative floor: whatever the estimate says, a pool with
+    /// NOTHING in flight admits the candidate. This is what turns any
+    /// future counting bug back into a throughput dip instead of the
+    /// 195 s deadlock.
+    #[test]
+    fn an_empty_pool_map_always_overrides_a_full_group() {
+        let p = FilePark::new();
+        p.set(&[3], Some(0), |_| Vec::new());
+        p.note_pick(&named("<a@mock>", 3, false));
+        assert!(p.defers(&work(3, false), false), "the estimate says full");
+        assert!(
+            !p.defers(&work(3, false), true),
+            "the pool's own map has the last word"
+        );
+        assert_eq!(p.floor_rescues.load(Ordering::Relaxed), 1);
+        // The estimate's own deferral count is not charged for a
+        // rescued candidate: it is answering a different question.
+        assert_eq!(p.deferred(), 1);
     }
 
     /// The mirror of the pin above, and the reason the fix is an
@@ -409,13 +678,16 @@ mod tests {
         p.set(&[3], Some(EST_BODY_BYTES), |_| {
             vec![Arc::from("<seed@mock>")]
         });
-        assert!(p.defers(&work(3, false)), "the seed fills the allowance");
+        assert!(
+            p.defers(&work(3, false), false),
+            "the seed fills the allowance"
+        );
         // A stranger's retirement leaves the seed's count alone.
         p.note_left(&named("<other@mock>", 3, false));
-        assert!(p.defers(&work(3, false)));
+        assert!(p.defers(&work(3, false), false));
         p.note_left(&named("<seed@mock>", 3, false));
         assert_eq!(p.groups.lock_ok()[&1].inflight, 0);
-        assert!(!p.defers(&work(3, false)), "the floor reopens");
+        assert!(!p.defers(&work(3, false), false), "the floor reopens");
         // And a second landing of the same id cannot underflow it back
         // into an over-admitting state it has already paid for.
         p.note_left(&named("<seed@mock>", 3, false));

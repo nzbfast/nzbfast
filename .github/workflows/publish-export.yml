@@ -101,6 +101,14 @@ on:
     # reddens the author who adds an input without naming it here.
     paths:
       - 'packaging/publish-public.sh'
+      # The ci-private.yml strip rules and the verify behind them, which
+      # publish-public.sh used to carry inline and now executes from here.
+      # They moved so that the pre-commit leak scan could run the SAME
+      # rules over the staged bytes (TODO 323) - a change to them changes
+      # what the export produces and what it refuses, so this job has to
+      # see it. The --paths arm derived it and reddened without this line,
+      # which is what that arm is for.
+      - 'packaging/ci-private-strip.sh'
       - 'packaging/PUBLIC_MANIFEST'
       - 'packaging/private-patterns.txt'
       - 'packaging/README.public.md'

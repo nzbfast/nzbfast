@@ -256,10 +256,12 @@ reach them.
 
 ## Adding a locale (Latin / simple plural)
 1. `web/i18n/<tag>.json` - translate from `en.reference.json`.
-2. `crates/nzbfast/src/serve/assets.rs`: add the tag to `UI_LOCALES` + an
-   `i18n_catalog()` arm (and a `manual_i18n()` arm once a manual exists,
-   else it falls back to English). This used to be one `serve.rs`; the
-   daemon is a module tree under `src/serve/` now.
+2. `crates/nzbfast/src/serve/uilocales.rs`: add the tag to `UI_LOCALES`.
+   Then `crates/nzbfast/src/serve/assets.rs`: an `i18n_catalog()` arm (and
+   a `manual_i18n()` arm once a manual exists, else it falls back to
+   English). This used to be one `serve.rs`; the daemon is a module tree
+   under `src/serve/` now, and the tag list sits one module below the
+   assets because the settings boundary reads it with `dashboard` off.
 3. `web/dashboard.html` + `web/wall.html`: add to the `LOCALES` array, plus
    one `LOCALE_NAMES` line in dashboard.html (`[native, English]` - both
    Settings selects are generated from it at boot).

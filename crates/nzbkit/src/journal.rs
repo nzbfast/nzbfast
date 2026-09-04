@@ -726,7 +726,7 @@ impl Journal {
     /// path: the path is exactly what cannot be trusted. Move the
     /// hostile file aside instead.
     pub fn open(dir: &Path, nzb_bytes: &[u8]) -> std::io::Result<(Journal, ResumeState)> {
-        use md5::{Digest, Md5};
+        use crate::md5fast::{Digest, Md5};
         let fp = format!("{:x}", Md5::digest(nzb_bytes));
         let path = dir.join(JOURNAL_LEAF);
         std::fs::create_dir_all(dir)?;

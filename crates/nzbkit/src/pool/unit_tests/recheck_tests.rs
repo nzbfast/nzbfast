@@ -431,3 +431,71 @@ async fn the_hold_window_folds_to_the_longest_any_server_asked_for() {
     let (sh, _) = Shared::new(fresh(&["<w@x>"]), &mixed);
     assert_eq!(sh.recheck_hold_ms, 90_000);
 }
+
+/// TODO 315: a cancelled hold gives its budget slot back, and a requeue
+/// takes it again.
+///
+/// The FIFTH release site (see `Shared::take_recheck`). A late re-ask
+/// waits in the ordinary queue, so `QueueControl::cancel` can name one:
+/// the §146 tail give-up commit cancels every walker it claims, the
+/// par-race cancels its stragglers, and the in-stream PAR2 sniff cancels
+/// every remaining segment of a covered slot - the same damaged-post
+/// population that produces holds in the first place. A cancelled Work
+/// is stashed in `cancelled` and nothing ever walks it again: not the
+/// expiry scan, which only reads the QUEUE, and not any verdict site. So
+/// a missed release here is charged for the life of the run, and once
+/// `recheck_430_max` slots are gone the mechanism retires itself in
+/// silence - the exact failure the four earlier releases exist to
+/// prevent.
+///
+/// The requeue half is the same bug in the other direction: a queued
+/// hold with nothing charged behind it refunds a slot ANOTHER article
+/// holds when it finally goes terminal.
+#[tokio::test]
+async fn a_cancelled_hold_gives_its_budget_back_and_a_requeue_takes_it_again() {
+    let servers = vec![
+        (server("a"), PoolConfig::default()),
+        (server("b"), PoolConfig::default()),
+    ];
+    let (sh, _) = Shared::new(fresh(&["<held@x>", "<other@x>"]), &servers);
+    let cfg = PoolConfig {
+        recheck_430: true,
+        ..Default::default()
+    };
+    sh.alive[0].fetch_add(1, Ordering::AcqRel);
+    sh.alive[1].fetch_add(1, Ordering::AcqRel);
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    // Exactly the shape `handle_missing` leaves in the queue: server b
+    // refused, server a holds the article's one late re-ask.
+    {
+        let mut q = sh.queue.lock().await;
+        let w = q.front_mut().unwrap();
+        w.tried_430 = server_bit(1);
+        assert!(sh.take_recheck(w, &cfg, server_bit(0)));
+    }
+    assert_eq!(sh.recheck_held.load(Ordering::Acquire), 1);
+    let ids: HashSet<Arc<str>> = ["<held@x>"].iter().map(|s| Arc::from(*s)).collect();
+    assert_eq!(ctl.cancel(&ids).len(), 1, "the held article is cancellable");
+    assert_eq!(
+        sh.recheck_held.load(Ordering::Acquire),
+        0,
+        "a cancelled hold must return its slot - a leak here retires the \
+         late re-ask for the rest of the run and says nothing"
+    );
+    // And back: the article is in the queue again with its bit still
+    // recorded, so the budget has to show it held again.
+    let back: Vec<Arc<str>> = ids.iter().cloned().collect();
+    assert_eq!(ctl.requeue(&back), 1);
+    assert_eq!(
+        sh.recheck_held.load(Ordering::Acquire),
+        1,
+        "a resurrected hold is charged again, or its later terminal \
+         release refunds a slot another article is holding"
+    );
+    let q = sh.queue.lock().await;
+    assert!(
+        q.iter().any(|w| &*w.id == "<held@x>" && w.recheck_430 != 0),
+        "the requeued Work still carries the hold it was cancelled with"
+    );
+}

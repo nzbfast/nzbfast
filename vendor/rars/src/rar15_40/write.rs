@@ -1,4 +1,5 @@
 use super::*;
+use crate::write_entropy::EntropyScope;
 use crate::codec::rar13::{
     unpack15_encode_with_options_and_progress, EncodeOptions as Rar15EncodeOptions, Unpack15Encoder,
 };
@@ -38,6 +39,12 @@ pub fn write_stored_archive_with_comment(
     options: WriterOptions,
     archive_comment: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
+    // Held for the whole archive: the salt draw below reads it back off
+    // this thread. Never `let _ =`, which would drop it here and put the
+    // writer back on OS entropy. Only the five functions that do the
+    // work install one - the wrappers above them delegate here, and a
+    // second install would restart the seeded sequence mid-archive.
+    let _entropy = EntropyScope::install(options.entropy);
     let has_file_comment = entries.iter().any(|entry| entry.file_comment.is_some());
     validate_stored_writer_options(options, archive_comment.is_some(), has_file_comment)?;
     if options.features.header_encryption {
@@ -48,16 +55,18 @@ pub fn write_stored_archive_with_comment(
     out.extend_from_slice(RAR15_SIGNATURE);
     write_main_header(
         &mut out,
-        if archive_comment.is_some() && uses_old_style_archive_comment(options.target) {
-            MHD_COMMENT
-        } else {
-            0
-        },
+        recovery_main_flags(options)
+            | if archive_comment.is_some() && uses_old_style_archive_comment(options.target) {
+                MHD_COMMENT
+            } else {
+                0
+            },
     );
     write_archive_comment(&mut out, archive_comment, options.target)?;
     for entry in entries {
         write_stored_entry(&mut out, entry, options)?;
     }
+    append_recovery_record(&mut out, options)?;
     Ok(out)
 }
 
@@ -82,6 +91,12 @@ pub fn write_compressed_archive_with_comment_and_progress(
     archive_comment: Option<&[u8]>,
     progress: Option<&dyn WriteProgress>,
 ) -> Result<Vec<u8>> {
+    // Held for the whole archive: the salt draw below reads it back off
+    // this thread. Never `let _ =`, which would drop it here and put the
+    // writer back on OS entropy. Only the five functions that do the
+    // work install one - the wrappers above them delegate here, and a
+    // second install would restart the seeded sequence mid-archive.
+    let _entropy = EntropyScope::install(options.entropy);
     let total_bytes: u64 = entries.iter().map(|entry| entry.data.len() as u64).sum();
     let total_work = if options.target == ArchiveVersion::Rar20 && !options.features.solid {
         total_bytes.saturating_mul(2)
@@ -117,7 +132,8 @@ fn write_compressed_archive_with_comment_impl(
 
     let mut out = Vec::new();
     out.extend_from_slice(RAR15_SIGNATURE);
-    let mut main_flags = if options.features.solid { MHD_SOLID } else { 0 };
+    let mut main_flags =
+        recovery_main_flags(options) | if options.features.solid { MHD_SOLID } else { 0 };
     if archive_comment.is_some() && uses_old_style_archive_comment(options.target) {
         main_flags |= MHD_COMMENT;
     }
@@ -155,6 +171,7 @@ fn write_compressed_archive_with_comment_impl(
             )?;
         }
     }
+    append_recovery_record(&mut out, options)?;
     Ok(out)
 }
 
@@ -182,6 +199,12 @@ pub fn write_rar29_compressed_archive_with_filter_policy_and_progress(
     policy: FilterPolicy,
     progress: Option<&dyn WriteProgress>,
 ) -> Result<Vec<u8>> {
+    // Held for the whole archive: the salt draw below reads it back off
+    // this thread. Never `let _ =`, which would drop it here and put the
+    // writer back on OS entropy. Only the five functions that do the
+    // work install one - the wrappers above them delegate here, and a
+    // second install would restart the seeded sequence mid-archive.
+    let _entropy = EntropyScope::install(options.entropy);
     let total_bytes = entries.iter().map(|entry| entry.data.len() as u64).sum();
     report_compression_operation(progress, true, total_bytes, entries.len());
     validate_rar29_filter_policy(&policy)?;
@@ -701,11 +724,31 @@ fn write_header_encrypted_compressed_archive(
     Ok(out)
 }
 
+/// The main-header bit that declares the volume NAMING, which the four
+/// volume writers OR into every volume they emit.
+///
+/// One place, because the bit has to be identical on every volume of a
+/// set - real `rar` sets it on all of them, not just the first - and
+/// because the pairing it stands for is measured rather than obvious;
+/// [`VolumeNumbering`] carries the table.
+fn numbering_flag(options: WriterOptions) -> u16 {
+    match options.volume_numbering {
+        VolumeNumbering::Classic => 0,
+        VolumeNumbering::NewStyle => MHD_NEWNUMBERING,
+    }
+}
+
 pub fn write_stored_volumes(
     entry: StoredEntry<'_>,
     options: WriterOptions,
     max_packed_per_volume: usize,
 ) -> Result<Vec<Vec<u8>>> {
+    // Held for the whole archive: the salt draw below reads it back off
+    // this thread. Never `let _ =`, which would drop it here and put the
+    // writer back on OS entropy. Only the five functions that do the
+    // work install one - the wrappers above them delegate here, and a
+    // second install would restart the seeded sequence mid-archive.
+    let _entropy = EntropyScope::install(options.entropy);
     validate_stored_writer_options(options, false, false)?;
     validate_volume_writer_inputs(
         entry.name,
@@ -726,7 +769,7 @@ pub fn write_stored_volumes(
             method: 0x30,
             dictionary_flags: dictionary_flags_for_options(options)?,
             base_flags: writer_file_flags(entry.password, None, false),
-            main_flags: 0,
+            main_flags: numbering_flag(options),
             password: entry.password,
             max_packed_per_volume,
         });
@@ -743,7 +786,7 @@ pub fn write_stored_volumes(
         method: 0x30,
         dictionary_flags: dictionary_flags_for_options(options)?,
         base_flags: writer_file_flags(entry.password, None, false),
-        main_flags: 0,
+        main_flags: numbering_flag(options),
         password: entry.password,
         max_packed_per_volume,
     })
@@ -763,6 +806,12 @@ pub fn write_compressed_volumes_with_progress(
     max_packed_per_volume: usize,
     progress: Option<&dyn WriteProgress>,
 ) -> Result<Vec<Vec<u8>>> {
+    // Held for the whole archive: the salt draw below reads it back off
+    // this thread. Never `let _ =`, which would drop it here and put the
+    // writer back on OS entropy. Only the five functions that do the
+    // work install one - the wrappers above them delegate here, and a
+    // second install would restart the seeded sequence mid-archive.
+    let _entropy = EntropyScope::install(options.entropy);
     let total_work = if options.target == ArchiveVersion::Rar20 && !options.features.solid {
         (entry.data.len() as u64).saturating_mul(2)
     } else {
@@ -811,7 +860,8 @@ fn write_compressed_volumes_impl(
             method: payload.method,
             dictionary_flags: dictionary_flags_for_options(options)?,
             base_flags: writer_file_flags(entry.password, None, false),
-            main_flags: if options.features.solid { MHD_SOLID } else { 0 },
+            main_flags: numbering_flag(options)
+                | if options.features.solid { MHD_SOLID } else { 0 },
             password: entry.password,
             max_packed_per_volume,
         });
@@ -828,10 +878,138 @@ fn write_compressed_volumes_impl(
         method: payload.method,
         dictionary_flags: dictionary_flags_for_options(options)?,
         base_flags: writer_file_flags(entry.password, None, false),
-        main_flags: if options.features.solid { MHD_SOLID } else { 0 },
+        main_flags: numbering_flag(options) | if options.features.solid { MHD_SOLID } else { 0 },
         password: entry.password,
         max_packed_per_volume,
     })
+}
+
+/// A split STORED set holding SEVERAL members.
+///
+/// [`write_stored_volumes`] splits ONE member across the volumes, which
+/// is the shape a single big file makes. This one walks a slice: members
+/// pack end to end and only the member that lands on a volume boundary
+/// carries the split flags, so `rar a -v50M set.rar a.mkv b.nfo` is
+/// expressible at last. Nothing in the RAR 1.5-4 writer could emit it
+/// before, and it is the commonest layout on the wire
+/// (nzbfast-local change, 4 Sep 2026 - see vendor/rars/VENDORING.md).
+///
+/// Header encryption is reached from here exactly as it is from
+/// [`write_compressed_volume_set`]: the per-volume main header carries
+/// `MHD_PASSWORD` and every file header rides an encrypted block of its
+/// own, one salt per block.
+pub fn write_stored_volume_set(
+    entries: &[StoredEntry<'_>],
+    options: WriterOptions,
+    max_packed_per_volume: usize,
+) -> Result<Vec<Vec<u8>>> {
+    // Held for the whole archive: the per-member salt draws below read
+    // it back off this thread. Never `let _ =`, which would drop it here
+    // and put the writer back on OS entropy.
+    let _entropy = EntropyScope::install(options.entropy);
+    validate_stored_writer_options(options, false, false)?;
+    if entries.is_empty() {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 volume writer needs at least one entry",
+        ));
+    }
+    let mut members = Vec::with_capacity(entries.len());
+    for entry in entries {
+        validate_stored_entry(entry)?;
+        validate_volume_writer_inputs(
+            entry.name,
+            entry.data,
+            entry.password,
+            entry.file_comment,
+            options,
+        )?;
+        members.push(volume_set_member(VolumeSetMemberInput {
+            name: entry.name,
+            unpacked: entry.data,
+            packed: entry.data,
+            method: 0x30,
+            file_time: entry.file_time,
+            file_attr: entry.file_attr,
+            host_os: entry.host_os,
+            password: entry.password,
+            solid_continuation: false,
+            target: options.target,
+        })?);
+    }
+    write_volume_set(&members, options, numbering_flag(options), max_packed_per_volume)
+}
+
+/// A split COMPRESSED set holding SEVERAL members.
+///
+/// The stored twin above, over encoded payloads. Each member is encoded
+/// on its own unless `features.solid` is set, in which case the members
+/// share one encoder run and a continuation carries `FHD_SOLID`, exactly
+/// as [`write_compressed_archive`] already does for an unsplit archive
+/// (nzbfast-local change, 4 Sep 2026 - see vendor/rars/VENDORING.md).
+pub fn write_compressed_volume_set(
+    entries: &[FileEntry<'_>],
+    options: WriterOptions,
+    max_packed_per_volume: usize,
+) -> Result<Vec<Vec<u8>>> {
+    // Held for the whole archive: the per-member salt draws below read
+    // it back off this thread. Never `let _ =`, which would drop it here
+    // and put the writer back on OS entropy.
+    let _entropy = EntropyScope::install(options.entropy);
+    validate_compressed_writer_options(options, false, false)?;
+    if entries.is_empty() {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 volume writer needs at least one entry",
+        ));
+    }
+    for entry in entries {
+        validate_volume_writer_inputs(
+            entry.name,
+            entry.data,
+            entry.password,
+            entry.file_comment,
+            options,
+        )?;
+    }
+    let mut members = Vec::with_capacity(entries.len());
+    if options.features.solid {
+        let mut solid_encoder = SolidEncoder::for_target(options, true)?;
+        let mut solid_run_has_member = false;
+        for entry in entries {
+            let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder, None)?;
+            let solid_continuation = payload.method != 0x30 && solid_run_has_member;
+            members.push(volume_set_member(VolumeSetMemberInput {
+                name: entry.name,
+                unpacked: entry.data,
+                packed: &payload.data,
+                method: payload.method,
+                file_time: entry.file_time,
+                file_attr: entry.file_attr,
+                host_os: entry.host_os,
+                password: entry.password,
+                solid_continuation,
+                target: options.target,
+            })?);
+            solid_run_has_member = payload.method != 0x30;
+        }
+    } else {
+        let payloads = encode_independent_payloads(entries, options, None)?;
+        for (entry, payload) in entries.iter().zip(&payloads) {
+            members.push(volume_set_member(VolumeSetMemberInput {
+                name: entry.name,
+                unpacked: entry.data,
+                packed: &payload.data,
+                method: payload.method,
+                file_time: entry.file_time,
+                file_attr: entry.file_attr,
+                host_os: entry.host_os,
+                password: entry.password,
+                solid_continuation: false,
+                target: options.target,
+            })?);
+        }
+    }
+    let main_flags = numbering_flag(options) | if options.features.solid { MHD_SOLID } else { 0 };
+    write_volume_set(&members, options, main_flags, max_packed_per_volume)
 }
 
 fn report_compression_operation(
@@ -891,6 +1069,7 @@ fn validate_stored_writer_options(
         options.target,
         ArchiveVersion::Rar15 | ArchiveVersion::Rar20 | ArchiveVersion::Rar29
     ) && has_file_comment;
+    allowed.recovery_record = allows_recovery_record(options);
     if options.features != allowed {
         return Err(Error::UnsupportedFeature {
             version: options.target,
@@ -941,6 +1120,7 @@ fn validate_compressed_writer_options(
         options.target,
         ArchiveVersion::Rar15 | ArchiveVersion::Rar20 | ArchiveVersion::Rar29
     ) && has_file_comment;
+    allowed.recovery_record = allows_recovery_record(options);
     if options.features != allowed {
         return Err(Error::UnsupportedFeature {
             version: options.target,
@@ -993,7 +1173,56 @@ fn validate_header_encrypted_archive_options(
     Ok(())
 }
 
+/// Whether the requested archive may carry a recovery record.
+///
+/// Answers a `FeatureSet` slot, so a `true` here is a promise that
+/// `append_recovery_record` will actually write one on this path. The
+/// two exclusions are real gaps and not spelling:
+///
+/// * RAR 1.5 and 2.0 want the old-style `PROTECT_HEAD` block instead
+///   (`writer_supports_recovery_record`);
+/// * a header-encrypted archive stores the record encrypted too, and
+///   this writer would leave it in the clear - which the extractor
+///   refuses to read back (`newsub_recovery_data`), so the archive
+///   would carry a record no reader accepts.
+///
+/// The VOLUME writers share these validators and are refused separately
+/// in `validate_volume_writer_inputs`: they reach the same `allowed`
+/// set but never reach `append_recovery_record`, so passing here would
+/// mean an archive claiming `MHD_PROTECT` with no record behind it.
+fn allows_recovery_record(options: WriterOptions) -> bool {
+    writer_supports_recovery_record(options.target)
+        && !options.features.header_encryption
+        && options.features.recovery_record
+}
+
+/// Refuses a percent with the feature flag off, and a flag with no percent.
+///
+/// Either half alone is a request the writer would answer by doing
+/// nothing: a percent with `features.recovery_record` off is dropped by
+/// `append_recovery_record`, and the flag with no percent has no size to
+/// build. Both are far more likely to be a caller's mistake than an
+/// intention, so both are named rather than ignored.
+fn validate_recovery_request(options: WriterOptions) -> Result<()> {
+    if options.recovery_percent.is_some() != options.features.recovery_record {
+        return Err(Error::InvalidHeader(
+            "RAR recovery record needs both features.recovery_record and a recovery percent",
+        ));
+    }
+    if matches!(options.recovery_percent, Some(percent) if percent == 0 || percent > 100) {
+        return Err(Error::InvalidHeader(
+            "RAR recovery percent must be in the range 1..=100",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_compression_level(options: WriterOptions) -> Result<()> {
+    // Every writer validator runs this first, which is why the recovery
+    // pairing check rides here: a path that forgot to call it would be
+    // a path that skipped the compression-level check too, and that is
+    // visible in a diff.
+    validate_recovery_request(options)?;
     if matches!(options.compression_level, Some(level) if level > 5) {
         return Err(Error::InvalidHeader(
             "RAR compression level must be in the range 0..5",
@@ -1380,6 +1609,18 @@ fn validate_volume_writer_inputs(
             feature: "volume_file_comment",
         });
     }
+    // The single-archive validators run before this one and now allow a
+    // recovery record, so without this arm a volume set would pass every
+    // check and be written with none: `write_split_volumes` never reaches
+    // `append_recovery_record`. `rar` puts one record in EVERY volume,
+    // over that volume's own bytes, which is a per-volume plan this
+    // writer does not have.
+    if options.features.recovery_record {
+        return Err(Error::UnsupportedFeature {
+            version: options.target,
+            feature: "RAR 3.x recovery record on a volume set",
+        });
+    }
     Ok(())
 }
 
@@ -1520,9 +1761,92 @@ fn encrypt_packed_data_for_writer(
 
 fn random_rar30_salt() -> Result<[u8; 8]> {
     let mut salt = [0; 8];
-    getrandom::fill(&mut salt)
-        .map_err(|_| Error::InvalidHeader("RAR 3.x writer could not generate encryption salt"))?;
+    crate::write_entropy::fill(
+        &mut salt,
+        "RAR 3.x writer could not generate encryption salt",
+    )?;
     Ok(salt)
+}
+
+/// Whether this target carries an embedded recovery record as a `RR`
+/// NEWSUB block.
+///
+/// RAR 2.0 and earlier protect an archive with an old-style
+/// `PROTECT_HEAD` (`Protect!`) block instead, which is a different
+/// layout with a different repair path; this writer builds only the
+/// RAR 3.x form (`Protect+`), so those two targets are refused rather
+/// than served something the extractor would read as the wrong record.
+fn writer_supports_recovery_record(target: ArchiveVersion) -> bool {
+    matches!(
+        target,
+        ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
+    )
+}
+
+/// `MHD_PROTECT` when this archive will carry a recovery record.
+///
+/// The flag lives in the main header, which is INSIDE the region the
+/// record protects, so it has to be right when the header is written -
+/// setting it afterwards would move a byte the tags already cover and
+/// leave sector 0 reading as damaged. Every caller therefore folds this
+/// into its main flags rather than patching later.
+fn recovery_main_flags(options: WriterOptions) -> u16 {
+    if options.features.recovery_record {
+        MHD_PROTECT
+    } else {
+        0
+    }
+}
+
+/// Appends the `RR` NEWSUB recovery record over everything written so far.
+///
+/// Must be the last thing added to `out`: the record protects the bytes
+/// that precede it and nothing else, and `rar15_40`'s repair path derives
+/// the protected range from this block's own offset. Returns without
+/// writing when the archive asked for no record.
+fn append_recovery_record(out: &mut Vec<u8>, options: WriterOptions) -> Result<()> {
+    if !options.features.recovery_record {
+        return Ok(());
+    }
+    let percent = options.recovery_percent.ok_or(Error::InvalidHeader(
+        "RAR 3.x recovery record requested with no percent",
+    ))?;
+    let plan = crate::recovery::rar3::plan_newsub_recovery(out.len(), percent)?;
+    let data = crate::recovery::rar3::build_newsub_recovery_data(out, plan);
+    let protected_sectors = u32::try_from(plan.protected_sectors)
+        .map_err(|_| Error::InvalidHeader("RAR 3.x recovery protected sector count overflows"))?;
+    let parity_sectors = u32::try_from(plan.parity_sectors)
+        .map_err(|_| Error::InvalidHeader("RAR 3.x recovery parity sector count overflows"))?;
+    // The 20 bytes `rar` writes after the `RR` name: the mark, the two
+    // counts, then two reserved words. This crate's own repair path
+    // reads none of them - it derives the geometry from the block
+    // offset and the data length - but `rar` does, so a record that
+    // omitted them would repair here and nowhere else.
+    let mut extra = Vec::with_capacity(20);
+    extra.extend_from_slice(b"Protect+");
+    extra.extend_from_slice(&parity_sectors.to_le_bytes());
+    extra.extend_from_slice(&protected_sectors.to_le_bytes());
+    extra.extend_from_slice(&0u16.to_le_bytes());
+    extra.extend_from_slice(&0u16.to_le_bytes());
+    write_file_header_and_data(
+        out,
+        FileRecord {
+            head_type: NEWSUB_HEAD,
+            name: b"RR",
+            unpacked_size: data.len(),
+            file_crc: crc32(&data),
+            packed: &data,
+            file_time: 0,
+            file_attr: 0,
+            host_os: 3,
+            target: ArchiveVersion::Rar30,
+            method: 0x30,
+            dictionary_flags: 0,
+            flags: SKIP_IF_UNKNOWN,
+            salt: None,
+            extra: &extra,
+        },
+    )
 }
 
 fn write_main_header(out: &mut Vec<u8>, flags: u16) {
@@ -2011,6 +2335,252 @@ fn write_split_volumes(entry: SplitVolumeRecord<'_>) -> Result<Vec<Vec<u8>>> {
     Ok(volumes)
 }
 
+/// One member of a multi-member volume set, already packed and, where a
+/// password was given, already encrypted.
+///
+/// The packed bytes are encrypted ONCE for the whole member and then cut
+/// at the volume boundaries, which is what the single-member writer does
+/// and what the reader expects: `validate_split_continuation_refs`
+/// refuses a set whose fragments disagree about the salt, so a member
+/// carries exactly one.
+struct VolumeSetMember<'a> {
+    name: &'a [u8],
+    unpacked_len: usize,
+    unpacked_crc: u32,
+    packed: Vec<u8>,
+    salt: Option<[u8; 8]>,
+    file_time: u32,
+    file_attr: u32,
+    host_os: u8,
+    password: Option<&'a [u8]>,
+    method: u8,
+    base_flags: u16,
+}
+
+/// `'a` is what the built member keeps (its name and password); `'p` is
+/// the payload, which the builder copies before returning, so a caller
+/// may hand over an encoded buffer it is about to drop.
+struct VolumeSetMemberInput<'a, 'p> {
+    name: &'a [u8],
+    unpacked: &'p [u8],
+    packed: &'p [u8],
+    method: u8,
+    file_time: u32,
+    file_attr: u32,
+    host_os: u8,
+    password: Option<&'a [u8]>,
+    solid_continuation: bool,
+    target: ArchiveVersion,
+}
+
+fn volume_set_member<'a>(input: VolumeSetMemberInput<'a, '_>) -> Result<VolumeSetMember<'a>> {
+    if input.packed.is_empty() {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 volume writer needs a non-empty packed payload",
+        ));
+    }
+    let mut packed = input.packed.to_vec();
+    let salt = match input.password {
+        Some(password) => encrypt_split_packed_data(&mut packed, input.target, password)?,
+        None => None,
+    };
+    let mut base_flags = writer_file_flags(input.password, None, input.solid_continuation);
+    if salt.is_some() {
+        base_flags |= FHD_SALT;
+    }
+    Ok(VolumeSetMember {
+        name: input.name,
+        unpacked_len: input.unpacked.len(),
+        unpacked_crc: crc32(input.unpacked),
+        packed,
+        salt,
+        file_time: input.file_time,
+        file_attr: input.file_attr,
+        host_os: input.host_os,
+        password: input.password,
+        method: input.method,
+        base_flags,
+    })
+}
+
+/// Pack several members end to end across the volumes.
+///
+/// [`write_split_volumes`] chunks ONE member's payload and gives each
+/// chunk a volume of its own. This walks a payload cursor across the
+/// members instead, so a volume can hold the tail of one member, whole
+/// members, and the head of the next - the layout `rar a -v` writes and
+/// the one [`crate::rar15_40::extract_volumes_to`] already reads, since
+/// its split state machine is per file header and not per volume.
+///
+/// The whole-file CRC rides the LAST fragment of each member and a
+/// middle fragment carries its own chunk CRC, exactly as the
+/// single-member writer does.
+fn write_volume_set(
+    members: &[VolumeSetMember<'_>],
+    options: WriterOptions,
+    main_flags: u16,
+    max_packed_per_volume: usize,
+) -> Result<Vec<Vec<u8>>> {
+    if max_packed_per_volume == 0 {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 volume payload size must be non-zero",
+        ));
+    }
+    if members.is_empty() {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 volume writer needs at least one entry",
+        ));
+    }
+    let header_password = if options.features.header_encryption {
+        validate_header_encrypted_archive_options(options, false, options.features.solid)?;
+        Some(header_encryption_password(
+            members.iter().map(|member| member.password),
+        )?)
+    } else {
+        None
+    };
+    let dictionary_flags = dictionary_flags_for_options(options)?;
+
+    let mut bodies: Vec<Vec<u8>> = Vec::new();
+    let mut body: Option<Vec<u8>> = None;
+    let mut packed_in_volume = 0usize;
+    for member in members {
+        let mut start = 0usize;
+        let mut split_before = false;
+        while start < member.packed.len() {
+            if body.is_none() {
+                body = Some(Vec::new());
+                packed_in_volume = 0;
+            }
+            let room = max_packed_per_volume - packed_in_volume;
+            let fragment = room.min(member.packed.len() - start);
+            let end = start + fragment;
+            let split_after = end < member.packed.len();
+            let chunk = &member.packed[start..end];
+            let mut flags = member.base_flags;
+            if split_before {
+                flags |= FHD_SPLIT_BEFORE;
+            }
+            if split_after {
+                flags |= FHD_SPLIT_AFTER;
+            }
+            let record = FileRecord {
+                head_type: FILE_HEAD,
+                name: member.name,
+                unpacked_size: member.unpacked_len,
+                file_crc: if split_after {
+                    crc32(chunk)
+                } else {
+                    member.unpacked_crc
+                },
+                packed: chunk,
+                file_time: member.file_time,
+                file_attr: member.file_attr,
+                host_os: member.host_os,
+                target: options.target,
+                method: member.method,
+                dictionary_flags,
+                flags,
+                salt: member.salt,
+                extra: &[],
+            };
+            // Invariant: the branch above starts a body whenever none exists.
+            let out = body.as_mut().expect("volume body started");
+            match header_password {
+                Some(password) => {
+                    let mut header = Vec::new();
+                    write_file_header(&mut header, &record)?;
+                    write_encrypted_header_and_data(out, &header, chunk, password)?;
+                }
+                None => write_file_header_and_data(out, record)?,
+            }
+            packed_in_volume += fragment;
+            start = end;
+            split_before = true;
+            if packed_in_volume == max_packed_per_volume {
+                // Invariant: the body exists - this arm runs after a write into it.
+                bodies.push(body.take().expect("volume body started"));
+                packed_in_volume = 0;
+            }
+        }
+    }
+    if let Some(finished) = body.take() {
+        bodies.push(finished);
+    }
+    if bodies.len() < 2 {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 volume writer needs at least two volumes",
+        ));
+    }
+
+    // The end headers are written here rather than inside the loop
+    // because only the FULL set knows which body is the last one: a
+    // member that ends exactly on a volume boundary closes its volume
+    // with nothing following, and marking that one "next volume" would
+    // send a reader looking for a volume that does not exist.
+    let last = bodies.len() - 1;
+    let mut volumes = Vec::with_capacity(bodies.len());
+    for (index, body) in bodies.iter().enumerate() {
+        volumes.push(finish_volume(
+            body,
+            index,
+            main_flags,
+            header_password,
+            index == last,
+        )?);
+    }
+    Ok(volumes)
+}
+
+/// Wrap one volume's file blocks in its own archive.
+///
+/// The end header is what chains the set. [`write_split_volumes`] omits
+/// it and gets away with it because its single member is split across
+/// EVERY volume, so `FHD_SPLIT_AFTER` alone tells a reader to continue.
+/// A multi-member set has volumes whose last file is complete, and a
+/// reference reader stops there unless an `ENDARC` block says another
+/// volume follows - measured against unrar 7.23, which extracted only
+/// the first member without it.
+fn finish_volume(
+    body: &[u8],
+    index: usize,
+    main_flags: u16,
+    header_password: Option<&[u8]>,
+    last: bool,
+) -> Result<Vec<u8>> {
+    let mut flags = MHD_VOLUME | main_flags;
+    if index == 0 {
+        flags |= MHD_FIRSTVOLUME;
+    }
+    if header_password.is_some() {
+        flags |= MHD_PASSWORD;
+    }
+    let mut out = Vec::with_capacity(RAR15_SIGNATURE.len() + 20 + body.len());
+    out.extend_from_slice(RAR15_SIGNATURE);
+    write_main_header(&mut out, flags);
+    out.extend_from_slice(body);
+    let end_flags = if last { 0 } else { EARC_NEXT_VOLUME };
+    match header_password {
+        Some(password) => {
+            let mut end = Vec::new();
+            write_end_header(&mut end, end_flags);
+            write_encrypted_header_and_data(&mut out, &end, &[], password)?;
+        }
+        None => write_end_header(&mut out, end_flags),
+    }
+    Ok(out)
+}
+
+fn write_end_header(out: &mut Vec<u8>, flags: u16) {
+    let start = out.len();
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.push(ENDARC_HEAD);
+    out.extend_from_slice(&flags.to_le_bytes());
+    out.extend_from_slice(&7u16.to_le_bytes());
+    write_header_crc(out, start);
+}
+
+
 fn write_header_encrypted_split_volumes(entry: SplitVolumeRecord<'_>) -> Result<Vec<Vec<u8>>> {
     validate_header_encrypted_archive_options(
         WriterOptions {
@@ -2024,6 +2594,16 @@ fn write_header_encrypted_split_volumes(entry: SplitVolumeRecord<'_>) -> Result<
             },
             compression_level: None,
             dictionary_size: None,
+            // Validation only. The caller installed the real setting
+            // before it reached here, and no draw reads this value.
+            entropy: Entropy::Os,
+            // Validation only, as above: the numbering already reached
+            // the record's `main_flags` at the caller.
+            volume_numbering: VolumeNumbering::Classic,
+            // Same: a volume set never carries a recovery record
+            // (`validate_volume_writer_inputs` refused one before this
+            // function was reached), so there is nothing to validate.
+            recovery_percent: None,
         },
         false,
         entry.main_flags & MHD_SOLID != 0,

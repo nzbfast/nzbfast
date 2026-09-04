@@ -149,6 +149,32 @@ impl Shared {
     /// one of the three and the budget leaks, which does not fail
     /// loudly: it silently retires the mechanism once
     /// `recheck_430_max` slots are gone.
+    ///
+    /// THREE MORE HAVE BEEN FOUND SINCE, and the count above is left as
+    /// written because that is how the trap reads: the three are the
+    /// verdict sites, and every OTHER way a Work can leave the queue for
+    /// good is a site too.
+    ///
+    /// The fourth is `next_work`'s unservable arm, where a fleet
+    /// shrinking under a queued hold retires it. The fifth is
+    /// [`QueueControl::cancel`](super::QueueControl::cancel), which
+    /// claims a queued Work terminal and stashes it whole - reachable
+    /// by the §146 tail give-up, the par-race and the in-stream PAR2
+    /// sniff, none of which look at `recheck_430` at all.
+    /// [`QueueControl::requeue`](super::QueueControl::requeue)
+    /// RE-CHARGES what it resurrects, through `recharge_recheck` below,
+    /// so a cancel/requeue round trip leaves the budget where it found
+    /// it.
+    ///
+    /// THE SIXTH is inside `runlife`'s own drain, and this list said
+    /// nothing about it until 1 Sep 2026 while the site itself has
+    /// released all along: an article whose retry budget is spent where
+    /// `note_spent` finds no live server still owed a go never returns
+    /// to the queue. It is a TERMINAL verdict reached in the
+    /// shed/reinsert loop rather than at a session's verdict site, which
+    /// is exactly why an enumeration written from the verdict sites
+    /// missed it - and why "every way a Work leaves the queue for good"
+    /// is the rule to check a new site against, not this list's length.
     pub(super) fn take_recheck(&self, w: &mut Work, cfg: &PoolConfig, group_bits: u32) -> bool {
         if !cfg.recheck_430 || w.recheck_430 & group_bits == group_bits {
             return false;
@@ -185,6 +211,24 @@ impl Shared {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 Some(n.saturating_sub(1))
             });
+    }
+
+    /// TODO 315: the exact partner of [`Self::release_recheck`], for the
+    /// one path that puts a released Work back in the queue -
+    /// `QueueControl::requeue` resurrecting something `cancel` took out.
+    ///
+    /// UNCONDITIONAL, with no `recheck_430_max` test, and that is not an
+    /// oversight: the slot was granted at `take_recheck` and the article
+    /// still carries the bit, so refusing here would leave a queued hold
+    /// with nothing charged behind it - and its eventual terminal
+    /// release would then refund a slot some OTHER article is holding.
+    /// The same predicate as the release, so the two cannot drift: a
+    /// Work with no hold recorded charges nothing.
+    pub(super) fn recharge_recheck(&self, w: &Work) {
+        if w.recheck_430 == 0 {
+            return;
+        }
+        self.recheck_held.fetch_add(1, Ordering::AcqRel);
     }
 }
 

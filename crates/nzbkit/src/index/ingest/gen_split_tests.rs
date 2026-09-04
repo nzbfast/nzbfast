@@ -561,3 +561,247 @@ fn a_wide_cluster_probes_every_filename_not_just_the_first_eleven() {
     );
     teardown(&dir, ix);
 }
+
+/// The same flood inside ONE OVER window, which is the pass loop's
+/// half rather than the sibling cap's. Measured on live teevee traffic
+/// 1 Sep 2026: 194 (poster, file, part) slots carrying 133-134 distinct
+/// message-ids inside one 25,000-header window, so 91% of the window
+/// deferred on the first pass and the leftover shrank by only the slot
+/// count per pass - `[25000, 23257, 23058, 22862, 22668]`.
+///
+/// A pass places exactly one article per slot, so a batch can never
+/// contribute more than `MAX_GEN_PASSES` generations however deep the
+/// slot is. This pins BOTH halves of that: the rows are exactly the
+/// ones the four-pass loop produced before the surplus was dropped
+/// early (unchanged outcome), and the surplus is counted in the drop
+/// census rather than carried through three more full passes to be
+/// dropped at the end.
+#[test]
+fn a_flood_inside_one_window_places_one_generation_per_pass_and_counts_the_rest() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-genflood-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut ix = Index::open(&dir.join("index.db")).unwrap();
+
+    // One slot, twelve reinjections - three times what the loop can
+    // place, and a fortieth of what teevee really posts.
+    const DEPTH: usize = 12;
+    let batch: Vec<_> = (0..DEPTH)
+        .map(|i| {
+            entry(
+                "\"Flood.S01E01.mkv\" yEnc (1/1)",
+                "bot@flood",
+                &format!("window-{i}"),
+                1000,
+            )
+        })
+        .collect();
+    ix.ingest("alt.test", &batch, 1000).unwrap();
+
+    let rows: i64 = ix
+        .db
+        .query_row("SELECT COUNT(*) FROM releases", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        rows, MAX_GEN_PASSES as i64,
+        "one window should contribute exactly MAX_GEN_PASSES generations"
+    );
+    assert_eq!(
+        ix.kv_get("ingest_drop_gen_depth").as_deref(),
+        Some((DEPTH - MAX_GEN_PASSES as usize).to_string().as_str()),
+        "the surplus past the pass budget was not counted"
+    );
+    // And the ones that DID land are the first four ids, in arrival
+    // order - the same four the old loop placed, one per pass.
+    let mut placed: Vec<String> = ix
+        .db
+        .prepare("SELECT id FROM releases")
+        .unwrap()
+        .query_map([], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .map(|r| ix.make_nzb(r.unwrap()).unwrap())
+        .collect();
+    placed.sort();
+    for i in 0..MAX_GEN_PASSES as usize {
+        assert!(
+            placed.iter().any(|n| n.contains(&format!("window-{i}"))),
+            "window-{i} did not reach a row"
+        );
+    }
+    for i in MAX_GEN_PASSES as usize..DEPTH {
+        assert!(
+            !placed.iter().any(|n| n.contains(&format!("window-{i}"))),
+            "window-{i} reached a row past the pass budget"
+        );
+    }
+    teardown(&dir, ix);
+}
+
+/// Stage 1 of the generation-row policy (1 Sep 2026): the per-group
+/// slot-depth census that a depth-N cutoff has to be costed against.
+/// It cannot be answered from stored rows - `MAX_GEN_SIBLINGS` truncates
+/// stored family depth at exactly 17, so the 133-850 a live flood
+/// reaches is nowhere in the index - which is why this counts forward
+/// traffic at ingest instead.
+///
+/// Two quantities, and this pins the difference between them, because
+/// whoever picks the cutoff reads `rows` and would otherwise read it as
+/// slots. `slots` files each clashing slot at its own depth; `rows`
+/// files a minted generation row at the depth of the SHALLOWEST
+/// clashing slot in its cluster, because a cutoff at N only stops a
+/// cluster reaching pass 2 when every one of its slots is at or past N.
+/// The mixed cluster below is exactly that case: one slot 12 deep, one
+/// 2 deep, and a cutoff at 9 would decline none of its three rows.
+#[test]
+fn the_depth_census_files_slots_by_depth_and_rows_by_their_cluster_floor() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-gencensus-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut ix = Index::open(&dir.join("index.db")).unwrap();
+
+    // One slot, twelve reinjections - the shape teevee posts, at a
+    // fortieth of the depth. Every generation it mints is one a cutoff
+    // at any N <= 12 would decline.
+    const DEEP: usize = 12;
+    let flood: Vec<_> = (0..DEEP)
+        .map(|i| {
+            entry(
+                "\"Flood.S01E01.mkv\" yEnc (1/1)",
+                "bot@flood",
+                &format!("deep-{i}"),
+                1000,
+            )
+        })
+        .collect();
+    ix.ingest("alt.test.deep", &flood, 1000).unwrap();
+
+    // The same cluster carrying a 12-deep slot AND a 2-deep one. Part 2
+    // is an ordinary two-generation part; part 1 is a flood. Silencing
+    // part 1 at a cutoff of 9 leaves part 2 still deferring, so the
+    // cluster still reaches passes 2-4 and mints the same three rows.
+    let mut mixed: Vec<_> = (0..DEEP)
+        .map(|i| {
+            entry(
+                "\"Mixed.S01E01.mkv\" yEnc (1/2)",
+                "bot@mix",
+                &format!("mix-a{i}"),
+                1000,
+            )
+        })
+        .collect();
+    mixed.extend((0..2).map(|i| {
+        entry(
+            "\"Mixed.S01E01.mkv\" yEnc (2/2)",
+            "bot@mix",
+            &format!("mix-b{i}"),
+            1000,
+        )
+    }));
+    ix.ingest("alt.test.mixed", &mixed, 2000).unwrap();
+
+    let n = |k: &str| -> u64 {
+        ix.kv_get(k)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    // Per GROUP, not globally: teevee against everything else is the
+    // whole discriminator, and a global total cannot show separation.
+    assert_eq!(
+        n("ingest_gen_depth_census_slots:alt.test.deep:0009_0012"),
+        1,
+        "the flood's one slot was not filed at its true depth"
+    );
+    assert_eq!(
+        n("ingest_gen_depth_census_rows:alt.test.deep:0009_0012"),
+        MAX_GEN_PASSES as u64 - 1,
+        "a 12-deep cluster mints one generation per pass past the first"
+    );
+    assert_eq!(
+        n("ingest_gen_depth_census_slots:alt.test.mixed:0009_0012"),
+        1
+    );
+    assert_eq!(n("ingest_gen_depth_census_slots:alt.test.mixed:0002"), 1);
+    assert_eq!(
+        n("ingest_gen_depth_census_rows:alt.test.mixed:0002"),
+        MAX_GEN_PASSES as u64 - 1,
+        "a mixed cluster's rows belong to its SHALLOWEST slot - a cutoff \
+         above 2 would not decline one of them"
+    );
+    assert_eq!(
+        n("ingest_gen_depth_census_rows:alt.test.mixed:0009_0012"),
+        0,
+        "filing a mixed cluster's rows under its deepest slot overstates \
+         what a cutoff there would reclaim"
+    );
+    // Nothing leaked across the group boundary.
+    assert_eq!(n("ingest_gen_depth_census_slots:alt.test.deep:0002"), 0);
+    // Cumulative counters with no window are a rate nobody can read, so
+    // the first batch to count anything dates them. It is stamped once
+    // and never moved: the second ingest's clock does not appear.
+    assert_eq!(
+        ix.kv_get("ingest_gen_depth_census_since").as_deref(),
+        Some("1000")
+    );
+    teardown(&dir, ix);
+}
+
+/// The census reads back nested for a human: metric -> group -> bucket,
+/// with the bucket vocabulary IN ORDER beside it. The order is the half
+/// a reader cannot reconstruct - the cutoff question is "sum this bucket
+/// and every deeper one" - and it must list buckets no group reached,
+/// or a cutoff at an empty bucket looks unanswerable rather than free.
+///
+/// Also pins the two ways a prefix scan goes wrong. `_` is a LIKE
+/// wildcard and this prefix carries five, so an unescaped scan would
+/// report a stranger's `ingestXgen...` key as its own; and a key this
+/// build does not understand is REPORTED under `unclassified`, not
+/// silently dropped - the founding defect of the drop census next door.
+#[test]
+fn the_depth_census_reads_back_nested_and_reports_keys_it_does_not_know() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-gencread-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut ix = Index::open(&dir.join("index.db")).unwrap();
+
+    let flood: Vec<_> = (0..12)
+        .map(|i| {
+            entry(
+                "\"Flood.S01E01.mkv\" yEnc (1/1)",
+                "bot@flood",
+                &format!("deep-{i}"),
+                1000,
+            )
+        })
+        .collect();
+    ix.ingest("alt.binaries.teevee", &flood, 1_700_000_000)
+        .unwrap();
+
+    // A key one character off the prefix - `X` where the scan expects a
+    // literal `_`. It must not appear anywhere in the answer.
+    ix.kv_set("ingestXgen_depth_census_slots:alt.decoy:0002", "999")
+        .unwrap();
+    // A well-formed key naming a bucket this build has no label for.
+    ix.kv_set("ingest_gen_depth_census_slots:alt.test:0009_0011", "7")
+        .unwrap();
+
+    let c = ix.gen_depth_census().unwrap();
+    assert_eq!(c["slots"]["alt.binaries.teevee"]["0009_0012"], 1, "{c}");
+    assert_eq!(c["rows"]["alt.binaries.teevee"]["0009_0012"], 3, "{c}");
+    assert_eq!(c["since"], 1_700_000_000i64, "{c}");
+    assert_eq!(c["window_known"], true, "{c}");
+    assert_eq!(
+        c["buckets"].as_array().unwrap().len(),
+        GEN_DEPTH_BUCKETS.len(),
+        "the whole bucket vocabulary is listed, reached or not: {c}"
+    );
+    assert_eq!(c["buckets"][0], "0002", "{c}");
+    assert_eq!(
+        c["unclassified"]["ingest_gen_depth_census_slots:alt.test:0009_0011"], "7",
+        "an unknown bucket label is reported with its raw value, not dropped: {c}"
+    );
+    assert!(
+        !c.to_string().contains("alt.decoy"),
+        "the LIKE wildcards in the prefix were not escaped: {c}"
+    );
+    teardown(&dir, ix);
+}

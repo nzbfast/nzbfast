@@ -49,6 +49,21 @@ mod harness;
 #[path = "../adoptguard/mod.rs"]
 mod adoptguard;
 
+// The one `nzbfast get` command spelling, for `layouts`. Same `#[path]`
+// and the same reason as the three above: it is also included by the
+// `e2e` target, where a plain `mod e2e_getrun;` resolves.
+//
+// `#[expect]` rather than `#[allow]`: this binary reaches only
+// `get_cmd` and the two dials, so the KILLABLE spawn form the `e2e`
+// crash rows drive (`GetRun`, `run_get_spawn`, `run_get_spawn_sub`) is
+// dead HERE and the expectation is fulfilled - measured in default,
+// default + `heavy-tests` and `--no-default-features`. If a module
+// here grows to drive the spawn form, this reports as unfulfilled and
+// the fix is to DELETE the waiver, not to widen it.
+#[expect(dead_code)]
+#[path = "../e2e_getrun/mod.rs"]
+mod e2e_getrun;
+
 // These two are real product sources compiled straight in via #[path] -
 // the source is NOT edited, only included - so the tests exercise the
 // shipped code rather than a copy. Hoisted to the root because the
@@ -65,10 +80,10 @@ mod adoptguard;
 #[path = "../../src/chaos_serve.rs"]
 mod chaos_serve;
 
-/// Stand-in for `crate::wall` as seen from src/watchlist.rs. The real
+/// Stand-in for `crate::wall` as seen from watchlist.rs. The real
 /// wall module re-exports exactly these names from nzbkit::release, so
 /// the included code and its embedded unit tests resolve identically.
-/// Must live at the crate root: that is where `src/watchlist.rs` looks.
+/// Must live at the crate root: that is where watchlist.rs looks.
 mod wall {
     pub use nzbkit::release::{Kind, Parsed, norm_title, parse_release};
 }
@@ -77,7 +92,7 @@ mod wall {
 // would otherwise be dead code here, as they were under the per-file
 // `#![allow(dead_code)]` these modules used to carry.
 #[expect(dead_code)]
-#[path = "../../src/watchlist.rs"]
+#[path = "../../../nzbfast-meta/src/watchlist.rs"]
 mod watchlist;
 
 mod cors;
@@ -89,6 +104,10 @@ mod groups_api;
 mod interests;
 mod job_files;
 mod library;
+// The posting-layout round-trip oracle - one generated test per
+// profile in `crates/postfast/catalog/`. See layouts.rs's header for
+// why it is a module here rather than a target of its own.
+mod layouts;
 mod log_daemon;
 mod log_lanes;
 mod log_split;
@@ -104,6 +123,7 @@ mod settings_catalogue;
 mod stream_repair;
 mod throttle;
 mod tls;
+mod verify_exit;
 #[path = "wall.rs"]
 mod wall_tests;
 mod watch_dedupe;

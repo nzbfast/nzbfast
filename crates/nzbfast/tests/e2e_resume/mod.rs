@@ -469,6 +469,19 @@ async fn kill9_resume_map_encrypted_store_set_resumes_into_one_pass() {
 /// What this pins is the part that could regress: a resumed chase must
 /// not fall into the materialize-and-unpack-from-disk path. Both
 /// container formats, one body.
+///
+/// BOTH fixtures are containers the DIRECT MAPS decline, and that is
+/// deliberate. A Copy 7z or a stored zip is no longer a chase at all
+/// since `nzbkit::extract::sevenz_map` and `nzbkit::extract::zip_map`:
+/// its members route straight to their outputs, so its articles DO
+/// complete into `R` records and the "journals nothing" finding above
+/// simply does not describe it - and whether they do depends on whether
+/// the tail promote beat the kill, which would make the count racy as
+/// well as wrong. The 7z leg has always used a COMPRESSED container for
+/// this; the zip leg uses a DEFLATED entry for the same reason (it was
+/// stored until the zip map landed, and read 74 placements where it
+/// asserts 0). A mapped container's resume is the stored-RAR replay
+/// path and is pinned by that path's own tests, two below this one.
 #[tokio::test(flavor = "multi_thread")]
 async fn kill9_of_a_top_level_chase_has_nothing_to_replay_and_stays_one_pass() {
     if !have_par2() {
@@ -477,8 +490,10 @@ async fn kill9_of_a_top_level_chase_has_nothing_to_replay_and_stays_one_pass() {
     }
     let movie = incompressible(3_000_000, 53);
     let sevenz = sevenz_container(&[("movie.mkv", &movie)]);
-    let zip =
-        nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)]);
+    let zip = nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec::deflated(
+        "movie.mkv",
+        &movie,
+    )]);
     for (tag, container, badge) in [
         ("7z", ("release.7z", &sevenz), "7z · one-pass"),
         ("zip", ("release.zip", &zip), "zip · one-pass"),
@@ -1192,8 +1207,8 @@ async fn a_resumed_run_rejournals_the_articles_it_replays() {
             restored.clone(),
         );
         tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+            cmd.env("NZBFAST_OPEN", "1")
                 .arg("--config")
                 .arg(&cfg)
                 .arg("get")
@@ -1203,9 +1218,8 @@ async fn a_resumed_run_rejournals_the_articles_it_replays() {
                 .arg("--connections")
                 .arg("2")
                 .arg("--window")
-                .arg("2")
-                .spawn()
-                .unwrap();
+                .arg("2");
+            let mut child = crate::harness::spawn_under_test(&mut cmd);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let tail = |txt: &str| -> Vec<(char, String)> {
                 txt.lines()
@@ -1406,8 +1420,8 @@ async fn a_resumed_run_rejournals_the_plaintext_once_articles_it_replays() {
             restored.clone(),
         );
         tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+            cmd.env("NZBFAST_OPEN", "1")
                 .arg("--config")
                 .arg(&cfg)
                 .arg("get")
@@ -1419,9 +1433,8 @@ async fn a_resumed_run_rejournals_the_plaintext_once_articles_it_replays() {
                 .arg("--connections")
                 .arg("2")
                 .arg("--window")
-                .arg("2")
-                .spawn()
-                .unwrap();
+                .arg("2");
+            let mut child = crate::harness::spawn_under_test(&mut cmd);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let tail = |txt: &str| -> Vec<(char, String)> {
                 txt.lines()
@@ -1702,7 +1715,17 @@ async fn a_volume_the_set_rebuilt_leaves_no_donor_behind() {
         return;
     }
     let mut fx = Fixture::new("obf-donor");
-    let inner = payload(3_000_000, 91);
+    // `unique_payload`, not `payload`: the four volumes below are
+    // consecutive slices of ONE sequence, and `payload` repeats every
+    // 131,072 bytes, so the starved volume's missing head sat verbatim
+    // inside its neighbours. This row completed at `1 block(s) rebuilt,
+    // 498 adopted` - the set this row is NAMED for rebuilt one block of
+    // 499 - and reads `67 rebuilt, 432 adopted from
+    // e3a71dc01c012541063a60e0066c219f.12` on these bytes, where the
+    // donor is the alias partial the row is actually about
+    // (research/PAYLOAD-TRAP-PATH-DEPENDENT-CENSUS-2026-09-04.md). The
+    // 20% below still covers it, so no parity change was needed here.
+    let inner = crate::payloads::unique_payload(3_000_000, 91);
     let n_vols = 4;
     let per = inner.len() / n_vols;
     // The volume that loses its head, and so the one the set has to

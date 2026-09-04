@@ -1,0 +1,237 @@
+[package]
+name = "nzbkit-base"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The nzbfast engine's base layer: NZB/yEnc/NNTP/PAR2/container primitives"
+
+# WHY THIS CRATE EXISTS. It is the 46 modules that `extract`, `pool`,
+# `mediaprobe` and `index` all reach and that reach none of them back -
+# cut out of `nzbkit` on 3 Sep 2026, the crate-split plan's nzbkit lane
+# 2. `crates/nzbkit` is now a FACADE re-exporting every module here under
+# its old name, so the workspace's 3,099 `nzbkit::` paths did not move.
+# Lane 3 takes the four siblings out BESIDE this crate, which is where
+# the parallel schedule (and the measured prize) arrives.
+#
+# The dependency list below is nzbkit's own, verbatim. Base is the half
+# of that crate that owns the wire, the disk, the codecs and the
+# containers, so it reaches nearly all of it; the facade keeps its copy
+# because the four siblings still there reach nearly all of it too.
+# Nothing here may name `nzbkit` - `tools/modgraph.py --nzbkit --check`
+# refuses the edge, and cargo would refuse the cycle.
+
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Events only - nzbkit is a library and installs no subscriber. The
+# binary does that (nzbfast::logging), so nzbkit's [pool] / [par2] lines
+# reach the same log pane as everything else, stamped the same way. No
+# default features: `attributes` (the #[instrument] proc macro) and
+# `log` compatibility are both unused here.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+memchr = "2"
+# Only `BufMut::limit`, so a body read can land in a `Vec`'s spare
+# capacity through `read_buf` without a `set_len` of our own (already
+# compiled: tokio's io-util pulls it).
+bytes = "1"
+quick-xml = "0.42"
+thiserror = "2"
+crc32fast = "1"
+libc = "0.2"
+md-5 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# User-definable categories: the one rule-matching engine (regex, falling
+# back to keyword substring) shared with the daemon's Smart Folders.
+regex-lite = "0.1"
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time", "sync"] }
+rustls = "0.23"
+tokio-rustls = "0.26"
+webpki-roots = "1"
+# Already in the tree as rustls' crypto provider; named directly so
+# `bench-cpu` can measure the TLS AEAD with the SAME implementation the
+# download path uses. Every downloaded byte is decrypted, so on a weak
+# core that term belongs in the per-byte budget next to md5 and decode.
+aws-lc-rs = "1.17"
+# `hooks` moved here from [dev-dependencies] on 25 Aug 2026 (TODO 300):
+# `progress_handler` stopped being a test-only affordance the day the
+# pooled readers got a query budget, and `index/deadline.rs` is
+# production code. The dep is optional, so this widens the feature set of
+# `indexer` builds only - a slim build still has no rusqlite at all.
+rusqlite = { version = "0.40.1", features = [
+    "bundled",
+    "functions",
+    "hooks",
+], optional = true }
+rsa = "0.9"
+sha1 = { version = "0.11", features = ["oid"] }
+flate2 = "1"
+# Already in the tree for 7z (sevenz-rust2's bzip2 feature); named
+# directly so the zip reader can use the same decoder. Cargo dedupes,
+# so this costs no binary size.
+bzip2 = "0.6"
+# Same story for zip method 14 (LZMA): sevenz-rust2 already pulls
+# lzma-rust2 for 7z's LZMA/LZMA2 streams, so naming it costs no new
+# dependency. `encoder` is for `zip::fixtures` (lib-visible for the
+# fuzz corpus, like bzip2's and flate2's always-present encoder
+# halves); nothing in the shipping call graph reaches it.
+lzma-rust2 = { version = "0.20", default-features = false, features = ["std", "encoder"] }
+# RAR5 encrypted store-mode sets: AES-256-CBC + PBKDF2-HMAC-SHA256
+# (RustCrypto - pure Rust, no new C in the tree).
+aes = "0.9"
+cbc = "0.2"
+hmac = "0.13"
+sha2 = "0.11"
+# yEnc body-layer encryption spike (Tensai75 draft, TODO: yencrypt.rs
+# header): XChaCha20-Poly1305 per segment + Argon2id key derivation.
+# Same RustCrypto stack/major line as the aes/hmac entries above.
+argon2 = "0.6"
+chacha20poly1305 = "0.11"
+# FF1 (NIST SP 800-38G) needs arbitrary-precision Feistel halves: a
+# radix-253 control line is a ~hundred-digit number.
+#
+# WAS an edge and not a crate while this said "0.4": der-parser pulls
+# num-bigint 0.4 transitively and cargo unified the two. The 3 Sep 2026
+# bump to 0.5 (dependabot #58) ended that - der-parser is still on 0.4,
+# so the lockfile now carries BOTH and this dependency costs a real
+# crate compile. Taken anyway: 0.5 is where the arithmetic fixes land,
+# `ff1.rs` is the only caller, and the NIST FF1-AES256 vectors in its
+# tests pass identically on either. `[bans] multiple-versions = "warn"`
+# in deny.toml is what keeps that duplicate from being a gate failure.
+num-bigint = "0.5"
+# Nested one-pass phase 2: the chasing decompressor drives the vendored
+# RAR engine's streaming reader over still-arriving inner volumes.
+rars = { path = "../../vendor/rars" }
+# Nested one-pass phase 3: inner 7z archives parse + decode in-stream
+# through a blocking Read+Seek view of the arriving bytes.
+# `deflate` is free: flate2 is already a direct dependency above, so the
+# decoder is linked either way and a deflate-in-7z archive stops
+# declining. zstd/brotli/lz4 are the remaining codecs 7z permits; each
+# would add a real dependency, so they stay off until one is seen.
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd"] }
+
+# PAR2 hashes every downloaded byte through MD5; the asm backend is
+# ~25% faster than the portable soft path - a slow-x86 win (docker
+# amd64, old desktops). md5-asm has a compile_error! on Windows (both
+# MSVC and mingw) and md-5 falls back to soft off-x86, hence the gate.
+#
+# WINDOWS IS NO LONGER SOFT, so do not read the gate above as saying it
+# is (3 Sep 2026). nzbkit-base's `md5fast` module carries a Rust
+# inline-assembly MD5 block function - LLVM assembles it, so it builds
+# under MSVC where this C crate cannot - and `md5fast::Md5` is the alias
+# every payload-hashing site in the workspace uses: the assembly on
+# Windows x86-64, `md5::Md5` verbatim everywhere else, which is what
+# keeps this entry load-bearing. Measured +28.7% on an i5-10600KF.
+# That module's header is the full story.
+[target.'cfg(all(target_arch = "x86_64", not(target_os = "windows")))'.dependencies]
+md-5 = { version = "0.10", features = ["asm"] }
+
+# The ARM64 half of the same story. `aws-lc-rs` is already a dependency
+# above (rustls' crypto provider), and it selects this exact `-sys`
+# crate, so naming it here exposes AWS-LC's assembly MD5 block function
+# without building or linking a second copy of anything. macOS and Linux
+# only: the aarch64-windows target has no aws-lc-sys prebuilt path here
+# and keeps the portable md-5, as it already did.
+[target.'cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))'.dependencies]
+aws-lc-sys = { version = "0.44.0", default-features = false, features = ["all-bindings"] }
+
+# There is deliberately NO matching aarch64 `asm` entry for sha2 beside
+# the md-5 one above, and re-adding one is not possible: sha2 0.11 has
+# no `asm` feature. It was needed on sha2 0.10, which reached the
+# aarch64 SHA-256 extensions ONLY under that feature - gated in its
+# source as `all(feature = "asm", target_arch = "aarch64")` - so every
+# SHA-256 here ran soft on Apple Silicon and on the arm64 image, and a
+# target-gated entry (fe5c0a16b, 21 Aug 2026) bought 456 -> 2411 MiB/s.
+# sha2 0.11 does the same detection in its DEFAULT path instead
+# (`cpufeatures::new!(sha2_hwcap, "sha2")`, falling back to
+# soft::compress), so the wave that landed the same day subsumed that
+# entry and it was removed with it. The C sha2-asm crate, and the
+# Windows `compile_error!` the gate existed to dodge, are out of the
+# graph entirely now.
+#
+# Unchanged by any of it: this is not a throughput win. SHA-256 is not
+# on the per-byte download path (that is yEnc + md5 for PAR2 + crc32) -
+# it is tens of milliseconds off a KDF that runs once per encrypted
+# archive and is memoised in KDF_CACHE after that. And ARM64 Windows
+# still gets soft SHA-256, because cpufeatures answers a flat `false`
+# there whichever sha2 major asks it.
+
+# Kernel TLS (TODO §70), Linux only and off by default. Nothing links it
+# unless the `ktls` feature is built in AND `NZBFAST_KTLS=1` is set at
+# run time, so the shipped binary is byte-identical to one built without
+# it. Pinned to the aws-lc-rs provider - the same one `tls_provider`
+# names, or the secrets it extracts would come from a second copy of
+# rustls' crypto stack.
+[target.'cfg(target_os = "linux")'.dependencies]
+ktls = { version = "6.0", default-features = false, features = ["aws_lc_rs"], optional = true }
+
+# FSCTL_SET_SPARSE for the Windows write path (disk.rs): out-of-order
+# positioned writes into a set_len file make NTFS zero-fill everything
+# between valid-data-length and the write offset - measured ~1.6x write
+# amplification on the 6 Aug line-rate campaign. Marking the output
+# sparse turns that zero-fill into a hole. Same crate and version
+# nzbfast already links.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    # logtee's Windows size cap: GetFileType (is stdout really a file?)
+    # and GetFinalPathNameByHandleW (an APPEND handle cannot truncate
+    # itself, so the cap needs the path to open a second one).
+    "Win32_Storage_FileSystem",
+] }
+
+[features]
+default = ["indexer"]
+# The availability oracle is sqlite's only consumer down here (`oracle`,
+# reached by `live` and by the indexer above). Slim builds disable it and
+# the whole bundled-sqlite C build drops out. The facade forwards this,
+# so `--no-default-features` on `nzbkit` still reaches it.
+indexer = ["dep:rusqlite"]
+# Off by default: the receive path this replaces is the one every
+# platform shares, and kTLS only exists on Linux. `nntp` is the one
+# module that names it and `nntp` is base, so the feature is declared
+# here and the facade forwards it - which is what keeps ci-private's
+# `ktls-check` job (`-p nzbkit --features ktls`) reaching the code.
+ktls = ["dep:ktls"]
+# Build-gate for the [[test]] target at the bottom of this file (TODO
+# 116b). EMPTY on purpose - it compiles no code in or out; its only
+# effect is whether cargo builds the target that names it in
+# `required-features`. The facade forwards it, so CLAUDE.md's
+# `--features nzbkit/heavy-tests` reaches this one too.
+heavy-tests = []
+# `renameclaim`, the rename-race harness, and nothing else. Its pins are
+# in `par2repair`'s tests HERE and `journal`'s in the facade - two crates
+# since the base cut, where a `cfg(test)` item is invisible whatever its
+# visibility. The facade turns it on through a DEV dependency, so
+# `cargo build -p nzbkit` never sees it. Same arrangement
+# nzbfast-unpack's own `test-support` uses, and for the same reason.
+test-support = []
+
+[dev-dependencies]
+# nzbkit's own, minus what only the facade's modules and its examples
+# reach (tracing-subscriber, rcgen).
+rusqlite = { version = "0.40.1", features = ["hooks"] }
+# 7z fixtures are written in-process by `nameprobe`'s tests (the writer
+# needs the encoder half; release builds keep it off).
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd", "compress"] }
+# test-util: paused-clock tests (`nntp`'s connect-timeout regressions
+# auto-advance past CONNECT_TIMEOUT instead of sleeping 20 s for real).
+tokio = { version = "1", features = ["test-util"] }
+
+# par2gen at scale - tens of megabytes of generated fixture and seconds
+# of Reed-Solomon per case, and nightly builds DEBUG, where this crate's
+# GF(2^16) fold is ~40x slower than release. `par2`, `par2gen` and
+# `par2repair` are all base, so the suite came down with them. Same
+# `required-features` gate and the same reason: per-push CI must not
+# BUILD it. Run locally with:
+#   cargo test --release -p nzbkit-base --test par2gen_large_set --features heavy-tests
+[[test]]
+name = "par2gen_large_set"
+required-features = ["heavy-tests"]

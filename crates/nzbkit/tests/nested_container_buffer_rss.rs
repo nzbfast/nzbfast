@@ -11,8 +11,8 @@
 //! incompressible bytes - so the container term is measured on its own,
 //! with no dictionary window anywhere in the process.
 //!
-//!   cargo test -p nzbkit --release --test nested_container_buffer_rss \
-//!     -- --ignored --nocapture
+//!   cargo test -p nzbkit --release --features heavy-tests \
+//!     --test nested_container_buffer_rss -- --ignored --nocapture
 //!
 //! `#[ignore]` because each arm allocates hundreds of MiB.
 
@@ -248,7 +248,7 @@ fn nested_container_buffer_scales_with_depth() {
 }
 
 /// The production wiring: `get` calls `set_holds_cap(budget.holds_cap())`
-/// (crates/nzbfast/src/get/vrig.rs). Does the existing trim/forfeit
+/// (crates/nzbfast-engine/src/get/vrig.rs). Does the existing trim/forfeit
 /// ladder bound the container buffer once the cap is actually wired?
 #[test]
 #[ignore = "allocates >1 GiB; the nested-container-buffer reproducer"]

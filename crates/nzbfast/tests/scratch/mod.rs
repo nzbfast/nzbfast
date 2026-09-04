@@ -202,15 +202,21 @@ mod sweep_tests {
         ScratchDir::attach(&p)
     }
 
-    /// The prefix set has to name THIS package, or every scratch entry
-    /// the package's own tests leave behind is swept by nobody. Both
-    /// copies of this file carry it and each answers for its own package.
+    /// The prefix set has to COVER this package, or every scratch entry
+    /// the package's own tests leave behind is swept by nobody. Every
+    /// copy of this file carries it and each answers for its own
+    /// package.
+    ///
+    /// A prefix, not an exact member: `nzbfast-core` (the crate-split
+    /// step 2 cut) is swept by `nzbfast-`, and giving it an entry of its
+    /// own would only widen what these packages already sweep for each
+    /// other.
     #[test]
     fn the_swept_prefixes_name_this_package() {
         let me = format!("{}-", env!("CARGO_PKG_NAME"));
         assert!(
-            SWEPT_PREFIXES.contains(&me.as_str()),
-            "{me:?} is not in {SWEPT_PREFIXES:?}, so this package's scratch is never reclaimed"
+            SWEPT_PREFIXES.iter().any(|p| me.starts_with(p)),
+            "{me:?} is covered by nothing in {SWEPT_PREFIXES:?}, so this package's scratch is never reclaimed"
         );
     }
 

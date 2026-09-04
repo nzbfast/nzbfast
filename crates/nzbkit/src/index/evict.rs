@@ -1176,9 +1176,13 @@ mod tests {
     #[test]
     fn evict_spans_batches_when_row_overhead_dominates() {
         let (dir, ix) = ev_open("manyrows");
+        // One transaction for the seed: 4,000 autocommit rows are 8,000
+        // journal flushes, and the subject starts at the compact below.
+        ix.db.execute_batch("BEGIN").unwrap();
         for i in 1..=4000i64 {
             ev_rel(&ix, i, 0, 1, i, 100, "movie", &format!("m:s{i}:2020"), 200);
         }
+        ix.db.execute_batch("COMMIT").unwrap();
         ix.compact().unwrap();
         let before = ix.db_bytes().unwrap();
         let target = before / 2;

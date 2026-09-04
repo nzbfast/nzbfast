@@ -22,6 +22,9 @@ parallel = ["dep:rayon"]
 
 [dependencies]
 aes = { version = "0.9", features = ["zeroize"] }
+# CBC decryption in place through the RustCrypto mode, eight AES blocks
+# per backend call. Already in the workspace lockfile via nzbkit.
+cbc = { version = "0.2", features = ["zeroize"] }
 aho-corasick = "1.1"
 blake2s_simd = "1.0"
 crc32fast = "1.4"

@@ -1,0 +1,54 @@
+# C2 + C7 + P1: the everyday obfuscation shape, and the first profile
+# to select a split set and a nesting level at once.
+
+[layout]
+name = "nc-r2-split-set-over-a-nested-archive"
+seed = 160
+note = """
+The nested corpus's `r2-depth2-store-store` leg, which its README calls
+the classic obfuscation shape: a stored RAR set split into volumes with
+a PAR2 set beside it, and the one member those volumes carry is another
+stored archive holding the payload. A client that unpacks the posted
+set has an archive; only one that keeps going reaches the files.
+
+It is here because it was the first shape in that corpus this generator
+could not emit, and the refusal was wrong. `[container]`'s single-entry
+volume writers cannot split a set holding several members, and the
+guard that says so was reading `[source]` file count - so a profile
+with two payload files was refused however deep it nested, even though
+a nested profile's OUTERMOST level holds exactly one member by
+construction, the archive below it. The refusal's own message named
+nesting as the escape and then blocked it. `split_level_members` in
+`crate::container` is that fix, and this row is what proves it: two
+payload files, a nesting level, and a split set over the one archive
+they are inside.
+
+Two payload files rather than one on purpose. With a single source the
+row would pass under the old guard too and would prove nothing about
+it.
+
+The end state is the two payload files and the PAR2 index. The volumes
+are spent by the unpack, the inner archive is consumed by the second
+one, and a clean run never fetches the parity.
+"""
+
+[source]
+files = [
+    { name = "nested-payload.bin", bytes = 24000 },
+    { name = "nested-notes.txt", bytes = 300 },
+]
+
+[container]
+kind = "rar-stored"
+nested = 1
+volume_bytes = 10000
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

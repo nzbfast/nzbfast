@@ -1,0 +1,48 @@
+# G2 at the redundancy a real post carries: the same colliding pair,
+# with only 10 % parity behind it.
+
+[layout]
+name = "cc-n16-zero-head-twins-r10"
+seed = 1601
+note = """
+Expresses bench/capability-corpus leg n16-twins-r10, and it is the
+sharp half of the pair cc-n15-zero-head-twins-r100 opens.
+
+The layout is that row's exactly, at 10 % redundancy instead of 100 %.
+That single number is the whole point of keeping both. At 100 % a
+client that pairs the two colliding heads the wrong way round can buy
+its way out with a full repair of an intact post; at 10 % it cannot,
+and one crossed claim turns a post that arrived whole into a failed
+job. So this is the row that says the pairing must be RESOLVED rather
+than survivable - by whole-file evidence, which is the only thing in
+the post that tells the twins apart.
+
+Held to the strict expectation on purpose: both members land byte-exact
+under their own FileDesc names, and because the post is intact the
+adopt guard refuses a run that got there by rebuilding anything from
+parity.
+"""
+
+[source]
+files = [
+    { name = "Low.Alpha.vob", bytes = 60000, zero_head = 20000 },
+    { name = "Low.Beta.vob", bytes = 60000, zero_head = 20000 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 32768
+names = "filedesc-only"
+
+[encoding]
+article_bytes = 30000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

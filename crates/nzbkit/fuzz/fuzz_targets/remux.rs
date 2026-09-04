@@ -19,16 +19,30 @@
 //!    chunk table that points backwards, an stsc run with no samples in
 //!    it - each is a way to ask for an infinite loop.
 //! 3. **Bounded allocation.** Nothing is sized by a declared length
-//!    alone; the file's own size bounds it first. The rss limit below is
-//!    what actually enforces this.
+//!    alone; the file's own size bounds it first. The MALLOC limit below
+//!    is what actually enforces this - see the run line.
 //! 4. **Arrival-order independence.** The same bytes served whole and
 //!    served with a hole produce identical output up to the hole. This
 //!    is the property the whole live-preview feature rests on, and the
 //!    only place it can be tested against arbitrary input.
 //!
-//! Run with the rss limit:
+//! Run it with a malloc ceiling and a roomy RSS, NOT the other way round:
 //!
-//!     cargo +nightly fuzz run remux -- -max_total_time=300 -rss_limit_mb=512
+//!     cargo +nightly fuzz run remux -- -max_total_time=300 \
+//!       -rss_limit_mb=4096 -malloc_limit_mb=512
+//!
+//! This line used to read `-rss_limit_mb=512`, and that number was
+//! measuring the wrong thing: `-rss_limit_mb` bounds the whole PROCESS,
+//! most of which is libFuzzer's corpus and ASan's quarantine rather than
+//! anything the remuxer allocated, and §73 phase 4 lost this target's
+//! first campaign to it at SEVEN SECONDS. `-malloc_limit_mb` is the
+//! single-allocation hook that property 3 actually wants, and it only
+//! DEFAULTS to `-rss_limit_mb` when left unset. A fragment emitted here
+//! is capped at 80 MiB, so 512 MiB clears the largest legal single
+//! allocation about six times over. Measured 2 Sep 2026 at 8fb0cd74a:
+//! 300 s, 278,929 runs, peak RSS 247 MB, no crash, OOM or timeout. This
+//! target runs in fuzz-smoke.yml from the same date; before that it was
+//! declared, built, and run by nothing.
 
 use libfuzzer_sys::fuzz_target;
 use nzbkit::mediaprobe::session::{Emit, RemuxSession};

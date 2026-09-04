@@ -1,0 +1,58 @@
+[package]
+name = "nzbfast-meta"
+version = "1.4.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The nzbfast bin's search, index-scan and metadata layer"
+
+[lints]
+workspace = true
+
+# One layer up from nzbfast-core and a SIBLING of nzbfast-unpack: this
+# crate must not name that one and it must not name `nzbfast`, which is
+# what lets the two compile at the same time. `tools/modgraph.py --check`
+# is what holds the rule from the source side (an edge from a meta module
+# into unpack, engine or bin is a refusal there); the absence of a
+# dependency line here is what holds it from the cargo side.
+[dependencies]
+nzbkit = { path = "../nzbkit", default-features = false }
+nzbfast-core = { path = "../nzbfast-core" }
+anyhow = "1"
+# `scan`'s ingest loop and `oracle_backtest`'s replay both run on the
+# shared runtime.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.150"
+# `wall`'s poster fetch reads gzip'd provider bodies.
+flate2 = "1"
+# `rss`'s feed ids.
+getrandom = "0.4"
+hex = "0.4"
+# `wall`'s metadata providers (TMDB, OMDb, Wikidata, the digital-release
+# pages). Every one of them goes out through `nzbfast_core::netfetch`,
+# which is where the SSRF guard and CLAUDE.md invariant 5a live; this is
+# the transport those agents are built on.
+ureq = "2"
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+
+[features]
+# The indexer stack's own half. `newznab` and `watchlist` carry 24
+# production sites of it between them, and it is what nzbfast's `indexer`
+# FORWARDS to, so a slim build turns both off together and there is one
+# switch rather than two.
+#
+# THE `mod`-LEVEL GATES MOVED IN HERE with the modules. `wall`, `scan`,
+# `groups`, `groupstats`, `gates` and `oracle_backtest` were
+# `#[cfg(feature = "indexer")] mod ...;` in main.rs, and the wall/wall_slim
+# swap was a `#[path]` pair there; both are cfgs inside this crate's
+# lib.rs now, so the bin re-imports one unconditional name.
+indexer = ["nzbkit/indexer", "nzbfast-core/indexer"]
+
+[dev-dependencies]
+# The layer below, with ITS test seams switched on - above all
+# `identity::may_call_out` and `netfetch::deny_test_callout` (CLAUDE.md
+# invariant 5a). `cfg!(test)` is a property of ONE crate's build and this
+# crate's tests compile nzbfast-core as a plain dependency, so without
+# this `wall`'s provider tests would reach the real internet.
+nzbfast-core = { path = "../nzbfast-core", features = ["test-support"] }

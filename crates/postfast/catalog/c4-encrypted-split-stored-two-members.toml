@@ -1,0 +1,49 @@
+# C2 + C4: an encrypted split set carrying two members, STORED.
+
+[layout]
+name = "c4-encrypted-split-stored-two-members"
+seed = 191
+note = """
+The stored spelling of c4-encrypted-split-two-members, and the pair is
+the point: the same encryption, the same split and the same member
+count, over a container the client must NOT decompress.
+
+It was refused until 4 Sep 2026, and the reason was an asymmetry in the
+writer rather than a rule this catalog chose:
+`Rar50VolumeWriter::encrypted_compressed_entries` has always taken a
+slice, while `::encrypted_stored_entry` was singular with no plural
+beside it, so an encrypted multi-member split set was emitable
+compressed and not stored. `::encrypted_stored_entries` is the missing
+plural.
+
+Incompressible members on purpose. The compressed row next door needs
+compressible ones or the writer stores them anyway and the row is a C1
+archive wearing a C3 name; this row wants the opposite, a set where
+nothing but the cipher and the volume join stands between the client and
+the payload.
+
+The password reaches the client through the NZB meta, as in every other
+encrypted row here - see c4-encrypted-rar5-data for why that is the
+only carrier the oracle leaves available, and why the salt is seeded.
+"""
+
+[source]
+files = [
+    { name = "locked-a.bin", bytes = 20000 },
+    { name = "locked-b.bin", bytes = 9000 },
+]
+
+[container]
+kind = "rar-stored"
+encryption = "data"
+password = "layout-fixture-pw"
+volume_bytes = 8000
+
+[nzb]
+meta_password = true
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

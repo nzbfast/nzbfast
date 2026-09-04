@@ -1,6 +1,6 @@
 //! B3-stage-2 A/B harness: the mapped repair fed by the old
 //! harvest-everything corpus (`repair_mapped` over slices copied whole
-//! into memory, the shape crates/nzbfast/src/repair.rs shipped until
+//! into memory, the shape crates/nzbfast-unpack/src/repair.rs shipped until
 //! B3 stage 2) versus the catalog's locator-backed pread
 //! (`repair_mapped_catalog`). Same directory, same damage, same
 //! verdict; the difference under test is bytes resident and time.

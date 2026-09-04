@@ -1,0 +1,45 @@
+# F7: the index arrives, looks like a `.par2`, and holds not one packet
+# a reader will accept.
+
+[layout]
+name = "f7-index-damaged-names-from-volumes"
+seed = 22
+note = """
+The other half of F7, and the harder half. `index = "absent"` is a
+file that is not there, which a client discovers by looking. This one
+IS there: right name, right length, PAR2 magic at the front, and every
+packet inside it unsealed, so a reader finds it, opens it and gets
+nothing. The failure this guards against is a client that treats
+"found the index" as "have the names" and stops looking.
+
+The damage is one flipped byte in each packet body with the checksum
+left alone, which is precisely the shape a reader is built to skip: the
+packet says what its own MD5 should be and the bytes disagree. Writing
+random bytes over the file instead would test whether a client
+recognises a `.par2` by its extension, which is a different question
+and P10's.
+
+names = "filedesc-only", so the volume's FileDesc packets are the only
+place a real name exists and there is nothing to fall back to. One
+recovery block and therefore one volume, for the reason
+f7-index-absent-names-from-volumes gives at length: nothing damages
+the payload here, so the client reads volumes only until it has the
+names, and with one volume there is no difference between what it read
+and what there is.
+"""
+
+[source]
+files = [{ name = "Sealed.Reel.bin", bytes = 120000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+block_bytes = 20000
+names = "filedesc-only"
+index = "damaged"
+
+[encoding]
+article_bytes = 20000

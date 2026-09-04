@@ -2,9 +2,9 @@
 //!
 //! A setting is spread across three places that are kept in step BY HAND:
 //!
-//!  1. the `apply_setting` match in serve/settings.rs - the allowlist,
+//!  1. the `apply_setting` match in settings.rs - the allowlist,
 //!     since its `_` arm is what rejects an unknown name;
-//!  2. the settings table in serve/settings.rs, which `get_config` is
+//!  2. the settings table in settings.rs, which `get_config` is
 //!     built by walking - what the dashboard reads back;
 //!  3. the restore path in `serve()`/`apply_saved_settings` - what a
 //!     restart puts back from settings.json.
@@ -18,7 +18,7 @@
 //! (2) has since been collapsed into the settings table, which
 //! `get_config` is generated from and which `log_value` takes its rules
 //! from - so that list can no longer be missed, and the
-//! `apply_arms_match_the_table` reflection test in serve/tests_api.rs
+//! `apply_arms_match_the_table` reflection test in tests_api.rs
 //! holds (1) to the same table. (3) is the one that genuinely resists
 //! collapsing: `apply_saved_settings` maps saved JSON onto launch
 //! options before the daemon exists, so its work is bespoke per setting
@@ -82,6 +82,11 @@ const ECHOED_READ_ONLY: &[&str] = &[
     // The tuner's line-speed shortfall verdict - display only.
     "tune_hint",
     "local_link",
+    // TODO 314 stage 1: which subprocess confinement mechanism this box
+    // has, and one sentence about it. Nothing to set - it is what the
+    // machine offers, not a choice. `script_confined` beside it IS the
+    // choice and is a normal rw setting.
+    "sandbox",
     // The server list has its own editor endpoints (credentials must not
     // ride the settings allowlist), and this is its first-run signal.
     "servers",
@@ -173,13 +178,15 @@ fn allowlist() -> Vec<String> {
     // allowlist - the count assertion below is what caught it, which is
     // exactly the direction it was written to fail in.
     let src = concat!(
-        include_str!("../../src/serve/settings.rs"),
-        include_str!("../../src/serve/settings_apply.rs"),
+        include_str!("../../../nzbfast-daemon/src/settings.rs"),
+        include_str!("../../../nzbfast-daemon/src/settings_apply.rs"),
     );
     let mut names = Vec::new();
     let mut inside = false;
     for line in src.lines() {
-        if line.starts_with("pub(super) fn apply_setting") {
+        if line.starts_with("pub fn apply_setting(")
+            || line.starts_with("pub(super) fn apply_setting_tail")
+        {
             inside = true;
             continue;
         }
@@ -728,8 +735,13 @@ fn port_zero_binds_an_os_chosen_port_and_says_which() {
     let logfile = dir.join("daemon-portzero.log");
     let out = std::fs::File::create(&logfile).unwrap();
     let err = out.try_clone().unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-        .env("NZBFAST_NO_ENRICH", "1")
+    // Through `spawn_under_test`, not a bare `.spawn()`: that is where
+    // the cargo-uplift ENOENT grace lives AND where the child is told
+    // which process to outlive by nothing. A daemon from THIS launcher
+    // (`nzbfast-setcat-*-restart`) is in the 30 Aug leak set - see
+    // `harness::leash`.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+    cmd.env("NZBFAST_NO_ENRICH", "1")
         .env_remove("NZBFAST_OPEN")
         .current_dir(&dir)
         .arg("--config")
@@ -744,10 +756,8 @@ fn port_zero_binds_an_os_chosen_port_and_says_which() {
         .arg("--index-db")
         .arg(dir.join("index.db"))
         .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .spawn()
-        .unwrap();
-    let mut child = KillOnDrop(child);
+        .stderr(Stdio::from(err));
+    let mut child = KillOnDrop(crate::harness::spawn_under_test(&mut cmd));
 
     // No port to poll, so wait on the file that is supposed to tell us -
     // written only once the listener exists, which is the whole contract.

@@ -10,7 +10,7 @@
 //! merges a 74 KB probe file against anybody.
 //!
 //! X5-16's own pins cannot live here - `pick_volumes` is `pub(crate)` -
-//! so they are in-crate at `crates/nzbfast/src/repair/wave5_probe_tests.rs`.
+//! so they are in-crate at `crates/nzbfast-unpack/src/repair/wave5_probe_tests.rs`.
 //!
 //! BOTH rows are graded as a RATIO over geometric N and never as a wall
 //! clock. That is not caution about slow CI, it is the only grading that
@@ -51,6 +51,30 @@
 //!    distance to a regressed tree is a bar that cannot say it catches
 //!    anything - the 3.0 this row shipped with had 19% of clearance on
 //!    each side, which is how it came to fail 2 runs in 8.
+//!
+//! # And a fourth, which is why every row here is `#[ignore]`d (1 Sep 2026)
+//!
+//! 4. **A ratio of two wall-clock timings needs a QUIET BOX, and a
+//!    nextest test-group is not one.** Rules 1-3 buy margin; none of
+//!    them bounds the interference. All three rows below went on
+//!    flaking under ordinary parallel load - X5-18's CRC arm reported
+//!    6.6x against its 6.0 bar inside a `--test e2e` run on a tree that
+//!    was HEALTHY, and two of the three flakes in the 1.3.1 release
+//!    verification ("447 passed (8 slow, 3 flaky)", laundered green by
+//!    `retries = 1`) were rows from this file. Giving the module its own
+//!    `test-group` was tried and measured and is NOT the fix: a group
+//!    holds these three apart from EACH OTHER, while a ratio of two
+//!    timings is sensitive to the whole machine - the other ~430 tests
+//!    in the `e2e` binary included. So they are `#[ignore]`d, and
+//!    nightly's `long-suites` runs them in a step of their own, one
+//!    thread, under `--run-ignored only`.
+//!
+//!    A NEW COST ROW ADDED HERE INHERITS THAT AND MUST SAY SO: the
+//!    nightly step selects the IGNORED tests of the whole `e2e` binary
+//!    (it was this module alone until 1 Sep 2026, when the binary's one
+//!    other ignored rig was measured and wired beside these three), so a
+//!    row landed without `#[ignore]` is not merely uncovered by that
+//!    step, it is back in the parallel one, competing with everything.
 
 use super::*;
 use md5::Digest as _;
@@ -122,15 +146,32 @@ fn recvslic(set_id: &[u8; 16], exponent: u32, slice: &[u8]) -> Vec<u8> {
 /// theoretical margin - ordinary fleet load reaches it, and this box
 /// routinely carries several sessions at once.
 ///
-/// Recorded rather than acted on, deliberately: the row is CORRECT and
-/// the tree was healthy, so there is nothing here to fix in the census.
-/// The remedy if it recurs is the one this comment already names - raise
-/// [`TRIALS`], or raise the counts, both of which are free here because
-/// the cost is genuinely linear. Do NOT raise the 8.0 bar; that is the
-/// only number in the row that carries the finding, and X5-18's own flake
-/// was fixed by lengthening the measurement rather than by widening the
-/// verdict.
+/// Recorded rather than acted on when that was written, and ACTED ON on
+/// 1 Sep 2026, because it recurred: the 1.3.1 release verification lost
+/// it on the first attempt and `retries = 1` laundered it green as one of
+/// "447 tests run: 447 passed (8 slow, 3 flaky)". The remedy is neither
+/// of the two this paragraph used to name. Raising [`TRIALS`] or the
+/// counts buys margin and is still free here, but margin is the wrong
+/// instrument against interference that has no bound - the load that
+/// reddened this row was the four other worktrees named above, and no
+/// number of trials makes the minimum of a set of contended samples
+/// uncontended. The row
+/// is `#[ignore]`d instead and measured on a quiet box in nightly; see
+/// the attribute below and the module header. Do NOT raise the 8.0 bar;
+/// that is the only number in the row that carries the finding, and
+/// X5-18's own flake was fixed by lengthening the measurement rather
+/// than by widening the verdict.
 #[test]
+#[ignore = "wall-clock COMPLEXITY assertion: it times the same work at two input \
+    sizes and asserts the growth RATIO is near-linear, so ANY competing load on the \
+    box breaks it. Both rows here have gone red on a tree that was HEALTHY - X5-18's \
+    CRC arm at 6.6x against its 6.0 bar inside a parallel `--test e2e` run, X5-17 as \
+    the only failure in 333 under multi-worktree load, passing solo in 0.763 s \
+    straight afterwards. A nextest test-group was tried and is not enough: a group \
+    holds a test apart from its SIBLINGS, and a ratio of two timings is sensitive to \
+    the whole machine. Runs in nightly `long-suites`' `e2e suite (ignored rigs - \
+    complexity ratios and payout, quiet box)` step - `--run-ignored only`, one \
+    thread, a step of its own; see research/E2E-SERIALIZATION-COST-2026-08-31.md"]
 fn x5_17_the_recovery_census_must_not_be_quadratic_in_distinct_keys() {
     /// One buffer of `n` RecvSlic packets, each with its own set id, so
     /// every packet is a new grouping key. Slice bytes are tiny: this
@@ -453,11 +494,21 @@ fn assert_tracking_is_lossless(par2: &[u8], name: &str, data: &[u8], frags: usiz
 /// removed was the per-fragment re-sort and its allocation - a large
 /// constant and a log factor - and not the ORDER, which stayed O(n^2)
 /// because both paths still merged with `Vec::insert` into the middle of
-/// a sorted vector. `crates/nzbkit/src/live/runs.rs` is where that was
+/// a sorted vector. `crates/nzbkit-base/src/live/runs.rs` is where that was
 /// fixed and its header carries the curve; the claim is true now, and the
 /// per-doubling ratio through THIS path reads 1.88 / 1.89 / 2.10 / 2.06 /
 /// 2.10 from 1,024 to 32,768 where it used to march toward 4.
 #[test]
+#[ignore = "wall-clock COMPLEXITY assertion: it times the same work at two input \
+    sizes and asserts the growth RATIO is near-linear, so ANY competing load on the \
+    box breaks it. Both rows here have gone red on a tree that was HEALTHY - X5-18's \
+    CRC arm at 6.6x against its 6.0 bar inside a parallel `--test e2e` run, X5-17 as \
+    the only failure in 333 under multi-worktree load, passing solo in 0.763 s \
+    straight afterwards. A nextest test-group was tried and is not enough: a group \
+    holds a test apart from its SIBLINGS, and a ratio of two timings is sensitive to \
+    the whole machine. Runs in nightly `long-suites`' `e2e suite (ignored rigs - \
+    complexity ratios and payout, quiet box)` step - `--run-ignored only`, one \
+    thread, a step of its own; see research/E2E-SERIALIZATION-COST-2026-08-31.md"]
 fn x5_18_disjoint_fragment_tracking_must_not_be_quadratic() {
     if !have_par2() {
         eprintln!("x5_18: par2 unavailable - skipping");
@@ -506,6 +557,16 @@ fn x5_18_disjoint_fragment_tracking_must_not_be_quadratic() {
 /// separately anyway - the two do different work per fragment, and the day
 /// one of them moves is the day the shared value stops being right.
 #[test]
+#[ignore = "wall-clock COMPLEXITY assertion: it times the same work at two input \
+    sizes and asserts the growth RATIO is near-linear, so ANY competing load on the \
+    box breaks it. Both rows here have gone red on a tree that was HEALTHY - X5-18's \
+    CRC arm at 6.6x against its 6.0 bar inside a parallel `--test e2e` run, X5-17 as \
+    the only failure in 333 under multi-worktree load, passing solo in 0.763 s \
+    straight afterwards. A nextest test-group was tried and is not enough: a group \
+    holds a test apart from its SIBLINGS, and a ratio of two timings is sensitive to \
+    the whole machine. Runs in nightly `long-suites`' `e2e suite (ignored rigs - \
+    complexity ratios and payout, quiet box)` step - `--run-ignored only`, one \
+    thread, a step of its own; see research/E2E-SERIALIZATION-COST-2026-08-31.md"]
 fn x5_18_disjoint_fragment_tracking_must_not_be_quadratic_in_full_md5_mode() {
     if !have_par2() {
         eprintln!("x5_18 md5: par2 unavailable - skipping");

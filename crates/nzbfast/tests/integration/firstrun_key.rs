@@ -222,7 +222,7 @@ fn expect_refusal(dir: &Path, port: u16, extra: &[&str]) -> String {
         .args(extra)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().unwrap();
+    let mut child = crate::harness::spawn_under_test(&mut cmd);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         match child.try_wait().unwrap() {
@@ -522,8 +522,8 @@ fn a_refusal_survives_the_exit_it_causes() {
         let log = dir.join("daemon.log");
         let out = std::fs::File::create(&log).unwrap();
         let err = out.try_clone().unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-            .env("NZBFAST_NO_ENRICH", "1")
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        cmd.env("NZBFAST_NO_ENRICH", "1")
             .env_remove("NZBFAST_OPEN")
             .arg("--config")
             .arg(dir.join("config.json"))
@@ -533,9 +533,8 @@ fn a_refusal_survives_the_exit_it_causes() {
             .arg("--out")
             .arg(dir.join("complete"))
             .stdout(Stdio::from(out))
-            .stderr(Stdio::from(err))
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::from(err));
+        let child = crate::harness::spawn_under_test(&mut cmd);
         // The guard rides along: dropping it here would delete the empty
         // apikey file out from under the daemon before it could refuse.
         running.push((child, log, dir));

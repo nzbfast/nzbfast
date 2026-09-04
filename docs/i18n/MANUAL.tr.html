@@ -96,6 +96,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>User Manual</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -729,6 +730,27 @@ bu yüzden <code>/m3u</code> devri ve <code>.strm</code> işaretçisi onu senin 
 onu üretmek (<code>/m3u</code>) anahtarı gerektirir. Zaten etkin bir indirmenin düz bayt
 sunumu açık kalır ve anahtarsız kurulumlar eskisi gibi davranır.</div>
 
+<p><b>Bir klasörü çok sonra denetlemek.</b> Her indirme, aldığı her dosya için bir
+sağlama toplamı kanıtlar ve bu toplamları taşıyan <code>.par2</code> dosyaları iş
+bitince temizlenir; dolayısıyla aylar sonra klasörü karşılaştıracak normalde hiçbir
+şey kalmaz. nzbfast bunun yerine onları dosyaların yanındaki küçük ve gizli bir
+<code>.nzbfast.manifest</code> dosyasında saklar. Ayarlar → İndirme →
+<b>İndirmeleri sonradan denetleme</b>, biten bir klasörü gösterdiğiniz yerdir: her
+dosyayı okur, artık uyuşmayanı bildirir ve onarmayı önerir. Onarmak ikinci ve ayrı
+bir tıklamadır ve yalnızca bozulan kısmı indirir; hâlâ sağlam olan her şey doğrudan
+diskinizden okunur. Aynı karttaki kutucuk, istemiyorsanız denetim dosyasını kapatır
+ve komut satırındaki <code>nzbfast verify</code> de onu okur.</p>
+
+<p>Aynı <b>İndirmeleri sonradan denetleme</b> kartı kendini bir zamanlamayla
+da çalıştırabilir: <b>Biten klasörleri zamanlanmış olarak denetle</b>
+anahtarı, siz açmadıkça kapalıdır; açıldığında denetim dosyası olan biten
+klasörleri dolaşır ve artık uyuşmayan her şey için kimse tıklamadan bir
+onarım başlatır. Bir indirme sürerken ya da beklerken asla çalışmaz ve
+denetlemek bir klasördeki her dosyayı baştan sona okumak demek olduğundan,
+hiçbir şey bozuk olmasa bile diske mal olur. Anahtarın yanındaki sınırlar bir
+denetimin kaç onarım başlatabileceğini ve ne kadar indirme yapabileceğini
+sınırlar.</p>
+
 <h2 id="servers">8 · Usenet sunucuları</h2>
 <p>Ayarlar → <b>Usenet sunucuları</b> tam düzenleyicidir: ekleme, düzenleme, kaldırma, yeniden sıralama ve herhangi
 bir sunucuyu havuza alıp havuzdan çıkarma. Her sunucuda şunlar bulunur:</p>
@@ -836,6 +858,19 @@ makalenin kendi sağlama toplamı yine doğrulanır. <i>Yalın</i> ise PAR2 bir 
 kapsar kapsamaz o makale sağlama toplamlarını da atlar: hasar bir an sonra, kendi
 bloğunda ortaya çıkar. Üçünde de son yerleşme geçişi ve her onarım tam MD5 kullanır ve
 PAR2 dosyası olmayan bir indirme makale sağlama toplamlarını korur.</p>
+<p><b>Hızlı son denetim</b> <span class="pill live">live</span> biten
+dosyalarınızı diskten geri okuyan denetimi değiştirir: bir indirmenin sonundaki kapanış
+geçişini ve komut satırındaki <code>nzbfast verify</code> komutunu, ki orada
+<code>--fast</code> aynı seçimdir. Normalde her dosya, dosyanın tamamı üzerinden alınan tek
+bir izle kanıtlanır ve bu, makinede kaç çekirdek olursa olsun tek çekirdekte tek bir
+okumadır. Bu açıkken her dosya PAR2 kümesinin blok başına sağlama toplamlarıyla kanıtlanır
+ve bunlar tüm çekirdeklerde aynı anda çalışır. Hızlı bir yerel diskte çok daha çabuk, bir ağ
+paylaşımında ya da dönen bir diskte pek bir şey kazandırmaz, çünkü orada sınır zaten
+disktir. Siz istemedikçe kapalıdır ve istediğinizde kabul ettiğiniz şudur: bir PAR2 kümesi
+farklı dosyaları anlatan iki kayıt taşıyabilir ve par2cmdline ile diğer araçlar böyle bir
+kümeye hasarlı derken nzbfast ona o zaman temiz der. Normal yazılımın kurduğu hiçbir küme
+öyle görünmez, ilk 16 KiB denetimi o biçimin her kazara oluşan sürümünü yine reddeder ve
+bir onarım, bu ayar ne derse desin kendini eski yolla kanıtlar.</p>
 <h3>Disk &amp; kota <span class="pill live">canlı</span></h3>
 <p><b>En az boş alan</b> (bunun altında yeni işleri duraklat; varsayılan 2 GB, 0 kapatır), gün ya da ay başına
 <b>indirme kotası</b> (UTC; Zorla işler atlar), <b>bellek sınırı</b> - motorun RAM bütçesi
@@ -1005,7 +1040,7 @@ sayfasına döner, izleme listesi de onun yerine o hesaplarla çalışır.</div>
 <tr><td>Aktarım sunucusu, Aktarım kanalları</td><td>Duyuruları taşıyan IRC ağı (konak ya da konak:port) ve dinlenecek kanallar, virgülle ayrılmış. Bir değişiklik bir sonraki bağlantıda geçerli olur: hemen uygulamak için akışı kapatıp açın.</td></tr>
 <tr><td>İlintiyle adlandır</td><td>Canlı genel aktarımlar dosya adı taşımaz, bu yüzden gizlenmiş gönderilerin çoğu doğrudan eşleştirilemez. Bir duyurunun kesinleştirdiği şey, bir sürümün ne zaman ortaya çıktığı ve ne kadar büyük olduğudur. Bu, duyurulan zaman ve boyutu adsız gönderilerle karşılaştırır ve uyduklarında Göz at bölümünde gerçek adı önerir. Bir öneri açıkça öneri olarak işaretlenir, uygulanması tıklamanızı ister ve diskteki dosyaları asla yeniden adlandırmaz.</td></tr>
 <tr><td>Güçlü eşleşmeleri kendiliğinden uygula</td><td>Varsayılan olarak kapalı, açıkken katı: boyut sıkı biçimde uyuşmalı, başka hiçbir duyuru neredeyse aynı ölçüde uymamalı ve duyuru ters yönden bakıldığında bu gönderiyi geri seçmeli. Uygulanan bir ad yalnızca sürümün nasıl gösterildiğini değiştirir, çıkarım olarak işaretlenir ve tamamlanan bir indirme onu yanlışlarsa kendiliğinden geri alınır. Daha zayıf olan her şey öneri kalır.</td></tr>
-<tr><td>Duyuru geçmişi</td><td>Canlı akış yalnızca açıldıktan sonraki duyuruları duyar. Bu, herkese açık bir pre veritabanından kabaca altı aylık eski duyuruyu nazikçe ve bir kez getirir; böylece dizinde zaten bulunan gönderiler de eşleştirilebilir. Arka planda yarım saat kadar çalışır.</td></tr>
+<tr><td>Duyuru geçmişi</td><td>Canlı akış yalnızca açıldıktan sonraki duyuruları duyar. Bu, herkese açık bir pre veritabanı olan predb.net'ten en yeni eski duyuruları bir kez getirir; böylece dizinde zaten bulunan gönderiler de eşleştirilebilir. predb.net, ondan kendi veritabanınızı oluşturmamanızı rica ediyor; bu yüzden yalnızca her bölümün en yeni iki sayfası alınır, dakikada en fazla 10 istek. Arka planda birkaç dakika çalışır.</td></tr>
 </table></div>
 
 <h3>Kitaplık, Güvenlik, Arayüz</h3>
@@ -1083,6 +1118,18 @@ Bir betik çıkarken arka planda çalışan bir yardımcı bırakabilir ve nzbfa
 öldürmez, ama nzbfast betiğin kendisi biter bitmez betiğin çıktısını okumayı
 durdurur: arka plana alınmış yardımcıya kendi çıktı yönlendirmesini ver, yoksa
 ilk kez bir şey yazdırmayı denediğinde durdurulur.</p>
+<p>Betikler ve isteğe bağlı harici <code>unrar</code> ile <code>par2</code>
+yardımcıları, makine bir yalıtım sunuyorsa onun içinde çalıştırılır: macOS'ta
+<code>sandbox-exec</code>, Linux'ta <code>bwrap</code>. Yalıtılmış bir betik tam
+okuma erişimini ve tam ağ erişimini korur, bu yüzden bildiriciler ve kitaplık
+araçları etkilenmez; yalnızca nzbfast'in zaten kullandığı klasörlere yazabilir
+(indirme klasörü, her taşıma hedefi, izlenen klasör ve sistemin geçici
+klasörü). Bir betiğin başka bir yere yazması gerekiyorsa ve "operation not
+permitted" ile başarısız oluyorsa Ayarlar &rarr; Klasörler altındaki <b>Betiklerin
+nereye yazabileceğini sınırla</b> seçeneğini kapat. Yalıtım bulunmayan yerlerde
+her şey her zamanki gibi çalışır - bir indirme bu yüzden asla başarısız olmaz -
+ve o anahtarın altındaki satır hangi mekanizmanın geçerli olduğunu söyler.
+Windows için henüz yok.</p>
 <h3>Kuyruk öncesi betik</h3>
 <p>İkinci bir kanca, bir indirme kuyruğa girmeden <em>önce</em> çalışır
 (Ayarlar → Klasörler → Kuyruk öncesi betik), SABnzbd'nin kuyruk öncesi
@@ -1423,7 +1470,7 @@ Sonradan Ayarlar'da ayarladığın bir anahtar yine de ona üstün gelir.</div>
 <tr><td><code>nzbfast serve</code></td><td>Arka plan sürecini çalıştır (panel + API + otomasyon). <code>--open</code> tarayıcıyı açar; <code>--apikey</code> anahtarı elle ayarlar (<a href="#firstrun-key">§2</a>); <code>--bind</code> dinleme adresini seçer, varsayılan <code>0.0.0.0</code> (her arayüz), yalnızca bu makine için <code>127.0.0.1</code>. Tam bayrak listesi için <code>--help</code>'e bak - her panel ayarının bir bayrak ikizi vardır.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Bir NZB'yi indir, tam işlem hattı, arka plan süreci yok. <code>--preflight</code> gönderi tamamlanamazsa erken durdurur; şifreli kümeler için <code>--password</code>.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Kullanılabilirlik kararı - COMPLETE / REPAIRABLE / IMPOSSIBLE - yükü indirmeden.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Dosyaları bir dizindeki PAR2 kümesine karşı doğrula.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Dosyaları bir dizindeki PAR2 kümesine karşı doğrula. PAR2 dosyaları yoksa settle manifestine düşer. Dosyalar sağlamsa 0, hasar bulursa 1 ile çıkar; denetlenecek hiçbir şeyi olmayan bir dizin de 0 ile çıkar ve bunu hata çıktısında söyler. <code>--fast</code> her dosyayı, dosyanın tamamı üzerindeki izi yerine kümenin blok başına sağlama toplamlarıyla kanıtlar; hızlı bir diskte çok daha çabuktur ve <a href="#settings">§9</a> içinde anlatılan takası getirir.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>Sistem kıyaslaması + çeşitlilik raporu, terminalde.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Grupları dizine tara / onu ara, arka plan süreci olmadan.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Bir SABnzbd ini'sinden sunucuları içe aktar.</td></tr>

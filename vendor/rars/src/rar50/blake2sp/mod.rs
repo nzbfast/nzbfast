@@ -2,29 +2,56 @@
 //!
 //! Built from eight independent BLAKE2s leaf states (tree mode, per RFC
 //! 7693). The eight leaves receive the input round-robin in 64-byte blocks
-//! and are completely independent, so large updates gather each leaf's
-//! blocks and hash the leaves side by side. Two leaf kernels exist behind
-//! [`LeafSet`]: `blake2s_simd` states hashed on a small thread team
-//! (`portable::PortableLeaves`, which picks up that crate's SSE4.1/AVX2
-//! many-way paths on x86), and a four-lane NEON kernel (`many::ManyLeaves`,
-//! the aarch64 default - `blake2s_simd` has no many-way kernel there, which
-//! otherwise left the whole hash on one scalar lane per leaf). On aarch64
-//! both are compiled and the tests hold them to each other and to
-//! `blake2s_simd`'s own blake2sp.
+//! and are completely independent, so a fast implementation compresses all
+//! eight side by side rather than one after another. Three kernels live
+//! here, and every one of them produces the same digest:
+//!
+//! - [`simd::SimdHasher`] - `blake2s_simd`'s own blake2sp, whose leaves
+//!   read their blocks in place at a stride of eight and compress
+//!   eight-wide under AVX2 or four-wide under SSE4.1, selected at run time
+//!   with the crate's portable compression as the fallback. The default
+//!   off aarch64 (2026-09-03; audit round 25).
+//! - [`many::ManyLeaves`] - a four-lane NEON kernel, the aarch64 default.
+//!   `blake2s_simd` has no many-way kernel there (`guts::MAX_DEGREE` is 1),
+//!   which otherwise left the whole hash on one scalar lane per leaf.
+//! - [`portable::PortableLeaves`] - eight independent `blake2s_simd`
+//!   states fed on a four-thread team after gathering each leaf's blocks
+//!   into a scratch buffer. This was the x86 production path until
+//!   2026-09-03 and is kept compiled on every target as the independent
+//!   implementation the agreement tests cross-check the other two against.
+//!
+//! [`LeafSet`] is the interface for the two that really are eight separate
+//! leaf states; `simd` owns its whole tree and so stands beside it. Every
+//! kernel a target has is held to `blake2s_simd`'s blake2sp - and so to
+//! the others - over random inputs and random chunkings.
+//!
+//! (The `simd` default off aarch64 is an nzbfast-local change, 3 Sep 2026 -
+//! re-apply on the next rars re-sync, see vendor/rars/VENDORING.md.)
 
+// The hand-built tree - [`LeafSet`], [`TreeHasher`], and the two kernels
+// that implement it - is PRODUCTION only on aarch64, and compiled
+// everywhere else only for the tests that cross-check it against the
+// many-way kernel. Off aarch64 a production build carries `simd` alone.
 #[cfg(target_arch = "aarch64")]
 mod many;
+#[cfg(any(target_arch = "aarch64", test))]
 mod portable;
+mod simd;
 
 const OUT_BYTES: usize = 32;
+#[cfg(any(target_arch = "aarch64", test))]
 const BLOCK_BYTES: usize = 64;
+#[cfg(any(target_arch = "aarch64", test))]
 const PARALLELISM: usize = 8;
+#[cfg(any(target_arch = "aarch64", test))]
 const GROUP_BYTES: usize = BLOCK_BYTES * PARALLELISM;
 // Below this many buffered bytes, feeding leaves serially beats spawning.
+#[cfg(any(target_arch = "aarch64", test))]
 const PARALLEL_MIN_BYTES: usize = 512 * 1024;
 
 /// The eight leaf states, fed whole 512-byte groups and finished with the
 /// final partial group.
+#[cfg(any(target_arch = "aarch64", test))]
 pub(crate) trait LeafSet: Clone {
     fn new() -> Self;
     /// `groups.len()` is a multiple of `GROUP_BYTES`; leaf `i` takes block
@@ -34,11 +61,7 @@ pub(crate) trait LeafSet: Clone {
     fn finalize(self, tail: &[u8]) -> [[u8; OUT_BYTES]; PARALLELISM];
 }
 
-#[cfg(target_arch = "aarch64")]
-pub(crate) type DefaultLeaves = many::ManyLeaves;
-#[cfg(not(target_arch = "aarch64"))]
-pub(crate) type DefaultLeaves = portable::PortableLeaves;
-
+#[cfg(any(target_arch = "aarch64", test))]
 fn root_params() -> blake2s_simd::Params {
     let mut params = blake2s_simd::Params::new();
     params
@@ -53,9 +76,15 @@ fn root_params() -> blake2s_simd::Params {
     params
 }
 
-/// The production hasher: [`TreeHasher`] over this target's leaf kernel.
-pub(crate) type Hasher = TreeHasher<DefaultLeaves>;
+/// The production hasher: this target's fastest kernel. Both shapes carry
+/// the same `new` / `update` / `finalize` surface, so the callers do not
+/// know which one they hold.
+#[cfg(target_arch = "aarch64")]
+pub(crate) type Hasher = TreeHasher<many::ManyLeaves>;
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) type Hasher = simd::SimdHasher;
 
+#[cfg(any(target_arch = "aarch64", test))]
 #[derive(Clone)]
 pub(crate) struct TreeHasher<L: LeafSet> {
     leaves: L,
@@ -64,6 +93,7 @@ pub(crate) struct TreeHasher<L: LeafSet> {
     buffer: Vec<u8>,
 }
 
+#[cfg(any(target_arch = "aarch64", test))]
 impl<L: LeafSet> TreeHasher<L> {
     pub(crate) fn new() -> Self {
         Self {
@@ -121,6 +151,7 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     use super::many::ManyLeaves;
     use super::portable::PortableLeaves;
+    use super::simd::SimdHasher;
     use super::{hash, Hasher, TreeHasher, GROUP_BYTES};
 
     fn reference(input: &[u8]) -> [u8; 32] {
@@ -136,21 +167,32 @@ mod tests {
         out
     }
 
-    /// Every leaf kernel this target has, fed `input` in the given
-    /// chunking, against `blake2s_simd`'s own blake2sp (and so against
-    /// each other).
-    fn check_both(input: &[u8], chunks: &[usize]) {
+    /// Walk `input` in the cycled `chunks` lengths, handing each piece to
+    /// `update`. The chunking is the point: every hasher here buffers, and
+    /// has to give the same digest however the stream is cut.
+    fn feed_chunks(input: &[u8], chunks: &[usize], mut update: impl FnMut(&[u8])) {
+        let mut offset = 0;
+        for &len in chunks.iter().cycle() {
+            if offset >= input.len() {
+                break;
+            }
+            let end = (offset + len).min(input.len());
+            update(&input[offset..end]);
+            offset = end;
+        }
+    }
+
+    /// EVERY kernel this target has, fed `input` in the given chunking,
+    /// against `blake2s_simd`'s own blake2sp (and so against each other).
+    fn check_kernels(input: &[u8], chunks: &[usize]) {
         fn feed<L: super::LeafSet>(input: &[u8], chunks: &[usize]) -> [u8; 32] {
             let mut hasher = TreeHasher::<L>::new();
-            let mut offset = 0;
-            for &len in chunks.iter().cycle() {
-                if offset >= input.len() {
-                    break;
-                }
-                let end = (offset + len).min(input.len());
-                hasher.update(&input[offset..end]);
-                offset = end;
-            }
+            feed_chunks(input, chunks, |piece| hasher.update(piece));
+            hasher.finalize()
+        }
+        fn feed_simd(input: &[u8], chunks: &[usize]) -> [u8; 32] {
+            let mut hasher = SimdHasher::new();
+            feed_chunks(input, chunks, |piece| hasher.update(piece));
             hasher.finalize()
         }
         let expected = reference(input);
@@ -158,6 +200,17 @@ mod tests {
             feed::<PortableLeaves>(input, chunks),
             expected,
             "portable kernel, len {}",
+            input.len()
+        );
+        // The many-way kernel IS the crate's own blake2sp, so this arm
+        // holds our streaming wrapper to it rather than cross-checking two
+        // independent compressions - the chunk boundaries are what a
+        // wrapper gets wrong, and the portable arm above is the
+        // independent implementation.
+        assert_eq!(
+            feed_simd(input, chunks),
+            expected,
+            "many-way kernel, len {}",
             input.len()
         );
         #[cfg(target_arch = "aarch64")]
@@ -187,7 +240,7 @@ mod tests {
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
         let input: Vec<u8> = (0..3 * GROUP_BYTES).map(|_| rng.next() as u8).collect();
         for len in 0..input.len() {
-            check_both(&input[..len], &[len.max(1)]);
+            check_kernels(&input[..len], &[len.max(1)]);
         }
     }
 
@@ -206,7 +259,7 @@ mod tests {
             let chunks: Vec<usize> = (0..1 + rng.next() as usize % 6)
                 .map(|_| 1 + rng.next() as usize % (700 * 1024))
                 .collect();
-            check_both(&input, &chunks);
+            check_kernels(&input, &chunks);
         }
     }
 
@@ -255,7 +308,16 @@ mod tests {
 
     /// Timing rig, not a gate. Run with
     /// `cargo test --release -p rars --lib blake2sp::tests::timing -- --ignored --nocapture`.
-    #[cfg(target_arch = "aarch64")]
+    ///
+    /// Every kernel this target has, one-shot and streamed in the 256 KiB
+    /// pieces the extract pipelines feed. On x86 the interesting pair is
+    /// `many-way` (one thread, AVX2/SSE4.1 eight-wide) against `portable`
+    /// (four threads, a gather copy and a one-instance compression each):
+    /// the second can win on WALL by spending four cores, and the producer
+    /// stage that carries this hash is in series with a read, so read the
+    /// user CPU beside the rate. `BLAKE2SP_BENCH_ONLY=many|simd|portable`
+    /// runs ONE variant over 1 GiB so `/usr/bin/time -l` attributes the
+    /// process's user CPU to it.
     #[test]
     #[ignore]
     fn timing() {
@@ -265,26 +327,34 @@ mod tests {
         let mut rng = XorShift(0x1234_5678_9ABC_DEF1);
         let input: Vec<u8> = (0..SIZE).map(|_| rng.next() as u8).collect();
         let gbps = |seconds: f64| SIZE as f64 / seconds / 1e9;
-        // `BLAKE2SP_BENCH_ONLY=neon|portable|serial` runs ONE variant over
-        // 1 GiB of input so the process's user CPU time (`/usr/bin/time -l`)
-        // is attributable to it; the hash-thread cost is what this kernel
-        // exists to cut, and wall time hides it.
+
+        let simd_once = |input: &[u8]| {
+            let mut hasher = SimdHasher::new();
+            hasher.update(input);
+            hasher.finalize()
+        };
+        let portable_once = |input: &[u8]| {
+            let mut hasher = TreeHasher::<PortableLeaves>::new();
+            hasher.update(input);
+            hasher.finalize()
+        };
+        #[cfg(target_arch = "aarch64")]
+        let many_once = |input: &[u8]| {
+            let mut hasher = TreeHasher::<ManyLeaves>::new();
+            hasher.update(input);
+            hasher.finalize()
+        };
+
         if let Ok(only) = std::env::var("BLAKE2SP_BENCH_ONLY") {
             let rounds = (1usize << 30) / SIZE;
             let start = Instant::now();
             let mut digest = [0u8; 32];
             for _ in 0..rounds {
                 digest = match only.as_str() {
-                    "neon" => {
-                        let mut hasher = TreeHasher::<ManyLeaves>::new();
-                        hasher.update(&input);
-                        hasher.finalize()
-                    }
-                    "portable" => {
-                        let mut hasher = TreeHasher::<PortableLeaves>::new();
-                        hasher.update(&input);
-                        hasher.finalize()
-                    }
+                    #[cfg(target_arch = "aarch64")]
+                    "many" | "neon" => many_once(&input),
+                    "simd" => simd_once(&input),
+                    "portable" => portable_once(&input),
                     "serial" => reference(&input),
                     other => panic!("unknown variant {other}"),
                 };
@@ -298,6 +368,7 @@ mod tests {
             );
             return;
         }
+
         let best = |f: &mut dyn FnMut() -> [u8; 32]| {
             let mut best = f64::MAX;
             for _ in 0..ROUNDS {
@@ -308,25 +379,15 @@ mod tests {
             }
             best
         };
-        let many = best(&mut || {
-            let mut hasher = TreeHasher::<ManyLeaves>::new();
-            hasher.update(&input);
-            hasher.finalize()
-        });
-        let portable = best(&mut || {
-            let mut hasher = TreeHasher::<PortableLeaves>::new();
-            hasher.update(&input);
-            hasher.finalize()
-        });
-        let crate_serial = best(&mut || reference(&input));
-        // Streaming in 256 KiB pieces, the shape the extract pipelines feed.
-        let many_stream = best(&mut || {
-            let mut hasher = TreeHasher::<ManyLeaves>::new();
+        let simd = best(&mut || simd_once(&input));
+        let simd_stream = best(&mut || {
+            let mut hasher = SimdHasher::new();
             for chunk in input.chunks(256 << 10) {
                 hasher.update(chunk);
             }
             hasher.finalize()
         });
+        let portable = best(&mut || portable_once(&input));
         let portable_stream = best(&mut || {
             let mut hasher = TreeHasher::<PortableLeaves>::new();
             for chunk in input.chunks(256 << 10) {
@@ -334,17 +395,33 @@ mod tests {
             }
             hasher.finalize()
         });
+        println!("blake2sp {} MiB, best of {ROUNDS}:", SIZE >> 20);
+        #[cfg(target_arch = "aarch64")]
+        {
+            let many = best(&mut || many_once(&input));
+            let many_stream = best(&mut || {
+                let mut hasher = TreeHasher::<ManyLeaves>::new();
+                for chunk in input.chunks(256 << 10) {
+                    hasher.update(chunk);
+                }
+                hasher.finalize()
+            });
+            println!(
+                "  NEON 4-way kernel     one-shot {:.2} GB/s  256K-chunked {:.2} GB/s",
+                gbps(many),
+                gbps(many_stream),
+            );
+        }
         println!(
-            "blake2sp {} MiB, best of {ROUNDS}:\n  NEON 4-way kernel     one-shot {:.2} GB/s  256K-chunked {:.2} GB/s\n  blake2s_simd leaves   one-shot {:.2} GB/s  256K-chunked {:.2} GB/s  ({} threads)\n  blake2s_simd blake2sp serial  {:.2} GB/s",
-            SIZE >> 20,
-            gbps(many),
-            gbps(many_stream),
+            "  crate many-way        one-shot {:.2} GB/s  256K-chunked {:.2} GB/s  (1 thread)\n  gathered leaf team    one-shot {:.2} GB/s  256K-chunked {:.2} GB/s  ({} threads)",
+            gbps(simd),
+            gbps(simd_stream),
             gbps(portable),
             gbps(portable_stream),
             super::portable::HASH_THREADS,
-            gbps(crate_serial),
         );
     }
+
 
     /// The crate's `unsafe_code` lint went from `forbid` to `deny` for the
     /// NEON entry in `many.rs` and for nothing else. Keep it that way: that

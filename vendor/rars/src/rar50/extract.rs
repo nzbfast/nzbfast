@@ -83,12 +83,14 @@ impl FileHeader {
 
     /// Packed reader from already-derived keys (or `None` for plaintext) -
     /// the chain pre-derives once per member set instead of once per open.
+    #[cfg(feature = "parallel")]
     fn packed_reader_with_keys<'a>(
         &self,
         archive: &'a Archive,
         keys: Option<&Rar50Keys>,
+        cache: &mut crate::source::RangeReaderCache,
     ) -> Result<Box<dyn Read + Send + 'a>> {
-        let reader = archive.range_reader(self.block.data_range.clone())?;
+        let reader = archive.range_reader_cached(self.block.data_range.clone(), cache)?;
         if !self.encrypted {
             return Ok(reader);
         }
@@ -123,8 +125,9 @@ impl FileHeader {
         &self,
         archive: &Archive,
         password: Option<&[u8]>,
+        cache: &mut crate::source::RangeReaderCache,
     ) -> Result<(Vec<u8>, Option<Rar50Keys>)> {
-        let (mut reader, keys) = self.packed_reader_with_password(archive, password)?;
+        let (mut reader, keys) = self.packed_reader_with_password(archive, password, cache)?;
         let mut packed = Vec::new();
         reader.read_to_end(&mut packed)?;
         Ok((packed, keys))
@@ -134,10 +137,30 @@ impl FileHeader {
         &self,
         archive: &'a Archive,
         password: Option<&[u8]>,
+        cache: &mut crate::source::RangeReaderCache,
     ) -> Result<(Box<dyn Read + Send + 'a>, Option<Rar50Keys>)> {
-        let reader = archive.range_reader(self.block.data_range.clone())?;
+        let (reader, cipher, keys) = self.packed_reader_parts(archive, password, cache)?;
+        match cipher {
+            Some(cipher) => Ok((
+                Box::new(Rar50DecryptingReader::with_cipher(reader, cipher)),
+                keys,
+            )),
+            None => Ok((reader, keys)),
+        }
+    }
+
+    /// The packed-byte reader and, for an encrypted entry, the CBC cipher
+    /// as SEPARATE parts, so a caller with its own pipeline (the stored
+    /// pipe) can run the read and the decrypt on different threads.
+    fn packed_reader_parts<'a>(
+        &self,
+        archive: &'a Archive,
+        password: Option<&[u8]>,
+        cache: &mut crate::source::RangeReaderCache,
+    ) -> Result<(Box<dyn Read + Send + 'a>, Option<Rar50Cipher>, Option<Rar50Keys>)> {
+        let reader = archive.range_reader_cached(self.block.data_range.clone(), cache)?;
         if !self.encrypted {
-            return Ok((reader, None));
+            return Ok((reader, None, None));
         }
         if !self.packed_size().is_multiple_of(16) {
             return Err(Error::InvalidHeader(
@@ -149,8 +172,8 @@ impl FileHeader {
             .ok_or(Error::InvalidHeader(
                 "RAR 5 encrypted file is missing encryption keys",
             ))?;
-        let reader = Rar50DecryptingReader::new(reader, keys.key, self.encryption_iv()?);
-        Ok((Box::new(reader), Some(keys)))
+        let cipher = Rar50Cipher::new(keys.key, self.encryption_iv()?);
+        Ok((reader, Some(cipher), Some(keys)))
     }
 
     fn verify_integrity_with_keys(&self, data: &[u8], keys: Option<&Rar50Keys>) -> Result<()> {
@@ -280,8 +303,9 @@ impl FileHeader {
         password: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         let mut decoder = Unpack50Decoder::new();
+        let mut reader_cache = crate::source::RangeReaderCache::default();
         Ok(self
-            .decoded_data_with_decoder(archive, &mut decoder, password)?
+            .decoded_data_with_decoder(archive, &mut decoder, password, &mut reader_cache)?
             .data)
     }
 
@@ -327,8 +351,9 @@ impl FileHeader {
         archive: &Archive,
         decoder: &mut Unpack50Decoder,
         password: Option<&[u8]>,
+        cache: &mut crate::source::RangeReaderCache,
     ) -> Result<DecodedData> {
-        let (packed, keys) = self.packed_data_with_password(archive, password)?;
+        let (packed, keys) = self.packed_data_with_password(archive, password, cache)?;
         let data = self.decode_packed_with_decoder(&packed, decoder)?;
         Ok(DecodedData { data, keys })
     }
@@ -339,8 +364,9 @@ impl FileHeader {
         decoder: &mut Unpack50Decoder,
         password: Option<&[u8]>,
         mode: DecodeMode,
+        cache: &mut crate::source::RangeReaderCache,
     ) -> Result<DecodedData> {
-        let (packed, keys) = self.packed_data_with_password(archive, password)?;
+        let (packed, keys) = self.packed_data_with_password(archive, password, cache)?;
         let data = self.decode_packed_with_decoder_mode(&packed, decoder, mode)?;
         Ok(DecodedData { data, keys })
     }
@@ -485,6 +511,33 @@ impl FileHeader {
         fn pipe_closed<T>(_: T) -> std::io::Error {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "extraction pipeline closed")
         }
+
+        // nzbfast-local change (3 Sep 2026): charge this member's decode
+        // working memory to `crate::memtrack` for as long as it runs, so
+        // the product's memory-floor attribution can name the rars term
+        // instead of leaving it in `unattributed` (audit round 14
+        // residue 1; round 35 measured it at 105 MB of a 2,246 MB
+        // compressed-RAR chase peak). Two terms, both from the same
+        // inputs the codec allocates from:
+        //   - the sliding flat plan, when this member is admitted to the
+        //     flat path (`flat_plan_bytes`, a function of the dictionary
+        //     - `buffered_decode_limit` is the caller's flat cap, and a
+        //     plan over it means the bounded ring runs instead and
+        //     allocates the retained window rather than a plan);
+        //   - the pipe's buffer pool below, which is exact.
+        // The tape workers' buffers are NOT here: they are allocated in
+        // `codec/rar50.rs`, which this change may not touch. See
+        // `memtrack`'s header for what that leaves out and why it is
+        // small.
+        let plan = crate::codec::rar50::flat_plan_bytes(0, output_size, dictionary_size) as u64;
+        let _decode_charge = crate::memtrack::Charge::new(
+            if plan <= buffered_decode_limit {
+                plan
+            } else {
+                dictionary_size as u64
+            }
+            .saturating_add((POOL_BUFFERS * PIPE_BUF) as u64),
+        );
 
         let (data_tx, data_rx) = std::sync::mpsc::sync_channel::<PipeChunk>(POOL_BUFFERS + 1);
         let (digest_tx, digest_rx) = std::sync::mpsc::channel::<PipeChunk>();
@@ -642,10 +695,64 @@ impl FileHeader {
         &self,
         archive: &Archive,
         password: Option<&[u8]>,
+        reader_cache: &mut crate::source::RangeReaderCache,
         writer: &mut dyn Write,
     ) -> Result<()> {
-        let (mut reader, keys) = self
-            .packed_reader_with_password(archive, password)
+        // A tiny plaintext range is already contiguous: in-memory archives
+        // can lend their backing slice, and file archives can lend the
+        // retained read-ahead window. Avoid a boxed reader plus a freshly
+        // allocated/zeroed inline buffer and the extra copy through it.
+        // (nzbfast-local change, 3 Sep 2026 - re-apply on the next rars
+        // re-sync; see vendor/rars/VENDORING.md.)
+        if !self.encrypted {
+            let view = archive
+                .small_range_view_cached(self.block.data_range.clone(), reader_cache)
+                .map_err(|error| self.entry_error("decoding", error))?;
+            if let Some(view) = view {
+                let data = view.as_slice();
+                let mut crc = Crc32::new();
+                let mut hash = streaming_hash_verifier(self)
+                    .map_err(|error| self.entry_error("decoding", error))?;
+                let mut written = 0u64;
+                let mut discarded = 0u64;
+                // Match the inline reader's observable chunking on malformed
+                // headers too. For packed data longer than the declared
+                // output, that reader first writes/hashes the declared-size
+                // prefix and rejects the extra bytes on its next read.
+                let capacity = usize::try_from(self.unpacked_size)
+                    .unwrap_or(STORED_INLINE_BUF)
+                    .clamp(1, STORED_INLINE_BUF);
+                for chunk in data.chunks(capacity) {
+                    let content_len = self
+                        .consume_stored_chunk(
+                            chunk,
+                            &mut written,
+                            &mut discarded,
+                            writer,
+                        )
+                        .map_err(|(operation, error)| self.entry_error(operation, error))?;
+                    let content = &chunk[..content_len];
+                    crc.update(content);
+                    if let Some((_, hasher)) = &mut hash {
+                        hasher.update(content);
+                    }
+                }
+                if written != self.unpacked_size {
+                    return Err(self.entry_error(
+                        "decoding",
+                        Error::InvalidHeader(
+                            "RAR 5 stored file has mismatched packed and unpacked sizes",
+                        ),
+                    ));
+                }
+                return self
+                    .verify_streaming_integrity(crc, hash, None)
+                    .map_err(|error| self.entry_error("verifying", error));
+            }
+        }
+
+        let (mut reader, cipher, keys) = self
+            .packed_reader_parts(archive, password, reader_cache)
             .map_err(|error| self.entry_error("decoding", error))?;
         let crc = Crc32::new();
         let hash =
@@ -655,6 +762,7 @@ impl FileHeader {
 
         let (crc, hash) = match pipe_stored_chunks(
             &mut *reader,
+            cipher,
             self.unpacked_size,
             |error| ("decoding", Error::from(error)),
             crc,
@@ -737,6 +845,19 @@ impl FileHeader {
     fn entry_error(&self, operation: &'static str, error: Error) -> Error {
         error.at_entry(self.name.clone(), operation)
     }
+
+    /// Whether this header carries a digest over the WHOLE member that
+    /// [`Self::verify_streaming_integrity`] will actually check. An
+    /// unknown hash type is ignored there, so it does not count here
+    /// either - and a member with nothing to check must keep the
+    /// per-fragment digests, which are then its only integrity check.
+    fn has_whole_member_digest(&self) -> bool {
+        self.data_crc32.is_some()
+            || self
+                .hash
+                .as_ref()
+                .is_some_and(|hash| hash.hash_type == 0 && hash.data.len() == 32)
+    }
 }
 
 /// Bounded stored-data pipeline: a scoped producer thread reads (and
@@ -765,6 +886,7 @@ const STORED_INLINE_BUF: usize = 64 * 1024;
 
 fn pipe_stored_chunks<E>(
     reader: &mut (dyn Read + Send),
+    cipher: Option<Rar50Cipher>,
     size_hint: u64,
     read_error: impl Fn(std::io::Error) -> E,
     crc: Crc32,
@@ -775,11 +897,21 @@ fn pipe_stored_chunks<E>(
         let capacity = usize::try_from(size_hint)
             .unwrap_or(STORED_INLINE_BUF)
             .clamp(1, STORED_INLINE_BUF);
+        // A whole number of AES blocks per read when a cipher rides along.
+        let capacity = if cipher.is_some() { capacity.max(16) & !15 } else { capacity };
         let mut buf = vec![0u8; capacity];
         let mut crc = crc;
         let mut hash = hash;
+        let mut cipher = cipher;
         loop {
-            let count = reader.read(&mut buf).map_err(&read_error)?;
+            let count = match &mut cipher {
+                Some(cipher) => {
+                    let count = fill_ciphertext(reader, &mut buf).map_err(&read_error)?;
+                    decrypt_slice(cipher, &mut buf[..count]).map_err(&read_error)?;
+                    count
+                }
+                None => reader.read(&mut buf).map_err(&read_error)?,
+            };
             if count == 0 {
                 return Ok((crc, hash));
             }
@@ -801,36 +933,96 @@ fn pipe_stored_chunks<E>(
     // trip, not just after a short read, for bytes `read` was about to
     // overwrite. (nzbfast-local change, 22 Aug 2026 - re-apply on the next
     // rars re-sync, see vendor/rars/VENDORING.md.)
+    //
+    // Stages, each on its own thread: producer (read, plus the fragment
+    // digests inside a chained reader) -> [decrypt, encrypted entries only]
+    // -> this thread (consume: the write) -> digester (CRC32 / BLAKE2sp),
+    // which recycles the buffer. Until 2 Sep 2026 the decrypt ran INSIDE
+    // the producer's read, in series with the syscall: an encrypted RAR5
+    // store set read 0.25 s per GiB on an M1 Ultra against 0.15 s for the
+    // same set unencrypted, and 0.52 against 0.30 on an i5-10600KF
+    // (research/RAR-PERF-AUDIT-2026-09-02.md, round 3). The buffers come
+    // from a thread-local pool that outlives the member, so a set of many
+    // small members stops paying four fresh 1 MiB allocations (and their
+    // page faults) per member.
     let (data_tx, data_rx) =
         std::sync::mpsc::sync_channel::<std::io::Result<(Vec<u8>, usize)>>(STORED_POOL + 1);
     let (digest_tx, digest_rx) = std::sync::mpsc::channel::<(Vec<u8>, usize)>();
     let (pool_tx, pool_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    for _ in 0..STORED_POOL {
-        let _ = pool_tx.send(vec![0u8; STORED_PIPE_BUF]);
+    let mut pooled = take_stored_buffers();
+    for buf in pooled.drain(..) {
+        let _ = pool_tx.send(buf);
     }
 
     let mut outcome = Ok(());
-    let digests = std::thread::scope(|scope| {
-        scope.spawn(move || {
+    let (digests, reclaimed) = std::thread::scope(|scope| {
+        let encrypted = cipher.is_some();
+        let producer = scope.spawn(move || {
             loop {
                 let Ok(mut buf) = pool_rx.recv() else {
-                    return;
+                    break;
                 };
                 debug_assert_eq!(buf.len(), STORED_PIPE_BUF);
-                match reader.read(&mut buf) {
-                    Ok(0) => return,
+                let read = if encrypted {
+                    // Whole buffers, so every chunk the decrypt stage sees
+                    // is block-aligned except a truncated tail, which
+                    // `fill_ciphertext` reports as the error it is.
+                    fill_ciphertext(reader, &mut buf)
+                } else {
+                    reader.read(&mut buf)
+                };
+                match read {
+                    Ok(0) => {
+                        // Hand the untouched buffer straight back; the
+                        // drain below collects it with the rest.
+                        let _ = data_tx.send(Ok((buf, 0)));
+                        break;
+                    }
                     Ok(count) => {
                         if data_tx.send(Ok((buf, count))).is_err() {
-                            return;
+                            break;
                         }
                     }
                     Err(error) => {
                         let _ = data_tx.send(Err(error));
-                        return;
+                        break;
                     }
                 }
             }
+            // Closing the data channel is what ends the downstream stages;
+            // once the digester has recycled its last buffer the pool
+            // sender drops and this drain ends with every surviving
+            // buffer, which goes back to the thread-local pool.
+            drop(data_tx);
+            pool_rx.iter().collect::<Vec<Vec<u8>>>()
         });
+
+        // The decrypt stage sits between producer and consumer only for an
+        // encrypted entry; a plain one hands the producer's receiver
+        // straight through, so it costs nothing where it does nothing.
+        let consume_rx = match cipher {
+            Some(mut cipher) => {
+                let (dec_tx, dec_rx) = std::sync::mpsc::sync_channel::<
+                    std::io::Result<(Vec<u8>, usize)>,
+                >(STORED_POOL + 1);
+                scope.spawn(move || {
+                    for received in data_rx {
+                        let forwarded = match received {
+                            Ok((mut buf, count)) => {
+                                decrypt_slice(&mut cipher, &mut buf[..count]).map(|()| (buf, count))
+                            }
+                            Err(error) => Err(error),
+                        };
+                        let stop = forwarded.is_err();
+                        if dec_tx.send(forwarded).is_err() || stop {
+                            return;
+                        }
+                    }
+                });
+                dec_rx
+            }
+            None => data_rx,
+        };
 
         let digester = scope.spawn(move || {
             let mut crc = crc;
@@ -848,8 +1040,12 @@ fn pipe_stored_chunks<E>(
             (crc, hash)
         });
 
-        for received in data_rx {
+        for received in consume_rx {
             let (buf, count) = match received {
+                Ok((buf, 0)) => {
+                    let _ = digest_tx.send((buf, 0));
+                    continue;
+                }
                 Ok(chunk) => chunk,
                 Err(error) => {
                     outcome = Err(read_error(error));
@@ -879,9 +1075,31 @@ fn pipe_stored_chunks<E>(
         // digester, whose exit drops the pool sender and fails that recv.
         drop(digest_tx);
         let digests = digester.join().expect("stored digest thread panicked");
-        digests
+        let reclaimed = producer.join().expect("stored producer thread panicked");
+        (digests, reclaimed)
     });
+    // Whatever buffers survived go back to the thread-local pool for the
+    // next member; ones lost to an early stop are simply reallocated.
+    STORED_BUFFERS.with(|cell| *cell.borrow_mut() = reclaimed);
     outcome.map(|()| digests)
+}
+
+thread_local! {
+    /// The stored pipe's buffers, kept between members on the thread that
+    /// runs the pipe (the extraction walk is one thread per set).
+    static STORED_BUFFERS: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `STORED_POOL` buffers of `STORED_PIPE_BUF` bytes: reused from the
+/// thread-local pool where it has them, freshly zeroed otherwise.
+fn take_stored_buffers() -> Vec<Vec<u8>> {
+    let mut bufs = STORED_BUFFERS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    bufs.retain(|buf| buf.len() == STORED_PIPE_BUF);
+    while bufs.len() < STORED_POOL {
+        bufs.push(vec![0u8; STORED_PIPE_BUF]);
+    }
+    bufs.truncate(STORED_POOL);
+    bufs
 }
 
 struct CountingWriter<'a> {
@@ -1148,9 +1366,15 @@ struct DecodedData {
 
 struct DecoderSession<'a> {
     decoder: Unpack50Decoder,
+    reader_cache: crate::source::RangeReaderCache,
     password: Option<&'a [u8]>,
     buffered_decode_limit: u64,
     policy: Option<crate::Rar50ExecutionPolicy>,
+    /// Whether a stored split member may leave its per-fragment packed
+    /// digests to a second pass - see [`crate::Rar50SplitFragmentDigests`].
+    /// Only the whole-set walks set it; every other session defaults to
+    /// checking as it reads, which is what every caller did before.
+    split_fragment_digests: crate::Rar50SplitFragmentDigests,
     /// Retained so a RESET decoder gets the caller's window limit back.
     /// `Unpack50Decoder::new()` defaults it to `usize::MAX`, so replacing the
     /// session's decoder with a bare one silently dropped the safety limit
@@ -1166,8 +1390,16 @@ const FLAT_OVERHEAD_ESTIMATE: u64 = 24 << 20;
 /// Whether a flat allocation of `output` bytes (retaining up to `dictionary`
 /// of window afterwards) fits the policy's working-memory allowance.
 fn flat_admitted(output: u64, dictionary: u64, policy: &crate::Rar50ExecutionPolicy) -> bool {
-    output
-        .saturating_add(dictionary)
+    // The plan slides (codec `flat_plan_bytes`), so what it allocates is a
+    // function of the dictionary, not the member; `usize::MAX` stands in
+    // for a window limit the session does not know here (the codec clamps
+    // the real one, which only makes the plan smaller).
+    let plan = crate::codec::rar50::flat_plan_bytes(
+        0,
+        usize::try_from(output).unwrap_or(usize::MAX),
+        usize::try_from(dictionary).unwrap_or(usize::MAX),
+    ) as u64;
+    plan.saturating_add(dictionary)
         .saturating_add(FLAT_OVERHEAD_ESTIMATE)
         <= policy.working_memory_limit
 }
@@ -1182,11 +1414,21 @@ impl<'a> DecoderSession<'a> {
         decoder.set_window_limit(usize::try_from(max_window).unwrap_or(usize::MAX));
         Self {
             decoder,
+            reader_cache: crate::source::RangeReaderCache::default(),
             password,
             buffered_decode_limit,
             policy: None,
+            split_fragment_digests: crate::Rar50SplitFragmentDigests::default(),
             max_window,
         }
+    }
+
+    fn with_split_fragment_digests(
+        mut self,
+        digests: crate::Rar50SplitFragmentDigests,
+    ) -> Self {
+        self.split_fragment_digests = digests;
+        self
     }
 
     /// A fresh decoder carrying this session's policy - window limit and
@@ -1203,7 +1445,7 @@ impl<'a> DecoderSession<'a> {
         let mut decoder = Unpack50Decoder::new();
         decoder.set_window_limit(usize::try_from(self.max_window).unwrap_or(usize::MAX));
         if let Some(policy) = self.policy {
-            decoder.set_mt_workers_cap(policy.max_workers.max(1));
+            decoder.set_mt_workers_cap(policy.max_tape_workers.min(policy.max_workers).max(1));
         }
         decoder
     }
@@ -1214,7 +1456,7 @@ impl<'a> DecoderSession<'a> {
     fn with_policy(mut self, policy: Option<crate::Rar50ExecutionPolicy>) -> Self {
         self.policy = policy;
         if let Some(policy) = policy {
-            self.decoder.set_mt_workers_cap(policy.max_workers.max(1));
+            self.decoder.set_mt_workers_cap(policy.max_tape_workers.min(policy.max_workers).max(1));
         }
         self
     }
@@ -1232,6 +1474,10 @@ impl<'a> DecoderSession<'a> {
         if !flat_admitted(file.unpacked_size, dictionary, policy) {
             return 0;
         }
+        // The limit bounds the flat ALLOCATION (codec `flat_plan_bytes`,
+        // which slides and so scales with the dictionary), not the member:
+        // since 2 Sep 2026 a multi-GB member with a 32 MiB dictionary plans
+        // ~96 MiB and takes the flat path under this same 512 MiB cap.
         self.buffered_decode_limit.min(policy.flat_output_limit)
     }
 
@@ -1242,7 +1488,12 @@ impl<'a> DecoderSession<'a> {
         writer: &mut dyn Write,
     ) -> Result<()> {
         if file.is_stored() {
-            return file.write_stored_to(archive, self.password, writer);
+            return file.write_stored_to(
+                archive,
+                self.password,
+                &mut self.reader_cache,
+                writer,
+            );
         }
         // Non-solid archives never reference a previous member's window, so
         // skip history retention (and the decoder clones below that exist
@@ -1281,6 +1532,7 @@ impl<'a> DecoderSession<'a> {
                         &mut self.decoder,
                         self.password,
                         DecodeMode::LzNoFilters,
+                        &mut self.reader_cache,
                     )
                     .map_err(|error| file.entry_error("decoding", error))?
                 } else {
@@ -1291,6 +1543,7 @@ impl<'a> DecoderSession<'a> {
                             &mut fresh,
                             self.password,
                             DecodeMode::LzNoFilters,
+                            &mut self.reader_cache,
                         )
                         .map_err(|error| file.entry_error("decoding", error))?;
                     self.decoder = fresh;
@@ -1318,7 +1571,11 @@ impl<'a> DecoderSession<'a> {
         writer: &mut dyn Write,
     ) -> Result<()> {
         let (mut packed, keys) = file
-            .packed_reader_with_password(archive, self.password)
+            .packed_reader_with_password(
+                archive,
+                self.password,
+                &mut self.reader_cache,
+            )
             .map_err(|error| file.entry_error("reading", error))?;
         if archive.main.is_solid() {
             // Work on a clone so a failed stream leaves the session's
@@ -1351,7 +1608,12 @@ impl<'a> DecoderSession<'a> {
     }
 
     fn decoded_file_data(&mut self, archive: &Archive, file: &FileHeader) -> Result<DecodedData> {
-        file.decoded_data_with_decoder(archive, &mut self.decoder, self.password)
+        file.decoded_data_with_decoder(
+            archive,
+            &mut self.decoder,
+            self.password,
+            &mut self.reader_cache,
+        )
     }
 
     fn split_decryptor(
@@ -1544,7 +1806,8 @@ where
         buffered_decode_limit,
         rar50_max_window(options),
     )
-    .with_policy(rar50_execution_policy(options));
+    .with_policy(rar50_execution_policy(options))
+    .with_split_fragment_digests(options.rar50_split_fragment_digests);
     // Solid archives: a run of chainable members decodes as ONE stream
     // through the MT pipeline instead of member-by-member on one thread.
     // Safe under a watermark, unlike the member pool above: a chain is
@@ -1602,6 +1865,9 @@ where
                     // The finish volume stays held; the walk is still in
                     // it.
                     let reported = &mut reported;
+                    if consumed.is_some() {
+                        session.reader_cache.clear();
+                    }
                     let mut spent = consumed.as_deref_mut().map(|consumed| {
                         move |spent_volume: usize| {
                             while *reported <= spent_volume {
@@ -1637,6 +1903,7 @@ where
         // pending right now, whose Finish will read those fragments back.
         if !split.is_pending() {
             if let Some(consumed) = consumed.as_mut() {
+                session.reader_cache.clear();
                 while reported <= volume_index {
                     consumed(reported);
                     reported += 1;
@@ -1752,6 +2019,7 @@ where
                 // is pending, which will read those fragments back at its
                 // Finish.
                 if !split.is_pending() {
+                    session.reader_cache.clear();
                     while reported < volumes.len() {
                         consumed(reported, u64::MAX);
                         reported += 1;
@@ -1828,6 +2096,7 @@ where
                             // the watermark off any path that could re-read.
                             let reported = &mut reported;
                             let consumed = &consumed;
+                            session.reader_cache.clear();
                             let mut spent = move |spent_volume: usize| {
                                 while *reported <= spent_volume {
                                     consumed(*reported, u64::MAX);
@@ -1862,6 +2131,7 @@ where
         }
 
         if let Some(file_index) = chase_at {
+            session.reader_cache.clear();
             let finish = incremental_split_decode(
                 &mut volumes,
                 (volume_index, file_index),
@@ -2697,6 +2967,7 @@ where
             .collect::<Result<_>>()?
     };
     let decoder = &mut session.decoder;
+    let reader_cache = &mut session.reader_cache;
     let mut consume_error: Option<Error> = None;
     let member_keys_ref = &member_keys;
     let member_sizes_ref = &member_sizes;
@@ -2714,7 +2985,11 @@ where
                 next += 1;
                 match member
                     .file
-                    .packed_reader_with_keys(&volumes[member.volume_index], keys)
+                    .packed_reader_with_keys(
+                        &volumes[member.volume_index],
+                        keys,
+                        reader_cache,
+                    )
                 {
                     Ok(reader) => Some(reader),
                     Err(error) => {
@@ -3033,6 +3308,161 @@ const POOL_INFLIGHT_BUDGET: u64 = 64 << 20;
 #[cfg(all(feature = "parallel", test))]
 const POOL_INFLIGHT_BUDGET: u64 = 8 * 1024;
 
+/// Cap the number of adjacent members claimed through one work-channel
+/// receive. Tiny-member archives otherwise spend one shared-receiver lock and
+/// one budget-lock acquisition per few kilobytes of useful work. Keeping at
+/// least eight batches per worker avoids starving the pool on smaller sets.
+/// (nzbfast-local change, 2 Sep 2026 - re-apply on the next rars re-sync;
+/// see vendor/rars/VENDORING.md.)
+#[cfg(feature = "parallel")]
+const POOL_WORK_BATCH_MAX: usize = 8;
+
+/// Result-channel coalescing is intentionally narrower than work batching.
+/// Eight 4 KiB members are the measured tiny-file shape where removing seven
+/// sends/tree operations matters; waiting for the whole range once members
+/// grow beyond that can hold an early result behind milliseconds of unrelated
+/// decode work. Keeping the ceiling at exactly that 32 KiB range leaves the
+/// tiny fast path unchanged and makes larger ranges publish each member as
+/// soon as it finishes.
+#[cfg(feature = "parallel")]
+const POOL_RESULT_BATCH_BYTE_MAX: u64 = POOL_WORK_BATCH_MAX as u64 * (4 << 10);
+
+#[cfg(feature = "parallel")]
+fn pool_work_batch_size(members: usize, workers: usize) -> usize {
+    (members / workers.saturating_mul(8).max(1)).clamp(1, POOL_WORK_BATCH_MAX)
+}
+
+#[cfg(feature = "parallel")]
+fn pool_result_batchable(mut unpacked_sizes: impl Iterator<Item = u64>) -> bool {
+    let mut members = 0usize;
+    let total = unpacked_sizes.try_fold(0u64, |total, size| {
+        members += 1;
+        total.checked_add(size)
+    });
+    (2..=POOL_WORK_BATCH_MAX).contains(&members)
+        && total.is_some_and(|total| total <= POOL_RESULT_BATCH_BYTE_MAX)
+}
+
+/// Select one contiguous work batch. The first member is always admitted so
+/// an individually oversized entry can still make progress; subsequent
+/// members must fit both the count cap and one worker's share of the global
+/// in-flight byte budget.
+#[cfg(feature = "parallel")]
+fn pool_work_batch_shape(
+    mut unpacked_sizes: impl Iterator<Item = u64>,
+    member_limit: usize,
+    byte_limit: u64,
+) -> (usize, u64) {
+    let Some(mut total) = unpacked_sizes.next() else {
+        return (0, 0);
+    };
+    let mut members = 1;
+    for size in unpacked_sizes.take(member_limit.saturating_sub(1)) {
+        let Some(next_total) = total.checked_add(size) else {
+            break;
+        };
+        if next_total > byte_limit {
+            break;
+        }
+        total = next_total;
+        members += 1;
+    }
+    (members, total)
+}
+
+/// One bounded worker result. The singleton arm avoids allocating a result
+/// vector and, for ranges above `POOL_RESULT_BATCH_BYTE_MAX`, restores
+/// per-member publication rather than holding the range behind its last
+/// decode.
+/// (nzbfast-local change, 3 Sep 2026 - re-apply on the next rars re-sync;
+/// see vendor/rars/VENDORING.md.)
+#[cfg(feature = "parallel")]
+type PoolMemberResult = Result<Vec<u8>>;
+#[cfg(feature = "parallel")]
+type PoolResultIter = std::vec::IntoIter<PoolMemberResult>;
+
+#[cfg(feature = "parallel")]
+enum PoolResultPacket {
+    Single(usize, PoolMemberResult),
+    Batch(usize, PoolResultIter),
+}
+
+#[cfg(feature = "parallel")]
+impl PoolResultPacket {
+    fn start(&self) -> usize {
+        match self {
+            Self::Single(start, _) | Self::Batch(start, _) => *start,
+        }
+    }
+}
+
+/// Batch-granular out-of-order storage plus one cursor for the range currently
+/// being emitted. Once a range reaches archive order, every later member in
+/// that range is consumed without another channel receive or tree operation.
+#[cfg(feature = "parallel")]
+#[derive(Default)]
+struct PoolResultReorder {
+    pending: std::collections::BTreeMap<usize, PoolResultPacket>,
+    ready: Option<(usize, PoolResultIter)>,
+}
+
+#[cfg(feature = "parallel")]
+impl PoolResultReorder {
+    fn next(
+        &mut self,
+        expected: usize,
+        result_rx: &std::sync::mpsc::Receiver<PoolResultPacket>,
+    ) -> Result<Vec<u8>> {
+        loop {
+            if let Some((next_seq, results)) = self.ready.as_mut() {
+                if *next_seq != expected {
+                    return Err(Error::InvalidHeader(
+                        "RAR 5 member decode pool returned a non-contiguous batch",
+                    ));
+                }
+                let result = results.next().ok_or(Error::InvalidHeader(
+                    "RAR 5 member decode pool returned an empty batch",
+                ))?;
+                *next_seq += 1;
+                if results.len() == 0 {
+                    self.ready = None;
+                }
+                return result;
+            }
+
+            let packet = match self.pending.remove(&expected) {
+                Some(packet) => packet,
+                None => {
+                    let packet = result_rx
+                        .recv()
+                        .map_err(|_| Error::InvalidHeader("RAR 5 member decode pool disconnected"))?;
+                    let start = packet.start();
+                    if start > expected {
+                        if self.pending.insert(start, packet).is_some() {
+                            return Err(Error::InvalidHeader(
+                                "RAR 5 member decode pool returned a duplicate batch",
+                            ));
+                        }
+                        continue;
+                    }
+                    if start < expected {
+                        return Err(Error::InvalidHeader(
+                            "RAR 5 member decode pool returned an overlapping batch",
+                        ));
+                    }
+                    packet
+                }
+            };
+            match packet {
+                PoolResultPacket::Single(_, result) => return result,
+                PoolResultPacket::Batch(start, results) => {
+                    self.ready = Some((start, results));
+                }
+            }
+        }
+    }
+}
+
 /// One pooled member, resolved when the plan is built.
 ///
 /// `Archive::files()` filters the block list, so it is not indexable:
@@ -3138,6 +3568,7 @@ fn decode_pooled_member(
     file: &FileHeader,
     password: Option<&[u8]>,
     max_window: u64,
+    reader_cache: &mut crate::source::RangeReaderCache,
 ) -> Result<Vec<u8>> {
     let fresh_decoder = || {
         let mut decoder = Unpack50Decoder::new();
@@ -3147,7 +3578,7 @@ fn decode_pooled_member(
     };
     let mut decoder = fresh_decoder();
     let decoded = file
-        .decoded_data_with_decoder(archive, &mut decoder, password)
+        .decoded_data_with_decoder(archive, &mut decoder, password, reader_cache)
         .map_err(|error| file.entry_error("decoding", error))?;
     match file.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref()) {
         Ok(()) => Ok(decoded.data),
@@ -3159,6 +3590,7 @@ fn decode_pooled_member(
                     &mut unfiltered_decoder,
                     password,
                     DecodeMode::LzNoFilters,
+                    reader_cache,
                 )
                 .map_err(|error| file.entry_error("decoding", error))?;
             file.verify_integrity_with_keys(&unfiltered.data, unfiltered.keys.as_ref())
@@ -3181,7 +3613,6 @@ where
     F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     R: FnMut(&ExtractedEntryMeta, &FileRedirection) -> Result<()>,
 {
-    use std::collections::BTreeMap;
     use std::sync::mpsc;
     use std::sync::{Arc, Condvar, Mutex};
 
@@ -3204,17 +3635,20 @@ where
         let floor = POOL_INFLIGHT_BUDGET.min(8 << 20);
         POOL_INFLIGHT_BUDGET.min((p.working_memory_limit / 4).max(floor))
     });
+    let work_batch_size = pool_work_batch_size(plan.order.len(), workers);
+    let work_batch_byte_limit = inflight_budget / workers as u64;
 
     // in-flight budget: (bytes enqueued-or-decoded but not yet written, abort)
     let budget = Arc::new((Mutex::new((0u64, false)), Condvar::new()));
     // feeder -> workers; small buffer, the budget is the real regulator
-    let (work_tx, work_rx) = mpsc::sync_channel::<usize>(workers * 2);
+    let (work_tx, work_rx) = mpsc::sync_channel::<std::ops::Range<usize>>(workers * 2);
     let work_rx = Arc::new(Mutex::new(work_rx));
     // workers -> coordinator
-    let (result_tx, result_rx) = mpsc::channel::<(usize, Result<Vec<u8>>)>();
+    let (result_tx, result_rx) = mpsc::channel::<PoolResultPacket>();
 
     let outcome = std::thread::scope(|scope| {
-        // Feeder: pushes pool sequence numbers in archive order, blocking
+        // Feeder: pushes small ranges of pool sequence numbers in archive
+        // order, blocking
         // while the in-flight byte budget is full. A single member larger
         // than the whole budget is still admitted alone (in_flight > 0
         // condition) so progress is always possible.
@@ -3223,21 +3657,38 @@ where
             let order = &plan.order;
             let work_tx = work_tx;
             scope.spawn(move || {
-                for (seq, entry) in order.iter().enumerate() {
-                    let size = entry.unpacked_size;
+                let mut start = 0;
+                while start < order.len() {
+                    let (members, size) = pool_work_batch_shape(
+                        order[start..].iter().map(|entry| entry.unpacked_size),
+                        work_batch_size,
+                        work_batch_byte_limit,
+                    );
+                    debug_assert!(members > 0);
+                    let end = start + members;
                     let (lock, cvar) = &*budget;
                     let mut state = lock.lock().expect("pool budget lock");
-                    while !state.1 && state.0 > 0 && state.0 + size > inflight_budget {
+                    while !state.1
+                        && state.0 > 0
+                        && state
+                            .0
+                            .checked_add(size)
+                            .is_none_or(|charged| charged > inflight_budget)
+                    {
                         state = cvar.wait(state).expect("pool budget wait");
                     }
                     if state.1 {
                         return; // coordinator aborted
                     }
-                    state.0 += size;
+                    state.0 = state
+                        .0
+                        .checked_add(size)
+                        .expect("pool budget addition was guarded against overflow");
                     drop(state);
-                    if work_tx.send(seq).is_err() {
+                    if work_tx.send(start..end).is_err() {
                         return; // workers gone (coordinator returned early)
                     }
+                    start = end;
                 }
             });
         }
@@ -3254,22 +3705,54 @@ where
             let work_rx = Arc::clone(&work_rx);
             let result_tx = result_tx.clone();
             let order = &plan.order;
-            scope.spawn(move || loop {
-                let seq = match work_rx.lock().expect("pool work lock").recv() {
-                    Ok(seq) => seq,
-                    Err(_) => return,
-                };
-                let entry = &order[seq];
-                let archive = &volumes[entry.volume_index];
-                let file = entry.file;
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    decode_pooled_member(archive, file, password, max_window)
-                }))
-                .unwrap_or(Err(Error::InvalidHeader(
-                    "RAR 5 member decode worker panicked",
-                )));
-                if result_tx.send((seq, result)).is_err() {
-                    return; // coordinator gone
+            scope.spawn(move || {
+                let mut reader_cache = crate::source::RangeReaderCache::default();
+                loop {
+                    let batch = match work_rx.lock().expect("pool work lock").recv() {
+                        Ok(batch) => batch,
+                        Err(_) => return,
+                    };
+                    let start = batch.start;
+                    let batch_len = batch.len();
+                    let mut decode = |seq: usize| {
+                        let entry = &order[seq];
+                        let archive = &volumes[entry.volume_index];
+                        let file = entry.file;
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            decode_pooled_member(
+                                archive,
+                                file,
+                                password,
+                                max_window,
+                                &mut reader_cache,
+                            )
+                        }))
+                        .unwrap_or(Err(Error::InvalidHeader(
+                            "RAR 5 member decode worker panicked",
+                        )))
+                    };
+                    debug_assert!(batch_len <= POOL_WORK_BATCH_MAX);
+                    if pool_result_batchable(batch.clone().map(|seq| order[seq].unpacked_size)) {
+                        let packet = PoolResultPacket::Batch(
+                            start,
+                            batch.map(&mut decode).collect::<Vec<_>>().into_iter(),
+                        );
+                        if result_tx.send(packet).is_err() {
+                            return; // coordinator gone
+                        }
+                    } else {
+                        // Preserve the pre-result-batching publication shape
+                        // for substantial work ranges: an early member can be
+                        // written while this worker decodes the next one.
+                        for seq in batch {
+                            if result_tx
+                                .send(PoolResultPacket::Single(seq, decode(seq)))
+                                .is_err()
+                            {
+                                return; // coordinator gone
+                            }
+                        }
+                    }
                 }
             });
         }
@@ -3287,11 +3770,12 @@ where
         // Coordinator: the exact serial walk, with pooled members' bytes
         // pulled from the reorder map instead of decoded inline. Inline
         // members (stored, streaming/MT, splits) use the session as today.
-        let mut pending: BTreeMap<usize, Result<Vec<u8>>> = BTreeMap::new();
+        let mut results = PoolResultReorder::default();
         let mut split = SplitVolumeState::new();
         let mut session =
             DecoderSession::new_with_password(password, buffered_decode_limit, max_window)
-                .with_policy(rar50_execution_policy(options));
+                .with_policy(rar50_execution_policy(options))
+                .with_split_fragment_digests(options.rar50_split_fragment_digests);
         // A mixed set can hold solid archives alongside the pooled ones;
         // their groups still chain through the MT pipeline here.
         let mut chain = SolidChainDriver::new();
@@ -3318,23 +3802,7 @@ where
                             }
                             let meta = file.metadata();
                             if let Some(&seq) = plan.seq_of.get(&(volume_index, file_index)) {
-                                let result = loop {
-                                    if let Some(result) = pending.remove(&seq) {
-                                        break result;
-                                    }
-                                    match result_rx.recv() {
-                                        Ok((got, result)) if got == seq => break result,
-                                        Ok((got, result)) => {
-                                            pending.insert(got, result);
-                                        }
-                                        Err(_) => {
-                                            return Err(Error::InvalidHeader(
-                                                "RAR 5 member decode pool disconnected",
-                                            ));
-                                        }
-                                    }
-                                };
-                                let data = result?;
+                                let data = results.next(seq, &result_rx)?;
                                 let mut writer = open(&meta)?;
                                 writer
                                     .write_all(&data)
@@ -3501,8 +3969,44 @@ impl PendingSplitRefs {
         // the bad volume and is the one to report - bare, exactly as the
         // incremental path reports it through `take_error`.
         let fragment_error: SharedFragmentError = Default::default();
-        let recover_fragment_error =
-            |error: Error| fragment_error.lock().unwrap().take().unwrap_or(error);
+        // Hash each byte ONCE where the format allows it. The final
+        // fragment's record is the member's verdict; the non-final
+        // fragments' records only say WHICH volume broke a verdict that
+        // has already failed. So skip them on the fast path and pay a
+        // second read for the diagnosis, but only when both halves hold:
+        // the member really does carry a whole-member digest (or nothing
+        // would check these bytes at all), and nobody is releasing
+        // volumes behind this read (`spent`), because a released volume
+        // may be deleted and cannot be read twice.
+        //
+        // Three conditions, all mechanical, plus the caller's opt-in:
+        // the member is STORED, so the two records really do cover the
+        // same bytes (a compressed member's packed and unpacked digests
+        // are two different checks); it carries a whole-member digest at
+        // all, or nothing else would ever check these bytes; and nobody
+        // is releasing volumes behind this read (`spent`), because a
+        // released volume may be deleted and cannot be read twice.
+        let digests = if session.split_fragment_digests
+            == crate::Rar50SplitFragmentDigests::DeferForStoredMembers
+            && final_file.is_stored()
+            && spent.is_none()
+            && final_file.has_whole_member_digest()
+        {
+            FragmentDigests::Defer
+        } else {
+            FragmentDigests::Check
+        };
+        let recover_fragment_error = |error: Error| {
+            if let Some(fragment) = fragment_error.lock().unwrap().take() {
+                return fragment;
+            }
+            if digests == FragmentDigests::Defer && is_member_digest_mismatch(&error) {
+                if let Some(fragment) = self.localize_fragment_damage(volumes) {
+                    return fragment;
+                }
+            }
+            error
+        };
         if final_file.is_stored() {
             // A stored split streams its fragments forward exactly once
             // (no retry path exists), so the consumption watermark is
@@ -3515,6 +4019,7 @@ impl PendingSplitRefs {
                     &mut writer,
                     spent,
                     &fragment_error,
+                    digests,
                 )
                 .map_err(|error| final_file.entry_error("extracting", error))
                 .map_err(recover_fragment_error);
@@ -3543,7 +4048,14 @@ impl PendingSplitRefs {
                 None
             };
             let mut reader = self
-                .fragment_reader(volumes, decryptor.as_ref(), watermark, &fragment_error)
+                .fragment_reader(
+                    volumes,
+                    decryptor.as_ref(),
+                    watermark,
+                    &fragment_error,
+                    // Compressed: the two records cover different bytes.
+                    FragmentDigests::Check,
+                )
                 .map_err(|error| final_file.entry_error("reading", error))?;
             let mut counting = CountingWriter {
                 inner: &mut *writer,
@@ -3609,7 +4121,10 @@ impl PendingSplitRefs {
             .map_err(recover_fragment_error)?;
         final_file
             .verify_integrity_with_keys(&data, decryptor.as_ref().map(|decryptor| &decryptor.keys))
-            .map_err(|error| final_file.entry_error("verifying", error))?;
+            .map_err(|error| final_file.entry_error("verifying", error))
+            // The buffered path verifies the member HERE rather than in
+            // stream, so this is where a deferred set's damage surfaces.
+            .map_err(recover_fragment_error)?;
         writer
             .write_all(&data)
             .map_err(Error::from)
@@ -3625,11 +4140,16 @@ impl PendingSplitRefs {
         writer: &mut dyn Write,
         spent: Option<&mut (dyn FnMut(usize) + Send)>,
         fragment_error: &SharedFragmentError,
+        digests: FragmentDigests,
     ) -> Result<()> {
         let spent = spent.map(|f| {
             Box::new(move |volume: usize| f(volume)) as Box<dyn FnMut(usize) + Send + '_>
         });
-        let mut reader = self.fragment_reader(volumes, decryptor, spent, fragment_error)?;
+        // The chained reader stays RAW here; the cipher rides into the pipe
+        // as its own stage (one CBC chain runs unbroken across fragment
+        // seams, so the split needs nothing seam-aware).
+        let mut reader = self.fragment_reader(volumes, None, spent, fragment_error, digests)?;
+        let cipher = decryptor.map(|d| Rar50Cipher::new(d.keys.key, d.iv));
         let crc = Crc32::new();
         let hash = streaming_hash_verifier(final_file)?;
         let mut written = 0u64;
@@ -3640,6 +4160,7 @@ impl PendingSplitRefs {
         // operation label is dropped rather than double-wrapped.
         let (crc, hash) = pipe_stored_chunks(
             &mut *reader,
+            cipher,
             final_file.unpacked_size,
             Error::from,
             crc,
@@ -3718,12 +4239,53 @@ impl PendingSplitRefs {
         }))
     }
 
+    /// Read the packed bytes again, hashing only the per-fragment
+    /// records, and name the first fragment whose own header says it is
+    /// damaged. Called ONLY after the member's whole-member digest has
+    /// already failed under [`FragmentDigests::Defer`], so that a
+    /// deferred set still reports the unrar-parity
+    /// [`Error::SplitFragmentCrc32Mismatch`] /
+    /// [`Error::SplitFragmentHashMismatch`] naming the volume.
+    ///
+    /// The chain that carries these digests sits INSIDE any decryptor, so
+    /// this reads the stored bytes raw and needs no password. Anything
+    /// that stops it - a volume gone since the first pass, a short read -
+    /// returns `None` and leaves the caller's original error standing:
+    /// this is a diagnosis, and a diagnosis that cannot be made must not
+    /// replace the finding it was meant to explain.
+    fn localize_fragment_damage(&self, volumes: &[Archive]) -> Option<Error> {
+        for &(volume_index, file_index) in &self.fragments {
+            let file = volumes.get(volume_index)?.files().nth(file_index)?;
+            let expected = match file.split_fragment_packed_digests() {
+                Some(expected) => expected,
+                None => continue,
+            };
+            let mut digest = FragmentDigest::new(expected, volume_index);
+            let mut reader = volumes[volume_index]
+                .range_reader(file.block.data_range.clone())
+                .ok()?;
+            let mut buf = vec![0u8; 256 * 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(count) => digest.update(&buf[..count]),
+                    Err(_) => return None,
+                }
+            }
+            if let Err(error) = digest.verify() {
+                return Some(error);
+            }
+        }
+        None
+    }
+
     fn fragment_reader<'r>(
         &self,
         volumes: &'r [Archive],
         decryptor: Option<&SplitDecryptor>,
         spent: Option<Box<dyn FnMut(usize) + Send + 'r>>,
         fragment_error: &SharedFragmentError,
+        digests: FragmentDigests,
     ) -> Result<Box<dyn Read + Send + 'r>> {
         // Fragment METADATA validates eagerly (a missing volume or entry
         // still surfaces before any output is written), but at most ONE
@@ -3746,7 +4308,10 @@ impl PendingSplitRefs {
             fragments.push((
                 volume_index,
                 file.block.data_range.clone(),
-                file.split_fragment_packed_digests(),
+                match digests {
+                    FragmentDigests::Check => file.split_fragment_packed_digests(),
+                    FragmentDigests::Defer => None,
+                },
             ));
         }
         let chained = LazyChainedReader {
@@ -3769,6 +4334,35 @@ impl PendingSplitRefs {
             Ok(Box::new(chained))
         }
     }
+}
+
+/// Whether the split chain hashes each fragment's packed bytes as it
+/// reads them, or leaves that to a second pass taken only when the
+/// member's own digest has already gone against it.
+///
+/// (nzbfast-local change, 3 Sep 2026 - re-apply on the next rars re-sync,
+/// see vendor/rars/VENDORING.md.)
+///
+/// The per-fragment records are unrar's damage LOCALIZER, not the
+/// verdict: a member whose FINAL digest proves cannot have had a bad
+/// fragment, so on a sound set every one of those hashes is work whose
+/// answer was already known. On a `-htb` set they are a second whole
+/// BLAKE2sp pass over every byte, on the producer thread, in series with
+/// the read - measured on an M3 Ultra over a 1 GiB stored `-v50m` member,
+/// audit round 25.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FragmentDigests {
+    /// Hash and check every fragment as it reads, failing at the bad
+    /// volume. The only choice when the member carries no whole-member
+    /// digest of its own (nothing else would ever check these bytes), and
+    /// when the caller is releasing volumes behind the read and so cannot
+    /// be asked to read one a second time.
+    Check,
+    /// Do not hash the fragments at all. A failure is localized
+    /// afterwards by [`PendingSplitRefs::localize_fragment_damage`],
+    /// which re-reads the packed bytes - one extra pass, on a set that is
+    /// already going to repair.
+    Defer,
 }
 
 /// The digests a non-final split fragment's PACKED bytes must produce,
@@ -3995,6 +4589,19 @@ fn checked_unpacked_size(size: u64) -> Result<usize> {
         .map_err(|_| Error::InvalidHeader("RAR 5 unpacked size overflows host address size"))
 }
 
+/// Is this the member's own digest failing - the one failure that a
+/// deferred set can explain by naming a volume? Peels the entry and
+/// offset wrappers `entry_error` adds.
+fn is_member_digest_mismatch(error: &Error) -> bool {
+    match error {
+        Error::Crc32Mismatch { .. } | Error::HashMismatch { .. } => true,
+        Error::AtEntry { source, .. } | Error::AtArchiveOffset { source, .. } => {
+            is_member_digest_mismatch(source)
+        }
+        _ => false,
+    }
+}
+
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -4015,9 +4622,15 @@ impl FileHeader {
         decryptor: Option<&SplitDecryptor>,
         fragment_error: &SharedFragmentError,
     ) -> Result<Vec<u8>> {
+        // The buffered path never defers: `write_to` sends every stored
+        // split down `write_stored_to`, so a member reaching here is
+        // compressed, and its packed and unpacked digests then cover
+        // DIFFERENT bytes - two checks, not one done twice.
+        let digests = FragmentDigests::Check;
         if self.is_stored() {
             let mut data = Vec::new();
-            let mut reader = split.fragment_reader(volumes, decryptor, None, fragment_error)?;
+            let mut reader =
+                split.fragment_reader(volumes, decryptor, None, fragment_error, digests)?;
             reader.read_to_end(&mut data)?;
             if data.len() as u64 != self.unpacked_size {
                 return Err(Error::InvalidHeader(
@@ -4031,7 +4644,8 @@ impl FileHeader {
         let dictionary_size = usize::try_from(info.dictionary_size).map_err(|_| {
             Error::InvalidHeader("RAR 5 dictionary size overflows host address size")
         })?;
-        let mut reader = split.fragment_reader(volumes, decryptor, None, fragment_error)?;
+        let mut reader =
+            split.fragment_reader(volumes, decryptor, None, fragment_error, digests)?;
         let output_size = checked_unpacked_size(self.unpacked_size)?;
         decoder
             .decode_member_from_reader_with_dictionary(
@@ -4060,9 +4674,13 @@ const DECRYPT_WINDOW_BYTES: usize = 64 * 1024;
 
 impl<R: Read> Rar50DecryptingReader<R> {
     fn new(inner: R, key: [u8; 32], iv: [u8; 16]) -> Self {
+        Self::with_cipher(inner, Rar50Cipher::new(key, iv))
+    }
+
+    fn with_cipher(inner: R, cipher: Rar50Cipher) -> Self {
         Self {
             inner,
-            cipher: Rar50Cipher::new(key, iv),
+            cipher,
             buffer: vec![0; DECRYPT_WINDOW_BYTES],
             pos: 0,
             len: 0,
@@ -4871,7 +5489,7 @@ mod tests {
             let (pending, final_file, volumes) =
                 two_fragment_split(&payload, false, payload.len() as u64, None);
             let outcome = pending
-                .write_stored_to(&volumes, &final_file, None, &mut FailingWriter, None, &Default::default())
+                .write_stored_to(&volumes, &final_file, None, &mut FailingWriter, None, &Default::default(), FragmentDigests::Check)
                 .map_err(|error| error.to_string());
             let _ = done_tx.send(outcome);
         });
@@ -4907,7 +5525,12 @@ mod tests {
             file.block.data_size = Some(payload.len() as u64);
             let archive = archive_with_blocks(vec![Block::File(file.clone())], payload);
             let outcome = file
-                .write_stored_to(&archive, None, &mut FailingWriter)
+                .write_stored_to(
+                    &archive,
+                    None,
+                    &mut crate::source::RangeReaderCache::default(),
+                    &mut FailingWriter,
+                )
                 .map_err(|error| error.to_string());
             let _ = done_tx.send(outcome);
         });
@@ -4917,6 +5540,140 @@ mod tests {
             .expect("stored pipeline deadlocked on early writer failure");
         let error = outcome.expect_err("writer failure must surface");
         assert!(error.contains("sink failed"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn tiny_stored_view_writes_and_verifies_the_exact_member() {
+        struct FailingWriter;
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("tiny sink failed"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let payload: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
+        let mut file = plain_file(b"tiny.bin", &payload, None);
+        file.block.data_range = 0..payload.len();
+        file.block.data_size = Some(payload.len() as u64);
+        file.data_crc32 = Some(crc32(&payload));
+        let archive = archive_with_blocks(vec![Block::File(file.clone())], payload.clone());
+        let mut out = Vec::new();
+        file.write_stored_to(
+            &archive,
+            None,
+            &mut crate::source::RangeReaderCache::default(),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out, payload);
+
+        let error = file
+            .write_stored_to(
+                &archive,
+                None,
+                &mut crate::source::RangeReaderCache::default(),
+                &mut FailingWriter,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("tiny sink failed"));
+
+        file.data_crc32 = Some(!crc32(&payload));
+        let error = file
+            .write_stored_to(
+                &archive,
+                None,
+                &mut crate::source::RangeReaderCache::default(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::AtEntry { source, .. } if matches!(*source, Error::Crc32Mismatch { .. })
+        ));
+
+        file.data_crc32 = None;
+        file.hash = Some(FileHash {
+            hash_type: 0,
+            data: blake2sp::hash(&payload).to_vec(),
+        });
+        file.write_stored_to(
+            &archive,
+            None,
+            &mut crate::source::RangeReaderCache::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        file.hash.as_mut().unwrap().data[0] ^= 1;
+        let error = file
+            .write_stored_to(
+                &archive,
+                None,
+                &mut crate::source::RangeReaderCache::default(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::AtEntry { source, .. } if matches!(*source, Error::HashMismatch { hash_type: 0 })
+        ));
+
+        file.hash = None;
+        file.unpacked_size = payload.len() as u64 - 1;
+        let mut over_out = Vec::new();
+        let over = file
+            .write_stored_to(
+                &archive,
+                None,
+                &mut crate::source::RangeReaderCache::default(),
+                &mut over_out,
+            )
+            .unwrap_err();
+        assert!(over.to_string().contains("supplies more data"));
+        assert_eq!(over_out, payload[..payload.len() - 1]);
+
+        // A growing source cannot lend a direct view, so it exercises the
+        // prior boxed-reader path against the identical malformed header.
+        // Both paths must write the declared prefix before rejecting the
+        // extra packed byte, and must surface the same entry-scoped error.
+        let stream = Arc::new(crate::source::GrowableBuffer::with_total_len(
+            payload.len() as u64,
+        ));
+        stream.append(&payload);
+        let mut forced_archive =
+            archive_with_blocks(vec![Block::File(file.clone())], Vec::new());
+        forced_archive.source = ArchiveSource::Stream {
+            source: stream,
+            len: payload.len(),
+        };
+        let mut forced_out = Vec::new();
+        let forced = file
+            .write_stored_to(
+                &forced_archive,
+                None,
+                &mut crate::source::RangeReaderCache::default(),
+                &mut forced_out,
+            )
+            .unwrap_err();
+        assert_eq!(forced.to_string(), over.to_string());
+        assert_eq!(forced_out, over_out);
+
+        file.unpacked_size = payload.len() as u64 + 1;
+        let mut short_out = Vec::new();
+        let short = file
+            .write_stored_to(
+                &archive,
+                None,
+                &mut crate::source::RangeReaderCache::default(),
+                &mut short_out,
+            )
+            .unwrap_err();
+        assert!(short.to_string().contains("mismatched packed and unpacked"));
+        assert_eq!(short_out, payload);
     }
 
     // A reader that hands back far less than it was asked for is what a
@@ -4940,6 +5697,7 @@ mod tests {
 
         let (crc, hash) = pipe_stored_chunks(
             &mut reader,
+            None,
             content.len() as u64,
             |error: std::io::Error| error,
             Crc32::new(),
@@ -4971,7 +5729,7 @@ mod tests {
 
         let mut out: Vec<u8> = Vec::new();
         pending
-            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default())
+            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default(), FragmentDigests::Check)
             .expect("non-zero AES padding must extract");
         assert_eq!(out, expected);
     }
@@ -4987,7 +5745,7 @@ mod tests {
 
         let mut out: Vec<u8> = Vec::new();
         let err = pending
-            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default())
+            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default(), FragmentDigests::Check)
             .unwrap_err();
         assert!(
             matches!(err, Error::InvalidHeader(msg) if msg.contains("one block of padding")),
@@ -5010,7 +5768,7 @@ mod tests {
 
         let mut out: Vec<u8> = Vec::new();
         pending
-            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default())
+            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default(), FragmentDigests::Check)
             .unwrap();
         assert_eq!(out, &padded[..logical]);
     }
@@ -5064,6 +5822,7 @@ mod tests {
             features: crate::FeatureSet::store_only(),
             compression_level: None,
             dictionary_size: None,
+            entropy: crate::Entropy::Os,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",
@@ -5097,6 +5856,7 @@ mod tests {
             features: crate::FeatureSet::store_only(),
             compression_level: None,
             dictionary_size: None,
+            entropy: crate::Entropy::Os,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",
@@ -5474,6 +6234,8 @@ mod tests {
             })],
             source: ArchiveSource::Memory(source),
             pending: None,
+            tail: crate::rar50::TailPolicy::Strict,
+            truncated_tail: false,
         }
     }
 
@@ -5528,6 +6290,8 @@ mod tests {
             blocks,
             source: ArchiveSource::Memory(bytes),
             pending: None,
+            tail: crate::rar50::TailPolicy::Strict,
+            truncated_tail: false,
         }
     }
 
@@ -5735,6 +6499,234 @@ mod tests {
         file
     }
 
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn member_pool_batches_do_not_reserve_another_workers_byte_share() {
+        let worker_share = (64u64 << 20) / 8;
+
+        // Eight 8 MiB members must remain eight separately claimable jobs;
+        // one worker may not reserve the pool's entire 64 MiB allowance.
+        assert_eq!(
+            pool_work_batch_shape([worker_share; 8].into_iter(), 8, worker_share),
+            (1, worker_share)
+        );
+        // The always-admit-one rule also keeps an above-share member moving,
+        // without attaching even a tiny second member to it.
+        assert_eq!(
+            pool_work_batch_shape([worker_share + 1, 1].into_iter(), 8, worker_share),
+            (1, worker_share + 1)
+        );
+
+        let tiny = 4u64 << 10;
+        assert_eq!(
+            pool_work_batch_shape([tiny; 8].into_iter(), 8, worker_share),
+            (8, tiny * 8)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn member_pool_result_batching_is_reserved_for_tiny_ranges() {
+        let tiny = 4u64 << 10;
+
+        // The measured 10,000 x 4 KiB shape keeps exactly the same eight-way
+        // result packets as the unrestricted batching candidate.
+        assert!(pool_result_batchable(
+            [tiny; POOL_WORK_BATCH_MAX].into_iter()
+        ));
+        assert!(pool_result_batchable(
+            [POOL_RESULT_BATCH_BYTE_MAX / 2; 2].into_iter()
+        ));
+
+        // Empty/singleton ranges never allocate a result vector, and crossing
+        // the byte ceiling by one byte restores immediate Single packets.
+        assert!(!pool_result_batchable(std::iter::empty()));
+        assert!(!pool_result_batchable([tiny].into_iter()));
+        assert!(!pool_result_batchable(
+            [
+                POOL_RESULT_BATCH_BYTE_MAX / 2,
+                POOL_RESULT_BATCH_BYTE_MAX / 2 + 1
+            ]
+            .into_iter()
+        ));
+
+        // Common ~MiB members and hostile totals cannot enter the delayed
+        // collection path; checked addition also makes overflow fail closed.
+        assert!(!pool_result_batchable([1u64 << 20; 6].into_iter()));
+        assert!(!pool_result_batchable(
+            [1u64; POOL_WORK_BATCH_MAX + 1].into_iter()
+        ));
+        assert!(!pool_result_batchable([u64::MAX, 1].into_iter()));
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn member_pool_result_packets_reorder_and_drain_at_batch_granularity() {
+        let packet = |start: usize| {
+            PoolResultPacket::Batch(
+                start,
+                vec![Ok(vec![start as u8]), Ok(vec![(start + 1) as u8])].into_iter(),
+            )
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Complete three contiguous ranges in reverse order. Waiting for zero
+        // receives all three messages and stores only TWO tree nodes; the
+        // second member of every range then drains from the ready cursor.
+        assert!(tx.send(packet(4)).is_ok());
+        assert!(tx.send(packet(2)).is_ok());
+        assert!(tx.send(packet(0)).is_ok());
+        let single = PoolResultPacket::Single(6, Ok(vec![6]));
+        assert!(matches!(&single, PoolResultPacket::Single(..)));
+        assert!(tx.send(single).is_ok());
+        drop(tx);
+
+        let mut reorder = PoolResultReorder::default();
+        assert_eq!(reorder.next(0, &rx).unwrap(), [0]);
+        // Two future BATCHES occupy two tree nodes, not four member nodes.
+        assert_eq!(reorder.pending.len(), 2);
+        assert!(reorder.ready.is_some());
+        let tail: Vec<u8> = (1..=6)
+            .map(|seq| reorder.next(seq, &rx).unwrap()[0])
+            .collect();
+        assert_eq!(tail, [1, 2, 3, 4, 5, 6]);
+        assert!(reorder.pending.is_empty());
+        assert!(reorder.ready.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn member_pool_result_packets_preserve_first_error_in_member_order() {
+        let batch = |start, first: PoolMemberResult, second: PoolMemberResult| {
+            PoolResultPacket::Batch(start, vec![first, second].into_iter())
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(tx
+            .send(batch(
+                2,
+                Err(Error::InvalidHeader("later member failed")),
+                Ok(vec![3]),
+            ))
+            .is_ok());
+        assert!(tx
+            .send(PoolResultPacket::Single(
+                4,
+                Err(Error::InvalidHeader("latest single member failed")),
+            ))
+            .is_ok());
+        assert!(tx
+            .send(batch(
+                0,
+                Ok(vec![0]),
+                Err(Error::InvalidHeader("first member failed")),
+            ))
+            .is_ok());
+        drop(tx);
+
+        let mut reorder = PoolResultReorder::default();
+        assert_eq!(reorder.next(0, &rx).unwrap(), [0]);
+        assert!(reorder
+            .next(1, &rx)
+            .unwrap_err()
+            .to_string()
+            .contains("first member failed"));
+        // The future batch is still intact: no out-of-order error can replace
+        // the archive-order error the coordinator observes first.
+        assert!(reorder
+            .next(2, &rx)
+            .unwrap_err()
+            .to_string()
+            .contains("later member failed"));
+        assert_eq!(reorder.next(3, &rx).unwrap(), [3]);
+        assert!(reorder
+            .next(4, &rx)
+            .unwrap_err()
+            .to_string()
+            .contains("latest single member failed"));
+    }
+
+    /// Exercise the batched work-channel path against the serial extractor,
+    /// including the cfg(test) byte budget that forces feeder backpressure.
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn batched_member_pool_matches_serial_bytes_and_order() {
+        struct SharedWriter(Rc<RefCell<Vec<u8>>>);
+
+        impl Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        fn collect(
+            archive: &Archive,
+            options: crate::ArchiveReadOptions<'_>,
+        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            let entries = RefCell::new(Vec::new());
+            extract_volumes_to(std::slice::from_ref(archive), options, |meta| {
+                let data = Rc::new(RefCell::new(Vec::new()));
+                entries
+                    .borrow_mut()
+                    .push((meta.name.clone(), Rc::clone(&data)));
+                Ok(Box::new(SharedWriter(data)))
+            })?;
+            Ok(entries
+                .into_inner()
+                .into_iter()
+                .map(|(name, data)| (name, data.borrow().clone()))
+                .collect())
+        }
+
+        let names: Vec<Vec<u8>> = (0..128)
+            .map(|index| format!("member-{index:03}.bin").into_bytes())
+            .collect();
+        let payloads: Vec<Vec<u8>> = (0..128)
+            .map(|index| {
+                (0..512)
+                    .map(|offset| b'a' + ((index + offset % 17) % 26) as u8)
+                    .collect()
+            })
+            .collect();
+        let compressed: Vec<_> = names
+            .iter()
+            .zip(&payloads)
+            .map(|(name, data)| CompressedEntry {
+                name,
+                data,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            })
+            .collect();
+        let bytes = Rar50Writer::new(WriterOptions::new(
+            crate::ArchiveVersion::Rar50,
+            crate::FeatureSet::default(),
+        ))
+        .compressed_entries(&compressed)
+        .finish()
+        .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert!(archive.files().all(|file| !file.is_stored()));
+
+        let pooled_options = crate::ArchiveReadOptions::new()
+            .with_rar50_buffered_decode_limit(BUFFERED_DECODE_LIMIT);
+        let plan = member_pool_plan(std::slice::from_ref(&archive), pooled_options).unwrap();
+        assert_eq!(plan.order.len(), 128);
+        assert!((1..=8).all(|workers| pool_work_batch_size(plan.order.len(), workers) > 1));
+
+        let pooled = collect(&archive, pooled_options).unwrap();
+        let serial = collect(
+            &archive,
+            crate::ArchiveReadOptions::new().with_rar50_buffered_decode_limit(0),
+        )
+        .unwrap();
+        assert_eq!(pooled, serial);
+    }
+
     /// A panic in the coordinator still lets `thread::scope` return.
     ///
     /// This one DOES reproduce: revert the `PoolAbortGuard` and it fails on the
@@ -5861,7 +6853,7 @@ mod tests {
 
         let mut out: Vec<u8> = Vec::new();
         let err = pending
-            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default())
+            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default(), FragmentDigests::Check)
             .unwrap_err();
         assert!(
             matches!(err, Error::InvalidHeader(msg) if msg.contains("mismatched packed and unpacked")),
@@ -5890,7 +6882,7 @@ mod tests {
 
         let mut out: Vec<u8> = Vec::new();
         let err = pending
-            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default())
+            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default(), FragmentDigests::Check)
             .unwrap_err();
         assert!(
             matches!(err, Error::Crc32Mismatch { .. }),
@@ -5923,7 +6915,7 @@ mod tests {
 
         let mut out: Vec<u8> = Vec::new();
         let err = pending
-            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default())
+            .write_stored_to(&volumes, &final_file, None, &mut out, None, &Default::default(), FragmentDigests::Check)
             .unwrap_err();
         assert!(
             matches!(err, Error::HashMismatch { hash_type: 0 }),
@@ -5941,8 +6933,15 @@ mod tests {
 
         let archive = archive_with_blocks(vec![Block::File(file.clone())], payload.to_vec());
         let mut decoder = Unpack50Decoder::new();
+        let mut reader_cache = crate::source::RangeReaderCache::default();
         let decoded = file
-            .decoded_data_with_mode(&archive, &mut decoder, None, DecodeMode::Lz)
+            .decoded_data_with_mode(
+                &archive,
+                &mut decoder,
+                None,
+                DecodeMode::Lz,
+                &mut reader_cache,
+            )
             .unwrap();
         assert_eq!(decoded.data, payload);
         assert!(decoded.keys.is_none());
@@ -5950,7 +6949,13 @@ mod tests {
         // LzNoFilters dispatches through the same stored short-circuit.
         let mut decoder = Unpack50Decoder::new();
         let decoded = file
-            .decoded_data_with_mode(&archive, &mut decoder, None, DecodeMode::LzNoFilters)
+            .decoded_data_with_mode(
+                &archive,
+                &mut decoder,
+                None,
+                DecodeMode::LzNoFilters,
+                &mut reader_cache,
+            )
             .unwrap();
         assert_eq!(decoded.data, payload);
     }

@@ -65,6 +65,9 @@ use crate::rar::{ArchiveMap, ArithGate, EntryCrypt, MapBlocker, Method, RarVersi
 use crate::rarcrypt;
 
 mod chase;
+/// Chase-worker park accounting: where the wall goes when a chased
+/// decode is not decoding. Off unless `NZBFAST_CHASE_STAT=1`.
+pub mod chasestat;
 mod config;
 mod crypto;
 mod deliver;
@@ -72,24 +75,31 @@ mod frontier;
 mod gate;
 mod holds;
 mod holds_ledger;
-mod names;
 mod park;
 mod prevalence;
 mod reader;
+pub use reader::MaterializedVolumes;
 mod reasons;
 mod routing;
 mod settle;
 mod sevenz;
+mod sevenz_map;
 mod shape;
 mod split;
 mod tar;
 #[cfg(test)]
 mod testutil;
 mod zip;
+mod zip_map;
 mod zip_split;
 
+pub use chase::DroppedVolume;
 use chase::*;
-pub use chase::{DroppedVolume, LossDoubt};
+// `LossDoubt` is declared in `crate::lossdoubt` since 3 Sep 2026 and
+// re-exported here so `nzbkit::extract::LossDoubt` is unchanged. It is
+// the seam between this module and `pool`, which carries one in its
+// `PoolConfig`; see that module's header.
+pub use crate::lossdoubt::LossDoubt;
 use config::*;
 pub use config::{
     NESTED_MAX_DEPTH_HARD_CEILING, nested_cap_after_store_layer, nested_depth_cap,
@@ -108,7 +118,15 @@ pub use holds_ledger::{HoldsLedger, install_process_ledger, process_ledger};
 // the same rule with the payload-content half missing - and all nine
 // now call `archive_sniff_eligible`. The roll-call, and which one
 // actually loses the file, is at `archive_sniff_eligible_name`.
-pub use names::{
+// LIFTED OUT OF `extract` on 3 Sep 2026 (nzbkit split lane 1) and
+// re-exported here so every `nzbkit::extract::release_stem` caller is
+// unchanged. This file is pure name grammar over a POSTED FILE NAME and
+// reaches nothing but `nzb`, `release` and `disk`, while `index`,
+// `nzbimport` and `release` itself each reached UP into `extract` for
+// `release_stem` alone - ten references that were the whole of what put
+// the 42k-line index module above the 27k-line extractor in the module
+// graph. See `crate::names`.
+pub use crate::names::{
     archive_sniff_eligible, archive_sniff_eligible_name, is_final_file, is_final_name,
     release_stem, vol_sort_key,
 };
@@ -123,6 +141,7 @@ pub use resume::ResumeOutput;
 use routing::Sniffed;
 use settle::*;
 use sevenz::*;
+use sevenz_map::*;
 use shape::*;
 pub use shape::{
     ArchiveShape, DiskArchive, NestedDisposition, NestedPrevalence, nested_prevalence,
@@ -162,6 +181,22 @@ pub type PromoteHook = Arc<dyn Fn(&str, u64, &[(u64, u64)], bool) + Send + Sync>
 /// the stale posted name pointed every rewritten placement at a file
 /// that does not exist, so the retry refetched the post it was holding.
 pub type MaterializedHook = Arc<dyn Fn(usize, &str, u64) + Send + Sync>;
+
+/// "No PAR2 set can ever claim a slot of this job."
+///
+/// Installed by the ENGINE (`get/vrig.rs`), because the answer is about
+/// the NZB's own classification and the in-stream `PAR2\0PKT` sniff -
+/// neither of which the extractor can see. It is asked ONLY once every
+/// slot's offset-0 span has reached this extractor
+/// ([`Extractor::parity_ruled_out`]), which is what makes a "nothing has
+/// been sniffed yet" answer mean "nothing ever will be": a par2 volume
+/// is identified from its offset-0 bytes, and the engine sets that flag
+/// before it hands the same span here.
+///
+/// Never `Some` on a child: a child's bytes are inner members, outside
+/// any root PAR2 set, and its `verify_gate` is `None` for the same
+/// reason - the trim there is already unvouched-and-free.
+pub type NoParityHook = Arc<dyn Fn() -> bool + Send + Sync>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SlotMode {
@@ -340,6 +375,29 @@ struct Group {
     /// Empty for every ordinary set, which is what keeps the close walk
     /// off the per-volume `reresolve` path entirely.
     zip_splits_open: Vec<String>,
+}
+
+impl Group {
+    /// An empty group. Two sites open one - a RAR volume's first parsed
+    /// entry, and the 7z direct map's install - and every field here is
+    /// "nothing yet", so there is one spelling of it rather than two
+    /// that a new field could silently leave out of one.
+    fn new() -> Group {
+        Group {
+            slots: Vec::new(),
+            bases: HashMap::new(),
+            resolve_stamp: None,
+            arith_provisional: HashMap::new(),
+            arith_ever: false,
+            fallback: false,
+            fallback_reason: None,
+            out_names: HashMap::new(),
+            routed: HashMap::new(),
+            routed_plain: HashMap::new(),
+            chase: None,
+            zip_splits_open: Vec::new(),
+        }
+    }
 }
 
 pub struct ExtractReport {
@@ -625,9 +683,30 @@ impl Limits {
     }
 }
 
+impl Inner {
+    /// Record a placement a held-span re-feed made, and tell the chain's
+    /// gauge about it in the same breath - see [`Extractor::late_gauge`]
+    /// for why the count is kept outside the lock. Every push goes
+    /// through here; a bare `late_placements.push` would leave the
+    /// counter short and the placement invisible to a lock-free drain.
+    fn push_late(&mut self, lp: LatePlacement) {
+        self.late_placements.push(lp);
+        self.late_gauge.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub struct Extractor {
     out_dir: PathBuf,
-    enabled: bool,
+    /// Whether this level maps its archives at all, or materializes
+    /// everything Plain. ATOMIC rather than a plain bool because the
+    /// grant that sets it on a child can be TAKEN BACK: a store-only
+    /// layer raises its child's depth cap off evidence that is still
+    /// arriving, and `Extractor::revoke_store_raise` lowers both this
+    /// flag and the child's cap when a compressed entry parses behind
+    /// it. Written under the PARENT's routing lock, read under this
+    /// level's own, so the two never share a guard and the flag has to
+    /// carry itself.
+    enabled: AtomicBool,
     /// Crash-resume: open existing files without truncating.
     resume: bool,
     /// Nesting level: 0 = the top-level extractor over the download's
@@ -644,6 +723,29 @@ pub struct Extractor {
     /// Deliberately outside `inner`: the daemon polls it once a second
     /// while the routing lock is the hot path.
     shape: Arc<ShapeLatch>,
+    /// THE FEEDING SIGNAL (round 44), shared with every nested level and
+    /// cloned into every [`FileWriter`] this extractor makes.
+    ///
+    /// It is the one fact the writer cannot work out for itself and the
+    /// engine simply knows: articles are STILL COMING to this job's
+    /// outputs, and nothing will open one of them BY NAME until the
+    /// engine says the download is over. Raised by
+    /// [`Self::set_feeding`], which the `get` pipeline calls once at the
+    /// start and lowers at the join where it already flushes every
+    /// writer's staged runs.
+    ///
+    /// Deliberately outside `inner`: the write path reads it per
+    /// article, on threads that must not take the routing lock, exactly
+    /// like `pager_armed` and `park_live` above.
+    ///
+    /// **What it does NOT do.** It does not make a byte invisible for
+    /// longer than the write-coalescing window's own bounds allow, and
+    /// it does not weaken `Extractor::write`'s postcondition for anyone
+    /// who has not raised it - which is every library caller and every
+    /// test. See `disk::FileWriter`'s `feeding` field for the whole
+    /// rule, and round 44 of `research/RAR-PERF-AUDIT-2026-09-02.md` for
+    /// the measurement that asked for it.
+    feeding: Arc<AtomicBool>,
     /// §156.3b stalled-chase pager: coalesced wake flags for the
     /// detached paging thread (`Extractor::wake_pager`). Outside `inner`
     /// on purpose - the arrival path and the blocking readers touch
@@ -665,6 +767,18 @@ pub struct Extractor {
     trim_spilled_off_lock: AtomicU64,
     /// Signalled when `spills_in_flight` drops to zero.
     spill_settled: Condvar,
+    /// How many [`LatePlacement`]s the WHOLE CHAIN is holding, undrained.
+    /// One `Arc` per chain, outside `inner` for the same reason the
+    /// pager flags are: [`Self::drain_late_placements`] is called once
+    /// per decoded article by the download's held-article join, from
+    /// under the `pending_r` mutex every decode thread queues on - and
+    /// on the ordinary job the answer is "none", which this makes free
+    /// instead of one routing-lock acquisition per level per article.
+    /// Bumped by [`Inner::push_late`], decremented by exactly what each
+    /// level's drain takes. A stale zero only defers a placement to the
+    /// next call; the final `force` flush runs after the decoders JOIN,
+    /// so it cannot lose one.
+    late_gauge: Arc<AtomicUsize>,
     inner: Mutex<Inner>,
 }
 
@@ -704,6 +818,22 @@ struct Inner {
     /// its WAIT env-gated, in get/vrig.rs). Chase frontier buffers created
     /// while this is Some are gated on it.
     verify_gate: Option<Arc<crate::live::VerifyGate>>,
+    /// "No PAR2 set will ever claim a slot of this job" - see
+    /// [`NoParityHook`] and [`Extractor::parity_ruled_out`]. Root only.
+    no_parity: Option<NoParityHook>,
+    /// The hook's answer, LATCHED. Both of its inputs are monotonic (a
+    /// sniffed volume stays sniffed, a seen head stays seen), so the
+    /// first true is final and the trim asks once per job rather than
+    /// once per pass.
+    no_parity_latched: bool,
+    /// Per slot, over the count the job OPENED with: has an offset-0
+    /// span reached this extractor? A slot minted later (`alloc_slot`,
+    /// for a volume rebuilt whole from parity) has no cell here and
+    /// needs none - a job that repairs had parity in the first place.
+    heads_seen: Vec<bool>,
+    /// How many of `heads_seen` are still false. The whole census is
+    /// two field reads on the trim's hot path once it hits zero.
+    heads_left: usize,
     /// Does the chase DECODE park on the gate (§94 B proper, opt-in while
     /// it soaks)? The handle is attached unconditionally since 22 Aug 2026
     /// (the dropping trim reads its watermark, see `rar_trim_volume`).
@@ -731,6 +861,21 @@ struct Inner {
     /// Lazily-created nested child extractor (level+1 inner files become
     /// its slots).
     child: Option<Arc<Extractor>>,
+    /// The cap [`Extractor::ensure_child`] would have handed the child
+    /// had this layer NOT looked store-only at the moment it was built -
+    /// i.e. the raise that is still outstanding and can still be taken
+    /// back. `None` means there is nothing to revoke: no child yet, no
+    /// raise granted (or the hard ceiling clamped it back to the same
+    /// number), or the revoke already ran.
+    ///
+    /// It exists because the evidence is INCOMPLETE at build time. The
+    /// child has to be created the moment the first inner file routes,
+    /// which is long before the volume's end header arrives, so
+    /// `saw_store && !saw_compressed` at that instant is a reading of a
+    /// latch that can still flip - a stored entry ahead of a compressed
+    /// one, or a store-only archive fed ahead of a compressed one at
+    /// the same level. See [`Extractor::revoke_store_raise`].
+    child_store_raise: Option<usize>,
     /// Child forwards queued by under-the-lock re-feed paths; delivered
     /// by `flush_pending_fwd` after the lock drops.
     pending_fwd: Vec<FwdJob>,
@@ -799,6 +944,16 @@ struct Inner {
     /// Off: a 7z chase retains everything and an archive over the
     /// retention cap demotes, as it did before trimming existed.
     sevenz_trim_on: bool,
+    /// 7z direct-map gate (`NZBFAST_NO_7Z_DIRECT` / runtime setter).
+    /// Off: a Copy-coded container keeps decoding through the worker
+    /// and its frontier buffer, which is exactly the round-12
+    /// behaviour - see `extract::sevenz_map`.
+    sevenz_direct_on: bool,
+    /// ZIP direct-map gate (`NZBFAST_NO_ZIP_DIRECT` / runtime setter).
+    /// Off: a stored zip container keeps streaming through the worker
+    /// and its frontier buffer, which is exactly the round-16
+    /// behaviour - see `extract::zip_map`.
+    zip_direct_on: bool,
     /// Drop-behind trim gate for the RAR chase (`NZBFAST_NO_RAR_TRIM` /
     /// runtime setter). Off: a chased RAR set retains everything and a
     /// set over the retention cap demotes to the unrar ladder, as it did
@@ -898,6 +1053,13 @@ struct Inner {
     /// against the cap exactly as before. That is the conservative
     /// direction - the failure mode of getting this wrong is a bomb guard
     /// that does not guard.
+    ///
+    /// `saw_compressed` latching is also what REVOKES a raise already
+    /// granted off an earlier reading of these two - see
+    /// [`Extractor::revoke_store_raise`] and `Inner::child_store_raise`.
+    /// Sticky in the compressed direction is not enough on its own,
+    /// because the child that spends the cap is built before the last
+    /// header arrives.
     saw_compressed: bool,
     saw_store: bool,
     /// Final-output CRC gate (`NZBFAST_NO_OUTPUT_CRC` / runtime setter).
@@ -928,6 +1090,14 @@ struct Inner {
     /// `extract_span`, returned cleared; a re-entrant taker just works
     /// on a fresh empty vector.
     map_scratch: Vec<(usize, u64, u64, u64)>,
+    /// The same buffer for `retain_header_bytes`, which runs on the same
+    /// article one call EARLIER than `extract_span` does (`rar_span`
+    /// stashes the header bytes before routing the data areas) - a
+    /// separate field rather than a shared one because the two are only
+    /// non-overlapping by that ordering, and a shared buffer would make
+    /// a future reorder a silent aliasing bug rather than a compile
+    /// error.
+    hdr_scratch: Vec<(usize, u64, u64, u64)>,
     /// Fallbacks of slots that never joined a group (blocker before any
     /// entry parsed) - reported alongside group fallbacks.
     slot_fallbacks: Vec<(String, String)>,
@@ -1010,6 +1180,9 @@ struct Inner {
     /// the journal writer gates it on `crypto_span_on_disk` exactly as
     /// it gates a directly-placed `D` (TODO 27.2).
     late_placements: Vec<LatePlacement>,
+    /// This chain's copy of [`Extractor::late_gauge`] - the push sites
+    /// hold `&mut Inner` and nothing else. See [`Inner::push_late`].
+    late_gauge: Arc<AtomicUsize>,
     /// Set when the CURRENT top-level write parked bytes of its own
     /// span in `holds` (reset at write entry; re-feed pushes are
     /// excluded via `refeed_active`). Read by the write tail to return
@@ -1160,6 +1333,8 @@ impl Extractor {
             !output_crc_env_off(),
             None,
             Arc::new(ShapeLatch::default()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(0)),
         )
     }
 
@@ -1190,6 +1365,8 @@ impl Extractor {
             !output_crc_env_off(),
             None,
             Arc::new(ShapeLatch::default()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(0)),
         )
     }
 
@@ -1219,14 +1396,18 @@ impl Extractor {
         verify_output_crc: bool,
         password: Option<std::sync::Arc<str>>,
         shape: Arc<ShapeLatch>,
+        feeding: Arc<AtomicBool>,
+        late_gauge: Arc<AtomicUsize>,
     ) -> Extractor {
         Extractor {
+            late_gauge: late_gauge.clone(),
             out_dir: out_dir.to_path_buf(),
-            enabled,
+            enabled: AtomicBool::new(enabled),
             resume,
             depth,
             parent,
             shape,
+            feeding,
             pager_armed: AtomicBool::new(false),
             pager_active: AtomicBool::new(false),
             park_live: AtomicBool::new(false),
@@ -1248,6 +1429,7 @@ impl Extractor {
                 preclaimed: HashMap::new(),
                 fold_names,
                 child: None,
+                child_store_raise: None,
                 pending_fwd: Vec::new(),
                 pending_promote: Vec::new(),
                 park: park::ParkState::new(),
@@ -1271,6 +1453,8 @@ impl Extractor {
                 top_chase_on: !top_chase_env_off() && !prefer_external_unrar(),
                 top_zip_on: !top_zip_env_off(),
                 sevenz_trim_on: !sevenz_trim_env_off(),
+                sevenz_direct_on: !sevenz_direct_env_off(),
+                zip_direct_on: !zip_direct_env_off(),
                 rar_trim_on: !rar_trim_env_off(),
                 rar_drop_on: !rar_drop_env_off(),
                 chase_dropped: 0,
@@ -1293,11 +1477,16 @@ impl Extractor {
                 chase_reads_paused: false,
                 extracted_bytes: 0,
                 map_scratch: Vec::new(),
+                hdr_scratch: Vec::new(),
                 slot_fallbacks: Vec::new(),
                 protect_sources: false,
                 password,
                 materialized: None,
                 verify_gate: None,
+                no_parity: None,
+                no_parity_latched: false,
+                heads_seen: vec![false; n_slots],
+                heads_left: n_slots,
                 verify_gate_waits: true,
                 crypto_files: HashMap::new(),
                 ciphertext_files: std::collections::HashSet::new(),
@@ -1309,6 +1498,7 @@ impl Extractor {
                 pw_probe_last: None,
                 refeed_active: false,
                 late_placements: Vec::new(),
+                late_gauge: late_gauge.clone(),
                 span_held: false,
                 fwd_windows: Vec::new(),
             }),
@@ -1328,9 +1518,18 @@ impl Extractor {
     /// crypto one carries the weaker claim its route can make and is
     /// gated on [`Extractor::crypto_span_on_disk`] at record time.
     pub fn drain_late_placements(&self) -> Vec<LatePlacement> {
+        // Chain-wide, lock-free: nothing anywhere below this extractor
+        // has anything to drain, so neither this level's lock nor the
+        // child's is taken. See [`Self::late_gauge`].
+        if self.late_gauge.load(Ordering::Relaxed) == 0 {
+            return Vec::new();
+        }
         let (mut out, child) = {
             let mut inner = self.inner.lock_ok();
             let placed = std::mem::take(&mut inner.late_placements);
+            // Exactly what THIS level took; the child's drain subtracts
+            // its own, off the same shared counter.
+            inner.late_gauge.fetch_sub(placed.len(), Ordering::Relaxed);
             // TODO 211 (b): a split head's placements are in its joined
             // volume's offsets; the journal wants the part's.
             (
@@ -1444,6 +1643,15 @@ impl Extractor {
     /// number to reason about at any depth, and each store layer hands
     /// its child one more level than it had.
     ///
+    /// "PROVEN" here is proven SO FAR, and the difference is why
+    /// [`Self::revoke_store_raise`] exists. This runs the moment the
+    /// first inner file routes, with the volume's later headers still in
+    /// flight and any second archive at this level not yet fed, so the
+    /// flags below are a reading of a latch that can still flip. The
+    /// grant is therefore provisional: `child_store_raise` records what
+    /// the child would have had without it, and the compressed latch in
+    /// `chase.rs` takes it back.
+    ///
     /// [`NESTED_MAX_DEPTH_HARD_CEILING`] is what stops that being
     /// unbounded. Store levels are individually harmless and a million of
     /// them is still an attack - each one is a real extractor with real
@@ -1463,6 +1671,18 @@ impl Extractor {
             } else {
                 inner.nested_max_depth
             };
+            // The evidence is POSITIVE but not yet COMPLETE, so record
+            // what the child would have got without the raise. A RAR
+            // volume interleaves headers with data, and a level can
+            // hold more than one archive, so `saw_compressed` may still
+            // latch behind this decision - `revoke_store_raise` is what
+            // takes the level back then. Only recorded when the raise
+            // actually MOVED the number: at the hard ceiling the clamp
+            // already handed back the unraised cap, and there is
+            // nothing to take.
+            if cap > inner.nested_max_depth {
+                inner.child_store_raise = Some(inner.nested_max_depth);
+            }
             let child = Arc::new(Self::build(
                 &self.out_dir,
                 0,
@@ -1488,6 +1708,16 @@ impl Extractor {
                 // One latch per chain: the child's observations land in
                 // the nested word of the same summary the root publishes.
                 self.shape.clone(),
+                // And ONE FEEDING SIGNAL per chain: a nested level's
+                // outputs are fed by the same download and are read by
+                // name at the same moment the root's are, so the engine
+                // raising it on the root must raise it for every writer
+                // below - the child's included, and the child may not
+                // exist yet when the root is told.
+                self.feeding.clone(),
+                // And one late-placement gauge per chain, for the same
+                // reason: the root's drain answers for every level.
+                self.late_gauge.clone(),
             ));
             {
                 let mut ci = child.inner.lock_ok();
@@ -1512,6 +1742,85 @@ impl Extractor {
             inner.child = Some(child);
         }
         inner.child.clone().unwrap()
+    }
+
+    /// Take back a store-layer cap raise this level granted on evidence
+    /// that has since turned out to be wrong: a compressed entry parsed
+    /// behind the stored one the raise was read from.
+    ///
+    /// [`Self::ensure_child`] must build the child the instant the first
+    /// inner file routes, and at that instant `saw_store &&
+    /// !saw_compressed` is a reading of a latch that is still moving -
+    /// the compressed entry's header has not arrived yet, or the
+    /// compressed archive beside this one at the same level has not been
+    /// fed yet. The disk twin `rar::volume_is_store_only` answers the
+    /// same question COMPLETELY, because it reads a whole file that is
+    /// already there; in-stream that answer is not available in time, so
+    /// the grant is made on first evidence and taken back here. The two
+    /// sites share the RULE (`nested_cap_after_store_layer`) and differ
+    /// in how they establish its premise, which is the honest version of
+    /// what that function's docstring used to claim.
+    ///
+    /// Lowering the cap alone is not enough: `enabled` is latched into
+    /// the child at construction and read on every still-Unknown span,
+    /// so a child that only exists because of the raise has to be
+    /// switched off as well. What this CANNOT undo is work the child
+    /// already did inside the window - a grandchild it built, or a slot
+    /// it already classified. Those keep the level they were given; the
+    /// revoke stops the LADDER, which is what the cap is for.
+    ///
+    /// Lock order is parent then child, the direction `ensure_child` and
+    /// the `preclaimed` hand-over in `routing.rs` already take. Nothing
+    /// walks the other way under a child's routing lock: the promote and
+    /// gate walks upward each take one level's lock at a time.
+    fn revoke_store_raise(&self, inner: &mut Inner) {
+        let Some(unraised) = inner.child_store_raise.take() else {
+            return;
+        };
+        let Some(child) = inner.child.clone() else {
+            return;
+        };
+        {
+            let mut ci = child.inner.lock_ok();
+            if ci.nested_max_depth > unraised {
+                ci.nested_max_depth = unraised;
+            }
+        }
+        if child.depth >= unraised {
+            child.enabled.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Raise or lower the job's FEEDING SIGNAL for this whole chain -
+    /// see the `feeding` field.
+    ///
+    /// **What the caller is promising by raising it**, and it must be
+    /// able to keep both halves:
+    ///
+    /// 1. more articles are coming to this job's outputs, and
+    /// 2. nothing will open one of those outputs BY NAME - settle's
+    ///    read-back, a PAR2 scan, an unpack step, a user - until the
+    ///    caller has lowered this and called
+    ///    [`disk::FileWriter::flush_staged`] over
+    ///    [`Self::writers_snapshot`].
+    ///
+    /// The `get` pipeline can promise both, at one point in the code,
+    /// and it is the only caller that does. Everything reached THROUGH
+    /// this extractor is already safe whether or not the signal is up:
+    /// every door on the writer that reads bytes, promises durability or
+    /// tears the writer down writes the open runs out first, a file
+    /// whose last article has arrived is written at once by the writer's
+    /// own completion rule, and no staged byte is ever published as
+    /// covered. What the signal changes is only the writer's guess about
+    /// a file that has gone quiet for a moment - and round 41 measured
+    /// that guess wrong several times a millisecond.
+    ///
+    /// Lowering it does not itself flush: the caller does that with
+    /// `flush_staged`, on the writers it can see, and the two are
+    /// separate because the ORDER matters (lower, then flush - the other
+    /// way round leaves a window in which an article can stage again).
+    pub fn set_feeding(&self, on: bool) {
+        self.feeding.store(on, Ordering::Relaxed);
     }
 
     /// Write one decoded span. `name`/`size` from the yEnc header.
@@ -1704,6 +2013,21 @@ impl Extractor {
             let mut g = self.inner.lock_ok();
             let inner = &mut *g;
             inner.span_held = false;
+            // The no-parity census (see `Extractor::parity_ruled_out`).
+            // HERE and not in the sniff below, because it must count the
+            // heads of slots that never reach a sniff at all - a plain
+            // file, a disabled extractor, a resume replay. The engine
+            // sets a slot's `par2_sniffed` flag before it hands the same
+            // offset-0 span to this function, so a head counted here
+            // whose file is recovery data is already visible to the
+            // hook.
+            if offset == 0
+                && let Some(seen) = inner.heads_seen.get_mut(slot)
+                && !*seen
+            {
+                *seen = true;
+                inner.heads_left -= 1;
+            }
             {
                 let s = &mut inner.slots[slot];
                 let fresh = s.name.is_empty() && !name.is_empty();
@@ -1722,7 +2046,7 @@ impl Extractor {
 
             match inner.slots[slot].mode {
                 SlotMode::Unknown => {
-                    if !self.enabled {
+                    if !self.enabled.load(Ordering::Relaxed) {
                         // No mapping possible - no reason to wait for the
                         // offset-0 sniff (crucial on resume, where segment
                         // 1 may never be refetched).
@@ -2263,20 +2587,53 @@ impl Extractor {
         // disk - swallowing it here let a job exit 0 with corrupt output
         // and a journal that recorded those articles persisted. Sync
         // everything, then fail loud if anything failed.
+        // N PLAIN FSYNCS AND ONE DEVICE BARRIER, not N barriers.
+        // `sync_data` is `fcntl(F_FULLFSYNC)` on Apple platforms, so the
+        // loop below used to issue a whole-device barrier PER MEMBER,
+        // serially, under this lock. On APFS over an internal SSD that
+        // measured 17 us each and 35 ms for a 2,048-member set (round 26
+        // of research/RAR-PERF-AUDIT-2026-09-02.md) - cheap because the
+        // writeback pacer had already flushed the pages - but the SHAPE
+        // is the risk rather than that number: N device barriers on a
+        // NAS or a spinning disk is a different order of cost, and one
+        // barrier AFTER N plain fsyncs is exactly as durable (the fsyncs
+        // put every file's dirty pages on the device; the barrier
+        // flushes the device's volatile cache once, for all of them).
+        // Every output here lives under one `out_dir`, so one device.
         let mut sync_err: Option<io::Error> = None;
         let mut extracted: Vec<(String, u64)> = Vec::new();
+        let mut barrier: Option<Arc<FileWriter>> = None;
         for (name, w) in &inner.inner_writers {
             extracted.push((name.clone(), w.size));
-            if let Err(e) = w.sync() {
-                sync_err.get_or_insert(e);
+            match w.sync_plain() {
+                // Only a LIVE handle can carry the closing barrier - see
+                // `sync_plain`'s own doc for what picking a parked one
+                // would have cost.
+                Ok(true) => barrier = Some(w.clone()),
+                Ok(false) => {}
+                Err(e) => {
+                    sync_err.get_or_insert(e);
+                }
             }
         }
         for s in &inner.slots {
-            if let Some(w) = &s.writer
-                && let Err(e) = w.sync()
-            {
-                sync_err.get_or_insert(e);
+            if let Some(w) = &s.writer {
+                match w.sync_plain() {
+                    Ok(true) => barrier = Some(w.clone()),
+                    Ok(false) => {}
+                    Err(e) => {
+                        sync_err.get_or_insert(e);
+                    }
+                }
             }
+        }
+        // The closing barrier - once, through whichever handle came
+        // last. Skipped when nothing was flushed, because there is then
+        // nothing to make durable.
+        if let Some(w) = barrier
+            && let Err(e) = w.sync_barrier()
+        {
+            sync_err.get_or_insert(e);
         }
         if let Some(e) = sync_err {
             return Err(e);

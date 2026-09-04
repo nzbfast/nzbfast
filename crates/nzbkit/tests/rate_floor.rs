@@ -17,6 +17,10 @@
 //! Env is process-global, which is why this test lives alone in its own
 //! integration binary: the floor is read once per process, and no other
 //! test may run under the shrunk window.
+//!
+//! test-target-gate: env knob read once per process; the shrunk floor
+//! would poison every other test in a shared binary under `cargo test`,
+//! and the unsafe set_var SAFETY argument needs a process it owns
 
 use std::sync::Arc;
 use std::time::Duration;

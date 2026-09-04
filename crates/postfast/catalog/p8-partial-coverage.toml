@@ -1,0 +1,49 @@
+# P8: one post, one recovery set, and only half the payload in it.
+
+[layout]
+name = "p8-partial-coverage"
+seed = 8
+note = """
+Ports e2e_norar's par2_covering_a_subset_renames_only_what_it_covers
+(Case 13 of the no-RAR family).
+
+The shape a poster produces by running par2 create over the feature and
+forgetting the extras, and the shape an incremental post produces when
+a file is added after the set was built. Half the post is named by the
+set and half is named by nothing at all.
+
+Both files are posted under tokens. Covered.Feature.mkv is in the set,
+so the client must file it under the FileDesc name; the other file is
+in no set, was never described anywhere, and the honest expectation for
+it is the TOKEN - a name that was posted nowhere cannot be recovered,
+and this row is where the catalog states that a partial set does not
+somehow name what it does not cover.
+
+Its value is the pairing: a client that filed the uncovered file under
+some guess would fail here, and a client that failed to file the
+covered one under its real name would fail here too. Either half alone
+is a weaker row.
+"""
+
+[source]
+files = [
+    { name = "Covered.Feature.mkv", bytes = 65536 },
+    { name = "Uncovered.Extra.bin", bytes = 16384 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+covers = ["Covered.Feature.mkv"]
+
+[encoding]
+article_bytes = 20000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

@@ -1,0 +1,33 @@
+# C11: the .001 / .002 / .003 spelling of volume order.
+
+[layout]
+name = "c11-stored-split-numeric"
+seed = 112
+note = """
+The third spelling: numeric extensions, with no `.rar` anywhere in the
+set. It is what a poster gets from a generic splitter and from several
+posting tools, and it is the one whose names carry no format hint at
+all - a client that decided a file was a RAR volume from its extension
+has nothing to read here, so the format has to come from the bytes.
+
+Same payload and same volume size as the other two C11 rows, so a
+failure that is really about the split rather than about the naming
+shows up on all three.
+"""
+
+[source]
+files = [{ name = "split.bin", bytes = 30000 }]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 10000
+volume_style = "numeric"
+
+[encoding]
+article_bytes = 4000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

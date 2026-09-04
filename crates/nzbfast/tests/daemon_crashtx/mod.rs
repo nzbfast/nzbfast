@@ -97,23 +97,27 @@ fn add_nzb(port: u16, xml: &str) -> String {
         .to_string()
 }
 
-/// This job's row as `.spool/queue.json` records it, or `None` if the
-/// file does not carry it at all.
+/// This job's row as `.spool/queue.jsonl` records it, or `None` if the
+/// store does not carry it at all.
 ///
 /// NOT `harness::queue_slot`, which reads a SAB `mode=queue` BODY -
-/// `{"queue":{"slots":[..]}}` - where the spool file is
-/// `{"next_id":N,"queue":[..]}`. And not a substring search for the id
-/// over the whole file: the ids are minted off a plain counter, so
-/// `...nzbfast1` is a strict prefix of `...nzbfast10` up, and the file
-/// carries an `out_dir` and an `nzb_path` that both spell the id too.
-/// Read the field it means.
+/// `{"queue":{"slots":[..]}}` - where the store is one compact record
+/// per LINE. And not a substring search for the id over the whole file:
+/// the ids are minted off a plain counter, so `...nzbfast1` is a strict
+/// prefix of `...nzbfast10` up, and the file carries an `out_dir` and an
+/// `nzb_path` that both spell the id too. Read the field it means.
+///
+/// Through `queuestore::replay_bytes` rather than a hand-rolled scan of
+/// the lines, because §7a's store is append-only: the LAST line for an
+/// id wins, a tombstone buries it, and a crash can leave a torn tail -
+/// which is precisely the state this test's subject creates, so reading
+/// it any other way would answer with a superseded row.
 fn spool_row(saved: &str, nzo: &str) -> Option<serde_json::Value> {
-    let v: serde_json::Value = serde_json::from_str(saved).ok()?;
-    v["queue"]
-        .as_array()?
-        .iter()
-        .find(|j| j["nzo_id"] == nzo)
-        .cloned()
+    nzbfast_daemon::queuestore::replay_bytes(saved.as_bytes())
+        .rows
+        .into_iter()
+        .find(|(id, _, _)| id == nzo)
+        .map(|(_, v, _)| v)
 }
 
 /// Every regular file under `root`, BASENAME and bytes, sorted, with
@@ -187,7 +191,7 @@ fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
 /// does for nothing.
 ///
 /// MEASURED 31 Aug 2026, and two of the three oracles fail. A
-/// nonterminal `Finishing` restores as `Queued` (`serve/job_wire.rs`'s
+/// nonterminal `Finishing` restores as `Queued` (`job_wire.rs`'s
 /// wildcard state arm), the journal is gone so there is nothing to
 /// resume from, the job re-runs, all 44 requests are refused, and the
 /// row files `Failed` over an output directory holding the finished
@@ -208,7 +212,7 @@ async fn x5_03_a_crash_after_journal_retirement_completes_the_row_without_refetc
     let dir = std::env::temp_dir().join(format!("nzbfast-crashtx-{}", std::process::id()));
     let _scratch = scratch::ScratchDir::attach(&dir);
     let out = dir.join("complete");
-    let spool = dir.join(".spool").join("queue.json");
+    let spool = dir.join(".spool").join("queue.jsonl");
     let cfg = dir.join("config.json");
 
     let data = payload(600_000, 11);
@@ -283,7 +287,7 @@ async fn x5_03_a_crash_after_journal_retirement_completes_the_row_without_refetc
                 assert!(
                     i < 199,
                     "the row never reached a persisted Finishing state\n\
-                     --- queue.json ---\n{saved}\n--- log ---\n{log}"
+                     --- queue.jsonl ---\n{saved}\n--- log ---\n{log}"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }

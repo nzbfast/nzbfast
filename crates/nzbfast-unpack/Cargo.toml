@@ -1,0 +1,85 @@
+[package]
+name = "nzbfast-unpack"
+version = "1.4.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The nzbfast bin's extraction, repair and filing layer"
+
+[lints]
+workspace = true
+
+# One layer up from nzbfast-core and a SIBLING of nzbfast-meta: this
+# crate must not name that one and it must not name `nzbfast`, which is
+# what lets the two compile at the same time. `tools/modgraph.py --check`
+# is what holds the rule from the source side (an edge from an unpack
+# module into meta, engine or bin is a refusal there); the absence of a
+# dependency line here is what holds it from the cargo side.
+[dependencies]
+nzbkit = { path = "../nzbkit", default-features = false }
+nzbfast-core = { path = "../nzbfast-core" }
+# `parallel` turns on rars' multithreaded RAR5 block decode. Same
+# features the bin declares - a second feature set here would resolve to
+# the union anyway and would say something untrue about the fork.
+rars = { path = "../../vendor/rars", features = ["parallel"] }
+# Native 7z extraction, decode-only (no `compress` encoder): the
+# extraction ladder in rarfix/sevenz.rs and the container probes in
+# unpack and splitjoin. The ENCODER arrives as a dev-dependency below,
+# for fixtures only, exactly as it does in the bin.
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "ppmd"] }
+anyhow = "1"
+# `check`'s bounded verify walk and `repair`'s side fetch both run on
+# the shared runtime.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.150"
+# 0.10 to MATCH nzbkit, the same pin the bin and nzbfast-core carry: the
+# download path hashes with md-5 0.10 and a second implementation would
+# be a different measurement.
+md-5 = "0.10"
+sha2 = "0.11"
+hex = "0.4"
+crc32fast = "1.5.0"
+libc = "0.2"
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+
+# The trash crate has no Android or iOS backend (no system trash exists
+# on either); the delete path refuses there and the files stay, same as
+# a refused delete on any other platform. Same cfg the bin carries.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+trash = "5.2.6"
+
+[features]
+# The test seams `crates/nzbfast`'s own tests reach into this crate for.
+# They were `#[cfg(test)]` while the two crates were one, and a
+# `cfg(test)` item is invisible from another crate whatever its
+# visibility - so the choice at the cut was this feature or deleting the
+# tests that use them. Today it carries `smart`'s trash-test globals:
+# `trash_globals_steady`, `one_trash_test_at_a_time` and
+# `force_trash_unresponsive`, which tests_jobs.rs and
+# splitjoin_tests.rs both take.
+#
+# nzbfast turns it on through a DEV-dependency (see its Cargo.toml), so
+# it is set whenever a test target is built and clear in
+# `cargo build --release -p nzbfast`, which is the shipped binary. The
+# same arrangement nzbfast-core's own `test-support` uses, and for the
+# same reason.
+test-support = []
+
+[dev-dependencies]
+# The layer below, with ITS test seams switched on: `repair`'s parity
+# tests take `lanegate::HeavyCpu::unheld()`, and `identity::may_call_out`
+# (CLAUDE.md invariant 5a) reads `cfg!(feature = "test-support")` because
+# `cfg!(test)` is a property of ONE crate's build and this crate's tests
+# compile nzbfast-core as a plain dependency.
+nzbfast-core = { path = "../nzbfast-core", features = ["test-support"] }
+# The 7z ENCODER, for building container fixtures in the extraction
+# tests. Dev-only on purpose: resolver 2 does not unify dev-dependency
+# features into a normal build, so `cargo build` still links the
+# decode-only configuration declared above.
+sevenz-rust2 = { version = "0.22", default-features = false, features = [
+    "aes256",
+    "bzip2",
+    "ppmd",
+    "compress",
+] }

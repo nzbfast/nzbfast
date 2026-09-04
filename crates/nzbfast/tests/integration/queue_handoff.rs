@@ -1,5 +1,5 @@
 //! The cross-job connection hand-over (`nzbkit::pool::handoff`,
-//! `serve/tasks/worker.rs`): job N+1's first article is requested while
+//! `tasks/worker.rs`): job N+1's first article is requested while
 //! job N is still draining, N's connections are handed over one at a
 //! time inside the connection cap, and N's tail still reaches the
 //! post-processing lane before N+1's.
@@ -367,7 +367,7 @@ async fn the_next_job_s_first_article_is_asked_while_the_previous_one_drains() {
         // The real ordering guarantee, and the one the hand-over owes:
         // job A's TAIL reaches the post-processing lane before job B's.
         // The runner submits a drained run and only then looks at its
-        // successor's signals (`serve/tasks/worker.rs`), and
+        // successor's signals (`tasks/worker.rs`), and
         // `job.finishing` is emitted inside `PostprocLane::submit` on
         // that same single task - so the two sequence numbers are
         // ordered by construction, with no timing window at all. A
@@ -794,8 +794,8 @@ async fn a_draining_predecessor_is_still_deferred_when_a_job_waits_behind_it() {
 // predecessor declined forever - its `abort` / `queue_ctl` had moved
 // into `drain_dl` and only the slow-job watchdog ever read them. Pause
 // was a no-op that answered success; a deleted job's metered traffic ran
-// to its own end. `Daemon::fire_drain` / `owns_wire` (serve/wire.rs) are
-// the fix, and until now only `serve/wire_tests.rs` covered them - unit
+// to its own end. `Daemon::fire_drain` / `owns_wire` (wire.rs) are
+// the fix, and until now only `wire_tests.rs` covered them - unit
 // tests over a hand-built `DrainSlot`, with nothing exercising the real
 // hand-over. `tests/daemon_delete/mod.rs` pins `NZBFAST_QUEUE_HANDOFF=0`,
 // so no delete test has ever run against a populated drain slot at all.

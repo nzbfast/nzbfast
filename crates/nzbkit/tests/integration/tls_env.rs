@@ -19,7 +19,7 @@
 //! The lock is HALF the fix and the smaller half. It orders the two
 //! tests; what lets the second one connect at all is that the client's
 //! config cache is keyed by the CA path (see `tls_client_config` in
-//! `crates/nzbkit/src/nntp/tls.rs`), so the second CA builds a second
+//! `crates/nzbkit-base/src/nntp/tls.rs`), so the second CA builds a second
 //! config rather than being served the first one's anchors.
 
 use std::path::{Path, PathBuf};

@@ -1,0 +1,49 @@
+# P5: a 0-byte member that is DESCRIBED by the recovery set and posted
+# nowhere at all.
+
+[layout]
+name = "p5-zero-byte-member"
+seed = 6
+note = """
+Ports e2e_norar's
+a_zero_byte_filedesc_member_materializes_under_its_real_name.
+
+The VIDEO_TS placeholder shape: a real release carries empty files, and
+an empty file has no bytes to post, so the ONLY record that it exists
+is its FileDesc packet - length 0, both MD5 fields the MD5 of the empty
+string, no slice checksums. A client that materialises members from
+parity alone never creates it; a client that reads the descriptors
+does.
+
+The e2e row builds this by writing a 1-byte placeholder, letting
+par2cmdline describe it, and then patching the FileDesc to the 0-byte
+truth, because par2cmdline prints "Skipping 0 byte file" and omits the
+member outright (matrix finding F3). Here the set comes from
+nzbkit::par2gen, which describes an empty member correctly the first
+time - that hole is the reason that creator exists. The patch operation
+is still ported, in crates/postfast/src/par2patch.rs, for sets built by
+something else.
+
+Feature.Main.mkv is posted normally beside it, so the row also states
+that an unposted member does not stop the posted one landing.
+"""
+
+[source]
+files = [
+    { name = "Feature.Main.mkv", bytes = 300000 },
+    { name = "VIDEO_TS.bup", bytes = 0 },
+]
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+zero_byte_member = true
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

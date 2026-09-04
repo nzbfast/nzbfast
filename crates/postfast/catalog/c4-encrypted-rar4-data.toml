@@ -1,0 +1,39 @@
+# C4 on the older generation: a data-encrypted RAR4 archive.
+
+[layout]
+name = "c4-encrypted-rar4-data"
+seed = 114
+note = """
+The same selection as c4-encrypted-rar5-data one archive generation
+back, and it is a different cipher rather than the same one in an older
+container: RAR 4 encrypts with AES-128 under a key derived the 2.9-era
+way, where RAR 5 uses AES-256 and PBKDF2. A client that handles one and
+not the other passes exactly one of these two rows, which is why both
+are here rather than the newer one standing for both.
+
+RAR4 is written by the 1.5-family writer targeting Rar40, which is the
+only target in that family whose writer accepts header encryption -
+that is what lets one `version = "rar4"` selection carry C4 and C5
+alike rather than half of it.
+
+The carrier and the seeded salt are c4-encrypted-rar5-data's; read that
+note first.
+"""
+
+[source]
+files = [{ name = "locked-rar4.bin", bytes = 24000 }]
+
+[container]
+kind = "rar-stored"
+version = "rar4"
+encryption = "data"
+password = "layout-fixture-pw"
+
+[nzb]
+meta_password = true
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

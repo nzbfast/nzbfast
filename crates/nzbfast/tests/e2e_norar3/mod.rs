@@ -10,9 +10,10 @@
 //!
 //! M4-66 and M4-67 joined them on 30 Aug 2026 - the dot-trim and
 //! format-character rows of the same matrix - for the same reason one
-//! level on: `e2e.rs` is AT its size-gate ceiling, so a module of their
-//! own cannot be registered there at all. See the section header above
-//! those two.
+//! level on: `e2e.rs` was AT its size-gate ceiling on 30 Aug 2026 (the
+//! 31 Aug recalibration gave test files their own), so a module of their
+//! own could not be registered there at all. See the section header
+//! above those two.
 
 use super::e2e_norar::{add_par2_patched, out_tree, rename_filedesc, run_norar, run_norar_chaos};
 use super::{Fixture, have_par2, payload};
@@ -281,15 +282,15 @@ async fn five_identical_head_files_with_one_damaged_all_land_under_their_own_nam
 // ---------------------------------------------------------------------------
 // M4-66 / M4-67 (30 Aug 2026), the matrix's dot-trim and format-character
 // rows. They live here rather than in a module of their own for a
-// mechanical reason: `crates/nzbfast/tests/e2e.rs` is AT its size-gate
-// ceiling, so a new `mod` line does not fit - and these are no-RAR matrix
-// rows from the same document as the four above.
+// mechanical reason: `crates/nzbfast/tests/e2e.rs` was AT its size-gate
+// ceiling on 30 Aug 2026, so a new `mod` line did not fit - and these are
+// no-RAR matrix rows from the same document as the four above.
 //
 // The mechanism has its own unit tests in
-// `crates/nzbkit/src/disk/tests.rs`
+// `crates/nzbkit-base/src/disk/tests.rs`
 // (`a_leading_dot_no_longer_collides_with_the_undotted_name`,
 // `format_characters_are_neutralised_like_control_characters`, and the
-// Unicode table pin) and in `crates/nzbkit/src/disk/relpath.rs` for the
+// Unicode table pin) and in `crates/nzbkit-base/src/disk/relpath.rs` for the
 // out-name key. Both premises are visible at the function, so these
 // three are not there to re-confirm them - they are here for the parts
 // only a real post shows: that M4-66 costs a declared name when a
@@ -532,4 +533,293 @@ async fn a_format_character_in_a_filedesc_name_never_reaches_disk() {
         !log.contains('\u{202e}'),
         "the engine's own log carried the override character\n{log}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// M4-99 / M4-80 (31 Aug 2026), the TRAILING half of the same trim M4-66
+// fixed at the leading end. They live beside those two because they are
+// the same collision class in the same function, and because `e2e.rs` is
+// still at its size-gate ceiling.
+//
+// The asymmetry is deliberate and is pinned by
+// `disk::tests::the_trailing_trim_is_untouched_by_the_leading_dot_mapping`:
+// Windows really does fold `evil. ` onto `evil`, so a portable name has
+// to strip there, and mapping the trailing run to `_` the way M4-66 maps
+// the leading one would break the extension (`movie.mkv.` ->
+// `movie.mkv_`), which is a worse outcome than a disambiguated name that
+// keeps `.mkv`. So the sanitizer cannot be made injective here, and
+// these rows are about what the PUBLISH does with a collapse it cannot
+// avoid.
+// ---------------------------------------------------------------------------
+
+/// Post two FileDescs whose names differ ONLY at the trailing end, over
+/// bodies of the same length, with the payload posted under hashes so
+/// nothing but the recovery set can name it.
+///
+/// The shape and every trap in it are `dot_twin_run`'s - read that
+/// function's doc comment first, including why the payload must stay
+/// `unique_payload` (a shared-alphabet `payload` lets the adoption scan
+/// harvest the corrupt article's blocks out of the SIBLING, which moves
+/// the block accounting this row prices against parity without moving
+/// the verdict).
+///
+/// `suffix` is what the first twin carries and the second does not: `.`
+/// is M4-99, `\u{a0}` and ` ` are M4-80.
+async fn trailing_twin_run(
+    tag: &str,
+    stem: &str,
+    suffix: &str,
+    damage: bool,
+) -> (Fixture, String, bool, PathBuf, Vec<u8>, Vec<u8>) {
+    let mut fx = Fixture::new(tag);
+    let a = crate::payloads::unique_payload(120_000, 0x4d07_0099);
+    let b = crate::payloads::unique_payload(120_000, 0x4d07_0080);
+    fx.add_file_renamed_by_par2("zzzzzzzzzztrailA.bin", "Tr5jTn93GcW", &a, 40_000);
+    fx.add_file_renamed_by_par2("zzzzzzzzzztrailB.bin", "Sp8pYw41SkV", &b, 40_000);
+    let decorated = format!("{stem}{suffix}");
+    let bare = stem.to_string();
+    assert!(
+        add_par2_patched(
+            &mut fx,
+            40,
+            &["zzzzzzzzzztrailA.bin", "zzzzzzzzzztrailB.bin"],
+            40_000,
+            |blob| {
+                assert!(rename_filedesc(blob, "zzzzzzzzzztrailA.bin", &decorated) > 0);
+                assert!(rename_filedesc(blob, "zzzzzzzzzztrailB.bin", &bare) > 0);
+            }
+        ),
+        "par2 create failed"
+    );
+    let chaos = if damage {
+        // Sorted, not `find` - `articles` is a HashMap, so an unsorted
+        // draw makes WHICH article is damaged depend on hash order and
+        // the fixture stops being reproducible. `dot_twin_run` measured
+        // two different pre-fix outcomes off that one choice.
+        let mut ids: Vec<&String> = fx
+            .articles
+            .keys()
+            .filter(|k| k.contains("Sp8pYw41SkV"))
+            .collect();
+        ids.sort();
+        let id = ids
+            .first()
+            .copied()
+            .expect("no article of the second file to damage")
+            .clone();
+        Chaos {
+            corrupt: std::iter::once(id).collect(),
+            ..Chaos::default()
+        }
+    } else {
+        Chaos::default()
+    };
+    let (log, ok, out) = run_norar_chaos(&fx, chaos).await;
+    (fx, log, ok, out, a, b)
+}
+
+/// M4-99, the CLEAN arm: both members arrive, so the publish guard sees
+/// the collision and resolves it under the house `{slot:03}-`
+/// convention. `None` because that path already named the landing -
+/// see [`assert_twin_survived`] for the asymmetry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trailing_dot_filedesc_twin_keeps_both_payloads() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let (_fx, log, ok, out, a, b) = trailing_twin_run("traildot", "trailcol.bin", ".", false).await;
+    assert_twin_survived(&log, ok, &out, &a, &b, "trailcol.bin", None);
+}
+
+/// M4-99, the DAMAGED arm - the one that made M4-66 worth fixing rather
+/// than pinning as a pass, reached here through the trailing end of the
+/// same trim. The damaged member never publishes, so the collision
+/// falls to `par2repair`'s claim loop, which resolved it in silence
+/// until 31 Aug 2026.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_trailing_dot_twin_keeps_both_payloads() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let (_fx, log, ok, out, a, b) =
+        trailing_twin_run("traildotdmg", "trailcol.bin", ".", true).await;
+    assert_twin_survived(
+        &log,
+        ok,
+        &out,
+        &a,
+        &b,
+        "trailcol.bin",
+        Some("\"trailcol.bin.\""),
+    );
+}
+
+/// M4-80's ASCII-space half, clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trailing_space_filedesc_twin_keeps_both_payloads() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let (_fx, log, ok, out, a, b) =
+        trailing_twin_run("trailspace", "spacecol.bin", " ", false).await;
+    assert_twin_survived(&log, ok, &out, &a, &b, "spacecol.bin", None);
+}
+
+/// M4-80's NBSP half, damaged - the sharpest shape either row has.
+///
+/// U+00A0 is `White_Space`, so `str::trim` peels it exactly as it peels
+/// an ASCII space; unlike a trailing dot it is legitimate in a release
+/// name and INVISIBLE, so the two names a poster typed are
+/// indistinguishable in a listing, in a raw log line and on disk. The
+/// declared-name assertion is spelled `"spacecol.bin\u{a0}"` because
+/// the log renders it with `{:?}` - that escape is the only place a
+/// user can see the character that cost the name.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_trailing_nbsp_twin_keeps_both_payloads() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let (_fx, log, ok, out, a, b) =
+        trailing_twin_run("trailnbspdmg", "spacecol.bin", "\u{a0}", true).await;
+    assert_twin_survived(
+        &log,
+        ok,
+        &out,
+        &a,
+        &b,
+        "spacecol.bin",
+        Some("\"spacecol.bin\\u{a0}\""),
+    );
+}
+
+/// What both rows ask for, in the words the matrix uses: **two inodes**
+/// - plus the account of it that neither row thought to ask for and
+/// that nothing was giving.
+///
+/// The trailing trim cannot be made injective (see the section header),
+/// so the two declared names legitimately arrive at one canonical
+/// spelling and one of the pair has to wear a disambiguator. That is
+/// the row's own acceptable outcome and is NOT what is asserted away
+/// here: what is asserted is that no payload is lost, that the pair
+/// really did collapse, and that the job log names the file the user is
+/// left with.
+///
+/// WHICH DISAMBIGUATOR DEPENDS ON WHO RESOLVES IT, and that asymmetry
+/// is measured rather than assumed - it is why `declared_in_log` is a
+/// parameter instead of a constant:
+///
+///   * CLEAN, both members arrive: `unpack::PublishedNames` sees the
+///     collision at publish time and the second member takes the
+///     house `{slot:03}-` convention (`001-spacecol.bin`). The log's
+///     `[extract] renamed <posted> → 001-<name>` line names it.
+///   * DAMAGED, one member goes through repair: that member never
+///     publishes, so the publish guard never fires, and the collision
+///     is resolved instead by `par2repair`'s colliding-target claim,
+///     which spells it `<name>.dup-<fid>`.
+///
+/// Before 31 Aug 2026 the second path was SILENT. The `.dup-` name
+/// appeared nowhere in the log at rc=0, while `[extract] renamed
+/// <posted> → <canonical>` was left standing about a file the repair
+/// had since moved aside - so the last thing the log said about that
+/// payload named a path it was not at. `declared_in_log` is `Some` for
+/// exactly the arms that go through that path.
+///
+/// The declared name is spelled as Rust `{:?}` renders it because that
+/// is how the log renders it, and for M4-80's NBSP half that is the
+/// point: a trailing U+00A0 is invisible in a directory listing and in
+/// a raw log line, and `\u{a0}` in the message is the only place a user
+/// can SEE the character that cost the name.
+fn assert_twin_survived(
+    log: &str,
+    ok: bool,
+    out: &std::path::Path,
+    a: &[u8],
+    b: &[u8],
+    canonical: &str,
+    declared_in_log: Option<&str>,
+) {
+    assert!(ok, "trailing-twin post failed:\n{log}");
+    let tree = out_tree(out);
+    let shown = || tree.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    let where_of = |want: &[u8]| {
+        tree.iter()
+            .find(|(_, got)| got.as_slice() == want)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| "<nowhere>".to_string())
+    };
+    // Neither payload is lost. This is the half both rows predicted
+    // would fail ("overwrite") and that was already held - by the
+    // publish guard on one path and by `par2repair`'s colliding-target
+    // claim on the other. Pinned rather than fixed, so a change to
+    // either cannot quietly retire it.
+    let (at_a, at_b) = (where_of(a), where_of(b));
+    assert!(
+        !at_a.is_empty() && at_a != "<nowhere>",
+        "the decorated twin's payload is on disk nowhere: {:?}\n{log}",
+        shown()
+    );
+    assert!(
+        at_b != "<nowhere>",
+        "the bare twin's payload is on disk nowhere: {:?}\n{log}",
+        shown()
+    );
+    assert!(
+        tree.iter().any(|(n, _)| n == canonical),
+        "nobody landed under the canonical name {canonical:?}: {:?}\n{log}",
+        shown()
+    );
+    // Exactly one of the two holds the canonical spelling and the other
+    // wears a disambiguator. Without this a run where the pair stopped
+    // colliding would satisfy everything above while exercising nothing
+    // - the inert-fixture shape this repo refuses in as many words.
+    let displaced = if at_a == canonical {
+        at_b.clone()
+    } else {
+        at_a.clone()
+    };
+    assert!(
+        at_a != at_b && displaced != canonical,
+        "the two declared names did not collide at all, so this fixture \
+         no longer exercises the row: decorated twin at {at_a:?}, bare \
+         twin at {at_b:?}\n{log}"
+    );
+    // The half that was missing on the repair path: the log names the
+    // file the user is actually left with.
+    assert!(
+        log.contains(&displaced),
+        "the log never names {displaced:?}, the file the user is left \
+         with: tree {:?}\n{log}",
+        shown()
+    );
+    // And on that path it names the declared name that lost, which is
+    // the only thing that tells a user WHY their `*arr` skipped it.
+    if let Some(declared) = declared_in_log {
+        assert!(
+            log.contains(declared),
+            "the log never names the declared name that lost the \
+             collision ({declared}): tree {:?}\n{log}",
+            shown()
+        );
+        // EXACTLY once, not once per pass. `dupclaim::disambiguate_colliding_targets`
+        // runs fresh on every pass over this set (an individually-verified
+        // publish pass and the repair proper both build their own `targets`
+        // and neither can see the other), so its own per-pass account is
+        // honest but repeats - measured at exactly two on this fixture
+        // before the caller-side dedup. The account a HUMAN reads has to
+        // say it once for the job, which is a fact about the caller
+        // composing the job log, not about the per-pass account itself.
+        let occurrences = log.matches(declared).count();
+        assert_eq!(
+            occurrences,
+            1,
+            "the collision account for {declared} appears {occurrences} time(s) in the \
+             job log, not once - a job that repairs this set across more than one pass \
+             must not repeat itself to the user: {:?}\n{log}",
+            shown()
+        );
+    }
 }

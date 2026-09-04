@@ -548,6 +548,11 @@ mod app {
             .open(&log_path)
             .ok()?;
         let log2 = log.try_clone().ok()?;
+        // sandbox-seam-gate: the tray launching OUR OWN daemon, by an
+        // absolute path beside the tray executable, with argv the tray built
+        // from literals. Confining the daemon is not this seam's job: the seam
+        // is what the DAEMON puts round the foreign code IT runs, and a policy
+        // here would apply to every download that daemon ever makes.
         Command::new(exe_dir.join("nzbfast.exe"))
             .args(["serve", "--port", &port.to_string()])
             .args([

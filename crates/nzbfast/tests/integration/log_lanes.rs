@@ -36,7 +36,15 @@ use std::path::{Path, PathBuf};
 ///  * `nzbimport`- posted-NZB import is how a job gets queued;
 ///  * `cats`     - custom-category migration also runs at startup
 ///                 (serve/startup.rs), on the app side.
-const SHARED: &[&str] = &["oracle", "watch", "nzbimport", "cats"];
+///  * `seed`     - the durable NZB seed lane. Nineteen of its lines come
+///                 from `seed_harvest.rs`, which reads the user's
+///                 own queue and history, so the lane is app-side and
+///                 its lines must stay in the app view. The lap's
+///                 reserved replay slice (2 Sep 2026,
+///                 research/SEED-REPLAY-STARVATION-2026-09-02.md) emits
+///                 the same tag from the indexer tree because it is the
+///                 same lane, not a new one.
+const SHARED: &[&str] = &["oracle", "watch", "nzbimport", "cats", "seed"];
 
 fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -59,11 +67,30 @@ fn read_normalised(p: &Path) -> String {
 /// `scan.rs` is the index scanner (its `scan` target is emitted only
 /// from `index_scan_into` / `scan_connect` / `collect_scan_pass`, none
 /// of which the download path reaches), and everything under
-/// `serve/tasks/indexer/` is the indexer task tree.
+/// `tasks/indexer/` is the indexer task tree.
+///
+/// `scan.rs` is in `crates/nzbfast-meta` since the crate-split step 3
+/// cut, so this reaches across the workspace for it. The `is_file`
+/// assertion below is what caught the move rather than the set silently
+/// shrinking by one source - keep it.
 fn indexer_sources() -> Vec<PathBuf> {
-    let root = crate_root().join("src");
-    let mut out = vec![root.join("scan.rs"), root.join("serve/tasks/indexer.rs")];
-    let dir = root.join("serve/tasks/indexer");
+    let meta = crate_root().join("../nzbfast-meta/src");
+    // `seed_harvest` joined the roster at the serve split's lane 2: the
+    // `seed_replay_pass` engine moved DOWN into it from
+    // `tasks/indexer/passes.rs`, and it is the only thing left
+    // emitting `target: "seed"`. The `is_file` assertion below is what
+    // said so - a roster keyed on paths fails LOUDLY at a cut, which is
+    // exactly what it is for.
+    let daemon = crate_root().join("../nzbfast-daemon/src");
+    // `tasks` is `crates/nzbfast-tasks` since the serve split's lane 3,
+    // same shape and for the same reason as the two lines above it.
+    let tasks = crate_root().join("../nzbfast-tasks/src");
+    let mut out = vec![
+        meta.join("scan.rs"),
+        daemon.join("seed_harvest.rs"),
+        tasks.join("tasks/indexer.rs"),
+    ];
+    let dir = tasks.join("tasks/indexer");
     let mut extra: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
         .map(|e| e.unwrap().path())

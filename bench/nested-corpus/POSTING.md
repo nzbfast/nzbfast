@@ -166,7 +166,7 @@ nzbfast get bench/nested-corpus/corpus.nzb --out /tmp/corpus-check
   with verify). The no-RAR producer's round trip - post obfuscated to the
   mock, download through the real `get` path, land every byte under the
   real names - is `crates/nzbfast/tests/e2e_norar/postmode.rs`, and the
-  PAR2 creator's own tests are beside it in `crates/nzbkit/src/par2gen.rs`
+  PAR2 creator's own tests are beside it in `crates/nzbkit-base/src/par2gen.rs`
   plus the par2cmdline interop suite named above.
 - The test mock (`nzbkit::mock::MockServer`) accepts POST and IHAVE. The
   standalone `nzbfast mockserve` loopback bench server does NOT - it serves

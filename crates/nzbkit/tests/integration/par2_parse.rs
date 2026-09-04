@@ -4,10 +4,10 @@
 
 use nzbkit::par2::{Par2Set, verify_file, verify_file_blocks, verify_file_streaming};
 
-const MAIN: &[u8] = include_bytes!("../fixtures/par2/testset.par2");
-const VOL: &[u8] = include_bytes!("../fixtures/par2/testset.vol0+4.par2");
-const ALPHA: &[u8] = include_bytes!("../fixtures/par2/alpha.bin"); // 10 KiB
-const BETA: &[u8] = include_bytes!("../fixtures/par2/beta.bin"); // 33 KiB
+const MAIN: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/testset.par2");
+const VOL: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/testset.vol0+4.par2");
+const ALPHA: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/alpha.bin"); // 10 KiB
+const BETA: &[u8] = include_bytes!("../../../nzbkit-base/tests/fixtures/par2/beta.bin"); // 33 KiB
 
 fn parse_set() -> Par2Set {
     Par2Set::parse(&[MAIN, VOL]).expect("fixture set parses")

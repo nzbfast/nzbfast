@@ -1,0 +1,48 @@
+# P2: the recovery set itself rides under opaque wire names, and its
+# FileDesc packets still carry the real ones.
+
+[layout]
+name = "cc-n02-p2-opaque-recovery-names"
+seed = 150
+note = """
+Expresses bench/capability-corpus leg n02-sniffed-par2.
+
+Hard mode for name resolution: nothing on the wire and nothing in the
+NZB says "par2" at all, so the set cannot be found by extension or by
+subject and has to be recognised by CONTENT. Once it is, the payload
+renames from its FileDesc exactly as it does when the set is announced.
+The corpus states the requirement as "identical end state to the
+announced leg", and that is what this profile is for: it is the same
+row as cc-n01 with one plane moved, so a failure here is the sniff and
+nothing else.
+
+P2 was the one recovery selection no catalog profile made before this
+row, which is why the leg was worth porting rather than citing: the
+coverage report read U for it while the client had handled the shape
+since the no-RAR matrix was swept.
+
+The wire name of the PAYLOAD is opaque too, so the only real name in
+the whole post is inside a set nothing announces. That pairing is the
+leg; a descriptive payload beside an opaque set would pass on a client
+that never opened the set at all.
+"""
+
+[source]
+files = [{ name = "Corpus.Sniffed.2026.mkv", bytes = 120000 }]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 20
+names = "opaque"
+
+[encoding]
+article_bytes = 40000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

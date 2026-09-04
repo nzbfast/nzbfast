@@ -1,0 +1,48 @@
+# P9 with both sets carrying more than one member.
+
+[layout]
+name = "m4-p9-two-sets-two-members-each"
+seed = 46
+note = """
+Ports e2e_norar's two_independent_par2_sets_each_claim_only_their_own
+(Case 23 of the no-RAR family).
+
+p9-two-sets is the same routing question with ONE member per set, and
+a one-member set is the case a crossing bug can survive: with a single
+descriptor on each side, a client that pooled every .par2 article in
+the job still has exactly one candidate name per file and can land the
+right answer for the wrong reason. Two members each removes that luck.
+A pooled reader here has a Main packet listing members it holds no
+descriptors for and recovery slices indexed against the wrong input
+geometry, and it files at least one payload under another file's name.
+
+All four files are posted under tokens, so each real name is
+recoverable only from the set that actually describes it, and every
+crossing shows up as a wrong name in the graded tree rather than as a
+verify that merely looks unhappy.
+"""
+
+[source]
+files = [
+    { name = "First.Release.E01.mkv", bytes = 49152 },
+    { name = "First.Release.E02.mkv", bytes = 40960 },
+    { name = "Second.Release.E01.mkv", bytes = 32768 },
+    { name = "Second.Release.E02.mkv", bytes = 24576 },
+]
+
+[naming]
+wire = "opaque"
+
+[recovery]
+kind = "par2"
+covers = ["First.Release.E01.mkv", "First.Release.E02.mkv"]
+second_covers = ["Second.Release.E01.mkv", "Second.Release.E02.mkv"]
+
+[encoding]
+article_bytes = 20000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

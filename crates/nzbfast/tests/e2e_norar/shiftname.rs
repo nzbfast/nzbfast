@@ -13,7 +13,7 @@
 //! name that verifies zero blocks is an ordinary adoption candidate to
 //! the engine, and `repair_dir_set_inner`'s own comment names the shape
 //! ("missing, renamed, SHIFTED - nothing on disk verifies").
-//! `crates/nzbfast/src/repair.rs::adoption_candidates_present` excluded
+//! `crates/nzbfast-unpack/src/repair.rs::adoption_candidates_present` excluded
 //! it by NAME alone, so on the get path the shortfall was called FINAL
 //! and the engine was never asked.
 //!

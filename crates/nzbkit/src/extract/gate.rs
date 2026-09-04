@@ -86,6 +86,13 @@ impl crate::live::ChaseGate for ChildGate {
             p.gate_wait_any(timeout);
         }
     }
+
+    fn vouched_end(&self, offset: u64) -> u64 {
+        let Some(p) = self.parent.upgrade() else {
+            return u64::MAX;
+        };
+        p.routed_vouched_range(self.slot, offset)
+    }
 }
 
 impl Extractor {
@@ -136,34 +143,8 @@ impl Extractor {
     /// has arrived). A slot no group routes to - a chase sink, a plain
     /// child file - is not PAR2 data and reads as ungated.
     pub(super) fn routed_vouched_to(&self, cs: usize) -> u64 {
-        let pieces = {
-            let inner = self.inner.lock_ok();
-            let mut found: Option<Vec<Piece>> = None;
-            for g in inner.groups.values() {
-                let Some((name, _)) = g.routed.iter().find(|&(_, &s)| s == cs) else {
-                    continue;
-                };
-                let mut v: Vec<Piece> = g
-                    .bases
-                    .iter()
-                    .filter_map(|(&(slot, ei), &base)| {
-                        let e = inner.slots[slot].mapper.as_ref()?.entries.get(ei)?;
-                        (e.name == *name && !e.is_dir).then_some(Piece {
-                            slot,
-                            data_off: e.data_off,
-                            len: e.data_len,
-                            base,
-                        })
-                    })
-                    .collect();
-                v.sort_by_key(|p| p.base);
-                found = Some(v);
-                break;
-            }
-            match found {
-                Some(v) => v,
-                None => return u64::MAX,
-            }
+        let Some(pieces) = self.routed_pieces(cs) else {
+            return u64::MAX;
         };
         let mut lim = 0u64;
         for p in pieces {
@@ -181,6 +162,88 @@ impl Extractor {
             break;
         }
         lim
+    }
+
+    /// The per-RANGE answer for a routed child (the tail-first reader's
+    /// escape - `crate::live::VerifyGate::vouched_end`), in CHILD
+    /// offsets: find the piece `off` lands in, ask that parent slot the
+    /// same question at the translated offset, and walk on through the
+    /// pieces while each answers vouched to its end. A nested container
+    /// carved out of damaged parent volumes reads its own map at its own
+    /// tail exactly as a root one does.
+    ///
+    /// Unresolved routing, or a piece that does not cover `off`, answers
+    /// `off` - park - rather than guessing. Same lock discipline as
+    /// [`Self::routed_vouched_to`]: the pieces are copied out under the
+    /// routing lock and every slot is asked with it down.
+    pub(super) fn routed_vouched_range(&self, cs: usize, off: u64) -> u64 {
+        let Some(pieces) = self.routed_pieces(cs) else {
+            // No group routes here: not PAR2 data, ungated, as
+            // `routed_vouched_to` reads it.
+            return u64::MAX;
+        };
+        let mut lim = off;
+        for p in pieces {
+            if p.base + p.len <= lim {
+                continue;
+            }
+            if p.base > lim {
+                // A hole in the resolved pieces: stop at what the walk
+                // has proved, which for the first piece is `off` itself.
+                break;
+            }
+            let within = lim - p.base;
+            let end = self.slot_vouched_range(p.slot, p.data_off + within);
+            if end <= p.data_off + within {
+                break;
+            }
+            let advanced = end.saturating_sub(p.data_off).min(p.len);
+            lim = p.base + advanced;
+            if advanced < p.len {
+                break;
+            }
+        }
+        lim
+    }
+
+    /// [`Self::routed_vouched_to`]'s piece walk, lifted so the per-range
+    /// answer stands on the same routing lookup.
+    fn routed_pieces(&self, cs: usize) -> Option<Vec<Piece>> {
+        let inner = self.inner.lock_ok();
+        for g in inner.groups.values() {
+            let Some((name, _)) = g.routed.iter().find(|&(_, &s)| s == cs) else {
+                continue;
+            };
+            let mut v: Vec<Piece> = g
+                .bases
+                .iter()
+                .filter_map(|(&(slot, ei), &base)| {
+                    let e = inner.slots[slot].mapper.as_ref()?.entries.get(ei)?;
+                    (e.name == *name && !e.is_dir).then_some(Piece {
+                        slot,
+                        data_off: e.data_off,
+                        len: e.data_len,
+                        base,
+                    })
+                })
+                .collect();
+            v.sort_by_key(|p| p.base);
+            return Some(v);
+        }
+        None
+    }
+
+    /// [`Self::slot_vouched_to`] asked per range: the root gate cell's
+    /// bitmap, or a translation through the parent one level up.
+    fn slot_vouched_range(&self, slot: usize, off: u64) -> u64 {
+        let gate = self.inner.lock_ok().verify_gate.clone();
+        if let Some(g) = gate {
+            return g.vouched_end(slot, off);
+        }
+        match self.parent.upgrade() {
+            Some(p) if self.depth > 0 => p.routed_vouched_range(slot, off),
+            _ => u64::MAX,
+        }
     }
 
     /// Park until any watermark at the root may have moved, bounded.

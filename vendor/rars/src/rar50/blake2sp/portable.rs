@@ -1,8 +1,17 @@
 //! The eight BLAKE2sp leaves as `blake2s_simd` states, hashed on a small
-//! scoped thread team. The default everywhere except aarch64, where
-//! `blake2s_simd` has no many-way kernel and [`super::ManyLeaves`] takes
-//! over; compiled there too so the tests can hold the two together.
-#![cfg_attr(target_arch = "aarch64", allow(dead_code))]
+//! scoped thread team, each thread gathering its leaves' 64-byte blocks
+//! out of the 512-byte groups first.
+//!
+//! This was the x86 production path until 2026-09-03, when
+//! [`super::simd::SimdHasher`] - the crate's own blake2sp, which reads the
+//! leaf blocks in place at a stride of eight and compresses them
+//! eight-wide under AVX2 - took over there. Nothing runs it in production
+//! any more: it is kept, and compiled on every target under test, as the
+//! INDEPENDENT implementation of the RAR5 tree that the agreement tests
+//! hold the two shipping kernels to. Do not delete it to buy the lines -
+//! without it, `check_kernels` compares the many-way kernel only with
+//! itself on x86.
+#![allow(dead_code)]
 
 use super::{LeafSet, BLOCK_BYTES, GROUP_BYTES, OUT_BYTES, PARALLELISM};
 

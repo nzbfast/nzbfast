@@ -292,7 +292,7 @@ fn held_index_lock_does_not_wedge_the_api() {
 
     // Prime `/` too, for the same reason and before any hold is armed.
     // Its page is built once per process and cached (`SHELL_CACHE` in
-    // serve/webasset.rs), so the FIRST request pays a build - the
+    // webasset.rs), so the FIRST request pays a build - the
     // substitutions over 1.4 MB of HTML, an FNV over the result and a
     // level-6 deflate of that - which is a fixed process-lifetime
     // constant and not contention. Measured 31 Aug 2026 against a debug
@@ -505,7 +505,7 @@ fn a_slow_index_read_cannot_starve_the_http_pool() {
 
     // Prime `/` too, for the same reason and before any hold is armed.
     // Its page is built once per process and cached (`SHELL_CACHE` in
-    // serve/webasset.rs), so the FIRST request pays a build - the
+    // webasset.rs), so the FIRST request pays a build - the
     // substitutions over 1.4 MB of HTML, an FNV over the result and a
     // level-6 deflate of that - which is a fixed process-lifetime
     // constant and not contention. Measured 31 Aug 2026 against a debug

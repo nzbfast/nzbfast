@@ -92,66 +92,19 @@ use crate::nntp::Connection;
 /// reapers from drifting apart.
 pub(crate) const KEEPALIVE_EVERY: Duration = Duration::from_secs(60);
 
-/// A parked connection older than this is closed rather than kept alive:
-/// it is occupying one of the account's connection slots that the user's
-/// other clients (and their *arr stack) also draw on.
-///
-/// This is the ABSOLUTE ceiling on how long any session is held, and the
-/// idle-release policy below only ever shortens it. Nothing the operator
-/// can configure makes the pool hold a connection for longer than this,
-/// so no setting here can create an indefinite hold.
-pub const DEFAULT_MAX_IDLE: Duration = Duration::from_secs(600);
-
-/// Release the pool down to its floor after this long with no job
-/// touching it.
-///
-/// Chosen against the re-warm cost, which is what the pool exists to
-/// avoid: a cold fleet costs 4.5-14.3x on job start, so a timeout of
-/// tens of seconds would spend that repeatedly and defeat the feature,
-/// while jobs arriving minutes apart are already a cold start from the
-/// user's point of view. Five minutes covers the case the pool actually
-/// pays for - a queue of NZBs draining back to back, an *arr grabbing a
-/// season - and gives the account back on any longer gap.
-pub const DEFAULT_IDLE_RELEASE: Duration = Duration::from_secs(300);
-
-/// The same timeout when the operator has configured a provider known to
-/// cap concurrent distinct SOURCE IPS - see
-/// [`crate::config::caps_source_ips`]. Shorter because the cost of
-/// holding is qualitatively different there: it is not a slice of a
-/// generous connection allowance, it is one of two or three IP slots for
-/// the whole account, so the user's other machines are locked out
-/// entirely rather than merely slowed.
-///
-/// A provider that caps concurrent SESSIONS is a different constraint
-/// and must NOT be folded in here, however alike the two read. Asked
-/// directly after the 25-26 Aug 2026 incident, whose provider capped
-/// sessions at 40: against a session cap, holding a warm session and
-/// churning one cost the same slot, and only one of them provokes the
-/// cap. That provider's server held every torn-down session for minutes
-/// before reaping it, so QUITTING freed nothing on the timescale that
-/// mattered while redialling walked straight into the wall the previous
-/// teardown was still occupying. Shortening the release there would buy
-/// no slot back and pay for it in dial storms - the opposite of what
-/// this constant does for an IP cap, where one held socket occupies
-/// exactly as much of the cap as sixty and letting go really does hand
-/// the slot over. Session-capped providers keep
-/// [`DEFAULT_IDLE_RELEASE`], and the fix for them is upstream of this
-/// module: not tearing the fleet down at the seam in the first place
-/// (`pool::session`'s abort exit).
-pub const CAPPED_IDLE_RELEASE: Duration = Duration::from_secs(120);
-
-/// Most connections the daemon parks per server.
-///
-/// Deliberately generous rather than tied to the configured
-/// `connections`: the fleet that parks them was already sized by the
-/// account limit so it cannot overshoot, while a cap read from a config
-/// that has since SHRUNK would evict live connections mid-run.
-///
-/// Public because it is also the ceiling on a meaningful idle-release
-/// FLOOR - keeping more than the pool will ever park is the same as
-/// keeping everything, and a setting that silently means nothing is
-/// worse than one that is clamped.
-pub const MAX_PER_SERVER: usize = 64;
+// THE FOUR IDLE/PARK LIMITS BELOW LIVE IN `config` since 3 Sep 2026
+// (nzbkit split lane 1), re-exported here so every
+// `nzbkit::warmpool::MAX_PER_SERVER` and every in-crate `warmpool::`
+// path is unchanged. They are what `Config` VALIDATES and CLAMPS
+// against - `idle_release_policy` reads three of them and a config
+// test holds the two timeouts inside `DEFAULT_MAX_IDLE` - so with them
+// declared here the configuration layer had to reach UP into the
+// connection pool for them, which is the one edge that stopped `config`
+// and the whole pool cluster being separable. Their doc comments moved
+// with them; the rationale for each number is at its declaration.
+pub use crate::config::{
+    CAPPED_IDLE_RELEASE, DEFAULT_IDLE_RELEASE, DEFAULT_MAX_IDLE, MAX_PER_SERVER,
+};
 
 /// Bound on the DATE that validates a parked connection, instead of the
 /// protocol-wide 60 s command timeout it used to inherit.
@@ -597,9 +550,41 @@ impl WarmPool {
         self.idle.lock().await.values().map(|v| v.len()).sum()
     }
 
+    /// Parked connections for ONE server identity, which is what the
+    /// standing reserve's floor is measured against
+    /// (`crate::warmreserve`).
+    ///
+    /// Per identity and not per host: `key` folds in the credentials and
+    /// the route, so a reserve that counted by host would read a
+    /// stale-password server's sessions as satisfying its floor and
+    /// never dial the ones a job could actually use.
+    ///
+    /// The reserve treats ANY parked session here as satisfying its
+    /// floor, including ones a finished job parked - it is a floor on
+    /// how many sit warm, not a private set of its own. That is what
+    /// stops it dialling on top of a pool that is already full.
+    pub async fn parked_for(&self, server: &ServerConfig) -> usize {
+        self.idle.lock().await.get(&key(server)).map_or(0, Vec::len)
+    }
+
     /// How long since a job last used the pool.
     pub fn idle_for(&self) -> Duration {
         self.last_activity.lock_ok().elapsed()
+    }
+
+    /// Rewind the activity clock, so a test can reach the release
+    /// timeout without waiting out five real minutes.
+    ///
+    /// `pub(crate)` and test-only because `crate::warmreserve` stands
+    /// its dialler down on exactly this reading and has to be able to
+    /// drive it - the private helper the tests in this file use is not
+    /// reachable from another module.
+    #[cfg(test)]
+    pub(crate) fn rewind_activity(&self, d: Duration) {
+        let mut t = self.last_activity.lock_ok();
+        *t = t
+            .checked_sub(d)
+            .expect("monotonic clock older than the rewind");
     }
 
     /// Trim each server down to ITS OWN floor once the pool has gone
@@ -802,6 +787,7 @@ mod tests {
             max_source_ips: None,
             address_family: Default::default(),
             tls_hostname: None,
+            warm_reserve: None,
         }
     }
 

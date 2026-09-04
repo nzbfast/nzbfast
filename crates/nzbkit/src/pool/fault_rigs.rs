@@ -662,6 +662,7 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig {
                 tail_fanout: true,
@@ -823,6 +824,7 @@ async fn queue_control_exports_the_tail_latch() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig::default(),
         )
@@ -876,6 +878,7 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig {
                 hedge,
@@ -1055,6 +1058,7 @@ fn bound_guard_server(host: &str, tail_fanout: bool) -> (ServerConfig, PoolConfi
             max_source_ips: None,
             address_family: Default::default(),
             tls_hostname: None,
+            warm_reserve: None,
         },
         PoolConfig {
             hedge: true,
@@ -1445,6 +1449,7 @@ async fn suspect_dup_races_a_pre_byte_stall_at_once() {
                 max_source_ips: None,
                 address_family: Default::default(),
                 tls_hostname: None,
+                warm_reserve: None,
             },
             PoolConfig {
                 ttfb_hedge: on,

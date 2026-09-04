@@ -2166,10 +2166,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
 <header>
   <h1><span class="logo" role="button" tabindex="0" data-i18n-title="hdr.logo.title" title="Next screen" aria-label="Next screen"
     onclick="logoCycle()"
-    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();logoCycle()}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-bolt"/></svg> nzbfast</span> <span class="v" id="ver" role="button" tabindex="0"
-    data-i18n-title="hdr.ver.title" title="Check for updates" aria-label="Check for updates"
-    onclick="jumpToUpdates()"
-    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();jumpToUpdates()}"></span></h1>
+    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();logoCycle()}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-bolt"/></svg> nzbfast</span></h1>
   <!-- One nav, same four destinations in the same order, on this page and
        on the wall. The current one is marked .on rather than renamed or
        removed: a nav that changes shape as you use it is why "go to the
@@ -2185,6 +2182,41 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
   <a href="#" class="pill" id="setPill" style="text-decoration:none" data-i18n-title="hdr.settings.title" title="Settings" onclick="return setView('settings')"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg> <span data-i18n="hdr.settings">settings</span></a>
   <a href="/manual" target="_blank" class="pill" style="text-decoration:none" data-i18n-title="hdr.manual.title" title="User manual"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-manual"/></svg> <span data-i18n="hdr.manual">manual</span></a>
   </nav>
+  <!-- The version, AFTER the nav for the same reason as the two chips
+       below it, and it did not used to be. It is EMPTY in the markup and
+       filled by script on load, so sitting inside the <h1> it widened
+       the logo block by 66px the moment the version arrived and shoved
+       the four destinations sideways on every page load - the exact
+       "the navbar isn't static, it shifts around" complaint the chip
+       comment below cites. It also made the nav start 91px further right
+       here than on the wall, so the same four buttons landed in two
+       different places depending on which page you were on.
+
+       THIS ELEMENT IS HIDDEN IN THE WEBSITE CAPTURES, and that is why
+       `website/SCREENSHOTS.manifest` no longer records a crate version.
+       The four marketing shots used to render it, so every release - a
+       patch touching no pixel included - left all four reading an old
+       number and reddened tools/shot-version-gate.py until somebody
+       re-ran a 30-minute rig. The shoot scripts now inject
+       `#ver{display:none!important}` before navigating, so the captures
+       carry no version at all and only a REAL UI change asks for a new
+       one. That is also why the `beta N` trap is retired: the script at
+       the bottom of this file writes the version AND the beta suffix
+       into this one element, so hiding it takes both, and
+       `packaging/beta-serial.txt` no longer has to be zeroed to shoot.
+
+       WHAT THAT COSTS YOU, the reader, is one line of bookkeeping: if
+       you MATERIALLY change what those four captures show - the header,
+       the card set or its order, the queue drawer, the top of Settings -
+       bump `ui-revision` in `website/SCREENSHOTS.manifest`. That is now
+       the only thing that asks for a re-shoot, and nothing can bump it
+       for you: no gate here can read a PNG, so an unbumped revision is a
+       stale picture nothing will report. The gate's header says so
+       plainly and carries the age warning that is the backstop. -->
+  <span class="v" id="ver" role="button" tabindex="0"
+    data-i18n-title="hdr.ver.title" title="Check for updates" aria-label="Check for updates"
+    onclick="jumpToUpdates()"
+    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();jumpToUpdates()}"></span>
   <!-- AFTER the nav, and that ordering is the fix for a real complaint
        ("the navbar isn't static, it shifts around", reddit 16 Aug). The
        header is one wrapping flex row, so anything that appears BEFORE
@@ -2965,6 +2997,8 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
       <option value="full" data-i18n="set.perf.verifymode.full">full: MD5 every block</option>
       <option value="fast" data-i18n="set.perf.verifymode.fast">fast: CRC32 blocks (default)</option>
       <option value="lean" data-i18n="set.perf.verifymode.lean">lean: CRC32 blocks, no article CRCs</option></select></div>
+  <div class="row" data-adv="1"><label data-i18n="set.perf.finalcheck">Fast final check<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.perf.finalcheck.hint">the check that reads your finished files back from the disk, at the end of a download and when you run nzbfast verify by hand. Normally each file is proved by one digest over the whole file, and that is a single read on one core however many cores the machine has. With this on, each file is proved from the PAR2 set's per-block checksums instead, which run on every core at once. Much faster on a fast local disk, and worth very little on a network share or a spinning disk, where the disk is already the limit. What it costs: a PAR2 set can carry two records that describe different files, and other tools call such a set damaged where this calls it clean. No normal set is built that way, and a repair still proves itself the old way whatever this says</span></label>
+    <input type="checkbox" id="s_fast_final_check" onchange="setCfg('fast_final_check',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.perf.fastpar">Fast PAR mode<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.perf.fastpar.hint">speeds up repair of badly damaged downloads. Turns itself off automatically if a repair does not verify</span></label>
     <input type="checkbox" id="s_fast_par" onchange="setCfg('fast_par',this.checked?1:0)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.perf.mem">Memory budget<span class="badge restart" data-i18n="badge.restart">applies after restart</span><span class="hint" data-i18n="set.perf.mem.hint">pipeline RAM cap, e.g. 8G; 0 = automatic (sized from this machine's RAM)</span></label>
@@ -3000,6 +3034,41 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <input class="txt sm" type="number" min="1" max="64" id="s_nested_max_depth" onchange="setCfg('nested_max_depth',this.value)"></div>
 </div>
 
+<!-- TODO 310 stage 2. The on-switch for the whole feature and the
+     surface that uses it, in ONE card, because they are unreadable
+     apart: the check file is the only thing a later check can read, so
+     a folder that finished while the box was off can be neither checked
+     nor repaired, and a "check this folder" button with no explanation
+     of where the answer comes from reads as magic. A card joins the
+     rail by being written (see SETGROUPS). -->
+<div class="card set" data-sg="download" data-sk="integrity">
+  <h3 data-i18n="set.chk.title">Checking downloads later</h3>
+  <div class="row"><label data-i18n="set.chk.keep">Keep a check file in each finished folder<span class="badge next" data-i18n="badge.next">applies from the next download</span><span class="hint" data-i18n="set.chk.keep.hint">every download proves a checksum for each file it fetched, and then throws it away: the .par2 files that carried it are cleaned up, so months later there is nothing left to check the folder against. With this on, those checksums are kept in a small hidden file called .nzbfast.manifest beside the payload, and a folder can be checked, and repaired, years after it was downloaded. It costs no extra downloading, and one quick read of the finished files as the download ends. Turn it off and finished folders get no such file; a folder that finished while it was off cannot be checked later, because there is nothing to check it against</span></label>
+    <input type="checkbox" id="s_write_manifest" onchange="setCfg('write_manifest',this.checked?1:0)"></div>
+  <div class="row"><label data-i18n="set.chk.dir">Check a finished folder<span class="hint" data-i18n="set.chk.dir.hint">reads every file in the folder and compares it with what the download proved. It reports what no longer matches and offers to repair it, and on its own it downloads nothing - repairing is a second, separate click. Only folders that have a check file in them can be checked</span></label>
+    <div class="pathrow"><input class="txt" id="healDir" data-i18n-placeholder="set.chk.dir.ph" placeholder="the folder a finished download went into"><button class="mini" onclick="browseDir(document.getElementById('healDir'),'dir')" data-i18n-title="btn.browse.title" title="Browse for a folder - including other drives" data-i18n="btn.browse">Browse…</button><button class="ghost" style="white-space:nowrap" onclick="healCheck(this)" data-i18n="set.chk.dir.btn">Check it</button></div></div>
+  <div id="healOut" style="display:none;font-size:12.5px;line-height:1.55;margin:2px 0 8px"></div>
+  <!-- TODO 310 stage 2, the SCHEDULED sweep. In this card rather than a
+       card of its own, because nothing sweeps until the tick at the top
+       is on as well: the check file is the only thing a sweep can read,
+       so the two are one control panel. It sits BELOW the manual box on
+       purpose - a reader meets "what a check is, and it spends nothing"
+       before "do that to the whole library unasked".
+       The three limits are deliberately NOT data-adv. healauto.rs's
+       header argues that an automatic road's ceilings ARE the feature,
+       and a switch that offers to keep a library healthy while its cost
+       bounds are hidden behind the advanced toggle is describing a
+       different product. -->
+  <div class="row"><label data-i18n="set.chk.auto">Check finished folders on a schedule<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.chk.auto.hint">off unless you turn it on. Every so often nzbfast goes through the finished folders that have a check file, checks each one against it, and starts a repair for whatever no longer matches, without anybody clicking. It never runs while a download is running or waiting, and it steps aside as soon as one arrives. Checking is not free: it reads every file in a folder from end to end, unpacked films included, so a library where nothing is wrong still costs the disk that read. At most 200 folders are looked at each time, and the next round carries on where the last one stopped, so a big library is covered over several rounds instead of one enormous read. Two things it will not do on its own: repair a download that is no longer on record here, because finding another copy of it means a search and what comes back may not be what is on your disk; and touch a download whose size it does not know, because then it cannot count what the repair would cost. Both are still offered by the Check it button above, where you can look at them first. Needs the check file setting at the top of this card: a folder without one cannot be checked</span></label>
+    <input type="checkbox" id="s_heal_auto" onchange="setCfg('heal_auto',this.checked?1:0)"></div>
+  <div class="row"><label data-i18n="set.chk.auto.every">Hours between checks<span class="hint" data-i18n="set.chk.auto.every.hint">weekly by default, because a check costs a full read of the folders it reaches and files do not go bad by the hour. 1 to 8760, which is a year. A new value applies from the next check onwards. The first check of a session runs a quarter of an hour after nzbfast starts, and the clock is not remembered across restarts, so a machine restarted more often than this checks more often than this; what bounds the cost of that is the two limits below, not this number</span></label>
+    <input class="txt sm" type="number" min="1" max="8760" id="s_heal_auto_interval_h" onchange="setCfg('heal_auto_interval_h',this.value)"></div>
+  <div class="row"><label data-i18n="set.chk.auto.jobs">Most repairs to start each time<span class="hint" data-i18n="set.chk.auto.jobs.hint">how many damaged downloads one check may start repairing. Four by default, and 16 at the very most, which is the same limit the Check it button above has: that button tells you the whole count before you press it, and this one tells nobody anything, so it is kept well below it. Damage past the limit is not forgotten, it waits for the next check or for the button above. 0 finds the damage and repairs none of it</span></label>
+    <input class="txt sm" type="number" min="0" max="16" id="s_heal_auto_max_jobs" onchange="setCfg('heal_auto_max_jobs',this.value)"></div>
+  <div class="row"><label data-i18n="set.chk.auto.bytes">Most to download each time<span class="hint" data-i18n="set.chk.auto.bytes.hint">a ceiling on what one check may spend on repairs, e.g. 20G. 0 does not mean unlimited here: it means nothing is repaired automatically, and there is no value that takes the ceiling off. Each repair is counted against this at the full size of the download it repairs, not at the size of the damaged part, even though a repair usually fetches far less than that. Counting it the pessimistic way is the point: a ceiling that holds in the worst case holds in every case. For a folder that was unpacked from an archive the worst case is the ordinary case, because none of what is on the disk can be reused</span></label>
+    <input class="txt sm" id="s_heal_auto_max_bytes" data-i18n-placeholder="set.chk.auto.bytes.ph" placeholder="e.g. 20G" onchange="setCfg('heal_auto_max_bytes',this.value)"></div>
+</div>
+
 <!-- TODO 304 stage 2. Its own card rather than two rows inside Disk &
      quota: the budget and the watchlist toggle are one feature and are
      unreadable apart - a GB figure with no explanation of what spends it
@@ -3032,6 +3101,10 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <div class="pathrow"><input class="txt" id="s_script" onchange="setCfg('script',this.value)"><button class="mini" onclick="browseDir('script','file')" data-i18n-title="btn.browsefile.title" title="Browse for a script file" data-i18n="btn.browse">Browse…</button><button class="mini" onclick="openDir('script')" data-i18n-title="set.watchdir.openscript.title" title="Open the folder containing this script" aria-label="Open the folder containing this script">📂</button></div></div>
   <div class="row" data-adv="1"><label data-i18n="set.watchdir.scripttimeout">Give the script at most<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.scripttimeout.hint">a script still running after this is killed, and a line saying so goes in the log; the download itself is unaffected either way. Seconds; 0 = wait as long as it takes, which is what a long transcode wants. Default 3600. With no limit, one script that hangs holds a thread for as long as nzbfast runs, and every job that finishes after it holds another</span></label>
     <input class="txt sm" type="number" min="0" max="604800" id="s_script_timeout_secs" onchange="setCfg('script_timeout_secs',this.value)"></div>
+  <div class="row"><label data-i18n="set.watchdir.scriptconfine">Limit where scripts can write<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.scriptconfine.hint">runs your scripts so they can only write inside the folders nzbfast already uses: the download folder, any move-to destinations, the watch folder and the system temporary folder. They keep full read access and full network access, so notifiers and library tools work as before. Turn this off if a script needs to write somewhere else and fails with "operation not permitted". This does nothing on a machine with no confinement available - the line below says which yours has</span></label>
+    <input type="checkbox" id="s_script_confined" onchange="setCfg('script_confined',this.checked?1:0)"></div>
+  <div class="row" data-adv="1"><label data-i18n="set.watchdir.sandbox">Subprocess confinement<span class="hint" data-i18n="set.watchdir.sandbox.hint">the external unrar and par2 helpers, and your own scripts, are run inside a confinement box where this machine offers one. Nothing to set here: this reports what is in force. Where none is available the helpers run exactly as they always have, so a download never fails for want of it</span></label>
+    <span class="mono" id="s_sandbox" style="opacity:.85"></span></div>
   <div class="row" data-adv="1"><label data-i18n="set.watchdir.prequeue">Pre-queue script<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.prequeue.hint">runs before every add with SABnzbd's pre-queue args + SAB_* env vars, and can rename, recategorize, reprioritize or reject the download before it queues; a rejected add goes to history with the reason. Empty = off. A script that fails or answers nonsense never blocks the add</span></label>
     <div class="pathrow"><input class="txt" id="s_pre_queue_script" onchange="setCfg('pre_queue_script',this.value)"><button class="mini" onclick="browseDir('pre_queue_script','file')" data-i18n-title="btn.browsefile.title" title="Browse for a script file" data-i18n="btn.browse">Browse…</button></div></div>
   <div class="row" data-adv="1"><label data-i18n="set.watchdir.prequeuetimeout">Give the pre-queue script at most<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.prequeuetimeout.hint">an add waits on this script, so its budget is short. A script still over it is killed and the add proceeds untouched. Seconds; 0 = no limit; default 30</span></label>
@@ -3378,12 +3451,13 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <input type="checkbox" id="s_predb_corr_enabled" onchange="setCfg('predb_corr_enabled',this.checked?1:0);setTimeout(()=>{refreshPredb();refreshPredbCorr()},400)"></div>
   <div class="row corr-sub" style="padding-left:16px"><label data-i18n="set.idx.corrauto">Apply strong matches automatically<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.idx.corrauto.hint">a match this needs is strict: the size must agree tightly, no other announcement may fit nearly as well, and the announcement must pick this post back when checked the other way around. Applied names change only how a release is shown, they are marked as inferred, and a finished download that proves one wrong takes it back off on its own. Everything weaker stays a suggestion for you to review.</span></label>
     <input type="checkbox" id="s_predb_corr_auto" onchange="setCfg('predb_corr_auto',this.checked?1:0)"></div>
-  <div class="row corr-sub" data-adv="1" style="padding-left:16px"><label data-i18n="set.idx.predbseed">How far back to import<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.idx.predbseed.hint">the window the import below asks for, in days. Longer takes longer and stores more; the announcements it brings back are still capped by the setting above. 1 to 366; default 180</span></label>
+  <div class="row corr-sub" data-adv="1" style="padding-left:16px"><label data-i18n="set.idx.predbseed">How far back to import<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.idx.predbseed.hint">the oldest announcement the import below will keep, in days. It is a limit rather than a target: the import reads only the newest couple of pages of each section, so in practice it stops well short of this. 1 to 366; default 180</span></label>
     <input class="txt sm" type="number" min="1" max="366" id="s_predb_seed_days" onchange="setCfg('predb_seed_days',this.value)"></div>
-  <div class="row corr-sub" style="padding-left:16px"><label data-i18n="set.idx.seed">Announcement history<span class="hint" data-i18n="set.idx.seed.hint">the live feed only hears announcements from the moment it is switched on. This fetches the past window set above from a public pre database, politely and once, so posts that are already indexed can be matched too. Runs in the background for half an hour or so; progress shows here.</span></label>
+  <div class="row corr-sub" style="padding-left:16px"><label data-i18n="set.idx.seed">Announcement history<span class="hint" data-i18n="set.idx.seed.hint">the live feed only hears announcements from the moment it is switched on. This fetches recent announcements from a public pre database, once, so posts that are already indexed can be matched too. Runs in the background for a few minutes; progress shows here.</span></label>
     <span style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button class="btn" id="predbSeedBtn" data-i18n="set.idx.seedbtn" onclick="startPredbSeed()">Import history</button>
-      <span id="predbSeedState" class="dim" style="font-size:12.5px;line-height:1.5"></span></span></div>
+      <span id="predbSeedState" class="dim" style="font-size:12.5px;line-height:1.5"></span></span>
+    <span class="hint" data-i18n="set.idx.seed.terms">announcements come from predb.net, a public pre database run on one small server. Its operator asks people not to build their own database out of it, so this takes only the two newest pages of each section, at most 10 requests a minute, and stops. Running it again brings back the same announcements rather than older ones.</span></div>
   <!-- The indexer-confirm lane (TODO 161). A child of correlation on
        purpose: it only ever consumes correlation's STRONG suggestions,
        so the rows grey with the switch above. There is no manual
@@ -4193,7 +4267,7 @@ const DAEMON_LOCALE='__NZBFAST_LOCALE__';   // serve.rs replaces this token
 // unreplaced token must mean "on" - that is the state where nothing is
 // hidden, so the fallback can never hide a working feature.
 // The casts are load-bearing for tools/checkjs-gate.py and say something
-// true: serve/webasset.rs rewrites these tokens before the page goes out,
+// true: webasset.rs rewrites these tokens before the page goes out,
 // so what is compared is a string whose value is not known here - without
 // them a checker reads every one of these comparisons as impossible.
 const IDX_ON=(/** @type {string} */('__NZBFAST_INDEX__'))!=='0';
@@ -6693,7 +6767,7 @@ async function tick(){
     const pill=document.getElementById('statusPill');
     // `pause_int` is SAB's "minutes:seconds" since 31 Aug 2026 (it was
     // bare whole minutes before, which is not SAB's shape - see
-    // serve/sabcompat/units.rs). `parseInt` stops at the colon and so
+    // sabcompat/units.rs). `parseInt` stops at the colon and so
     // still yields the MINUTES this name is about; it is spelled out
     // here because the field looks like a plain number and is not.
     const pmin=parseInt(q.pause_int)||0;
@@ -7464,7 +7538,7 @@ function altSwitchBlock(s){
 // Repair, High, Normal and Low, and SAB deliberately clears a
 // state-setting priority back to a stateless one so a client can be
 // written against those five. Both halves moved in one commit - see
-// `sab_priority_name` in serve/sabcompat.rs. The page's own sentences
+// `sab_priority_name` in sabcompat.rs. The page's own sentences
 // are unchanged; only the field they are decided from is.
 function dupHeld(s){
   const l=s&&s.labels;
@@ -7803,16 +7877,41 @@ function renderHistory(slots){
     +` aria-label="${escA(t('hist.search','search history…'))}"`
     +` oninput="setHistSearch(this.value)" style="margin-inline-start:auto;max-width:180px">`);
   // The header's one-click clears appear only when they have work to do -
-  // and each counts exactly what its own sweep will take, which is NOT
-  // its chip's count: the Completed and Failed chips both include the
+  // and each counts what its own sweep will take, which is NOT its
+  // chip's count: the Completed and Failed chips both include the
   // password-locked rows, and those stay either way (see clearHistDone
   // and clearHistFailed).
+  // Both counters come from the daemon's SEARCH-FILTERED pass (see
+  // `history_page`: the facets are taken after the search `continue`),
+  // and since 1 Sep 2026 both sweeps carry that search too, so the two
+  // halves agree on which list is being cleared.
+  //
+  // THE COUNT IS AN ESTIMATE IN BOTH DIRECTIONS, which an earlier
+  // version of this note got wrong by claiming the sweep can only ever
+  // take fewer. Two reasons, and they point opposite ways:
+  //  - with a search active the count matches on four fields and the
+  //    sweep on the name alone, so the sweep takes FEWER
+  //    (histClearSearch);
+  //  - the counts classify a §96 storage-deleted row under a FILESYSTEM
+  //    PROBE BUDGET (HISTORY_STAT_BUDGET) while the delete classifies
+  //    every row with an unbudgeted pass (published_failed_map), so a
+  //    row whose folder is gone lying past the budget is counted under
+  //    Completed and swept by "Clear failed" - MORE than its count -
+  //    while "Clear completed" leaves it, fewer than its.
+  // Neither can take a row the user cannot see, which is the property
+  // that matters; the toast prints the daemon's real number.
   const clearable=count('clearable');
   const cb=document.getElementById('histClear');
-  if(cb) cb.style.display=clearable?'':'none';
+  // ...and neither is OFFERED against a list it would sweep outside of.
+  // The facets are counted before the bucket chip narrows anything and
+  // plan_history_delete takes no bucket, so with "Failed" showing,
+  // "Clear completed" was still on the header and removed rows that were
+  // not in the list under it (bug sweep F26, 1 Sep 2026). A chip that
+  // excludes what a sweep takes hides that sweep.
+  if(cb) cb.style.display=(clearable&&cur!=='failed'&&cur!=='locked')?'':'none';
   const clearableFailed=count('clearable_failed');
   const cbf=document.getElementById('histClearFailed');
-  if(cbf) cbf.style.display=clearableFailed?'':'none';
+  if(cbf) cbf.style.display=(clearableFailed&&cur!=='done'&&cur!=='locked')?'':'none';
   // Already filtered and windowed by the daemon.
   const rows=lastHistSlots;
   // §129 2f: same shape of guard as the queue's - never yank a checkbox
@@ -9601,7 +9700,7 @@ function renderSearch(){
           title="${escA(wtip)}" aria-label="${escA(wtip)}">☆</button>`
       :'';
     return `<tr><td>${browseArt?artImg(r.art):''}${esc(r.name)}${r.quality?`<span class="qbadge">${esc(r.quality)}</span>`:''}</td>
-      <td class="nowrap">${gb(r.size)} ${unit('GB')}</td><td>${r.files}</td>
+      <td class="nowrap">${fmtGB(r.size)}</td><td>${r.files}</td>
       <td class="${r.complete?'ok':'dim'}">${r.complete?t('browse.complete','complete'):t('browse.partial','partial')}${r.par2?' <span class="dim">+par2</span>':''}</td>
       <td style="white-space:nowrap">${watch} <button onclick="grab(${r.id},this)" ${r.complete?'':'disabled'}>${t('browse.get','Get')}</button></td></tr>`;
   }).join('')
@@ -9994,7 +10093,21 @@ function whyslowBlock(s){
           {r:fmtRate((+w.fleet_carry_bps||0)/1e6),i:+w.fleet_implied||0}))}${
           anchorSrcLbl(w.anchor_src)?` · ${esc(t('diag.receipts.fleet.anchor',
             'line ceiling: {src}',
-            {src:anchorSrcLbl(w.anchor_src)}))}`:''}`:''}`:''}${
+            {src:anchorSrcLbl(w.anchor_src)}))}`:''}`:''}${
+        // TODO 275 item 7: and WHY the budget stopped where it did,
+        // when the answer is a provider rather than the rule. The
+        // governor holds the fleet at its first ceiling for the rest of
+        // a run in which any account refused it for capacity, and the
+        // four numbers above cannot say so - a budget of 50 on servers
+        // allowing 50 and one stood down from 100 read identically.
+        // Inside the `fleet` block and a SIBLING of the carry clause
+        // rather than nested in it. Inside, because this sentence
+        // qualifies the budget the fleet verdict just named and would
+        // be a non-sequitur under any other layer. A sibling, because
+        // the refusal explains the hold whether or not a carry has been
+        // measured yet, and the carry clause is gated on having one.
+        +w.fleet_refused?` · ${esc(t('diag.receipts.fleet.refused',
+          'a server refused more connections earlier in this download, so nzbfast is holding here instead of asking that account for more'))}`:''}`:''}${
       // TODO 312 item 7: the working behind a `knee` verdict, on the
       // same rule as the block above - this one also asks the reader to
       // change something, so it has to show why. Four numbers: what our
@@ -10065,8 +10178,26 @@ function whyslowBlock(s){
         // same treatment the Providers card already gives a refusal
         // line, and for the same reason: it is the thing the user can
         // quote at their provider.
-        w.sole_said?` · ${esc(String(w.sole_said))}`:''}`:''}</div>
-    ${w.layer==='fleet'?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnRow('s_line_cap_fleet')">${
+        w.sole_said?` · ${esc(String(w.sole_said))}`:''}`:''}${
+      // TODO 313: some of this download's connections are working on
+      // the jobs behind it. Gated on the RECEIPT (`spill_lent`) and
+      // never on the layer, like every clause above it - a spill is
+      // live or it is not, and which layer whyslow currently blames
+      // says nothing about that. Off by default and always 0 until the
+      // `queue_spill` setting is turned on, so this clause simply never
+      // renders on an install that has not asked for it.
+      +w.spill_lent>0?` · ${esc(t('diag.receipts.spill',
+        '{n} of its connections are working on the jobs behind it while it waits',
+        {n:+w.spill_lent||0}))}`:''}</div>
+    ${
+    // TODO 275 item 7: no remedy button on a run a provider refused.
+    // The offer is "change the connection budget", and on this install
+    // raising it dials straight back into an account that has already
+    // said no - which is the one outcome worse than offering nothing.
+    // The sentence above still explains the hold, exactly as the
+    // `solecap` and `knee` blocks below still name their host on a tick
+    // whose own receipt has emptied.
+    w.layer==='fleet'&&!w.fleet_refused?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnRow('s_line_cap_fleet')">${
       esc(t('diag.fleet.setting','Change the connection budget'))}</button> <span class="dim">${
       esc(t('diag.fleet.setting.note','the new number applies from the next download; a per-server "Use exactly this many" in the server editor lifts it for that server alone'))}</span></div>`:''}
     ${w.layer==='solecap'&&w.sole_host?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnServer('${escA(w.sole_host)}')">${
@@ -12484,7 +12615,7 @@ async function delWatchFailed(ref){
 // "Create report" (Gary, 19 Aug): everything about ONE download as
 // shareable text - its facts, its providers, the NZB's shape and its own
 // log lines, without handing over the daemon's whole log. Assembled by
-// the daemon (serve/report.rs), which is the only place that can slice a
+// the daemon (report.rs), which is the only place that can slice a
 // job's own span out of the log ring.
 //
 // Straight to the clipboard: the point is pasting it somewhere. The
@@ -12554,13 +12685,29 @@ async function delHist(id){
 // is served unpaginated today, but a UI that posted the ids it happens
 // to be holding would quietly clear only the visible page the day that
 // changes - and would race any job finishing between paint and click.
+// ...but the daemon must be told which list. Both header sweeps are
+// offered ON a searched list, their confirmations say "out of this
+// list", and until 1 Sep 2026 they sent no filter at all: 39 failures
+// the user had narrowed away with "Alpha" went with the one row on
+// screen, silently, and the toast reported all 40 (bug sweep F26).
+// `search=` is the daemon's own SAB narrowing on the class sweeps
+// (plan_history_delete + sab_search_matches, landed 31 Aug 2026), so
+// the fix is to send the search box.
+//
+// It matches the job NAME only, where the list's `hist_search=` also
+// matches category / identity_name / filed_base - so a row visible on
+// one of those three can survive its own sweep. That direction is the
+// deliberate one: the sweep can only ever take rows the user can see,
+// and an under-clear is visible (the row stays, the toast prints the
+// daemon's real count) where an over-delete was not.
+function histClearSearch(){ return histSearch?'&search='+encodeURIComponent(histSearch):''; }
 async function clearHistDone(btn){
   if(!confirm(t('confirm.histclear','Clear the finished downloads out of this list?\nAnything that failed or is waiting for a password stays, and no files are deleted.'))) return;
   await busy(btn, t('busy.clearing','Clearing…'), async()=>{
     // mustOk for the reason clearQueue above carries: a refusal used to
     // reach the count toast and say "Cleared 0 from the list." over a
     // list nothing was cleared from.
-    const j=mustOk(await api('history','&name=delete&value=completed'));
+    const j=mustOk(await api('history','&name=delete&value=completed'+histClearSearch()));
     // Counted, not just acknowledged: "Cleared." over a list that still
     // has rows in it (the failures, which is the whole point) reads as a
     // button that did not work. Worded without a plural noun so one
@@ -12576,10 +12723,12 @@ async function clearHistDone(btn){
 // so a job that finishes between paint and click is never raced). A
 // password-locked failure carries the only 🔑 that unpacks it once the
 // user supplies one, so it stays exactly as a locked Completed row does.
+// And the same search scoping, for the same reason - see
+// histClearSearch above.
 async function clearHistFailed(btn){
   if(!confirm(t('confirm.histclearfailed','Clear the failed downloads out of this list?\nAnything waiting for a password stays, and no files are deleted.'))) return;
   await busy(btn, t('busy.clearing','Clearing…'), async()=>{
-    const j=mustOk(await api('history','&name=delete&value=failed'));
+    const j=mustOk(await api('history','&name=delete&value=failed'+histClearSearch()));
     toast(t('toast.histCleared','Cleared {n} from the list.',{n:num(j.removed||0,0)}));
     tick();
   });
@@ -14194,6 +14343,10 @@ async function runLadder(btn){ await busy(btn,t('busy.testing','Testing…'), as
   if(!fixed) startLadderLive();
   const j=await api('connladder',`&value=${idx}`+(fixed?`&value2=${fixed}`:''));
   stopLadderLive();
+  // Same refusal the carry probe draws, and for the same reason: this
+  // test opens its own connections against a job the runner is already
+  // holding open, so the daemon refuses rather than starving it.
+  if(j.downloading){ o.innerHTML=`<span>${esc(t('set.srv.carry.busy','Not tested: a download is running. This test opens its own connections, so running it now would take capacity from the job. Unpacking and repair count as running too - try again when nothing is left in the queue.'))}</span>`; return; }
   // A fresh install has nothing representative to measure with, and a
   // wrong ladder is worse than none - say what to do, not just "error".
   if(j.no_real_articles){ o.innerHTML=`<span class="bad">${esc(t('ladder.noarticles','Nothing has been downloaded on this install yet, so there are no real articles to measure this server with. Complete a download first, then test again.'))}</span>`; return; }
@@ -14299,6 +14452,11 @@ async function runLadderAll(btn){ await busy(btn,t('busy.testing','Testing…'),
     startLadderLive();
     const j=await api('connladder',`&value=${i}`);
     stopLadderLive();
+    // Every remaining provider will be refused for the same reason, so
+    // continuing the sweep would spend the rest of it on a loop that
+    // cannot succeed - abort here rather than printing this sentence
+    // into every row that follows. Rows already filled stay as they are.
+    if(j.downloading){ o.innerHTML=`<span>${esc(t('set.srv.carry.busy','Not tested: a download is running. This test opens its own connections, so running it now would take capacity from the job. Unpacking and repair count as running too - try again when nothing is left in the queue.'))}</span>`; return; }
     const row=document.getElementById('lad'+i);
     if(j.error){ row.innerHTML=`<td>${esc(hosts[i])}</td><td class="bad" colspan="3">${esc(j.no_real_articles?t('ladder.noarticles.short','no downloaded articles to measure with yet'):tErr(j.error))}</td>`; window._ladderAll.push({idx:i,peak:0}); continue; }
     const peak=j.peak_gbps*1000/8;
@@ -14589,7 +14747,7 @@ let pwPromptMode='done', pwLiveAsked=new Set();
 // same job seeding the previous-poll id set did while the cue was a
 // queue diff. Named by description rather than by its old identifier on
 // purpose: `the_queue_snapshot_diff_does_not_narrate_switches` in
-// serve/assets.rs greps this page for those names, and a comment must
+// assets.rs greps this page for those names, and a comment must
 // not be what makes that pin fail.
 //
 // Consumed on first sight rather than kept, so a genuine RE-add of the
@@ -16008,7 +16166,7 @@ addEventListener('drop', e=>{
 // --- Settings view (M16): read get_config, write mode=config / server_* ---
 let inSettings=false, srvList=[], srvEditIdx=-1, srvTuned={}, srvAutoConn=false;
 // Mirrors conntune::STALE_SECS / EXPIRE_SECS / knee_applies
-// (crates/nzbfast/src/conntune.rs). A stored knee past its re-probe
+// (crates/nzbfast-core/src/conntune.rs). A stored knee past its re-probe
 // appointment still caps jobs and every surface says how old it is; one
 // past FOUR appointments is not applied at all, so a row that goes on
 // saying "auto-tuned from 24" is announcing a cap that no longer exists
@@ -16678,7 +16836,7 @@ async function newNzbKey(){
 
 // Settings backup: one JSON file with everything a lost /config takes
 // (settings, servers with their passwords, both keys). The server side
-// is backup_export / backup_import in serve/api/config.rs, both behind
+// is backup_export / backup_import in api/config.rs, both behind
 // the full API key.
 async function backupDownload(){
   const j=await api('backup_export');
@@ -16865,6 +17023,11 @@ async function loadSettings(){
   put('s_verify_mode', c.verify_mode||(c.fast_verify===false||c.fast_verify===0?'full':'fast'));
   // get_config always reports the live value, so no default is assumed
   // here - the daemon's FAST_PAR_DEFAULT is the authority.
+  // Reported by get_config as the value actually in effect, which
+  // includes one that came from NZBFAST_VERIFY_IFSC_ONLY - so read it
+  // straight rather than assuming the off default.
+  const ffc=document.getElementById('s_fast_final_check');
+  if(document.activeElement!==ffc) ffc.checked=c.fast_final_check===true||c.fast_final_check===1;
   const fpp=document.getElementById('s_fast_par');
   if(document.activeElement!==fpp) fpp.checked=c.fast_par===true||c.fast_par===1;
   const peu=document.getElementById('s_prefer_external_unrar');
@@ -16880,6 +17043,20 @@ async function loadSettings(){
   // poll landing while the box is being clicked must not fight it.
   const wtg=document.getElementById('s_write_through');
   if(document.activeElement!==wtg) wtg.checked=c.write_through===true||c.write_through===1;
+  // TODO 310 stage 2. Same focus guard again, and the same shape: this
+  // one is the on-switch for the whole check-and-repair road, so a poll
+  // landing mid-click must not put it back.
+  const wmf=document.getElementById('s_write_manifest');
+  if(document.activeElement!==wmf) wmf.checked=c.write_manifest===true||c.write_manifest===1;
+  // TODO 310 stage 2, the scheduled sweep. Same focus guard again for
+  // the switch; the three ceilings go through `put`, which already
+  // carries it. The byte one reads back through sizeStr for the reason
+  // min_free does: the daemon stores bytes and the field takes "20G".
+  const hau=document.getElementById('s_heal_auto');
+  if(document.activeElement!==hau) hau.checked=c.heal_auto===true||c.heal_auto===1;
+  put('s_heal_auto_interval_h', c.heal_auto_interval_h??168);
+  put('s_heal_auto_max_jobs', c.heal_auto_max_jobs??4);
+  put('s_heal_auto_max_bytes', sizeStr(c.heal_auto_max_bytes));
   initMovePace(c.move_pace||'yield');
   // Same guard as #smartrows / #catrows below: register_cat adds a
   // category the moment a job arrives carrying one, and rebuilding the
@@ -16897,6 +17074,10 @@ async function loadSettings(){
   put('s_watch_interval_secs', c.watch_interval_secs??5);
   put('s_script_timeout_secs', c.script_timeout_secs??3600);
   put('s_pre_queue_script', c.pre_queue_script);
+  // Read-only: the daemon's own sentence about which mechanism is in
+  // force, or why none is. Not translated - it names a binary.
+  const sbx=document.getElementById('s_sandbox');
+  if(sbx) sbx.textContent = (c.sandbox&&c.sandbox.detail)||'';
   put('s_pre_queue_timeout_secs', c.pre_queue_timeout_secs??30);
   put('s_cleanup_exts', (c.cleanup_exts||[]).join(', '));
   put('s_password_prompt', c.password_prompt||'done');
@@ -16916,6 +17097,9 @@ async function loadSettings(){
   if(wkn && document.activeElement!==wkn) wkn.checked = c.watch_keep_nzb===true;
   const rfd=document.getElementById('s_refeed_nzb');
   if(rfd && document.activeElement!==rfd) rfd.checked = c.refeed_nzb===true;
+  // Defaults ON in the daemon, so an absent key must not read as off.
+  const scf=document.getElementById('s_script_confined');
+  if(scf && document.activeElement!==scf) scf.checked = c.script_confined!==false;
   const wrc=document.getElementById('s_watch_recursive');
   if(wrc && document.activeElement!==wrc) wrc.checked = c.watch_recursive===true;
   const wmr=document.getElementById('s_watch_move_rejected');
@@ -18589,7 +18773,7 @@ async function testServer(btn){ await busy(btn,t('busy.testing','Testing…'), a
 // request BODY and not as a query parameter, because this door is
 // reached through `apiPost`, which builds exactly `/api?mode=<mode>`
 // and has no query string to add a flag to; `carry_refusal` in
-// `serve/api/servers.rs` says the same at its own end.
+// `api/servers.rs` says the same at its own end.
 //
 // The confirm is asked again on that second run, and deliberately: the
 // first one was refused before anything was dialled, so the run that
@@ -19333,6 +19517,138 @@ async function previewEvict(btn){
     if(j.truncated)
       parts.push(t('set.db.pv.more','It stopped counting there: a real cleanup would delete more than this.'));
     if(out){ out.style.display=''; setHtml('evictPreviewOut', parts.map(p=>`<div>${p}</div>`).join('')); }
+  });
+}
+
+// ---- TODO 310 stage 2: check a finished folder, then repair it ------
+//
+// TWO CLICKS, and the split is the feature rather than a nicety. The
+// first reads the folder's check file, re-reads the payload and reports
+// what no longer matches; it asks no indexer, queues nothing and
+// downloads nothing. The second starts real downloads and spends real
+// bytes, possibly metered ones, on files the reader believes they
+// already have. That is the shape §282 item 20's alt-hunt road already
+// established on the queue drawer, and this is deliberately the same
+// one rather than a third idiom for "show me the options, then spend".
+//
+// So there is no confirm() in front of the second click: the report IS
+// the confirmation step, it is on screen while the button is pressed,
+// and it names every download the click would start before it starts
+// any of them.
+let HEAL={};
+// The read. Costs one full read of the folder's payload - that is the
+// price of knowing whether the bytes are still the bytes - and nothing
+// else at all.
+async function healCheck(btn){
+  const dir=(document.getElementById('healDir')||{}).value.trim();
+  if(!dir){ toast(t('toast.needdir','Type or pick a folder to check.'), true); return; }
+  await busy(btn,t('busy.checking','Checking…'), async()=>{
+    const j=await api('heal_offer',`&value=${encodeURIComponent(dir)}`);
+    // Every refusal here is a sentence the reader can act on - the wrong
+    // folder, a folder with no check file in it - so it renders IN the
+    // report pane rather than in a toast that scrolls away while they
+    // are still reading the path they typed.
+    if(!j.status){ HEAL={}; healSay(`<div class="warn">${esc(tErr(j.error)||j.error||t('err.failed','failed'))}</div>`); return; }
+    HEAL={dir, targets:j.targets||[], unidentified:j.unidentified||[], max:+j.max_jobs||0};
+    healReport();
+  });
+}
+function healSay(html){
+  const out=document.getElementById('healOut');
+  if(!out) return;
+  out.style.display='';
+  setHtml('healOut', html);
+}
+// What the folder says, grouped by the download each damaged file would
+// come back from - which is the daemon's own grouping and not a
+// rearrangement here: one season folder legitimately holds files from
+// several posts, and each episode is repaired from its own.
+function healReport(){
+  const tg=HEAL.targets||[], un=HEAL.unidentified||[];
+  if(!tg.length && !un.length){
+    healSay(`<div class="ok">${t('set.chk.clean','Everything in that folder still matches what the download proved.')}</div>`);
+    return;
+  }
+  // The three answers `heal_offer` gives for where a replacement would
+  // come from. Said here, at the first click, rather than discovered at
+  // the second: "this one cannot be repaired" is the reader's answer,
+  // not an error to meet after pressing a button.
+  const SRC={
+    recorded:t('set.chk.src.recorded','The download it came from is still on record here, so nothing has to be searched for.'),
+    search:t('set.chk.src.search','That download is no longer on record here, so another copy of it would be searched for by name.'),
+    none:t('set.chk.src.none','That download is no longer on record here, and the name is not one a search can be aimed with, so this cannot be repaired.')};
+  const n=tg.reduce((a,x)=>a+(x.files||[]).length,0)+un.length;
+  const parts=[`<div>${tn('set.chk.head',n,
+    '{n} file in that folder no longer matches what the download proved.',
+    '{n} files in that folder no longer match what the download proved.')}</div>`];
+  for(const x of tg){
+    // data-* + dataset rather than an inline JS string literal: a
+    // release name comes from an NZB somebody else wrote, and an
+    // attribute value is HTML-entity-decoded BEFORE the handler is
+    // compiled as JS (the trap fsGo's own renderer documents).
+    const can=x.source!=='none';
+    parts.push(`<div style="margin-top:8px">`
+      +`<div class="mono">${esc(x.name)}</div>`
+      +`<div class="dim">${(x.files||[]).map(esc).join(', ')}</div>`
+      +`<div class="dim">${SRC[x.source]||''}</div>`
+      +(can?`<div style="margin-top:3px"><button class="ghost mini" data-sha="${escA(x.nzb_sha)}" onclick="healStart(this,this.dataset.sha)">${
+          t('set.chk.repair','Repair this one')}</button></div>`:'')
+      +`</div>`);
+  }
+  // Named apart from the loop's own `can` above: same question, whole
+  // list rather than one row, and one shadowed name here would read as
+  // the other one leaking out of the loop.
+  const repairable=tg.filter(x=>x.source!=='none').length;
+  if(repairable>1) parts.push(`<div style="margin-top:10px"><button class="ghost" onclick="healStart(this,'')">${
+      t('set.chk.repairall','Repair all of it')}</button></div>`);
+  // Against every target and not just the repairable ones: the cap the
+  // daemon truncates at counts them all, so a warning drawn off the
+  // repairable subset would under-report by exactly the ones it cannot
+  // repair anyway.
+  if(HEAL.max && tg.length>HEAL.max)
+    parts.push(`<div class="dim">${t('set.chk.cap','{n} downloads are started at a time. Check the folder again afterwards to start the rest.',{n:HEAL.max})}</div>`);
+  if(un.length)
+    parts.push(`<div class="warn" style="margin-top:10px">${
+      t('set.chk.unident','These no longer match either, and cannot be repaired: the check file does not record which download they came from.')
+      } ${un.map(esc).join(', ')}</div>`);
+  parts.push(`<div class="dim" style="margin-top:10px">${t('set.chk.foot',
+    'Repairing fetches only the damaged part. Everything in the folder that is still intact is read straight off the disk, so a single bad file does not cost you the whole download again.')}</div>`);
+  healSay(parts.join(''));
+}
+// The click that SPENDS: one download per damaged post, each carrying
+// this folder so the intact bytes are adopted off the disk and only the
+// damaged remainder comes off the wire. `sha` names one post from the
+// report; empty means every one it listed.
+async function healStart(btn, sha){
+  const dir=HEAL.dir||'';
+  if(!dir) return;
+  await busy(btn,t('busy.starting','Starting…'), async()=>{
+    const j=mustOk(await api('heal_start',
+      `&value=${encodeURIComponent(dir)}${sha?`&alt=${encodeURIComponent(sha)}`:''}`));
+    const st=(j.started||[]).length, ref=j.refused||[], over=+j.not_started||0;
+    // The report is REPLACED by the outcome rather than left standing:
+    // its Repair buttons are now answers to a question that has been
+    // asked, and clicking one again is how the same post gets started
+    // twice in a reader's mind (the daemon refuses it, but a button
+    // that has to be refused should not still be there).
+    HEAL={};
+    // The pane cannot end up shown and empty, so this line is
+    // conditional: `heal_start` refuses a folder with nothing damaged
+    // in it outright, and every target it did accept ends as a start, a
+    // refusal or one of the `not_started` over the cap - so at least one
+    // of the three lines below always renders. A leading "0 repairs are
+    // on the queue" above the refusal that explains why is noise in
+    // front of the sentence the reader actually needs.
+    const parts=[];
+    if(st) parts.push(`<div class="ok">${tn('set.chk.started',st,
+      '{n} repair is on the queue now.','{n} repairs are on the queue now.')}</div>`);
+    if(over) parts.push(`<div class="dim">${t('set.chk.rest',
+      '{n} were not started this time. Check the folder again to start them.',{n:over})}</div>`);
+    for(const r of ref)
+      parts.push(`<div class="warn">${esc(r.name)}: ${esc(tErr(r.error)||r.error||'')}</div>`);
+    healSay(parts.join(''));
+    if(st) toast(t('toast.healstarted','Repairing. Watch it on the dashboard.'));
+    tick();
   });
 }
 

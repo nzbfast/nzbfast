@@ -1,0 +1,29 @@
+# S6: a second server that has nothing at all, beside a first that has
+# everything.
+
+[layout]
+name = "s6-dead-second-server"
+seed = 52
+note = """
+The mirror of s6-second-server-fills, and the cheaper failure to get
+wrong. A provider that carries none of a post is ordinary - a small
+backbone, a different retention, a takedown that only reached one spool
+- and the job must not be slowed, retried into the ground, or failed
+because one of its servers is useless for this post. The first server
+has everything; the end state is the clean one.
+
+100 % missing rather than a dead port, deliberately: a server that
+refuses to connect is a different fault (the connect path), and this
+one answers every request promptly and unhelpfully, which is the shape
+that actually costs a client something if it treats a 430 from any
+server as evidence about the article.
+"""
+
+[source]
+files = [{ name = "one.sided.bin", bytes = 120000 }]
+
+[encoding]
+article_bytes = 20000
+
+[[serve.second]]
+missing_pct = 100.0

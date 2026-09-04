@@ -136,6 +136,30 @@ ALIGN_TO(16, static const unsigned crc_mask[4]) = {
 };
 
 
+/* Load the final 1..15 bytes of the buffer without reading past them.
+ *
+ * The four tail sites below used to do a full ALIGNED 16-byte load while
+ * only `len` (1..15) bytes remained. On x86 that cannot fault - `src` is
+ * 16-byte aligned by this point and 16 divides the page size, so the load
+ * stays inside one page - and partial_fold() masks the surplus bytes out,
+ * which is why this has always produced the right CRC. It is an
+ * out-of-bounds read all the same, and AddressSanitizer reports it as
+ * one: the scheduled fuzz smoke's yenc_decode burst died on exactly this
+ * in the 256-bit sibling (run 33719528482, 3 Sep 2026; the reproducer is
+ * seeds/yenc_decode/crash-d94c80b4149bae0e461b8c0d86d2f5757efdf9cf).
+ *
+ * Zero-filling is not a NEW claim about which bytes partial_fold ignores:
+ * the `len < 16` path at the top of crc_fold() has always used exactly
+ * this bounded form, so this only makes the same claim at every tail
+ * instead of one of them. Local change against upstream rapidyenc - see
+ * ../VENDOR.txt.
+ */
+static __m128i crc_load_tail(const unsigned char *src, long len) {
+    __m128i part = _mm_setzero_si128();
+    memcpy(&part, src, (size_t)len);
+    return part;
+}
+
 static uint32_t crc_fold(const unsigned char *src, long len, uint32_t initial) {
     unsigned long algn_diff;
     __m128i xmm_t0, xmm_t1, xmm_t2, xmm_t3;
@@ -221,7 +245,7 @@ static uint32_t crc_fold(const unsigned char *src, long len, uint32_t initial) {
         if (len == 0)
             goto done;
 
-        xmm_crc_part = _mm_load_si128((__m128i *)src + 3);
+        xmm_crc_part = crc_load_tail(src + 48, len);
     } else if (len >= 32) {
         len -= 32;
 
@@ -245,7 +269,7 @@ static uint32_t crc_fold(const unsigned char *src, long len, uint32_t initial) {
         if (len == 0)
             goto done;
 
-        xmm_crc_part = _mm_load_si128((__m128i *)src + 2);
+        xmm_crc_part = crc_load_tail(src + 32, len);
     } else if (len >= 16) {
         len -= 16;
 
@@ -264,11 +288,11 @@ static uint32_t crc_fold(const unsigned char *src, long len, uint32_t initial) {
         if (len == 0)
             goto done;
 
-        xmm_crc_part = _mm_load_si128((__m128i *)src + 1);
+        xmm_crc_part = crc_load_tail(src + 16, len);
     } else {
         if (len == 0)
             goto done;
-        xmm_crc_part = _mm_load_si128((__m128i *)src);
+        xmm_crc_part = crc_load_tail(src, len);
     }
 
 partial:

@@ -1,0 +1,58 @@
+# C2 + C3 + C13 + P1: a stored split set over a COMPRESSED inner level.
+
+[layout]
+name = "nc-r2c-store-over-a-compressed-inner-level"
+seed = 173
+note = """
+The nested corpus's `r2c-depth2-store-compressed` leg: `r2`'s classic
+obfuscation shape with the inner level genuinely compressed, so a
+client that reaches the payload has run the RAR decompressor on the way
+- which is the whole question, and the reason the corpus keeps this leg
+apart from `r2`.
+
+It took two keys that landed on 4 Sep 2026 from different lanes, and it
+is the row where they meet. `[[container.inner]]` (C13, gap H2) is what
+lets a level differ from the one above it; before it, one `[container]`
+table described every level and a compressed inner under a stored outer
+had no spelling at all. `[source] content = "compressible"` is the
+other half: the RAR writers fall back to STORE per entry whenever
+compression would not shrink it, and neutral `[source]` bytes come off
+the ChaCha stream, so the inner level would have been a stored archive
+wearing a C3 label and `ContainerError::NothingToCompress` refuses one.
+With something to shrink, it really compresses.
+
+Note which level carries which selection, because it is the point of
+the row rather than an arrangement. The INNER level compresses, over
+the payload. The OUTER level is stored and split, over the inner
+archive's output - and that output is compressed bytes, which are
+incompressible, so a compressed outer level could not be written here
+at all. Compression composes downwards only, and this is the shape that
+says so.
+
+The end state is the payload files and the PAR2 index. The volumes are
+spent by the unpack, the inner archive is consumed by the second pass,
+and a clean run never fetches the parity.
+"""
+
+[source]
+files = [
+    { name = "feature.bin", bytes = 60000, content = "compressible" },
+    { name = "notes.txt", bytes = 3000, content = "compressible" },
+]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 10000
+
+[[container.inner]]
+kind = "rar-compressed"
+
+[recovery]
+kind = "par2"
+redundancy_pct = 10
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

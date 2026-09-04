@@ -195,7 +195,7 @@ pub fn nzb_identity(xml: &[u8]) -> Result<NzbIdentity, crate::nzb::NzbError> {
             }
         }
         if let Some(name) = f.filename_hint() {
-            let stem = crate::extract::release_stem(name);
+            let stem = crate::names::release_stem(name);
             if !stem.is_empty() {
                 *stems.entry(stem).or_default() += 1;
             }

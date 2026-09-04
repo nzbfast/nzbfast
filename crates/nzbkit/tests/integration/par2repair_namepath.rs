@@ -136,7 +136,12 @@ fn apply_every_set(dir: &Path) -> Vec<nzbkit::par2repair::RepairReport> {
         // `true` is `get::latesets`' own argument: its shortfall is the
         // last word on the set, so it opts into patching an existing
         // member - see `par2repair::status::publishable`.
-        match repair_dir_set_with_donors_scoped(dir, &id, &[], PacketScope::Nested, true) {
+        //
+        // `None` for the applicability whitelist (F6): this helper
+        // applies EVERY set it finds, so every set is applicable and the
+        // directory-wide reading is the right one. The narrowed reading
+        // has its own fixture below.
+        match repair_dir_set_with_donors_scoped(dir, &id, &[], PacketScope::Nested, true, None) {
             Ok(RepairStatus::Repaired(r)) => out.push(r),
             Ok(other) => eprintln!("set {id:02x?}: {other:?}"),
             Err(e) => panic!("set {id:02x?} failed: {e}"),
@@ -423,4 +428,115 @@ fn two_sets_claiming_one_name_through_the_scoped_entry_point() {
         names_in(dir)
     );
     assert_eq!(names_in(dir).len(), 2, "dir holds {:?}", names_in(dir));
+}
+
+/// A set the caller will NEVER apply does not cost a running set's
+/// target its declared name - F6, 1 Sep 2026.
+///
+/// `get::latesets` discovers sets with `PacketScope::Nested`, so the
+/// walk reaches a recovery set that came out of an extracted archive and
+/// whose packets live only in a subdirectory. That pass then REFUSES
+/// such a set in every round: `published_here` wants every packet either
+/// directly in the output directory or at a path an ACTIVE set declares,
+/// and `named` is derived once from the active sets and never grows. The
+/// set can therefore never land a file - but its FileDesc names were
+/// still voting in `PacketCatalog::declared_and_contested`, so a root
+/// set's `X.bin` was contested against a competitor that would never
+/// run, and `dupclaim` retargeted it to `X.bin.dup-<file id>`. The
+/// payload is kept, under a name nothing downstream imports, beside
+/// whatever damaged original was on disk (a declared name is never
+/// swept).
+///
+/// Both arms run on the SAME fixture, which is what makes either
+/// assertion mean anything:
+///
+/// - narrowed (`Some({root})`, what the late-set pass now passes): the
+///   root set's member lands at its DECLARED name.
+/// - directory-wide (`None`, which every other entry point keeps and
+///   `repair_sets_catalog` relies on): it is still disambiguated. That
+///   is today's behaviour, it proves the fixture really does produce a
+///   cross-set collision, and it is the guard against the narrowing
+///   being widened into a blanket "never contest".
+#[test]
+fn a_set_the_caller_cannot_apply_does_not_contest_a_declared_name() {
+    if !have_par2() {
+        eprintln!("namepath phantom: par2 unavailable - skipping");
+        return;
+    }
+    // Root set declares `X.bin`; a set whose packets exist ONLY under
+    // `sub/` declares `X.bin` too, for DIFFERENT content, so the two
+    // descriptors differ and the name is genuinely contested when both
+    // sets are allowed to vote.
+    fn fixture(dir: &Path) -> [u8; 16] {
+        std::fs::write(dir.join("X.bin"), payload(100_000, 0x5eed_0006)).unwrap();
+        par2_create(dir, "setroot", &["X.bin"]);
+        let sub = dir.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("X.bin"), payload(140_000, 0x5eed_0007)).unwrap();
+        par2_create(&sub, "setsub", &["X.bin"]);
+        // The subdirectory set's own payload goes: only its PACKETS
+        // matter here, and leaving 140,000 bytes of a foreign release
+        // about would grade the adoption scan instead of the vote.
+        std::fs::remove_file(sub.join("X.bin")).unwrap();
+        // Only the parity can produce the root set's member now, so the
+        // repair has to build a target and the claim loop has to route
+        // it somewhere.
+        std::fs::remove_file(dir.join("X.bin")).unwrap();
+        // FLAT discovery, so this is the ROOT set and nothing else - the
+        // one the late-set pass would attempt.
+        let root = disk_set_ids(dir).expect("disk_set_ids");
+        assert_eq!(
+            root.len(),
+            1,
+            "the flat walk must see exactly the root set: {root:02x?}"
+        );
+        root[0]
+    }
+    fn repaired(
+        dir: &Path,
+        id: &[u8; 16],
+        applicable: Option<&std::collections::HashSet<[u8; 16]>>,
+    ) -> nzbkit::par2repair::RepairReport {
+        match repair_dir_set_with_donors_scoped(dir, id, &[], PacketScope::Nested, true, applicable)
+        {
+            Ok(RepairStatus::Repaired(r)) => r,
+            other => panic!("the root set did not repair: {other:?}"),
+        }
+    }
+
+    let g = scratch_dir("par2repair-namepath-phantom");
+    let dir: &Path = &g;
+    let root = fixture(dir);
+    let only_root: std::collections::HashSet<[u8; 16]> = std::iter::once(root).collect();
+    let r = repaired(dir, &root, Some(&only_root));
+    assert_eq!(r.per_file.len(), 1, "one declared file: {:?}", r.per_file);
+    assert_eq!(
+        r.per_file[0].path,
+        nzbkit::disk::join_out_name(dir, &nzbkit::disk::sanitize_out_name(&r.per_file[0].name)),
+        "the root set's member was disambiguated against a set the caller \
+         refuses to apply - dir holds {:?}",
+        names_in(dir)
+    );
+    assert!(
+        dir.join("X.bin").is_file(),
+        "nothing landed at the declared name: dir holds {:?}",
+        names_in(dir)
+    );
+
+    // Same fixture, no whitelist: the directory-wide reading still
+    // contests, so the narrowing above is the whitelist and not a
+    // loosening of the collision rule itself.
+    let g2 = scratch_dir("par2repair-namepath-phantom-wide");
+    let wide: &Path = &g2;
+    let root2 = fixture(wide);
+    let r2 = repaired(wide, &root2, None);
+    assert_eq!(r2.per_file.len(), 1, "one declared file: {:?}", r2.per_file);
+    assert_ne!(
+        r2.per_file[0].path,
+        nzbkit::disk::join_out_name(wide, &nzbkit::disk::sanitize_out_name(&r2.per_file[0].name)),
+        "the directory-wide reading did not contest, so this fixture never \
+         built a cross-set collision and the narrowed arm above graded \
+         nothing - dir holds {:?}",
+        names_in(wide)
+    );
 }

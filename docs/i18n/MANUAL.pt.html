@@ -96,6 +96,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>Manual do usuário</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -742,6 +743,29 @@ e o ponteiro <code>.strm</code> o incorporam para você; gerá-lo (<code>/m3u</c
 exige a chave. O serviço puro de bytes de um download já ativo permanece aberto, e
 instalações sem chave se comportam como antes.</div>
 
+<p><b>Verificar uma pasta muito tempo depois.</b> Cada download comprova uma soma
+de verificação para cada ficheiro que traz, e os ficheiros <code>.par2</code> que
+transportavam essas somas são limpos no fim, por isso meses mais tarde normalmente
+não resta nada com que comparar a pasta. Em vez disso, o nzbfast guarda-as num
+pequeno ficheiro oculto <code>.nzbfast.manifest</code> ao lado dos dados. Em
+Definições → Downloads → <b>Verificar downloads mais tarde</b> aponta-o a uma pasta
+concluída: lê todos os ficheiros, comunica o que já não corresponde e propõe
+repará-lo. Reparar é um segundo clique, separado, e traz apenas a parte danificada -
+tudo o que continua intacto é lido diretamente do seu disco. A caixa do mesmo cartão
+desliga o ficheiro de verificação se preferir não o ter, e
+<code>nzbfast verify</code> na linha de comandos também o lê.</p>
+
+<p>O mesmo cartão <b>Verificar downloads mais tarde</b> também pode funcionar
+sozinho com regularidade: o interruptor <b>Verificar as pastas concluídas
+com regularidade</b>, desligado a não ser que o ligue, percorre então as
+pastas concluídas que têm um ficheiro de verificação e inicia uma reparação
+de tudo o que já não corresponde, sem que ninguém clique. Nunca corre
+enquanto uma transferência está a decorrer ou à espera, e como verificar
+significa ler todos os ficheiros de uma pasta de uma ponta à outra, isso
+custa ao disco mesmo quando nada está estragado. Os limites junto ao
+interruptor definem quantas reparações e quanta transferência uma
+verificação pode iniciar.</p>
+
 <h2 id="servers">8 · Servidores Usenet</h2>
 <p>Ajustes → <b>Servidores Usenet</b> é o editor completo: adicionar, editar, remover, reordenar e colocar ou tirar
 do pool qualquer servidor. Cada servidor tem:</p>
@@ -848,6 +872,20 @@ continua a verificar a soma de verificação de cada artigo. <i>Leve</i> salta t
 essas somas de artigo assim que o PAR2 cobre um ficheiro: o dano aparece um instante
 depois, no seu bloco. Nas três, a passagem final e qualquer reparação usam MD5 completo,
 e uma transferência sem ficheiros PAR2 mantém as suas somas de artigo.</p>
+<p><b>Verificação final rápida</b> <span class="pill live">live</span> muda a
+verificação que relê do disco os seus ficheiros terminados: a passagem final no fim de uma
+transferência e <code>nzbfast verify</code> na linha de comandos, onde <code>--fast</code>
+é a mesma escolha. Normalmente cada ficheiro é provado por uma impressão sobre o ficheiro
+inteiro, e essa é uma única leitura num só núcleo por mais núcleos que a máquina tenha. Com
+isto ligado, cada ficheiro é provado pelas somas de verificação por bloco do conjunto PAR2,
+e essas correm em todos os núcleos ao mesmo tempo. Muito mais rápido num disco local veloz,
+e de pouco valor numa pasta de rede ou num disco de pratos, onde o disco já é o limite.
+Está desligada enquanto não a pedir, e é isto que aceita quando o faz: um conjunto PAR2
+pode levar dois registos que descrevem ficheiros diferentes, e o par2cmdline e as outras
+ferramentas chamam danificado a um conjunto assim onde o nzbfast lhe chama então limpo.
+Nenhum conjunto construído por software normal tem essa forma, uma verificação dos
+primeiros 16 KiB continua a recusar qualquer versão acidental dela, e uma reparação
+prova-se à maneira antiga diga o que disser esta definição.</p>
 <h3>Disco e cota <span class="pill live">ao vivo</span></h3>
 <p><b>Espaço livre mínimo</b> (pausa novos trabalhos abaixo dele; 2 GB por padrão, 0 desativa), <b>cota de download</b> por
 dia ou mês (UTC; trabalhos Forçar a ignoram), <b>limite de memória</b> - o orçamento de RAM do
@@ -1017,7 +1055,7 @@ trabalhar com essas contas.</div>
 <tr><td>Servidor de retransmissão, Canais</td><td>A rede IRC que transporta os anúncios (anfitrião ou anfitrião:porta) e os canais a escutar, separados por vírgulas. Uma alteração faz efeito na ligação seguinte: desliga e volta a ligar o fluxo para a aplicar já.</td></tr>
 <tr><td>Nomear por correlação</td><td>As retransmissões públicas em direto não levam nomes de ficheiro, por isso a maioria dos envios ofuscados não pode ser associada diretamente. O que um anúncio fixa é quando uma publicação apareceu e o seu tamanho. Isto compara a hora e o tamanho anunciados com os envios sem nome e, quando encaixam, sugere o nome verdadeiro em Navegar. Uma sugestão é assinalada como tal, exige o teu clique e nunca renomeia ficheiros no disco.</td></tr>
 <tr><td>Aplicar automaticamente as correspondências fortes</td><td>Desligado por omissão, e exigente quando ligado: o tamanho tem de bater certo, nenhum outro anúncio pode encaixar quase tão bem, e o anúncio tem de voltar a escolher este envio na verificação inversa. Um nome aplicado só muda a forma como a publicação é mostrada, é marcado como inferido e retira-se sozinho se uma transferência concluída o desmentir. Tudo o que for mais fraco continua uma sugestão.</td></tr>
-<tr><td>Histórico de anúncios</td><td>O fluxo em direto só ouve os anúncios posteriores a ser ligado. Isto vai buscar cerca de seis meses de anúncios antigos a uma base de pres pública, com cortesia e uma só vez, para que também os envios já indexados possam ser associados. Corre meia hora ou assim em segundo plano.</td></tr>
+<tr><td>Histórico de anúncios</td><td>O fluxo em direto só ouve os anúncios posteriores a ser ligado. Isto vai buscar uma só vez os anúncios antigos mais recentes ao predb.net, uma base de pres pública, para que também os envios já indexados possam ser associados. O predb.net pede que não se construa uma base própria a partir dele, por isso só são obtidas as duas páginas mais recentes de cada secção, no máximo 10 pedidos por minuto. Corre alguns minutos em segundo plano.</td></tr>
 </table></div>
 
 <h3>Biblioteca, Segurança, Interface</h3>
@@ -1097,6 +1135,18 @@ Um script pode deixar um auxiliar rodando em segundo plano ao sair e o
 nzbfast não vai matá-lo, mas o nzbfast para de ler a saída do script
 no momento em que o próprio script termina: dê a um auxiliar em segundo plano o seu
 próprio redirecionamento de saída, ou ele será interrompido na primeira vez que tentar imprimir.</p>
+<p>Os scripts, e as ferramentas externas opcionais <code>unrar</code> e
+<code>par2</code>, são executados dentro de um confinamento onde a máquina
+oferece um: <code>sandbox-exec</code> no macOS, <code>bwrap</code> no Linux. Um
+script confinado mantém acesso total de leitura e total à rede, por isso os
+notificadores e as ferramentas de biblioteca não são afetados; só pode escrever
+dentro das pastas que o nzbfast já usa (a pasta de transferências, qualquer
+destino de movimentação, a pasta vigiada e a pasta temporária do sistema).
+Desliga <b>Limitar onde os scripts podem escrever</b> em Definições &rarr;
+Pastas se um script precisar de escrever noutro sítio e falhar com "operation
+not permitted". Onde não há confinamento disponível tudo corre exatamente como
+sempre correu - uma transferência nunca falha por isso - e a linha abaixo desse
+interruptor diz qual o mecanismo em vigor. O Windows ainda não tem nenhum.</p>
 <h3>Script pré-fila</h3>
 <p>Um segundo gancho roda <em>antes</em> de um download entrar na fila
 (Ajustes → Pastas → Script pré-fila), com o contrato pre-queue do SABnzbd:
@@ -1439,7 +1489,7 @@ Uma chave que você definir depois em Ajustes ainda ganha dela.</div>
 <tr><td><code>nzbfast serve</code></td><td>Roda o daemon (painel + API + automação). <code>--open</code> abre o navegador; <code>--apikey</code> define a chave na mão (<a href="#firstrun-key">§2</a>); <code>--bind</code> escolhe o endereço de escuta, padrão <code>0.0.0.0</code> (todas as interfaces), <code>127.0.0.1</code> só para esta máquina. Veja <code>--help</code> para a lista completa de flags - cada ajuste do painel tem um flag gêmeo.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Baixa um NZB, pipeline completo, sem daemon. <code>--preflight</code> aborta cedo se a publicação não puder ser concluída; <code>--password</code> para conjuntos criptografados.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Veredito de disponibilidade - COMPLETE / REPAIRABLE / IMPOSSIBLE - sem baixar o conteúdo.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Verifica arquivos contra o conjunto PAR2 em um diretório.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Verifica arquivos contra o conjunto PAR2 em um diretório. Recorre ao manifesto do settle quando os arquivos PAR2 já não existem. Sai com 0 quando os arquivos estão íntegros e com 1 quando encontra danos; um diretório sem nada a conferir também sai com 0 e diz isso na saída de erro. <code>--fast</code> prova cada ficheiro pelas somas de verificação por bloco do conjunto em vez da sua impressão sobre o ficheiro inteiro, o que é bem mais rápido num disco veloz e traz o compromisso descrito no <a href="#settings">§9</a>.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>O benchmark do sistema + relatório de diversidade, no terminal.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Varre grupos para o índice / pesquisa nele, sem o daemon.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Importa servidores de um ini do SABnzbd.</td></tr>

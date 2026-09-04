@@ -1,38 +1,72 @@
 [workspace]
 members = [
+    "crates/nzbkit-base",
     "crates/nzbkit",
+    "crates/nzbfast-core",
+    "crates/nzbfast-unpack",
+    "crates/nzbfast-meta",
+    "crates/nzbfast-engine",
+    "crates/nzbfast-daemon",
+    "crates/nzbfast-tasks",
+    "crates/nzbfast-api",
     "crates/nzbfast",
     "crates/nzbfast-ffi",
     "crates/nzbtray",
+    "crates/postfast",
+    "crates/parfast",
     "vendor/rars",
     "vendor/tiny_http",
+    "vendor/lzma-rust2",
 ]
-# nzbfast-ffi is deliberately NOT a default member: it turns on
-# nzbfast's `ffi` feature, and feature unification would then compile
-# the whole module tree a second time (as the lib target) in every
-# workspace-wide build and test run. Build it explicitly:
+# nzbfast-ffi is deliberately NOT a default member. Two reasons, and the
+# FIRST of them ended on 2 Sep 2026 with the crate-split step 4.5 - read
+# the history below before citing it.
+#
+# What is left: it is a `staticlib`, so a workspace-wide BUILD pays a
+# whole-archive link for a target only the iOS app consumes, and it turns
+# on nzbfast's `ffi` feature, which unifies features (tokio, rusqlite)
+# wider than any shipped build resolves. Build it explicitly:
 # `cargo build -p nzbfast-ffi --target aarch64-apple-ios-sim`.
 #
-# `--workspace` OVERRIDES this line, so a command that passes it gets
-# none of the protection above. That is not hypothetical: ci-private's
-# `cargo nextest archive` carried `--workspace` from the day it was
-# written until 23 Aug 2026, so every push paid the duplicate on both
-# the Linux and the Windows leg while this comment said it did not.
-# Measured cold on an 18-core box with the flag as the only variable:
-# the archive build goes 50.9 s -> 64.7 s wall and 381 s -> 455 s of
-# CPU, the cached target/ 3.30 GB -> 5.53 GB, the archive artifact
-# 159 MB -> 244 MB, and the test set 4,701 -> 6,464 - of which 1,774 are
-# the nzbfast lib root re-running a strict SUBSET of the bin root's own
-# tests. Byte-identical
-# ones: `feature = "ffi"` has exactly ONE site in this workspace,
-# `crates/nzbfast/src/lib.rs`'s crate-root `#![cfg]`, so the two roots
-# compile the same module files under the same resolved features and
-# the duplicate sampled nothing. Before adding `--workspace` to anything
-# that BUILDS (as opposed to `cargo metadata`, `cargo fmt` or another
-# command that emits no artifacts), price it - and prefer naming the
-# package, which is how the two clippy gates reach nzbfast-ffi today
-# without dragging the ffi feature through a link step.
-default-members = ["crates/nzbkit", "crates/nzbfast", "crates/nzbtray", "vendor/rars", "vendor/tiny_http"]
+# WHAT ENDED: the DUPLICATE COMPILE. Until step 4.5, `feature = "ffi"`
+# had exactly one site - `crates/nzbfast/src/lib.rs`'s crate-root
+# `#![cfg]` - so turning it on gave the package a SECOND root over the
+# same module files, and a workspace-wide run compiled the whole tree
+# twice and ran ~1,774 tests that were a strict subset of the bin root's.
+# Measured cold on an 18-core box on 23 Aug 2026 with `--workspace` as
+# the only variable: archive build 50.9 s -> 64.7 s wall, 381 s -> 455 s
+# CPU, cached target/ 3.30 GB -> 5.53 GB, archive artifact 159 MB ->
+# 244 MB, test set 4,701 -> 6,464. lib.rs is now the package's ONE root
+# and carries the tree in every configuration, so none of that doubling
+# exists any more; `ffi` gates three `embedded_*` functions.
+#
+# `--workspace` still OVERRIDES this line, so a command that passes it
+# gets none of the protection above - and the flag has been added by
+# accident before (ci-private's `cargo nextest archive` carried it from
+# the day it was written until 23 Aug 2026, while this comment said it
+# did not). Before adding `--workspace` to anything that BUILDS (as
+# opposed to `cargo metadata`, `cargo fmt` or another command that emits
+# no artifacts), price it - and prefer naming the package, which is how
+# the two clippy gates reach nzbfast-ffi today without dragging the ffi
+# feature through a link step.
+default-members = [
+    "crates/nzbkit-base",
+    "crates/nzbkit",
+    "crates/nzbfast-core",
+    "crates/nzbfast-unpack",
+    "crates/nzbfast-meta",
+    "crates/nzbfast-engine",
+    "crates/nzbfast-daemon",
+    "crates/nzbfast-tasks",
+    "crates/nzbfast-api",
+    "crates/nzbfast",
+    "crates/nzbtray",
+    "crates/postfast",
+    "crates/parfast",
+    "vendor/rars",
+    "vendor/tiny_http",
+    "vendor/lzma-rust2",
+]
 resolver = "2"
 
 [workspace.package]
@@ -203,5 +237,48 @@ strip = "symbols"
 [profile.dev.package.rars]
 opt-level = 2
 
+# THREE MORE FIXTURE BUILDERS, same argument as rars above and measured
+# the same way (research/TEST-SWEEP-SLOW-TESTS-2026-09-01.md, class C):
+# `aes` and `cbc` encrypt the two 24 MB RAR-crypt fixtures at opt-level 0
+# in the sweep, and `rusqlite` runs every index test's SQLite through an
+# unoptimised binding. None of the three is in any timing assertion - the
+# pool fault rigs measure nzbkit's OWN throughput, and a blanket
+# `package."*"` override was tried and rejected for exactly that reason
+# (see the rars note above). Anything wider than these three is a
+# decision about the rigs, not about fixtures.
+[profile.dev.package.aes]
+opt-level = 2
+[profile.dev.package.cbc]
+opt-level = 2
+[profile.dev.package.rusqlite]
+opt-level = 2
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
+
 [profile.test.package.rars]
 opt-level = 2
+
+# sevenz-rust2 0.22.2 vendored from crates.io (Apache-2.0) for TWO changes
+# now. The first: its AES decoder read its input 512 bytes at a time
+# through a stack buffer and copied every plaintext byte through an
+# intermediate,
+# which held an encrypted 1 GiB Copy-method member at 0.47 s of user
+# CPU against 7-Zip's 0.26 on an M1 Ultra
+# (research/RAR-PERF-AUDIT-2026-09-02.md, round 10). The second: a
+# caller-supplied entropy source (src/write_entropy.rs), because
+# AesEncoderOptions drew its salt and IV from the OS, so no encrypted 7z
+# the posting-layout generator wrote could be reproduced from a seed -
+# the same blocker rars::Entropy answered for the RAR writers. Os is
+# still the default in both crates and must stay that way. See
+# vendor/sevenz-rust2/README-nzbfast.md; re-apply both on the next bump.
+# lzma-rust2 0.20.0 vendored (Apache-2.0). It started as ONE change - its
+# multi-threaded LZMA2 reader only spawned a worker once every existing
+# worker had marked itself active, which the dispatcher outran, so a
+# 16-block stream decoded on one or two threads (8.1 s vs 2.7 s fixed on
+# an 8-vCPU EPYC) - and now carries four, including a bit-tree fastpath
+# in the decoder (-2.4% single-thread on x86) and the differential test
+# that fastpath is carried by. vendor/lzma-rust2/README-nzbfast.md is the
+# whole list, with the measurement for each; re-apply them on a bump.
+[patch.crates-io]
+sevenz-rust2 = { path = "vendor/sevenz-rust2" }
+lzma-rust2 = { path = "vendor/lzma-rust2" }

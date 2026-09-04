@@ -96,6 +96,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
 <div class="wrap">
 <nav>
   <a class="brand" href="/index.html">⚡ nzbfast <small>Benutzerhandbuch</small></a>
+  <!--__NZBFAST_APP_NAV__-->
   <!-- i18n switcher: same markup in every language; hrefs never change -->
   <div class="langsw" style="font-size:11.5px;margin-top:6px;color:var(--dim)"><a href="/manual">EN</a> · <a href="/manual/fr">FR</a> · <a href="/manual/de">DE</a> · <a href="/manual/it">IT</a> · <a href="/manual/es">ES</a> · <a href="/manual/nl">NL</a> · <a href="/manual/pt">PT</a> · <a href="/manual/sv">SV</a> · <a href="/manual/da">DA</a> · <a href="/manual/nb">NB</a> · <a href="/manual/fi">FI</a> · <a href="/manual/tr">TR</a> · <a href="/manual/ro">RO</a> · <a href="/manual/he">HE</a> · <a href="/manual/ar">AR</a> · <a href="/manual/fa">FA</a></div>
   <ol>
@@ -788,6 +789,29 @@ Ausstellen (<code>/m3u</code>) verlangt den Key. Das reine Byte-Ausliefern eines
 schon aktiven Downloads bleibt offen, und Installationen ohne Key verhalten sich wie
 bisher.</div>
 
+<p><b>Einen Ordner lange nach dem Download prüfen.</b> Jeder Download weist für
+jede geholte Datei eine Prüfsumme nach, und die <code>.par2</code>-Dateien, die
+diese Prüfsummen getragen haben, werden danach aufgeräumt - Monate später gibt es
+also normalerweise nichts mehr, womit sich der Ordner vergleichen ließe. nzbfast
+hebt sie stattdessen auf, in einer kleinen versteckten
+<code>.nzbfast.manifest</code> neben den Dateien. Unter Einstellungen → Downloads →
+<b>Downloads später prüfen</b> zeigst du damit auf einen fertigen Ordner: es liest
+jede Datei, meldet, was nicht mehr übereinstimmt, und bietet eine Reparatur an.
+Das Reparieren ist ein zweiter, eigener Klick, und es holt nur den beschädigten
+Teil - alles noch Heile wird direkt von deiner Platte gelesen. Das Häkchen in
+derselben Karte schaltet die Prüfdatei ab, wenn du sie lieber nicht möchtest, und
+<code>nzbfast verify</code> auf der Kommandozeile liest sie ebenfalls.</p>
+
+<p>Dieselbe Karte <b>Downloads später prüfen</b> kann sich auch selbst nach
+einem Zeitplan richten: Der Schalter <b>Fertige Ordner nach Zeitplan
+prüfen</b> ist aus, solange du ihn nicht einschaltest; eingeschaltet geht er
+die fertigen Ordner mit Prüfdatei durch und startet eine Reparatur für alles,
+was nicht mehr übereinstimmt, ohne dass jemand klickt. Er läuft nie, während
+ein Download läuft oder wartet, und weil Prüfen bedeutet, jede Datei eines
+Ordners von vorn bis hinten zu lesen, kostet das die Platte, selbst wenn
+nichts kaputt ist. Grenzen neben dem Schalter begrenzen, wie viele
+Reparaturen und wie viel Download eine Prüfung starten darf.</p>
+
 <h2 id="servers">8 · Usenet-Server</h2>
 <p>Einstellungen → <b>Usenet-Server</b> ist der volle Editor: hinzufügen, bearbeiten, entfernen, umsortieren und
 jeden Server in den Pool holen oder aus ihm herausnehmen. Jeder Server hat:</p>
@@ -901,6 +925,21 @@ schneller ist, und prüft weiterhin die eigene Prüfsumme jedes Artikels. <i>Spa
 Schaden fällt dann einen Moment später auf, bei seinem Block. In allen dreien rechnen
 der abschließende Durchgang und jede Reparatur volles MD5, und ein Download ohne
 PAR2-Dateien behält seine Artikel-Prüfsummen.</p>
+<p><b>Schnelle Endprüfung</b> <span class="pill live">live</span> ändert die Prüfung,
+die Ihre fertigen Dateien wieder von der Festplatte liest: den abschließenden Durchgang am
+Ende eines Downloads und <code>nzbfast verify</code> auf der Kommandozeile, wo
+<code>--fast</code> dieselbe Wahl ist. Normalerweise wird jede Datei durch eine Prüfsumme
+über die gesamte Datei belegt, und das ist ein einzelner Durchlauf auf einem Kern, ganz
+gleich wie viele Kerne die Maschine hat. Mit dieser Option wird jede Datei stattdessen über
+die blockweisen Prüfsummen des PAR2-Satzes belegt, und die laufen auf allen Kernen
+gleichzeitig. Auf einer schnellen lokalen Platte deutlich flotter, auf einer Netzfreigabe
+oder einer sich drehenden Platte kaum spürbar, denn dort ist die Platte ohnehin die Grenze.
+Sie ist aus, solange Sie sie nicht verlangen, und darauf lassen Sie sich dann ein: ein
+PAR2-Satz kann zwei Angaben tragen, die verschiedene Dateien beschreiben, und par2cmdline
+und die anderen Werkzeuge nennen so einen Satz beschädigt, wo nzbfast ihn dann sauber
+nennt. Kein von normaler Software gebauter Satz sieht so aus, eine Prüfung der ersten
+16 KiB weist weiterhin jede unabsichtliche Fassung davon zurück, und eine Reparatur belegt
+sich auf die alte Weise, was diese Einstellung auch sagt.</p>
 <h3>Festplatte &amp; Quota <span class="pill live">live</span></h3>
 <p><b>Minimaler freier Platz</b> (neue Jobs darunter pausieren; standardmäßig 2 GB, 0 schaltet es ab), <b>Download-Quota</b>
 pro Tag oder Monat (UTC; Erzwingen-Jobs umgehen sie), <b>Speicher-Budget</b> - die
@@ -1081,7 +1120,7 @@ stattdessen mit diesen Konten.</div>
 <tr><td>Relay-Server, Relay-Kanäle</td><td>Das IRC-Netz, das die Ankündigungen trägt (Host oder Host:Port), und die kommagetrennten Kanäle. Eine Änderung greift beim nächsten Verbinden: Feed aus und wieder an, um sie sofort anzuwenden.</td></tr>
 <tr><td>Über Korrelation benennen</td><td>Die öffentlichen Live-Relays führen keine Dateinamen, die meisten verschleierten Posts lassen sich also nicht direkt zuordnen. Was eine Ankündigung festhält, ist der Zeitpunkt und die Größe. Dies vergleicht Ankündigungszeit und -größe mit namenlosen Posts und schlägt bei Passung den echten Namen unter Durchsuchen vor. Ein Vorschlag ist als solcher markiert, braucht deinen Klick und benennt nie Dateien auf der Platte um.</td></tr>
 <tr><td>Starke Treffer automatisch anwenden</td><td>Standardmäßig aus, und streng, wenn an: die Größe muss eng passen, keine andere Ankündigung darf fast genauso gut passen, und die Ankündigung muss diesen Post in der Gegenprobe zurückwählen. Ein angewandter Name ändert nur die Anzeige, ist als abgeleitet markiert und verschwindet von selbst, wenn ein fertiger Download ihn widerlegt. Alles Schwächere bleibt ein Vorschlag.</td></tr>
-<tr><td>Ankündigungs-Historie</td><td>Der Live-Feed hört nur, was nach dem Einschalten angekündigt wird. Dies holt rund sechs Monate frühere Ankündigungen von einer öffentlichen Pre-Datenbank, höflich und einmalig, damit auch bereits indizierte Posts zugeordnet werden können. Läuft etwa eine halbe Stunde im Hintergrund.</td></tr>
+<tr><td>Ankündigungs-Historie</td><td>Der Live-Feed hört nur, was nach dem Einschalten angekündigt wird. Dies holt einmalig die jüngsten früheren Ankündigungen von predb.net, einer öffentlichen Pre-Datenbank, damit auch bereits indizierte Posts zugeordnet werden können. predb.net bittet darum, daraus keine eigene Datenbank aufzubauen, deshalb werden nur die zwei neuesten Seiten jeder Sektion geholt, höchstens 10 Anfragen pro Minute. Läuft ein paar Minuten im Hintergrund.</td></tr>
 </table></div>
 
 <h3>Bibliothek, Sicherheit, Oberfläche</h3>
@@ -1165,6 +1204,18 @@ Ein Skript darf beim Beenden einen Helfer im Hintergrund weiterlaufen lassen und
 nzbfast wird ihn nicht töten, aber nzbfast hört in dem Moment auf, die Ausgabe des
 Skripts zu lesen, in dem das Skript selbst endet: gib einem Hintergrund-Helfer
 eine eigene Ausgabe-Umleitung, sonst wird er beim ersten Druckversuch gestoppt.</p>
+<p>Skripte und die optionalen externen Helfer <code>unrar</code> und
+<code>par2</code> laufen in einer Abschottung, sofern der Rechner eine anbietet:
+<code>sandbox-exec</code> unter macOS, <code>bwrap</code> unter Linux. Ein
+abgeschottetes Skript behält vollen Lesezugriff und vollen Netzwerkzugriff,
+Benachrichtiger und Mediathek-Werkzeuge sind also unberührt; schreiben darf es
+nur in die Ordner, die nzbfast ohnehin nutzt (den Download-Ordner, jedes
+Verschiebe-Ziel, den Überwachungsordner und den temporären Systemordner).
+Schalte <b>Schreibzugriff von Skripten begrenzen</b> in Einstellungen &rarr;
+Ordner aus, wenn ein Skript woanders schreiben muss und mit "operation not
+permitted" scheitert. Wo keine Abschottung verfügbar ist, läuft alles genau wie
+bisher - ein Download schlägt deswegen nie fehl - und die Zeile unter dem
+Schalter sagt, welcher Mechanismus aktiv ist. Für Windows gibt es noch keinen.</p>
 <h3>Pre-Queue-Skript</h3>
 <p>Ein zweiter Haken läuft, <em>bevor</em> ein Download in die Warteschlange kommt
 (Einstellungen → Ordner → Pre-Queue-Skript), mit SABnzbds Pre-Queue-Vertrag:
@@ -1529,7 +1580,7 @@ setzt, gewinnt trotzdem gegen ihn.</div>
 <tr><td><code>nzbfast serve</code></td><td>Den Daemon starten (Dashboard + API + Automatisierung). <code>--open</code> öffnet den Browser; <code>--apikey</code> setzt den Key von Hand (<a href="#firstrun-key">§2</a>); <code>--bind</code> wählt die Lausch-Adresse, standardmäßig <code>0.0.0.0</code> (jede Schnittstelle), <code>127.0.0.1</code> nur für diese Maschine. <code>--help</code> zeigt die volle Flag-Liste - jede Dashboard-Einstellung hat einen Flag-Zwilling.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Eine NZB laden, volle Pipeline, ohne Daemon. <code>--preflight</code> bricht früh ab, wenn der Post nicht komplettierbar ist; <code>--password</code> für verschlüsselte Sets.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Verfügbarkeits-Urteil - COMPLETE / REPAIRABLE / IMPOSSIBLE - ohne Nutzdaten zu laden.</td></tr>
-<tr><td><code>nzbfast verify DIR</code></td><td>Dateien gegen das PAR2-Set in einem Verzeichnis prüfen.</td></tr>
+<tr><td><code>nzbfast verify DIR</code></td><td>Dateien gegen das PAR2-Set in einem Verzeichnis prüfen. Fällt auf das Settle-Manifest zurück, wenn die PAR2-Dateien fehlen. Beendet sich mit 0, wenn die Dateien in Ordnung sind, und mit 1, wenn Schäden gefunden werden; ein Verzeichnis ohne Prüfgrundlage endet ebenfalls mit 0 und sagt das auf der Fehlerausgabe. <code>--fast</code> belegt jede Datei über die blockweisen Prüfsummen des Satzes statt über die Prüfsumme über die ganze Datei, was auf einer schnellen Platte deutlich flotter ist und den in <a href="#settings">§9</a> beschriebenen Handel mitbringt.</td></tr>
 <tr><td><code>nzbfast sysbench</code></td><td>Der System-Benchmark + Diversitäts-Bericht, im Terminal.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Gruppen in den Index scannen / ihn durchsuchen, ohne Daemon.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Server aus einer SABnzbd-ini importieren.</td></tr>

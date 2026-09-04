@@ -146,6 +146,80 @@ fn chunked_ingest_matches_single_chunk_ingest() {
     }
 }
 
+/// A stream carrying `gens` postings of ONE release: same poster, same
+/// stem, same filenames and part numbers, different message-ids - which
+/// is what `cluster_batch`'s generation split tests for. The generations
+/// are interleaved rather than concatenated, so a single batch sees them
+/// all contending for one (file, part) slot the way a backfill leg
+/// spanning a repost delivers them.
+fn repost_corpus(gens: usize, nfiles: usize, nparts: usize) -> Vec<OverEntry> {
+    let mut out = Vec::new();
+    for p in 1..=nparts {
+        for f in 0..nfiles {
+            for g in 0..gens {
+                out.push(OverEntry {
+                    number: 0,
+                    subject: format!("\"Reposted.Release.part{f:03}.rar\" yEnc ({p}/{nparts})"),
+                    from: "poster@example".into(),
+                    // The ONLY thing that differs between generations,
+                    // which is exactly the proof of a second posting.
+                    message_id: format!("<gen{g}-seg-{f}-{p}@news>"),
+                    bytes: 750_000,
+                    date: 1_700_000_000,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Sub-batching an ingest NEVER drops more articles to the generation
+/// budget than handing the same stream over in one batch - the property
+/// that makes [`INGEST_BATCH`] safe to apply to a 100,000-article fetch.
+///
+/// The budget in [`MAX_GEN_PASSES`] is per BATCH, so a batch collecting
+/// many generations of one (file, part) slot into a single budget drops
+/// what it cannot place, while smaller batches each get a fresh budget
+/// and place more of them. Measured on the 600,000-header repost corpus
+/// in `research/INDEXER-SCAN-CPU-AUDIT-2026-09-03.md`: 12,182 drops at a
+/// 100,000 batch against 2,808 at 20,000 and 936 at 10,000 - all three
+/// of which the shipped scan loop already reaches, because it sizes its
+/// batch as `100_000 / nconn`.
+///
+/// This pins the DIRECTION rather than the counts: the counts belong to
+/// a corpus, the direction is why the split is an improvement and not
+/// merely a different answer. A change that made a smaller batch drop
+/// MORE would invert the argument for `INGEST_BATCH` and must fail here.
+#[test]
+fn sub_batching_never_drops_more_to_the_generation_budget() {
+    let all = repost_corpus(6, 3, 4);
+    let drops = |tag: &str, per: usize| -> i64 {
+        let (dir, mut ix) = open_ix(tag);
+        for c in all.chunks(per) {
+            ix.ingest("alt.binaries.test", c, 1_700_000_100).unwrap();
+        }
+        let n = ix
+            .kv_get("ingest_drop_gen_depth")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        teardown(&dir, ix);
+        n
+    };
+    let whole = drops("gen-whole", all.len());
+    let split = drops("gen-split", all.len().div_ceil(4));
+    // The corpus must actually reach the budget, or this test passes by
+    // measuring nothing - the failure mode that made the stock rig
+    // corpus useless for this question in the first place.
+    assert!(
+        whole > 0,
+        "corpus never exercised the generation budget: it cannot say anything about batching"
+    );
+    assert!(
+        split <= whole,
+        "sub-batching dropped MORE to the generation budget ({split}) than one batch ({whole})"
+    );
+}
+
 /// Deep-backfill measurement rig (N8): wall time plus WAL bytes for a
 /// release-heavy chunked ingest, incremental vs the old per-chunk full
 /// recompute (simulated by poisoning the counters to -1 between chunks,
