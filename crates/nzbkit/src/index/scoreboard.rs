@@ -2,7 +2,7 @@
 //! reference indexer's newest releases, answer per release - do we have
 //! the post, is it NAMED in our index, and how far behind were we?
 //!
-//! The verdicts follow Codex's refinement from the red-team round:
+//! The verdicts follow the review's refinement from the red-team round:
 //! `have_named` requires EXACT title/episode-level parity between the
 //! reference's display name and the name we hold (stem or fed pre
 //! name), not merely a plausible size+time neighbour. Presence via the
@@ -796,7 +796,7 @@ mod tests {
 
     /// An obfuscated post in the right size+time band is presence, not
     /// naming - and a pre-fed real name upgrades it to have_named, but
-    /// ONLY at exact episode parity (the Codex refinement).
+    /// ONLY at exact episode parity (the review refinement).
     #[test]
     fn band_hits_split_on_exact_name_parity() {
         let d = dir("band");

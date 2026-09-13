@@ -1240,7 +1240,7 @@ impl Mp4Track {
     /// declaring `count = u32::MAX` describe 8.6 billion samples in
     /// sixteen bytes, and with a `Uniform` stsz nothing else contradicts
     /// them. 16M samples is ~194 hours of 24 fps video, so the cap costs
-    /// no real file anything (Codex sweep 12 Aug F5).
+    /// no real file anything (review sweep 12 Aug F5).
     pub fn sample_count(&self) -> u64 {
         let by_stts: u64 = self
             .stts
@@ -1656,7 +1656,7 @@ fn read_stsz(
 /// i.e. the non-zero value 4, 8 or 16. So EVERY valid stz2 file was
 /// decoded as "every sample is exactly 4/8/16 bytes long": offsets walked
 /// into earlier samples within the first chunk and the remux output was
-/// truncated and overlapping (Codex sweep 12 Aug F9).
+/// truncated and overlapping (review sweep 12 Aug F9).
 fn read_stz2(
     src: &dyn Source,
     t: &mut Mp4Track,
@@ -2007,7 +2007,7 @@ pub fn mp4_sync_before(t: &Mp4Track, t_ticks: u64) -> Option<u64> {
     // instead made a 16-byte table a CPU bomb: `count = u32::MAX` with
     // `dur = 0` never advances dts, so any seek past zero span 4.29
     // billion iterations, and sixteen authenticated preview requests
-    // could hold every remux worker (Codex sweep 12 Aug F5).
+    // could hold every remux worker (review sweep 12 Aug F5).
     let total = t.sample_count();
     let mut idx = 0u64;
     let mut dts = 0u64;
@@ -2522,7 +2522,7 @@ mod tests {
     /// declaring `count = u32::MAX, duration = 0` never advances DTS, so
     /// the old per-sample expansion span 4.29 billion iterations for any
     /// seek past zero - and sixteen authenticated preview requests could
-    /// hold every remux worker (Codex sweep 12 Aug F5).
+    /// hold every remux worker (review sweep 12 Aug F5).
     ///
     /// The assertion that matters is that this returns AT ALL: a test
     /// that hangs is the regression.
@@ -2585,7 +2585,7 @@ mod tests {
     /// `stz2` is the COMPACT table and shared `read_stsz` for its whole
     /// life, which read its `field_size` byte as a UNIFORM sample size -
     /// so every valid stz2 file decoded as "4, 8 or 16 bytes per sample",
-    /// and the remux output overlapped and truncated (Codex sweep 12 Aug
+    /// and the remux output overlapped and truncated (review sweep 12 Aug
     /// F9).
     #[test]
     fn compact_sample_sizes_are_decoded_at_all_three_widths() {

@@ -742,7 +742,7 @@ fn hunt_one(d: &Daemon, req: &HuntRequest) -> Result<(), NoHunt> {
     let before = cands.len();
     cands.retain(|c| affordable(c.size, budget));
     let mut any_over_budget = cands.len() != before;
-    // §290 (Codex F-09). The two checks above are the CHEAP ones and
+    // §290 (review finding F-09). The two checks above are the CHEAP ones and
     // they stay: `budget` is historical spend against an indexer's
     // ADVERTISED size, which is what lets an unaffordable candidate
     // be dropped before it eats one of the four fetches. Neither is
@@ -867,7 +867,7 @@ fn hunt_budget(
 /// money before spending them on nobody's click, and it used to
 /// `unwrap_or(false)`: a malformed or momentarily unreadable file
 /// read as "no server is metered", which is unlimited automatic
-/// spend on exactly the install the ceiling exists for (Codex sweep
+/// spend on exactly the install the ceiling exists for (review sweep
 /// 24 Aug, F-10). Failing the other way costs one skipped automatic
 /// hunt on an install with no ceiling set, and the refusal names
 /// itself in the giveup clause.
@@ -1224,7 +1224,7 @@ fn hunt_fetch(d: &Daemon, cand: &Cand) -> Option<(Vec<u8>, Option<Fetched>)> {
 /// would park the only copy that can still deliver.
 ///
 /// **ONE row, and this was a bare `allow_dupe = true` until 25 Aug
-/// 2026** (§290, Codex F-09). That bool switched BOTH duplicate arms
+/// 2026** (§290, review finding F-09). That bool switched BOTH duplicate arms
 /// off at once - the name arm and §292's same-post arm - against
 /// every record in both stores, and the argument above is true about
 /// the failed source row and about nothing else. Against any OTHER
@@ -1298,7 +1298,7 @@ fn hunt_enqueue(
             // filed straight to history as Failed, and this arm
             // used to announce that as a replacement anyway: log,
             // `job.replaced`, and a `true` that stopped the
-            // candidate loop with nothing running (Codex sweep
+            // candidate loop with nothing running (review sweep
             // 24 Aug, F-08). A rejection is not a replacement:
             // say so, skip the event, and let the loop try the
             // next candidate.
@@ -1459,7 +1459,7 @@ fn hunt_enqueue(
 /// stamped. That answer is `hunt_enqueue`'s placement oracle: false
 /// means the add never became a live row (the pre-queue REJECT
 /// shape above), so no replacement happened and the caller must not
-/// announce one (Codex sweep 24 Aug, F-08).
+/// announce one (review sweep 24 Aug, F-08).
 fn stamp_hunt_switch(d: &Daemon, req: &HuntRequest, new_id: &str, new_name: &str) -> bool {
     // The CLAUSE carries `why_from_fail`'s stripped form, the same
     // call `promote_held_alternative` makes: the raw `fail_message`
@@ -1517,7 +1517,7 @@ fn stamp_hunt_switch(d: &Daemon, req: &HuntRequest, new_id: &str, new_name: &str
     // auto-retry stamp, so a refused append the rewrite could still
     // rescue would reload the stamp at the next start and re-queue
     // the abandoned row beside the replacement this search just
-    // added (Codex C11). Its present-check keeps a delete that
+    // added (review C11). Its present-check keeps a delete that
     // landed since from being resurrected.
     if let Some(failed) = failed {
         d.history_publish(&failed, || {
@@ -1933,7 +1933,7 @@ fn hunt_hold(
 /// fresh download of the copy the user was just told could not be
 /// switched to. Unlike the other `drop_spool` callers this one is
 /// not fault-conditioned: every refused switch left the orphan
-/// (Codex sweep 24 Aug, F-04).
+/// (review sweep 24 Aug, F-04).
 ///
 /// **UNLINK BEFORE `save_queue`, on purpose** (sweep 9, finding 4,
 /// which read the order as a defect and proposed the inverse). The

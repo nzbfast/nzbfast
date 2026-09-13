@@ -1507,7 +1507,7 @@ impl Extractor {
     ///    group. None is read off the fragment in front of the writer.
     ///    Only the tail piece carries the whole-file checks, so reading
     ///    them off a head answered "allowed" for a split hash-only set
-    ///    (Codex sweep 12 Aug F2) - and the same trap waits for any
+    ///    (review sweep 12 Aug F2) - and the same trap waits for any
     ///    per-file check field added later.
     /// 2. An output that already holds bytes with no `CryptoState`
     ///    behind it holds CIPHERTEXT, and may never latch plaintext-once
@@ -1561,7 +1561,7 @@ impl Extractor {
         // after the lock drops, so a routed-but-unwritten ciphertext
         // job was invisible here, and a span arriving in that window
         // (a live password candidate landing mid-file) latched
-        // plaintext-once over it: a mixed output (Codex sweep 13 Aug
+        // plaintext-once over it: a mixed output (review sweep 13 Aug
         // C1). The counter stays as the belt - it is what covers
         // resume, where bytes from a prior run sit under an output the
         // latch never saw.

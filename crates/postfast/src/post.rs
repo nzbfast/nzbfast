@@ -39,6 +39,16 @@
 //!   `nzbfast post --post-server` applies.
 //! - **D4 companion metadata**: `--nfo` and `--sfv` post a companion
 //!   file beside the payload and list it in the NZB.
+//!
+//! `--optimal-parse` rides here for the same reason the four above do:
+//! it is a choice about THIS post rather than a shape the profile
+//! describes. It hands the RAR 5 writer its cost-based parser, which is
+//! worth about -2.4% of a compressed archive for about 3.7x the
+//! creation CPU, and (since 7 Sep 2026) its sampled regional filters,
+//! which are worth nothing on most posts and a further quarter of the
+//! archive on the numeric shapes that want them; see
+//! [`crate::container::Packing`] for why it is a flag and not a
+//! compression level, and why it is off until it is asked for.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -93,6 +103,14 @@ pub struct Args {
     /// Re-download the post and compare hashes before reporting
     /// success, the way `nzbfast post --verify` does.
     pub verify: bool,
+    /// Hand the RAR 5 writer its cost-based parse for the archives
+    /// this post packs: smaller volumes, dearer to create. Off unless
+    /// asked for - see [`crate::container::Packing`].
+    pub optimal_parse: bool,
+    /// `--dictionary <bytes>`: the RAR 5 dictionary to ask for. `None`
+    /// is the writer's default, 32 MiB fitted to the largest member; see
+    /// [`crate::container::Packing::dictionary`].
+    pub dictionary: Option<u64>,
     /// Connections the verify pool opens. The post itself is one
     /// connection by construction - see [`Args::spread_ms`]: a spread
     /// is a statement about the ORDER articles reach a server in, and
@@ -166,6 +184,8 @@ pub fn parse_args(argv: &[String]) -> Result<Args, ArgError> {
     let mut spread_ms = 0u64;
     let mut companions = Companions::default();
     let mut verify = false;
+    let mut optimal_parse = false;
+    let mut dictionary: Option<u64> = None;
     let mut connections = 4usize;
 
     let mut i = 0;
@@ -205,6 +225,14 @@ pub fn parse_args(argv: &[String]) -> Result<Args, ArgError> {
             "--nfo" => companions.nfo = true,
             "--sfv" => companions.sfv = true,
             "--verify" => verify = true,
+            "--optimal-parse" => optimal_parse = true,
+            "--dictionary" => {
+                let v = value(&mut i)?;
+                dictionary = Some(v.parse().map_err(|_| ArgError::NotANumber {
+                    flag: "--dictionary".into(),
+                    value: v,
+                })?);
+            }
             other if other.starts_with("--") => return Err(ArgError::Unknown(other.to_string())),
             other => positional.push(PathBuf::from(other)),
         }
@@ -228,6 +256,8 @@ pub fn parse_args(argv: &[String]) -> Result<Args, ArgError> {
         spread_ms,
         companions,
         verify,
+        optimal_parse,
+        dictionary,
         // A zero here is a hang rather than a setting, the same way it
         // is in the pool: one connection is the smallest honest answer.
         connections: connections.clamp(1, 16),
@@ -437,10 +467,14 @@ pub fn override_source(profile: &Profile, inputs: &[Input]) -> Profile {
 
 /// Profile plus real files to a layout, in one step: the whole of what
 /// this tool does before a socket is opened.
-pub fn layout_for(profile: &Profile, inputs: Vec<Input>) -> Result<(Profile, Layout), PostError> {
+pub fn layout_for(
+    profile: &Profile,
+    inputs: Vec<Input>,
+    packing: crate::container::Packing,
+) -> Result<(Profile, Layout), PostError> {
     let p = override_source(profile, &inputs);
     let payload: Vec<Vec<u8>> = inputs.into_iter().map(|i| i.bytes).collect();
-    let layout = crate::layout::generate_over(&p, payload)?;
+    let layout = crate::layout::generate_over_with(&p, payload, packing)?;
     Ok((p, layout))
 }
 
@@ -813,7 +847,14 @@ mod live {
     pub async fn run(args: &Args) -> Result<Report, PostError> {
         let profile = Profile::load(&args.profile)?;
         let inputs = read_inputs(&args.paths, profile.encoding.article_bytes as usize)?;
-        let (profile, layout) = layout_for(&profile, inputs)?;
+        let (profile, layout) = layout_for(
+            &profile,
+            inputs,
+            crate::container::Packing {
+                optimal_parse: args.optimal_parse,
+                dictionary: args.dictionary,
+            },
+        )?;
 
         let cfg = nzbkit::config::Config::load(&args.config)
             .map_err(|e| PostError::Server(format!("reading {}: {e}", args.config.display())))?;
@@ -1079,7 +1120,7 @@ mod tests {
     fn the_deployment_plane_parses() {
         let a = parse_args(&argv(&format!(
             "{BASE} --group alt.test --group alt.binaries.test --spread-ms 250 --nfo --sfv \
-             --verify --connections 8"
+             --verify --connections 8 --optimal-parse"
         )))
         .expect("parses");
         assert_eq!(a.profile, PathBuf::from("p.toml"));
@@ -1098,6 +1139,64 @@ mod tests {
         );
         assert!(a.verify);
         assert_eq!(a.connections, 8);
+        assert!(a.optimal_parse);
+        // And it is a flag a caller ASKS for: the line without it packs
+        // the way this crate has always packed.
+        assert!(!parse_args(&argv(BASE)).expect("parses").optimal_parse);
+    }
+
+    /// `--optimal-parse` reaches the POSTED bytes, through the whole
+    /// route the flag actually takes: `Args` to [`layout_for`] to the
+    /// container plane to the RAR 5 writer.
+    ///
+    /// The comparison is between two layouts over the SAME real files
+    /// under the SAME profile, and it is strict on the total posted
+    /// length. A flag dropped at any joint on that route builds two
+    /// identical posts, and a check that only asked whether the layout
+    /// built would be green for both.
+    #[test]
+    fn the_optimal_parse_flag_reaches_the_posted_bytes() {
+        let dir = scratch("optimal-parse");
+        std::fs::create_dir_all(&dir).expect("scratch");
+        // Bytes an archiver can shrink, drawn the way `Content::Compressible`
+        // draws them: runs of a byte, so the member compresses under any
+        // LZ77 coder without being periodic.
+        let path = dir.join("doc.bin");
+        let mut bytes = Vec::with_capacity(60_000);
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        while bytes.len() < 60_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let run = 4 + (x % 20) as usize;
+            let byte = (x >> 40) as u8;
+            for _ in 0..run.min(60_000 - bytes.len()) {
+                bytes.push(byte);
+            }
+        }
+        std::fs::write(&path, &bytes).expect("write input");
+        let profile = Profile::parse(
+            "[layout]\nname = \"post-parse\"\nseed = 7\n\n\
+             [source]\nfiles = [{ name = \"placeholder.bin\", bytes = 1 }]\n\n\
+             [container]\nkind = \"rar-compressed\"\nversion = \"rar5\"\n\n\
+             [encoding]\narticle_bytes = 4000\n",
+        )
+        .expect("profile parses");
+        let posted = |packing| {
+            let inputs = read_inputs(std::slice::from_ref(&path), 4000).expect("inputs read");
+            let (_, layout) = layout_for(&profile, inputs, packing).expect("layout builds");
+            layout.files.iter().map(|(_, b)| b.len()).sum::<usize>()
+        };
+        let lazy = posted(crate::container::Packing::LAZY);
+        let best = posted(crate::container::Packing {
+            optimal_parse: true,
+            dictionary: None,
+        });
+        assert!(
+            best < lazy,
+            "the flag posted {best} bytes against the default's {lazy}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The three options with no sane default are required by name.
@@ -1262,7 +1361,8 @@ complete = true
             vec![("real-a.bin", 26000)],
             "the profile's own placeholder.bin must be gone"
         );
-        let (_, layout) = layout_for(&profile, inputs).expect("layout builds");
+        let (_, layout) =
+            layout_for(&profile, inputs, crate::container::Packing::LAZY).expect("layout builds");
         // A stored RAR of 26 KB at a 10 KB volume limit is three
         // volumes, so the container plane ran over the real payload
         // rather than over the profile's one placeholder byte.
@@ -1299,7 +1399,8 @@ complete = true
         let paths = write_inputs(&dir, &[("one.bin", 500)]);
         let profile = Profile::parse(C2_P1).expect("profile parses");
         let inputs = read_inputs(&paths, 4000).expect("inputs read");
-        let e = layout_for(&profile, inputs).expect_err("500 bytes is not a split set");
+        let e = layout_for(&profile, inputs, crate::container::Packing::LAZY)
+            .expect_err("500 bytes is not a split set");
         let text = e.to_string();
         assert!(
             text.contains("two volumes"),
@@ -1332,7 +1433,8 @@ complete = true
         let paths = write_inputs(&dir, &[("release.bin", 26000)]);
         let profile = Profile::parse(C2_P1).expect("profile parses");
         let inputs = read_inputs(&paths, 4000).expect("inputs read");
-        let (profile, layout) = layout_for(&profile, inputs).expect("layout builds");
+        let (profile, layout) =
+            layout_for(&profile, inputs, crate::container::Packing::LAZY).expect("layout builds");
         (profile, layout, dir)
     }
 
@@ -1554,6 +1656,10 @@ complete = true
                 sfv: true,
             },
             verify: true,
+            // The default packing: this row is about the wire and the
+            // round trip, and the parse is pinned on the bytes by
+            // `the_optimal_parse_flag_reaches_the_posted_bytes`.
+            optimal_parse: false,
             connections: 4,
         };
         let report = run(&args).await.expect("post and verify");

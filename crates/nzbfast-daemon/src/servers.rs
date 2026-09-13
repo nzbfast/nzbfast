@@ -126,7 +126,7 @@ pub fn normalized_server(
         //
         // The RAW-INPUT encoder, guarded by "is this byte-for-byte what is
         // already stored". `obfuscate`'s prefix guess is what broke a
-        // literal `obf1:`-prefixed password (Codex sweep 12 Aug F16), and
+        // literal `obf1:`-prefixed password (review sweep 12 Aug F16), and
         // `mode=server_secret` hands this field back as CLEARTEXT, so what
         // arrives here is a typed password - except for a caller that
         // echoes the stored value straight back, which the guard leaves
@@ -282,7 +282,7 @@ pub fn normalized_server(
             // Port 0 parses as a `u16` and is not a port anybody can
             // connect to: accepted here it saved silently and then
             // failed every connection through this provider with an OS
-            // error instead of a form message (Codex sweep 7, L5). The
+            // error instead of a form message (review sweep 7, L5). The
             // NNTP port above takes the same range.
             if addr
                 .rsplit_once(':')

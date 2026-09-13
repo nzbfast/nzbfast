@@ -1,4 +1,4 @@
-//! §290 (Codex F-09/F-11): what the derived ledger counts, and what the
+//! §290 (review finding F-09/F-11): what the derived ledger counts, and what the
 //! admission does with it.
 //!
 //! Each test here is one of the three holes the module header names, and

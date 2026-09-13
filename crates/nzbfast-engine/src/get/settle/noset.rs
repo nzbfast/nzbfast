@@ -370,7 +370,7 @@ async fn disk_par2_fallback(
             .map(|(_, s)| s.hint.clone())
             .collect();
         // The census's own out-of-set findings belong
-        // here too (Codex sweep 2, 3 Aug M2). A slot
+        // here too (review sweep 2, 3 Aug M2). A slot
         // whose articles ALL arrived and still does not
         // cover its declared range has every counter at
         // zero, so the scan above cannot see it - and
@@ -503,7 +503,48 @@ pub(super) async fn settle_without_set(
     // to answer one bool for "clean" and "there was nothing to verify",
     // and this call site wanted the first meaning while silently taking
     // the second as well. `proved_clean` is the first meaning alone.
-    let disk_verified = verify_dir(out_dir)?.proved_clean();
+    let dir_verdict = verify_dir(out_dir)?;
+    let disk_verified = dir_verdict.proved_clean();
+    // P10, the `.par2`-named decoy (catalog row
+    // `n2-p2-p10-par2-named-decoy`, whose `note` carries the three
+    // measured arms and what each of them did). A post
+    // names ONE file `.par2` and its bytes are not a recovery set. That
+    // file becomes the job's only par2-main slot, so it is the only
+    // input in-stream activation ever sees, while the real set rides
+    // under tokens and is sniff-deferred as recovery data. Activation
+    // then either fails outright or goes live on a set naming zero
+    // files, and both land here with the payload already published
+    // under its wire token.
+    //
+    // The naming pass that would rescue it is `disk_par2_fallback`
+    // below - it magic-sniffs the deferred volumes on disk and adopts
+    // the token file back under its FileDesc name - and it was
+    // unreachable, because the gate below asks only whether the
+    // DOWNLOAD went wrong. It did not: every article arrived and
+    // decoded, so `all_good` is true and the job reported success with
+    // an obfuscated filename and no error.
+    //
+    // So the gate gains the question it was missing: did the directory
+    // pass just above read a recovery set off disk whose member is NOT
+    // there under the name it gives? `verify_dir` already had that
+    // answer and only `proved_clean` was being read out of it - on the
+    // decoy row it logs `set: 1 file(s)` and then
+    // `✘ <name> - file missing` while the bytes sit beside it under a
+    // token.
+    //
+    // AND `any_sniffed`, which is what keeps this narrow. It means
+    // recovery volumes were identified in-stream by packet magic and
+    // their set never went live - the F11 shape and the decoy's - so a
+    // job whose only disk-side `Damaged` verdict comes from a stray
+    // NZB-CLASSIFIED set (a leftover release in the same NZB, a foreign
+    // set over a phantom member) is untouched: nothing sniffed it, and
+    // it keeps today's behaviour of not dragging a complete job into a
+    // repair pass. The volume FETCH inside the arm keeps the old
+    // condition for the same reason - this door is opened for NAMING,
+    // and issue #14's bandwidth choice is not up for renegotiation on a
+    // job whose every payload article already arrived.
+    let disk_set_unnamed =
+        matches!(dir_verdict, crate::unpack::DirVerify::Damaged) && sniff.any_sniffed();
     // Sweep 8, L5: no set means every payload slot is out-of-set, so
     // the spare rule covers all of the optional furniture here. Same
     // contract as the clean and repaired branches.
@@ -582,7 +623,7 @@ pub(super) async fn settle_without_set(
              fetching them for the disk-side naming and verify pass"
         );
     }
-    if !all_good || deferred_recovery {
+    if !all_good || deferred_recovery || disk_set_unnamed {
         // Public issue #9. Getting here with a damaged download
         // does NOT mean the post shipped no recovery data - on a
         // fully obfuscated post it usually means we could not SEE
@@ -614,7 +655,11 @@ pub(super) async fn settle_without_set(
         // disk yet. Fetch all of it: without a set there is no
         // block arithmetic to fit exactly, and this is the rare
         // fallback where correctness outranks bandwidth.
-        {
+        // NOT under `disk_set_unnamed`: see the note at its
+        // declaration. That arm is reached by a job whose every payload
+        // article arrived, so the bytes the naming pass adopts from are
+        // already on disk and there is nothing here to buy with wire.
+        if !all_good || deferred_recovery {
             // Only slots that actually HAVE deferred articles: a
             // sniffed volume that nonetheless landed in full (a
             // cancel that caught nothing, or a fully-restored
@@ -686,6 +731,61 @@ pub(super) async fn settle_without_set(
         }
         // Missing articles left zero-filled holes and no PAR2
         // filled them - embedded RAR recovery records can.
+        //
+        // But only over volumes that EXIST. A set the one-pass chase was
+        // extracting in-stream has no volume file on disk until
+        // `finish()` demotes it, and `finish()` runs in the tail's
+        // extract-finish phase, AFTER this rung. So on the shape the
+        // 6 Sep 2026 recovery-record census found in the wild - a
+        // top-level RAR set with a record, no PAR2, one article gone
+        // from the wire - this rung looked at a directory holding only
+        // the journal, `collect_rar_volumes` found nothing, and the job
+        // failed "nothing can rebuild them" with the parity that could
+        // have rebuilt it sitting in memory. Measured by the e2e
+        // `recovery_record_only_post_heals_a_wire_missing_article`
+        // before this block existed: the rung's directory listing was
+        // `[".nzbfast.journal"]`. The with-set arm never saw it because
+        // its repair materializes the set's slots first (repair.rs, the
+        // `extractor.materialize(*sidx)` loop); this is that step for
+        // the set-less arm, restricted to the slots that actually carry
+        // a hole AND whose volume head declared a record. Both halves
+        // are load-bearing: a whole chase must not be forfeited for a
+        // missing sidecar, and a holed chase with NO record must not be
+        // forfeited either - the daemon's `stream_zero_fills_after_the_run_detaches`
+        // is a player reading a holed set through the in-stream output,
+        // and materializing it abandoned that output, so the response
+        // ended truncated where the reader would have zero-filled the
+        // hole and played on (measured: the first cut of this block
+        // reddened exactly that test). The head flag is known before the
+        // tail is, which is what makes the decision possible here.
+        // `materialize` is a no-op on a plain slot and demotes an
+        // archive slot's whole group, and a dropping chase materializes
+        // with its consumed prefix missing, which the refetch below
+        // brings back off the wire, exactly as the with-set arm does
+        // after its own loop.
+        let mut holed = 0usize;
+        for (i, slot) in slots.iter().enumerate() {
+            let miss = slot.missing.load(std::sync::atomic::Ordering::Relaxed);
+            let unresolved = slot.remaining.load(std::sync::atomic::Ordering::Relaxed);
+            if miss == 0 && unresolved == 0 {
+                continue;
+            }
+            if !extractor.slot_declares_recovery_record(i) {
+                continue;
+            }
+            holed += 1;
+            if let Err(e) = extractor.materialize(i) {
+                warn!(target: "repair", "materialize slot {i} for recovery-record repair: {e}");
+            }
+        }
+        if holed > 0
+            && let Err(e) = crate::get::dropped::refetch_dropped_volumes(
+                extractor, slot_file, servers, nzb, out_dir, buf_pool, cancel,
+            )
+            .await
+        {
+            warn!(target: "repair", "refetch of dropped volume spans failed: {e}");
+        }
         repaired = true;
         // And the rung's own reason where it has one. This arm composed
         // its whole failure from a bare bool, so a bomb verdict raised
@@ -906,7 +1006,7 @@ pub(in crate::get) async fn fetch_matched_deferred(
             // the way the pool-side reconcile does: these bytes came in
             // through `fetch_volumes` on the side machinery, so no
             // terminal outcome will ever credit them again and dropping
-            // the credit would leave the bar short (Codex sweep 2,
+            // the credit would leave the bar short (review sweep 2,
             // 3 Aug ML2).
             slots[sidx].par2_sniffed.store(false, Ordering::Release);
             // The side fetch re-attempted every article of the file, so

@@ -220,8 +220,21 @@ pub(crate) enum SevenzKey {
     /// The container refused to open, or the entry failed to decode.
     Fails,
     /// The read hit [`SEVENZ_PROBE_CAP`] before the entry ended, so no
-    /// checksum was ever reached. NOT a pass.
+    /// checksum was ever reached. NOT a pass - but the checksum EXISTS,
+    /// so a full extraction under a wrong key still fails at it.
     Unknown,
+    /// The entry decoded to its end and there was no checksum to run:
+    /// the archive omits per-file CRCs, which is legal. NOT a pass, and
+    /// unlike [`Self::Unknown`] no later read can turn it into one.
+    ///
+    /// 7z AES-256 is CBC with no MAC, so a wrong key decrypts to
+    /// exactly as many bytes as a right one. A `Copy`-method entry adds
+    /// no second check of its own, so nothing anywhere in the pipeline
+    /// can tell a right key from a wrong one on this shape - which is
+    /// why `sevenz_password_candidates` will only ever hand this
+    /// verdict to the OPERATOR'S own password, never to a harvested
+    /// guess.
+    Unverifiable,
 }
 
 /// How much of a 7z entry a key check will decode before giving up.
@@ -237,7 +250,7 @@ pub(crate) const SEVENZ_PROBE_CAP: u64 = 64 << 20;
 /// a wrong key on a data-encrypted entry is the entry's CHECKSUM at its
 /// end, and a first member bigger than the cap never reaches it - so a
 /// capped read used to come back "opens" for any value at all, and the
-/// first candidate tried won (Codex sweep M, 13 Aug 2026: a 65 MiB
+/// first candidate tried won (review sweep M, 13 Aug 2026: a 65 MiB
 /// Copy entry answered `capped=true` for a wrong password whose full
 /// read answers false). Reaching the cap is `Unknown`, and only the
 /// extraction can settle it.
@@ -273,7 +286,7 @@ pub(crate) fn sevenz_password_check_capped(
     // second with `-p -mhe=off`, and block 0 is plaintext while block 1
     // is encrypted - and entries arrive in block order, so the first
     // data entry was block 0's and decoded to its checksum under ANY
-    // value, `None` included (Codex sweep F-10, 23 Aug 2026). That
+    // value, `None` included (review sweep F-10, 23 Aug 2026). That
     // `Opens` settled the shortlist at the caller's value and the
     // sidecar password the later block needs was never harvested.
     // Empty means nothing in here is encrypted, and then the first data
@@ -320,10 +333,18 @@ pub(crate) fn sevenz_password_check_capped(
     // fail closed so the caller harvests rather than trusting a value
     // no AES coder ever saw.
     let missed = !encrypted.is_empty() && !probed.get();
-    match (res.is_ok() && !missed, capped.get() || unchecked.get()) {
-        (false, _) => SevenzKey::Fails,
-        (true, true) => SevenzKey::Unknown,
-        (true, false) => SevenzKey::Opens,
+    if !(res.is_ok() && !missed) {
+        return SevenzKey::Fails;
+    }
+    // Capped BEFORE unchecked: a read that stopped at the cap never
+    // reached the end of the entry, so it cannot know whether a
+    // checksum was waiting there.
+    if capped.get() {
+        SevenzKey::Unknown
+    } else if unchecked.get() {
+        SevenzKey::Unverifiable
+    } else {
+        SevenzKey::Opens
     }
 }
 
@@ -435,7 +456,7 @@ pub(crate) fn first_encrypted_zip(dir: &std::path::Path) -> Option<Vec<PathBuf>>
 /// accepts a wrong value once in 256 tries; that was always documented
 /// as "a candidate, not a verdict", but the caller then stopped at the
 /// first hit and never came back, so a 1-in-256 accident ahead of the
-/// real value left the archive packed with the answer in hand (Codex
+/// real value left the archive packed with the answer in hand (review
 /// sweep F, 13 Aug 2026: the checked-in `zipcrypto.zip` is opened by
 /// `wrong-93` as well as by `SECRET`). The extraction's CRC32 is the
 /// only authority, so hand the caller the whole shortlist and let it
@@ -520,7 +541,7 @@ pub(crate) fn resolve_zip_password(
 /// in the directory, and its answer used to be handed to every group -
 /// so with two encrypted sets under different passwords, the second was
 /// tried with the first one's value, failed as "wrong password", and
-/// stayed packed while the run reported success (Codex sweep 13 Aug U1).
+/// stayed packed while the run reported success (review sweep 13 Aug U1).
 /// Returns `None` to keep the caller's password (it already verifies,
 /// the set is check-less, or nothing matched).
 pub(crate) fn resolve_rar_group_password(
@@ -613,8 +634,18 @@ pub(crate) fn sevenz_password_candidates(
     // or plaintext headers over encrypted data) and `Unknown` (a first
     // member past the 64 MB cap) both fall through to the harvest
     // exactly as before, one fast failing probe later.
-    if sevenz_password_check(z, provided) == SevenzKey::Opens {
-        return keep(); // settled: this is what the extraction needs
+    match sevenz_password_check(z, provided) {
+        SevenzKey::Opens => return keep(), // settled: this is what the extraction needs
+        // NOTHING can verify this container, so the only value that may
+        // ever be spent on it is the one the OPERATOR supplied. A
+        // harvested candidate would extract full-size garbage and
+        // publish it as a success - the size check in
+        // `extract_one_sevenz` proves length, never authenticity. With
+        // no operator password there is nothing to trust, so this falls
+        // through to the harvest, where every `Unverifiable` candidate
+        // is dropped and the job parks instead.
+        SevenzKey::Unverifiable if provided.is_some() => return keep(),
+        _ => {}
     }
     // The 7z header does not advertise its KDF depth up front and each
     // probe may decode up to 64 MB, so the wall-clock budget is the
@@ -628,7 +659,20 @@ pub(crate) fn sevenz_password_candidates(
         }
         match sevenz_password_check(z, Some(&cand.value)) {
             SevenzKey::Opens => proven.push((Some(cand.value), cand.source)),
+            // A capped read still has a checksum ahead of it, so a
+            // wrong value fails the real extraction. Worth a try, last.
             SevenzKey::Unknown => maybe.push((Some(cand.value), cand.source)),
+            // Dropped: see the `Unverifiable` arm above. A harvested
+            // value on a CRC-less encrypted container can never be
+            // proved, and extracting under it publishes garbage.
+            SevenzKey::Unverifiable => {
+                warn!(
+                    target: "password",
+                    "{} cannot be checked against this 7z (encrypted, no per-file CRC) - \
+                     not spending it; supply the password on the job to use it",
+                    cand.source
+                );
+            }
             SevenzKey::Fails => {}
         }
     }

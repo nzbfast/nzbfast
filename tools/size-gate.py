@@ -62,6 +62,21 @@ import re
 import sys
 
 CRATES = "crates"
+# A SECOND SCANNED ROOT, 12 Sep 2026. This gate walks the literal string
+# `crates` from the repo root, so it saw nothing at all of the parfast
+# desktop GUI's two Rust crates, which live in a DETACHED cargo
+# workspace at `apps/parfast/` that the root manifest never names
+# (decision D2a: `crates/`, the root `Cargo.toml` and `Cargo.lock` all
+# ship publicly and the GUI stays private until release -
+# research/PLAN-PARFAST-GUI-2026-09-12.md section 4.4). Production Rust
+# is production Rust wherever its manifest lives, and a ceiling that
+# does not reach a tree is a ceiling that tree will cross.
+#
+# WIDENING THE COVERAGE IS NOT LOOSENING THE GATE: the ceilings, the
+# baselines and the ratchet are untouched, and a file added here is
+# scored exactly as one under `crates/` is. A third detached workspace
+# gets a third entry.
+ROOTS = (CRATES, os.path.join("apps", "parfast", "crates"))
 FILE_CEILING = 4000  # production .rs raw lines; the worst competitor file is ~5,400
 TEST_FILE_CEILING = 12000  # whole-file test code - append-heavy case tables
 FN_CEILING = 500  # production function lines; rustnzb ships zero over 500
@@ -247,6 +262,8 @@ def strip_noise(text):
             i += 1
             while i < n and text[i] != '"':
                 if text[i] == "\\":
+                    if i + 1 < n and text[i + 1] == "\n":
+                        out.append("\n")
                     i += 1
                 elif text[i] == "\n":
                     out.append("\n")
@@ -265,6 +282,8 @@ def strip_noise(text):
                 i += 2
                 while i < n and text[i] != '"':
                     if text[i] == "\\":
+                        if i + 1 < n and text[i + 1] == "\n":
+                            out.append("\n")
                         i += 1
                     elif text[i] == "\n":
                         out.append("\n")
@@ -358,16 +377,23 @@ def functions(clean_lines):
         yield m.group(1), start, end - start + 1
 
 
+def rust_files():
+    """Every production-or-test `.rs` path this gate scores, over every
+    scanned root. `fuzz` directories are excluded here, once, rather
+    than at each walk - they are cargo-fuzz's generated harnesses."""
+    for scan in ROOTS:
+        for root, _dirs, files in os.walk(scan):
+            if f"{os.sep}fuzz{os.sep}" in root + os.sep:
+                continue
+            for f in files:
+                if f.endswith(".rs"):
+                    yield os.path.join(root, f)
+
+
 def collect():
     contents = {}
-    for root, _dirs, files in os.walk(CRATES):
-        if f"{os.sep}fuzz{os.sep}" in root + os.sep:
-            continue
-        for f in files:
-            if not f.endswith(".rs"):
-                continue
-            p = os.path.join(root, f)
-            contents[p] = open(p, encoding="utf8", errors="replace").read()
+    for p in rust_files():
+        contents[p] = open(p, encoding="utf8", errors="replace").read()
 
     test_files = set()
     clean = {p: strip_noise(t).split("\n") for p, t in contents.items()}
@@ -652,6 +678,24 @@ SELFTEST_NOISE = [
         "a brace inside a comment does not open a block",
         "fn f() {\n    // }\n    let y = 1;\n}\nfn g() {\n    let z = 1;\n}\n",
         {"f": 4, "g": 3},
+    ),
+    # A trailing `\` inside a string is Rust's line continuation, and it is
+    # how this repo wraps long format!/assert! messages - so the shape is
+    # common, not exotic. The lexer stepped over the backslash and then over
+    # the newline, emitting neither: every line after it in the file was one
+    # short, and a function containing k of them measured k lines UNDER its
+    # real span. Measured 10 Sep 2026 before the fix: 4,550 newlines lost
+    # over 545 of 1,036 files, 1,760 production fns under-counted (worst
+    # +121) and 7,283 reported at a wrong line (worst 164 out).
+    (
+        "a backslash-continued newline inside a string still counts as a line",
+        'fn f() {\n    let s = "aaa \\\n         bbb";\n    let _ = 1;\n}\nfn g() {\n    let z = 1;\n}\n',
+        {"f": 5, "g": 3},
+    ),
+    (
+        "...and inside a byte string, which is a second copy of the same loop",
+        'fn f() {\n    let s = b"aaa \\\n         bbb";\n    let _ = 1;\n}\nfn g() {\n    let z = 1;\n}\n',
+        {"f": 5, "g": 3},
     ),
 ]
 
@@ -940,6 +984,55 @@ def selftest_argv():
     return bad
 
 
+def selftest_line_structure():
+    """`strip_noise` must preserve the LINE COUNT of every file in the tree.
+
+    The fixture cases above pin two known shapes; this pins the PROPERTY the
+    docstring claims, against the files themselves. That matters because the
+    fixture form is satisfiable by a lexer that has quietly stopped matching
+    some third shape, and an equality against the real tree is not: any arm
+    that steps over a newline without emitting one shows up here the day it
+    is written. The shipped lexer failed this on 545 of 1,036 files.
+
+    Every line number `functions()` yields, and every index `test_line_mask`
+    is read at, lives in this coordinate space - so a file that drifts here
+    is a file whose ceiling verdict is measured against the wrong span.
+    """
+    bad = 0
+    try:
+        paths = list(rust_files())
+    except OSError as e:
+        print(f"  selftest FAIL: could not walk the tree ({e}) - run from the repo root", file=sys.stderr)
+        return 1
+    # A pin that reaches nothing passes forever. Same reasoning, and the same
+    # floor, as the --headroom real-tree case below.
+    if len(paths) < HEADROOM_FILE_FLOOR:
+        print(
+            f"  selftest FAIL: line-structure pin reached {len(paths)} .rs files, "
+            f"floor is {HEADROOM_FILE_FLOOR} - run from the repo root",
+            file=sys.stderr,
+        )
+        return 1
+    drift = []
+    for p in paths:
+        text = open(p, encoding="utf8", errors="replace").read()
+        got = strip_noise(text).count("\n")
+        want = text.count("\n")
+        if got != want:
+            drift.append((p, got - want))
+    if drift:
+        bad += 1
+        worst = min(drift, key=lambda d: d[1])
+        print(
+            f"  selftest FAIL: strip_noise changed the line count of {len(drift)} file(s) - "
+            f"worst {worst[1]:+d} in {worst[0]}.\n"
+            "    Some arm steps over a newline without emitting one. Fix the ARM, never this pin:\n"
+            "    every function span and every #[cfg(test)] mask index is measured in that space.",
+            file=sys.stderr,
+        )
+    return bad
+
+
 def selftest():
     bad = 0
     for name, fn_name, want_test, src in SELFTEST:
@@ -973,6 +1066,7 @@ def selftest():
             file=sys.stderr,
         )
         bad += 1
+    bad += selftest_line_structure()
     bad += selftest_headroom()
     bad += selftest_argv()
     if bad:
@@ -980,7 +1074,7 @@ def selftest():
         return 1
     print(
         f"size-gate: selftest ok ({len(SELFTEST)} scope cases, {len(SELFTEST_NOISE)} tokenizer cases, "
-        f"{HEADROOM_CASES} headroom cases, {ARGV_CASES} argv cases)"
+        f"{HEADROOM_CASES} headroom cases, {ARGV_CASES} argv cases, plus the tree-wide line-structure pin)"
     )
     return 0
 

@@ -67,7 +67,7 @@ pub fn name_password(name: &str) -> Option<(String, String)> {
 /// collided as duplicates, while an all-CJK name reduced to the empty
 /// string - an identity so unspecific that the exact-duplicate check
 /// has to refuse it, so a genuine re-send of that release was admitted
-/// as new (Codex sweep J, 13 Aug 2026). ASCII names flatten exactly as
+/// as new (review sweep J, 13 Aug 2026). ASCII names flatten exactly as
 /// they always did; `to_lowercase` differs from `to_ascii_lowercase`
 /// only on characters the old filter was deleting anyway.
 pub fn flatten_name(name: &str) -> String {

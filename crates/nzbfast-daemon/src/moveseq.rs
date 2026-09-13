@@ -199,7 +199,7 @@ pub(crate) fn stamp_move(job: &Arc<Mutex<Job>>) {
 
 /// The same, for a caller that already holds the record - and has to,
 /// because the check that says the stamp is still theirs to make must
-/// happen under the same hold (Codex sweep 6, N2).
+/// happen under the same hold (review sweep 6, N2).
 pub(crate) fn stamp_move_locked(job: &mut Job) {
     job.move_seq += 1;
 }
@@ -287,7 +287,7 @@ impl Daemon {
     /// the two left the record deleted from replayed history and absent
     /// from the old queue snapshot: it existed in NEITHER store, and no
     /// amount of startup reconciliation can recover a record nothing
-    /// wrote down (Codex sweep 12 Aug F1).
+    /// wrote down (review sweep 12 Aug F1).
     ///
     /// Queue first. The torn state is "in both stores", which
     /// `load_queue` now resolves in the QUEUE's favour on this path -
@@ -352,7 +352,7 @@ impl Daemon {
             // (seq+1) before this thread gets here. An id-only tombstone
             // landing after that park's history row deleted it, and the
             // next queue save omitted the parked job too: lost from both
-            // stores with no crash needed (Codex sweep 13 Aug Q1). The
+            // stores with no crash needed (review sweep 13 Aug Q1). The
             // bounded tombstone still buries the seq-N row this move
             // pulled out of history, and can never touch a later one.
             if !self.history_tombstone_upto(nzo_id, seq) {
@@ -972,7 +972,7 @@ mod harness {
         assert!(split.parked.is_empty());
     }
 
-    /// Q1 (Codex sweep 13 Aug): a retry's tombstone, delayed behind its
+    /// Q1 (review sweep 13 Aug): a retry's tombstone, delayed behind its
     /// own slow queue save, must not erase the NEWER park generation
     /// that landed meanwhile.
     ///
@@ -1036,7 +1036,7 @@ mod harness {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Q2 (Codex sweep 13 Aug): "Save queue" compacting history inside a
+    /// Q2 (review sweep 13 Aug): "Save queue" compacting history inside a
     /// park's window must not erase the park's durable prewrite.
     ///
     /// The window is real code: park prewrites the history row to DISK,
@@ -1165,7 +1165,7 @@ mod harness {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Q3 (Codex sweep 13 Aug): a TERMINAL queue snapshot carrying a
+    /// Q3 (review sweep 13 Aug): a TERMINAL queue snapshot carrying a
     /// higher `move_seq` than the stored history row is the newer
     /// outcome and must win - it used to be discarded on id alone,
     /// which reverted a finished retry to its previous failure.

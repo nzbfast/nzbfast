@@ -55,7 +55,7 @@ fn seal_run_blocking_fails_orphans_exactly_once() {
     assert_eq!(seal_run_blocking(&sh, &tx, FailCode::FleetExhausted), 0);
 }
 
-/// Codex F-15 (22 Aug 2026): shard threads used to come up through bare
+/// Review finding F-15 (22 Aug 2026): shard threads used to come up through bare
 /// `std::thread::spawn`, which PANICS when the OS refuses a thread -
 /// unwinding `fetch_all_sharded` mid-run, detaching whatever shards had
 /// already started, and leaking the failed shard plan's pre-born lives

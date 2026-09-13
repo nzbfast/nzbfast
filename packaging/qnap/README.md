@@ -72,9 +72,21 @@ The build itself runs QDK, QNAP's own kit, pinned by commit in
 `qdk-pin.txt`. **QDK cannot run on macOS**: `qbuild` finishes by rewriting
 the generated self-extractor with `sed -i "s/SCRIPT_LEN/.../"`, and BSD
 sed reads the next argument as a backup suffix, so the length patch never
-lands. `make-qpkg.sh` therefore runs it in a container when it has to, and
-natively when `qbuild` is on `PATH`. If neither is available it refuses
-rather than assembling the format by hand.
+lands. `make-qpkg.sh` therefore runs it natively when `qbuild` is on
+`PATH`, and in a container on a Linux host without it. If neither is
+available it refuses rather than assembling the format by hand.
+
+**On macOS it refuses before it does anything at all**, and the command
+above is not the one to run there - dispatch the workflow instead. The
+container is not the way round it either, even though `qbuild` itself is
+happy inside one: `make-qpkg.sh` stages into `mktemp -d`, macOS `mktemp`
+given no template ignores `$TMPDIR` and always answers under
+`/var/folders`, and colima shares `$HOME` and `/tmp/colima` but not
+`/var/folders` - so the bind mount hands `qbuild` an empty `/work` and it
+says `qpkg.cfg: No such file` about a file that is sitting in the staging
+tree on the host. Re-running with `TMPDIR` set does not move it. That
+cost an hour on 4 Sep 2026 cutting v1.4.0, which is why the refusal is
+now the first thing the script does.
 
 Every release gets one, and it is built AFTER the release rather than
 during it. The **qnap-qpkg** workflow is the one that ships it: dispatch

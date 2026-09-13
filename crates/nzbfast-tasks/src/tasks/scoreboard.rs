@@ -60,7 +60,7 @@ const RECHECK_CHUNK: usize = 200;
 pub fn spawn_scoreboard(daemon: &Arc<Daemon>) {
     let d = daemon.clone();
     tokio::spawn(async move {
-        // CLAUDE.md invariant 5: the gate that fences every other
+        // project invariant 5: the gate that fences every other
         // outbound enrichment call fences this one, and it is asked of
         // `may_call_out` so there is one copy of the rule. Checked once
         // - the variable is process-wide and static - so a test daemon

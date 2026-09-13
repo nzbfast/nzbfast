@@ -32,11 +32,25 @@ pub enum Level {
 }
 
 /// Where the lines go. `stdio` is the program; the buffering
-/// constructor is what the unit tests read back.
+/// constructor is what the unit tests read back; the tapping one is
+/// what a long-lived host (the GUI's log drawer, through
+/// `parfast-session`) reads WHILE the command runs.
 pub struct Sink {
     level: i32,
     buf: Option<(String, String)>,
+    tap: Option<Tap>,
 }
+
+/// A live line consumer: `(line, is_stderr)`, called as each line is
+/// emitted rather than at the end.
+///
+/// A BUFFERED sink cannot serve a progress drawer - `take()` hands back
+/// everything at once, after the command has already finished, which is
+/// precisely when a running job no longer needs it. The three command
+/// modules write prose at about ten sites each and none of them knows
+/// about a host, so the seam belongs here, at the one place every line
+/// already passes through.
+pub type Tap = Box<dyn FnMut(&str, bool) + Send>;
 
 impl Sink {
     /// The real one: straight to stdout and stderr.
@@ -44,6 +58,7 @@ impl Sink {
         Sink {
             level: 0,
             buf: None,
+            tap: None,
         }
     }
 
@@ -53,6 +68,22 @@ impl Sink {
         Sink {
             level: 0,
             buf: Some((String::new(), String::new())),
+            tap: None,
+        }
+    }
+
+    /// A sink that hands every line to `tap` as it is emitted and
+    /// prints nothing. The verbosity ladder still applies, so a host
+    /// that wants the per-packet detail sets the level as the command
+    /// line would.
+    ///
+    /// [`Sink::take`] panics on one of these, exactly as it does on a
+    /// stdio sink: the lines have already been delivered.
+    pub fn tapped(tap: Tap) -> Sink {
+        Sink {
+            level: 0,
+            buf: None,
+            tap: Some(tap),
         }
     }
 
@@ -67,6 +98,14 @@ impl Sink {
     /// a per-target open line, and finding the targets is not free).
     pub fn level(&self) -> i32 {
         self.level
+    }
+
+    /// Is this the program's own sink - stdout and stderr - rather than
+    /// a buffer or a host's tap? The progress meter draws only on this
+    /// one: a buffered sink is a test reading lines back, and a tapped
+    /// sink is a host with its own progress bar, fed by the engine.
+    pub fn is_stdio(&self) -> bool {
+        self.buf.is_none() && self.tap.is_none()
     }
 
     /// Is this level going to print? Same predicate the sink applies,
@@ -91,6 +130,10 @@ impl Sink {
         if !self.shows(level) {
             return;
         }
+        if let Some(tap) = self.tap.as_mut() {
+            tap(line, false);
+            return;
+        }
         match &mut self.buf {
             Some((o, _)) => {
                 o.push_str(line);
@@ -104,6 +147,10 @@ impl Sink {
     /// silence about progress, not about failure, and the captured
     /// table pins a stderr line under `-q` on three separate shapes.
     pub fn err(&mut self, line: &str) {
+        if let Some(tap) = self.tap.as_mut() {
+            tap(line, true);
+            return;
+        }
         match &mut self.buf {
             Some((_, e)) => {
                 e.push_str(line);
@@ -168,6 +215,33 @@ mod tests {
         s.line(Level::Normal, "Loaded 6 new packets");
         s.line(Level::Terse, "Loading \"set.par2\".");
         assert_eq!(s.take().0, "Loading \"set.par2\".\n");
+    }
+
+    /// A tapped sink delivers each line AS IT IS EMITTED, keeps the
+    /// ladder, and separates stderr - the three properties the GUI's
+    /// live log drawer turns on.
+    #[test]
+    fn a_tapped_sink_delivers_lines_live_and_keeps_the_ladder() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_seen = std::sync::Arc::clone(&seen);
+        let mut s = Sink::tapped(Box::new(move |line, is_err| {
+            sink_seen
+                .lock()
+                .expect("tap mutex")
+                .push((line.to_string(), is_err));
+        }));
+        s.set_level(-1);
+        s.line(Level::Terse, "Loading \"set.par2\".");
+        // Dropped by -q, exactly as a printing sink drops it.
+        s.line(Level::Normal, "Loaded 6 new packets");
+        s.err("Not enough command line arguments.");
+        assert_eq!(
+            *seen.lock().expect("tap mutex"),
+            vec![
+                ("Loading \"set.par2\".".to_string(), false),
+                ("Not enough command line arguments.".to_string(), true),
+            ]
+        );
     }
 
     #[test]

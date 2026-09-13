@@ -43,9 +43,58 @@ pub(super) struct PartLatch {
     /// what keeps the unscoped sentinel out of it - see
     /// [`PartLatch::scoped`].
     pub(super) off: std::sync::Mutex<HashSet<u32>>,
+    /// The run-wide stand-down, set once [`RUN_WIDE_AFTER`] files have
+    /// EACH independently earned the per-file one above. See that
+    /// constant for why the count is what makes this safe.
+    pub(super) run_off: AtomicBool,
     /// Part-mismatch steers issued (each one an extra BODY).
     pub(super) steers: AtomicU64,
 }
+
+/// How many files must INDEPENDENTLY earn a per-file stand-down before
+/// the gate stands down for the rest of the run (F-09 follow-up,
+/// 30 Aug 2026).
+///
+/// WHAT THE COST IS, measured rather than reasoned about. The evidence
+/// the per-file latch needs is a REFETCH of an already-steered id
+/// agreeing, so every article of that file already decoded when the
+/// verdict lands has been steered - a full extra BODY each. That window
+/// is the pipeline's depth (fleet x window, plus whatever sits in the
+/// consumer's decode queue) and NOT the file's length, which is the
+/// half F-09's write-up had wrong: measured on this rig at 8,000-byte
+/// articles it is 22-38 steers whether the file has 20 articles or 200.
+/// It equals the whole file exactly when the file is SHORTER than that
+/// window - and a release's par2 volumes are all that shape. Measured
+/// on 40 files of 3 articles, one 0-based post: 79 steers over 120
+/// articles, 66% extra payload, and the identical verdict independently
+/// re-earned FORTY times. Every one of those files is the same poster
+/// numbering the same way.
+///
+/// WHY TWO AND NOT ONE. One is what this latch USED to be, and F-09
+/// narrowed it to per-file for a stated reason: "one mislabelled file
+/// must not switch off the wrong-part check for every other file in the
+/// job". Two honours that literally - a single mislabelled file can
+/// never reach here - while still paying the adjudication window at
+/// most twice per RUN instead of once per FILE. And the bar it raises
+/// is not lowered anywhere: each of the two stand-downs still needs its
+/// own two-disjoint-backbone refetch agreement. Nothing about the
+/// per-file evidence is weakened; an already-earned verdict is
+/// generalised from "this file" to "this post" only after the post has
+/// said it twice.
+///
+/// WHAT IS GIVEN UP, priced rather than asserted. For the remaining
+/// files the wrong-part check is off, so a genuine split-brain there is
+/// owned rather than steered. That is NOT silent corruption: the
+/// consumer places a body at the offset the body's OWN yEnc header
+/// declares (`get::workers`, `write_verified(.., dec.offset(), ..)`),
+/// never at the offset the NZB implied - so a misfiled body lands where
+/// it really belongs and the article that was asked for leaves a HOLE,
+/// which the verifier sees and par2 repairs. The gate is an
+/// optimisation that avoids a repair, not the last line before bad
+/// bytes. Measured cost of the widening on the mixed rig (two 0-based
+/// files plus one correctly-numbered file under a split-brain swap) is
+/// in `run_wide_part_latch_prices_both_sides`.
+pub(super) const RUN_WIDE_AFTER: usize = 2;
 
 impl PartLatch {
     /// Is this [`Work::file`] a file at all? `u32::MAX` is
@@ -88,15 +137,23 @@ impl PartLatch {
 
     /// Has this file's gate stood down? Never for an unscoped request.
     pub(super) fn is_off(&self, file: u32) -> bool {
-        Self::scoped(file) && self.off.lock_ok().contains(&file)
+        Self::scoped(file)
+            && (self.run_off.load(Ordering::Relaxed) || self.off.lock_ok().contains(&file))
     }
 
     /// Two disjoint backbones proved this file's segment numbering is
-    /// synthesized: stand its gate down. True only the FIRST time, so
-    /// the caller logs once; false for an unscoped request, which
-    /// cannot earn one.
-    pub(super) fn stand_down(&self, file: u32) -> bool {
-        Self::scoped(file) && self.off.lock_ok().insert(file)
+    /// synthesized: stand its gate down. Reports whether this was the
+    /// FIRST time, so the caller logs once, and how many files have now
+    /// earned one; an unscoped request can neither earn nor be recorded.
+    ///
+    /// BOTH halves are read under the SAME hold, which is what makes
+    /// [`RUN_WIDE_AFTER`] safe: two files earning their verdict at once
+    /// must not each read a length that excludes the other, or the
+    /// run-wide arm never fires on the pair that armed it.
+    pub(super) fn stand_down(&self, file: u32) -> (bool, usize) {
+        let mut off = self.off.lock_ok();
+        let fresh = Self::scoped(file) && off.insert(file);
+        (fresh, off.len())
     }
 
     /// Has ANY file's gate stood down (the ledger summary)?
@@ -962,9 +1019,12 @@ impl QueueControl {
                             if first_part == got && first_group & h.group_bits == 0
                     );
                     if agreed {
-                        if sh.part_latch.stand_down(h.work.file)
-                            && let Some(l) = &sh.live
-                        {
+                        // `stand_down` reads the count under the same
+                        // hold as the insert, which is what makes the
+                        // run-wide arm below fire on the pair that
+                        // armed it.
+                        let (fresh, files) = sh.part_latch.stand_down(h.work.file);
+                        if fresh && let Some(l) = &sh.live {
                             l.note(
                                     h.server,
                                     "crc-retry",
@@ -972,6 +1032,24 @@ impl QueueControl {
                                         "{id}: two servers agree on part {got} where the NZB declared {want} - segment numbers are synthesized, part gate off for this file"
                                     ),
                                 );
+                        }
+                        // `swap` and not a store: the note is the
+                        // ledger's only record that the run-wide arm
+                        // took, and printing it once per later file
+                        // would read as one verdict per file - which is
+                        // the very thing this stops paying for.
+                        if fresh
+                            && files >= RUN_WIDE_AFTER
+                            && !sh.part_latch.run_off.swap(true, Ordering::Relaxed)
+                            && let Some(l) = &sh.live
+                        {
+                            l.note(
+                                h.server,
+                                "crc-retry",
+                                format!(
+                                    "{files} files of this post have each had two servers agree - the numbering is the poster's, part gate off for the rest of the run"
+                                ),
+                            );
                         }
                         return finalize(&sh);
                     }

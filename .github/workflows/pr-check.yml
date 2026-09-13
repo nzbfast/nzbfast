@@ -121,7 +121,7 @@ jobs:
       # the reason for the SPLIT is no longer the reason it was written.
       #
       # It used to be serialisation. The daemon suite is single-threaded
-      # by invariant (CLAUDE.md invariant 4), and under a plain parallel
+      # by invariant (project invariant 4), and under a plain parallel
       # `cargo test --workspace` it flaked about 1 run in 3 on an
       # unmodified tree (cancelling_a_download_leaves_its_duplicate_held),
       # measured against a clean checkout - so it was the invocation, not
@@ -370,7 +370,7 @@ jobs:
           key: pr-cargo-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       # Same two-pass split as the Linux leg, for the reason that leg
       # USED to have: the daemon suite is single-threaded by invariant
-      # (CLAUDE.md invariant 4) and flakes under a parallel workspace
+      # (project invariant 4) and flakes under a parallel workspace
       # pass, and cargo cannot exclude one test target from --workspace.
       # `.config/nextest.toml` answers it narrowly, with per-binary
       # `max-threads = 1` groups, exactly as the Linux leg's own comment

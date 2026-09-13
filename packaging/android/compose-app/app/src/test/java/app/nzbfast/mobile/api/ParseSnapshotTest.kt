@@ -68,7 +68,7 @@ class ParseSnapshotTest {
         assertTrue(h[0].playable)
     }
 
-    /** Codex sweep 5 Aug L3: Play used to render for EVERY Completed
+    /** review sweep 5 Aug L3: Play used to render for EVERY Completed
      * row - ISOs, software, archive-only jobs got a dead button. No
      * media chip and no media extension means no Play. */
     @Test

@@ -5,7 +5,7 @@
 use super::*;
 use crate::payloads;
 
-/// Codex sweep 10 Aug M3: par2cmdline is an OPTIONAL escape hatch, so a
+/// Review sweep 10 Aug M3: par2cmdline is an OPTIONAL escape hatch, so a
 /// machine without one must still reach the escalation that fetches
 /// every remaining recovery volume and retries natively. The old control
 /// flow returned the moment the external binary would not spawn, which

@@ -233,6 +233,11 @@ pub enum GenError {
     /// would post the source and then silently overwrite it with the
     /// generated one, and the NZB would carry two files under one name.
     RecoveryNameCollides(String),
+    /// The generated recovery set lands on a name a SIBLING inside the
+    /// container already extracts as. Both end up in one output
+    /// directory, so one overwrites the other and the expectation could
+    /// not say which won.
+    RecoveryNameCollidesWithSibling(String),
 }
 
 impl std::fmt::Display for GenError {
@@ -288,6 +293,15 @@ impl std::fmt::Display for GenError {
                  another recovery file, under F6's competing set) is two files under one \
                  name on the wire"
             ),
+            Self::RecoveryNameCollidesWithSibling(n) => write!(
+                f,
+                "the recovery set's generated name {n:?} is also a [container] sibling. A \
+                 sibling extracts into the same output directory the posted recovery files \
+                 land in, so one would overwrite the other - and `check_siblings` cannot \
+                 see it, because the sibling is inside the archive and never reaches the \
+                 posted-name list. par2's base name is the stem of the first covered \
+                 member's basename: rename the sibling, or cover a different member"
+            ),
         }
     }
 }
@@ -323,7 +337,7 @@ from_stage!(crate::profile::Contradiction, Profile);
 /// a diff of two failing runs.
 pub fn generate(profile: &Profile) -> Result<Layout, GenError> {
     let (sources, rng) = seeded_payload(profile)?;
-    build(profile, sources, rng)
+    build(profile, sources, rng, container::Packing::LAZY)
 }
 
 /// [`generate`] over a payload the caller supplies: the same layout,
@@ -348,6 +362,25 @@ pub fn generate(profile: &Profile) -> Result<Layout, GenError> {
 /// or off a disk. The price is one ChaCha fill of the payload's size,
 /// paid by a tool that is about to put those bytes on a wire.
 pub fn generate_over(profile: &Profile, payload: Vec<Vec<u8>>) -> Result<Layout, GenError> {
+    generate_over_with(profile, payload, container::Packing::LAZY)
+}
+
+/// [`generate_over`] under a caller's [`container::Packing`]: the same
+/// layout, whose compressed archives are packed the way the caller
+/// asked for rather than the way the catalog packs.
+///
+/// The one caller is the posting tool again, and the packing arrives
+/// the way the rest of its deployment plane does - as a flag rather
+/// than a profile key, for the reason [`container::Packing`] gives.
+/// Nothing about the layout moves with it: the packing changes the
+/// archive's BYTES, so the volume count, the article count and the
+/// message-ids follow the bytes exactly as they follow a payload, and
+/// every name and every draw is where it was.
+pub fn generate_over_with(
+    profile: &Profile,
+    payload: Vec<Vec<u8>>,
+    packing: container::Packing,
+) -> Result<Layout, GenError> {
     let (mut sources, rng) = seeded_payload(profile)?;
     if payload.len() != sources.len() {
         return Err(GenError::PayloadCount {
@@ -365,7 +398,7 @@ pub fn generate_over(profile: &Profile, payload: Vec<Vec<u8>>) -> Result<Layout,
         }
         s.bytes = bytes;
     }
-    build(profile, sources, rng)
+    build(profile, sources, rng, packing)
 }
 
 /// Validate, refuse what this stage does not build, and draw the
@@ -385,6 +418,7 @@ fn build(
     profile: &Profile,
     sources: Vec<assemble::SourceFile>,
     mut rng: Rng,
+    packing: container::Packing,
 ) -> Result<Layout, GenError> {
     // The container plane runs between the payload and every plane
     // below it, and it REPLACES what those planes see: with an archive
@@ -393,7 +427,7 @@ fn build(
     // volumes, the naming plane names volumes, and neither module
     // learns that a container exists. `None` is C0, where the sources
     // are the posted files and nothing changes.
-    let mut contained = container::wrap(profile, &sources, &mut rng)?;
+    let mut contained = container::wrap_with(profile, &sources, &mut rng, packing)?;
     // The recovery set is built BEFORE any name is drawn for it and
     // AFTER the payload is assembled, because it describes the payload
     // and draws nothing. What it decides - which members a set covers,
@@ -516,6 +550,29 @@ fn build(
         if all.iter().any(|s| s.rel == f.name) {
             return Err(GenError::RecoveryNameCollides(f.name.clone()));
         }
+        // ...and against the SIBLINGS, at every level of the stack. A
+        // sibling is written inside the archive, so it is not a posted
+        // file and `all` will never hold it - but it extracts into the
+        // same directory these files are downloaded into, which is the
+        // one namespace that matters. `movie.bin` + `siblings =
+        // [{ name = "movie.par2" }]` derives `movie.par2` from the stem
+        // and posts it beside an archive that unpacks a second
+        // `movie.par2`.
+        if profile
+            .container
+            .siblings
+            .iter()
+            .chain(
+                profile
+                    .container
+                    .inner
+                    .iter()
+                    .flat_map(|l| l.siblings.iter()),
+            )
+            .any(|sib| sib.name == f.name)
+        {
+            return Err(GenError::RecoveryNameCollidesWithSibling(f.name.clone()));
+        }
         all.push(assemble::SourceFile {
             rel: f.name.clone(),
             base: f.name.clone(),
@@ -557,10 +614,10 @@ fn build(
         // have no tree of their own. The recovery files sit beside
         // either, which is where a `par2 create` run would have left
         // them.
-        files: all
-            .iter()
-            .map(|s| (s.rel.clone(), s.bytes.clone()))
-            .collect(),
+        // Encoding has finished borrowing these buffers. Transfer them
+        // into the result so building the expectation below does not
+        // keep a second complete copy of the posted files alive.
+        files: all.into_iter().map(|s| (s.rel, s.bytes)).collect(),
         articles: articles.bodies,
         headers: articles.headers,
         nzb,
@@ -569,7 +626,7 @@ fn build(
         expect: expectation(
             profile,
             &sources,
-            contained.as_ref(),
+            contained,
             split.as_ref(),
             &plan,
             &recovered,
@@ -600,7 +657,7 @@ fn carried_files<'a>(
 fn expectation(
     profile: &Profile,
     sources: &[assemble::SourceFile],
-    contained: Option<&Contained>,
+    contained: Option<Contained>,
     split: Option<&Split>,
     plan: &naming::Plan,
     recovered: &Recovered,
@@ -752,7 +809,7 @@ fn expected_files(
 /// an expectation nothing can check.
 fn expected_end_state(
     sources: &[assemble::SourceFile],
-    contained: Option<&Contained>,
+    contained: Option<Contained>,
     split: Option<&Split>,
     plan: &naming::Plan,
     recovered: &Recovered,
@@ -782,7 +839,13 @@ fn expected_end_state(
     let Some(c) = contained else {
         return expected_files(sources, plan, recovered, sidecar_names, repairing, swept);
     };
-    let mut out = c.payload.clone();
+    // MOVED out of the container, not cloned out of it. `c.payload` is
+    // already a whole copy of the payload that `container::wrap` made
+    // for exactly this, and `contained` is dropped as this function
+    // returns - so the clone was a THIRD live copy of the payload, and
+    // it is the term that set the stored arm's global peak once the
+    // container plane's own two copies went (8 Sep 2026).
+    let mut out = c.payload;
     let posted = c.volumes.len()
         - (0..c.volumes.len())
             .filter(|i| recovered.is_unposted(*i))
@@ -1169,6 +1232,30 @@ article_bytes = 1024
         assert!(
             matches!(e, GenError::RecoveryNameCollides(ref n) if n == "movie.par2"),
             "expected the recovery/source collision, got {e}"
+        );
+    }
+
+    /// ...and the same collision against a SIBLING, which
+    /// `check_siblings` cannot see.
+    ///
+    /// A sibling is written INSIDE the archive, so it never reaches the
+    /// posted-name list `check_siblings` compares against - but it
+    /// extracts into the same output directory the posted `.par2`
+    /// lands in, so `movie.bin` + a `movie.par2` sibling is two files
+    /// under one name at the client and the expectation could not say
+    /// which won.
+    #[test]
+    fn a_sibling_named_like_the_recovery_set_is_refused() {
+        let text = "[layout]\nname = \"t\"\nseed = 1\n\n\
+                     [source]\nfiles = [{ name = \"movie.bin\", bytes = 24000 }]\n\n\
+                     [container]\nkind = \"rar-stored\"\n\
+                     siblings = [{ name = \"movie.par2\", bytes = 90 }]\n\n\
+                     [recovery]\nkind = \"par2\"\nredundancy_pct = 10\n";
+        let e = generate(&Profile::parse(text).expect("test profile parses"))
+            .expect_err("a sibling named like the generated set is a collision");
+        assert!(
+            matches!(e, GenError::RecoveryNameCollidesWithSibling(ref n) if n == "movie.par2"),
+            "expected the recovery/sibling collision, got {e}"
         );
     }
 

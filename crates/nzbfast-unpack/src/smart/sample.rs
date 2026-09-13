@@ -31,7 +31,7 @@ pub(super) fn is_sample_clip(p: &Path) -> bool {
 /// and could take the canonical episode name from the feature. Widening
 /// `is_sample_clip` itself would have fixed that and also widened
 /// `is_deletable_sample`, which decides what a sweep may DELETE - the
-/// one direction the rename paths are not allowed to move (Codex sweep
+/// one direction the rename paths are not allowed to move (review sweep
 /// 5, M4).
 ///
 /// A WHOLE TOKEN, never a substring, since matrix row M4-91. `contains`

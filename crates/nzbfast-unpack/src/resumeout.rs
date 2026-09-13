@@ -180,7 +180,7 @@ impl Drop for ResumeArm {
             // partial at a path the native pass is ABOUT to publish to,
             // length or no length: a grown partial there is still the
             // chase's own file, and leaving it would shunt the real
-            // member to a disambiguated name (Codex F-10, kept).
+            // member to a disambiguated name (review finding F-10, kept).
             let owned = std::fs::metadata(&e.path).is_ok_and(|m| m.len() == e.len);
             if owned {
                 let _ = std::fs::remove_file(&e.path);
@@ -227,7 +227,7 @@ pub(crate) fn plan(dir: &Path) -> std::collections::HashMap<String, (PathBuf, u6
 /// A name it carries TWICE is dropped from the plan: both entries would
 /// otherwise open the same partial at the same mark, and the published
 /// file would be the first entry's prefix with the second's tail, with
-/// both reporting success (Codex F-02, 22 Aug 2026). Such a name falls
+/// both reporting success (review finding F-02, 22 Aug 2026). Such a name falls
 /// into `clear_unresumed`'s set instead and extracts from byte zero,
 /// which is merely the old cost.
 ///
@@ -924,7 +924,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Codex F-10, the direction that is a DECISION rather than a
+    /// Review finding F-10, the direction that is a DECISION rather than a
     /// defect. `clear_unresumed` unlinks an armed partial sitting at a
     /// path this pass is about to publish to EVEN THOUGH its length has
     /// moved off the mark - which is the very test the arm's own

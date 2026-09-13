@@ -125,7 +125,7 @@ pub(super) fn fetch_manifest(url: &str) -> std::result::Result<Value, String> {
 /// `latest.json?token=abc` into `latest.json?token=abc.sig` - same path,
 /// mutated query - so a custom mirror behind a token or presigned URL
 /// fetched its manifest fine and then failed closed as "unsigned",
-/// forever and quietly (Codex sweep 24 Aug, F-21). The default GitHub
+/// forever and quietly (review sweep 24 Aug, F-21). The default GitHub
 /// URL has no query and never hit it. String surgery rather than a URL
 /// parser: the setter already pins the scheme, and the first `?` or `#`
 /// is where a path ends in any http(s) URL.
@@ -589,7 +589,7 @@ mod tests {
 
     /// `.sig` lands on the PATH, with the query and fragment kept where
     /// they were - a token-bearing mirror URL must not have its token
-    /// mutated into `abc.sig` (Codex sweep 24 Aug, F-21).
+    /// mutated into `abc.sig` (review sweep 24 Aug, F-21).
     #[test]
     fn the_sig_url_keeps_the_query_intact() {
         assert_eq!(

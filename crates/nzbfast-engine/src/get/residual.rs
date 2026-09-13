@@ -349,7 +349,7 @@ fn charge_twin_sets(
 /// clause below - a descriptor's own set describes it by construction,
 /// so a set with claims that names it is that set itself whenever it
 /// has any - and a guard that is sufficient beside another sufficient
-/// one is a pair no mutation can falsify, which is CLAUDE.md's
+/// one is a pair no mutation can falsify, which is CONTRIBUTING.md's
 /// FORTY-SIXTH entry. Measured rather than reasoned out: with both in
 /// place, blanking the `set_has_claims[si]` test killed no test in this
 /// module, which is how the redundancy was found at all.
@@ -537,6 +537,7 @@ mod twin_charge_tests {
         files: Vec<nzbkit::par2::Par2File>,
     ) -> Arc<nzbkit::par2::Par2Set> {
         Arc::new(nzbkit::par2::Par2Set {
+            comment: None,
             recovery_set_id: [0u8; 16],
             block_size,
             files,

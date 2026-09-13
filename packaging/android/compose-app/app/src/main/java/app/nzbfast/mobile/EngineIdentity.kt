@@ -20,7 +20,7 @@ import org.json.JSONObject
  * and answer `{"version":"x"}`; the real daemon exited on EADDRINUSE while
  * the UI attached to the impostor. That captured key is a FULL key - it
  * controls the real daemon on the next start and reads back stored
- * provider credentials through `mode=server_secret` (Codex sweep 12 Aug
+ * provider credentials through `mode=server_secret` (review sweep 12 Aug
  * F4).
  *
  * The daemon already publishes what is needed: `runtime.json`, written

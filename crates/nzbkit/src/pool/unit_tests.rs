@@ -207,7 +207,7 @@ fn ctx_for_unions_mirror_group_bits() {
     );
 }
 
-/// Codex F-13: every routing decision in the pool is a `u32` bitmask
+/// Review finding F-13: every routing decision in the pool is a `u32` bitmask
 /// and `server_bit` answers 0 past `MAX_SERVERS`, so servers 33 and up
 /// would share the empty bit - invisible to each other's 430 ledger,
 /// tier gate and dup guard, and able to drive an article terminal
@@ -478,7 +478,7 @@ fn stall_bound_shares_the_line_among_the_fewer_of_workers_and_articles_left() {
 
 // The same sharer count, with articles actually IN FLIGHT. `pending`
 // is every non-terminal article - queued AND in flight - so it is the
-// whole count on its own; `stall_bound` used to add `inflight.len()`
+// whole count on its own; `stall_bound` used to add `sess.inflight.len()`
 // on top of it and judge the tail against about twice the work that
 // was left (found by the drain-tail note 21 Aug, fixed in the 22 Aug
 // bug sweep). Nothing pinned the fix: the tail case above happens to
@@ -1150,7 +1150,7 @@ fn requeue_refuses_when_the_last_worker_retires_inside_the_gate_window() {
     );
 }
 
-/// Codex F-07 (22 Aug 2026): `requeue` used to clear the revived
+/// Review finding F-07 (22 Aug 2026): `requeue` used to clear the revived
 /// articles' `done` bits BEFORE its refusal points, and its rollback
 /// re-claimed them on the way out. A lingering duplicate dispatch
 /// completing inside that window took the cleared bit as a fresh
@@ -1486,7 +1486,7 @@ fn sharded_fetch_with_zero_shard_clamp_still_reports() {
     assert!(stats[0].bytes > 0);
 }
 
-/// Codex 5 Aug M4: `drain()` sets ONLY `draining` - no `finished`, no
+/// Review 5 Aug M4: `drain()` sets ONLY `draining` - no `finished`, no
 /// abort - so a filler that watches just those two loops forever after a
 /// graceful pause, pinning `Arc<Shared>` and an authenticated provider
 /// session. The filler must notice the flag on its own tick and quit
@@ -1683,40 +1683,38 @@ async fn recycle_slow_sheds_after_consecutive_race_losses() {
     // A duplicate dispatch won both of the first two articles already.
     assert!(sh.claim_done("<l0@x>", 0));
     assert!(sh.claim_done("<l1@x>", 1));
-    let mut inflight: VecDeque<Work> = [
-        work("<l0@x>"),
-        Work {
-            ord: 1,
-            ..work("<l1@x>")
-        },
-        Work {
-            ord: 2,
-            ..work("<l2@x>")
-        },
-    ]
-    .into_iter()
-    .collect();
-    for _ in 0..inflight.len() {
+    let mut sess = SessionState::from_inflight(
+        [
+            work("<l0@x>"),
+            Work {
+                ord: 1,
+                ..work("<l1@x>")
+            },
+            Work {
+                ord: 2,
+                ..work("<l2@x>")
+            },
+        ]
+        .into_iter()
+        .collect(),
+    );
+    for _ in 0..sess.inflight.len() {
         sh.charge_wire();
     }
-    let mut losses = 0u32;
-    let mut bytes = 0u64;
-    let started = Instant::now();
+    let mut lad = Ladder::new();
     // First loss: evidence noted, no recycle yet.
     let step = handle_body(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
-        &mut losses,
-        &mut bytes,
-        started,
+        &mut sess,
+        &mut lad,
     )
     .await;
     assert!(matches!(step, BodyStep::Proceed));
-    assert_eq!(losses, 1);
+    assert_eq!(lad.race_losses, 1);
     // Second consecutive loss: the session has proven slow - shed and
     // redial, counter reset, the innocent in-flight article requeued.
     let step = handle_body(
@@ -1724,16 +1722,14 @@ async fn recycle_slow_sheds_after_consecutive_race_losses() {
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
-        &mut losses,
-        &mut bytes,
-        started,
+        &mut sess,
+        &mut lad,
     )
     .await;
     assert!(matches!(step, BodyStep::Recycle));
-    assert_eq!(losses, 0, "a recycle spends the evidence");
-    assert!(inflight.is_empty(), "the shed empties the pipeline");
+    assert_eq!(lad.race_losses, 0, "a recycle spends the evidence");
+    assert!(sess.inflight.is_empty(), "the shed empties the pipeline");
     assert_eq!(
         sh.queue.lock().await.front().map(|w| &*w.id),
         Some("<l2@x>"),
@@ -1744,23 +1740,21 @@ async fn recycle_slow_sheds_after_consecutive_race_losses() {
     // fan-out makes losing normal - no evidence is charged.
     let (sh2, _) = Shared::new(fresh(&["<e0@x>", "<e1@x>"]), &servers);
     assert!(sh2.claim_done("<e0@x>", 0));
-    let mut inflight2: VecDeque<Work> = [work("<e0@x>")].into_iter().collect();
+    let mut sess2 = SessionState::from_inflight([work("<e0@x>")].into_iter().collect());
     sh2.charge_wire();
-    let mut losses2 = 0u32;
+    let mut lad2 = Ladder::new();
     let step = handle_body(
         &cfg,
         ctx,
         &sh2,
         &tx,
-        &mut inflight2,
         PooledBuf::unpooled(Vec::new()),
-        &mut losses2,
-        &mut bytes,
-        started,
+        &mut sess2,
+        &mut lad2,
     )
     .await;
     assert!(matches!(step, BodyStep::Proceed));
-    assert_eq!(losses2, 0, "endgame losses are not evidence");
+    assert_eq!(lad2.race_losses, 0, "endgame losses are not evidence");
 }
 
 /// §122.5 recycle arm (proactive): a session whose own delivery rate
@@ -1782,22 +1776,23 @@ async fn recycle_slope_redials_a_collapsed_session() {
     // age (clamped to 0.5 s), one live worker shares them.
     sh.bytes[0].store(64_000_000, Ordering::Release);
     let (tx, mut rx) = mpsc::channel(8);
-    let mut inflight: VecDeque<Work> = [
-        work("<s0@x>"),
-        Work {
-            ord: 1,
-            ..work("<s1@x>")
-        },
-    ]
-    .into_iter()
-    .collect();
-    for _ in 0..inflight.len() {
+    let mut sess = SessionState::from_inflight(
+        [
+            work("<s0@x>"),
+            Work {
+                ord: 1,
+                ..work("<s1@x>")
+            },
+        ]
+        .into_iter()
+        .collect(),
+    );
+    for _ in 0..sess.inflight.len() {
         sh.charge_wire();
     }
-    let mut losses = 0u32;
+    let mut lad = Ladder::new();
     // This session: 11 s old, nothing delivered until now.
-    let mut session_bytes = 0u64;
-    let started = Instant::now()
+    sess.start = Instant::now()
         .checked_sub(Duration::from_secs(11))
         .expect("host has been up longer than 11 s");
     let step = handle_body(
@@ -1805,11 +1800,9 @@ async fn recycle_slope_redials_a_collapsed_session() {
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
-        &mut losses,
-        &mut session_bytes,
-        started,
+        &mut sess,
+        &mut lad,
     )
     .await;
     // The article itself was WON and delivered - the slope verdict is
@@ -1819,7 +1812,7 @@ async fn recycle_slope_redials_a_collapsed_session() {
         other => panic!("expected the won article delivered, got {other:?}"),
     }
     assert!(matches!(step, BodyStep::Recycle));
-    assert!(inflight.is_empty());
+    assert!(sess.inflight.is_empty());
     assert_eq!(
         sh.queue.lock().await.front().map(|w| &*w.id),
         Some("<s1@x>"),
@@ -2014,7 +2007,7 @@ async fn a_promote_mid_pipeline_sheds_to_a_fresh_session() {
     );
 }
 
-/// Codex sweep 5, L6: a recorded ceiling must not outlive proof that it
+/// Review sweep 5, L6: a recorded ceiling must not outlive proof that it
 /// is wrong. Session memory deliberately survives a job so the next one
 /// does not rediscover a cap - but after a plan upgrade a fleet that
 /// holds MORE than the old number has disproven it, and the row was

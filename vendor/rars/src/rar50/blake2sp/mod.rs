@@ -462,11 +462,14 @@ mod tests {
             keyword,
             &mut hits,
         );
-        assert_eq!(hits.len(), 1, "{keyword} outside the NEON entry: {hits:?}");
+        // Two homes since 6 Sep 2026: the NEON BLAKE2sp entry and the GF16
+        // recovery fold kernels (recovery/gf16_fold.rs), whose module
+        // header carries the same argument.
+        hits.sort();
+        assert_eq!(hits.len(), 2, "{keyword} outside its two homes: {hits:?}");
         assert!(
-            hits[0].ends_with("blake2sp/many.rs"),
-            "the one {keyword} block moved: {}",
-            hits[0]
+            hits[0].ends_with("blake2sp/many.rs") && hits[1].ends_with("recovery/gf16_fold.rs"),
+            "an {keyword} block moved: {hits:?}"
         );
     }
 

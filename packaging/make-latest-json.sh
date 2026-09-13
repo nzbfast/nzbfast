@@ -352,7 +352,7 @@ fi
 # proves the crypto library works and nothing about WHICH key was used:
 # any well-formed ed25519 private key passes it. A stale, rotated or test
 # key therefore produced a green "signed" line, a manifest every shipped
-# client rejects, and a burned serial (Codex sweep 24 Aug, F-15). Hold
+# client rejects, and a burned serial (review sweep 24 Aug, F-15). Hold
 # the supplied key to the ONE key clients actually trust, read out of
 # serve/update.rs so the two cannot drift, BEFORE anything is signed or
 # recorded.

@@ -1398,7 +1398,17 @@ location / {
     proxy_set_header Host              $host;
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-}</code></pre>
+}
+
+# Apache (mod_proxy, mod_proxy_http, mod_headers)
+&lt;Location /&gt;
+    ProxyPass        http://127.0.0.1:6789/
+    ProxyPassReverse http://127.0.0.1:6789/
+    RequestHeader set X-Forwarded-Proto "https"
+    # Where the proxy does the authenticating, supply the key here and
+    # clients behind it never need one. Use set, not setifempty.
+    # RequestHeader set X-Api-Key "your-api-key"
+&lt;/Location&gt;</code></pre>
 <p>Ajoutez par-dessus ce que propose votre proxy : authentification basique, un service de forward-auth comme Authelia ou Authentik, ou des certificats client. Un détail piège tout le monde - Sonarr, Radarr et les applications mobiles ne peuvent pas effectuer une connexion via navigateur, laissez-leur donc un passage. La plupart des proxys savent laisser passer une requête portant un en-tête <code>X-Api-Key</code> valide et exiger l'authentification pour tout le reste.</p>
 <div class="warn-box"><b>Ne redirigez pas simplement le port 6789 sur votre routeur.</b>
 Sans certificat configuré, le tableau de bord parle du HTTP en clair : votre clé API

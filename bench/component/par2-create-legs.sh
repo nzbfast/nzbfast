@@ -28,6 +28,12 @@ PAR2_120=${PAR2_120:-$HOME/parshoot3/bin/par2}
 PAR2_130=${PAR2_130:-$HOME/parshoot3/bin/par2cmdline130}
 TURBO140=${TURBO140:-$HOME/parshoot3/bin/par2turbo}
 TURBO150=${TURBO150:-$HOME/parshoot3/bin/par2turbo150}
+# Rival-survey arms, 5 Sep 2026 - the same roster as par2-round.sh's
+# block, minus par2rs (the rust-par2 crate does not create).
+PAR2TBB=${PAR2TBB:-$HOME/parshoot3/bin/par2tbb}
+TBBLIB=${TBBLIB:-}
+GOPAR=${GOPAR:-$HOME/parshoot3/bin/gopar}
+TURBO120=${TURBO120:-$HOME/parshoot3/bin/par2turbo120utf8}
 OUT=${OUT:-${TMPDIR:-/tmp}/par2-create-out}
 PCT=${PCT:-10}
 ROUNDS=${1:-3}; shift || true
@@ -60,20 +66,41 @@ for r in $(seq 1 "$ROUNDS"); do
     par2_120) (cd "$SRC" && "$PAR2_120" c -q -s"$bs" -r"$PCT" -B"$SRC" "$OUT/bench.par2" $members > /dev/null 2>&1) ;;
     # shellcheck disable=SC2086
     par2_130) (cd "$SRC" && "$PAR2_130" c -q -s"$bs" -r"$PCT" -B"$SRC" "$OUT/bench.par2" $members > /dev/null 2>&1) ;;
-    # turbo at BOTH versions, and each with and without -T16, because
-    # the shipped default is what a user gets and -T16 is what its own
-    # documentation steers them to.
+    # turbo at BOTH versions, and each with and without -T16. `-T` is
+    # turbo's FILES-HASHED-IN-PARALLEL count, NOT its compute-thread knob
+    # (that is lower-case `-t`, which already defaults to the detected core
+    # count), so the `_16` arms are a wide hash fan-out rather than a thread
+    # pin and the plain arms are not handicapped. See the README's trap
+    # entry; the arm names are kept so older numbers stay comparable.
     # shellcheck disable=SC2086
     turbo140) (cd "$SRC" && "$TURBO140" c -q -s"$bs" -r"$PCT" -B"$SRC" "$OUT/bench.par2" $members > /dev/null 2>&1) ;;
     # shellcheck disable=SC2086
     turbo150) (cd "$SRC" && "$TURBO150" c -q -s"$bs" -r"$PCT" -B"$SRC" "$OUT/bench.par2" $members > /dev/null 2>&1) ;;
     # shellcheck disable=SC2086
     turbo150_16) (cd "$SRC" && "$TURBO150" c -q -s"$bs" -r"$PCT" -T16 -B"$SRC" "$OUT/bench.par2" $members > /dev/null 2>&1) ;;
+    # --- rival-survey arms -----------------------------------------------
+    # par2cmdline 0.4 has no -B and stores bare names, so par2tbb writes
+    # its set beside the payload and the files are renamed out afterwards
+    # (same filesystem: a rename, microseconds, inside the timer).
+    # shellcheck disable=SC2086
+    tbb)     (cd "$SRC" && LD_LIBRARY_PATH=$TBBLIB "$PAR2TBB" c -q -s"$bs" -r"$PCT" bench.par2 $members > /dev/null 2>&1; mv -f bench*.par2 "$OUT"/ 2>/dev/null) ;;
+    # gopar takes a recovery COUNT, not a percentage: derive it from the
+    # members' block count at this size so every arm asks for the same
+    # redundancy.
+    gopar)   nb=0; for f in $members; do sz=$(wc -c < "$SRC/$f"); nb=$((nb + (sz + bs - 1) / bs)); done
+             # shellcheck disable=SC2086
+             (cd "$SRC" && "$GOPAR" c -s "$bs" -c "$(( (nb * PCT + 99) / 100 ))" "$OUT/bench.par2" $members > /dev/null 2>&1) ;;
+    # shellcheck disable=SC2086
+    turbo120) (cd "$SRC" && "$TURBO120" c -q -s"$bs" -r"$PCT" -B"$SRC" "$OUT/bench.par2" $members > /dev/null 2>&1) ;;
+    # shellcheck disable=SC2086
+    turbo120_16) (cd "$SRC" && "$TURBO120" c -q -s"$bs" -r"$PCT" -T16 -B"$SRC" "$OUT/bench.par2" $members > /dev/null 2>&1) ;;
+    *) echo "unknown tool $tool" >&2; false ;;
    esac
+   rc=$?
    t1=$(now)
-   printf "CREATE r=%d bs=%-8d tool=%-7s wall=%.3f files=%s MB=%s\n" \
+   printf "CREATE r=%d bs=%-8d tool=%-7s wall=%.3f files=%s MB=%s rc=%d\n" \
      "$r" "$bs" "$tool" "$(echo "$t1 - $t0" | bc)" \
-     "$(ls "$OUT" | wc -l | tr -d ' ')" "$(du -sm "$OUT" | cut -f1)"
+     "$(ls "$OUT" | wc -l | tr -d ' ')" "$(du -sm "$OUT" | cut -f1)" "$rc"
    [ -n "${TIMING:-}" ] && [ -f "$OUT/../create.err" ] && \
      grep repair-timing "$OUT/../create.err" | sed 's/.*repair-timing: /    /'
   done

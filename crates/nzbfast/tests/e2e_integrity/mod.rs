@@ -627,7 +627,7 @@ async fn an_under_declared_size_must_not_win_by_arrival_order() {
 
 /// W4-11 (order permutation): the same lie with NOTHING stalled.
 ///
-/// This arm is codex's arrival-order half stated directly, and it is the
+/// This arm is the review's arrival-order half stated directly, and it is the
 /// one whose behaviour the fix CHANGED IN KIND rather than in degree: on
 /// the tree that confirmed the row it was measured red roughly 1 run in
 /// 5 on an idle box - a genuine race, green only on the runs where the

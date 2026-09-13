@@ -216,7 +216,8 @@ fn a_proven_store_ladder_does_not_spend_a_level() {
     }
     std::fs::write(dir.join("release.rar"), &cur).unwrap();
 
-    let ok = extract_nested_capped(&dir, None, 0, 5, &mut None).expect("extract_nested_capped");
+    let ok =
+        extract_nested_capped(&dir, None, 0, 5, &mut None, None).expect("extract_nested_capped");
     assert!(ok.produced(), "a store ladder must not fail: {ok:?}");
     let got = find_file(&dir, "payload.bin").expect("payload past the un-exempted cap");
     assert_eq!(
@@ -261,7 +262,8 @@ fn a_compressing_layer_still_spends_a_level() {
     // enters the archive it just produced and the payload comes out.
     let sdir = tmpdir("mixed-store");
     std::fs::write(sdir.join("release.rar"), store_rar("L02.rar", &inner)).unwrap();
-    let ok = extract_nested_capped(&sdir, None, 0, 1, &mut None).expect("extract_nested_capped");
+    let ok =
+        extract_nested_capped(&sdir, None, 0, 1, &mut None, None).expect("extract_nested_capped");
     assert!(ok.produced(), "a store ladder must not fail: {ok:?}");
     assert_eq!(
         std::fs::read(find_file(&sdir, "payload.bin").expect("payload past the raised cap"))
@@ -279,7 +281,8 @@ fn a_compressing_layer_still_spends_a_level() {
         !nzbkit::rar::volume_is_store_only(&cdir.join("release.rar")),
         "fixture is not compressed - this leg would be a second store test"
     );
-    let ok = extract_nested_capped(&cdir, None, 0, 1, &mut None).expect("extract_nested_capped");
+    let ok =
+        extract_nested_capped(&cdir, None, 0, 1, &mut None, None).expect("extract_nested_capped");
     assert!(
         ok.produced(),
         "a too-deep chain degrades, never fails: {ok:?}"
@@ -332,7 +335,7 @@ fn a_store_ladder_stops_at_the_hard_ceiling() {
 
     // A cap two below the ceiling, so the raise saturates rather than
     // the ladder simply running out.
-    let ok = extract_nested_capped(&dir, None, start, ceiling - 2, &mut None)
+    let ok = extract_nested_capped(&dir, None, start, ceiling - 2, &mut None, None)
         .expect("extract_nested_capped");
     assert!(
         ok.produced(),
@@ -498,7 +501,8 @@ fn the_tail_entry_depth_costs_exactly_one_level() {
     // Leg 1: the disk-only path. `CAP` levels, and the payload comes out.
     let d0 = tmpdir("entrydepth-0");
     std::fs::write(d0.join("release.rar"), &outer).unwrap();
-    let ok = extract_nested_capped(&d0, None, 0, CAP, &mut None).expect("extract_nested_capped");
+    let ok =
+        extract_nested_capped(&d0, None, 0, CAP, &mut None, None).expect("extract_nested_capped");
     assert!(
         ok.produced(),
         "a ladder within the cap must not fail: {ok:?}"
@@ -512,7 +516,7 @@ fn the_tail_entry_depth_costs_exactly_one_level() {
     // Leg 2: the tail's entry. The SAME ladder, one level short.
     let d1 = tmpdir("entrydepth-tail");
     std::fs::write(d1.join("release.rar"), &outer).unwrap();
-    let ok = extract_nested_capped(&d1, None, TAIL_NESTED_ENTRY_DEPTH, CAP, &mut None)
+    let ok = extract_nested_capped(&d1, None, TAIL_NESTED_ENTRY_DEPTH, CAP, &mut None, None)
         .expect("extract_nested_capped");
     assert!(
         ok.produced(),

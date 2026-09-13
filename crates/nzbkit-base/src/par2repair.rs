@@ -68,18 +68,45 @@ use tracing::{debug, info, warn};
 /// slot allocation) can refuse a set that could never repair anyway
 /// BEFORE committing any state to it.
 pub const MAX_INPUT_SLICES: usize = 32768;
-/// A dense missing x missing GF(2^16) inverse costs ~4*m^2 bytes (the
-/// matrix plus its inverse) and O(m^3) single-threaded field ops. The
-/// PAR2 spec slice cap (32768) is far too loose a bound for that: a
-/// crafted set declaring tens of thousands of missing blocks would pin
-/// multiple GB and run for hours (a repair-time DoS). Refuse a matrix
-/// larger than a real recovery set ever is; 8192 caps peak matrix memory
-/// near 256 MB. An extreme legitimate repair can still use par2cmdline.
-/// Public for the same pre-repair planners as [`MAX_INPUT_SLICES`].
+/// The dense arm's matrix scale, and NO LONGER A REFUSAL: `~4*m^2` bytes
+/// of matrix and inverse, ~256 MB at this m. A hard cap until 8 Sep 2026;
+/// the arm is bounded by MEMORY now (`reconstruct::check_repair_dim_dense`),
+/// as Forney's was. Kept because `forney` and `catalog` anchor cost
+/// arguments on its scale. Nothing refuses on it: timed from ABOVE it at
+/// last on a 20-core arm64 desktop, the arm takes 67.8 s at m = 10,000
+/// where this doc predicted hours, and par2cmdline-turbo 1.5.0 - the
+/// fallback it named - takes 84.9 s on the same set.
 pub const MAX_REPAIR_DIM: usize = 8192;
 
 /// Present-slice bytes buffered between threaded syndrome flushes.
 const BATCH_BYTES: usize = 64 << 20;
+
+/// Reader threads feeding present slices to the fold worker: the
+/// machine's workers capped at eight, or at FOUR on Windows.
+/// `NZBFAST_FEED_READERS` (1..=64) overrides either.
+///
+/// The Windows cap is measured (i5-10600KF, 6c/12t, 5 Sep 2026, the
+/// next-dial handoff section 5): `ReadFile` out of the page cache is a
+/// kernel memcpy at ~2.9 GB/s per thread there, so the 3-block leg's
+/// 1 GiB feed is 374 / 372 / 352 ms on one reader, 228 / 251 / 233 on
+/// two, **209 / 208 / 196 on four**, 223 / 242 / 243 on eight and
+/// 241 / 237 / 232 on twelve - past four the readers and the six fold
+/// workers fight over six physical cores. The 101-block leg is flat
+/// across 2 / 4 / 8 (0.99-1.12 s, noise). macOS copies the same GiB in
+/// ~30 ms across eight readers and is not the box the cap is for.
+fn feed_readers() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("NZBFAST_FEED_READERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| (1..=64).contains(&n))
+            .unwrap_or_else(|| {
+                let cap = if cfg!(windows) { 4 } else { 8 };
+                crate::mem::cpu_workers().min(cap)
+            })
+    })
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RepairError {
@@ -106,10 +133,54 @@ pub enum RepairError {
     /// atomic, not because it was skipped.
     #[error("recovery data short: {have} usable recovery slice(s) for {need} missing block(s)")]
     RecoveryShort { have: usize, need: usize },
+    /// The recovery set is fine; the SOLVE just does not fit this
+    /// machine's memory budget. Deliberately distinct from
+    /// [`Self::Malformed`] for the same reason [`Self::RecoveryShort`]
+    /// is: `check_repair_dim_within`'s window-over-budget refusal used
+    /// to report this as a malformed set, which sent the reader after a
+    /// corrupt PAR2 download when the download is fine and the box
+    /// simply is not big enough for the solve RIGHT NOW. It is
+    /// retryable where `Malformed` is not - a bigger machine, or a
+    /// raised `NZBFAST_REPAIR_SOLVE_BUDGET`, repairs the SAME set.
+    /// Measured 8 Sep 2026: an identical set refused here at a 16 GiB
+    /// budget repairs in 18.16 s on a 256 GiB box, all 21 files
+    /// sha-verified - only the budget differed.
+    #[error(
+        "recovery set needs {needed_mb} MB for the solve ({m} missing blocks at {block_size} B \
+         each) - over this machine's {budget_mb} MB solve-window budget \
+         (NZBFAST_REPAIR_SOLVE_BUDGET). The set itself is fine: retry on a machine with more \
+         memory, or raise the budget"
+    )]
+    SolveBudget {
+        m: usize,
+        block_size: usize,
+        needed_mb: u64,
+        budget_mb: u64,
+    },
     #[error("recovery matrix is singular for this slice combination")]
     SingularMatrix,
     #[error("repaired file failed MD5 verification: {0}")]
     VerifyFailed(String),
+    /// A caller raised its [`control::PauseGate`]'s cancel while the
+    /// repair was running. Deliberately distinct from every other arm
+    /// here: nothing is WRONG - not the set, not the machine, not the
+    /// recovery data - and a caller that reports this as a failed repair
+    /// tells its user their set is broken when they simply pressed
+    /// Cancel.
+    ///
+    /// WHAT IS LEFT ON DISK, which is the half a caller has to know.
+    /// Cancelled before the patch (the verify pass, the fold, the
+    /// solve): nothing at all was written, exactly as an
+    /// [`AfterSurvey::Stop`] leaves it. Cancelled DURING the patch:
+    /// every temp-staged member is removed and none is renamed in, and
+    /// an in-place patched member has some subset of its MISSING blocks
+    /// filled - the patch only ever writes blocks the verify pass found
+    /// missing, so it is monotone and the member is no worse than it
+    /// was. Nothing is purged and no backup is consumed, because both
+    /// happen after a repair that finished. A re-run re-verifies from
+    /// disk and repairs from the same recovery data.
+    #[error("repair cancelled")]
+    Cancelled,
 }
 
 /// The log₂ of the RS constant for each of the first `n` input slices:
@@ -143,14 +214,33 @@ pub fn input_base_logs(n: usize) -> Result<Vec<u32>, RepairError> {
 // `pub(crate)` because `par2gen` folds its RECOVERY slices with the very
 // same routine. The benchmark doors keep their `par2repair::` re-exports.
 pub(crate) mod linalg;
-use linalg::{FeedBatch, fold_parallel, invert};
-pub use linalg::{bench_backsub, bench_fold, bench_invert};
+use linalg::{FeedBatch, fold_parallel_controlled, invert_controlled};
+pub use linalg::{bench_backsub, bench_fold, bench_invert, set_unattended_unstructured_ceiling};
 
 // The Forney-style back-substitution and its gate: the LAST phase of a
 // repair, and its own subject, the way `linalg` is the fold's and
 // `fastpar` is the syndrome dispatch's.
 pub(crate) mod forney;
+
 use forney::ForneyPlan;
+/// Arm or disarm the joint solve for this process, overriding
+/// `NZBFAST_FORNEY_JOINT` in BOTH directions.
+///
+/// The default is ON on aarch64 and OFF on every x86 class since 11 Sep
+/// 2026 - see `forney::joint_default_on`, which carries the measurement
+/// and the reason the split is provenance rather than preference. So
+/// this is no longer only a way to turn the arm on: passing `false` is
+/// how a caller takes the shipped solve on a part where the arm is the
+/// default, which is what a measurement round needs.
+///
+/// This is the door `parfast --fast` comes through. It is a process
+/// setting rather than a per-repair argument because the solver is
+/// chosen inside plan construction, several layers below any repair
+/// entry point, and threading a flag down that stack would put an
+/// experimental switch in every signature between here and there.
+pub use forney::{
+    JointDecline, JointReach, joint_armed, joint_reach, reset_joint_reach, set_joint_arm,
+};
 
 /// Which back-substitution a repair runs. Both produce the same words
 /// (the differential harness in `inline_tests` holds them to it); the
@@ -173,6 +263,10 @@ pub use slices::{recovery_slice_census, recovery_slice_locators, slice_fits_bloc
 /// [`feed`]: Reconstructor::feed
 /// [`finish`]: Reconstructor::finish
 pub struct Reconstructor {
+    /// What the SOLVE reports to and is cancelled through - taken at
+    /// [`Reconstructor::new_controlled`] and inert for every other
+    /// constructor. See `par2repair::control`.
+    control: control::RepairControl,
     block_size: usize,
     /// k_i per global input index (shared with [`Feeder`] handles).
     base_logs: std::sync::Arc<Vec<u32>>,
@@ -189,13 +283,20 @@ pub struct Reconstructor {
     /// the caller's disk reads overlap the GF math (bounded channel:
     /// one batch queued while one folds).
     tx: Option<std::sync::mpsc::SyncSender<FeedBatch>>,
-    /// Worker returns (syndromes, retained batches) - retained is empty
-    /// on the streaming path, and holds the resident source corpus when
-    /// the experimental NTT dispatch selected retention.
-    worker: Option<std::thread::JoinHandle<(Vec<Vec<u16>>, Vec<FeedBatch>, usize, bool)>>,
+    /// Worker returns (syndromes, retained batches, windows closed,
+    /// any window transformed, slices transformed) - retained is empty
+    /// on the streaming path, and holds the LAST window of the resident
+    /// source corpus when the experimental NTT dispatch selected
+    /// retention (the whole corpus when it fitted the budget).
+    worker: Option<std::thread::JoinHandle<(Vec<Vec<u16>>, Vec<FeedBatch>, usize, bool, usize)>>,
     /// Pending present slices, packed into the next batch's arena.
     batch: FeedBatch,
     batch_capacity: usize,
+    /// Recycled batch arenas, shared with every [`Feeder`] and the fold
+    /// worker (see [`linalg::ArenaPool`]).
+    pool: std::sync::Arc<linalg::ArenaPool>,
+    /// See [`Reconstructor::backsub_arm`].
+    backsub_arm: &'static str,
     /// The dispatcher selected NTT retention at construction (the
     /// mid-flight budget/plan fallbacks can still land on the fold).
     ntt_selected: bool,
@@ -224,8 +325,21 @@ pub struct SyndromeReport {
     /// The NTT transform computed the syndromes (false on the fold path
     /// and on every mid-flight fallback).
     pub(crate) ntt_used: bool,
-    /// Present slices fed to the transform (0 when it did not run).
+    /// Present slices fed to the transform, summed over every window
+    /// (0 when it did not run). Summed rather than "the last window's",
+    /// which is what it was until the streaming admission of 5 Sep 2026
+    /// made a multi-window repair the ordinary case: this number is the
+    /// geometry a divergence report is reproduced from, and a tail-only
+    /// count understates it by the window count.
     pub(crate) n_present: usize,
+    /// Retention windows the corpus was taken in - 1 when the whole
+    /// corpus was retained and computed at once, more when the budget
+    /// admitted it a window at a time, 0 on the fold path, where
+    /// nothing is retained at all. A window that the plan could not
+    /// represent and that folded still counts: this is how the corpus
+    /// was DIVIDED, not how many transforms ran (`ntt_used` answers
+    /// that).
+    pub(crate) windows: usize,
 }
 
 /// One thread's share of a multi-accumulate: `dsts[j] ^= Σ_i
@@ -262,9 +376,12 @@ pub enum SyndromePath {
     Auto,
     /// The streaming fold, unconditionally (today's behavior).
     Fold,
-    /// Resident-source NTT with this retention budget in bytes; falls
-    /// back to the fold if retention overflows the budget or the plan
-    /// is unbuildable. Test/bench hook.
+    /// Resident-source NTT with this WINDOW budget in bytes: the worker
+    /// retains fed batches up to it, transforms and releases them, and
+    /// starts over, so a corpus larger than the budget is taken a
+    /// window at a time rather than folded. A window whose plan is
+    /// unbuildable (a duplicate feed, an out-of-range log) folds
+    /// instead. Test/bench hook - it skips every shape gate.
     NttForce(usize),
     /// TEST ONLY: [`SyndromePath::NttForce`], then flip one syndrome
     /// word after the transform - simulates an NTT correctness bug so
@@ -288,23 +405,52 @@ use fastpar::{NttProbe, resolve_syndrome_path, run_with_ntt_fallback};
 // The creator reads the same shape gates and stripe geometry the repair
 // dispatcher prices, so the two engines admit the NTT on one rule.
 pub(crate) use fastpar::{
-    NTT_MIN_MISSING, NTT_MIN_PRESENT, ntt_budget_env, ntt_stripe_geometry, ntt_worker_arenas,
+    ntt_budget_within_published, ntt_min_missing, ntt_stripe_geometry, ntt_worker_arenas,
 };
 // Pinned by `inline_tests` (a descendant, so `use super::*` names them)
 // and by nothing else in this module - importing them unconditionally
 // would be an unused import at `-D warnings` in every non-test build.
 #[cfg(test)]
-use fastpar::{FAST_PAR_TRIPPED, ntt_default_budget, ntt_gates_pass};
+use fastpar::{
+    FAST_PAR_TRIPPED, NTT_MIN_MISSING, NTT_MIN_PRESENT, NTT_MIN_WINDOW_PRESENT, NTT_MIN_WORK,
+    NTT_MIN_WORK_PER_ROW, exponent_span, ntt_budget_env, ntt_default_budget, ntt_gates_pass,
+};
 
 // `impl Reconstructor` lives in par2repair/reconstruct.rs (TODO 106
 // size-gate split).
 mod catalog;
 mod nested;
+mod rebuilt;
 mod reconstruct;
+mod retain;
+// The retention ADMISSION census (TODO 331 item 1) and the caller-
+// labelled entry points that feed it. Off by default; see census.rs.
+mod census;
+mod entry;
+pub use census::{CallerSite, CallerStage, RetentionCaller, close_retention_census};
+/// The census's TEST SEAMS, reachable the way `renameclaim` is: a
+/// `pub` path under the `test-support` feature. Three of them, and each
+/// exists because a process-global cannot be varied from a test any
+/// other way - the census sink, the retention budget's `OnceLock`, and
+/// the NTT verify-failure retry.
+#[cfg(any(test, feature = "test-support"))]
+pub mod census_testing {
+    pub use super::census::testing::{Recorder, record, record_to_file};
+    pub use super::fastpar::force_one_retry;
+    pub use super::retain::{ForcedPolicy, force_policy};
+}
+pub use entry::{
+    repair_dir, repair_dir_as, repair_dir_set_with_donors, repair_dir_set_with_donors_as,
+    repair_dir_set_with_donors_controlled_as, repair_dir_set_with_donors_scoped,
+    repair_dir_set_with_donors_scoped_as, repair_dir_set_with_donors_scoped_controlled_as,
+    repair_dir_with_donors, repair_present_or_renamed_sets, repair_present_sets,
+    repair_present_sets_as, repair_present_sets_controlled_as,
+};
 
 pub use catalog::PacketCatalog;
-use catalog::{Crit, RecLoc, SetReplay, SlicePool, load_selected_recovery};
+use catalog::{Crit, RecLoc, SetReplay, SlicePool, load_selected_recovery_span};
 pub use nested::{PacketScope, nested_subdirs, source_candidate_files};
+use rebuilt::RebuiltStore;
 
 /// One producer's handle into a [`Reconstructor`]'s fold worker (M2c.2
 /// parallel feed reads). Same batching as the built-in feed path, but
@@ -313,6 +459,7 @@ pub struct Feeder {
     tx: std::sync::mpsc::SyncSender<FeedBatch>,
     base_logs: std::sync::Arc<Vec<u32>>,
     batch: FeedBatch,
+    pool: std::sync::Arc<linalg::ArenaPool>,
     max_batch: usize,
 }
 
@@ -353,7 +500,7 @@ impl Feeder {
         if self.batch.slices.is_empty() {
             return;
         }
-        let batch = std::mem::replace(&mut self.batch, FeedBatch::with_capacity(self.max_batch));
+        let batch = std::mem::replace(&mut self.batch, self.pool.take(self.max_batch));
         // The worker outlives every sender; send can't fail.
         let _ = self.tx.send(batch);
     }
@@ -575,7 +722,12 @@ fn repair_mapped_inner(
         return Ok(0);
     }
 
-    // Smallest exponents win, deduped; exactly one per missing slice.
+    // Lowest consecutive RUN wins, deduped, one per missing slice - NOT
+    // the `m` smallest, which this driver took until 8 Sep 2026 while
+    // the disk driver had selected this way since 6 Sep. One gap costs
+    // 3.9-9.3x over the whole reconstructor; the argument is in
+    // `catalog::select_consecutive_run` and the round in
+    // research/SPARSE-EXPONENT-BACKSUB-2026-09-08.md.
     let mut by_exp: HashMap<u32, &[u8]> = HashMap::new();
     for (e, data) in recovery {
         if data.len() == block_size {
@@ -590,7 +742,7 @@ fn repair_mapped_inner(
     }
     let mut exps: Vec<u32> = by_exp.keys().copied().collect();
     exps.sort_unstable();
-    exps.truncate(missing.len());
+    let exps = catalog::select_consecutive_run(&exps, missing.len());
     // Borrowed payloads, not clones: the caller's corpus outlives the
     // whole attempt (it is pinned across the NTT-fallback retry), and
     // `Reconstructor::new_with_path` widens these into its own u16
@@ -607,75 +759,118 @@ fn repair_mapped_inner(
     // fold worker; XOR accumulation makes arrival order irrelevant.
     let timing = std::env::var_os("NZBFAST_REPAIR_TIMING").is_some();
     let t0 = std::time::Instant::now();
-    let rec = Reconstructor::new_with_path(block_size, n_inputs, &missing, &chosen, path)?;
-    probe.selected = rec.ntt_selected();
-    probe.m = missing.len();
-    probe.block_size = block_size;
-    probe.max_exp = chosen.last().map_or(0, |&(e, _)| e);
-    probe.context = files
-        .first()
-        .map(|(f, _)| f.name.clone())
-        .unwrap_or_default();
-    let work: Vec<(usize, usize, u64, usize)> = files
-        .iter()
-        .enumerate()
-        .flat_map(|(fi, (f, present))| {
-            let base = first_slice[fi];
-            present
-                .iter()
-                .enumerate()
-                .filter(|&(_, &p)| p)
-                .map(move |(i, _)| {
-                    let off = i as u64 * bs;
-                    (base + i, fi, off, (f.length - off).min(bs) as usize)
-                })
-        })
-        .collect();
-    // A par-only / whole-set-missing rebuild has NO present slices to
-    // stream: every input's contribution to the syndromes is zero, so
-    // the recovery slices already ARE the syndromes and the solve runs
-    // on them directly (parity as a source). Skip the reader fan-out -
-    // `work.chunks(0)` would panic on the empty list.
-    if !work.is_empty() {
-        let readers = crate::mem::cpu_workers().min(8).min(work.len()).max(1);
-        // Split the shared batch budget across handles so total in-flight
-        // memory matches the old single-feeder design.
-        let per_reader_batch = (BATCH_BYTES / readers).max(1 << 20);
-        let chunk = work.len().div_ceil(readers);
-        let mut read_results: Vec<Result<(), RepairError>> = (0..readers).map(|_| Ok(())).collect();
-        std::thread::scope(|s| {
-            for (wchunk, res) in work.chunks(chunk).zip(read_results.iter_mut()) {
-                let mut feeder = rec.feeder(per_reader_batch);
-                s.spawn(move || {
-                    *res = (|| {
-                        for &(g, fi, off, take) in wchunk {
-                            feeder.feed_with(g, take, |buf| io.read(fi, off, buf))?;
-                        }
-                        Ok(())
-                    })();
-                    // feeder drops here → tail batch flushes.
-                });
-            }
-        });
-        for r in read_results {
-            r?;
+    // The same bracket the disk driver takes, on the path a DOWNLOAD
+    // waits on rather than the CLI one (`forney::PlanPrepCounters`).
+    let _prep = forney::PrepSpan::start("mapped repair");
+    // MEMORY SETS THE PASS COUNT, NEVER A VERDICT. A window too big for
+    // the budget is cut along the block's byte axis and swept once per
+    // slab instead of being refused - `reconstruct::plan_slabs` carries
+    // the argument and the incident. `slabs == 1` is the ordinary case
+    // and reproduces the pre-slab code exactly: one construction, one
+    // pass over the payload, one write per missing block.
+    let plan = reconstruct::plan_slabs_for(missing.len(), block_size);
+    if plan.slabs > 1 {
+        info!(
+            target: "repair-timing",
+            "solve window over budget: {} block(s) at {block_size} B in {} slab(s) of {} B \
+             - the payload is swept once per slab",
+            missing.len(),
+            plan.slabs,
+            plan.width
+        );
+    }
+    for si in 0..plan.slabs {
+        let span = plan.range(si, block_size);
+        let (c0, w) = (span.start, span.len());
+        // Borrowed again per slab, never copied: each recovery payload is
+        // the caller's, and a slab is a sub-slice of it.
+        let chosen_slab: Vec<(u32, &[u8])> =
+            chosen.iter().map(|&(e, d)| (e, &d[c0..c0 + w])).collect();
+        let rec = Reconstructor::new_with_path(w, n_inputs, &missing, &chosen_slab, path)?;
+        if si == 0 {
+            probe.selected = rec.ntt_selected();
+            probe.m = missing.len();
+            probe.block_size = block_size;
+            probe.max_exp = chosen.last().map_or(0, |&(e, _)| e);
+            probe.context = files
+                .first()
+                .map(|(f, _)| f.name.clone())
+                .unwrap_or_default();
         }
-    }
-    if timing {
-        info!(target: "repair-timing", "feed reads queued in {:.2?}", t0.elapsed());
-    }
-    let (rebuilt, syn_report) = rec.finish_reported();
-    probe.used = syn_report.ntt_used;
-    probe.n_present = syn_report.n_present;
-    if timing {
-        info!(target: "repair-timing", "fold+solve done at {:.2?}", t0.elapsed());
-    }
+        // Every present slice's contribution to THIS slab: the same work
+        // list, shifted into the slab and clipped to it. A block whose
+        // file ends before the slab starts contributes nothing and is
+        // dropped here rather than read as a zero-length request.
+        let work: Vec<(usize, usize, u64, usize)> = files
+            .iter()
+            .enumerate()
+            .flat_map(|(fi, (f, present))| {
+                let base = first_slice[fi];
+                present
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &p)| p)
+                    .filter_map(move |(i, _)| {
+                        let off = i as u64 * bs;
+                        let whole = (f.length - off).min(bs) as usize;
+                        let take = whole.saturating_sub(c0).min(w);
+                        (take > 0).then_some((base + i, fi, off + c0 as u64, take))
+                    })
+            })
+            .collect();
+        // A par-only / whole-set-missing rebuild has NO present slices to
+        // stream: every input's contribution to the syndromes is zero, so
+        // the recovery slices already ARE the syndromes and the solve runs
+        // on them directly (parity as a source). Skip the reader fan-out -
+        // `work.chunks(0)` would panic on the empty list.
+        if !work.is_empty() {
+            let readers = feed_readers().min(work.len()).max(1);
+            // Split the shared batch budget across handles so total in-flight
+            // memory matches the old single-feeder design.
+            let per_reader_batch = (BATCH_BYTES / readers).max(1 << 20);
+            let chunk = work.len().div_ceil(readers);
+            let mut read_results: Vec<Result<(), RepairError>> =
+                (0..readers).map(|_| Ok(())).collect();
+            std::thread::scope(|s| {
+                for (wchunk, res) in work.chunks(chunk).zip(read_results.iter_mut()) {
+                    let mut feeder = rec.feeder(per_reader_batch);
+                    s.spawn(move || {
+                        *res = (|| {
+                            for &(g, fi, off, take) in wchunk {
+                                feeder.feed_with(g, take, |buf| io.read(fi, off, buf))?;
+                            }
+                            Ok(())
+                        })();
+                        // feeder drops here → tail batch flushes.
+                    });
+                }
+            });
+            for r in read_results {
+                r?;
+            }
+        }
+        if timing {
+            info!(
+                target: "repair-timing",
+                "slab {}/{}: feed reads queued in {:.2?}", si + 1, plan.slabs, t0.elapsed()
+            );
+        }
+        let (rebuilt, syn_report) = rec.finish_owned_reported();
+        if si == 0 {
+            probe.used = syn_report.ntt_used;
+            probe.n_present = syn_report.n_present;
+        }
+        if timing {
+            info!(
+                target: "repair-timing",
+                "slab {}/{}: fold+solve done at {:.2?}", si + 1, plan.slabs, t0.elapsed()
+            );
+        }
 
-    // Write rebuilt blocks back, tails trimmed - across threads, the same
-    // fan-out the disk driver's patch uses: `VolumeIo` is `Sync`, each
-    // block is one positional write to its own offset, and serially this
-    // was the last data pass in the call still running on one core.
-    if !missing.is_empty() {
+        // Write rebuilt blocks back, tails trimmed - across threads, the same
+        // fan-out the disk driver's patch uses: `VolumeIo` is `Sync`, each
+        // block is one positional write to its own offset, and serially this
+        // was the last data pass in the call still running on one core.
         let threads = crate::mem::cpu_workers().min(missing.len()).max(1);
         let chunk = missing.len().div_ceil(threads);
         let mut results: Vec<std::io::Result<()>> = (0..threads).map(|_| Ok(())).collect();
@@ -691,8 +886,11 @@ fn repair_mapped_inner(
                             let fi = owner[g];
                             let (f, _) = &files[fi];
                             let off = (g - first_slice[fi]) as u64 * bs;
-                            let take = (f.length - off).min(bs) as usize;
-                            io.write(fi, off, &rebuilt[mi][..take])?;
+                            let whole = (f.length - off).min(bs) as usize;
+                            let take = whole.saturating_sub(c0).min(w);
+                            if take > 0 {
+                                io.write(fi, off + c0 as u64, &rebuilt[mi][..take])?;
+                            }
                         }
                         Ok(())
                     })();
@@ -703,7 +901,6 @@ fn repair_mapped_inner(
             r?;
         }
     }
-
     if timing {
         info!(target: "repair-timing", "patch done at {:.2?}", t0.elapsed());
     }
@@ -1192,6 +1389,20 @@ struct DirContext {
     /// recreated, and never reported as spent donors (the sweep is
     /// scoped to the repair dir - a donor is somebody else's payload).
     donors: Vec<PathBuf>,
+    /// Which outer call site opened this repair, for the retention
+    /// admission census. Rides the context for the same reason `donors`
+    /// does - it would otherwise be a parameter on every signature
+    /// between the entry points and `RetainedCorpus`. `Unknown` by
+    /// default, which is an explicit bucket and never folded into a
+    /// named one.
+    caller: RetentionCaller,
+    /// The surveying entry point's door (10 Sep 2026): `contested` and
+    /// `declared` are EMPTY here and derived by the inner pass once its
+    /// scan completes, under a provisional verify; a contested name then
+    /// reruns the pass with the settled context - see
+    /// `survey::repair_dir_set_surveyed_as`. Every other door settles
+    /// both before the call and leaves this false.
+    settle_names_after_scan: bool,
 }
 
 // Extra-file adoption - the candidate walk (repair dir plus §293 donor
@@ -1199,7 +1410,7 @@ struct DirContext {
 // scan - lives in par2repair/adopt.rs, a child module (size gate,
 // TODO 106), and fans out across candidates (R2 / N11).
 mod adopt;
-pub use adopt::is_recovery_by_name_and_content;
+pub use adopt::{is_recovery_by_name_and_content, scan_members_for_blocks};
 mod donate;
 pub use donate::{Donation, donate_whole_files, donor_candidates, placed_names};
 
@@ -1249,225 +1460,18 @@ struct Target {
     md5_unfinished: bool,
 }
 
-/// Repair the PAR2 recovery set found in `dir`: parse every `*.par2`
-/// file (packets only - data files are located by their FileDesc names),
-/// verify each recovery-set file block-by-block from disk, reconstruct
-/// missing/corrupt blocks from recovery slices, and patch them in place.
-/// Files longer than declared are truncated; absent files are recreated.
-/// Success requires every touched file to pass its whole-file MD5.
-/// When the dir carries packets from more than one recovery set, the
-/// first set seen (sorted packet-file order) is the one repaired.
-pub fn repair_dir(dir: &Path) -> Result<RepairStatus, RepairError> {
-    // Lazy build keeps the historical shape: criticals from the first
-    // file(s), the recovery-volume tail scanned in the background under
-    // the target-verify pass.
-    let mut cat = PacketCatalog::build_lazy(dir)?;
-    repair_dir_set(&mut cat, None, &DirContext::default(), true, None)
-}
+mod survey;
+pub use survey::{
+    AfterSurvey, MemberSurvey, PacketFileScan, PacketSeen, RecoverySeen, RepairForecast,
+    ScanReport, SolveKind, SurveyObserver, repair_dir_set_surveyed, repair_dir_set_surveyed_as,
+};
 
-/// [`repair_dir`] with DONOR directories (§293): each donor's files
-/// join the extra-file adoption scan as candidates, so a block the
-/// recovery set cannot rebuild and the wire will not serve again can
-/// still be found in a failed predecessor's output. Donor files are
-/// read-only to the repair - never patched, never recreated, never
-/// reported in `consumed_sources` - and an unreadable donor directory
-/// degrades to "no donation" rather than failing the repair. Adoption
-/// still runs only when its gate fires (a file unidentified outright,
-/// or damage past the recovery on disk); donors widen what the scan
-/// can find, not when it runs.
-pub fn repair_dir_with_donors(dir: &Path, donors: &[PathBuf]) -> Result<RepairStatus, RepairError> {
-    let mut cat = PacketCatalog::build_lazy(dir)?;
-    let ctx = DirContext {
-        donors: donors.to_vec(),
-        ..DirContext::default()
-    };
-    repair_dir_set(&mut cat, None, &ctx, true, None)
-}
-
-/// [`repair_dir_with_donors`] scoped to ONE recovery set, named by id
-/// rather than left to "whichever set the sorted packet walk saw first".
-///
-/// A directory-scoped verdict is a verdict about ONE set, and on a
-/// multi-set post that set is not the caller's. Not theory:
-/// `fetch_and_repair` runs once per set the mapped route declined, and
-/// on the directory-scoped entry every one of those passes repaired the
-/// FIRST set - passes two and three then found it verifying, answered
-/// [`RepairStatus::NoDamage`], and the job printed `repair complete ✔`
-/// and exited 0 over two payload files holed with 49,805 zero bytes.
-/// Measured on origin/main `b5e8f0717`; the private notes for 29 Aug
-/// 2026 on directory-scoped multi-set repair carry the mechanism and
-/// name what it deliberately does NOT change.
-///
-/// A wanted set with no Main packet on disk is
-/// [`RepairError::NoMainPacket`] - the honest answer, which lets the
-/// caller reach its own backstop instead of accepting a green about
-/// somebody else's files. The donors are [`repair_dir_with_donors`]'s
-/// exactly; the catalog and the two [`DirContext`] name sets are not,
-/// and deliberately - see [`repair_dir_set_with_donors_scoped`], which
-/// this forwards to, for why a set picked out of a shared directory has
-/// to be told what its neighbours declare.
-pub fn repair_dir_set_with_donors(
-    dir: &Path,
-    set_id: &[u8; 16],
-    donors: &[PathBuf],
-) -> Result<RepairStatus, RepairError> {
-    repair_dir_set_with_donors_scoped(dir, set_id, donors, PacketScope::Flat, false, None)
-}
-
-/// [`repair_dir_set_with_donors`] with packet DISCOVERY scope named.
-///
-/// Only the packet walk widens: the data files this set speaks for are
-/// still resolved against `dir` through
-/// [`crate::disk::join_out_name`], because a FileDesc name is relative
-/// to the JOB, never to wherever its packets happen to have landed.
-/// That is what makes `META/inner.par2` naming a root payload work, and
-/// it is the same rule the flat walk always applied.
-///
-/// This is "one set out of a directory that may hold SEVERAL" by
-/// construction - `get::latesets` applies every non-activated set in
-/// turn through it - so it owes its caller both of [`DirContext`]'s
-/// protections, and neither survives a lazy catalog: a name is declared
-/// by a critical packet, and which files carry which set's criticals is
-/// not known until they have been read. The bytes are read either way
-/// (the volume scan always finishes before the repair does), so the
-/// price of building COMPLETE is the overlap with the verify pass and
-/// not the I/O. What the default cost is measured, not reasoned, and
-/// pinned in `crates/nzbkit/tests/integration/par2repair_namepath.rs`.
-///
-/// `applicable` is the OTHER half of that answer, and only a caller
-/// applying sets in turn can give it: the ids it will actually attempt.
-/// A Nested walk discovers sets a caller may permanently refuse (an
-/// extracted subdirectory carrying its own recovery set, which
-/// `get::latesets`' `published_here` will not let run), and a set that
-/// can never land a file must not disambiguate a running set's target
-/// away from its declared name - F6, 1 Sep 2026. `None` keeps the
-/// directory-wide reading; see `PacketCatalog::declared_and_contested`
-/// for why only the CONTESTED half narrows.
-pub fn repair_dir_set_with_donors_scoped(
-    dir: &Path,
-    set_id: &[u8; 16],
-    donors: &[PathBuf],
-    scope: PacketScope,
-    patch_existing: bool,
-    applicable: Option<&HashSet<[u8; 16]>>,
-) -> Result<RepairStatus, RepairError> {
-    let mut cat = PacketCatalog::build_scoped(dir, scope)?;
-    let (declared, contested) =
-        cat.declared_and_contested(crate::disk::case_insensitive_dir(dir), applicable);
-    let ctx = DirContext {
-        contested,
-        declared,
-        donors: donors.to_vec(),
-        patch_existing,
-    };
-    repair_dir_set(&mut cat, Some(*set_id), &ctx, true, None)
-}
-
-/// What the verify pass found about ONE member, before a byte is
-/// repaired - the half of a repair a command-line tool has to PRINT.
-///
-/// Every field is the pass's own finding, not a re-derivation: `intact`
-/// is the FileDesc whole-file MD5 over an exactly-sized file, and
-/// `blocks_present` counts the IFSC block CRC32s that proved out. See
-/// [`repair_dir_set_surveyed`] for why this exists at all.
-#[derive(Clone, Debug)]
-pub struct MemberSurvey {
-    /// The FileDesc name, exactly as the packet spells it - NOT the
-    /// on-disk path, which sanitizing and collision disambiguation may
-    /// both have moved.
-    pub name: String,
-    /// Something is at the member's destination path.
-    pub exists: bool,
-    /// The whole-file FileDesc MD5 matched AND the length is exact.
-    /// `verify_pass1`'s verdict verbatim, so false under its EARLY STOP
-    /// is the tri-state's "not proven" - see
-    /// [`repair_dir_set_surveyed`] for why an observer takes it as
-    /// damaged rather than deciding it.
-    pub intact: bool,
-    /// Blocks the pass proved present, at most `blocks_total`.
-    pub blocks_present: usize,
-    /// Blocks the set declares for this member.
-    pub blocks_total: usize,
-}
-
-/// What an observer wants done once it has seen the survey.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AfterSurvey {
-    /// Go on and repair, exactly as the unobserved entry points do.
-    Repair,
-    /// Stop here. Nothing has been written yet - the verify pass and
-    /// the packet walk only READ - so the directory is untouched.
-    Stop,
-}
-
-/// [`repair_dir_set_with_donors`] that shows its caller the verify pass
-/// and lets the caller call the repair off.
-///
-/// THE PROBLEM THIS SOLVES, because it is not obvious from the
-/// signature. A par2cmdline-compatible CLI has to print an `Opening:`
-/// and a `Target:` line for every member BEFORE it decides anything,
-/// and those lines are a per-member verify verdict. Getting them out of
-/// [`repair_dir_set_with_donors`] was impossible, so `parfast` surveyed
-/// the whole set itself and then called that entry, which surveys the
-/// whole set AGAIN: two complete passes over every payload byte on
-/// every damaged repair. Measured on the 1 GiB / 21-member rig corpus,
-/// retired instructions, 4 Sep 2026: the duplicate pass was 26.0G of
-/// the 3-block leg's 40.4G and 29.2G of the 101-block leg's 106.3G,
-/// against the engine harness's 14.4G and 77.0G for the same work.
-///
-/// The observer runs after the verify pass and before the fold, so it
-/// sees what the repair is about to act on and may still refuse it
-/// ([`AfterSurvey::Stop`] - the answer for "the reference prints
-/// `Repair is not possible.` here", and for a rename-only run).
-/// `Ok(None)` is that refusal; `Ok(Some(_))` is an ordinary verdict.
-///
-/// It fires ONCE. The NTT verify-failure retry re-runs the whole
-/// attempt, verify pass included, and a caller that PRINTS would print
-/// its table twice.
-///
-/// `intact` in the report is `verify_pass1`'s, EARLY STOP included, so
-/// it is the tri-state's withheld-positive and not a decided verdict -
-/// see `Pass1Out::md5_unfinished`. That is deliberate and it is the
-/// same reading `parfast`'s own `verify::survey` settled on in
-/// `89b2f4c0a`: on the M4-69 shape (a byte-exact member whose IFSC
-/// contradicts its own FileDesc MD5) both call it damaged, the repair
-/// rebuilds the disputed block to the bytes it already had, and the
-/// file comes out identical. An observer that decided it here instead
-/// would make one tool print two answers for one set.
-pub fn repair_dir_set_surveyed(
-    dir: &Path,
-    set_id: &[u8; 16],
-    donors: &[PathBuf],
-    observe: &mut dyn FnMut(&[MemberSurvey]) -> AfterSurvey,
-) -> Result<Option<RepairStatus>, RepairError> {
-    let mut cat = PacketCatalog::build_scoped(dir, PacketScope::Flat)?;
-    let (declared, contested) =
-        cat.declared_and_contested(crate::disk::case_insensitive_dir(dir), None);
-    let ctx = DirContext {
-        contested,
-        declared,
-        donors: donors.to_vec(),
-        patch_existing: false,
-    };
-    // The caller's answer, remembered here rather than smuggled through
-    // `RepairStatus`: a new variant would have to be handled by every
-    // match on it in the workspace, to describe a state only this entry
-    // point can reach.
-    let mut stopped = false;
-    // Scoped so `watch`'s borrow of `stopped` ends before it is read -
-    // the block IS the drop, and an explicit `drop` of a closure is a
-    // clippy error.
-    let status = {
-        let mut watch = |members: &[MemberSurvey]| {
-            let action = observe(members);
-            stopped = action == AfterSurvey::Stop;
-            action
-        };
-        repair_dir_set(&mut cat, Some(*set_id), &ctx, true, Some(&mut watch))?
-    };
-    Ok((!stopped).then_some(status))
-}
-
+// What a repair says WHILE it runs, and how a caller stops it - the
+// half of the observer contract that begins where `survey`'s ends.
+// Its own module for the same reason `survey` is: one subject, and the
+// argument about where a pause may park is long enough to need room.
+pub mod control;
+pub use control::{PauseGate, ProgressSink, RepairControl, RepairPhase};
 /// Every recovery-set id the PAR2 packets in `dir` carry, in
 /// first-seen (sorted packet-file) order. Finding F12's door: a set
 /// can LAND on disk through another set's naming (par2-of-par2 - the
@@ -1555,36 +1559,6 @@ fn covered_names_catalog(cat: &PacketCatalog) -> Vec<String> {
     out
 }
 
-/// Repair every recovery set in `dir` whose data files are actually
-/// there. A nested layer can land beside packets that describe files
-/// which never touched this dir (the downloaded set's own index next to
-/// an in-stream-extracted payload: its volumes exist only as the
-/// extracted output) - repairing such a set would at best re-derive
-/// "everything missing" noise and at worst resurrect volume files, so a
-/// set only qualifies when at least one of its FileDesc names exists on
-/// disk. Sets are repaired in first-seen (sorted packet-file) order;
-/// per-set failures don't stop later sets. `Ok(vec![])` = nothing
-/// relevant here at all.
-pub fn repair_present_sets(dir: &Path) -> Result<Vec<SetOutcome>, RepairError> {
-    repair_sets_inner(dir, false)
-}
-
-/// [`repair_present_sets`], plus a content fallback for the wholly
-/// renamed obfuscated post: when not a single FileDesc name is on disk,
-/// the sets are attempted anyway and the verdicts speak (issue #9's
-/// single-file shape, where not even a companion .nfo keeps its name).
-///
-/// A separate entry point because the fallback is WRONG for the other
-/// caller. The nested disk post-pass leans on the name gate to skip an
-/// outer index whose volumes never touched disk - attempted anyway,
-/// `repair_dir_set` would RECREATE those volumes on disk from recovery
-/// slices and adoption, materializing files the one-pass pipeline just
-/// proved it never needed to write. Only the no-set obfuscated arm,
-/// which owns a directory where everything already landed, wants this.
-pub fn repair_present_or_renamed_sets(dir: &Path) -> Result<Vec<SetOutcome>, RepairError> {
-    repair_sets_inner(dir, true)
-}
-
 /// One recovery set's verdict, with the file names that set declares.
 ///
 /// The names travel WITH the verdict because a caller turning "the sets
@@ -1614,11 +1588,6 @@ pub struct SetOutcome {
     pub status: Result<RepairStatus, RepairError>,
 }
 
-fn repair_sets_inner(dir: &Path, renamed_fallback: bool) -> Result<Vec<SetOutcome>, RepairError> {
-    let mut cat = PacketCatalog::build(dir)?;
-    repair_sets_catalog(&mut cat, renamed_fallback)
-}
-
 /// [`repair_sets_inner`] over a shared catalog: the discovery walk (set
 /// order, declared names, contested-name claims) replays occurrences,
 /// and each qualifying set's repair consults the same catalog instead
@@ -1626,6 +1595,13 @@ fn repair_sets_inner(dir: &Path, renamed_fallback: bool) -> Result<Vec<SetOutcom
 fn repair_sets_catalog(
     cat: &mut PacketCatalog,
     renamed_fallback: bool,
+    caller: RetentionCaller,
+    // The control-carrying observer of
+    // [`entry::repair_present_sets_controlled_as`], or `None` for every
+    // entry of this family that reports nothing. Re-borrowed per set, so
+    // its `control()` is asked once per set - which is the set boundary
+    // that door's doc rests on.
+    mut observe: Option<&mut (dyn SurveyObserver + '_)>,
 ) -> Result<Vec<SetOutcome>, RepairError> {
     let dir = cat.dir().to_path_buf();
     let dir = dir.as_path();
@@ -1659,6 +1635,8 @@ fn repair_sets_catalog(
         declared,
         donors: Vec::new(),
         patch_existing: false,
+        caller,
+        settle_names_after_scan: false,
     };
     let mut out = Vec::new();
     for id in &order {
@@ -1666,11 +1644,23 @@ fn repair_sets_catalog(
             .iter()
             .any(|n| crate::disk::join_out_name(dir, &crate::disk::sanitize_out_name(n)).is_file());
         if present {
+            let status = repair_dir_set(cat, Some(*id), &ctx, false, observe.as_deref_mut());
+            let cancelled = matches!(status, Err(RepairError::Cancelled));
             out.push(SetOutcome {
                 set_id: *id,
                 names: names[id].clone(),
-                status: repair_dir_set(cat, Some(*id), &ctx, false, None),
+                status,
             });
+            // THE SET EDGE, and the same one `get::latesets` breaks on.
+            // The gate is sticky, so every set after this one would come
+            // straight back `Cancelled` too - a run of verdicts that
+            // reads like N unreadable sets over a directory where the
+            // user simply pressed Cancel. Unreachable for the entries
+            // that pass no observer: an inert control can never answer
+            // this error.
+            if cancelled {
+                break;
+            }
         }
     }
     // No set matched by NAME - which on a wholly renamed obfuscated post
@@ -1694,11 +1684,45 @@ fn repair_sets_catalog(
         let packet_set: HashSet<&Path> = cat.packet_paths().collect();
         if adopt::any_adoption_source(dir, &packet_set)? {
             for id in &order {
+                // A SET THAT NAMES NOTHING IS NO SET, and this loop is
+                // the one place that has to say so out loud. The name
+                // gate above tests `names[id].iter().any(is_file)`, so
+                // an id with no FileDesc packet at all never reaches it;
+                // here every id in the walk is attempted, and one whose
+                // Main packet lists file ids no FileDesc describes comes
+                // straight back `Malformed("FileDesc missing for file
+                // id ...")` - an ERROR, which fails `every_set_ok` for
+                // the whole directory and takes the real set's verdict
+                // down with it.
+                //
+                // That is not hypothetical: it is P10, the `.par2`-named
+                // decoy (catalog row `n2-p2-p10-par2-named-decoy`). A
+                // post names one file `.par2` whose bytes carry a
+                // genuine Main packet, a genuine Creator packet and no
+                // FileDesc, the real set rides under tokens, and this
+                // fallback is the pass that would otherwise adopt the
+                // token payload back under its FileDesc name. Attempting
+                // the decoy's set turned that rescue into a failed job.
+                //
+                // Narrow on purpose: this skips only a set with ZERO
+                // declared names. A set with SOME descriptors missing -
+                // a genuinely damaged index - still reaches
+                // `repair_dir_set` and still reports its error, which is
+                // a statement about a set this post really has.
+                if names[id].is_empty() {
+                    continue;
+                }
+                let status = repair_dir_set(cat, Some(*id), &ctx, false, observe.as_deref_mut());
+                let cancelled = matches!(status, Err(RepairError::Cancelled));
                 out.push(SetOutcome {
                     set_id: *id,
                     names: names[id].clone(),
-                    status: repair_dir_set(cat, Some(*id), &ctx, false, None),
+                    status,
                 });
+                // The set edge again - see the walk above.
+                if cancelled {
+                    break;
+                }
             }
         }
     }
@@ -1727,7 +1751,7 @@ fn repair_dir_set(
     want: Option<[u8; 16]>,
     ctx: &DirContext,
     fresh: bool,
-    mut observe: Option<&mut dyn FnMut(&[MemberSurvey]) -> AfterSurvey>,
+    mut observe: Option<&mut (dyn SurveyObserver + '_)>,
 ) -> Result<RepairStatus, RepairError> {
     // The NTT verify-failure retry is safe to run as a full re-attempt
     // here: the rerun re-verifies every target from disk, so any block
@@ -1737,10 +1761,25 @@ fn repair_dir_set(
     // VerifyFailed returned. The retry drops `fresh`: the first attempt
     // wrote to the directory, so the rerun rechecks and re-proves.
     let mut fresh = fresh;
-    run_with_ntt_fallback(SyndromePath::Auto, |path, probe| {
+    // The retention admission census's invocation boundary. The NTT
+    // retry below is a second ATTEMPT of THIS invocation: it pays for a
+    // second corpus under one final verdict, which is failure 4 of
+    // `research/PAR2-RETENTION-CALLER-CENSUS-2026-09-08.md` and the
+    // reason the two ids are separate.
+    let inv = census::Invocation::start(ctx.caller);
+    let out = run_with_ntt_fallback(SyndromePath::Auto, |path, probe| {
         let f = std::mem::replace(&mut fresh, false);
-        repair_dir_set_inner(cat, want, ctx, f, path, probe, observe.take())
-    })
+        let att = inv.attempt();
+        let r = repair_dir_set_inner(cat, want, ctx, f, path, probe, observe.take(), &att);
+        // `probe.used` on a `VerifyFailed` is exactly what makes the
+        // fallback rerun, so the attempt can say whether it is the
+        // verdict without the census guessing from a later record.
+        let continuing = probe.used && matches!(r, Err(RepairError::VerifyFailed(_)));
+        att.finish(&r, continuing);
+        r
+    });
+    inv.finish(&out);
+    out
 }
 
 fn repair_dir_set_inner(
@@ -1750,12 +1789,28 @@ fn repair_dir_set_inner(
     fresh: bool,
     path: SyndromePath,
     probe: &mut NttProbe,
-    observe: Option<&mut dyn FnMut(&[MemberSurvey]) -> AfterSurvey>,
+    mut observe: Option<&mut (dyn SurveyObserver + '_)>,
+    att: &census::Attempt,
 ) -> Result<RepairStatus, RepairError> {
     let dir = cat.dir().to_path_buf();
     let dir = dir.as_path();
+    // Progress out, cancel in, pause parked - asked ONCE, here, so a
+    // hook site downstream is a cheap branch on an owned value and not a
+    // virtual call through an observer another thread cannot borrow.
+    // An inert control is what every caller that passes no observer
+    // gets, and every site below short-circuits on it. See
+    // `par2repair::control`.
+    let control = observe.as_deref().map(|o| o.control()).unwrap_or_default();
     let timing = std::env::var_os("NZBFAST_REPAIR_TIMING").is_some();
     let t0 = std::time::Instant::now();
+    // Plan preparation is not a phase of its own - it happens inside
+    // `Reconstructor::new_with_path`, mid-way through what `mark` calls
+    // "feed+fold+solve" - so it is BRACKETED rather than marked, and the
+    // denominator it reports is the whole of this function. Measured
+    // 8 Sep 2026 over 65 repairs: 0.11-0.76% of a repair on the shapes
+    // real sets have, which is why the plan's own arithmetic is not
+    // worth optimising (`forney::PrepSpan`).
+    let _prep = forney::PrepSpan::start("repair");
     let mut mark = {
         let mut last = t0;
         move |label: &str| {
@@ -1899,28 +1954,149 @@ fn repair_dir_set_inner(
     //     volume scan (they touch disjoint files: data files here, .par2
     //     volumes there). A prebuilt catalog has no tail left to scan,
     //     so verify runs alone and the replay just finishes from memory.
+    // The verify pass keeps the blocks it proves (up to the retention
+    // budget) so the syndrome pass below folds them from memory rather
+    // than reading the set a second time - see `retain`.
+    // Recorded BEFORE the pass it pays for, so an attempt that is
+    // interrupted - or that returns clean and logs nothing at all - is
+    // still visible as a corpus somebody bought.
+    let mut retained = att.admit(n_inputs, bs);
+    // The hashing loop's own phase. Its `total` is the declared length
+    // of every member, which is what the pass reads when nothing is
+    // missing; a member that is absent or short costs less and the bar
+    // simply arrives early. A cancel raised here unwinds before a byte
+    // is written, exactly as an `AfterSurvey::Stop` would.
+    control.begin(
+        control::RepairPhase::Verify,
+        targets.iter().map(|t| t.file.length).sum(),
+    );
     if cat.complete() {
-        verify_all_targets(&mut targets, bs)?;
+        verify_all_targets(&mut targets, bs, retained.as_ref(), &control)?;
     } else {
         let mut verify_res: Result<(), RepairError> = Ok(());
         let mut bg_res: Result<(), RepairError> = Ok(());
         std::thread::scope(|s| {
             let h = s.spawn(|| cat.scan_rest());
-            verify_res = verify_all_targets(&mut targets, bs);
+            verify_res = verify_all_targets(&mut targets, bs, retained.as_ref(), &control);
             bg_res = h.join().expect("volume scan worker panicked");
         });
         verify_res?;
         bg_res?;
     }
+    control.finish(control::RepairPhase::Verify);
+    // The surveying door's PROVISIONAL pass settles here (see
+    // `DirContext::settle_names_after_scan`): the catalog is complete,
+    // so the name sets can be derived. A contested name means the
+    // disambiguation above ran without its one input, so this pass is
+    // thrown away (retained corpus included, before the rerun admits
+    // its own) and rerun with the settled context - the path every
+    // other entry point takes, before the observer saw anything or a
+    // byte was written. `fresh` stays true: nothing wrote to the
+    // directory since the listing.
+    let settled: Option<DirContext> = if ctx.settle_names_after_scan {
+        debug_assert!(cat.complete(), "the scan above completes the catalog");
+        let (declared, contested) = cat.declared_and_contested(fold, None);
+        let resolved = DirContext {
+            contested,
+            declared,
+            settle_names_after_scan: false,
+            ..ctx.clone()
+        };
+        if !resolved.contested.is_empty() {
+            att.provisional_discarded(resolved.contested.len());
+            drop(retained);
+            mark("provisional verify discarded (contested names)");
+            return repair_dir_set_inner(cat, want, &resolved, true, path, probe, observe, att);
+        }
+        Some(resolved)
+    } else {
+        None
+    };
+    let ctx: &DirContext = settled.as_ref().unwrap_or(ctx);
     replay.feed_files(cat, fed, |_| false);
     let rec_locs = std::mem::take(&mut replay.rec_locs);
     mark("verify targets + volume scan");
+    att.verify_done();
+    // What the scan validated, for a caller that prints it (see
+    // `SurveyObserver::packets_scanned`). Built only when somebody is
+    // listening: it is a copy of every packet identity in the set.
+    if let Some(observe) = observe.as_mut() {
+        observe.packets_scanned(&cat.scan_report());
+    }
     // The verify pass is done and NOTHING has been written yet, so this
     // is the one point where an observer can both see the whole set and
     // still refuse the repair. Names are the FileDesc's own, in Main
     // packet order; a caller that prints in its own order matches on
     // them (see [`repair_dir_set_surveyed`]).
-    if let Some(observe) = observe {
+    // THE FORECAST, and it is announced to EVERY caller rather than only
+    // to the ones that survey.
+    //
+    // "Repairing" on its own is not information: the same word covers a
+    // second and half an hour, and a user watching a long one cannot tell
+    // it from a wedged one. This is the last moment before a byte is
+    // written and the first at which the answer is known, so it is said
+    // here - on the `repair` target, which the daemon's log viewer
+    // already shows and every caller already reads - instead of through
+    // the observer alone. Twelve call sites reach this function and only
+    // parfast passes an observer; a fact this cheap should not be
+    // available to one of them.
+    //
+    // The observer still gets it structurally below, because a caller
+    // that wants to ACT on it (defer the job, ask first) needs the fields
+    // and not a log line.
+    let missing_now: usize = targets
+        .iter()
+        .map(|t| t.present.iter().filter(|&&ok| !ok).count())
+        .sum();
+    let forecast = (missing_now > 0).then(|| survey::forecast(&rec_locs, missing_now, bs));
+    if let Some(f) = forecast.as_ref() {
+        if f.is_long() {
+            // THE LAST CLAUSE IS CONDITIONAL, and it was not until
+            // 12 Sep 2026. It used to end flatly "and nothing reports
+            // progress while it runs", which was true of every caller
+            // there was: there was no counter and no token anywhere
+            // past the survey handshake. Since `par2repair::control`
+            // there is, so the sentence is now about THIS caller - a
+            // caller that passed a `RepairControl` is told a phase and
+            // a fraction from inside the fold for the whole of that
+            // half hour, and telling it otherwise would be the more
+            // alarming of the two lies. An uncontrolled caller still
+            // hears exactly what it heard before. The clause is
+            // KEPT rather than deleted because the thing it warns
+            // about is still real for the twelve call sites that pass
+            // nothing (CLAUDE.md's comment-gate rule).
+            warn!(
+                target: "repair",
+                "large repair ahead: {} block(s) to rebuild ({} MB), and the recovery set \
+                 is itself damaged so there is no fast solve for it - expect roughly {} \
+                 minute(s){}",
+                f.missing_blocks,
+                (f.missing_blocks as u64).saturating_mul(f.block_size as u64) / (1 << 20),
+                f.est_secs.unwrap_or(0).div_ceil(60),
+                if control.is_active() {
+                    ", and it reports its progress as it goes"
+                } else {
+                    ", and nothing reports progress while it runs"
+                }
+            );
+        } else {
+            info!(
+                target: "repair",
+                "repair ahead: {} block(s) to rebuild, {} solve",
+                f.missing_blocks,
+                match f.solve {
+                    survey::SolveKind::Structured => "structured",
+                    survey::SolveKind::Unstructured => "unstructured",
+                }
+            );
+        }
+    }
+    let observed = observe.is_some();
+    let mut stopped = false;
+    if let Some(observe) = observe.as_mut() {
+        if let Some(f) = forecast.as_ref() {
+            observe.forecast(f);
+        }
         let members: Vec<MemberSurvey> = targets
             .iter()
             .map(|t| MemberSurvey {
@@ -1931,13 +2107,23 @@ fn repair_dir_set_inner(
                 blocks_total: t.n_slices,
             })
             .collect();
-        if observe(&members) == AfterSurvey::Stop {
-            // The caller's own verdict stands in for the engine's; the
-            // surveying entry point turns this into `Ok(None)` and no
-            // other entry point can reach it.
-            return Ok(RepairStatus::NoDamage);
-        }
+        stopped = observe.after_survey(&members) == AfterSurvey::Stop;
     }
+    // The census's survey record, taken here because this is where the
+    // observer's answer exists and BEFORE the stop returns `NoDamage`:
+    // a stop is not a clean set, and the two are one value below.
+    att.survey(&targets, retained.as_ref(), observed, stopped);
+    if stopped {
+        // The caller's own verdict stands in for the engine's; the
+        // surveying entry point turns this into `Ok(None)` and no
+        // other entry point can reach it.
+        return Ok(RepairStatus::NoDamage);
+    }
+    // THE FIRST PAUSE POINT, and it is on the driver thread between two
+    // units of work - the verify pass is joined and the fold has not
+    // started. Every `gate()` in this function is placed to that rule;
+    // see `control::PauseGate` for why a worker may never park.
+    control.gate()?;
     let mut missing: Vec<usize> = Vec::new();
     for t in &targets {
         for (i, ok) in t.present.iter().enumerate() {
@@ -2021,6 +2207,7 @@ fn repair_dir_set_inner(
                 flipped += 1;
             }
         }
+        att.arbitrated(flipped);
         if flipped > 0 {
             info!(
                 target: "repair",
@@ -2059,7 +2246,11 @@ fn repair_dir_set_inner(
         // `adopt::disabled_for_screen`.
         (Vec::new(), 0, HashMap::new())
     } else if !missing.is_empty() && (any_unidentified || missing.len() > by_exp.len()) {
-        adopt::adopt_blocks(dir, &ctx.donors, &targets, &missing, bs, &sniffed)?
+        let mut excluded = sniffed.clone();
+        if let Some(observer) = observe.as_ref() {
+            excluded.extend(observer.adoption_exclusions().iter().cloned());
+        }
+        adopt::adopt_blocks(dir, &ctx.donors, &targets, &missing, bs, &excluded)?
     } else {
         (Vec::new(), 0, HashMap::new())
     };
@@ -2189,9 +2380,28 @@ fn repair_dir_set_inner(
     // proven byte-exact is not thrown away with the set. Verdict and
     // arithmetic are unchanged. See `status::finish`.
     let mut shortfall = (by_exp.len() < needed).then_some(by_exp.len());
+    // MEMORY SETS THE PASS COUNT, NEVER A VERDICT. `check_repair_dim`
+    // used to refuse here when the solve's window was over budget, which
+    // repaired NOTHING on a set that was perfectly good; the plan below
+    // cuts the solve along the block's byte axis instead and sweeps the
+    // payload once per slab. `reconstruct::plan_solve` carries the
+    // argument, the tiers and the incident.
+    let solve = if shortfall.is_none() && needed > 0 {
+        reconstruct::plan_solve_for(needed, bs)
+    } else {
+        reconstruct::plan_solve_for(0, bs)
+    };
+    if solve.slabs.slabs > 1 {
+        info!(
+            "solve window over budget: {needed} block(s) at {bs} B in {} slab(s) of {} B,              output {:?} - the payload is swept once per slab",
+            solve.slabs.slabs, solve.slabs.width, solve.staging
+        );
+    }
+    // Only the FIRST slab's bytes of each recovery slice: at one slab
+    // that is the whole slice and this is the pre-slab load exactly.
     let recovery = if shortfall.is_none() && needed > 0 {
-        reconstruct::check_repair_dim(needed)?;
-        match load_selected_recovery(&pool, &mut by_exp, needed, bs, !fresh)? {
+        let span = solve.slabs.range(0, bs);
+        match load_selected_recovery_span(&pool, &mut by_exp, needed, bs, span, !fresh)? {
             Some(loaded) => loaded,
             // Re-proof at pread dropped enough mutated packets to fall
             // short - the same verdict a fresh scan of the changed file
@@ -2208,107 +2418,305 @@ fn repair_dir_set_inner(
 
     // --- syndrome pass: stream every present slice once ---
     let blocks_rebuilt = missing.len();
-    let rebuilt: Vec<Vec<u8>> = if blocks_rebuilt > 0 && shortfall.is_none() {
-        let mut rec = Reconstructor::new_with_path(bs, n_inputs, &missing, &recovery, path)?;
-        probe.selected = rec.ntt_selected();
-        probe.m = missing.len();
-        probe.block_size = bs;
-        probe.max_exp = recovery.last().map_or(0, |&(e, _)| e);
-        probe.context = dir.display().to_string();
-        // `Reconstructor::new` has copied every recovery slice into its own
-        // u16 syndrome buffers, so this second payload-sized copy (missing x
-        // block_size - 537 MB on a 128-block/4 MiB repair) is dead weight for
-        // the rest of the solve. Peak RSS on that repair measured ~2 GB
-        // against a 268 MB resolved budget; this is one of the four live
-        // buffers and the only one that is redundant.
-        drop(recovery);
-        // Present-slice reads fan out exactly as in `repair_mapped`
-        // (M2c.2): contiguous chunks of the flattened work list per
-        // reader (sequential read patterns), each with its own Feeder
-        // into the one fold worker. This loop used to run single-file,
-        // single-threaded - the only serial data pass left in the
-        // disk repair path.
-        let work: Vec<(usize, usize, u64, usize)> = targets
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.exists)
-            .flat_map(|(ti, t)| {
-                t.present
+    let rebuilt: RebuiltStore = if blocks_rebuilt > 0 && shortfall.is_none() {
+        let plan = solve.slabs;
+        // Where the output goes. `Whole` takes the solve's own buffers
+        // by move and is the pre-slab driver exactly.
+        let mut store = match solve.staging {
+            reconstruct::Staging::Whole => RebuiltStore::Whole(Vec::new()),
+            reconstruct::Staging::Assembled => {
+                RebuiltStore::Assembled(vec![vec![0u8; bs]; blocks_rebuilt])
+            }
+            reconstruct::Staging::Spill => RebuiltStore::spill(dir, blocks_rebuilt, bs as u64)?,
+        };
+        // The exponents slab 0 selected. Every later slab MUST solve
+        // against the same ones: the recovery matrix is a function of
+        // this set, so a slab that silently re-selected (a slice going
+        // bad between sweeps drops it from the pool and `by_exp` picks
+        // again) would solve a DIFFERENT system and write bytes that
+        // look repaired and are not. Re-selection is refused below
+        // rather than followed.
+        let pinned: Vec<u32> = recovery.iter().map(|(e, _)| *e).collect();
+        let mut recovery = recovery;
+        for si in 0..plan.slabs {
+            // A SLAB BOUNDARY IS A UNIT BOUNDARY: the previous slab's
+            // scope has joined and the next one's has not been opened,
+            // so this is where a slabbed repair honours a pause. See
+            // `control::PauseGate` - a worker may never park, so on a
+            // one-slab repair the pause lands at the fold/solve
+            // boundary instead and the capability says so.
+            control.gate()?;
+            let span = plan.range(si, bs);
+            let (c0, w) = (span.start, span.len());
+            // THE FOLD'S OWN PHASE, and the one this whole module was
+            // built for: on an ordinary repair the feed is most of the
+            // wall, and until 12 Sep 2026 a progress bar stopped dead
+            // here for all of it.
+            //
+            // SIZED HERE, before the retained corpus is taken, and over
+            // EVERY present block of the slab rather than over the work
+            // list below. The verify pass keeps what it proved (see
+            // `retain`), so on a set that fitted the retention budget
+            // the work list is EMPTY and the whole fold arrives from
+            // memory - a total taken from `work` would read 0 there,
+            // which is a bar that is full before it starts. Adopted
+            // blocks are added because they are fed too.
+            control.begin(
+                control::RepairPhase::Fold,
+                targets
                     .iter()
-                    .enumerate()
-                    .filter(|&(_, &p)| p)
-                    .map(move |(i, _)| {
-                        let off = i as u64 * block_size;
-                        (
-                            t.first_slice + i,
-                            ti,
-                            off,
-                            (t.file.length - off).min(block_size) as usize,
-                        )
+                    .filter(|t| t.exists)
+                    .flat_map(|t| {
+                        t.present
+                            .iter()
+                            .enumerate()
+                            .filter(|&(_, &p)| p)
+                            .map(|(i, _)| {
+                                let off = i as u64 * block_size;
+                                let whole = (t.file.length - off).min(block_size) as usize;
+                                whole.saturating_sub(c0).min(w) as u64
+                            })
                     })
-            })
-            .collect();
-        if !work.is_empty() {
-            let readers = crate::mem::cpu_workers().min(8).min(work.len()).max(1);
-            let per_reader_batch = (BATCH_BYTES / readers).max(1 << 20);
-            let chunk = work.len().div_ceil(readers);
-            let targets_ref = &targets;
-            let mut read_results: Vec<Result<(), RepairError>> =
-                (0..readers).map(|_| Ok(())).collect();
-            std::thread::scope(|s| {
-                for (wchunk, res) in work.chunks(chunk).zip(read_results.iter_mut()) {
-                    let mut feeder = rec.feeder(per_reader_batch);
-                    s.spawn(move || {
-                        *res = (|| {
-                            let mut open: Option<(usize, File)> = None;
-                            for &(g, ti, off, take) in wchunk {
-                                if open.as_ref().is_none_or(|(oi, _)| *oi != ti) {
-                                    open = Some((ti, File::open(&targets_ref[ti].path)?));
-                                }
-                                let f = &open.as_ref().expect("just opened").1;
-                                feeder.feed_with(g, take, |buf| {
-                                    crate::disk::read_exact_at(f, buf, off)
-                                })?;
-                            }
-                            Ok(())
-                        })();
-                        // feeder drops here → tail batch flushes.
-                    });
+                    .sum::<u64>()
+                    + adopted.len() as u64 * w as u64,
+            );
+            if si > 0 {
+                recovery =
+                    load_selected_recovery_span(&pool, &mut by_exp, needed, bs, span, !fresh)?
+                        .ok_or_else(|| {
+                            RepairError::Malformed(format!(
+                                "recovery slices became unreadable between slab {si} and the one \
+                         before it - the set changed under a repair already in progress"
+                            ))
+                        })?;
+                if recovery.iter().map(|(e, _)| *e).ne(pinned.iter().copied()) {
+                    return Err(RepairError::Malformed(format!(
+                        "recovery selection changed at slab {si} of {} - a slabbed solve \
+                         must use one recovery set throughout, and re-selecting mid-repair \
+                         would rebuild against a different system",
+                        plan.slabs
+                    )));
                 }
-            });
-            for r in read_results {
-                r?;
             }
-        }
-        // Adopted blocks are present data too - fed from their source.
-        let mut by_cand: HashMap<usize, Vec<(usize, u64)>> = HashMap::new();
-        for (&g, s) in &adopted {
-            by_cand.entry(s.cand).or_default().push((g, s.offset));
-        }
-        for (ci, mut list) in by_cand {
-            list.sort_unstable_by_key(|&(_, off)| off);
-            for (g, off) in list {
-                let take = crate::disk::chunk_len(cands[ci].1.saturating_sub(off), bs);
-                let data = cand_reader.read(
-                    AdoptSrc {
-                        cand: ci,
-                        offset: off,
-                    },
-                    take,
-                )?;
-                rec.feed(g, &data);
+            // The recovery payloads are widened into the syndrome rows
+            // by the constructor and are dead weight afterwards, so they
+            // go before the output is allocated - the same reason the
+            // pre-slab driver dropped them here.
+            let feed_from = std::mem::take(&mut recovery);
+            let mut rec =
+                Reconstructor::new_controlled(w, n_inputs, &missing, &feed_from, path, &control)?;
+            if si == 0 {
+                probe.selected = rec.ntt_selected();
+                probe.m = missing.len();
+                probe.block_size = bs;
+                probe.max_exp = feed_from.last().map_or(0, |&(e, _)| e);
+                probe.context = dir.display().to_string();
             }
+            drop(feed_from);
+            // What the verify pass held goes to the fold worker first,
+            // from memory; only the present blocks it did not hold are
+            // read below. A SLABBED solve cannot use it - those batches
+            // are whole blocks and this pass wants one slab of each - so
+            // it is dropped instead, which is also the right thing to do
+            // with `m x block_size` of cache on the one path that is
+            // short of memory by definition.
+            let held: Vec<bool> = match retained.take() {
+                Some(r) if plan.slabs == 1 => {
+                    let (batches, held) = r.take();
+                    let (n, bytes) = batches.iter().fold((0usize, 0usize), |(n, b), batch| {
+                        (n + batch.slices.len(), b + batch.len())
+                    });
+                    if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
+                        info!(
+                            target: "repair-timing",
+                            "retained from the verify pass: {n} block(s), {:.1} MB",
+                            bytes as f64 / 1e6
+                        );
+                    }
+                    // The line above is CONSUMPTION and is gated on a timing
+                    // env var, which is failure 2 of the caller census. This
+                    // is the same fact told to the census, which already
+                    // recorded the admission that paid for it.
+                    att.consumed(n, bytes);
+                    for b in batches {
+                        // Retained blocks are fold input that never
+                        // touched the disk on this pass, and they are
+                        // counted in the phase's total above - a bar
+                        // that ignored them would sit at zero through
+                        // the whole of a set that fitted the retention
+                        // budget, which is most small repairs.
+                        control.step(control::RepairPhase::Fold, b.len() as u64);
+                        rec.send_batch(b);
+                    }
+                    // Handing over is instant; the FOLDING of what was
+                    // just handed over is not, and it happens on the
+                    // syndrome worker - which polls the same cancel and
+                    // discards instead of folding (see
+                    // `Reconstructor::new_controlled`). This check is
+                    // what stops the hand-over itself on a corpus large
+                    // enough to be several batches.
+                    if control.cancelled() {
+                        return Err(RepairError::Cancelled);
+                    }
+                    held
+                }
+                _ => Vec::new(),
+            };
+            let held = &held;
+            // Present-slice reads fan out exactly as in `repair_mapped`
+            // (M2c.2): contiguous chunks of the flattened work list per
+            // reader (sequential read patterns), each with its own Feeder
+            // into the one fold worker. This loop used to run single-file,
+            // single-threaded - the only serial data pass left in the
+            // disk repair path.
+            //
+            // Shifted into the slab and clipped to it: a block whose file
+            // ends before this slab starts contributes nothing and is
+            // dropped here rather than read as a zero-length request.
+            let work: Vec<(usize, usize, u64, usize)> = targets
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.exists)
+                .flat_map(|(ti, t)| {
+                    t.present
+                        .iter()
+                        .enumerate()
+                        .filter(move |&(i, &p)| {
+                            p && !held.get(t.first_slice + i).copied().unwrap_or(false)
+                        })
+                        .filter_map(move |(i, _)| {
+                            let off = i as u64 * block_size;
+                            let whole = (t.file.length - off).min(block_size) as usize;
+                            let take = whole.saturating_sub(c0).min(w);
+                            (take > 0).then_some((t.first_slice + i, ti, off + c0 as u64, take))
+                        })
+                })
+                .collect();
+            if !work.is_empty() {
+                let readers = feed_readers().min(work.len()).max(1);
+                let per_reader_batch = (BATCH_BYTES / readers).max(1 << 20);
+                let chunk = work.len().div_ceil(readers);
+                let targets_ref = &targets;
+                // By reference into every reader: `RepairControl` is
+                // clonable, but a clone per reader is an Arc bump for
+                // nothing - the scope cannot outlive this frame.
+                let control = &control;
+                let mut read_results: Vec<Result<(), RepairError>> =
+                    (0..readers).map(|_| Ok(())).collect();
+                std::thread::scope(|s| {
+                    for (wchunk, res) in work.chunks(chunk).zip(read_results.iter_mut()) {
+                        let mut feeder = rec.feeder(per_reader_batch);
+                        s.spawn(move || {
+                            *res = (|| {
+                                let mut open: Option<(usize, File)> = None;
+                                for &(g, ti, off, take) in wchunk {
+                                    // PER BLOCK, which is the batch this
+                                    // loop deals in - one relaxed load
+                                    // and one relaxed add against a
+                                    // block-sized read. A reader that
+                                    // sees the cancel stops feeding; the
+                                    // fold worker then drains what it
+                                    // has and `finish` returns blocks
+                                    // nobody will write, because the
+                                    // check before the patch refuses
+                                    // first.
+                                    //
+                                    // IT PARKS HERE TOO, which is the
+                                    // one place in the fold a pause can
+                                    // be honoured: this reader owns a
+                                    // static, disjoint chunk of `work`,
+                                    // so no other thread is waiting for
+                                    // the block it holds; its Feeder is
+                                    // its own; it holds no lock; and the
+                                    // fold worker keeps draining while
+                                    // it sleeps. `control::PauseGate`
+                                    // carries the rule and why the
+                                    // solve's shared unit queue is
+                                    // excluded from it.
+                                    control.gate_if_held()?;
+                                    if open.as_ref().is_none_or(|(oi, _)| *oi != ti) {
+                                        open = Some((ti, File::open(&targets_ref[ti].path)?));
+                                    }
+                                    let f = &open.as_ref().expect("just opened").1;
+                                    feeder.feed_with(g, take, |buf| {
+                                        crate::disk::read_exact_at(f, buf, off)
+                                    })?;
+                                    control.step(control::RepairPhase::Fold, take as u64);
+                                }
+                                Ok(())
+                            })();
+                            // feeder drops here → tail batch flushes.
+                        });
+                    }
+                });
+                for r in read_results {
+                    r?;
+                }
+            }
+            // Adopted blocks are present data too - fed from their source.
+            let mut by_cand: HashMap<usize, Vec<(usize, u64)>> = HashMap::new();
+            for (&g, s) in &adopted {
+                by_cand.entry(s.cand).or_default().push((g, s.offset));
+            }
+            for (ci, mut list) in by_cand {
+                list.sort_unstable_by_key(|&(_, off)| off);
+                for (g, off) in list {
+                    let take = crate::disk::chunk_len(cands[ci].1.saturating_sub(off), bs);
+                    let data = cand_reader.read(
+                        AdoptSrc {
+                            cand: ci,
+                            offset: off,
+                        },
+                        take,
+                    )?;
+                    // The slab's bytes of an adopted block, on the same
+                    // clip as a present one.
+                    let from = c0.min(data.len());
+                    let to = (c0 + w).min(data.len());
+                    rec.feed(g, &data[from..to]);
+                    control.step(control::RepairPhase::Fold, (to - from) as u64);
+                }
+            }
+            control.finish(control::RepairPhase::Fold);
+            // BEFORE THE SOLVE, which is the other multi-minute stretch
+            // and the one a cancelled repair must not sit through. On a
+            // set whose whole corpus was retained the fold is one
+            // hand-over and this is where the cancel lands; on any set
+            // big enough to read from disk the readers have already
+            // carried it out.
+            control.check()?;
+            let (r, syn_report) = rec.finish_owned_reported();
+            if si == 0 {
+                probe.used = syn_report.ntt_used;
+                probe.n_present = syn_report.n_present;
+            }
+            match &mut store {
+                // One slab: the solve's buffers ARE the output.
+                RebuiltStore::Whole(v) => *v = r,
+                store => store.put_slab(&r, c0, w)?,
+            }
+            mark("feed+fold+solve");
         }
-        let (r, syn_report) = rec.finish_reported();
-        probe.used = syn_report.ntt_used;
-        probe.n_present = syn_report.n_present;
-        mark("feed+fold+solve");
-        r
+        store
     } else {
-        Vec::new()
+        RebuiltStore::Whole(Vec::new())
     };
 
     // --- patch ---
+    // Every write to a target is below this line; the observer's
+    // `before_write` contract (see [`SurveyObserver`]) is that nothing
+    // above it touched one. Adoption and the feed only read.
+    //
+    // THE LAST PAUSE POINT, and the cancel that matters most. A cancel
+    // raised during the fold or the solve unwinds here, before
+    // `before_write` and before any destination is opened, so the
+    // directory is exactly as the survey found it - and a solve that
+    // was abandoned mid-fold produced blocks that are NOT a repair,
+    // which is why this check may never be moved below the patch.
+    control.gate()?;
+    if let Some(observe) = observe.as_mut() {
+        observe.before_write();
+    }
     // X6-02c: [`adopt::adopted_from_names`] owns the rule and its argument.
     let adopted_from = adopt::adopted_from_names(dir, &cands, &donor_cands, &adopted);
     // Which candidates donated anything. Turning these into whole paths
@@ -2417,19 +2825,39 @@ fn repair_dir_set_inner(
             let g = t.first_slice + i;
             let off = i as u64 * block_size;
             let take = (t.file.length - off).min(block_size) as usize;
+            // PER BLOCK, and this is the cancel with the consequences -
+            // see `RepairError::Cancelled`, which states exactly what a
+            // cancelled patch leaves behind. The guarantee that makes it
+            // safe lives in this loop: a MISSING block is the only thing
+            // written in place (`copy_present` is false for every
+            // in-place job, so the `present` arm above is a temp-file
+            // arm only), so a half-written in-place patch has strictly
+            // more correct blocks than it started with and strictly none
+            // fewer. Temps are removed by `cleanup` and nothing is
+            // renamed in, so a cancel is re-runnable either way.
+            //
+            // It parks here too: a patch worker owns a static, disjoint
+            // chunk of the job list and holds only its own destination
+            // handle. A paused repair therefore stops with a target
+            // part-written, which is the same state a cancel leaves and
+            // the same state a re-run recovers from.
+            control.gate_if_held()?;
             if present {
                 if let Some(src) = &src {
                     let mut v = vec![0u8; take];
                     crate::disk::read_exact_at(src, &mut v, off)?;
                     crate::disk::write_all_at(f, &v, off)?;
+                    control.step(control::RepairPhase::Write, take as u64);
                 }
                 continue;
             }
             if let Some(&mi) = rebuilt_of.get(&g) {
-                crate::disk::write_all_at(f, &rebuilt[mi][..take], off)?;
+                rebuilt.write_block_to(mi, take, f, off)?;
+                control.step(control::RepairPhase::Write, take as u64);
             } else if let Some(&s) = adopted.get(&g) {
                 let data = cand_reader.lock_ok().read(s, take)?;
                 crate::disk::write_all_at(f, &data, off)?;
+                control.step(control::RepairPhase::Write, take as u64);
             }
         }
         Ok(())
@@ -2530,6 +2958,23 @@ fn repair_dir_set_inner(
         }
     }
     // Pass two: every target's blocks, across threads.
+    // Sized from the JOBS and not from the set: a temp-staged member is
+    // rewritten whole and an in-place one only where it was damaged, so
+    // the two cost wildly different amounts and a bar over declared
+    // lengths would crawl through one and jump through the other.
+    control.begin(
+        control::RepairPhase::Write,
+        jobs.iter()
+            .map(|j| {
+                let t = &targets[j.ti];
+                if j.tmp.is_some() {
+                    t.file.length
+                } else {
+                    t.present.iter().filter(|&&p| !p).count() as u64 * block_size
+                }
+            })
+            .sum(),
+    );
     let write_results: Vec<Result<(), RepairError>> = if jobs.is_empty() {
         Vec::new()
     } else {
@@ -2574,6 +3019,7 @@ fn repair_dir_set_inner(
             }
         }
     }
+    control.finish(control::RepairPhase::Write);
     mark("patch");
     // Whole-file MD5 for everything written - files are independent, so
     // verify across threads.
@@ -2703,789 +3149,19 @@ fn repair_dir_set_inner(
     Ok(status::finish(shortfall, needed, adopted.len(), report))
 }
 
-/// Per-worker read-chunk size for the parallel block-hash pass. Blocks
-/// larger than this are streamed through the chunk incrementally, so
-/// the buffer bound holds whatever the wire-supplied block size is
-/// (`bs` goes up to [`crate::par2::MAX_BLOCK_SIZE`], 256 MiB).
-const HASH_CHUNK: usize = 4 << 20;
-/// Small proved slices can share one positioned read. Keep the window below
-/// the normal streaming chunk: this is large enough to amortize syscall and
-/// `FileExt` overhead without charging sparse IFSC grids for dense buffers.
-const HASH_POSITIONED_WINDOW: usize = 512 << 10;
-/// Ceiling on total chunk-buffer bytes across hash workers - the same
-/// role the partials budget plays for the download path: parallelism
-/// must never buy unbounded reader memory. 16 workers x 4 MiB.
-const HASH_POOL_BYTES: usize = 64 << 20;
-/// Below this many readable bytes the thread fan-out is not worth its
-/// setup; the serial single-pass scanner keeps the small-file path.
-#[cfg(not(fuzzing))]
-const HASH_PAR_MIN_BYTES: u64 = 8 << 20;
-/// Under cargo-fuzz the gate drops to 8 KiB. `par2_verify_diff` exists to
-/// prove the two verify paths cannot disagree, and a gate it can only
-/// cross by writing 8 MiB per case would cost ~30 executions a second -
-/// the parallel branch would be fuzzed at a rate that finds nothing. The
-/// threshold is a performance choice, not part of the verdict rule, so
-/// lowering it changes which path answers and never what it answers.
-#[cfg(fuzzing)]
-const HASH_PAR_MIN_BYTES: u64 = 8 << 10;
-
-/// The pool gate, readable from outside the crate so `par2_verify_diff`
-/// can assert it is small enough for the files that target writes. The
-/// failure this guards is silent: if `--cfg fuzzing` ever stops reaching
-/// this crate, the gate goes back to 8 MiB, every generated case takes
-/// the serial path, and the differential keeps passing while proving
-/// nothing about the parallel one.
-#[doc(hidden)]
-pub fn hash_par_min_bytes() -> u64 {
-    HASH_PAR_MIN_BYTES
-}
-
-/// Per-block CRC32 presence for one file, across a worker pool.
-///
-/// `crc_ok[i]` reproduces the serial scanner's presence decision
-/// exactly: full blocks close at `bs`, the tail extends through its
-/// zero padding via `crc32_zeros`, and a block whose declared bytes are
-/// not all on disk is damage by definition and stays false.
-///
-/// PRESENCE only. This pool used to also check the per-block IFSC MD5s
-/// and hand back "every block matched" as a whole-file verdict (§129),
-/// which is a claim about the IFSC list, not about the FileDesc MD5 the
-/// contract names - see [`verify_pass1`] and [`md5_matches`] for why
-/// that stopped being a verdict (H7). Presence needs no such premise:
-/// it is defined by the IFSC CRC32s, so it is the pool's to answer.
-///
-/// `limit` is how many bytes are readable (min of declared length and
-/// disk length); `threads` is this file's share of the machine. The calling
-/// file-level worker hashes range zero and only the remaining ranges become
-/// child threads, so nested file-level and block-level pools stay inside that
-/// share. On Windows each child owns a separate handle because its positioned
-/// read compatibility primitive moves the handle cursor.
-fn hash_blocks_par(
-    _path: &Path,
-    _source: &File,
-    limit: u64,
-    length: u64,
-    blocks: &[BlockCheck],
-    bs: usize,
-    threads: usize,
-) -> Result<Vec<bool>, RepairError> {
-    let n_slices = length.div_ceil(bs as u64) as usize;
-    if n_slices == 0 {
-        return Ok(Vec::new());
-    }
-    let mut crc_ok = vec![false; n_slices];
-    let diagnostic_slices = hash_diagnostic_slice_count(&blocks[..blocks.len().min(n_slices)]);
-    if diagnostic_slices == 0 {
-        return Ok(crc_ok);
-    }
-    let chunk_buf = hash_positioned_buffer_len(&blocks[..diagnostic_slices], bs);
-    let proven_slices = blocks[..diagnostic_slices]
-        .iter()
-        .filter(|check| check.is_proven())
-        .count();
-    let workers = bounded_hash_workers(threads, proven_slices, chunk_buf);
-    // Contiguous block ranges per worker: N sequential read streams,
-    // not a random-access shuffle.
-    let (per, ranges) = hash_range_geometry(diagnostic_slices, workers);
-    let (caller_blocks, child_blocks) = crc_ok[..diagnostic_slices].split_at_mut(per);
-    let mut child_out: Vec<Result<(), RepairError>> = (1..ranges).map(|_| Ok(())).collect();
-    let hash_range = |first_block: usize,
-                      oks: &mut [bool],
-                      _independent_handle: bool|
-     -> Result<(), RepairError> {
-        #[cfg(unix)]
-        let src = _source;
-        // The caller is the only user of the original handle on this branch;
-        // every concurrent Windows child needs its own cursor.
-        #[cfg(windows)]
-        let owned = if _independent_handle {
-            Some(File::open(_path)?)
-        } else {
-            None
-        };
-        #[cfg(windows)]
-        let src = owned.as_ref().unwrap_or(_source);
-        let mut buf = Vec::new();
-        let mut crc = crc32fast::Hasher::new();
-        let mut j = 0usize;
-        while j < oks.len() {
-            let bidx = first_block + j;
-            let Some(check) = blocks.get(bidx).filter(|check| check.is_proven()) else {
-                j += 1;
-                continue;
-            };
-            let off = bidx as u64 * bs as u64;
-            let declared = (length - off).min(bs as u64);
-            let avail = limit.saturating_sub(off).min(bs as u64);
-            if avail < declared {
-                // Truncation: the serial pass never closes this block's CRC
-                // either.
-                j += 1;
-                continue;
-            }
-            if buf.is_empty() {
-                buf = vec![0u8; chunk_buf];
-            }
-
-            // A lane owns a contiguous range of slice slots. Adjacent proved
-            // full slices share a positioned read, but an UNPROVEN cell or a
-            // short physical/declaration tail ends the run. In particular,
-            // this never reads a fixed-false IFSC gap as incidental read-ahead.
-            if avail == bs as u64 && declared == bs as u64 && bs <= buf.len() {
-                let max_run = hash_full_run_limit(
-                    (buf.len() / bs).min(oks.len() - j),
-                    limit - off,
-                    length - off,
-                    bs as u64,
-                );
-                let run = hash_proven_run_len(&blocks[bidx..], max_run);
-                debug_assert!(run > 0);
-                let bytes = run * bs;
-                crate::disk::read_exact_at(src, &mut buf[..bytes], off)?;
-                for k in 0..run {
-                    crc.update(&buf[k * bs..(k + 1) * bs]);
-                    let crc_val = crc.clone().finalize();
-                    crc.reset();
-                    oks[j + k] = blocks[bidx + k].crc_matches(crc_val);
-                }
-                j += run;
-                continue;
-            }
-
-            let mut p = 0u64;
-            while p < avail {
-                let take = crate::disk::chunk_len(avail - p, buf.len());
-                crate::disk::read_exact_at(src, &mut buf[..take], off + p)?;
-                crc.update(&buf[..take]);
-                p += take as u64;
-            }
-            // Tail zero padding in O(log n), exactly as the serial scanner
-            // does it.
-            let crc_val = if avail == bs as u64 {
-                crc.clone().finalize()
-            } else {
-                crate::yenc_simd::crc32_zeros(crc.clone().finalize(), bs as u64 - avail)
-            };
-            crc.reset();
-            oks[j] = check.crc_matches(crc_val);
-            j += 1;
-        }
-        Ok(())
-    };
-    let caller_out = std::thread::scope(|s| {
-        for (child_index, (oks, res)) in child_blocks
-            .chunks_mut(per)
-            .zip(child_out.iter_mut())
-            .enumerate()
-        {
-            let hash_range = &hash_range;
-            s.spawn(move || {
-                *res = hash_range((child_index + 1) * per, oks, true);
-            });
-        }
-        hash_range(0, caller_blocks, false)
-    });
-    caller_out?;
-    for r in child_out {
-        r?;
-    }
-    Ok(crc_ok)
-}
-
-/// Number of consecutive proved cells a coalesced read may cross. Keeping the
-/// UNPROVEN stop in a small pure helper makes the no-incidental-read boundary
-/// directly testable rather than merely inferred from a checksum result.
-fn hash_proven_run_len(blocks: &[BlockCheck], max_run: usize) -> usize {
-    blocks
-        .iter()
-        .take(max_run)
-        .take_while(|check| check.is_proven())
-        .count()
-}
-
-/// Clamp full-slice availability before narrowing to pointer width. The lane
-/// cap is already tiny, while `readable` and `declared` are wire/file `u64`s;
-/// narrowing either quotient first can wrap to zero on a 32-bit target.
-fn hash_full_run_limit(lane_slots: usize, readable: u64, declared: u64, block_size: u64) -> usize {
-    (readable / block_size)
-        .min(declared / block_size)
-        .min(lane_slots as u64) as usize
-}
-
-/// Buffer size for one block-hash lane. The longest consecutive proved run
-/// controls allocation so an isolated sparse grid retains the old one-slice
-/// buffer, while dense small-slice grids receive a bounded coalescing window.
-fn hash_positioned_buffer_len(blocks: &[BlockCheck], bs: usize) -> usize {
-    if bs >= HASH_POSITIONED_WINDOW {
-        return bs.min(HASH_CHUNK);
-    }
-    let max_run = HASH_POSITIONED_WINDOW / bs;
-    let mut run = 0usize;
-    let mut longest = 0usize;
-    for check in blocks {
-        if check.is_proven() {
-            run += 1;
-            longest = longest.max(run);
-            if longest == max_run {
-                break;
-            }
-        } else {
-            run = 0;
-        }
-    }
-    longest.max(1) * bs
-}
-
-/// Resolve the block-hash pool width from work that can still become true.
-/// Geometry continues to span the diagnostic prefix so offsets stay exact,
-/// but UNPROVEN holes must not buy empty child threads.
-fn bounded_hash_workers(requested: usize, proven_slices: usize, chunk_buf: usize) -> usize {
-    if proven_slices == 0 {
-        return 0;
-    }
-    requested
-        .min(proven_slices)
-        .min((HASH_POOL_BYTES / chunk_buf.max(1)).max(1))
-        .max(1)
-}
-
-fn hash_range_geometry(blocks: usize, workers: usize) -> (usize, usize) {
-    if blocks == 0 || workers == 0 {
-        return (0, 0);
-    }
-    let per = blocks.div_ceil(workers);
-    (per, blocks.div_ceil(per))
-}
-
-/// Last slice for which IFSC evidence can possibly produce `true`. Missing
-/// entries and a fitted UNPROVEN suffix have fixed-false verdicts and require
-/// neither positioned reads nor worker ranges.
-fn hash_diagnostic_slice_count(blocks: &[BlockCheck]) -> usize {
-    blocks
-        .iter()
-        .rposition(BlockCheck::is_proven)
-        .map_or(0, |index| index + 1)
-}
-
-/// What the verify pass learned about one target file.
-///
-/// `#[doc(hidden)] pub` for the same reason [`SyndromeReport`] is: the
-/// `par2_verify_diff` fuzz target lives outside this crate and has to
-/// compare the verdicts of both verify paths against each other and
-/// against bytes it generated. Not part of the supported API surface.
-#[doc(hidden)]
-pub struct Pass1Out {
-    pub exists: bool,
-    /// `clean` AND the disk length is exactly the declared one. Read it
-    /// beside `md5_unfinished`: these three verdicts are a TRI-state,
-    /// and false under that flag is "not proven", not "disproven".
-    pub intact: bool,
-    /// Whole-file MD5 matched over the declared length: every block is
-    /// present even if trailing junk keeps `intact` false. Same
-    /// tri-state as `intact` - see `md5_unfinished`.
-    pub clean: bool,
-    /// Per-block presence from the in-stream block CRC32s, for a
-    /// damaged file with IFSC data (None when clean, absent, or the
-    /// set has no IFSC packets - those fall back to all-false).
-    pub present: Option<Vec<bool>>,
-    /// Where the post-repair self-prove may pick the whole-file MD5
-    /// back up (TODO 133.1 cost work) - see [`Md5Resume`].
-    pub resume: Option<Md5Resume>,
-    /// The whole-file MD5 stopped at the first failed block, so `clean`
-    /// is false on IFSC evidence alone and the digest was never
-    /// finished - see [`verify_pass1`]. Always false when `resume` is
-    /// None.
-    ///
-    /// This is the flag that makes the two above a tri-state, and a
-    /// caller that reads them without it reads an IFSC verdict as a
-    /// FileDesc one. In-tree the only reader is [`verify_all_targets`],
-    /// which carries the flag through to `Target`, and the one verdict
-    /// it can change is arbitrated in `repair_dir_set_inner`. What the
-    /// early stop can NOT do is manufacture a positive: `md5_ok` is
-    /// gated on it, so a false "clean" - the H7 direction - stays
-    /// unreachable
-    /// (`filedesc_md5_over_bytes_the_ifsc_denies_is_unproven_not_damaged`).
-    pub md5_unfinished: bool,
-}
-
-/// The whole-file MD5 state this verify pass had reached at the byte
-/// boundary of the first block it could not prove present - the point
-/// up to which the file's bytes have been read (and hashed) once
-/// already, and before which an IN-PLACE patch writes nothing: every
-/// block the patch touches is a not-present block, and those all start
-/// at or after this boundary (so do `set_len`'s zero-extension bytes).
-/// Hashing `[offset..length]` of the patched file from `state` is
-/// therefore the same FileDesc-MD5 proof over the same final bytes as
-/// a full reread; the only thing it stops re-checking is that nothing
-/// OUTSIDE the repair rewrote the already-verified prefix in the
-/// window between verify and patch, which the full reread only caught
-/// by accident. Temp-file rebuilds do NOT get this: their prefix is a
-/// fresh copy whose bytes nobody has hashed, so they keep the full
-/// reread ([`md5_matches`]).
-///
-/// The self-prove itself stays a separate read-back-from-disk step
-/// after the patch - fusing it into the syndrome feed is the shape the
-/// mapped driver's safety contract forbids
-/// (`mapped_driver_rereads_files_it_did_not_rebuild`), and this
-/// mirrors that: prove what landed, never what was about to be fed.
-///
-/// `#[doc(hidden)] pub` for `par2_verify_diff`, which asserts the
-/// resumed verdict can never disagree with the full one.
-#[doc(hidden)]
-#[derive(Clone, Debug)]
-pub struct Md5Resume {
-    offset: u64,
-    state: Md5,
-}
-
-impl Md5Resume {
-    /// A resume point built OUTSIDE a verify pass: the live verifier's
-    /// prefix hasher (`live::prefix`), which hashes a slot's
-    /// PAR2-vouched prefix off disk while the download runs. Same
-    /// meaning, same obligations - `offset` must be a point below which
-    /// the patch writes nothing, and `state` must be the digest of the
-    /// bytes on disk under it - which is why the mapped self-prove
-    /// rechecks that span against the IFSC CRC32s anyway before it
-    /// trusts the resume (`self_prove_set`).
-    /// A RESUME POINT CAN ONLY FAIL, NEVER PASS. The verdict is still
-    /// `digest == f.md5` over the whole file, so a state that does not
-    /// describe the bytes under `offset` produces a digest that does
-    /// not match and the repair reports `VerifyFailed`. That is what
-    /// makes this constructor safe to expose to the bench and the
-    /// verifier alike: the worst a wrong prefix can do is throw the
-    /// mapped route away and fall back to the directory path.
-    pub(crate) fn from_prefix(offset: u64, state: Md5) -> Md5Resume {
-        Md5Resume { offset, state }
-    }
-
-    /// How far this resume point reaches, and the digest it would
-    /// finalize to. Test-only: `live/prefix_tests.rs` asserts the
-    /// hasher's output IS the FileDesc MD5 of the proven prefix, which
-    /// is the whole of what it promises the repair.
-    #[cfg(test)]
-    pub(crate) fn offset_for_test(&self) -> u64 {
-        self.offset
-    }
-
-    #[cfg(test)]
-    pub(crate) fn finish_for_test(&self) -> [u8; 16] {
-        self.state.clone().finalize().into()
-    }
-
-    /// [`Md5Resume::from_prefix`] for `par2_mapped_repair_bench`, which
-    /// stands in for the live verifier's download-time hasher and lives
-    /// outside this crate. Not part of the supported API surface.
-    #[doc(hidden)]
-    pub fn bench_prefix(offset: u64, state: Md5) -> Md5Resume {
-        Md5Resume::from_prefix(offset, state)
-    }
-}
-
-/// Blocks below this stop the resume snapshotting: one `Md5` clone per
-/// block start is noise against hashing 64 KiB, but a wire-supplied
-/// 4-byte block size would turn it into the dominant term of the scan.
-#[cfg(not(fuzzing))]
-const RESUME_MIN_BLOCK: usize = 64 << 10;
-/// Under cargo-fuzz the gate drops to 16 bytes for the same reason
-/// `HASH_PAR_MIN_BYTES` does: `par2_verify_diff` asserts the resumed
-/// self-prove verdict against the full one, and a gate the generated
-/// block sizes never cross would leave that assertion passing while
-/// proving nothing. The threshold is a performance choice; the snapshot
-/// it gates is either taken or not, never different.
-#[cfg(fuzzing)]
-const RESUME_MIN_BLOCK: usize = 16;
-
-/// The resume gate, readable from outside the crate so
-/// `par2_verify_diff` can assert it is small enough for the block sizes
-/// that target generates - the same silent-coverage guard as
-/// [`hash_par_min_bytes`].
-#[doc(hidden)]
-pub fn resume_min_block() -> usize {
-    RESUME_MIN_BLOCK
-}
-
-/// Target verification in ONE streaming pass: the whole-file MD5 and
-/// the per-block IFSC CRC32s are computed from the same buffered read.
-/// The old shape hashed every damaged file twice (whole-file MD5, then
-/// a second full pass of per-block MD5+CRC); the CRC costs a few
-/// percent on top of the MD5 and deletes that second pass outright.
-///
-/// Presence is decided by the block CRC32 ALONE. The block MD5s are
-/// deliberately not consulted: a corrupt block that collides CRC32
-/// (2⁻³² per damaged block, and damage is honest randomness) would
-/// poison the syndromes and make the repair produce wrong bytes for
-/// OTHER blocks - and that is exactly what the mandatory whole-file
-/// self-prove after patching catches, so the failure mode is a FAILED
-/// repair, never a wrong "Repaired". Same trade par2cmdline's own
-/// scanning makes, with a stronger backstop.
-///
-/// The CLEAN verdict is the FileDesc whole-file MD5 and only that.
-/// "Every padded block MD5 matched" is a statement about the IFSC list,
-/// which is a SEPARATE claim in the same set - nothing binds the two,
-/// so a PAR2 pairing one file's FileDesc with another's IFSC under one
-/// file id passed the block proof and failed the MD5 (H7, 08-08 sweep;
-/// `ifsc_contradicting_the_filedesc_md5_is_rejected_by_both_paths`).
-/// Recomputing the spec's file id does not bind them either - it hashes
-/// hash16k, length and name, not the whole-file MD5 beside them.
-///
-/// `threads` is this file's share of the machine (see
-/// [`verify_all_targets`]). It buys parallelism for one shape only: a
-/// file SHORT of its declared length cannot be clean whatever any hash
-/// says, so [`hash_blocks_par`]'s block-CRC32 presence scan is the
-/// whole answer there and runs across lanes. Everything else takes the
-/// serial pass below, which gets the whole-file MD5 and the per-block
-/// CRC32s out of one read.
-///
-/// `#[doc(hidden)] pub` for `par2_verify_diff` (see [`Pass1Out`]), which
-/// calls it at both thread counts over the same file.
-#[doc(hidden)]
-pub fn verify_pass1(
-    path: &Path,
-    file: &Par2File,
-    bs: usize,
-    threads: usize,
-) -> Result<Pass1Out, RepairError> {
-    let mut f = match File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Pass1Out {
-                exists: false,
-                intact: false,
-                clean: false,
-                present: None,
-                resume: None,
-                md5_unfinished: false,
-            });
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let disk_len = f.metadata()?.len();
-    let n_slices = file.length.div_ceil(bs as u64) as usize;
-    let track = !file.blocks.is_empty();
-    if threads > 1
-        && n_slices >= 2
-        && file.blocks.len() >= n_slices
-        && disk_len < file.length
-        && disk_len >= HASH_PAR_MIN_BYTES
-    {
-        let crc_ok = hash_blocks_par(path, &f, disk_len, file.length, &file.blocks, bs, threads)?;
-        return Ok(Pass1Out {
-            exists: true,
-            intact: false,
-            clean: false,
-            present: Some(crc_ok),
-            // The pool branch never computes the whole-file MD5, so
-            // there is no state to resume from - such targets keep the
-            // full-reread self-prove.
-            resume: None,
-            md5_unfinished: false,
-        });
-    }
-    let mut whole = Md5::new();
-    let mut blocks_ok = track.then(|| vec![false; n_slices]);
-    let mut crc = crc32fast::Hasher::new();
-    let mut bfill = 0usize;
-    let mut bidx = 0usize;
-    // Resume snapshotting (TODO 133.1): `pending` is the whole-file
-    // MD5 state at the START of the block currently being scanned;
-    // when a block fails its CRC, that clone becomes the frozen
-    // `snap` the self-prove resumes from. Cloning stops the moment a
-    // failure is frozen - after that only the hash itself keeps going.
-    let snapping = track && bs >= RESUME_MIN_BLOCK;
-    let mut snap: Option<Md5Resume> = None;
-    let mut pending: Option<Md5Resume> = None;
-    // EARLY STOP (2 Sep 2026): once a block has failed its CRC the
-    // whole-file digest can no longer prove the file clean, and the
-    // self-prove after the patch resumes from `snap` - the state at
-    // that block's start - and hashes everything past it anyway. So the
-    // bytes past the first failure were hashed TWICE, once here to a
-    // digest nobody reads and once after the patch; on a 1 GiB single
-    // member damaged at block 2 that was 1.4 s of a 3.1 s repair
-    // (measured, M3 Ultra, md5 at 0.75 GB/s). The per-block CRCs keep
-    // going - presence is still decided here - and only the digest
-    // stops. What that gives up is the one case where an unfinished
-    // digest WOULD have mattered: an IFSC entry disagreeing with a
-    // byte-exact file (the whole-file MD5 arbitrates, M4-69). For that
-    // shape the repair rebuilds the disputed block to the bytes it
-    // already had and the resumed self-prove passes, so the file comes
-    // out identical; the only verdict it can change is a SHORTFALL,
-    // which is why `repair_dir_set_inner` finishes the digest before
-    // declaring one - see its arbitration step. Never on the pool
-    // branch above (no snapshot to resume from) and never below
-    // RESUME_MIN_BLOCK, where no snapshot is taken.
-    let mut md5_stopped = false;
-    // The buffer is bounded regardless of the slice size - `bs` is
-    // wire-supplied up to `par2::MAX_BLOCK_SIZE` (256 MiB), and this allocates
-    // once per parallel worker. The in-stream block CRC accumulates
-    // across reads (`bfill`), so blocks may straddle buffers freely.
-    let mut buf = vec![0u8; bs.clamp(1 << 20, 8 << 20)];
-    let limit = file.length.min(disk_len);
-    // The read-side cache policy (disk::readpolicy). This loop is a
-    // single front-to-back pass over the target, and for the common
-    // outcome - the file is clean - nothing reads those bytes again.
-    // Measured on a 23.4 GB member: -11.4% cold, flat warm, and the
-    // unrelated working set on the box goes from 17-19% evicted to zero
-    // (`DROP_BEHIND_DEFAULT`). It gives back only what THIS read
-    // faulted in, so a payload somebody else cached is left alone.
-    //
-    // THE TRADE, STATED HERE because this is where it lands: a member
-    // past the policy's floor (a quarter of RAM, so 8 GiB on a 32 GB
-    // host) that turns out to be DAMAGED is re-read by the repair, and
-    // the bytes this pass brought in are now cold. Every RAR volume
-    // shape is far below that floor and is untouched either way; a
-    // member that large was never going to be held in cache whole.
-    let scan = crate::disk::ScanCache::attach(&f, path, disk_len);
-    let mut pos = 0u64;
-    while pos < limit {
-        let take = crate::disk::chunk_len(limit - pos, buf.len());
-        read_full(&mut f, &mut buf[..take])?;
-        scan.consumed(&f, pos + take as u64);
-        if !snapping {
-            whole.update(&buf[..take]);
-        }
-        if let Some(ok) = blocks_ok.as_mut() {
-            let mut p = 0usize;
-            while p < take {
-                if snapping && bfill == 0 && snap.is_none() {
-                    pending = Some(Md5Resume {
-                        offset: pos + p as u64,
-                        state: whole.clone(),
-                    });
-                }
-                let seg = (bs - bfill).min(take - p);
-                if snapping && !md5_stopped {
-                    // Fed per block segment instead of per read so the
-                    // state at each block boundary exists to clone;
-                    // segments are >= RESUME_MIN_BLOCK except at
-                    // buffer straddles, so the per-call overhead stays
-                    // noise.
-                    whole.update(&buf[p..p + seg]);
-                }
-                let crc_proven = file.blocks.get(bidx).is_some_and(BlockCheck::is_proven);
-                // An all-zero IFSC MD5 is the reserved UNPROVEN marker.
-                // `crc_matches` can therefore never accept this cell, so its
-                // CRC state has a fixed false answer before touching bytes.
-                // The FileDesc MD5 above still sees the payload whenever its
-                // proof remains live, and later proved blocks retain their
-                // independent CRC state.
-                if crc_proven {
-                    crc.update(&buf[p..p + seg]);
-                }
-                bfill += seg;
-                p += seg;
-                if bfill == bs {
-                    let matched = if crc_proven {
-                        let done = std::mem::replace(&mut crc, crc32fast::Hasher::new());
-                        file.blocks[bidx].crc_matches(done.finalize())
-                    } else {
-                        false
-                    };
-                    if let Some(slot) = ok.get_mut(bidx) {
-                        *slot = matched;
-                    }
-                    if !matched && snap.is_none() {
-                        snap = pending.take();
-                        // Only with a snapshot in hand: the self-prove
-                        // must be able to resume from it.
-                        md5_stopped = snap.is_some();
-                    }
-                    bfill = 0;
-                    bidx += 1;
-                }
-            }
-        }
-        pos += take as u64;
-    }
-    if bfill > 0
-        && let Some(ok) = blocks_ok.as_mut()
-    {
-        // Tail block, zero-padded to the block size per spec - but
-        // only when the declared bytes were all on disk (a tail cut
-        // short by a truncated file is damage by definition).
-        let off = bidx as u64 * bs as u64;
-        let expect = (file.length - off).min(bs as u64);
-        if limit - off >= expect
-            && let Some(check) = file.blocks.get(bidx)
-            && check.is_proven()
-        {
-            // Extended through the padding in O(log n) rather than by
-            // hashing a zero buffer: `bs` is wire-supplied up to 256 MiB,
-            // and a set of many one-byte targets made every parallel
-            // worker allocate one of those at its tail block - a
-            // metadata-driven `targets x block_size` memory spike on a
-            // file that could be a few KB. The read buffer above is
-            // already clamped for exactly this reason.
-            let padded = crate::yenc_simd::crc32_zeros(crc.clone().finalize(), (bs - bfill) as u64);
-            ok[bidx] = check.crc_matches(padded);
-        }
-        if !ok.get(bidx).copied().unwrap_or(true) && snap.is_none() {
-            // Tail block unproven (bad padded CRC, cut short, or no
-            // IFSC entry): the resume boundary is its start.
-            snap = pending.take();
-        }
-    }
-    // No block failed IN the streamed bytes: any remaining damage
-    // (blocks wholly past a boundary-truncated EOF, or nothing but a
-    // length mismatch `set_len` fixes) starts at or after `limit`, so
-    // the state right here resumes it. A partial tail that FAILED set
-    // `snap` above, so reaching here with `bfill > 0` means the tail
-    // proved out - the only in-place mutation left is `set_len`, which
-    // never touches a byte below `limit`. Cloned before `finalize`
-    // consumes the hasher.
-    if snapping && snap.is_none() {
-        snap = Some(Md5Resume {
-            offset: limit,
-            state: whole.clone(),
-        });
-    }
-    let md5: [u8; 16] = whole.finalize().into();
-    let md5_ok = !md5_stopped && disk_len >= file.length && md5 == file.md5;
-    Ok(Pass1Out {
-        exists: true,
-        intact: md5_ok && disk_len == file.length,
-        clean: md5_ok,
-        present: if md5_ok { None } else { blocks_ok },
-        // Kept even when the MD5 matched: a clean-but-oversized target
-        // (`needs_resize`) is patched by a bare `set_len` truncation,
-        // and its resume boundary is `limit` - the whole proof is the
-        // already-computed state, no reread at all.
-        resume: snap,
-        md5_unfinished: md5_stopped,
-    })
-}
-
-/// Verify every target from a size-descending work queue (biggest file
-/// first, so no fixed-chunk straggler). One streaming pass per file
-/// does everything - see [`verify_pass1`].
-fn verify_all_targets(targets: &mut [Target], bs: usize) -> Result<(), RepairError> {
-    if targets.is_empty() {
-        return Ok(());
-    }
-    let mut order: Vec<usize> = (0..targets.len()).collect();
-    order.sort_by_key(|&ti| targets[ti].file.length); // pop() takes the largest
-    let queue = std::sync::Mutex::new(order);
-    let machine = crate::mem::cpu_workers();
-    let cores = machine.min(targets.len());
-    // Each file-level worker hands its big files a fair share of the
-    // remaining cores for block-parallel hashing - one 8 GB target on a
-    // 24-core box gets all 24 lanes instead of one.
-    let inner = (machine / cores).max(1);
-    let targets_ref: &[Target] = targets;
-    let mut results: Vec<Result<Vec<(usize, Pass1Out)>, RepairError>> = Vec::new();
-    std::thread::scope(|s| {
-        let handles: Vec<_> = (0..cores)
-            .map(|_| {
-                s.spawn(|| {
-                    let mut out: Vec<(usize, Pass1Out)> = Vec::new();
-                    loop {
-                        let Some(ti) = queue.lock_ok().pop() else {
-                            return Ok(out);
-                        };
-                        let t = &targets_ref[ti];
-                        out.push((ti, verify_pass1(&t.path, &t.file, bs, inner)?));
-                    }
-                })
-            })
-            .collect();
-        results = handles
-            .into_iter()
-            .map(|h| h.join().expect("verify worker panicked"))
-            .collect();
-    });
-    let mut p1s: Vec<(usize, Pass1Out)> = Vec::with_capacity(targets.len());
-    for r in results {
-        p1s.extend(r?);
-    }
-    for (ti, out) in p1s {
-        let t = &mut targets[ti];
-        t.exists = out.exists;
-        t.intact = out.intact;
-        t.present = match out.present {
-            Some(p) => p,
-            None => vec![out.clean; t.n_slices],
-        };
-        t.resume = out.resume;
-        t.md5_unfinished = out.md5_unfinished;
-    }
-    Ok(())
-}
-
-fn read_full(f: &mut File, mut buf: &mut [u8]) -> std::io::Result<()> {
-    while !buf.is_empty() {
-        match f.read(buf) {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "file shorter than its metadata length",
-                ));
-            }
-            Ok(n) => buf = &mut buf[n..],
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
-/// Whole-file proof for a patched target: the FileDesc MD5 over the
-/// bytes as they will actually be read afterwards - M2c's self-proving
-/// contract, and nothing else stands in for it (H7).
-///
-/// `#[doc(hidden)] pub` for `par2_verify_diff` (see [`Pass1Out`]): the
-/// third verdict in the differential, and the one the other two must
-/// not contradict.
-#[doc(hidden)]
-pub fn md5_matches(path: &Path, file: &Par2File) -> Result<bool, RepairError> {
-    let mut f = File::open(path)?;
-    if f.metadata()?.len() != file.length {
-        return Ok(false);
-    }
-    let mut hasher = Md5::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    let md5: [u8; 16] = hasher.finalize().into();
-    Ok(md5 == file.md5)
-}
-
-/// [`md5_matches`] resumed from the verify pass's snapshot: the same
-/// FileDesc whole-file proof, minus a reread of the prefix the verify
-/// pass already hashed and an in-place patch cannot have touched (see
-/// [`Md5Resume`] for why that equivalence holds, and for why temp-file
-/// rebuilds never take this path).
-///
-/// `#[doc(hidden)] pub` for `par2_verify_diff`: the fourth verdict in
-/// the differential - on an unpatched file it must equal
-/// [`md5_matches`] exactly.
-#[doc(hidden)]
-pub fn md5_matches_resumed(
-    path: &Path,
-    file: &Par2File,
-    resume: &Md5Resume,
-) -> Result<bool, RepairError> {
-    use std::io::Seek;
-    let mut f = File::open(path)?;
-    if f.metadata()?.len() != file.length {
-        return Ok(false);
-    }
-    let mut hasher = resume.state.clone();
-    f.seek(std::io::SeekFrom::Start(resume.offset))?;
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    let md5: [u8; 16] = hasher.finalize().into();
-    Ok(md5 == file.md5)
-}
+// The verify half of the repair - the block-hash pass, the pass-1
+// verdict and its resume snapshot, and the final whole-file proof.
+// Its own file since 10 Sep 2026: this file stood at 3,999 of the size
+// gate's 4,000-line ceiling and the next edit would have redded it.
+mod verify;
+// A glob rather than a list, and `pub use` rather than `use`, so the
+// module surface is exactly what it was before the lift: this is a
+// contiguous 1,082-line block out of this file, every name in it kept
+// the unqualified spelling its call sites already used (here, in the
+// sibling modules, and in `unit_tests.rs`), and re-exporting at each
+// item's own visibility keeps the `pub` ones public and the
+// `pub(super)` ones reachable from this module and its children.
+pub use verify::*;
 
 // Wave-4 rows M4-99/M4-80: the colliding-destination claim, and the
 // report that says which declared name it could not honour. Its own

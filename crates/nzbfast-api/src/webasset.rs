@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use super::*;
 
 /// Compressed, validated delivery for the embedded pages (TODO §129
-/// phase 0c, extended by R10 / Codex C9). The dashboard is ~1.2 MB of
+/// phase 0c, extended by R10 / review C9). The dashboard is ~1.2 MB of
 /// HTML fetched on every visit: with no validator and no content
 /// encoding it re-crossed the wire in full each time, which a LAN never
 /// notices and a phone on a remote link always pays for. The validator

@@ -1609,6 +1609,9 @@ pub enum Contradiction {
     SiblingNameCollides(String),
     /// A sibling that states both a length and a content.
     SiblingBytesAndText(String),
+    /// H3: a sibling name a client would refuse or sanitize - absolute,
+    /// traversing, or carrying a character the writers cannot spell.
+    SiblingUnsafeName(String),
     /// An inner level that encrypts with no password at that level and
     /// none on `[container]` to inherit.
     InnerEncryptionWithoutPassword(usize),
@@ -1877,6 +1880,15 @@ impl fmt::Display for Contradiction {
                  answers to what the file holds: bytes is noise of a stated length, text is \
                  the content itself. Drop whichever one you did not mean - a password note \
                  wants text, a filler member wants bytes"
+            ),
+            Self::SiblingUnsafeName(n) => write!(
+                f,
+                "[container] sibling name {n:?} is not a name a post may carry: it is \
+                 absolute, traverses with \".\" or \"..\", or holds a control character, a \
+                 quote or a backslash. Every other name in a profile - sources, decoys, \
+                 phantoms, the companion, [layout] name - goes through the same test, and \
+                 a sibling skipping it meant the expectation asked for a path the client \
+                 sanitizes and the row could never be green"
             ),
             Self::SiblingNameCollides(n) => write!(
                 f,
@@ -2158,6 +2170,9 @@ impl Profile {
                     return Err(Contradiction::SiblingWithoutBytes(s.name.clone()));
                 }
                 _ => {}
+            }
+            if crate::assemble::check_name(&s.name).is_err() {
+                return Err(Contradiction::SiblingUnsafeName(s.name.clone()));
             }
             if !seen.insert(s.name.as_str()) {
                 return Err(Contradiction::SiblingNameCollides(s.name.clone()));
@@ -2987,6 +3002,39 @@ files = [{ name = "a.bin", bytes = 4096 }]
         // uniform chain says by saying nothing at the level.
         Profile::parse(&inner("", "password = \"stack-fixture-pw\""))
             .expect("an inner level inherits the stack's password");
+    }
+
+    /// A sibling name goes through the same `check_name` every other
+    /// name in a profile does.
+    ///
+    /// Sources, decoys, phantoms, the companion and `[layout] name` all
+    /// did; siblings did not, so `../evil.bin` loaded and wrapped, the
+    /// expectation asked for a path outside the output directory, and
+    /// the client sanitized it - a row that could never be green,
+    /// accepted by the generator.
+    #[test]
+    fn a_sibling_name_is_checked_like_every_other_name() {
+        let sib = |name: &str| {
+            format!(
+                "{MINIMAL}\n[container]\nkind = \"rar-stored\"\n\
+                 siblings = [{{ name = \"{name}\", bytes = 90 }}]\n"
+            )
+        };
+        for bad in [
+            "../evil.bin",
+            "/etc/passwd",
+            "a/../b.txt",
+            "sub/",
+            "./x.bin",
+        ] {
+            assert!(
+                matches!(refusal(&sib(bad)), Contradiction::SiblingUnsafeName(_)),
+                "{bad} must be refused"
+            );
+        }
+        // A plain name, and a name in a subdirectory, still load.
+        Profile::parse(&sib("notes.txt")).expect("a plain sibling name loads");
+        Profile::parse(&sib("sub/notes.txt")).expect("a nested sibling name loads");
     }
 
     #[test]

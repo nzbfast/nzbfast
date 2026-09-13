@@ -198,7 +198,7 @@ pub(super) async fn release_drained_conn(
 /// Ends with the run (`finished`), on user abort, or on graceful drain -
 /// `drain()` deliberately sends no `finished`, so the filler must watch
 /// the flag itself or a paused job leaves it looping forever with an
-/// authenticated provider session (Codex 5 Aug M4). The 500 ms tick
+/// authenticated provider session (review 5 Aug M4). The 500 ms tick
 /// below bounds how late it notices. Quits whatever it still holds on
 /// every exit path. Connect failures back off 5 s - a provider at its
 /// connection cap refuses the spare and that refusal must not become a

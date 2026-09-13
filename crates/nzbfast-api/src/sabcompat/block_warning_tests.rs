@@ -39,6 +39,15 @@ fn write_cfg(dir: &std::path::Path, servers: &str) -> std::path::PathBuf {
     p
 }
 
+/// The ledger key a row spelled `{"host": h}` bills to. The §96.5
+/// meter is per ACCOUNT rather than per host (`ServerConfig::account_key`),
+/// so a test billing by hand must bill the key `sab_warnings` reads back.
+fn acct(host: &str) -> String {
+    let s: nzbkit::config::ServerConfig =
+        serde_json::from_str(&format!(r#"{{"host":"{host}"}}"#)).expect("server config");
+    s.account_key()
+}
+
 fn texts(d: &Arc<Daemon>, cfg: &std::path::Path) -> String {
     sab_warnings(d, cfg, false, None)
         .iter()
@@ -66,13 +75,13 @@ fn a_spent_block_is_a_warning_until_it_is_refilled() {
         r#"[{"host":"flat.example"},{"host":"blk.example","block_bytes":1000}]"#,
     );
 
-    d.add_usage(&[("blk.example".into(), 400)]);
+    d.add_usage(&[(acct("blk.example"), 400)]);
     assert!(
         !texts(&d, &cfg).contains("blk.example"),
         "a block with data left is not a condition"
     );
 
-    d.add_usage(&[("blk.example".into(), 600)]);
+    d.add_usage(&[(acct("blk.example"), 600)]);
     let text = texts(&d, &cfg);
     assert!(
         text.contains("blk.example") && text.contains("Block refilled"),
@@ -83,7 +92,7 @@ fn a_spent_block_is_a_warning_until_it_is_refilled() {
         "an unlimited server has no block to spend: {text}"
     );
 
-    d.block_refilled("blk.example");
+    d.block_refilled(&acct("blk.example"));
     assert!(
         !texts(&d, &cfg).contains("blk.example"),
         "a refill clears the condition"
@@ -112,10 +121,7 @@ fn a_disabled_server_and_a_zero_block_raise_nothing() {
         r#"[{"host":"off.example","block_bytes":1000,"enabled":false},
             {"host":"zero.example","block_bytes":0}]"#,
     );
-    d.add_usage(&[
-        ("off.example".into(), 9_000),
-        ("zero.example".into(), 9_000),
-    ]);
+    d.add_usage(&[(acct("off.example"), 9_000), (acct("zero.example"), 9_000)]);
     let text = texts(&d, &cfg);
     assert!(
         !text.contains("off.example"),

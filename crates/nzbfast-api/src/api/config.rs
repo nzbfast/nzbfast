@@ -60,7 +60,7 @@ fn m_backup_import(
                     "error": "not an nzbfast backup file",
                 }),
                 Some(b) => {
-                    // Per-file atomicity is not bundle atomicity (Codex
+                    // Per-file atomicity is not bundle atomicity (review
                     // C18): a later member's refusal must not leave a
                     // hybrid of old and imported startup state. Hold the
                     // current bytes of all three members BEFORE the
@@ -409,6 +409,16 @@ fn m_get_config(
                             // Lifetime article completion% from
                             // the reliability ledger (null until
                             // a job has finished on this host).
+                            // PER HOST, deliberately, where the block
+                            // meter beside it is per account: two rows
+                            // on one hostname therefore print the SAME
+                            // figure, and that is the truth rather than
+                            // the aliasing `block_spent` had. Article
+                            // availability is a property of the
+                            // BACKBONE - the two accounts are asking one
+                            // provider for one spool - so splitting it
+                            // would only halve the sample and make both
+                            // answers noisier.
                             "completion_pct": d.reliability(&s.host).map(|(t, m)| {
                                 100.0 * (t.saturating_sub(m)) as f64 / t as f64
                             }),
@@ -794,7 +804,7 @@ fn m_import_apply(
                 // apply_and_save answers (live, saved), and `saved=false`
                 // means the value works NOW and reverts at restart. The
                 // import used to drop that bool at every site and report
-                // plain success over an unwritable settings dir (Codex
+                // plain success over an unwritable settings dir (review
                 // sweep 5 Aug M7) - collect the non-durable adoptions
                 // and say so in the response.
                 let mut unsaved: Vec<&str> = Vec::new();
@@ -1229,7 +1239,7 @@ mod tests {
     use crate::testutil::test_daemon;
     use std::os::unix::fs::PermissionsExt;
 
-    /// M7 (Codex sweep 5 Aug): `apply_and_save` answers (live, saved),
+    /// M7 (review sweep 5 Aug): `apply_and_save` answers (live, saved),
     /// and the SAB import dropped `saved` at every site - an unwritable
     /// settings dir imported "successfully" and then silently reverted
     /// at restart. The response must say what is live-only.

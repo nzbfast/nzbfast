@@ -220,7 +220,7 @@ fn is_furniture(
         // since #43, and the extension-gated predicate let an
         // extensionless `sample` through as ordinary payload - so a job
         // whose feature was still packed (packed IS furniture) promoted
-        // the teaser to the release name (Codex sweep 6, N1). This is a
+        // the teaser to the release name (review sweep 6, N1). This is a
         // rename decision; the junk sweep's is not, and keeps the
         // narrower rule.
         || is_sample_named(p)
@@ -238,7 +238,7 @@ fn rename_main_file(file: &Path, base: &str) {
     // and still invisible to completed-media discovery and to any
     // library that scans by extension. This route is mutually exclusive
     // with auto-rename and disables the later identify rung, so nothing
-    // downstream was going to rescue it (Codex sweep 5, M3).
+    // downstream was going to rescue it (review sweep 5, M3).
     let ext = match ext_of(file) {
         e if !e.is_empty() => e,
         _ => super::video_ext(file).unwrap_or_default(),

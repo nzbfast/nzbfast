@@ -34,9 +34,10 @@
 # packaging/qnap/README.md.
 #
 # The build itself runs QDK, QNAP's own kit, pinned in qdk-pin.txt. It
-# cannot run on macOS (BSD sed -i, see Dockerfile), so this script runs it
-# in a container when it has to and natively when qbuild is already on
-# PATH, which is what CI does.
+# runs natively when qbuild is already on PATH, which is what CI does,
+# and in a container on a Linux host without it. On macOS NEITHER path
+# can work and this script refuses at the top - see the host check below
+# for why, and dispatch the qnap-qpkg workflow instead.
 set -eu
 
 VER="${1:?usage: make-qpkg.sh <version> [outdir] [port]}"
@@ -51,6 +52,64 @@ PORT="${3:-6789}"
 REL="https://github.com/nzbfast/nzbfast/releases/download/v${VER}"
 SELF="$(cd "$(dirname "$0")" && pwd)"
 QDK_COMMIT="$(grep -v '^#' "$SELF/qdk-pin.txt" | grep -m1 . )"
+
+# ---- host check -------------------------------------------------------
+# macOS cannot build this package by EITHER path below, so refuse here -
+# before downloading ~40 MB of payload, before starting a container
+# runtime, before building the QDK image. Each of those fails later,
+# somewhere else, and says something other than what is wrong.
+#
+#   Natively: qbuild finishes by rewriting the generated self-extractor
+#   with `sed -i "s/SCRIPT_LEN/.../"`. BSD sed reads the next argument as
+#   a backup suffix, so the length patch never lands and the package
+#   cannot unpack itself. QDK is ~2,400 lines of GNU-assuming shell and
+#   that call is only the first one to bite.
+#
+#   In a container: qbuild is fine in there - the STAGING TREE is not.
+#   $WORK comes from `mktemp -d`, and macOS mktemp given no template
+#   IGNORES $TMPDIR: it always returns /var/folders/<...>/T/tmp.XXXXXXXX,
+#   from confstr(_CS_DARWIN_USER_TEMP_DIR). colima shares $HOME and
+#   /tmp/colima into its VM and does not share /var/folders, so the bind
+#   mount hands qbuild an EMPTY /work and it reports
+#   `qpkg.cfg: No such file` about a file sitting in the staging tree on
+#   the host. Re-running with TMPDIR under $HOME does not move it, which
+#   is exactly what makes that message worth an hour. Diagnosed the long
+#   way on 4 Sep 2026 cutting v1.4.0. The container path stays, for the
+#   Linux hosts where it works.
+#
+# Do not hand-assemble the layout instead: qinstall.sh runs as ROOT on
+# somebody's NAS, so the format is not something to guess at.
+if [ "$(uname -s)" = "Darwin" ]; then
+    cat >&2 <<EOF
+✗ the .qpkg cannot be built on macOS, by any path this script has.
+
+  qbuild natively: it patches its own self-extractor with
+    sed -i "s/SCRIPT_LEN/.../"
+  and BSD sed reads the next argument as a backup suffix, so the length
+  patch never lands and the package cannot unpack itself.
+
+  qbuild in a container: macOS \`mktemp -d\` ignores \$TMPDIR, so the
+  staging tree is under /var/folders, which colima does not share into
+  its VM. qbuild then sees an empty /work and says
+    qpkg.cfg: No such file
+  about a file that is right there on the host. Setting TMPDIR does not
+  move it - that message is about the mount, not about qpkg.cfg.
+
+  Build it in CI, on the Ubuntu runner where QDK works - dispatch on the
+  private repo, which is where every other release workflow is run:
+
+      TAG=v$VER
+      gh workflow run qnap-qpkg.yml --ref "\$TAG" -f tag="\$TAG"
+
+  \`--ref\` is load-bearing and the workflow refuses a dispatch without
+  it: \`-f tag=\` selects only the PAYLOAD, while qpkg.cfg,
+  package_routines and the pinned QDK qinstall.sh that runs as ROOT on
+  the NAS all come from whatever the run checked out. Step 4c of the
+  publish-release skill is the rest of it - the release page has to be
+  up first, and the artifact is scanned and uploaded by hand.
+EOF
+    exit 1
+fi
 
 if command -v sha256sum >/dev/null 2>&1; then SHA256C="sha256sum -c -"
 else SHA256C="shasum -a 256 -c -"; fi
@@ -252,17 +311,31 @@ elif command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; the
     # every header (with no matching name, so it reads as a bare number
     # rather than looking like a leak). $WORK is a mktemp staging tree
     # this script owns and deletes, so chowning it costs nothing.
+    # The `qpkg.cfg: No such file` qbuild prints when the mount did not
+    # land names a file that IS in the staging tree, and says nothing
+    # about which side was empty. Look before building so the message
+    # names the mount instead.
+    # shellcheck disable=SC2016  # the ls runs INSIDE the container
     $RUNTIME run --rm -v "$WORK:/work" "nzbfast-qdk:$QDK_COMMIT" \
-        sh -c 'chown -R 0:0 /work && exec "$@"' _ \
+        sh -c 'if [ ! -f /work/qpkg.cfg ]; then
+                   echo "✗ /work does not hold qpkg.cfg." >&2
+                   echo "  It holds: $(ls -A /work 2>/dev/null | tr "\n" " ")" >&2
+                   echo "  The staging tree is populated on the host, so this" >&2
+                   echo "  runtime is not sharing that path into its VM." >&2
+                   exit 1
+               fi
+               chown -R 0:0 /work && exec "$@"' _ \
         qbuild --root /work --build-dir /work/out --build-version "$VER" \
                --gzip --verbose
 else
     echo "✗ no qbuild and no container runtime." >&2
-    echo "  The .qpkg is built by QNAP's own QDK, which does not run on" >&2
-    echo "  macOS (see packaging/qnap/Dockerfile). Either:" >&2
-    echo "    - install Docker or Podman and re-run this, or" >&2
-    echo "    - let CI do it: the qnap-qpkg workflow builds and uploads" >&2
-    echo "      the package on an Ubuntu runner." >&2
+    echo "  The .qpkg is built by QNAP's own QDK. Either:" >&2
+    echo "    - put qbuild on PATH (see packaging/qnap/README.md), or" >&2
+    echo "    - install Docker or Podman and re-run this - the Dockerfile" >&2
+    echo "      beside this script builds the pinned QDK, or" >&2
+    echo "    - let CI do it: the qnap-qpkg workflow builds the package" >&2
+    echo "      on an Ubuntu runner. Dispatch it AT THE TAG:" >&2
+    echo "          gh workflow run qnap-qpkg.yml --ref v$VER -f tag=v$VER" >&2
     echo "  Do not hand-assemble the package layout instead." >&2
     exit 1
 fi

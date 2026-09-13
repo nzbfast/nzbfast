@@ -1498,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "nzbfast"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "nzbfast-api"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "nzbfast-core"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "nzbfast-daemon"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "nzbfast-engine"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -1650,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "nzbfast-meta"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1667,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "nzbfast-tasks"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
@@ -1690,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "nzbfast-unpack"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "nzbtray"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "rustls",
  "serde_json",
@@ -1850,9 +1850,12 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "parfast"
-version = "0.90.0-beta.1"
+version = "1.5.0-beta.1"
 dependencies = [
+ "libc",
  "nzbkit",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

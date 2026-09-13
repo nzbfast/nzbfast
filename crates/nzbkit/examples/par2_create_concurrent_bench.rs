@@ -1,7 +1,7 @@
 //! Run N `par2gen::create_into` calls CONCURRENTLY in one process, so the
 //! footprint of simultaneous creates can be measured against one.
 //!
-//! Codex's ranked remaining item 3 ("process-wide create admission") says the
+//! the review's ranked remaining item 3 ("process-wide create admission") says the
 //! creator's scan ceiling is INVOCATION-wide rather than process-wide, and
 //! that the recovery accumulators and the transform's window are accounted by
 //! their own separate budgets on top of it. Nothing in the tree measured what

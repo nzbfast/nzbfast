@@ -13,7 +13,7 @@
 //!    the UI at the next load (as a fresh 200, because the bytes - and
 //!    therefore the tag - changed).
 //!
-//! R10 / Codex C9 added two things underneath that contract without
+//! R10 / review C9 added two things underneath that contract without
 //! changing it: the catalogues and the manuals are compressed and
 //! hashed at build time, and a built dashboard/wall is cached under the
 //! daemon state it was stamped with. The last test here is the one that

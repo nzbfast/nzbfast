@@ -21,6 +21,7 @@ fn pfile(name: &str, length: u64) -> Par2File {
 
 fn pset(files: Vec<Par2File>) -> Par2Set {
     Par2Set {
+        comment: None,
         recovery_set_id: [0u8; 16],
         block_size: 4096,
         files,
@@ -1141,7 +1142,7 @@ fn a_stale_prefix_fails_its_checksum_and_the_pass_rewinds_to_byte_zero() {
 /// Two entries of one name share one plan key, so a resume of `a.bin`
 /// would have BOTH open the partial at the mark and the published file
 /// come out as A's prefix with B's tail - while both entries report
-/// success (Codex F-02). A name the batch carries twice is not resumed.
+/// success (review finding F-02). A name the batch carries twice is not resumed.
 #[test]
 fn duplicate_member_names_are_never_resumed() {
     use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
@@ -2184,7 +2185,7 @@ fn fragments_with_nothing_extracted_beside_them_still_fail() {
 /// A memberless `.rev`-shaped set beside a headless fragment: the
 /// recovery volume extracts as a no-op and must not count as "a set
 /// extracted", or the fragment is forgiven and the caller greens a
-/// directory that published nothing (Codex F-23).
+/// directory that published nothing (review finding F-23).
 #[test]
 fn a_memberless_recovery_volume_does_not_forgive_a_lone_fragment() {
     let dir = reex_dir("obf-rev-plus-frag");
@@ -2491,7 +2492,7 @@ fn reextract_dir_success_means_the_payload_is_on_disk() {
     std::fs::remove_dir_all(&bare).unwrap();
 }
 
-/// Codex sweep 13 Aug R2: a RAR whose signature block was damaged
+/// Review sweep 13 Aug R2: a RAR whose signature block was damaged
 /// before posting sniffs as Plain (`plain_by_sniff`) - the TODO 160
 /// admission then patched the signature back through the Plain writer,
 /// nothing re-sniffed, and the corrected archive retired PACKED as the
@@ -2604,7 +2605,7 @@ fn the_par2_backup_purge_takes_only_the_backups_this_run_made() {
     assert!(there("r.part2.rar.3"), "an empty target list purged a file");
 
     // An unreadable directory snapshots as None, so the caller skips the
-    // purge entirely (Codex F-06): a missing or partial snapshot must not
+    // purge entirely (review finding F-06): a missing or partial snapshot must not
     // make every pre-existing `.N` look freshly made.
     assert!(dir_entry_names(&dir.join("does-not-exist")).is_none());
 

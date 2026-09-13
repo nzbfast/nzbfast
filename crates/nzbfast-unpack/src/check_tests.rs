@@ -2146,7 +2146,7 @@ fn a_two_set_nzb_does_not_cap_one_sets_volumes_by_anothers_name() {
     // declared two sets and threw away a trustworthy 51-slice cap -
     // preflight then credits the looser byte-derived number, and damage
     // between the two downloads the whole release before failing
-    // (Codex sweep 5, L8).
+    // (review sweep 5, L8).
     let raw = |subject: &str, bytes: u64, id: &str| {
         format!(
             "<file subject=\"{subject}\"><groups><group>a.b.test</group></groups>\
@@ -2178,7 +2178,7 @@ fn a_two_set_nzb_does_not_cap_one_sets_volumes_by_anothers_name() {
     // name-capped itself, but it can still supply the global block-size
     // probe and cap a DIFFERENT set with a foreign block size, which is
     // the false-Impossible the cross-set rule exists to prevent
-    // (Codex sweep 5, L2).
+    // (review sweep 5, L2).
     let anon_plus_named = parse(format!(
         "{}{}",
         file(".vol-01.par2", 100_000, "a1@x"),
@@ -2200,7 +2200,7 @@ fn a_two_set_nzb_does_not_cap_one_sets_volumes_by_anothers_name() {
     // so a genuine second set stopped registering, the declared cap
     // stayed alive, and a foreign block size could cap the wrong
     // volumes back into a false Impossible - a worse direction than the
-    // split L8 was fixing (Codex sweep 6, N9).
+    // split L8 was fixing (review sweep 6, N9).
     let two_sets_one_group = parse(format!(
         "{}{}{}{}",
         raw("[01/03] - Feature - GROUP.par2 yEnc (1/1)", 100_000, "fm@x"),

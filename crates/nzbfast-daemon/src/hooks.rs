@@ -800,7 +800,7 @@ fn post_event(p: &Pending) -> Result<u16, SendErr> {
 /// the blocking pool, where a pp-script can hold the thread for
 /// minutes - so the send described whatever the record had become by
 /// then: for a job deleted and retried mid-script, a "Failed" event
-/// with an empty error naming the RETRY's directory (Codex sweep 3,
+/// with an empty error naming the RETRY's directory (review sweep 3,
 /// H3). One hold, one snapshot, and nothing to drift.
 pub(super) fn notify_ctx_for(j: &Job) -> crate::notify::Ctx {
     let ok = j.state == JobState::Completed;
@@ -1164,7 +1164,7 @@ mod tests {
     /// is a `#!/bin/sh` file and production `run_script` launches the
     /// path directly, so Windows has neither the executable bit nor a
     /// guaranteed shell and the marker would never appear. Same rule,
-    /// and the same reason, as the note at tests_api.rs:8 (Codex sweep 5
+    /// and the same reason, as the note at tests_api.rs:8 (review sweep 5
     /// M11 - the first version of this test was ungated and would have
     /// reddened the Windows lane).
     #[cfg(unix)]
@@ -1242,7 +1242,7 @@ mod tests {
     /// LIVE, after the script - which for the documented slow script
     /// ("it may still be moving or renaming files") described the record
     /// as it was minutes later: status "Failed", an empty error, and a
-    /// directory the plan never saw (Codex sweep 3, H3).
+    /// directory the plan never saw (review sweep 3, H3).
     ///
     /// Both halves in one test on purpose: a fence that declined
     /// everything would pass the first assert and silence every real

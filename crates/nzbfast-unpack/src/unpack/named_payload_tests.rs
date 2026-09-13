@@ -58,7 +58,7 @@ fn a_named_cb7_is_never_collected_as_sevenz() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
-/// Codex sweep 13 Aug U3: a `.cbr` beside the set must not suppress a
+/// Review sweep 13 Aug U3: a `.cbr` beside the set must not suppress a
 /// genuinely nested extensionless RAR.
 ///
 /// The `pre_obfuscated` census read "any RAR magic without RAR grammar"

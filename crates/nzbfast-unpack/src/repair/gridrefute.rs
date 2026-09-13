@@ -85,7 +85,7 @@ use super::*;
 /// this arm's population the screen has already effectively passed
 /// before it is asked. Two guards where one is sufficient also make
 /// both unfalsifiable, which is the rule `tools/cfg-safety-gate.py`'s
-/// entry in CLAUDE.md was written for: no e2e shape could be built that
+/// entry in CONTRIBUTING.md was written for: no e2e shape could be built that
 /// reached this arm with a damaged head, because losing the head is
 /// what stops the name tier claiming the file at all (measured: a
 /// head-loss fixture fell through at `adoption_candidates_present` and

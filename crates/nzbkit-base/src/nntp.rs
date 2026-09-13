@@ -81,7 +81,7 @@ pub enum AuthRefusal {
 /// count, not the account's connection ceiling, and "lower your
 /// connection count" is not the remedy. Reducing local sockets need not
 /// help at all when the problem is that the account is reachable from
-/// more than one public address (Codex sweep 5, M9).
+/// more than one public address (review sweep 5, M9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapacityLimit {
     /// "too many connections", "connections per user" - the sessions we

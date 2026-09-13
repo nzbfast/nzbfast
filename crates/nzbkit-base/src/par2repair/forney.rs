@@ -113,7 +113,7 @@
 //! are fewer again because each call consumes several coefficient/source
 //! pairs.
 //!
-//! The conservative transform-vs-dense gate was measured 3 Sep 2026 with
+//! The transform-vs-dense gate was first measured 3 Sep 2026 with
 //! the original direct stage-1 DFT, 64 KiB blocks, best of three, solve only
 //! (`examples/par2_fold_bench`; the tables and the method are in
 //! `research/PAR2-PERF-AUDIT-2026-09-02.md` section 20). Transform
@@ -126,8 +126,12 @@
 //! ```
 //!
 //! Those direct-DFT baseline crossovers were m ~ 1,200 on the M3 and ~1,350
-//! on the Zen 4; the mixed-radix stage only lowers the transform side, so the
-//! existing 2,048 gate stays conservative. At the
+//! on the Zen 4, and the mixed-radix stage only lowers the transform side.
+//! The 2,048 gate they were used to justify has since been recalibrated
+//! DOWN on six boxes and three kernel classes - see
+//! [`backsub_min_missing`] and
+//! `research/FORNEY-GATE-CROSSOVER-2026-09-10.md`; the margin those
+//! numbers bought is gone deliberately, and must not be restored. At the
 //! `MAX_REPAIR_DIM` cap the whole solve is 1.05 s against 7.6 s and
 //! 3.7 s against 16.6 s. Setup is cheaper on this route as well (33 ms
 //! against 48 ms at the cap on the M3): the tables here are `O(m)` wide
@@ -142,7 +146,42 @@
 
 use crate::gf16::{self, MulTable};
 use crate::sync::MutexExt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::info;
+
+// The JOINT arm: a fused constructor-and-solver, the DEFAULT on
+// aarch64 since 11 Sep 2026 and still opt-in on x86. Nothing below is
+// entered, and no table below is built, when the gate says no - see
+// `joint::joint_gate` and `joint::joint_default_on`, plus
+// `research/JOINT-FORNEY-INTEGRATION-2026-09-10.md` for the arm and
+// `research/JOINT-CROSSOVER-PER-CLASS-2026-09-11.md` for the default.
+mod joint;
+mod locator;
+mod peel;
+mod poly;
+mod tail;
+mod whole;
+
+pub(super) use joint::joint_gate;
+#[cfg(test)]
+pub(crate) use joint::seam_joint_default_on;
+pub(crate) use joint::{seam_joint_arm, seam_joint_factor, seam_joint_kernel};
+// The VALUES, for `par2seams`'s drift gates only - production reads the
+// gates through `seam_joint_factor` / `seam_joint_kernel` and never the
+// numbers, so an un-gated re-export is an unused import under `-D warnings`.
+#[cfg(test)]
+pub(crate) use joint::{JOINT_FACTOR_MIN_M, JOINT_KERNEL_MIN_M_X86};
+pub use joint::{
+    JointDecline, JointReach, joint_armed, joint_reach, reset_joint_reach, set_joint_arm,
+};
+
+/// Record that this repair took a solver the joint arm does not reach.
+///
+/// `reconstruct` owns that fork and this module owns the record, so the
+/// crossing is one function rather than a second public enum.
+pub(super) fn note_joint_not_forney() {
+    joint::note_joint_declined(JointDecline::NotForney);
+}
 
 /// Segment length of the blocked Hankel product. Paired with
 /// [`CONV`] = `2*BLK - 1`: the linear convolution of two length-`BLK`
@@ -160,18 +199,148 @@ const CONV: usize = 2 * BLK - 1;
 const GT2: usize = 257;
 
 /// `NZBFAST_BACKSUB` default: the missing-block count at or above which
-/// the transform solve replaces the dense product.
+/// the transform solve replaces the dense product. This is the arm
+/// every fused kernel that is neither NEON nor nibble-shuffle takes -
+/// in practice the GFNI ones, AVX-512 (fan-in 12) or 256-bit (6).
 ///
-/// Set from the same kind of sweep `fastpar::NTT_MIN_MISSING` rests on -
-/// both solves timed at the same shapes on an M3 Ultra and a Zen 4 EPYC,
-/// audit section 20 - and set ABOVE the measured crossover for the same
-/// reason: one constant cannot be right on every box, and the dense
-/// product is the one that has run in the field for a year. Measured
-/// crossover m ~ 1,200 (M3) and ~ 1,350 (Zen 4); 2,048 is ~1.5x past
-/// both, is already 1.90x / 1.45x AT the gate, and reaches 2.72x /
-/// 2.04x by m = 3,000. The Windows parts are unmeasured here, which is
-/// the margin's other job.
-pub(crate) const BACKSUB_MIN_MISSING: usize = 2048;
+/// **1,280 since 10 Sep 2026, down from 2,048, and the value is
+/// deliberately the nibble constant's.** The 2,048 came from the same
+/// kind of sweep `fastpar::NTT_MIN_MISSING` rests on - both solves
+/// timed at the same shapes on an M3 Ultra and a Zen 4 EPYC, audit
+/// section 20, measured crossover m ~ 1,200 and ~ 1,350 - and was then
+/// set ~1.5x ABOVE it, because "one constant cannot be right on every
+/// box, and the dense product is the one that has run in the field for
+/// a year". That margin was an argument about confidence rather than
+/// performance, and the class it was applied to was the one class
+/// nobody had measured it on. The six-box round of 10 Sep 2026
+/// (`research/FORNEY-GATE-CROSSOVER-2026-09-10.md`) measured GFNI
+/// directly: crossover ~1,400 on a Core Ultra 9 386H (bare metal) and
+/// ~1,300 on an EPYC 9354P (VM), so the 2,048 gate was 46% and 57%
+/// high, and AT its own gate it cost 30.3% of wall / 44.5% of CPU on
+/// the bare-metal part and 22.8% / 31.6% on the VM. That band - roughly
+/// 1,300 to 2,048 - is live on every AVX-512+GFNI part: Zen 4 onward,
+/// Ice Lake onward.
+///
+/// Collapsed onto 1,280 rather than onto the measured ~1,300 on
+/// purpose: the nibble figure is EXACT on the class it gates and the
+/// GFNI figure is ~1,300-1,400, so one number serves both x86 classes
+/// and neither class carries a number nobody measured. It is not
+/// even a compromise for GFNI - at m = 1,280 Forney was ALREADY ahead
+/// on both GFNI boxes, -5.0% on the Core Ultra and -4.5% on the EPYC,
+/// both just inside noise. The two constants keep separate names
+/// because their PROVENANCE differs, not their value, and so a
+/// re-measure of either class can move one without the other.
+///
+/// Which way to be wrong when a part is unmeasured: see
+/// [`backsub_min_missing`]. Bias DOWN. Do not restore the old margin.
+pub(crate) const BACKSUB_MIN_MISSING: usize = 1280;
+
+/// The gate on the x86 nibble-shuffle arms (AVX2 or SSSE3 without GFNI:
+/// Intel before Ice Lake, AMD before Zen 4), where the dense product is
+/// relatively dearer. Measured 4 Sep 2026 on an i5-10600KF desktop
+/// (Windows 11, 6c/12t), both arms forced, 64 KiB blocks: dense
+/// 221-251 ms against forney 479-491 at m = 512, 446-511 against
+/// 550-608 at m = 768, 798 against 659-683 at m = 1,024, and 1,760-1,900
+/// against 872-883 at m = 1,500 - a 2.1x loss on the published heavy
+/// leg under the 2,048 gate. Crossover ~950-1,050 there; 1,280 is ~1.25x
+/// past it (a margin, narrower than the others because this constant is
+/// measured on the very class it gates) and puts the
+/// 1,500-block leg on the fast side by ~0.9 s of a ~5.5 s repair.
+/// Re-measured 6 Sep 2026 at 1 MiB blocks on the same box (10 GiB,
+/// m = 900, both arms forced, mirrored): forney 26.17 / 26.25 s wall
+/// against dense 24.94 / 24.98, CPU 246-248 against 198 - the
+/// crossover does not move down with the block size, so the gate
+/// holds at large blocks too.
+///
+/// **Unchanged by the 10 Sep six-box recalibration, and the only one of
+/// the three that was already right.** That round re-measured this box
+/// on fresh fixtures and put the crossover EXACTLY at 1,280 - the
+/// finding being that each constant was right where it was measured on
+/// the class it gates and wrong where it was not, which is why this one
+/// held and the other two did not. It is now also the generic
+/// constant's value; see [`BACKSUB_MIN_MISSING`] for why that is a
+/// collapse and not a coincidence.
+pub(crate) const BACKSUB_MIN_MISSING_NIBBLE: usize = 1280;
+
+/// The gate on aarch64 (NEON), **704 since 10 Sep 2026, down from 896.**
+///
+/// The 896 was measured 5 Sep 2026 with the conjugate-paired transform
+/// leaf in, which the transform solve is built on: the crossover the
+/// 2,048 constant above was set from moved down with it. M3 Ultra, both
+/// arms forced, byte-identical repairs: at m = 1,500 (the 1 GiB heavy
+/// leg) the solve is 117-127 ms against the dense 275-299, the whole
+/// repair 689-703 ms against 774-835; at m = 900 (10 GiB, 1 MiB blocks)
+/// 1.12 s against 1.76, wall 7.67 against 8.08. The fold bench's table
+/// on the same box at 64 KiB: dense 31 ms vs forney 50 at m = 512, 126
+/// vs 81 at 1,024 - crossover ~700, and 896 was set 1.28x past it under
+/// the margin rule that no longer applies.
+///
+/// The six-box round of 10 Sep 2026
+/// (`research/FORNEY-GATE-CROSSOVER-2026-09-10.md`) put the crossover
+/// at ~704 on an M1 Ultra, ~768 on the M3 Ultra and ~704 on an M5 Max -
+/// 896 was 27% / 17% / 27% high. Localised by a 5-rep fine sweep at
+/// 64-block steps with noise of 0.06-0.19 s throughout, so 704 is
+/// RESOLVED rather than inferred: M1 and M5 first win beyond noise at
+/// 704, M3 at 768. Taking the low end of the three follows the bias
+/// rule on [`backsub_min_missing`]; on the M3 the cost of being one
+/// step low is bounded by the 64-block gap and is inside that box's own
+/// noise, where being high is not.
+pub(crate) const BACKSUB_MIN_MISSING_NEON: usize = 704;
+
+/// The gate this build runs under: [`BACKSUB_MIN_MISSING_NEON`] on
+/// aarch64, [`BACKSUB_MIN_MISSING_NIBBLE`] on the nibble-shuffle arms,
+/// [`BACKSUB_MIN_MISSING`] everywhere else. Keyed on the selected
+/// kernel's fan-in exactly as the fold scheduler is
+/// (`gf16::multi_fold_schedule_granule_words`): 4 is the nibble
+/// kernels' width and no other arm's. The two x86 arms carry the same
+/// NUMBER since 10 Sep 2026 and the branch is still written out,
+/// because they are two separately measured classes and a re-measure of
+/// either must be able to move one alone.
+///
+/// # Which way to be wrong
+///
+/// **Bias LOW.** The penalty is asymmetric by about 3x, measured on the
+/// six-box round (`research/FORNEY-GATE-CROSSOVER-2026-09-10.md`):
+///
+/// ```text
+/// box                worst cost too LOW   worst cost too HIGH
+/// i5 (nibble)              +26.7%               71.1%
+/// Core Ultra (GFNI)        +20.3%               47.2%
+/// M5 Max (NEON)             +8.5%               73.2%
+/// M1 Ultra (NEON)           +6.5%               67.2%
+/// ```
+///
+/// Too low costs at most ~27% and only inside a BOUNDED band that ends
+/// at the crossover. Too high costs up to 73% and keeps GROWING with
+/// depth, because the dense product degrades quadratically in m where
+/// the transform does not - at m = 3,072 dense burns 3.5-4.7x the CPU
+/// of Forney on every box measured. So for an unmeasured part, take the
+/// nearest measured class and bias down from it; the pre-10-Sep
+/// convention biased UP for a stability reason, and had been paying a
+/// performance price on GFNI hardware for it ever since.
+///
+/// # Why a constant per class, and not a predicate over (n, m)
+///
+/// Because the crossover does not move with `n`. An n-axis sweep over
+/// n = 5,600 / 11,200 / 22,400 - a 4x range, 182 legs - found it
+/// UNMOVED, m* = 768 at every n on both an M3 Ultra and an M5 Max. (A
+/// coarser step than the NEON fine sweep, which is why the M5 reads 768
+/// there and 704 above; the finding is the absence of movement, not the
+/// value.) The cost models predicted a weak logarithmic rise
+/// (`m* ~ k log n`, ~15% over a 4x range) and the measurement does not
+/// resolve even that. A per-class constant is therefore the right
+/// shape. Do not add a computed predicate. What DOES vary is the class - the two arms do not benefit
+/// equally from kernel width, which spans 2x across the three shipped
+/// classes, and is why `multi_fold_width()` is the thing to key on.
+pub(crate) fn backsub_min_missing() -> usize {
+    if cfg!(target_arch = "aarch64") {
+        BACKSUB_MIN_MISSING_NEON
+    } else if gf16::multi_fold_width() == 4 {
+        BACKSUB_MIN_MISSING_NIBBLE
+    } else {
+        BACKSUB_MIN_MISSING
+    }
+}
 
 /// Stripe-width granule, in u16 words: 32 words = 64 bytes, the widest
 /// granule any shipped fused kernel takes (`gf16::xor_mul_multi_gfni512`
@@ -184,11 +353,53 @@ pub(crate) const BACKSUB_MIN_MISSING: usize = 2048;
 /// MORE work. Alignment here is not a micro-optimisation.
 const STRIPE_GRAN: usize = 32;
 
-/// Per-worker byte budget for stage 1's spectral arena, which is
-/// `nseg * CONV * w` words. The stripe width is chosen to fit it, so a
-/// deep repair narrows its stripes rather than growing its footprint.
-/// `NZBFAST_BACKSUB_W` pins the width instead (a bench knob).
+/// Per-worker byte budget for stage 2's GROUP TILE (`gtile * GT2 * w`
+/// words), which is sized to fit it. Stage 1's spectral arena is NOT
+/// sized from this any more - see [`ForneyPlan::stripe_w`] and
+/// [`STRIPE_W_TARGET`] for why a flat per-worker byte budget was the
+/// wrong shape there.
 const SPECTRA_BUDGET: usize = 8 << 20;
+
+/// Stripe width the back-substitution asks for, in u16 words, before
+/// the memory budget gets a say: 512 words = 1,024 bytes per row per
+/// fold call.
+///
+/// **This used to be a ceiling that a deep repair never reached, and it
+/// cost 2x on the whole repair.** Until 7 Sep 2026 the width was the
+/// largest power of two whose stage-1 arena (`nseg * CONV * w` words)
+/// fitted a flat 8 MiB per worker. `nseg = ceil(m / BLK)` grows with the
+/// damage, so the stripe COLLAPSED as a repair deepened - 512 words at
+/// m <= 3,277, 128 at m = 10,240, and 64 words (128 bytes a fold call)
+/// at m = 16,385, which is a 1 GiB corpus at 64 KiB blocks rebuilt from
+/// scratch. At 128 bytes the per-call cost dominates the call, and on
+/// the x86 nibble kernels that cost is eight 16-byte `pshufb` tables
+/// rebuilt per source per call - the same overhead
+/// [`STRIPE_GRAN`] exists to stop the remainder path paying, measured
+/// elsewhere in this engine at 33-39% of a transform.
+///
+/// Measured on the i5-10600KF (6c/12t, AVX2, no GFNI), full rebuild at
+/// m = 16,385, mirrored arms, every leg 0/21 bad:
+///
+/// ```text
+///     stripe   wall p1 / p2     back-substitution   stage 1   stage 2
+///     64 w     27.60 / 27.87    25.19 / 25.52       12.99     11.46
+///     256 w    15.57 / 15.56    13.24 / 13.25        7.23      5.39
+///     512 w    14.78 / 14.61    12.43 / 12.28        7.25      4.55
+///     1024 w   14.52 / 14.62    12.16 / 12.22        7.50      4.05
+/// ```
+///
+/// -47% on the whole repair; par2cmdline-turbo 1.5.0 took 285.5 s on the
+/// same leg. 512 is the knee - 1,024 buys a further 0.5% for twice the
+/// arena - and it is where the ALREADY-SHIPPED shallow repairs sat, so
+/// this makes one width the answer at every depth rather than raising
+/// anything. The M3 Ultra is flat at the same widths (2.30 s at 64
+/// against 2.26 / 2.25 at 256 / 512): a NEON `FoldCoeff` is two bytes,
+/// so that arm never paid the per-call table build and never showed the
+/// collapse. The floor is not arch-keyed all the same - the mechanism
+/// costs nothing on NEON but does not HURT there either, and a flat
+/// arch constant chosen against one round of shapes is exactly what
+/// went stale here.
+const STRIPE_W_TARGET: usize = 512;
 
 /// Whether this shape takes the transform solve. `NZBFAST_BACKSUB` is
 /// the escape hatch in both directions (`forney` / `dense`), the way
@@ -215,8 +426,16 @@ pub(crate) fn backsub_gate(m: usize) -> bool {
         // `NZBFAST_GF16_MULTI=0` kernel A/B) the measured ratios do not
         // transfer and the dense product keeps the shape. The forced
         // arm above still reaches it, which is what the harness needs.
-        _ => gf16::multi_fold_width() > 0 && m >= BACKSUB_MIN_MISSING,
+        _ => gf16::multi_fold_width() > 0 && m >= backsub_min_missing(),
     }
+}
+
+/// The selection census's door onto [`backsub_gate`], so
+/// `par2seams` reports the arm this build actually takes instead of
+/// re-deriving it. Three lines and no logic, deliberately: a census that
+/// reasons independently is a second copy of the rule.
+pub(crate) fn seam_backsub(m: usize) -> bool {
+    backsub_gate(m)
 }
 
 /// Stage-1 transform policy. The measured Good-Thomas network is the
@@ -251,9 +470,7 @@ fn fold_rows(dst: &mut [u16], srcs: &[&[u16]], coeffs: &[u16]) {
             // The sub-32-byte tail, and the WHOLE fold on a build with
             // no fused kernel - same rule as par2ntt::fold_into.
             for (src, &c) in group[..cnt].iter().zip(&coeffs[g..g + cnt]) {
-                if c != 0 {
-                    gf16::FoldTable::new(c).xor_mul_into(&mut dst[done..], &src[done * 2..]);
-                }
+                gf16::xor_mul_single_into(&mut dst[done..], &src[done * 2..], c);
             }
         }
         g += cnt;
@@ -437,6 +654,34 @@ fn column_stripes(rows: &mut [Vec<u16>], w: usize) -> Vec<(usize, Vec<&mut [u16]
     out
 }
 
+/// The width [`ForneyPlan::stripe_w`] resolves to, split out from the
+/// plan so the budget arithmetic can be tested without one: `nseg` and
+/// `m` describe the solve, `words` the block, `workers` the concurrency
+/// [`per_stripe`] will run at, and `budget` the whole solve's byte
+/// budget (`reconstruct::solve_window_budget`).
+fn stripe_w_for(nseg: usize, m: usize, words: usize, workers: usize, budget: u64) -> usize {
+    // What the solve already holds for the whole of its life: the two
+    // `m x block` buffers `check_repair_dim_within` admitted it on.
+    // `words` is block words, so the block is `2 * words` bytes.
+    let window = (m as u64).saturating_mul(words as u64).saturating_mul(4);
+    let headroom = budget.saturating_sub(window);
+    let workers = workers.max(1) as u64;
+    // Stage 1 per worker: the `nseg * CONV` spectral arena, the one
+    // resident output spectrum, and the two mixed-radix coordinate
+    // arenas - `(nseg + 3) * CONV * w` words.
+    let per_worker = |w: usize| {
+        (nseg as u64 + 3)
+            .saturating_mul(CONV as u64)
+            .saturating_mul(w as u64)
+            .saturating_mul(2)
+    };
+    let mut w = STRIPE_W_TARGET;
+    while w > STRIPE_GRAN && per_worker(w).saturating_mul(workers) > headroom {
+        w >>= 1;
+    }
+    w
+}
+
 /// Run `body` over the column stripes of `rows`, one worker per unit
 /// until they run out. Units are popped off one mutex exactly as
 /// `fold_parallel` drains its grid, so a slow core never sets the wall.
@@ -448,6 +693,11 @@ where
         return;
     }
     let stripes = column_stripes(rows, w);
+    // Every stripe unit here runs against an ALREADY-PREPARED plan, so
+    // this is the reuse the one cold construction is amortised over -
+    // the half of the plan-table question that a stopwatch on the
+    // constructor alone cannot answer. See `PlanPrepCounters`.
+    PREP_STRIPE_USES.fetch_add(stripes.len() as u64, Ordering::Relaxed);
     let workers = crate::mem::cpu_workers().max(1).min(stripes.len().max(1));
     let units = std::sync::Mutex::new(stripes);
     std::thread::scope(|s| {
@@ -531,6 +781,196 @@ impl Stage1Plan {
     }
 }
 
+/// Plan-preparation accounting: how long the coefficient tables cost to
+/// build, and how many times a built plan is then USED.
+///
+/// The plan is built once per [`Reconstructor`] and reused by every
+/// column stripe of both stages, so "what does one preparation cost" and
+/// "how often does preparation happen" are different questions, and the
+/// plan-table multiplication policy
+/// (`research/par-plan-tables-2026-09-08`) turns on the second one: a
+/// 16% cut of a phase nobody has sized against a whole repair is not yet
+/// a 16% cut of anything a user waits for.
+///
+/// `cold_ns` / `cold` are the constructor - the COLD path, once per
+/// repair; `stripe_uses` is how many stripe units ran against an
+/// already-built plan, which is the reuse the cold cost is amortised
+/// over.
+///
+/// Counters are process-global and MONOTONE, so a caller reads a
+/// difference across the phase it cares about rather than an absolute
+/// (see [`prep_counters`] and `PlanPrepCounters::since`). Two repairs
+/// running at once in one daemon therefore pool into each other's
+/// window; that is acceptable for a measurement driver running one
+/// repair per process, and is why nothing branches on these.
+static PREP_COLD_NS: AtomicU64 = AtomicU64::new(0);
+static PREP_COLD: AtomicU64 = AtomicU64::new(0);
+static PREP_STRIPE_USES: AtomicU64 = AtomicU64::new(0);
+
+/// The SOLVE's counterparts, added 8 Sep 2026
+/// (`research/par-solve-repair-share-2026-09-08`) for the same reason
+/// and by the same argument: the joint constructor-and-solver
+/// (`research/par-joint-quiet-2026-09-08`) cuts 46-48% off the solve at
+/// 32,768 missing blocks, 144 of 144 paired comparisons positive, and
+/// that is a reduction of an unknown until the phase is sized against a
+/// whole repair - exactly the hole the prep counters above were dug to
+/// fill for the constructor. Measured: the solve is 19.5-43.3% of a
+/// real repair on the shapes real sets have, against preparation's
+/// 0.11-0.76% on the same fixtures.
+///
+/// Stage 1 ([`ForneyPlan::hankel`]) and stage 2 ([`ForneyPlan::evaluate`])
+/// are charged SEPARATELY because the repair driver runs them apart, with
+/// the syndrome buffers dropped between them, and because only the
+/// two together are the thing the joint solver replaces. `STAGE1` counts
+/// stage-1 entries, which is the number of SOLVES: a repair that solves
+/// once is a different economic case from one that solves many windows,
+/// and `STAGE1` over `PREP_COLD` is that ratio.
+///
+/// Charged unconditionally, unlike the `repair-timing` lines beside
+/// them: both stages already take an `Instant` at entry whatever the
+/// environment says, so this adds one `elapsed` and one relaxed atomic
+/// per stage per solve, against a stage that runs for hundreds of
+/// milliseconds.
+static SOLVE_STAGE1_NS: AtomicU64 = AtomicU64::new(0);
+static SOLVE_STAGE2_NS: AtomicU64 = AtomicU64::new(0);
+static SOLVE_STAGE1: AtomicU64 = AtomicU64::new(0);
+
+/// A reading of the counters above. Differences, not absolutes: see
+/// [`PlanPrepCounters::since`].
+#[derive(Clone, Copy, Default)]
+pub(super) struct PlanPrepCounters {
+    /// Wall time inside `ForneyPlan::prepare*`, successful builds only -
+    /// a `None` return means the Forney arm was abandoned and no plan
+    /// was prepared.
+    pub(super) cold_ns: u64,
+    /// Successful plan constructions.
+    pub(super) cold: u64,
+    /// Stripe units run against a prepared plan, both stages.
+    pub(super) stripe_uses: u64,
+    /// Wall time inside [`ForneyPlan::hankel`], the blocked Hankel
+    /// product - stage 1 of the solve.
+    pub(super) stage1_ns: u64,
+    /// Wall time inside [`ForneyPlan::evaluate`] - stage 2 of the solve.
+    pub(super) stage2_ns: u64,
+    /// Solves: stage-1 entries, one per back-substitution that took the
+    /// transform arm.
+    pub(super) solves: u64,
+}
+
+impl PlanPrepCounters {
+    /// This reading minus an earlier one. Saturating, so a counter that
+    /// wrapped or was read out of order reports zero rather than a
+    /// nonsense share.
+    pub(super) fn since(self, earlier: Self) -> Self {
+        Self {
+            cold_ns: self.cold_ns.saturating_sub(earlier.cold_ns),
+            cold: self.cold.saturating_sub(earlier.cold),
+            stripe_uses: self.stripe_uses.saturating_sub(earlier.stripe_uses),
+            stage1_ns: self.stage1_ns.saturating_sub(earlier.stage1_ns),
+            stage2_ns: self.stage2_ns.saturating_sub(earlier.stage2_ns),
+            solves: self.solves.saturating_sub(earlier.solves),
+        }
+    }
+
+    /// Both solve stages together, which is the phase the joint
+    /// constructor-and-solver replaces.
+    pub(super) fn solve_ns(self) -> u64 {
+        self.stage1_ns.saturating_add(self.stage2_ns)
+    }
+}
+
+/// Read the plan-preparation counters. Relaxed: these are a measurement
+/// aid read once per phase, not a synchronisation point.
+pub(super) fn prep_counters() -> PlanPrepCounters {
+    PlanPrepCounters {
+        cold_ns: PREP_COLD_NS.load(Ordering::Relaxed),
+        cold: PREP_COLD.load(Ordering::Relaxed),
+        stripe_uses: PREP_STRIPE_USES.load(Ordering::Relaxed),
+        stage1_ns: SOLVE_STAGE1_NS.load(Ordering::Relaxed),
+        stage2_ns: SOLVE_STAGE2_NS.load(Ordering::Relaxed),
+        solves: SOLVE_STAGE1.load(Ordering::Relaxed),
+    }
+}
+
+/// A repair's Forney-phase bracket: hold one for the span you want the
+/// shares taken over, and it reports TWO `repair-timing` lines when it
+/// drops - `plan prep:` for the constructor and `forney solve:` for the
+/// two solve stages. `what` names that span, because the two repair
+/// drivers start their clocks in different places.
+///
+/// Named for preparation because that is what it was dug for; it covers
+/// the solve as well since 8 Sep 2026. The two shares are reported apart
+/// and must NOT be added: they are separately measured components of one
+/// repair and the campaign doc warns about summing those.
+///
+/// A guard rather than a pair of calls so each driver spends ONE line on
+/// it: `par2repair.rs` carries the 4,000-line file ceiling with margin
+/// measured in single digits, and both drivers reporting through the
+/// same code is also what keeps the two lines comparable.
+///
+/// Silent unless `NZBFAST_REPAIR_TIMING` is set, read once at `start` so
+/// the drop path does no work in a production repair.
+pub(super) struct PrepSpan {
+    at: PlanPrepCounters,
+    t0: std::time::Instant,
+    what: &'static str,
+    on: bool,
+}
+
+impl PrepSpan {
+    pub(super) fn start(what: &'static str) -> PrepSpan {
+        PrepSpan {
+            at: prep_counters(),
+            t0: std::time::Instant::now(),
+            what,
+            on: std::env::var_os("NZBFAST_REPAIR_TIMING").is_some(),
+        }
+    }
+}
+
+impl Drop for PrepSpan {
+    fn drop(&mut self) {
+        if !self.on {
+            return;
+        }
+        let prep = prep_counters().since(self.at);
+        let total = self.t0.elapsed();
+        let share = if total.as_nanos() == 0 {
+            0.0
+        } else {
+            prep.cold_ns as f64 * 100.0 / total.as_nanos() as f64
+        };
+        info!(
+            target: "repair-timing",
+            "plan prep: {:.2?} over {} cold build(s), {} stripe use(s) - {share:.3}% of the {total:.2?} {}",
+            std::time::Duration::from_nanos(prep.cold_ns),
+            prep.cold,
+            prep.stripe_uses,
+            self.what,
+        );
+        // The solve's own share, on its own line so the two phases can
+        // be read apart: the joint solver replaces BOTH, but the
+        // constructor half is already sized at 0.11-0.76% of a repair
+        // and the two are NOT added: they are separately measured
+        // components of one repair, and the joint arm changes both at
+        // once.
+        let solve_share = if total.as_nanos() == 0 {
+            0.0
+        } else {
+            prep.solve_ns() as f64 * 100.0 / total.as_nanos() as f64
+        };
+        info!(
+            target: "repair-timing",
+            "forney solve: {:.2?} over {} solve(s) (stage 1 {:.2?}, stage 2 {:.2?}) - {solve_share:.3}% of the {total:.2?} {}",
+            std::time::Duration::from_nanos(prep.solve_ns()),
+            prep.solves,
+            std::time::Duration::from_nanos(prep.stage1_ns),
+            std::time::Duration::from_nanos(prep.stage2_ns),
+            self.what,
+        );
+    }
+}
+
 /// The scalar half of the solve, built once per repair from the missing
 /// columns' base logs and the first recovery exponent: the master
 /// polynomial that drives stage 1 and the per-column coefficients that
@@ -559,6 +999,13 @@ pub(super) struct ForneyPlan {
     evalc: Vec<u16>,
     /// Column indices per stage-2 group, parallel to `stage_a`'s rows.
     groups: Vec<Vec<u32>>,
+    /// The locator polynomial `P`'s coefficients, `p[i]` the `z^i` one.
+    /// EMPTY unless the joint arm is armed: the two-stage solve reads
+    /// `P` only through `rhat`, so retaining it would be a memory
+    /// change on a path the switch is meant to leave untouched.
+    locator: Vec<u16>,
+    /// The joint arm's own plan, or `None` on the shipped path.
+    joint: Option<joint::JointPlan>,
 }
 
 impl ForneyPlan {
@@ -574,24 +1021,30 @@ impl ForneyPlan {
     /// this to compare both arithmetic paths in one process without mutating
     /// the process-global environment; production enters through `prepare`.
     fn prepare_with_dft(ks: &[u32], e0: u32, mixed: bool) -> Option<ForneyPlan> {
+        Self::prepare_impl(ks, e0, mixed, joint_gate())
+    }
+
+    /// The constructor, with the joint arm explicit. `joint` selects
+    /// BOTH halves of the joint constructor - the product tree in
+    /// `locator::build` and the whole-field derivative evaluation in
+    /// `poly::evaluate_field` - and retains `P` for the joint solve.
+    /// With it false every line below is the one that ran before the
+    /// switch existed; `locator::chain` is that same coefficient chain,
+    /// moved into its own file and nothing more.
+    fn prepare_impl(ks: &[u32], e0: u32, mixed: bool, joint: bool) -> Option<ForneyPlan> {
         let m = ks.len();
         if m == 0 {
             return None;
         }
+        // Charged to `PREP_COLD_NS` at the `Some` below, so an abandoned
+        // build (duplicate base -> Gauss-Jordan) contributes nothing:
+        // no plan was prepared, so there is no preparation to size.
+        let t_prep = std::time::Instant::now();
         let bases: Vec<u16> = ks.iter().map(|&k| gf16::pow2(k as u64)).collect();
         // P(z) = Π (z + g_c), degree m: p[i] is the z^i coefficient.
         // Identical to invert_vandermonde's build - the same polynomial
         // in the same order, because it is the same factorization.
-        let mut p = vec![0u16; m + 1];
-        p[0] = 1;
-        for (deg, &g) in bases.iter().enumerate() {
-            let t = MulTable::new(g);
-            p[deg + 1] = p[deg];
-            for i in (1..=deg).rev() {
-                p[i] = p[i - 1] ^ t.mul(p[i]);
-            }
-            p[0] = t.mul(p[0]);
-        }
+        let (p, locator_stats) = locator::build(&bases, joint);
         // d_c = Π_{k≠c}(g_c + g_k) = P'(g_c), and in characteristic 2
         // the formal derivative keeps only the odd coefficients:
         // P'(z) = Σ_j p[2j+1] * (z^2)^j.
@@ -600,13 +1053,25 @@ impl ForneyPlan {
             .take_while(|&i| i <= m)
             .map(|i| p[i])
             .collect();
+        // The joint arm evaluates P' at the WHOLE field once (65,536
+        // entries, 128 KB, transient) and then reads each column's
+        // derivative out by index, against m Horner passes over an
+        // m/2-term polynomial. Same values either way, asserted by
+        // `field_derivative_matches_horner` in `unit_tests`.
+        let field = joint.then(|| poly::evaluate_field(&dodd));
         let mut scales = vec![0u16; m];
         par_build(&mut scales, 1, 64, |c, slot| {
-            let z2 = MulTable::new(gf16::mul(bases[c], bases[c]));
-            let mut d = 0u16;
-            for &coef in dodd.iter().rev() {
-                d = z2.mul(d) ^ coef;
-            }
+            let d = match &field {
+                Some((values, _)) => values[gf16::mul(bases[c], bases[c]) as usize],
+                None => {
+                    let z2 = MulTable::new(gf16::mul(bases[c], bases[c]));
+                    let mut d = 0u16;
+                    for &coef in dodd.iter().rev() {
+                        d = z2.mul(d) ^ coef;
+                    }
+                    d
+                }
+            };
             // A zero here is a duplicate base, which cannot happen for
             // valid ks; it leaves the scale zero and the caller refuses
             // below rather than solving a singular system quietly.
@@ -617,6 +1082,10 @@ impl ForneyPlan {
                 gf16::mul(gf16::inv(d), gf16::pow2(neg_e0))
             };
         });
+        // The whole-field table is dead the moment the scales are built,
+        // and must not still be resident while the plan's own O(m) and
+        // O(m * 257) tables are allocated below.
+        drop(field);
         if scales.contains(&0) {
             return None; // duplicate base - Gauss-Jordan takes it from here
         }
@@ -727,7 +1196,7 @@ impl ForneyPlan {
                 *slot = sc.mul(bpow[k2 * t2 % GT2]);
             }
         });
-        Some(ForneyPlan {
+        let mut plan = ForneyPlan {
             m,
             nseg,
             rhat,
@@ -737,14 +1206,66 @@ impl ForneyPlan {
             stage_a,
             evalc,
             groups,
-        })
+            locator: if joint { p } else { Vec::new() },
+            joint: None,
+        };
+        // Built LAST because it reads the finished plan: the locator
+        // polynomial for its stage-1 kernel and the column groups for
+        // its factored stage-2 coefficients.
+        if joint {
+            plan.joint = Some(joint::JointPlan::new(&plan, ks));
+        }
+        PREP_COLD_NS.fetch_add(t_prep.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        PREP_COLD.fetch_add(1, Ordering::Relaxed);
+        if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some()
+            && let Some(j) = &plan.joint
+        {
+            info!(
+                target: "repair-timing",
+                "  forney joint plan: {} KB of kernel tables, locator tree held <= {} KB ({} KB of it cached transforms)",
+                j.heap_bytes() / 1024,
+                locator_stats.peak_heap_bound / 1024,
+                locator_stats.cache_heap / 1024,
+            );
+        }
+        Some(plan)
     }
 
-    /// Stripe width: a POWER OF TWO between [`STRIPE_GRAN`] and 512
-    /// words, the largest that keeps stage 1's spectral arena inside
-    /// [`SPECTRA_BUDGET`] per worker. A deep repair therefore narrows
-    /// its stripes rather than growing its footprint.
-    /// `NZBFAST_BACKSUB_W` pins the width instead (a bench knob).
+    /// Stripe width: a POWER OF TWO between [`STRIPE_GRAN`] and
+    /// [`STRIPE_W_TARGET`]. The target IS the answer unless the memory
+    /// budget refuses, in which case the stripe narrows one halving at a
+    /// time - so the fast path is the default and a narrow stripe is the
+    /// low-memory concession, not the other way round.
+    /// `NZBFAST_BACKSUB_W` pins the width instead (a bench knob, and the
+    /// A/B arm this was measured on).
+    ///
+    /// **The budget is the solve's own, not a new one.** This repair was
+    /// admitted by `check_repair_dim_within` against
+    /// `reconstruct::solve_window_budget` - the quarter-of-the-OOM-line
+    /// figure `fastpar::ntt_default_budget` derives from RAM and any
+    /// cgroup limit - having priced the `2 * m * block_size` window it
+    /// holds for the whole solve. The stripe arenas are the rest of that
+    /// same peak, so they are spent out of what the window LEFT, and the
+    /// admission decision is untouched: a shape that repairs today still
+    /// repairs, only possibly on a narrower stripe.
+    ///
+    /// What it costs, per worker, is `(nseg + 3) * CONV * w` words: the
+    /// `nseg * CONV` spectral arena plus the output spectrum and the two
+    /// mixed-radix coordinate arenas. At nseg = 129 and w = 512 that is
+    /// 33.7 MB each and ~404 MB across twelve workers, against a 2.1 GB
+    /// window - ~20%, inside a budget that is 16 GiB on a 64 GB box.
+    ///
+    /// So the concession arm is RARE by construction, and worth saying
+    /// out loud rather than leaving as an unexercised branch: the window
+    /// grows with `m * block_size` and the arena with `nseg * w`, i.e.
+    /// with `m / BLK`, so the arena is ~`512 * 255 * 2 / (128 * 2 *
+    /// block_size)` = `1,020 / block_size` of the window per worker. It
+    /// takes more than `block_size / 1,020` workers for the arena to
+    /// reach the window at all - 64 on a 64 KiB set - and the budget is
+    /// bigger than the window to begin with. The arm therefore binds
+    /// only on a many-core box repairing SMALL blocks, and the unit test
+    /// `stripe_narrows_only_when_the_solve_budget_is_short` pins both
+    /// sides of that.
     ///
     /// A power of two, not merely a multiple of the granule, so that
     /// the LAST stripe is aligned too: block sizes are multiples of 64
@@ -758,11 +1279,14 @@ impl ForneyPlan {
         {
             return w.min(words.max(1));
         }
-        let per_word = (self.nseg * CONV).max(1) * 2;
-        let by_budget = (SPECTRA_BUDGET / per_word).clamp(STRIPE_GRAN, 512);
-        // Largest power of two that fits the budget.
-        let w = 1usize << by_budget.ilog2();
-        w.min(words.max(1))
+        stripe_w_for(
+            self.nseg,
+            self.m,
+            words,
+            crate::mem::cpu_workers(),
+            super::reconstruct::solve_window_budget() as u64,
+        )
+        .min(words.max(1))
     }
 
     /// Stage 1: `T_t = Σ_r S_r * p[r + t + 1]`, the blocked Hankel
@@ -784,6 +1308,14 @@ impl ForneyPlan {
             let dft_words = if mixed { CONV * len } else { 0 };
             let mut dft_a = vec![0u16; dft_words];
             let mut dft_b = vec![0u16; dft_words];
+            // GAUGED, because `stripe_w` now SPENDS to this number
+            // rather than capping it at a flat 8 MiB: what a worker
+            // holds here is part of the repair's peak and has to appear
+            // in the memory floor like the rest of it.
+            let _arena = crate::memgauge::Charge::new(
+                crate::memgauge::Sub::RepairWork,
+                ((shat.len() + chat.len() + dft_a.len() + dft_b.len()) * 2) as u64,
+            );
             let mut ssrc: Vec<&[u16]> = Vec::with_capacity(BLK);
             let mut sp: Vec<&[u16]> = Vec::with_capacity(self.nseg);
             let mut coeffs: Vec<u16> = Vec::with_capacity(self.nseg);
@@ -846,6 +1378,8 @@ impl ForneyPlan {
                 }
             }
         });
+        SOLVE_STAGE1_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        SOLVE_STAGE1.fetch_add(1, Ordering::Relaxed);
         if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
             info!(
                 target: "repair-timing",
@@ -879,6 +1413,12 @@ impl ForneyPlan {
         per_stripe(out, w, |off, cells| {
             let len = cells[0].len();
             let mut b = vec![0u16; gtile * GT2 * len];
+            // Gauged for the same reason stage 1's arena is: it is part
+            // of the repair's peak and the memory floor has to see it.
+            let _arena = crate::memgauge::Charge::new(
+                crate::memgauge::Sub::RepairWork,
+                (b.len() * 2) as u64,
+            );
             let mut tsrc: Vec<&[u16]> = Vec::with_capacity(self.m.div_ceil(GT2).max(1));
             for (tile, gt) in self.groups.chunks(gtile).enumerate() {
                 let base = tile * gtile;
@@ -910,6 +1450,7 @@ impl ForneyPlan {
                 }
             }
         });
+        SOLVE_STAGE2_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
             info!(
                 target: "repair-timing",
@@ -928,6 +1469,25 @@ impl ForneyPlan {
         let mut out: Vec<Vec<u16>> = vec![vec![0u16; words]; self.m];
         self.evaluate(&t, &mut out);
         out
+    }
+
+    /// The JOINT arm's whole solve, or `None` when this plan was not
+    /// built for it. `syn` is MOVED in and comes back as the rebuilt
+    /// blocks in the same allocation - see `joint::ForneyPlan::run_joint`.
+    ///
+    /// A `None` here is the shipped path, not a failure: the caller
+    /// falls through to `hankel` / `evaluate` with the syndromes it
+    /// still owns.
+    pub(super) fn solve_joint(&self, syn: Vec<Vec<u16>>) -> Result<Vec<Vec<u16>>, Vec<Vec<u16>>> {
+        match &self.joint {
+            Some(j) => Ok(self.run_joint(j, syn)),
+            None => Err(syn),
+        }
+    }
+
+    /// Whether this plan carries a joint arm.
+    pub(super) fn has_joint(&self) -> bool {
+        self.joint.is_some()
     }
 }
 
@@ -1155,21 +1715,79 @@ mod tests {
         }
     }
 
-    /// `SPECTRA_BUDGET` caps the large `nseg*255` arena. The mixed
-    /// network adds exactly two reusable 255-row arenas; together with
-    /// the already-shipped output spectrum, fixed overhead stays below
-    /// 765 KiB per worker at the maximum 512-word stripe.
+    /// The mixed network adds exactly two reusable 255-row arenas;
+    /// together with the already-shipped output spectrum, fixed overhead
+    /// stays below 765 KiB per worker at the maximum stripe width.
+    ///
+    /// Swept to [`MAX_INPUT_SLICES`], not `MAX_REPAIR_DIM`: this arm has
+    /// no `MAX_REPAIR_DIM` cap - that constant guards the DENSE product
+    /// and the Gauss-Jordan fallback, and `check_repair_dim_within`
+    /// admits the transform arm on its memory window alone. The sweep
+    /// stopped at `MAX_REPAIR_DIM / BLK` = 64 until 7 Sep 2026, i.e. it
+    /// covered half the nseg range production reaches and none of the
+    /// depths where the stripe was collapsing.
     #[test]
     fn mixed_dft_worker_scratch_is_bounded() {
-        const MAX_FIXED: usize = 3 * CONV * 512 * 2;
+        const MAX_FIXED: usize = 3 * CONV * STRIPE_W_TARGET * 2;
         assert_eq!(MAX_FIXED, 783_360);
-        for nseg in 1..=crate::par2repair::MAX_REPAIR_DIM.div_ceil(BLK) {
-            let per_word = nseg * CONV * 2;
-            let by_budget = (SPECTRA_BUDGET / per_word).clamp(STRIPE_GRAN, 512);
-            let w = 1usize << by_budget.ilog2();
-            assert!(nseg * CONV * w * 2 <= SPECTRA_BUDGET);
+        for nseg in 1..=crate::par2repair::MAX_INPUT_SLICES.div_ceil(BLK) {
+            let w = stripe_w_for(nseg, nseg * BLK, 1 << 15, 32, 16 << 30);
+            assert!(w <= STRIPE_W_TARGET);
             assert!(3 * CONV * w * 2 <= MAX_FIXED);
         }
+    }
+
+    /// The point of the 7 Sep 2026 fix: the target width is what a
+    /// repair GETS, at every depth PAR2 can express, on a box that can
+    /// afford it. Before it, `nseg` alone drove the width down - 512
+    /// words to 64 between m = 3,277 and m = 16,385 - and cost 2x on the
+    /// whole repair on the x86 nibble kernels.
+    ///
+    /// The shape here is the measured one made general: 64 KiB blocks,
+    /// twelve workers, and the 16 GiB budget `ntt_default_budget`
+    /// derives on a 64 GB box.
+    #[test]
+    fn stripe_holds_the_target_width_at_every_repair_depth() {
+        for nseg in 1..=crate::par2repair::MAX_INPUT_SLICES.div_ceil(BLK) {
+            let m = (nseg * BLK).min(crate::par2repair::MAX_INPUT_SLICES);
+            assert_eq!(
+                stripe_w_for(nseg, m, 1 << 15, 12, 16 << 30),
+                STRIPE_W_TARGET,
+                "nseg={nseg} lost the target stripe on a box that can afford it"
+            );
+        }
+        // ...and the depth the anomaly was found at, spelled out: a
+        // 1 GiB corpus at 64 KiB blocks rebuilt from nothing.
+        assert_eq!(
+            stripe_w_for(16385usize.div_ceil(BLK), 16385, 1 << 15, 12, 16 << 30),
+            512
+        );
+    }
+
+    /// The concession arm, which the doc comment argues is rare: the
+    /// stripe narrows only when the solve budget has little left after
+    /// the `2 * m * block_size` window, and it narrows by halvings down
+    /// to [`STRIPE_GRAN`] rather than to zero.
+    ///
+    /// Small blocks and many workers are what it takes - the arena is
+    /// `1,020 / block_size` of the window per worker - so these are
+    /// 4 KiB blocks at the input-slice ceiling.
+    #[test]
+    fn stripe_narrows_only_when_the_solve_budget_is_short() {
+        let (nseg, m, words) = (256, 32768, 2048);
+        // Roomy: the window is 268 MB of a 16 GiB budget.
+        assert_eq!(stripe_w_for(nseg, m, words, 32, 16 << 30), STRIPE_W_TARGET);
+        // Tight: a 1 GiB budget leaves 805 MB, and 32 workers want
+        // 2.16 GB at the target. Two halvings fit.
+        assert_eq!(stripe_w_for(nseg, m, words, 32, 1 << 30), 128);
+        // Tighter still, and it stops at the granule rather than
+        // running off the bottom - a stripe off the granule builds a
+        // FoldTable per source on every remainder (see STRIPE_GRAN).
+        assert_eq!(stripe_w_for(nseg, m, words, 1024, 1 << 30), STRIPE_GRAN);
+        // And a budget the window has already eaten whole still yields a
+        // usable width rather than zero or a panic.
+        assert_eq!(stripe_w_for(nseg, m, words, 32, 1 << 20), STRIPE_GRAN);
+        assert_eq!(stripe_w_for(nseg, m, words, 32, 0), STRIPE_GRAN);
     }
 
     /// The identity stage 2 is built on: with `α = 2^{257·128}` and
@@ -1197,7 +1815,7 @@ mod tests {
     /// The default arm of the gate, pinned to the constant it documents.
     /// Deliberately does NOT set `NZBFAST_BACKSUB`: it is a process-wide
     /// escape hatch and this binary runs every other test beside this
-    /// one (the one-process rule in CLAUDE.md's build section).
+    /// one (the one-process rule in CONTRIBUTING.md's build section).
     ///
     /// The default arm is TWO conditions, and this pins both. It used to
     /// assert a bare `true` at the constant, which is the answer on every
@@ -1220,11 +1838,25 @@ mod tests {
             return;
         }
         let fused = gf16::multi_fold_width() > 0;
-        assert!(!backsub_gate(BACKSUB_MIN_MISSING - 1));
+        let gate = backsub_min_missing();
+        assert!(!backsub_gate(gate - 1));
         assert_eq!(
-            backsub_gate(BACKSUB_MIN_MISSING),
+            backsub_gate(gate),
             fused,
             "at the constant the gate is the fused-multi-kernel arm alone"
+        );
+        // aarch64 takes its own constant, the nibble arms (fan-in 4) the
+        // lower x86 one, every other arm the original; each is pinned
+        // wherever it is observable.
+        assert_eq!(
+            gate,
+            if cfg!(target_arch = "aarch64") {
+                BACKSUB_MIN_MISSING_NEON
+            } else if gf16::multi_fold_width() == 4 {
+                BACKSUB_MIN_MISSING_NIBBLE
+            } else {
+                BACKSUB_MIN_MISSING
+            }
         );
     }
 }

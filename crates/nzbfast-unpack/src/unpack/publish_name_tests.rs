@@ -2,7 +2,7 @@
 //! right for a previous run's copy, and silent data loss when the target
 //! is a file this same job put there.
 //!
-//! Codex read-only sweep of 3 Aug 2026 listed "sanitized output-name
+//! read-only review sweep of 3 Aug 2026 listed "sanitized output-name
 //! collisions can still overwrite on disk" among three older items it
 //! rechecked and left undispositioned. Re-derived 23 Aug 2026: the
 //! sanitizer itself is the wrong place to look (it is many-to-one by
@@ -221,7 +221,7 @@ fn payloads_deep(dir: &std::path::Path) -> Vec<Vec<u8>> {
     v
 }
 
-/// W4-17 (codex Wave 4, 30 Aug 2026), FLAT FIRST. `node` and
+/// W4-17 (review Wave 4, 30 Aug 2026), FLAT FIRST. `node` and
 /// `node/child.bin` are two valid FileDesc members that share no
 /// complete string, so the claim's equality test saw no collision at
 /// all - and then the child's `create_out_dirs` met a REGULAR FILE
@@ -359,6 +359,16 @@ fn a_later_successful_publish_clears_an_earlier_failure() {
 /// creates them with no slot behind them, so a seeded registry cannot be
 /// the only guard. Contrast `a_previous_runs_copy_is_still_replaced`
 /// above: the PAR2 tier replaces exactly this, on purpose.
+///
+/// AND IT CARRIES THE RETURN-VALUE HALF OF THE RACE PIN since 10 Sep
+/// 2026, so do not weaken the `is_none` below to a payload check.
+/// `a_weak_publish_never_renames_over_an_entry_created_beside_it` moved
+/// onto `crate::renameclaim::never_renames_over_a_neighbour`, which
+/// asserts on the FILESYSTEM and cannot see a return value; a `Some`
+/// that never renamed - the caller told a payload landed at a name
+/// somebody else holds - is pinned HERE now, on the same
+/// `AlreadyExists` branch of the claim that a lost race reaches. That
+/// test's own doc argues why the two are the same branch.
 #[test]
 fn a_weak_name_never_replaces_a_file_the_registry_never_saw() {
     let dir = temp_dir("weak");
@@ -414,7 +424,7 @@ fn entries(dir: &std::path::Path) -> Vec<String> {
     v
 }
 
-/// X5-20 (codex Extreme Wave 5, 30 Aug 2026), the pin for the fix.
+/// X5-20 (review Extreme Wave 5, 30 Aug 2026), the pin for the fix.
 /// CONFIRMED red against origin/main before it: publish reported
 /// `Some(".../Real.Name.mkv")` and BOTH directory entries survived.
 /// Renaming one hardlink over another name for one inode is a POSIX
@@ -736,87 +746,135 @@ fn a_weak_publish_whose_rename_fails_leaves_no_placeholder_behind() {
 /// The claim closes it because it IS the occupancy question, asked
 /// atomically: `create_new` answers `AlreadyExists` for a regular file,
 /// a dangling link, a link out of the directory and a directory - the
-/// same four answers `symlink_metadata` gives.
+/// same four answers `symlink_metadata` gives. Verified RED against the
+/// pre-claim code when it was written: ~72% of trials lost their
+/// adversary's entry. RE-VERIFIED on the harness, 10 Sep 2026, with
+/// this door alone reverted to the `lstat` - it fails on TRIAL 0, in
+/// 0.01 s, which is the standard the five pins in
+/// `smart/renameclaim_tests.rs` were each held to.
 ///
-/// BOUNDED and not a timing assertion: 300 trials, ~0.2 s, and
-/// what is asserted is an INVARIANT that must hold in every one of them.
-/// The adversary's own claim count is FLOORED, because an adversary that
-/// never got the name would make this pass having raced nothing, which
-/// is the vacuous green this repo keeps writing gates about. Verified
-/// RED against the pre-claim code: ~72% of trials lost.
+/// THE RACE IS THE HOUSE HARNESS'S SINCE 10 Sep 2026
+/// (`crate::renameclaim::never_renames_over_a_neighbour`, the twelfth
+/// pin on it and the eighth in this crate), and everything below is why.
+/// This pin hand-rolled its own adversary thread and reddened
+/// `unit-one-process` TWICE in seventeen hours doing it, both times on
+/// its own coverage floor rather than on the invariant:
+///
+///     55ed141b9   the adversary got the name   1 of 300
+///     4df00e93    the adversary got the name   3 of 300
+///
+/// Neither red was a product defect - every correctness trial passed
+/// both times - and both fixes bought the coverage the expensive way.
+/// The first (6b504bb284) added a rendezvous, so `go` flipped only while
+/// the adversary was provably spinning on a core; that cut the problem
+/// down and did not remove it. The second (fe7779854b) made the floor
+/// count REAL RACES instead of assuming a win rate, running on to 5,000
+/// trials until the adversary had taken the name 15 times. Both are
+/// correct, and both are a SECOND answer to a problem this crate had
+/// already solved for eleven other doors, on the identical
+/// `unit-one-process` red (8 of 300, run 33420059671, 31 Aug 2026).
+///
+/// WHY THE HARNESS REACHES THE FLOOR WHERE A HAND-ROLLED LOOP COULD NOT,
+/// which is the whole of the argument and not a preference for shared
+/// code. Both hand-rolled versions released the door at the instant the
+/// adversary was released, so the earliest an arrival could land was the
+/// door's own START and the win RATE was then whatever the scheduler
+/// decided: ~91% on an idle box against ~1% on a loaded 4-vCPU runner
+/// where a pure spin loop is the first thing a scheduler takes a core
+/// back from. No test may assume that rate, and no local box can
+/// reproduce it - measured 10 Sep 2026 on the 32-core dev box, 274/300
+/// idle and still 199/300 at 8x oversubscription - so the second fix
+/// waited it out instead. The harness has no rate to assume. Its door
+/// waits `lead` AFTER the adversary has started its OWN clock, so an
+/// adversary that woke late is COMPENSATED rather than left arriving
+/// after the ~112 us window closed, and a hill-climb moves the arrival
+/// one step later whenever it got the name and one step earlier whenever
+/// it did not - so it settles either side of the rename, wins roughly
+/// half the trials by construction on any box, and re-settles when the
+/// box's speed changes under it. THE FLOOR IS UNCHANGED at `trials / 20`,
+/// 15 of 300, which is exactly the figure `MIN_RACES` carried; the trial
+/// cap is the harness's `trials * 4` and there is no wall-clock budget
+/// left to become the limit that binds a run it is rescuing (`BUDGET`
+/// bound fe7779854b's first draft at 456 trials on a box at load 445).
+/// NEVER lower the floor to make one of these green - the floor is the
+/// whole reason a green here is not vacuous.
+///
+/// MEASURED HERE rather than argued from the harness's own record, by
+/// instrumenting it locally on 10 Sep 2026 on the dev Mac at load ~480:
+/// this door races 181-226 of 300 across three runs, with the climb
+/// settling at an arrival of 82-172 us and `lead` never once needing to
+/// double. That is the sibling pins' regime exactly - the five in
+/// `smart/renameclaim_tests.rs` raced 211-263 of 300 in the same
+/// sitting - so this pin is now as trustworthy as they are and fails
+/// the same way if it stops being.
+///
+/// WHAT MOVED, AND WHERE IT WENT, because the two assertions are not the
+/// same shape. The harness asserts on the FILESYSTEM: the adversary
+/// holds the name with a zero-byte file, so "still zero bytes" is "still
+/// the adversary's", and this door's source is `b"SRC"`, which satisfies
+/// the harness's stated non-empty-source precondition. This test also
+/// asserted a CONDITIONAL on the RETURN VALUE - in a trial the adversary
+/// won, `publish_weak_name` must have answered `None` - and the harness
+/// cannot see a return value. That half is now carried deterministically
+/// by `a_weak_name_never_replaces_a_file_the_registry_never_saw` above,
+/// and the substitution is exact rather than approximate: `create_new`
+/// is atomic, so a trial the adversary won is a trial where this door's
+/// own claim answered `AlreadyExists`, which is the same branch that
+/// test drives - a registry `for_dir` seeded with nothing, a non-empty
+/// source, an occupant no slot in the registry knows. The only shape a
+/// race could reach and a deterministic case cannot is an occupant that
+/// appears LATER inside the door, and nothing between this door's entry
+/// and its claim reads the target: `out_name_of` compares strings,
+/// `prepare_out_path` is a no-op for a flat name, and
+/// `is_redundant_link` answers false for the adversary's separate inode
+/// whenever it appeared. The property is kept rather than dropped
+/// because a `Some` that never renamed is a real and different defect -
+/// the caller told a payload landed at a name the adversary is holding.
 #[test]
 fn a_weak_publish_never_renames_over_an_entry_created_beside_it() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
+    /// The count `smart/renameclaim_tests.rs` cites back to this file,
+    /// and it stays 300 because the harness's floor is `trials / 20` -
+    /// the same 15 races `MIN_RACES` asked for. Cutting the trials
+    /// would cut the floor with them, which is the one edit this whole
+    /// history says never to make.
+    ///
+    /// IT COSTS MORE THAN THE HAND-ROLLED LOOP DID, measured rather
+    /// than assumed, and read the reason before treating it as a
+    /// regression: 17.5 s here against that loop's 2.5 s on the dev Mac
+    /// at load ~480, of which 11.3 s is the harness WAITING for its
+    /// adversary to publish `armed`. That wait is the scheduler latency
+    /// a descheduled spinner pays, and the harness absorbing it instead
+    /// of charging it to the arrival offset is precisely why it reaches
+    /// the window on a box that cannot. The five sibling pins cost
+    /// 7-26 s each under the same load, 10.4-17.3 s of it in that same
+    /// wait, so the price is the loaded box's and not this door's.
+    /// Neither figure was taken on an idle box, because this one never
+    /// is.
     const TRIALS: usize = 300;
+
     let dir = temp_dir("weakrace");
-    let go = Arc::new(AtomicBool::new(false));
-    let claimed = Arc::new(AtomicBool::new(false));
-    let stop = Arc::new(AtomicBool::new(false));
-
-    // `to_path_buf`, not `clone`: `temp_dir` hands back a `ScratchDir`
-    // guard that removes the tree on drop, so the adversary takes a plain
-    // copy of the PATH and the guard stays on this thread.
-    let (advdir, g, c, st) = (dir.to_path_buf(), go.clone(), claimed.clone(), stop.clone());
-    let adversary = std::thread::spawn(move || {
-        let target = advdir.join("movie.mkv");
-        loop {
-            while !g.load(Ordering::Acquire) {
-                if st.load(Ordering::Relaxed) {
-                    return;
-                }
-                std::hint::spin_loop();
-            }
-            // `create_new`, so "I got the name" is the filesystem's
-            // answer and not a guess: it can only succeed while nothing
-            // is there, which makes the classification below exact.
-            let ok = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&target)
-                .is_ok();
-            c.store(ok, Ordering::Release);
-            g.store(false, Ordering::Release);
-        }
-    });
-
-    let mut adversary_got_the_name = 0usize;
-    for i in 0..TRIALS {
-        let src = dir.join("0Bf3qZ.bin");
-        std::fs::write(&src, b"SRC").unwrap();
-        let _ = std::fs::remove_file(dir.join("movie.mkv"));
-        let mut taken = PublishedNames::for_dir(&dir);
-        claimed.store(false, Ordering::Relaxed);
-        // Swept, so the adversary's create lands at every point across
-        // the publish rather than always at the same one.
-        for _ in 0..(i % 400) * 3 {
-            std::hint::spin_loop();
-        }
-        go.store(true, Ordering::Release);
-        let published = publish_weak_name(&src, "movie.mkv", &dir, 1, &mut taken).is_some();
-        while go.load(Ordering::Acquire) {
-            std::hint::spin_loop();
-        }
-        if claimed.load(Ordering::Acquire) {
-            adversary_got_the_name += 1;
-            assert!(
-                !published,
-                "trial {i}: the weak tier renamed over an entry that was \
-                 created beside it - the W4-03 harm through the window"
-            );
-        }
-        let _ = std::fs::remove_file(dir.join("movie.mkv"));
-        let _ = std::fs::remove_file(&src);
-    }
-    stop.store(true, Ordering::Release);
-    go.store(true, Ordering::Release);
-    let _ = adversary.join();
-
-    assert!(
-        adversary_got_the_name >= TRIALS / 20,
-        "the adversary claimed the name only {adversary_got_the_name} times in \
-         {TRIALS}, so this run raced nothing and its green means nothing"
+    let src = dir.join("0Bf3qZ.bin");
+    let target = dir.join("movie.mkv");
+    // The registry is built in `before` and not in the door, so the door
+    // is the publish and nothing else. `for_dir` PROBES the volume for
+    // its case fold, and those syscalls in front of the `create_new`
+    // would push the guard away from the door's entry - the harness
+    // steers either way, it just has further to climb. `before` runs
+    // outside the raced region entirely (the adversary's clock starts
+    // when it observes `go`, which the harness flips after `before`
+    // returns), so nothing is being hidden from the race here.
+    let taken = std::cell::RefCell::new(None);
+    crate::renameclaim::never_renames_over_a_neighbour(
+        &target,
+        TRIALS,
+        || {
+            std::fs::write(&src, b"SRC").unwrap();
+            *taken.borrow_mut() = Some(PublishedNames::for_dir(&dir));
+        },
+        || {
+            let mut t = taken.borrow_mut();
+            let _ = publish_weak_name(&src, "movie.mkv", &dir, 1, t.as_mut().unwrap());
+        },
     );
 }
 

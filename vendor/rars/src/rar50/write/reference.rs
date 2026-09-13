@@ -214,8 +214,10 @@ fn vint_width(value: u64) -> usize {
 /// archive that a size rule would have to answer the same way. What fits
 /// every one of the twenty-odd shapes measured is
 ///
-///     estimate = sum over members of (data length + 33 + 3 * name length)
-///     width    = vint_width(estimate << 12)
+/// ```text
+/// estimate = sum over members of (data length + 33 + 3 * name length)
+/// width    = vint_width(estimate << 12)
+/// ```
 ///
 /// and the fit was then CONFIRMED by prediction rather than by curve
 /// fitting: it says a single member named `s.bin` crosses from four bytes
@@ -495,7 +497,9 @@ fn main_header_recovery(reserve: usize, archive_flags: u64) -> Vec<u8> {
 ///
 /// What fits every shape measured is
 ///
-///     width = vint_width((archive length + 1) << 12)
+/// ```text
+/// width = vint_width((archive length + 1) << 12)
+/// ```
 ///
 /// and it was then confirmed by PREDICTION at both crossings rather than
 /// by curve fitting. It says three bytes becomes four at exactly 511
@@ -700,7 +704,7 @@ pub fn assemble_with_recovery(
     // Patching the main header afterwards would leave a record describing
     // bytes the archive no longer has, and the reference's `t` would
     // report the record as broken.
-    super::write_recovery_service(&mut body.out, recovery_percent, None, 1)?;
+    super::write_recovery_service(&mut body.out, recovery_percent, None, 1, false)?;
     body.out.extend_from_slice(&end_header(false));
     Ok(body.out)
 }

@@ -732,7 +732,7 @@ fn record_ladder_result(
     // all the same: the rungs that ran moved real bytes.
     if !link_idle(lane.d) {
         lane.d
-            .add_usage(&[(srv.host.clone(), steps.iter().map(|s| s.bytes).sum())]);
+            .add_usage(&[(srv.account_key(), steps.iter().map(|s| s.bytes).sum())]);
         info!(
             target: "tune",
             "{}: a download or index scan started while the ladder ran - \
@@ -807,7 +807,7 @@ fn record_ladder_result(
         }
     };
     lane.d.add_usage(&[(
-        srv.host.clone(),
+        srv.account_key(),
         steps.iter().map(|s| s.bytes).sum::<u64>() + remeasure_owed.load(Ordering::Relaxed),
     )]);
     // The per-rung rates in the log are the ONLY record

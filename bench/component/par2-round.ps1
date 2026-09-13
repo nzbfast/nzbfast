@@ -49,6 +49,15 @@ param(
   # binary a user actually runs. A release table has to come from the
   # second one, argument parsing and output layer included.
   [string]$Parfast = "$env:USERPROFILE\paraudit\bin\parfast.exe",
+  # Rival-survey arms, 5 Sep 2026 (research/PAR2-RIVAL-SURVEY-2026-09-05.md).
+  # Windows is where the two Windows-only tools live: MultiPar's par2j64
+  # (GPU behind /lc256, CPU otherwise) and Paul Houle's phpar2 1.5 (a
+  # par2cmdline 0.4 fork with hand-written assembly, 2017). Turbo120 is
+  # nzbgetcom's turbo fork; Par2rs the CLI over the rust-par2 crate.
+  [string]$Par2j    = "$env:USERPROFILE\paraudit\rivals\mp\par2j64.exe",
+  [string]$Phpar2   = "$env:USERPROFILE\paraudit\rivals\phpar2\x64\phpar2.exe",
+  [string]$Turbo120 = "$env:USERPROFILE\paraudit\rivals\turbo120utf8\par2.exe",
+  [string]$Par2rs   = "$env:USERPROFILE\paraudit\bin\rivals\par2rs-cli.exe",
   [int]$Rounds    = 3,
   [string]$Legs   = "verify,3,101,heavy",
   [string]$Tools  = "ours,turbo16,turbo",
@@ -123,8 +132,17 @@ foreach ($r in 1..$Rounds) {
         "sched16b"{ Invoke-Arm $Ours  @(".")                 @{ NZBFAST_REPAIR_TIMING = $Timing; NZBFAST_GF16_GRANULE = "16" } }
         "sched32" { Invoke-Arm $Ours  @(".")                 @{ NZBFAST_REPAIR_TIMING = $Timing; NZBFAST_GF16_GRANULE = "32" } }
         "parfast" { Invoke-Arm $Parfast @("r","-q",$par)      @{} }
+        # `-T` is turbo's files-hashed-in-parallel count, NOT its compute-thread
+        # knob (lower-case `-t`, which defaults to the detected core count).
         "turbo16" { Invoke-Arm $Turbo @("r","-q","-T16",$par) @{} }
         "turbo"   { Invoke-Arm $Turbo @("r","-q",$par)        @{} }
+        # --- rival-survey arms (see the param block) ---
+        "par2j"       { Invoke-Arm $Par2j    @("r",$par)              @{} }
+        "par2j_gpu"   { Invoke-Arm $Par2j    @("r","/lc256",$par)     @{} }
+        "phpar2"      { Invoke-Arm $Phpar2   @("r","-q",$par)         @{} }
+        "turbo120"    { Invoke-Arm $Turbo120 @("r","-q",$par)         @{} }
+        "turbo120_16" { Invoke-Arm $Turbo120 @("r","-q","-T16",$par)  @{} }
+        "par2rs"      { Invoke-Arm $Par2rs   @("r",$par)              @{} }
       }
       $sw.Stop()
       $ok = 0

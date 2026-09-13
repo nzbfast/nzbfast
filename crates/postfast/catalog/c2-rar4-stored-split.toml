@@ -27,7 +27,7 @@ volume and reports a checksum error on the member it had to truncate.
 Nothing here noticed, because our own client joins volumes from the NZB
 rather than from the archive headers, so the row was green over a set
 no reference reader could open. Closed 4 Sep 2026 by
-WriterOptions::volume_numbering in the fork at ~/Claude/rars and
+WriterOptions::volume_numbering in the fork at the upstream rars fork and
 hand-ported into vendor/rars; container::rar4_volume_numbering derives
 it from the same fields the names are spelled from, and this row now
 extracts under unrar 7.23 at exit 0. Its bytes moved by exactly three

@@ -17,7 +17,7 @@
 //! reader of them is keyed by HOST.
 //!
 //! Nothing here touches a socket or a config FILE: `reset_hub_for_job`
-//! takes the server list as a snapshot (Codex sweep H - the read it used
+//! takes the server list as a snapshot (review sweep H - the read it used
 //! to do inline was on the runner and could hang the queue), so a test
 //! hands it one directly.
 
@@ -28,6 +28,17 @@ fn tmp(tag: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir
+}
+
+/// The ledger key a row spelled `{"host": h}` bills to. The §96.5 meter
+/// is per ACCOUNT rather than per host (`ServerConfig::account_key`),
+/// and every row below leaves `username` unset - so each host here is
+/// exactly ONE account, which is what keeps these cases about the
+/// pool-build rules and not about the key.
+fn acct(host: &str) -> String {
+    let s: nzbkit::config::ServerConfig =
+        serde_json::from_str(&format!(r#"{{"host":"{host}"}}"#)).expect("server config");
+    s.account_key()
 }
 
 /// The server list as `reset_hub_for_job` receives it - a parsed
@@ -58,7 +69,7 @@ fn published(
 fn distinct_hosts_are_scored_exactly_as_before() {
     let dir = tmp("distinct");
     let d = crate::testutil::test_daemon(&dir);
-    d.add_usage(&[("spent.example".into(), 1_200)]);
+    d.add_usage(&[(acct("spent.example"), 1_200)]);
     let (excluded, budgets) = published(
         &d,
         r#"[{"host":"spent.example","block_bytes":1000},
@@ -86,9 +97,9 @@ fn distinct_hosts_are_scored_exactly_as_before() {
 fn an_exhausted_row_does_not_exclude_its_funded_sibling() {
     let dir = tmp("funded");
     let d = crate::testutil::test_daemon(&dir);
-    // Spend is HOST-aggregated by design, so both rows read 1,200: the
-    // 1,000 block is spent, the 5,000 one has 3,800 left.
-    d.add_usage(&[("blk.example".into(), 1_200)]);
+    // One host, no usernames - so one ACCOUNT, and both rows read
+    // 1,200: the 1,000 block is spent, the 5,000 one has 3,800 left.
+    d.add_usage(&[(acct("blk.example"), 1_200)]);
     let (excluded, budgets) = published(
         &d,
         r#"[{"host":"blk.example","block_bytes":1000},
@@ -118,7 +129,7 @@ fn an_exhausted_row_does_not_exclude_its_funded_sibling() {
 fn a_flat_rate_sibling_is_never_excluded_and_never_capped() {
     let dir = tmp("flatsib");
     let d = crate::testutil::test_daemon(&dir);
-    d.add_usage(&[("mix.example".into(), 1_200)]);
+    d.add_usage(&[(acct("mix.example"), 1_200)]);
     let (excluded, budgets) = published(
         &d,
         r#"[{"host":"mix.example","block_bytes":1000},
@@ -159,7 +170,7 @@ fn a_flat_rate_sibling_is_never_excluded_and_never_capped() {
 fn the_budget_is_order_independent_and_takes_the_largest_remaining() {
     let dir = tmp("order");
     let d = crate::testutil::test_daemon(&dir);
-    d.add_usage(&[("two.example".into(), 500)]);
+    d.add_usage(&[(acct("two.example"), 500)]);
     let forwards = published(
         &d,
         r#"[{"host":"two.example","block_bytes":2000},
@@ -183,7 +194,7 @@ fn the_budget_is_order_independent_and_takes_the_largest_remaining() {
 fn a_host_whose_every_account_is_spent_is_still_excluded() {
     let dir = tmp("allspent");
     let d = crate::testutil::test_daemon(&dir);
-    d.add_usage(&[("done.example".into(), 2_000)]);
+    d.add_usage(&[(acct("done.example"), 2_000)]);
     let (excluded, budgets) = published(
         &d,
         r#"[{"host":"done.example","block_bytes":1000},
@@ -208,7 +219,7 @@ fn a_host_whose_every_account_is_spent_is_still_excluded() {
 fn a_disabled_exhausted_row_does_not_exclude_its_enabled_sibling() {
     let dir = tmp("disabled");
     let d = crate::testutil::test_daemon(&dir);
-    d.add_usage(&[("off.example".into(), 1_200)]);
+    d.add_usage(&[(acct("off.example"), 1_200)]);
     let (excluded, budgets) = published(
         &d,
         r#"[{"host":"off.example","block_bytes":1000,"enabled":false},
@@ -233,11 +244,12 @@ fn a_disabled_exhausted_row_does_not_exclude_its_enabled_sibling() {
 }
 
 /// The settle-side half of the usage fold, which MUST move with
-/// `Daemon::flush_run_usage`'s (see `Daemon::fold_bytes_by_host`).
+/// `Daemon::flush_run_usage`'s (see `Daemon::fold_bytes_by_account`).
 ///
-/// `DetachedTail::usage_flushed` is keyed by HOST and holds the SUM of
-/// every pool row on that host, while `pool_live.servers` is one row per
-/// configured ACCOUNT. Comparing an unfolded row counter against that
+/// `DetachedTail::usage_flushed` is keyed by ACCOUNT and holds the SUM
+/// of every pool row billing to it, while `pool_live.servers` is one row
+/// per configured SERVER - and these two rows are one account, having
+/// one host and one (absent) username. Comparing an unfolded row counter against that
 /// sum under-bills exactly the way the flush did; folding here and not
 /// there would bill the run twice. Both are asserted in one run below:
 /// the detach bills the pair's first 300 bytes, and the settle bills the
@@ -264,9 +276,9 @@ fn settle_bills_the_residual_of_two_rows_on_one_host_once() {
         "the detach bills both rows"
     );
     assert_eq!(
-        detached.usage_flushed.get("blk.example"),
+        detached.usage_flushed.get(&acct("blk.example")),
         Some(&300),
-        "and the high-water mark is the host's TOTAL, not one row's"
+        "and the high-water mark is the account's TOTAL, not one row's"
     );
 
     // The drain moves another 100 across the pair.
@@ -278,7 +290,7 @@ fn settle_bills_the_residual_of_two_rows_on_one_host_once() {
     assert_eq!(
         d.usage_lifetime("blk.example"),
         400,
-        "the residual is the HOST's, so none of the drain's paid bytes is lost"
+        "the residual is the ACCOUNT's, so none of the drain's paid bytes is lost"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

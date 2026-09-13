@@ -1066,5 +1066,8 @@ pub mod winasm {
     }
 }
 
+/// Eight independent messages per pass on AVX2: [`multi::md5_many`].
+pub mod multi;
+
 #[cfg(test)]
 mod tests;

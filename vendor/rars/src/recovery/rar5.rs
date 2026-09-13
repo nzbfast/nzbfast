@@ -33,10 +33,12 @@ const MAX_STRIPE_PLAN_CELLS: usize = 32 * 1024 * 1024;
 /// which is why every small archive repaired and every real one did not.
 const RAR5_RECOVERY_PARITY_PER_RECORD_MAX: u64 = 64 * KIB;
 
+use std::borrow::Cow;
+
 use crate::write_progress::ProgressReporter;
 use crate::{WriteOperation, WriteProgressEvent};
 
-fn shared_gf16() -> &'static Gf16 {
+pub(super) fn shared_gf16() -> &'static Gf16 {
     static GF16: std::sync::OnceLock<Gf16> = std::sync::OnceLock::new();
     GF16.get_or_init(Gf16::new)
 }
@@ -497,8 +499,34 @@ fn encode_inline_recovery_parity_with_progress(
     pass: usize,
 ) -> Result<(InlineRecoveryPlan, Vec<Vec<u8>>)> {
     let plan = plan_inline_recovery(archive_prefix.len() as u64, recovery_percent)?;
-    let shards = split_prefix_shards(archive_prefix, plan)?;
-    let shard_refs: Vec<&[u8]> = shards.iter().map(Vec::as_slice).collect();
+    // Borrow every full-length shard straight out of the prefix; only the
+    // final short one needs a buffer of its own. `split_prefix_shards` built
+    // an owned copy of EVERY shard, which is a second whole copy of the
+    // archive live beside the first: on a 4 GiB archive at 1% recovery that
+    // measured 12.98 GB of peak RSS against 8.75 GB here, and the encode
+    // itself 10.9% faster for not doing the copy.
+    let shard_len = usize::try_from(plan.group_count).map_err(|_| Error::PlanOverflow)?;
+    let ranges = split_prefix_shard_ranges(archive_prefix.len(), plan)?;
+    let shards: Vec<Cow<'_, [u8]>> = ranges
+        .into_iter()
+        .map(|range| {
+            if range.len() == shard_len {
+                Cow::Borrowed(&archive_prefix[range])
+            } else {
+                // The tail shard is short, and a shard wholly past the end of
+                // the prefix is empty - `split_prefix_shard_ranges` can return
+                // an inverted range there, so the emptiness check guards the
+                // slice as well as skipping a zero-length copy.
+                let mut padded = vec![0u8; shard_len];
+                if !range.is_empty() {
+                    let filled = range.len();
+                    padded[..filled].copy_from_slice(&archive_prefix[range]);
+                }
+                Cow::Owned(padded)
+            }
+        })
+        .collect();
+    let shard_refs: Vec<&[u8]> = shards.iter().map(|shard| shard.as_ref()).collect();
     let total_bytes = plan.payload_size()?;
     if let Some(progress) = progress {
         progress.report(WriteProgressEvent::OperationStarted {
@@ -533,6 +561,216 @@ fn encode_inline_recovery_parity_with_progress(
     Ok((plan, parity))
 }
 
+/// The inline recovery record of an archive computed AS THE ARCHIVE PASSES,
+/// for a writer that never holds it: the parity rows and the per-group
+/// CRC states are accumulated from `push` calls in file order and the
+/// record assembled at `finish`, byte-identical to
+/// [`build_structural_inline_recovery_data`] over the same bytes (a test
+/// holds it over odd chunk sizes). The plan needs the prefix LENGTH up
+/// front, which a stored writer knows from its headers and member sizes.
+///
+/// Every shard is a contiguous range of the prefix, so a pushed chunk
+/// belongs to one shard and one group at a time and folds straight into
+/// every parity row at its offset; the working set is the parity rows
+/// (the record's own size) plus one multiply table per row for the
+/// current shard. The in-memory path copies the prefix into 200 shard
+/// buffers first, which on a 1 GiB archive is the third gigabyte of a
+/// 3.2 GB working set and most of the wall on a KVM guest. (nzbfast-local
+/// addition, 6 Sep 2026; see VENDORING.md.)
+pub struct InlineRecoveryFolder {
+    plan: InlineRecoveryPlan,
+    prefix_len: u64,
+    shard_len: usize,
+    position: u64,
+    matrix: Vec<Vec<u16>>,
+    /// The multiply tables of the shard `position` is in, one per row.
+    tables: Vec<Option<Gf16MulTable>>,
+    tables_for_shard: Option<usize>,
+    parity: Vec<Vec<u8>>,
+    /// CRC states per group, per shard, filled as slices complete.
+    states_by_group: Vec<Vec<u64>>,
+    /// The running CRC of the (group, shard) slice `position` is in.
+    slice_crc: u64,
+    /// The low byte of a symbol whose high byte has not arrived.
+    carry: Option<u8>,
+}
+
+impl InlineRecoveryFolder {
+    pub fn new(prefix_len: u64, recovery_percent: u64) -> Result<Self> {
+        let plan = plan_inline_recovery(prefix_len, recovery_percent)?;
+        let data_shards = usize::try_from(plan.data_shards).map_err(|_| Error::PlanOverflow)?;
+        let recovery_shards =
+            usize::try_from(plan.recovery_shards).map_err(|_| Error::PlanOverflow)?;
+        let shard_len = usize::try_from(plan.group_count).map_err(|_| Error::PlanOverflow)?;
+        let capacity = (data_shards as u64)
+            .checked_mul(plan.group_count)
+            .ok_or(Error::PlanOverflow)?;
+        if prefix_len > capacity {
+            return Err(Error::PrefixExceedsPlan);
+        }
+        let matrix = make_encoder_matrix(data_shards, recovery_shards)?;
+        let group_count = if plan.group_count == 0 {
+            1
+        } else {
+            recovery_groups(plan)?.len()
+        };
+        Ok(Self {
+            plan,
+            prefix_len,
+            shard_len,
+            position: 0,
+            matrix,
+            tables: Vec::new(),
+            tables_for_shard: None,
+            parity: vec![vec![0u8; shard_len]; recovery_shards],
+            states_by_group: vec![vec![0u64; data_shards]; group_count],
+            slice_crc: 0,
+            carry: None,
+        })
+    }
+
+    /// The record's length, known from the plan before any byte is pushed.
+    pub fn record_len(&self) -> Result<u64> {
+        self.plan.payload_size()
+    }
+
+    /// The next bytes of the prefix, in file order.
+    pub fn push(&mut self, mut bytes: &[u8]) -> Result<()> {
+        let group_len = usize::try_from(RAR5_RECOVERY_PARITY_PER_RECORD_MAX)
+            .map_err(|_| Error::PlanOverflow)?;
+        while !bytes.is_empty() {
+            if self.position >= self.prefix_len {
+                return Err(Error::PrefixExceedsPlan);
+            }
+            let position = usize::try_from(self.position).map_err(|_| Error::PlanOverflow)?;
+            let shard = position / self.shard_len;
+            let offset = position % self.shard_len;
+            let group_end = (offset / group_len + 1) * group_len;
+            let slice_end = group_end.min(self.shard_len);
+            let take = bytes.len().min(slice_end - offset);
+            let (chunk, rest) = bytes.split_at(take);
+            bytes = rest;
+            self.slice_crc = crc64_update(chunk, self.slice_crc);
+            self.fold(shard, offset, chunk)?;
+            self.position += take as u64;
+            let at_slice_end = offset + take == slice_end;
+            if at_slice_end || self.position == self.prefix_len {
+                let group = offset / group_len;
+                self.states_by_group[group][shard] = self.slice_crc;
+                self.slice_crc = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// XOR `chunk` times every row's coefficient for `shard` into the parity
+    /// rows at `offset`, whole symbols at a time.
+    fn fold(&mut self, shard: usize, offset: usize, chunk: &[u8]) -> Result<()> {
+        if self.tables_for_shard != Some(shard) {
+            self.tables = self
+                .matrix
+                .iter()
+                .map(|row| {
+                    let coefficient = row[shard];
+                    (coefficient != 0).then(|| Gf16MulTable::new(coefficient))
+                })
+                .collect();
+            self.tables_for_shard = Some(shard);
+        }
+        let mut offset = offset;
+        let mut chunk = chunk;
+        if let Some(low) = self.carry.take() {
+            let Some((&high, rest)) = chunk.split_first() else {
+                self.carry = Some(low);
+                return Ok(());
+            };
+            self.fold_symbols(offset - 1, &[low, high]);
+            offset += 1;
+            chunk = rest;
+        }
+        let whole = chunk.len() / 2 * 2;
+        self.fold_symbols(offset, &chunk[..whole]);
+        if whole < chunk.len() {
+            self.carry = Some(chunk[whole]);
+        }
+        Ok(())
+    }
+
+    /// Every row's share of `piece` (a whole pushed chunk, up to the
+    /// writer's copy buffer). The chunk is cut into 64 KiB pieces and the
+    /// PIECES run in parallel, each task folding its piece into every row:
+    /// a task's working set is its piece plus the rows' matching 64 KiB
+    /// columns, which stays in cache however many rows there are, and one
+    /// chunk is a dozen tasks of a few hundred microseconds. Two shapes
+    /// measured before this one on the 8-vCPU guest: the rows in parallel
+    /// per 64 KiB piece (sixteen dispatches per chunk: system time 8 s over
+    /// a gigabyte, slower than the serial fold) and the rows in parallel per
+    /// chunk (each row streaming a megabyte of destination per chunk).
+    fn fold_symbols(&mut self, offset: usize, piece: &[u8]) {
+        let tables = &self.tables;
+        let fold_piece = |(columns, source): (Vec<&mut [u8]>, &[u8])| {
+            for (table, column) in tables.iter().zip(columns) {
+                if let Some(table) = table {
+                    table.fold_into(column, source);
+                }
+            }
+        };
+        // Each row's span for this chunk, cut into the pieces' columns and
+        // regrouped per piece: piece `i` owns column `i` of every row.
+        let pieces = piece.len().div_ceil(RECOVER_FOLD_CHUNK).max(1);
+        let mut per_piece: Vec<Vec<&mut [u8]>> =
+            (0..pieces).map(|_| Vec::with_capacity(tables.len())).collect();
+        for row in self.parity.iter_mut() {
+            for (index, column) in row[offset..offset + piece.len()]
+                .chunks_mut(RECOVER_FOLD_CHUNK)
+                .enumerate()
+            {
+                per_piece[index].push(column);
+            }
+        }
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            if STREAMED_FOLD_PARALLEL && pieces > 1 {
+                per_piece
+                    .into_par_iter()
+                    .zip(piece.par_chunks(RECOVER_FOLD_CHUNK))
+                    .for_each(fold_piece);
+                return;
+            }
+        }
+        per_piece
+            .into_iter()
+            .zip(piece.chunks(RECOVER_FOLD_CHUNK))
+            .for_each(fold_piece);
+    }
+
+    /// The record over everything pushed, which must be the whole prefix.
+    pub fn finish(mut self) -> Result<Vec<u8>> {
+        if self.position != self.prefix_len {
+            return Err(Error::PrefixExceedsPlan);
+        }
+        if let Some(low) = self.carry.take() {
+            // The prefix ends inside a symbol; its high byte is the zero
+            // padding of the last shard.
+            let position = usize::try_from(self.position - 1).map_err(|_| Error::PlanOverflow)?;
+            self.fold_symbols(position % self.shard_len, &[low, 0]);
+        }
+        let shard_ranges = split_prefix_shard_ranges(
+            usize::try_from(self.prefix_len).map_err(|_| Error::PlanOverflow)?,
+            self.plan,
+        )?;
+        let last_shard_data_len = shard_ranges.last().map_or(0usize, std::ops::Range::len);
+        assemble_inline_recovery_record(
+            self.plan,
+            self.prefix_len,
+            last_shard_data_len,
+            &self.states_by_group,
+            &self.parity,
+        )
+    }
+}
+
 pub fn build_structural_inline_recovery_data(
     archive_prefix: &[u8],
     recovery_percent: u64,
@@ -553,18 +791,11 @@ pub(crate) fn build_structural_inline_recovery_data_with_progress(
         pass,
     )?;
     let shard_ranges = split_prefix_shard_ranges(archive_prefix.len(), plan)?;
-    let total_len = usize::try_from(plan.payload_size()?).map_err(|_| Error::PlanOverflow)?;
-    let header_size = usize::try_from(plan.header_size).map_err(|_| Error::PlanOverflow)?;
-    let shard_size = usize::try_from(plan.shard_size).map_err(|_| Error::PlanOverflow)?;
     let data_shards = usize::try_from(plan.data_shards).map_err(|_| Error::PlanOverflow)?;
-    let recovery_shards = usize::try_from(plan.recovery_shards).map_err(|_| Error::PlanOverflow)?;
-    let header_size_u32 = u32::try_from(plan.header_size).map_err(|_| Error::PlanOverflow)?;
-    let data_shards_u16 = u16::try_from(plan.data_shards).map_err(|_| Error::PlanOverflow)?;
-    let recovery_shards_u16 =
-        u16::try_from(plan.recovery_shards).map_err(|_| Error::PlanOverflow)?;
-    let chunk_data_extent = shard_ranges.last().map_or(0usize, std::ops::Range::len);
-    let chunk_data_extent_u32 =
-        u32::try_from(chunk_data_extent).map_err(|_| Error::PlanOverflow)?;
+    // How much of the LAST data shard is real archive bytes (the rest is the
+    // zero padding to `group_count`); each record's extent field is its
+    // group's share of that - see the record header below.
+    let last_shard_data_len = shard_ranges.last().map_or(0usize, std::ops::Range::len);
     // One record per (recovery shard, group), laid out shard-index-major:
     // every group of shard 0, then every group of shard 1. Writing a single
     // record carrying the whole parity row is what RARLab's own reader will
@@ -588,21 +819,57 @@ pub(crate) fn build_structural_inline_recovery_data_with_progress(
         states_by_group.push(states);
     }
 
-    // The trailing state is shared: every record of a group carries the CRC of
-    // SHARD 0's parity for that group, not its own. Splitting a row into
-    // records does not change that - it only makes the shared value per-group.
-    let mut final_state_by_group: Vec<u64> = Vec::with_capacity(groups.len());
-    for group in &groups {
-        let offset = usize::try_from(group.offset).map_err(|_| Error::PlanOverflow)?;
-        let len = usize::try_from(group.len).map_err(|_| Error::PlanOverflow)?;
-        final_state_by_group.push(
-            parity
-                .first()
-                .and_then(|payload| payload.get(offset..offset + len))
-                .map(crc64_rar_state)
-                .unwrap_or(0),
-        );
+    assemble_inline_recovery_record(
+        plan,
+        archive_prefix.len() as u64,
+        last_shard_data_len,
+        &states_by_group,
+        &parity,
+    )
+}
+
+/// The record bytes from a plan, the per-(group, shard) CRC states and the
+/// parity rows - the half of [`build_structural_inline_recovery_data`] that
+/// does not need the prefix, so a writer that never holds the prefix
+/// ([`InlineRecoveryFolder`]) assembles the same record.
+fn assemble_inline_recovery_record(
+    plan: InlineRecoveryPlan,
+    prefix_len: u64,
+    last_shard_data_len: usize,
+    states_by_group: &[Vec<u64>],
+    parity: &[Vec<u8>],
+) -> Result<Vec<u8>> {
+    let total_len = usize::try_from(plan.payload_size()?).map_err(|_| Error::PlanOverflow)?;
+    let header_size = usize::try_from(plan.header_size).map_err(|_| Error::PlanOverflow)?;
+    let shard_size = usize::try_from(plan.shard_size).map_err(|_| Error::PlanOverflow)?;
+    let data_shards = usize::try_from(plan.data_shards).map_err(|_| Error::PlanOverflow)?;
+    let recovery_shards = usize::try_from(plan.recovery_shards).map_err(|_| Error::PlanOverflow)?;
+    let header_size_u32 = u32::try_from(plan.header_size).map_err(|_| Error::PlanOverflow)?;
+    let data_shards_u16 = u16::try_from(plan.data_shards).map_err(|_| Error::PlanOverflow)?;
+    let recovery_shards_u16 =
+        u16::try_from(plan.recovery_shards).map_err(|_| Error::PlanOverflow)?;
+    let groups = if plan.group_count == 0 {
+        vec![RecoveryGroup { offset: 0, len: 0 }]
+    } else {
+        recovery_groups(plan)?
+    };
+    if states_by_group.len() != groups.len() {
+        return Err(Error::PlanOverflow);
     }
+    // The trailing state is ONE value for the whole archive, the same in
+    // every record. rar 7.23 checks exactly that - it accepted rar's own
+    // archive with every record's trailing value replaced by zero, or by an
+    // arbitrary constant, once the record CRCs were recomputed, and refused
+    // it as "corrupt" whenever two records disagreed. Until 6 Sep 2026 this
+    // wrote a per-GROUP value (the CRC of shard 0's parity for that group),
+    // which is one value only while there is one group, so every recovery
+    // record over about 13 MB (200 shards x 64 KiB) tested as corrupt in rar
+    // while our own reader, which ignores the field, read it fine. The value
+    // kept is the CRC of shard 0's whole parity row: content-derived, and
+    // identical to the old value on every single-group archive.
+    // (nzbfast-local fix; see VENDORING.md.)
+    let final_state = parity.first().map(|row| crc64_rar_state(row)).unwrap_or(0);
+    let final_state_by_group: Vec<u64> = vec![final_state; groups.len()];
 
     let mut out = Vec::with_capacity(total_len);
     for (shard_index, payload) in parity.iter().enumerate() {
@@ -611,7 +878,7 @@ pub(crate) fn build_structural_inline_recovery_data_with_progress(
         }
         for ((group, states), final_state) in groups
             .iter()
-            .zip(&states_by_group)
+            .zip(states_by_group)
             .zip(&final_state_by_group)
         {
             let group_offset = usize::try_from(group.offset).map_err(|_| Error::PlanOverflow)?;
@@ -631,9 +898,29 @@ pub(crate) fn build_structural_inline_recovery_data_with_progress(
             out.extend_from_slice(&header_size_u32.to_le_bytes());
             out.push(1);
             out.push(1);
-            out.extend_from_slice(&0u64.to_le_bytes());
-            out.extend_from_slice(&chunk_data_extent_u32.to_le_bytes());
-            out.extend_from_slice(&(archive_prefix.len() as u64).to_le_bytes());
+            // The group's OFFSET within its shard and the group's LENGTH, as
+            // RARLab writes them (dumped from rar 7.23's own records: 0,
+            // 0x10000, 0x20000 and 65536, 65536, 36498 for a 32 MiB stored
+            // archive). Until 6 Sep 2026 this wrote zero and the whole
+            // shard's extent here, which coincide with the truth only while
+            // the record holds a single group - so every recovery record
+            // over about 13 MB (200 shards x 64 KiB) tested as "corrupt" in
+            // rar 7.23 while our own reader, which computes the group from
+            // the file offset, read it fine. (nzbfast-local fix; see
+            // VENDORING.md.)
+            // The extent field is the group's share of the last data
+            // shard's REAL bytes - the group length for every group but the
+            // one holding the padding (rar's records read 65536, 65536,
+            // 36498 where the last group is 36702 long and the last shard
+            // 204 bytes short). rar does not check it (a wrong value with
+            // a right CRC tests fine); it is written as rar writes it.
+            let group_extent = last_shard_data_len
+                .saturating_sub(group_offset)
+                .min(group_len);
+            let group_extent_u32 = u32::try_from(group_extent).map_err(|_| Error::PlanOverflow)?;
+            out.extend_from_slice(&group.offset.to_le_bytes());
+            out.extend_from_slice(&group_extent_u32.to_le_bytes());
+            out.extend_from_slice(&prefix_len.to_le_bytes());
             out.extend_from_slice(&plan.group_count.to_le_bytes());
             out.extend_from_slice(&plan.shard_size.to_le_bytes());
             out.extend_from_slice(&data_shards_u16.to_le_bytes());
@@ -1466,7 +1753,7 @@ fn recover_damaged_shards(
                             sum ^ gf.mul(weight, matrix[row_index][data_index])
                         })
                 };
-                (coefficient != 0).then(|| Gf16MulTable::new(gf, coefficient))
+                (coefficient != 0).then(|| Gf16MulTable::new(coefficient))
             })
             .collect();
 
@@ -1501,6 +1788,9 @@ fn recover_damaged_shards(
     Ok(())
 }
 
+/// Whether the streamed record's fold runs its pieces on the pool.
+const STREAMED_FOLD_PARALLEL: bool = true;
+
 /// One chunk of a table-driven fold; even so chunk starts stay on symbol
 /// boundaries. 64 KiB keeps the destination L2-resident while sources stream.
 const RECOVER_FOLD_CHUNK: usize = 64 * 1024;
@@ -1513,22 +1803,70 @@ const RECOVER_FOLD_CHUNK: usize = 64 * 1024;
 struct Gf16MulTable {
     lo: [u16; 256],
     hi: [u16; 256],
+    /// The SIMD form of the same multiply (see `gf16_fold`); the scalar
+    /// tables above fold whatever the kernels leave (nzbfast-local change,
+    /// 6 Sep 2026; see VENDORING.md).
+    simd: super::gf16_fold::FoldTables,
+}
+
+/// `c * x^k` in GF(2^16) for `k` in 0..16 - the products of `c` by the
+/// sixteen powers of two, off one xtime chain (shift, reduce by the
+/// field's own `PRIMITIVE_POLYNOMIAL`). Sixteen shifts and at most
+/// sixteen XORs, reading no table at all.
+fn power_chain(coefficient: u16) -> [u16; 16] {
+    let mut powers = [0u16; 16];
+    let mut value = u32::from(coefficient);
+    for slot in powers.iter_mut() {
+        *slot = value as u16;
+        value <<= 1;
+        if value > FIELD_MASK {
+            value ^= PRIMITIVE_POLYNOMIAL;
+        }
+    }
+    powers
+}
+
+/// The split byte tables for multiply-by-`c`: `lo[b] = c * b` and
+/// `hi[b] = c * (b << 8)`, the pair a scalar word product reads as
+/// `lo[w & 0xff] ^ hi[w >> 8]`.
+///
+/// Built by the subset walk over `power_chain` rather than by 512 calls
+/// to `Gf16::mul`: multiplication by a fixed `c` is GF(2)-linear in its
+/// other operand, so every entry is the XOR of the chain elements its
+/// index has bits set for. Some 16 shifts and 510 XORs over a 1 KiB
+/// working set, where the log/antilog form is 512 branchy round trips
+/// through a 768 KiB table pair. Identical output, pinned over all
+/// 65,536 coefficients by `split_tables_match_mul`
+/// (nzbfast-local change, 11 Sep 2026; see VENDORING.md).
+fn split_tables(coefficient: u16) -> ([u16; 256], [u16; 256]) {
+    let powers = power_chain(coefficient);
+    let mut lo = [0u16; 256];
+    let mut hi = [0u16; 256];
+    for bit in 0..8 {
+        let (low_basis, high_basis) = (powers[bit], powers[bit + 8]);
+        for index in 0..(1usize << bit) {
+            lo[index | (1 << bit)] = lo[index] ^ low_basis;
+            hi[index | (1 << bit)] = hi[index] ^ high_basis;
+        }
+    }
+    (lo, hi)
 }
 
 impl Gf16MulTable {
-    fn new(gf: &Gf16, coefficient: u16) -> Self {
-        let mut lo = [0u16; 256];
-        let mut hi = [0u16; 256];
-        for byte in 0..256u16 {
-            lo[byte as usize] = gf.mul(coefficient, byte);
-            hi[byte as usize] = gf.mul(coefficient, byte << 8);
+    fn new(coefficient: u16) -> Self {
+        let (lo, hi) = split_tables(coefficient);
+        Self {
+            lo,
+            hi,
+            simd: super::gf16_fold::FoldTables::new(coefficient),
         }
-        Self { lo, hi }
     }
 
     /// XORs `coefficient * source` into `destination`, both little-endian
     /// 2-byte symbol streams of equal, even length.
     fn fold_into(&self, destination: &mut [u8], source: &[u8]) {
+        let done = super::gf16_fold::fold_simd(&self.simd, destination, source);
+        let (destination, source) = (&mut destination[done..], &source[done..]);
         for (destination, source) in destination.chunks_exact_mut(2).zip(source.chunks_exact(2)) {
             let product =
                 self.lo[usize::from(source[0])] ^ self.hi[usize::from(source[1])];
@@ -1717,14 +2055,13 @@ fn encode_parity_shards_with_progress(
     }
 
     let matrix = make_encoder_matrix(data.len(), recovery_shards)?;
-    let gf = shared_gf16();
     let mut parity = vec![vec![0u8; first.len()]; recovery_shards];
     for (recovery_index, row) in matrix.iter().enumerate() {
         // Same table-driven fold as `recover_damaged_shards`: one
         // multiply-by-constant table per data shard, row-major accumulation.
         let tables: Vec<Option<Gf16MulTable>> = row
             .iter()
-            .map(|&coefficient| (coefficient != 0).then(|| Gf16MulTable::new(gf, coefficient)))
+            .map(|&coefficient| (coefficient != 0).then(|| Gf16MulTable::new(coefficient)))
             .collect();
         let parity_row = &mut parity[recovery_index];
 
@@ -1769,10 +2106,24 @@ fn encode_parity_shards_with_progress(
 /// stripe boundary inside a 2-byte symbol would corrupt the fold, and
 /// the writer's window is chosen even for exactly that reason.
 ///
-/// The multiply tables are built per call rather than cached, which
-/// costs 512 field multiplies per row and is nothing beside folding the
-/// stripe itself. Caching them would make the working set scale with the
-/// data volume count, which is the thing the striping exists to avoid.
+/// The multiply tables are built per call rather than cached. Caching
+/// them would make the working set scale with the data volume count,
+/// which is the thing the striping exists to avoid - so the build stays
+/// per call, and what changed is its price. This said the build "costs
+/// 512 field multiplies per row and is nothing beside folding the
+/// stripe itself" until 11 Sep 2026, which was written before the SIMD
+/// fold kernels landed in `05930d7d5d` and a faster fold makes the
+/// build a LARGER share of the call, not a smaller one. `split_tables`
+/// now builds the pair by the subset walk, ~616 -> ~147 ns per table
+/// measured on an M-series Mac, and at this function's window
+/// (`REV_MIN_WINDOW`..`REV_MAX_WINDOW`, so 64 KiB at worst) the
+/// original sentence is true again with room to spare: the build is
+/// ~0.3% of a 1 MiB window's fold. It is the STRIPED REPAIR that the
+/// old form actually cost, because its tables are rebuilt per (source,
+/// damaged row) per STRIPE and a memory-tight budget makes a stripe
+/// tens of KiB - 30% of the whole repair at a 20,900-byte stripe. See the
+/// host repo's `research/JOINT-STAGE2-DEPTH-GATE-2026-09-11.md`
+/// section 7.2 (nzbfast-local change, 11 Sep 2026; see VENDORING.md).
 pub fn fold_stripe_into_parity(
     matrix: &[Vec<u16>],
     data_index: usize,
@@ -1789,7 +2140,6 @@ pub fn fold_stripe_into_parity(
     if stripe.len() < len || parity.iter().any(|row| row.len() < len) {
         return Err(Error::ShardSizeMismatch);
     }
-    let gf = shared_gf16();
     for (row, destination) in matrix.iter().zip(parity.iter_mut()) {
         let Some(&coefficient) = row.get(data_index) else {
             return Err(Error::BadRecoveryChunk);
@@ -1797,7 +2147,7 @@ pub fn fold_stripe_into_parity(
         if coefficient == 0 {
             continue;
         }
-        let table = Gf16MulTable::new(gf, coefficient);
+        let table = Gf16MulTable::new(coefficient);
         for (offset, chunk) in destination[..len]
             .chunks_mut(RECOVER_FOLD_CHUNK)
             .enumerate()
@@ -2172,7 +2522,7 @@ where
             tables.clear();
             tables.extend(plan.inverse.iter().map(|row| {
                 let coeff = row[slot];
-                (coeff != 0).then(|| Gf16MulTable::new(gf, coeff))
+                (coeff != 0).then(|| Gf16MulTable::new(coeff))
             }));
             fold_source_into(&mut out, &tables, &scratch[..len]);
         }
@@ -2192,7 +2542,7 @@ where
             tables.clear();
             tables.extend(combined.iter().map(|row| {
                 let coeff = row[data_index];
-                (coeff != 0).then(|| Gf16MulTable::new(gf, coeff))
+                (coeff != 0).then(|| Gf16MulTable::new(coeff))
             }));
             fold_source_into(&mut out, &tables, &scratch[..len]);
         }
@@ -2219,10 +2569,44 @@ mod tests {
         repair_inline_recovery_archive,
         repair_inline_recovery_prefix, repair_inline_recovery_prefix_shards,
         repair_shards_striped, shared_gf16, shard_record_span, solve_damaged_group_shards,
-        split_prefix_shard_ranges, split_prefix_shards,
+        split_prefix_shard_ranges, split_prefix_shards, split_tables,
         Error, Gf16, InlineRecoveryPlan, StripeRepairPlan, FIELD_SIZE,
         MAX_RECONSTRUCTION_SHARDS, MAX_WINRAR602_DATA_SHARDS,
     };
+
+    /// `split_tables` is the subset walk over the field's xtime chain
+    /// where the old form was 512 calls to `Gf16::mul`, so nothing but
+    /// this test says the two agree - and they must agree for EVERY
+    /// coefficient, because these tables are the scalar half of every
+    /// `Gf16MulTable` on every arch and the WHOLE fold on one with no
+    /// SIMD kernel. The chain is derived from this module's own
+    /// `PRIMITIVE_POLYNOMIAL` rather than copied from the PAR2 engine's
+    /// gf16, and a wrong reduction is exactly what a sampled pin would
+    /// miss, so this is exhaustive over all 65,536: 33.5 M comparisons,
+    /// well under a second natively
+    /// (nzbfast-local change, 11 Sep 2026; see VENDORING.md).
+    #[test]
+    fn split_tables_match_mul() {
+        let gf = shared_gf16();
+        let mut cases = 0u64;
+        for coefficient in 0..=u16::MAX {
+            let (lo, hi) = split_tables(coefficient);
+            for byte in 0..256u16 {
+                assert_eq!(
+                    lo[byte as usize],
+                    gf.mul(coefficient, byte),
+                    "coefficient={coefficient:04x} lo[{byte}]"
+                );
+                assert_eq!(
+                    hi[byte as usize],
+                    gf.mul(coefficient, byte << 8),
+                    "coefficient={coefficient:04x} hi[{byte}]"
+                );
+                cases += 2;
+            }
+        }
+        assert_eq!(cases, 2 * 65_536 * 256);
+    }
 
     #[test]
     fn rar5_inline_recovery_plan_matches_fixture_formula_examples() {
@@ -2301,6 +2685,33 @@ mod tests {
                 shard_size: 68_882,
             }
         );
+    }
+
+    /// The folder's record over a prefix pushed in odd chunks is the
+    /// whole-prefix builder's record, byte for byte - including a prefix
+    /// of odd length (a half symbol at the end), several groups and a last
+    /// shard shorter than the others.
+    #[test]
+    fn inline_recovery_folder_matches_the_whole_prefix_builder() {
+        for (len, percent) in [(3_000_001usize, 5u64), (150_001, 10), (20 << 20, 3)] {
+            let prefix: Vec<u8> = (0..len)
+                .map(|i| ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as u8)
+                .collect();
+            let expected = build_structural_inline_recovery_data(&prefix, percent).unwrap();
+            let mut folder = super::InlineRecoveryFolder::new(len as u64, percent).unwrap();
+            assert_eq!(folder.record_len().unwrap(), expected.len() as u64);
+            let mut at = 0usize;
+            let mut step = 1usize;
+            while at < len {
+                let take = step.min(len - at);
+                folder.push(&prefix[at..at + take]).unwrap();
+                at += take;
+                step = (step * 7 + 3) % 200_003 + 1;
+            }
+            let record = folder.finish().unwrap();
+            assert_eq!(record.len(), expected.len(), "len {len} pct {percent}");
+            assert!(record == expected, "len {len} pct {percent}: record differs");
+        }
     }
 
     #[test]

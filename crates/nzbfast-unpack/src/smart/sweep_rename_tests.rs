@@ -1950,12 +1950,12 @@ fn a_named_extension_is_never_second_guessed_by_the_sniff() {
     assert_eq!(nameless_video(out), None);
 }
 
-/// Codex sweep 5, M1/M2/M4: the issue-43 extensionless classifier
+/// Review sweep 5, M1/M2/M4: the issue-43 extensionless classifier
 /// reached `tv_rename` and nothing else, so every OTHER naming route
 /// still selected by extension and walked straight past the very file
 /// the job is about.
 ///
-/// Each arm below is a route Codex named, driven through its own
+/// Each arm below is a route review named, driven through its own
 /// function rather than through a fixture with a named `.mkv` - which
 /// is exactly why the original #43 tests missed all three.
 #[test]
@@ -2037,7 +2037,7 @@ fn every_naming_route_can_see_an_extensionless_feature() {
     );
 }
 
-/// Codex sweep 6, N1: sweep 5's M4 fix reached `tv_rename` and season
+/// Review sweep 6, N1: sweep 5's M4 fix reached `tv_rename` and season
 /// filing, and left the other two selectors on the extension-gated
 /// predicate.
 ///

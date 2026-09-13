@@ -49,7 +49,7 @@ fail-fast = false
 leak-timeout = "1s"
 
 # The daemon suite spawns real daemons and binds ports; it must run one
-# test at a time (CLAUDE.md invariant 4). Under libtest that was
+# test at a time (project invariant 4). Under libtest that was
 # --test-threads=1; under nextest it is test-group serialization here,
 # so a bare `cargo nextest run --test daemon` is safe even without -j1.
 [[profile.default.overrides]]
@@ -85,7 +85,7 @@ fail-fast = false
 # ---------------------------------------------------------------------
 # THE REPO-WIDE WEDGE CEILING (25 Aug 2026). Ten minutes, per test,
 # everywhere this profile reaches - which is every CI test job and the
-# pre-push sweep CLAUDE.md documents.
+# pre-push sweep CONTRIBUTING.md documents.
 #
 # WHY IT EXISTS. 58b793077 put a ceiling on `extract::` in the nzbkit
 # lib and DELIBERATELY went no wider, because its instrument needs
@@ -124,7 +124,7 @@ fail-fast = false
 #
 # 600 s is 4.2x the worst of those. The binding number is the LOCAL one,
 # not CI's, and that is the point worth keeping: `--profile ci` is what
-# CLAUDE.md's pre-push oracle line runs, on a shared box with eight
+# CONTRIBUTING.md's pre-push oracle line runs, on a shared box with eight
 # other sessions on it. Those same two WAL tests take 4.1 s when run
 # alone on this box - a 34x contention swing - so the number has to be
 # read off a real contended sweep and never off a solo timing.
@@ -559,7 +559,7 @@ threads-required = 'num-test-threads'
 # MEASURED with this block in place: the iteration line
 # (`--test e2e -E 'not test(/_at_shipped_thresholds$/)'`) is 449 tests in
 # 177.9 s at `--retries 0`, against the ~210 s that line was documented
-# at in CLAUDE.md before it. No measurable cost.
+# at in CONTRIBUTING.md before it. No measurable cost.
 #
 # THIS IS THE CONTAINMENT AND NOT THE CURE, stated so the next lane does
 # not read it as one. The tests are still wall-clock-sensitive; a loaded
@@ -909,8 +909,8 @@ max-threads = 6
 # modules also carry the ordinary, fast, currently-parallel unit tests
 # that the main documented CI sweep already runs on every push - a
 # module-wide group would silently serialize all of those too. All 26
-# are named (not only the 21 actually wired into nightly.yml below):
-# five are excluded from that job pending a product decision (see the
+# are named (not only the 20 actually wired into nightly.yml below):
+# six are excluded from that job pending a product decision (see the
 # nightly.yml comment beside them), and a test that is unsafe to run
 # concurrently with itself does not become safe by being temporarily
 # unwired.

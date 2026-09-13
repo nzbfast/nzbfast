@@ -289,6 +289,7 @@ mod scope_tests {
 
     fn pset(files: Vec<nzbkit::par2::Par2File>) -> nzbkit::par2::Par2Set {
         nzbkit::par2::Par2Set {
+            comment: None,
             recovery_set_id: [0u8; 16],
             block_size: 4096,
             files,

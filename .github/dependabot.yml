@@ -18,6 +18,34 @@ updates:
         patterns:
           - "*"
     open-pull-requests-limit: 3
+    # THE WEEKLY CARGO JOB WAS RED ON EVERY RUN FROM SOME TIME BEFORE
+    # 21 AUG 2026 TO 4 SEP, AND NOBODY NOTICED FOR A REASON WORTH
+    # KEEPING IN MIND: it still opened PRs for everything else, so the
+    # group applied partially and a red run read as a working one. Both
+    # stalls were `dependency_file_not_resolvable` - a manifest FEATURE
+    # the new version renamed or dropped, which Dependabot cannot bump
+    # around and reports as a whole-run error rather than a skipped
+    # crate. Neither was ever in an ignore block; they are now, each
+    # with the exit condition that removes it again.
+    ignore:
+      # md-5 0.11.0 (27 Mar 2026) dropped the `asm` feature entirely,
+      # and crates/nzbkit-base asks for it on x86. NOT a bump to take:
+      # 0.11 has no autodetecting replacement backend (`compress.rs`
+      # offers `soft` and `loongarch64_asm` only), and MD5 here is the
+      # per-byte PAR2 hash, so taking it is a measured x86 verify
+      # throughput regression. Exit condition: an upstream backend that
+      # autodetects, not a version number. 0.10.x bumps still flow.
+      - dependency-name: "md-5"
+        versions: [">=0.11"]
+      # ureq 3.4.0 (8 Aug 2026) renamed the `tls` feature to `_tls`, and
+      # crates/nzbtray is on `version = "2", features = ["tls"]`. Unlike
+      # md-5 this one SHOULD be taken - it is just not the one-line
+      # manifest edit the rename makes it look like: 3.x is a different
+      # API, and the tray wires its own rustls loopback verifier through
+      # it (`loopback_tls`), on a Windows-only crate no host CI job
+      # runs. Exit condition: that port. 2.x bumps still flow.
+      - dependency-name: "ureq"
+        versions: [">=3"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

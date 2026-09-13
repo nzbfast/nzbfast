@@ -40,23 +40,23 @@ class Nzbfast < Formula
   # because `on_macos` itself may not contain a `url`.
   on_macos do
     on_arm do
-      url "https://github.com/nzbfast/nzbfast/releases/download/v1.3.1/nzbfast-1.3.1-macos-universal.zip"
-      sha256 "929c7470326dcaa5ad693c2b5d5ff1d82624bf54a81a485d629b1db664fcc35e"
+      url "https://github.com/nzbfast/nzbfast/releases/download/v1.4.0/nzbfast-1.4.0-macos-universal.zip"
+      sha256 "355d6e097aa43cf911be3ad54be1c58a0eedbe45cca22f82b2d1aab2b4f65232"
     end
     on_intel do
-      url "https://github.com/nzbfast/nzbfast/releases/download/v1.3.1/nzbfast-1.3.1-macos-universal.zip"
-      sha256 "929c7470326dcaa5ad693c2b5d5ff1d82624bf54a81a485d629b1db664fcc35e"
+      url "https://github.com/nzbfast/nzbfast/releases/download/v1.4.0/nzbfast-1.4.0-macos-universal.zip"
+      sha256 "355d6e097aa43cf911be3ad54be1c58a0eedbe45cca22f82b2d1aab2b4f65232"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/nzbfast/nzbfast/releases/download/v1.3.1/nzbfast-1.3.1-linux-x64.tar.gz#/nzbfast-linux-x64-1.3.1.tar.gz"
-      sha256 "17bfd91fb8dfc2159e0061e4e0a4fee08c308b281b5b70ba91e3eeec379e5dea"
+      url "https://github.com/nzbfast/nzbfast/releases/download/v1.4.0/nzbfast-1.4.0-linux-x64.tar.gz#/nzbfast-linux-x64-1.4.0.tar.gz"
+      sha256 "7e387c672bf15ea6165740b50b8b63583b50298cf8aab6b61dcf676a02aa503d"
     end
     on_arm do
-      url "https://github.com/nzbfast/nzbfast/releases/download/v1.3.1/nzbfast-1.3.1-linux-arm64.tar.gz#/nzbfast-linux-arm64-1.3.1.tar.gz"
-      sha256 "920a286a466155594e2d9c1ec39c2d8a7b99640207a6f978b4ee5664c8f31fc8"
+      url "https://github.com/nzbfast/nzbfast/releases/download/v1.4.0/nzbfast-1.4.0-linux-arm64.tar.gz#/nzbfast-linux-arm64-1.4.0.tar.gz"
+      sha256 "75b768c5627f3b2c5d8566344bf2a5d7bb2fa49ea4be2e212d666d5bc77b7209"
     end
   end
 

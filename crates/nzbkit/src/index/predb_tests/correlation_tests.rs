@@ -1358,7 +1358,7 @@ fn a_named_fragment_blocks_its_groups_merge() {
     teardown(&d, ix);
 }
 
-/// Codex sweep 10 Aug M6: a fold moves the fragments' FILES onto the
+/// Review sweep 10 Aug M6: a fold moves the fragments' FILES onto the
 /// kept row, so it has to move their message-id identity too. The
 /// `rel_identity_ad` delete trigger drops `msgid_map` for every source
 /// release, and without an explicit remap the fold silently destroys
@@ -1708,7 +1708,7 @@ fn a_folded_shatter_is_scored_the_way_ingest_scores_it() {
     teardown(&d, ix);
 }
 
-/// Codex sweep 3 Aug M3: folding deletes the bare twin row, and
+/// Review sweep 3 Aug M3: folding deletes the bare twin row, and
 /// when that twin held the table's MAXIMUM id, SQLite hands the
 /// same id to the next insert. A cursor parked on the deleted id
 /// with a strictly-greater scan would never visit the recreated
@@ -1750,7 +1750,7 @@ fn a_recreated_twin_at_the_deleted_maximum_id_still_folds() {
     teardown(&d, ix);
 }
 
-/// Codex sweep 3 Aug M2: predb pruning must not leave dangling
+/// Review sweep 3 Aug M2: predb pruning must not leave dangling
 /// pre_corr identities - an orphaned SUGGESTED row starves every
 /// future lower-scoring valid candidate (the upsert takes only
 /// >= scores), and a dangling reference in a settled row can
@@ -1806,7 +1806,7 @@ fn pruning_a_pre_releases_its_correlation_identity() {
     teardown(&d, ix);
 }
 
-/// Codex sweep 2, 3 Aug M5: the orphan repair used to run only when
+/// Review sweep 2, 3 Aug M5: the orphan repair used to run only when
 /// the SAME call had just deleted a pre. A store that already holds
 /// dangling rows - left by a crash between the delete and the
 /// repair, or by the pre-transaction version failing partway - then

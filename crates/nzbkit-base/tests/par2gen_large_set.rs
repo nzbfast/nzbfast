@@ -36,7 +36,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use nzbkit_base::par2gen::{
-    Member, Par2Spec, accum_budget_bytes, create_into, pin_accum_budget_for_tests,
+    CreatePlan, Member, Par2Spec, accum_budget_bytes, create_into, create_into_exact, ntt_range,
+    pin_accum_budget_for_tests,
 };
 
 /// A payload with no long runs and no repeating period a fold could
@@ -337,6 +338,103 @@ fn the_accumulator_budget_really_splits_a_set_into_several_passes() {
     assert_eq!(std::fs::read(victim).unwrap(), good);
 }
 
+/// A cancel in a LATER pass has to remove the EARLIER passes' volumes.
+///
+/// This is the one cancel claim the light suite
+/// (`nzbkit/tests/integration/par2gen_cancel.rs`) cannot make, and it
+/// lives here for the same reason its neighbour above does: reaching a
+/// second pass means pinning the process-wide accumulator budget, which
+/// the merged integration binary refuses to have left behind it. The
+/// shape is that neighbour's, at the same pinned budget so the two
+/// cannot disagree about where the boundary is.
+#[test]
+fn a_cancel_in_a_later_pass_removes_the_earlier_passes_volumes() {
+    use nzbkit_base::par2gen::control::{CreateControl, CreatePhase};
+    use nzbkit_base::par2repair::{PauseGate, ProgressSink};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    pin_accum_budget_for_tests(64 << 20);
+    let t = Tmp::new("cancelpass");
+    let block = 1u64 << 20;
+    let members = vec![
+        t.write("a.bin", &payload(5 << 20, 7)),
+        t.write("b.bin", &payload((3 << 20) + 4_097, 8)),
+    ];
+    let out = t.0.clone();
+    let n_slices = 8 + 4; // 5 MiB + 3 MiB + a tail, at a 1 MiB block
+    let per_batch = (accum_budget_bytes() / block).max(1) as usize;
+    // Nine passes' worth of rows at the pinned budget, so a cancel in
+    // the SECOND pass has a first pass's volumes to take back.
+    let rows = per_batch * 3;
+    assert!(
+        rows > per_batch,
+        "fixture no longer crosses the budget ({rows} rows, {per_batch}-row batch) - \
+         re-size it, do not delete the assertion"
+    );
+
+    /// Cancels the create the second time the fold phase is SIZED -
+    /// which is the second pass, exactly (`recovery_slices` begins the
+    /// phase once per batch), and records what it was told.
+    struct OnSecondPass {
+        begins: AtomicU64,
+        gate: Arc<PauseGate>,
+        volumes_written: Mutex<u64>,
+    }
+    impl ProgressSink for OnSecondPass {
+        fn progress(&self, phase: CreatePhase, done: u64, _total: u64) {
+            if phase == CreatePhase::Write && done > 0 {
+                *self.volumes_written.lock().unwrap() = done;
+            }
+            if phase == CreatePhase::Fold && done == 0 {
+                // `(Fold, 0, total)` is a pass sizing its bar.
+                if self.begins.fetch_add(1, Ordering::SeqCst) + 1 >= 2 {
+                    self.gate.cancel();
+                }
+            }
+        }
+    }
+
+    let gate = PauseGate::new();
+    let sink = Arc::new(OnSecondPass {
+        begins: AtomicU64::new(0),
+        gate: gate.clone(),
+        volumes_written: Mutex::new(0),
+    });
+    let progress: Arc<dyn ProgressSink> = sink.clone();
+    let err = nzbkit_base::par2gen::create_into_exact_controlled(
+        &out,
+        &members,
+        "cset",
+        Some(block),
+        rows,
+        CreatePlan::ENGINE,
+        None,
+        &CreateControl::new(Some(progress), Some(gate)),
+    )
+    .expect_err("a create cancelled in its second pass must not report success");
+    assert!(
+        matches!(err, nzbkit_base::par2gen::Par2GenError::Cancelled),
+        "{err:?}"
+    );
+    assert!(
+        *sink.volumes_written.lock().unwrap() > 0,
+        "the cancel landed before the first pass wrote a volume, so this proved nothing"
+    );
+    let left: Vec<String> = std::fs::read_dir(&out)
+        .expect("read dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".par2"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "a cancel in a later pass left the earlier passes' volumes: {left:?}"
+    );
+    assert_eq!(n_slices, 12, "the fixture's slice count is a constant here");
+    pin_accum_budget_for_tests(0);
+}
+
 #[test]
 fn two_builds_of_one_set_are_byte_identical() {
     // The fold is PARALLEL and its work is split by a grid derived from
@@ -418,6 +516,119 @@ fn the_slice_ceilings_refuse_before_anything_is_built() {
     let msg = format!("{err}");
     assert!(msg.contains("recovery slices"), "{msg}");
     assert!(msg.contains("lower the redundancy"), "{msg}");
+}
+
+#[test]
+fn the_transform_writes_the_fold_s_bytes_at_a_real_block_size() {
+    // The create-side NTT at a block size that is not a toy, which is the
+    // half `crates/nzbkit/tests/integration/par2gen_create_ntt.rs` cannot
+    // afford on every push. That file covers all four dispatch shapes -
+    // mapped, copied windows, the subfloor clause, stripe-first - at a
+    // 128-byte block, where the transform runs as ONE stripe on ONE
+    // worker: `ntt_stripe_geometry` cuts a block into 512-word stripes
+    // and hands them to every core, so at 128 bytes there is a single
+    // stripe and the atomic claim loop, the per-worker scratch and the
+    // cross-worker column split never run at all.
+    //
+    // 4,096 bytes gives four stripes over as many workers as the box
+    // has, which is the geometry a real set is built at. The price is
+    // why it lives here rather than beside them: the same slice count at
+    // a real block is thirty times the payload, folded twice over (both
+    // arms). Measured 8 Sep 2026 on the dev Mac (32 cores, arm64), DEBUG
+    // build: 0.7 s here against 0.5 s for all four of the per-push
+    // tests - both parallel folds, so a 4 vCPU runner pays several times
+    // that.
+    //
+    // The shape comes from the shipped gates rather than from numbers
+    // copied out of them, so it re-sizes itself if a gate is
+    // re-derived; the assertion that a plan was really built is what
+    // makes that safe.
+    //
+    // The arm pin and the plan counter are process-global and this test
+    // takes no lock over them, because none of the five tests beside it
+    // is anywhere near the gates - the widest is ~1,500 slices at 75
+    // rows - so nothing else in this binary builds a plan or cares which
+    // arm is pinned. A large-shape test added here later would break
+    // that: the counter is monotone, so a concurrent plan build inflates
+    // this test's difference and fails it LOUDLY rather than passing on
+    // somebody else's transform. The fix then is a shared serializer,
+    // the way `par2gen_create_ntt` next door already carries one.
+    let bs = 4_096u64;
+    let (slices, rows) = ntt_range::floor_shape_for_tests();
+    let t = Tmp::new("createntt");
+    // Two members, the second a PARTIAL tail block - the block the
+    // mapped path copies into its pad arena instead of reading out of
+    // the mapping. Each arm gets its own copy beside its own set,
+    // because a PAR2 set names its members relative to its own
+    // directory and the transform arm is repaired below.
+    // The NAMES travel with the bytes: a volume split that came out
+    // differently would otherwise compare equal file for file.
+    let mut built: Vec<Vec<(String, Vec<u8>)>> = Vec::new();
+    for (tag, fold) in [("fold", true), ("ntt", false)] {
+        ntt_range::pin_transform_off_for_tests(fold);
+        let dir = t.0.join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let members = vec![
+            {
+                let path = dir.join("payload.bin");
+                std::fs::write(&path, payload((slices - 1) * bs as usize, 41)).unwrap();
+                Member {
+                    name: "payload.bin".into(),
+                    path,
+                }
+            },
+            {
+                let path = dir.join("tail.bin");
+                std::fs::write(&path, payload(bs as usize / 2, 42)).unwrap();
+                Member {
+                    name: "tail.bin".into(),
+                    path,
+                }
+            },
+        ];
+        let before = ntt_range::cold_builds_for_tests();
+        let names =
+            create_into_exact(&dir, &members, "set", Some(bs), rows, CreatePlan::ENGINE).unwrap();
+        let cold = ntt_range::cold_builds_for_tests() - before;
+        assert_eq!(
+            cold,
+            u64::from(!fold),
+            "the {tag} arm built {cold} transform plan(s) at {slices} inputs x {rows} rows - if \
+             this is the transform arm the shipped gates refused a fixture sized from those same \
+             gates, so re-size the fixture; do not delete the assertion"
+        );
+        built.push(
+            names
+                .iter()
+                .map(|n| (n.clone(), std::fs::read(dir.join(n)).unwrap()))
+                .collect(),
+        );
+    }
+    ntt_range::pin_transform_off_for_tests(false);
+    assert_eq!(
+        built[0], built[1],
+        "the transform and the fold must write the same recovery set"
+    );
+
+    // And it repairs, which is the only thing that proves the exponents
+    // the transform produced are the ones the repairer expects.
+    let victim = t.0.join("ntt").join("payload.bin");
+    let good = std::fs::read(&victim).unwrap();
+    let mut broken = good.clone();
+    let n = broken.len();
+    broken[10_000..300_000].fill(0);
+    broken[n - 50_000..].fill(0xff);
+    std::fs::write(&victim, &broken).unwrap();
+    let status = nzbkit_base::par2repair::repair_dir(&t.0.join("ntt")).expect("repair runs");
+    assert!(
+        matches!(status, nzbkit_base::par2repair::RepairStatus::Repaired(_)),
+        "{status:?}"
+    );
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        good,
+        "victim not byte-exact"
+    );
 }
 
 #[test]

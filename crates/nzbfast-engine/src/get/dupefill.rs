@@ -1952,7 +1952,7 @@ fn donor_files_by_name(donor: &Nzb) -> std::collections::HashMap<String, usize> 
 /// Kept as ONE function deliberately. A copy would be a second spelling
 /// of a MEASURED constant plus a second copy of the provenance above
 /// it, and the two would part company the first time either moved -
-/// the drift class `CLAUDE.md`'s gate list keeps growing to refuse, and
+/// the drift class `CONTRIBUTING.md`'s gate list keeps growing to refuse, and
 /// which its TWENTY-FOURTH entry records taking seven minutes to create
 /// for the three rate formatters. It also means the five
 /// mutation-verified tests in `dupefill_tests` cover both callers at

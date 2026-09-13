@@ -97,6 +97,12 @@ and PRs. Please don't take the lack of a personal name as a lack of
 care; reviews are real, and your name (unlike ours) is preserved in
 history.
 
+The project is built with heavy use of AI coding assistants (mostly
+Claude), and that includes drafting replies on issues and PRs. The
+maintainer is accountable for everything posted under the `nzbfast`
+account. If a reply reads as if nobody checked it, say so: it will be
+corrected in the open rather than defended.
+
 ## Security issues
 
 Please don't open a public issue for exploitable bugs - use GitHub's

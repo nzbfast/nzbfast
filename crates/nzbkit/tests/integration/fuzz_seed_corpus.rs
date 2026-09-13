@@ -516,3 +516,77 @@ fn the_nzb_semantic_seed_corpus_stays_tiny() {
         "the nzb_semantic seeds are choice streams, not documents - {total} bytes"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `rar_map`'s repro (seeds/README.md, 11 Sep 2026).
+//
+// This one is not a corpus: it is the single input behind the scheduled
+// fuzz-smoke red of 11 Sep 2026 (run 34564492152, sha `a6ed0da5`),
+// reduced from 41,608 bytes to 25. It sits here for the reason every
+// repro does - the CI artifact expires and `artifacts/` is gitignored -
+// and it is asserted by SHAPE rather than by outcome, exactly as the
+// `nzb_parse` adversarial seeds are.
+//
+// Shape, because the finding was in the fuzz TARGET, not the library: the
+// target's RAR4 `-hp` half asserted `next <= volume_size`, which is a rule
+// `VolumeMapper::advance_to` enforces one layer up and which the block
+// parser deliberately does not. So there is no library behaviour change to
+// pin a before/after on, and a test asserting the corrected invariant would
+// pass on both sides of the fix and prove nothing. What CAN go stale is the
+// seed: if these bytes ever stop producing an out-of-volume cursor - a
+// widened plausibility gate, a clamp, a changed throwaway key - the seed
+// stops carrying the shape it was committed for, and the next burst would
+// replay 25 inert bytes and still say zero crashes. That is the failure
+// this file exists for.
+// ---------------------------------------------------------------------------
+
+/// The `rar_map` repro still reaches an out-of-volume cursor.
+///
+/// The assertions are the target's own half 2, in the same order, minus
+/// the one that was wrong: the parse is ACCEPTED (so the header frame
+/// cleared the plausibility gate and lies inside the declared volume),
+/// the cursor STRICTLY ADVANCES (the non-termination rule), and it lands
+/// PAST the declared volume (the shape, and the thing the old assertion
+/// read as a defect). The last one is the assertion that fired in CI,
+/// inverted: what CI called a bug is what this seed is kept for.
+#[test]
+fn the_rar_map_seed_still_carries_an_out_of_volume_cursor() {
+    let path = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fuzz/seeds/rar_map/crash-f23952f19b3ae77b1b576164f2d99592f840188a-reduced"
+    ));
+    let data = std::fs::read(path).expect("the rar_map repro is committed");
+    // The target's own preamble, byte for byte: byte 0 is the feed-shape
+    // selector and `declared` is derived from the body's length.
+    let mode = data[0];
+    let body = &data[1..];
+    assert_eq!(
+        mode & 0x04,
+        0,
+        "the selector must leave the volume size KNOWN"
+    );
+    let declared = body.len() as u64;
+    let base = u64::from(mode) * 16;
+    let (next, _blocked) =
+        nzbkit::rar::fuzz_v4_encrypted_header(body, base, [0x5a; 16], [0xa5; 16], declared);
+    let next = next.expect("the repro's encrypted header is still accepted");
+    assert!(
+        next > base,
+        "the repro must still ADVANCE - a cursor at or before its own start is \
+         the separate shape that spun the parse loop"
+    );
+    assert!(
+        next > declared,
+        "the repro must still land past the {declared}-byte volume - it is kept \
+         for that shape, and got {next}"
+    );
+    // And the property the target asserts in its place: a volume size only
+    // GATES the parse, it never moves the cursor.
+    let (unsized_next, _) =
+        nzbkit::rar::fuzz_v4_encrypted_header(body, base, [0x5a; 16], [0xa5; 16], 0);
+    assert_eq!(
+        unsized_next,
+        Some(next),
+        "a volume size must gate the parse, never change where it lands"
+    );
+}

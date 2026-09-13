@@ -26,7 +26,7 @@ fn tmp(tag: &str) -> std::path::PathBuf {
 /// admission, so both calls passed the find, both read the spool
 /// copy and both enqueued - with `allow_dupe` set, so nothing held
 /// the second, and `choose_out_dir` gave it a suffixed folder of its
-/// own: one press, two complete downloads (Codex sweep 3, L3).
+/// own: one press, two complete downloads (review sweep 3, L3).
 #[test]
 fn two_overlapping_retries_of_one_notice_add_the_release_once() {
     let dir = tmp("keptrace");
@@ -114,7 +114,7 @@ fn a_failed_retry_leaves_the_notice_where_it_was() {
 /// empty. The recategorize then re-pointed the record and poked
 /// nothing, so the primary run started at the new directory from
 /// zero and refetched the whole release over the same provider
-/// quota, and the old folder was named by no record at all (Codex
+/// quota, and the old folder was named by no record at all (review
 /// sweep 3, M12).
 #[test]
 fn a_recategorize_with_no_sidecar_moves_the_partial_files() {
@@ -156,7 +156,7 @@ fn a_recategorize_with_no_sidecar_moves_the_partial_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex C10: the queue store refuses AFTER the recategorize moved the
+/// Review C10: the queue store refuses AFTER the recategorize moved the
 /// partial tree. The relocation fence prevents the live scheduling
 /// race, not a restart after refused persistence - so the refused save
 /// has to roll the whole transaction back, record and bytes together,

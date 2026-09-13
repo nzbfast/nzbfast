@@ -419,11 +419,11 @@ fn the_naming_seam_owes_ingests_group_recovery_too() {
     teardown(&d, ix);
 }
 
-/// Codex probe A: archive volumes share one release stem but remain
+/// Review probe A: archive volumes share one release stem but remain
 /// distinct files, each with its own yEnc part-number universe.
 #[test]
-fn codex_probe_a_shatter_fold_keeps_distinct_archive_volume_filenames() {
-    let d = dir("codex-probe-a");
+fn probe_a_shatter_fold_keeps_distinct_archive_volume_filenames() {
+    let d = dir("probe-a");
     let mut ix = Index::open(&d.join("index.db")).unwrap();
     const STEM: &str = "e3b0c44298fc1c149afbf4c8996fb924";
     let groups = ["alt.binaries.movies", "alt.binaries.tv"];
@@ -435,7 +435,7 @@ fn codex_probe_a_shatter_fold_keeps_distinct_archive_volume_filenames() {
                 &[over(
                     &subject,
                     &format!("p{file}{part}@test"),
-                    &format!("codex-a-{file}-{part}@test"),
+                    &format!("probe-a-{file}-{part}@test"),
                     1_000,
                 )],
                 5_000,
@@ -473,7 +473,7 @@ fn codex_probe_a_shatter_fold_keeps_distinct_archive_volume_filenames() {
     teardown(&d, ix);
 }
 
-/// Codex probe D: a posting bigger than the member cap must still
+/// Review probe D: a posting bigger than the member cap must still
 /// reach one complete row. "It folds on a later lap" was never true -
 /// the cursor parks at the top id, so a posting that has stopped
 /// arriving is never revisited.
@@ -504,7 +504,7 @@ fn a_posting_past_the_member_cap_still_folds_to_one_row() {
             for id in 1..=MEMBERS {
                 rel.execute(rusqlite::params![id, STEM, format!("p{id}@test"), MEMBERS])
                     .unwrap();
-                let segments = format!(r#"[[{id},"<codex-d-{id}@test>",100]]"#);
+                let segments = format!(r#"[[{id},"<probe-d-{id}@test>",100]]"#);
                 file.execute(rusqlite::params![
                     id,
                     format!("{STEM}.bin"),
@@ -552,7 +552,7 @@ fn a_posting_past_the_member_cap_still_folds_to_one_row() {
     teardown(&d, ix);
 }
 
-/// Codex probe C: a checked marker belongs to ONE suggested pairing,
+/// Review probe C: a checked marker belongs to ONE suggested pairing,
 /// not to every later pairing the same release acquires. A stronger
 /// pre replacing the stored one starts a fresh pairing, and the
 /// confirm lane has never spent a lookup on it.
@@ -571,7 +571,7 @@ fn a_replacement_pairing_starts_unchecked() {
         "alt.binaries.x264",
         &[overd(
             r#""cD3xY7Bm2ZpK4L9q.part01.rar" yEnc (1/1)"#,
-            "codex-c1",
+            "probe-c1",
             5_000_000_000,
             4_600,
         )],

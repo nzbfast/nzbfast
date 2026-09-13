@@ -348,6 +348,19 @@ fn queue_has_runnable_wants_queued_and_unpaused() {
             .lock_ok()
             .push_back(jv("c", "c", serde_json::json!({})));
         assert!(d.queue_has_runnable());
+        // The global pause outranks the per-job flag: nothing behind it
+        // will be picked, so nothing behind it is "a download running".
+        d.paused.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            !d.queue_has_runnable(),
+            "a globally paused queue has nothing runnable"
+        );
+        d.paused.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(d.queue_has_runnable(), "and it comes back on resume");
+        d.offline.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(!d.queue_has_runnable(), "offline is a pause too");
+        d.offline.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(d.queue_has_runnable());
     });
 }
 
@@ -407,7 +420,7 @@ fn pick_job_priority_desc_then_fifo() {
     });
 }
 
-/// Codex F-06: `pick_job`'s half of the relocation fence.
+/// Review finding F-06: `pick_job`'s half of the relocation fence.
 ///
 /// The daemon test `a_relocating_job_cannot_be_started_into_its_
 /// destination` proves the fence end to end but cannot say WHICH arm
@@ -1924,7 +1937,7 @@ fn dupe_alias_meets_one_show_under_two_names_and_never_a_spinoff() {
             "different show ids: a spin-off must never be its parent's duplicate"
         );
 
-        // Codex sweep 7, H2: an equal NUMBER is not an equal show. The
+        // Review sweep 7, H2: an equal NUMBER is not an equal show. The
         // column those ids live in carries TVmaze, AniList and TMDB
         // numbering, all small and dense, and under the keyless default
         // an anime title lands in the AniList one for no reason the user
@@ -2052,7 +2065,7 @@ fn a_deleted_release_is_not_a_duplicate_until_the_mark_is_spent() {
 
 /// A row NZBGet's `HistoryDelete` hid is still a row we HAVE.
 ///
-/// That asymmetry is the whole fix for the Codex triage's finding 8:
+/// That asymmetry is the whole fix for the review triage's finding 8:
 /// `HistoryDelete` shares a facade arm with `HistoryFinalDelete` no
 /// longer, and what the hide buys is precisely this - Sonarr's "Remove
 /// completed downloads" fires that verb after every import, and before

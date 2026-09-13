@@ -1710,7 +1710,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Codex sweep 13 Aug R3: the OTHER ordering - materialize FIRST,
+    /// Review sweep 13 Aug R3: the OTHER ordering - materialize FIRST,
     /// verified rename after. The `M` record rewrote the slot's
     /// placements to identity form under the demote-time name, and the
     /// rename then reached only the in-memory `renamed_to`: replay

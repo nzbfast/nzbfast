@@ -665,7 +665,7 @@ fn a_split_of_a_single_rar_is_joined_once_the_rar_arm_fails() {
 
 /// The rescue replaces the RAR arms' verdict on the container it joined,
 /// and ONLY theirs: an unrelated broken archive beside the split set
-/// keeps its own failure (Codex F-01). Before the fix the level said
+/// keeps its own failure (review finding F-01). Before the fix the level said
 /// `Produced` with the 7z still sitting there unopened.
 #[test]
 fn a_split_container_rescue_does_not_absolve_an_unrelated_broken_archive() {
@@ -694,7 +694,7 @@ fn a_split_container_rescue_does_not_absolve_an_unrelated_broken_archive() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex F-01, 23 Aug 2026. Two container-split sets in one directory: a
+/// Review finding F-01, 23 Aug 2026. Two container-split sets in one directory: a
 /// named final payload (`comic.cb7`, real 7z bytes, byte-split) and an
 /// ordinary split `.rar`. The rescue joins both, and the scratch pass
 /// returns ONE verdict for the directory. The RAR extracts, so that
@@ -814,7 +814,7 @@ fn the_container_reading_still_refuses_recovery_data() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex F-12, the detection half. The rescue has spent the parts by the
+/// Review finding F-12, the detection half. The rescue has spent the parts by the
 /// time it stages the joined container, so a container that cannot be
 /// moved into the scratch dir is the ONLY copy of that payload and it is
 /// sitting in the output directory unopened. `stage_joined_into` must
@@ -873,7 +873,7 @@ fn a_joined_container_that_cannot_be_staged_is_reported_not_dropped() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex F-12, the fold half - the part the detection above is useless
+/// Review finding F-12, the fold half - the part the detection above is useless
 /// without. An empty scratch dir extracts to `None`, which is also how
 /// the honest "nobody claimed it, so the joined container IS the
 /// payload" ending reads; before the fix both mapped to `Produced` and a

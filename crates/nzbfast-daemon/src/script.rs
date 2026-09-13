@@ -526,7 +526,7 @@ impl Daemon {
     /// name. The detached caller did test, but one statement earlier
     /// than the read it was guarding, which leaves the same gap a lock
     /// apart instead of a task apart. `None` is a caller that wants no
-    /// fence (Codex sweep 4, M4b).
+    /// fence (review sweep 4, M4b).
     ///
     /// `fence` says WHICH question to ask, and the two callers genuinely
     /// differ. The awaited one runs before its own `park`, so its

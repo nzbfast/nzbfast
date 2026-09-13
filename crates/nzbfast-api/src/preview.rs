@@ -89,7 +89,7 @@ pub(super) struct LiveSource {
     /// `revoked` before each read and inside its wait loop so the body
     /// ends and the handle drops within one poll - without that the
     /// source sat on the inode for up to the body ceiling and par2cmdline
-    /// 0.8.1 reported its target missing (Codex F-08, 22 Aug 2026). It
+    /// 0.8.1 reported its target missing (review finding F-08, 22 Aug 2026). It
     /// also polls `needs_reopen`: par2cmdline does not repair in place, and a
     /// source that kept reading through the old handle would remux the
     /// damaged bytes over a span the repair had already fixed.
@@ -859,7 +859,7 @@ mod tests {
     /// The revoke twin of the abandon pair above, and Windows-only by
     /// construction: `ReadLease::revoked` is `cfg!(windows) &&
     /// repairing`, so a Unix run of this could only ever assert the
-    /// false branch (Codex F-08, TODO 246). An external par2 wants the
+    /// false branch (review finding F-08, TODO 246). An external par2 wants the
     /// inode and our handle is in its way; without the `revoked` polls
     /// the source sat on it for up to the body ceiling and par2cmdline
     /// 0.8.1 reported its target missing.

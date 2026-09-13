@@ -50,7 +50,7 @@ pub mod split;
 // the PLANE, and each format's library is its own module.
 pub mod zip;
 
-pub use container::{Contained, ContainerError};
+pub use container::{Contained, ContainerError, Packing};
 pub use fault::FaultError;
 pub use layout::{Expectation, GenError, Layout, generate, generate_over};
 pub use profile::{Contradiction, FORMAT_VERSION, Profile, ProfileError};

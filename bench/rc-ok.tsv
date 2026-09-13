@@ -1,0 +1,22 @@
+# Exit codes that mean SUCCESS, per tool. THE SINGLE DEFINITION - read by
+# bench/lib/legrc.sh (the shell harnesses) and by
+# bench/component/scen-summarise.py (the log reader). Do not write a second
+# copy of this table into a harness; add the tool here instead.
+#
+# Why the file exists at all: on 9 Sep 2026 a 65 GiB publication round
+# published a 115x "win" that was a REFUSAL - parfast declined the solve as
+# over its memory budget, said so on stderr and exited 5, into a harness that
+# discarded both streams and inferred success from a restored-file count
+# and inferred success from a restored-file count. The rule that came out of
+# it is that a timed leg must capture rc - and a bare `rc != 0` test is WRONG
+# here, because at least one tool in this fleet reports success with a
+# nonzero code. Full account in the README's trap list.
+#
+# Format: <tool><TAB><space-separated codes>. A tool absent from this file
+# succeeds on 0 and nothing else.
+#
+# MultiPar's par2j: its own docs read "16 = repair succeeded". Windows-only,
+# so it appears in round2.ps1 / par2-round.ps1 rather than the shell rounds,
+# but the definition is shared so neither side can drift alone.
+par2j	0 16
+par2j_gpu	0 16

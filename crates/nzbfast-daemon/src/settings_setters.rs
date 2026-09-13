@@ -499,7 +499,12 @@ pub(super) fn set_auto_retry_mins(
             .trim()
             .parse::<u64>()
             .map_err(|_| "auto_retry_mins must be a number")?;
-        d.auto_retry_secs.store(m * 60, Ordering::Relaxed);
+        // `saturating_mul`: `m` is parsed as an unbounded u64 straight
+        // off the API, so `m * 60` overflowed - a panic in any checked
+        // build and a wrap to a SHORT retry interval in release, which
+        // is the dangerous direction.
+        d.auto_retry_secs
+            .store(m.saturating_mul(60), Ordering::Relaxed);
         (true, json!(m))
     })
 }

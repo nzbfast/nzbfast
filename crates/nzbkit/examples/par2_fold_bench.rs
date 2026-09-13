@@ -126,8 +126,12 @@ fn main() {
 
     // The back-substitution race: the dense m x m product against the
     // transform solve, at the same shapes, on one binary. This is the
-    // measurement `forney::BACKSUB_MIN_MISSING` rests on (audit section
-    // 20), so it prints setup and solve apart - the dense arm's setup
+    // measurement `forney::BACKSUB_MIN_MISSING` was first set from
+    // (audit section 20); the constants were recalibrated on 10 Sep 2026
+    // from full CLI repairs on six boxes instead
+    // (research/FORNEY-GATE-CROSSOVER-2026-09-10.md), so this sweep is
+    // now the cheap solve-only probe rather than the gate's provenance.
+    // It prints setup and solve apart - the dense arm's setup
     // BUILDS the m x m inverse and the transform arm's does not, and
     // both are wall a repair pays.
     //

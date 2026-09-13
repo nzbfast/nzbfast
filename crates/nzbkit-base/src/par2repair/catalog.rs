@@ -195,6 +195,16 @@ pub(super) enum Crit {
     Ifsc([u8; 16], Vec<BlockCheck>),
 }
 
+/// One file's scan, before it is folded into the catalog.
+struct ScanOut {
+    occ: Vec<Occ>,
+    /// Critical bodies in first-seen order WITHIN this file; the fold
+    /// applies first-seen-wins across files.
+    crits: Vec<([u8; 16], Crit)>,
+    scanned: u64,
+    stamp: Option<Stamp>,
+}
+
 struct CatFile {
     path: PathBuf,
     stamp: Stamp,
@@ -230,6 +240,20 @@ pub struct PacketCatalog {
     /// Total packet-file bytes read+validated since build (for the
     /// perf harness; not part of any verdict).
     bytes_scanned: u64,
+}
+
+/// `NZBFAST_PAR2_CATALOG_WARM=0` skips the page-cache warming thread the
+/// parallel scan runs ahead of its groups (see [`PacketCatalog::scan_rest`]).
+fn warm_scan_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NZBFAST_PAR2_CATALOG_WARM").as_deref() != Ok("0"))
+}
+
+/// `NZBFAST_PAR2_CATALOG_PARALLEL=0` forces the sequential catalog scan.
+/// Read once: this is asked per scan and a repair does several.
+fn parallel_scan_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NZBFAST_PAR2_CATALOG_PARALLEL").as_deref() != Ok("0"))
 }
 
 impl PacketCatalog {
@@ -414,6 +438,47 @@ impl PacketCatalog {
         (declared, contested)
     }
 
+    /// Every scanned file and every validated packet in it, in the
+    /// order [`walk`] presents them - the payload of
+    /// [`super::SurveyObserver::packets_scanned`]. A file the lazy walk
+    /// has not reached is absent rather than empty, so a caller can
+    /// tell "nothing in it" from "not read"; after [`scan_rest`] the two
+    /// coincide. Identity only: a caller needs the MD5 to dedupe
+    /// repeats across volumes, the set id to filter, and the exponent
+    /// and slice length to count recovery blocks by the parser's own
+    /// rule. Nothing here is a verdict.
+    ///
+    /// [`walk`]: Self::walk
+    /// [`scan_rest`]: Self::scan_rest
+    pub(super) fn scan_report(&self) -> super::ScanReport {
+        super::ScanReport {
+            files: self
+                .files
+                .iter()
+                .filter_map(|f| {
+                    let occs = f.packets.as_ref()?;
+                    Some(super::PacketFileScan {
+                        path: f.path.clone(),
+                        packets: occs
+                            .iter()
+                            .map(|o| super::PacketSeen {
+                                md5: o.md5,
+                                set_id: o.set_id,
+                                recovery: match o.kind {
+                                    Kind::RecvSlic { exp, len, .. } => Some(super::RecoverySeen {
+                                        exponent: exp,
+                                        slice_len: len,
+                                    }),
+                                    Kind::Plain => None,
+                                },
+                            })
+                            .collect(),
+                    })
+                })
+                .collect(),
+        }
+    }
+
     /// Number of files whose packets are cataloged; `..scanned_prefix()`
     /// of the sorted list is what [`walk`] currently covers when the
     /// catalog was built lazily.
@@ -518,30 +583,332 @@ impl PacketCatalog {
         }
     }
 
-    /// Scan every remaining unscanned file.
+    /// Scan every remaining unscanned file, on many threads.
+    ///
+    /// **Why this is parallel, and why it is sound.** The whole cost of a
+    /// scan is [`Self::scan_one`] - one read (or map) and an MD5 over
+    /// every packet in the file - and it touches no catalog state. The
+    /// only cross-file coupling is which file's copy of a repeated
+    /// critical body ends up in `parsed`, and that is settled by
+    /// [`Self::apply_scan`], which this calls in FILE-INDEX ORDER
+    /// whatever order the reads finished in. So the catalog this leaves
+    /// behind is byte-for-byte the one the sequential walk left:
+    /// `parallel_scan_matches_sequential` pins that on a fixture with
+    /// criticals repeated across volumes, which is the case that would
+    /// break if the merge ever went in completion order.
+    ///
+    /// **Why it was worth doing.** `repair_dir_set_surveyed_as` - the
+    /// door `parfast` and every surveying caller takes - builds the
+    /// catalog COMPLETE before the repair's own clock starts, so this
+    /// walk was 583 ms of a 2 GiB set that no phase line could see and
+    /// the largest single component of a 13-17% CLI-versus-driver gap
+    /// (`research/parfast-cli-gap-2026-09-09/REPORT.md`, 9 Sep 2026).
+    /// The alternative was to stop building complete and recover the
+    /// overlap with the verify pass, which `entry.rs`'s
+    /// `repair_dir_set_with_donors_scoped` explains is not available
+    /// here: `declared_and_contested` is one of `DirContext`'s two
+    /// protections and neither survives a lazy catalog. Reading the same
+    /// bytes on more threads needs no such trade.
+    ///
+    /// **The bound is on BYTES IN FLIGHT.** A whole file is resident
+    /// while it is scanned - that is what the sequential walk charged to
+    /// `memgauge` one file at a time - so N workers on a set of large
+    /// volumes would hold N of them at once. The files are therefore
+    /// PACKED into groups that fit the budget and one group runs at a
+    /// time, so the peak is bounded by construction. See the body for
+    /// the two shapes that were tried and rejected first.
+    ///
+    /// `NZBFAST_PAR2_CATALOG_PARALLEL=0` forces the sequential walk - the
+    /// A/B knob, and the escape hatch if a host ever wants one.
     pub(super) fn scan_rest(&mut self) -> Result<(), RepairError> {
-        while self.scan_next()? {}
+        let todo: Vec<usize> = self
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.packets.is_none())
+            .map(|(i, _)| i)
+            .collect();
+        if todo.len() < 2 || !parallel_scan_enabled() {
+            while self.scan_next()? {}
+            return Ok(());
+        }
+        // The bound is on BYTES IN FLIGHT, and it holds BY CONSTRUCTION:
+        // the files are packed, in order, into groups whose read bytes
+        // sum to at most the budget, and one group is scanned at a time.
+        // Everything inside a group may therefore be in flight at once
+        // with no admission control, no wait and no lock - the peak is
+        // the group total, which is the budget.
+        //
+        // Two shapes were tried and rejected before this one. Capping the
+        // WIDTH against the widest file collapses to a single worker on
+        // any real set, because PAR2 volumes are sized by exponential
+        // doubling and the largest holds about half the recovery set -
+        // measured, it gave back the whole gain. Per-file admission on a
+        // `Condvar` works, but its wait loop breaks on capacity rather
+        // than on a sticky abort, which is not a shape
+        // `tools/wait-recheck-gate.py` can classify, and teaching a gate
+        // a new shape to admit one's own code is the wrong direction.
+        // Packing needs neither.
+        //
+        // A file over `SLURP_MAX_BYTES` is MAPPED rather than read -
+        // page-cache backed, reclaimable, charged nothing here for the
+        // same reason `scan_one` does not gauge it - so it costs a group
+        // nothing and never forces one open on its own.
+        const IN_FLIGHT_BYTES: u64 = 256 << 20;
+        let workers = crate::mem::cpu_workers().clamp(1, 8);
+        let cost = |i: usize| -> u64 {
+            let n = std::fs::metadata(&self.files[i].path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if n > Self::SLURP_MAX_BYTES { 0 } else { n }
+        };
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut cur: Vec<usize> = Vec::new();
+        let mut sum = 0u64;
+        for &i in &todo {
+            let c = cost(i);
+            // A file bigger than the whole budget opens its own group
+            // rather than being refused: `cur.is_empty()` admits it.
+            if !cur.is_empty() && sum + c > IN_FLIGHT_BYTES {
+                groups.push(std::mem::take(&mut cur));
+                sum = 0;
+            }
+            cur.push(i);
+            sum += c;
+        }
+        if !cur.is_empty() {
+            groups.push(cur);
+        }
+        // WARM THE VOLUMES AHEAD OF THE GROUPS. The groups above are
+        // scanned one at a time to hold the in-flight bound, so on a cold
+        // cache the big volumes - each its own group - are read one after
+        // another, at one file's queue depth. Until 10 Sep 2026 that was
+        // masked by an accident: `parfast`'s own duplicate load was
+        // reading the same volumes on another thread at the same time,
+        // and the catalog found them in the page cache. TODO 334 removed
+        // the duplicate and the cold scan doubled (1.81 s against 0.88 s
+        // on an M3 Ultra, 2 GiB set, APFS-cloned so its pages were cold).
+        // So the warming is done on purpose: one thread reads every file
+        // this walk is about to read, sequentially, through a small
+        // reused buffer it never keeps, which pulls the pages into the
+        // cache the groups then hit. Reclaimable cache, not RSS - the
+        // in-flight bound is untouched. A mapped file (over
+        // `SLURP_MAX_BYTES`) is not read here: `scan_one` prefetches the
+        // mapping itself. `NZBFAST_PAR2_CATALOG_WARM=0` is the A/B arm.
+        let warm: Vec<PathBuf> = if warm_scan_enabled() {
+            todo.iter()
+                .filter(|&&i| cost(i) > 0)
+                .map(|&i| self.files[i].path.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Four readers, in the groups' own order, so the queue depth the
+        // accidental fan-out used to give the device is given on purpose:
+        // one sequential reader measured 21% behind it on the cold
+        // fixture, four is what the duplicate load's fan ran at over the
+        // files that mattered.
+        let warmer = std::thread::Builder::new()
+            .name("par2-catalog-warm".into())
+            .spawn(move || {
+                let next = std::sync::atomic::AtomicUsize::new(0);
+                std::thread::scope(|sc| {
+                    for _ in 0..4.min(warm.len()) {
+                        let (next, warm) = (&next, &warm);
+                        sc.spawn(move || {
+                            let mut buf = vec![0u8; 16 << 20];
+                            loop {
+                                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let Some(p) = warm.get(k) else { return };
+                                let Ok(mut f) = File::open(p) else { continue };
+                                while let Ok(n) = std::io::Read::read(&mut f, &mut buf) {
+                                    if n == 0 {
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+            })
+            .ok();
+        for group in groups {
+            if group.len() < 2 || workers < 2 {
+                for i in group {
+                    let out = Self::scan_one(&self.files[i].path)?;
+                    self.apply_scan(i, out);
+                }
+                continue;
+            }
+            let paths: Vec<PathBuf> = group.iter().map(|&i| self.files[i].path.clone()).collect();
+            // Dynamic within the group: the doubling above means a static
+            // split would leave one worker holding most of the bytes.
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<ScanOut, RepairError>)>();
+            std::thread::scope(|sc| {
+                for _ in 0..workers.min(group.len()) {
+                    let tx = tx.clone();
+                    let (next, paths) = (&next, &paths);
+                    sc.spawn(move || {
+                        loop {
+                            let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if k >= paths.len() {
+                                return;
+                            }
+                            if tx.send((k, Self::scan_one(&paths[k]))).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            });
+            drop(tx);
+            let mut done: Vec<Option<Result<ScanOut, RepairError>>> =
+                (0..group.len()).map(|_| None).collect();
+            for (k, out) in rx {
+                done[k] = Some(out);
+            }
+            // IN FILE-INDEX ORDER within the group, and the groups were
+            // packed in order, so the whole walk applies in file order.
+            for (k, &i) in group.iter().enumerate() {
+                let out = done[k]
+                    .take()
+                    .expect("every index is sent before the scope ends")?;
+                self.apply_scan(i, out);
+            }
+        }
+        // Whatever the warmer had not reached was read by a group already;
+        // it finishes on its own shortly, but it must not outlive the
+        // catalog's directory (a refresh could be re-listing it).
+        if let Some(w) = warmer {
+            let _ = w.join();
+        }
         Ok(())
     }
 
+    /// Read a packet file whole up to this size; MAP anything larger.
+    ///
+    /// The scan needs one `&[u8]` over the entire file - every packet is
+    /// MD5-verified and `RawPacket::body` borrows from it - so a big volume
+    /// used to mean a big private allocation, which is why
+    /// [`super::MAX_PACKET_FILE_BYTES`] refused one outright. That refusal
+    /// was the bug: PAR2 volumes are sized by exponential doubling, so the
+    /// LARGEST holds about half the recovery set (measured: 45%), and a set
+    /// with ~2 GiB of parity therefore has a volume over 1 GiB. Ours and
+    /// turbo's both land it on a power-of-two block count, so it hits the
+    /// ceiling exactly and passes it on the repeated critical packets alone
+    /// - 8,420 bytes over, in the case that found this. The volume was
+    /// skipped, 36% of the parity went with it, and the repair then failed
+    /// `Unrepairable` on a set turbo completes.
+    ///
+    /// Mapping instead of reading keeps resident memory bounded WITHOUT
+    /// refusing the file: the pages are page-cache backed and reclaimable
+    /// rather than a private copy. Raising the old ceiling would have made
+    /// the exposure it guards worse; this removes the reason for it.
+    ///
+    /// Only files ABOVE this take the mapping, so the common path is
+    /// byte-for-byte what it was. That is deliberate: a member truncated
+    /// under a live mapping faults the reader (SIGBUS /
+    /// EXCEPTION_IN_PAGE_ERROR) rather than returning short, and confining
+    /// the mapping to volumes that are refused outright today means the
+    /// change cannot make any currently-working repair worse.
+    const SLURP_MAX_BYTES: u64 = 1 << 30;
+
     fn scan_file(&mut self, i: usize) -> Result<(), RepairError> {
+        let out = Self::scan_one(&self.files[i].path)?;
+        self.apply_scan(i, out);
+        Ok(())
+    }
+
+    /// One file's scan with NO access to the catalog: the read, the MD5
+    /// verification of every packet and the body parsing, which is all of
+    /// the cost. Pure by construction so [`Self::scan_rest`] can run it
+    /// on many files at once - see there for why that is sound.
+    ///
+    /// Critical bodies come back as a LIST in first-seen order rather
+    /// than a map, because the map's semantics are first-seen-wins and
+    /// this function cannot see what an earlier file already claimed.
+    /// [`Self::apply_scan`] does the claiming, in file order.
+    fn scan_one(path: &Path) -> Result<ScanOut, RepairError> {
         // Stamp before read: a write racing the read leaves the stored
         // stamp older than the bytes, so the next refresh re-scans -
         // the safe direction.
-        if let Ok(md) = std::fs::metadata(&self.files[i].path) {
-            self.files[i].stamp = Stamp::of(&md);
+        let stamp = std::fs::metadata(path).ok().map(|md| Stamp::of(&md));
+        // A volume at or under the slurp threshold is READ, exactly as
+        // it always was. A larger one is MAPPED instead - see
+        // `SLURP_MAX_BYTES`. `scan_packets` needs one `&[u8]` over the
+        // whole file either way (every packet is MD5-verified and
+        // `RawPacket::body` borrows from it), so the choice is only
+        // where the bytes live, and the parser is untouched.
+        let flen = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let mapped = if flen > Self::SLURP_MAX_BYTES {
+            // RETRIED against a freshly stat'd length, because the
+            // frequent failure here is not a broken mmap - it is
+            // `MappedMember::open`'s own `f.metadata()?.len() != len`
+            // refusal, and `refresh()` re-scans while a volume may still
+            // be growing, so a member being extended fails the length
+            // check on essentially every pass. Every such failure lands
+            // on the whole-file `read` below, which has no size test of
+            // its own and no admission gate: the packer prices a file
+            // over `SLURP_MAX_BYTES` at 0 (`cost`), so any number of
+            // multi-GiB members pack into one group and are read whole,
+            // concurrently, outside the in-flight bound the grouping
+            // exists to enforce. The retry removes that arm without
+            // refusing anything - a hard refusal here would re-open the
+            // skipped-volume bug the 64 GiB ceiling was raised to fix.
+            crate::par2gen::MappedMember::open(path, flen)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    let fresh = std::fs::metadata(path).map(|m| m.len()).unwrap_or(flen);
+                    (fresh != flen)
+                        .then(|| {
+                            crate::par2gen::MappedMember::open(path, fresh)
+                                .ok()
+                                .flatten()
+                        })
+                        .flatten()
+                })
+        } else {
+            None
+        };
+        // A COLD mapped volume is faulted in a page at a time by the MD5
+        // walk below, with nothing ahead of it: measured 10 Sep 2026 on
+        // an M3 Ultra, 2 GiB set, APFS-cloned so its pages were cold, the
+        // catalog's verify-overlapped scan took 1.81 s against 0.88 s
+        // when a second reader happened to be pulling the same volume
+        // through the page cache at the same time. That second reader
+        // was `parfast`'s own duplicate load, which TODO 334 removed, so
+        // the hint has to come from here: ask for the whole mapping up
+        // front, exactly as `par2gen`'s own readers do.
+        if let Some(m) = &mapped {
+            m.prefetch();
         }
-        let bytes = std::fs::read(&self.files[i].path)?;
-        self.bytes_scanned += bytes.len() as u64;
-        // Memory-floor gauge (instrument-first): this whole-file read is
+        let owned;
+        let bytes: &[u8] = match &mapped {
+            Some(m) => m.bytes(),
+            None => {
+                owned = std::fs::read(path)?;
+                &owned
+            }
+        };
+        let scanned = bytes.len() as u64;
+        // Memory-floor gauge (instrument-first): the whole-file READ is
         // transient but real RSS while it lives, outside every budget
         // tier - the suspected owner of the damaged-fixture floor. The
-        // release below pairs with the drop at the end of this scan.
-        crate::memgauge::add(crate::memgauge::Sub::RepairScan, bytes.len() as u64);
-        let _scan_gauge = ScanGaugeGuard(bytes.len() as u64);
-        let parsed = &mut self.parsed;
+        // release below pairs with the drop at the end of this scan. A
+        // MAPPING is page-cache backed and reclaimable, so it is not
+        // charged as private bytes here.
+        let charged = if mapped.is_some() {
+            0
+        } else {
+            bytes.len() as u64
+        };
+        crate::memgauge::add(crate::memgauge::Sub::RepairScan, charged);
+        let _scan_gauge = ScanGaugeGuard(charged);
+        let mut crits: Vec<([u8; 16], Crit)> = Vec::new();
         let mut occ: Vec<Occ> = Vec::new();
-        par2::scan_packets(&bytes, |pkt| {
+        par2::scan_packets(bytes, |pkt| {
             let kind = if pkt.ptype == *par2::TYPE_RECVSLIC && pkt.body.len() >= 4 {
                 Kind::RecvSlic {
                     exp: u32::from_le_bytes(pkt.body[0..4].try_into().unwrap()),
@@ -549,7 +916,7 @@ impl PacketCatalog {
                     len: (pkt.body.len() - 4) as u32,
                 }
             } else {
-                if let std::collections::hash_map::Entry::Vacant(v) = parsed.entry(pkt.md5) {
+                {
                     let crit = if pkt.ptype == *par2::TYPE_MAIN {
                         // The non-recovery ids are deliberately dropped here: repair lays
                         // files onto the global slice index space from the
@@ -564,7 +931,7 @@ impl PacketCatalog {
                         None
                     };
                     if let Some(c) = crit {
-                        v.insert(c);
+                        crits.push((pkt.md5, c));
                     }
                 }
                 Kind::Plain
@@ -575,8 +942,28 @@ impl PacketCatalog {
                 kind,
             });
         });
-        self.files[i].packets = Some(occ);
-        Ok(())
+        Ok(ScanOut {
+            occ,
+            crits,
+            scanned,
+            stamp,
+        })
+    }
+
+    /// Fold one [`Self::scan_one`] result into the catalog. Called in
+    /// FILE-INDEX ORDER, which is what preserves first-seen-wins for the
+    /// critical bodies whatever order the reads finished in.
+    fn apply_scan(&mut self, i: usize, out: ScanOut) {
+        if let Some(st) = out.stamp {
+            self.files[i].stamp = st;
+        }
+        self.bytes_scanned += out.scanned;
+        for (md5, crit) in out.crits {
+            if let std::collections::hash_map::Entry::Vacant(v) = self.parsed.entry(md5) {
+                v.insert(crit);
+            }
+        }
+        self.files[i].packets = Some(out.occ);
     }
 
     /// pread one recovery slice's payload and re-prove it against the
@@ -645,7 +1032,7 @@ impl PacketCatalog {
     /// [`super::repair_present_sets`] against this catalog.
     pub fn repair_present_sets(&mut self) -> Result<Vec<super::SetOutcome>, RepairError> {
         self.refresh()?;
-        super::repair_sets_catalog(self, false)
+        super::repair_sets_catalog(self, false, super::RetentionCaller::default(), None)
     }
 
     /// [`super::repair_present_or_renamed_sets`] against this catalog.
@@ -653,7 +1040,7 @@ impl PacketCatalog {
         &mut self,
     ) -> Result<Vec<super::SetOutcome>, RepairError> {
         self.refresh()?;
-        super::repair_sets_catalog(self, true)
+        super::repair_sets_catalog(self, true, super::RetentionCaller::default(), None)
     }
 }
 
@@ -672,19 +1059,100 @@ pub(super) fn warn_short_slices(refused: usize, shortest: u32, bs: usize) {
     }
 }
 
-/// Load the `needed` smallest selected exponents' payloads, one
-/// `block_size` buffer each. With `revalidate`, every slice is re-proven
-/// against its packet MD5 as it is read; a slice that no longer proves
-/// (the file mutated below stat granularity) is dropped from `by_exp`
-/// and the selection re-runs with the next exponent up, exactly as a
-/// fresh scan would never have offered the mutated packet. `None` =
-/// dropping left fewer than `needed` - the caller's Unrepairable
-/// arithmetic reads the shrunken map.
+/// The `needed` recovery exponents to solve with: the LOWEST CONSECUTIVE
+/// RUN of that length, falling back to the `needed` smallest when the
+/// set has no such run.
+///
+/// Taking the smallest `needed` unconditionally is what this used to do,
+/// and it decides which back-substitution runs. Consecutive exponents
+/// make the matrix a Vandermonde times a diagonal, which is the
+/// `O(m^2)` explicit inverse and, past `forney::backsub_gate`, the
+/// Forney transform solve. A selection with ONE GAP in it has neither,
+/// and falls through to Gauss-Jordan on an explicit `m x m`: `O(m^3)`
+/// scalar ops and `~4*m^2` bytes. That arm refused outright past
+/// `MAX_REPAIR_DIM` = 8,192 until 8 Sep 2026 and is bounded by MEMORY
+/// now, so a gapped selection is SLOW rather than declined - which is
+/// still a reason to prefer a clean run, just not the same reason.
+///
+/// Gaps mean recovery packets were themselves lost, which is ordinary on
+/// an incomplete post - and there is usually no reason to accept one,
+/// because a set holding more recovery than the damage needs will have a
+/// clean run further up. Measured 6 Sep 2026 on a 46 MB corpus at 100%
+/// redundancy with one middle volume removed, m = 978: taking the
+/// smallest fell to gauss-jordan at 0.65 s against turbo's 0.43 s - the
+/// one shape in the audit where a rival was ahead - and the arm's cost
+/// is cubic, so at m = 8,192 the same selection is tens of seconds.
+///
+/// BOTH repair drivers select through this. The mapped driver - the
+/// in-place repair the download pipeline runs - took the `needed`
+/// smallest until 8 Sep 2026, two days after the disk driver stopped:
+/// measured there at m = 2,048 / 64 KiB, one gap is 5.0 ms -> 956 ms of
+/// setup and 123 ms -> 391 ms of solve, 6.75x over the whole
+/// reconstructor (research/SPARSE-EXPONENT-BACKSUB-2026-09-08.md). A
+/// third selection site written tomorrow would inherit the same defect
+/// and nothing refuses one; that gate is named as open in that round.
+///
+/// The run is the LOWEST one so the exponents stay as small as the set
+/// allows: the transform prices its work on the span it must produce,
+/// and a needlessly high first exponent is what the creator's range plan
+/// exists to avoid paying for.
+pub(super) fn select_consecutive_run(sorted_exps: &[u32], needed: usize) -> Vec<u32> {
+    if needed == 0 {
+        return Vec::new();
+    }
+    if sorted_exps.len() >= needed {
+        // `sorted_exps` is sorted and deduplicated (it comes from a map's
+        // keys), so a window is consecutive exactly when its span is
+        // `needed - 1`.
+        let span = (needed - 1) as u32;
+        for i in 0..=(sorted_exps.len() - needed) {
+            if sorted_exps[i + needed - 1].saturating_sub(sorted_exps[i]) == span {
+                return sorted_exps[i..i + needed].to_vec();
+            }
+        }
+    }
+    let mut out = sorted_exps.to_vec();
+    out.truncate(needed);
+    out
+}
+
+/// Load the selected exponents' payloads, one `block_size` buffer each -
+/// [`select_consecutive_run`] chooses which. With `revalidate`, every
+/// slice is re-proven against its packet MD5 as it is read; a slice that
+/// no longer proves (the file mutated below stat granularity) is dropped
+/// from `by_exp` and the selection re-runs, exactly as a fresh scan
+/// would never have offered the mutated packet. `None` = dropping left
+/// fewer than `needed` - the caller's Unrepairable arithmetic reads the
+/// shrunken map.
 pub(super) fn load_selected_recovery(
     pool: &SlicePool<'_>,
     by_exp: &mut HashMap<u32, RecLoc>,
     needed: usize,
     bs: usize,
+    revalidate: bool,
+) -> Result<Option<Vec<(u32, Vec<u8>)>>, RepairError> {
+    load_selected_recovery_span(pool, by_exp, needed, bs, 0..bs, revalidate)
+}
+
+/// [`load_selected_recovery`], keeping only bytes `span` of each slice.
+///
+/// A slabbed solve holds `m x span.len()` of recovery rather than
+/// `m x bs`, which is the whole point of slabbing: on the 65 GiB set
+/// that is the difference between 17.2 GB of resident recovery and half
+/// that. The trim happens HERE, inside the reader, and not on the
+/// returned vector - a caller that trimmed afterwards would already
+/// have every full slice in memory at once, which is the allocation
+/// being avoided.
+///
+/// A slice is still READ and validated in full: the packet MD5 covers
+/// the whole slice, so a span cannot be proven on its own. The full
+/// buffer is one per reader thread and transient; only the span is kept.
+pub(super) fn load_selected_recovery_span(
+    pool: &SlicePool<'_>,
+    by_exp: &mut HashMap<u32, RecLoc>,
+    needed: usize,
+    bs: usize,
+    span: std::ops::Range<usize>,
     revalidate: bool,
 ) -> Result<Option<Vec<(u32, Vec<u8>)>>, RepairError> {
     loop {
@@ -693,55 +1161,108 @@ pub(super) fn load_selected_recovery(
         }
         let mut exps: Vec<u32> = by_exp.keys().copied().collect();
         exps.sort_unstable();
-        exps.truncate(needed);
-        let mut loaded: Vec<(u32, Vec<u8>)> = Vec::with_capacity(needed);
-        // Keyed by (list, index): a donor's file 0 and the catalog's
-        // file 0 are two different files.
-        let mut open: HashMap<(SliceSrc, usize), File> = HashMap::new();
-        let mut dropped: Option<u32> = None;
-        for e in exps {
+        exps = select_consecutive_run(&exps, needed);
+        // One reader per packet file, the slices of that file in exponent
+        // order: the selection used to pread its slices one after another
+        // on the caller, and on a Windows page cache that is a ~2.9 GB/s
+        // copy - 33 ms for the 101 x 1 MiB of the 101-block leg on the
+        // i5-10600KF (5 Sep 2026), against ~8 ms across the eight volumes
+        // it came from. A file's handle stays on its thread
+        // (`read_exact_at` moves the cursor on Windows).
+        let mut groups: HashMap<(SliceSrc, usize), Vec<u32>> = HashMap::new();
+        for &e in &exps {
             let loc = by_exp[&e];
-            let f = match open.entry((loc.src, loc.file)) {
-                std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
-                std::collections::hash_map::Entry::Vacant(v) => v.insert(pool.open(&loc)?),
-            };
-            // The packet MD5 covers the WHOLE payload, so an over-long
-            // slice ([`slice_fits_block`]) has to be read and validated
-            // whole and only then cut to the block. `>= bs` is the
-            // selection predicate at both callers, so the cut below is
-            // exact; the `.max(bs)` is the belt for a third caller that
-            // does not filter, where a short buffer would read past the
-            // packet into its neighbour.
-            let mut data = vec![0u8; (loc.len as usize).max(bs)];
-            if loc.must_revalidate(revalidate) {
-                if !pool.read_validated_slice(f, &loc, &mut data)? {
-                    warn!(
-                        file = %pool.path_of(&loc).display(),
-                        exponent = e,
-                        "recovery packet no longer matches its cataloged MD5 - dropping it"
-                    );
-                    dropped = Some(e);
-                    break;
+            groups.entry((loc.src, loc.file)).or_default().push(e);
+        }
+        let groups: Vec<Vec<u32>> = groups.into_values().collect();
+        type Slot = Result<Option<(u32, Vec<u8>)>, RepairError>;
+        let results: Vec<Vec<Slot>> = std::thread::scope(|sc| {
+            let handles: Vec<_> = groups
+                .iter()
+                .map(|group| {
+                    let by_exp = &*by_exp;
+                    sc.spawn(move || -> Vec<Slot> {
+                        let mut out: Vec<Slot> = Vec::with_capacity(group.len());
+                        let mut file: Option<File> = None;
+                        for &e in group {
+                            let loc = by_exp[&e];
+                            let f = match &file {
+                                Some(f) => f,
+                                None => match pool.open(&loc) {
+                                    Ok(f) => file.insert(f),
+                                    Err(err) => {
+                                        out.push(Err(err.into()));
+                                        break;
+                                    }
+                                },
+                            };
+                            let mut data = vec![0u8; (loc.len as usize).max(bs)];
+                            let read = if loc.must_revalidate(revalidate) {
+                                pool.read_validated_slice(f, &loc, &mut data)
+                            } else {
+                                crate::disk::read_exact_at(f, &mut data, loc.off)
+                                    .map(|()| true)
+                                    .map_err(RepairError::from)
+                            };
+                            match read {
+                                Ok(true) => {
+                                    // Whole slice validated above; only
+                                    // the slab's bytes are kept.
+                                    data.truncate(span.end.min(bs));
+                                    data.drain(..span.start.min(data.len()));
+                                    data.shrink_to_fit();
+                                    out.push(Ok(Some((e, data))));
+                                }
+                                Ok(false) => {
+                                    warn!(
+                                        file = %pool.path_of(&loc).display(),
+                                        exponent = e,
+                                        "recovery packet no longer matches its cataloged MD5 - dropping it"
+                                    );
+                                    out.push(Ok(None));
+                                    break;
+                                }
+                                Err(err) => {
+                                    out.push(Err(err));
+                                    break;
+                                }
+                            }
+                        }
+                        out
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("recovery slice reader panicked"))
+                .collect()
+        });
+        let mut loaded: Vec<(u32, Vec<u8>)> = Vec::with_capacity(needed);
+        let mut any_dropped = false;
+        for slots in results {
+            for slot in slots {
+                match slot? {
+                    Some(pair) => loaded.push(pair),
+                    None => any_dropped = true,
                 }
-            } else {
-                crate::disk::read_exact_at(f, &mut data, loc.off)?;
             }
-            // `truncate` alone keeps the padded CAPACITY, and what is
-            // held here is `m` of these at once - the bound
-            // `reconstruct::check_repair_dim` states as `m x
-            // block_size`. Shrinking keeps that true. It costs nothing
-            // in the conforming case, where capacity already equals
-            // `bs` and both calls are no-ops.
-            data.truncate(bs);
-            data.shrink_to_fit();
-            loaded.push((e, data));
         }
-        match dropped {
-            Some(e) => {
-                by_exp.remove(&e);
+        if any_dropped {
+            // A group loads in exponent order and stops at its failure, so
+            // the failed slice is the first of its group that did not
+            // load. Drop those from the pool and select again over what
+            // remains - exactly the serial loop's one-at-a-time retry,
+            // taken for every failing file at once.
+            let got: std::collections::HashSet<u32> = loaded.iter().map(|(e, _)| *e).collect();
+            for group in &groups {
+                if let Some(failed) = group.iter().find(|e| !got.contains(e)) {
+                    by_exp.remove(failed);
+                }
             }
-            None => return Ok(Some(loaded)),
+            continue;
         }
+        loaded.sort_unstable_by_key(|(e, _)| *e);
+        return Ok(Some(loaded));
     }
 }
 
@@ -1096,5 +1617,153 @@ struct ScanGaugeGuard(u64);
 impl Drop for ScanGaugeGuard {
     fn drop(&mut self) {
         crate::memgauge::sub(crate::memgauge::Sub::RepairScan, self.0);
+    }
+}
+
+#[cfg(test)]
+mod recovery_selection_tests {
+    use super::{Crit, Kind, PacketCatalog, PacketScope, select_consecutive_run};
+
+    /// Which recovery exponents the solve gets, which decides which
+    /// back-substitution arm runs. A gap anywhere in the selection costs
+    /// the Vandermonde structure and drops the repair to Gauss-Jordan at
+    /// `O(m^3)` - so a run is preferred wherever the set has one, and the
+    /// LOWEST run, to keep the transform's exponent span small.
+    #[test]
+    fn the_selection_prefers_the_lowest_consecutive_run() {
+        // The smallest three are gapped (0, 1, 5); the run is 5..8.
+        assert_eq!(
+            select_consecutive_run(&[0, 1, 5, 6, 7, 9], 3),
+            vec![5, 6, 7]
+        );
+        // Already consecutive from the bottom: unchanged, and still the
+        // lowest, so the span stays as small as the set allows.
+        assert_eq!(select_consecutive_run(&[0, 1, 2, 3, 9], 3), vec![0, 1, 2]);
+        // Two runs, and the lower one wins even though both would work.
+        assert_eq!(
+            select_consecutive_run(&[0, 1, 2, 7, 8, 9], 3),
+            vec![0, 1, 2]
+        );
+        // NO run of the needed length: fall back to the smallest, which
+        // is what the caller did unconditionally before. The repair still
+        // happens, on the unstructured arm.
+        assert_eq!(select_consecutive_run(&[0, 2, 4, 6], 3), vec![0, 2, 4]);
+        // Exactly enough, and consecutive.
+        assert_eq!(select_consecutive_run(&[4, 5, 6], 3), vec![4, 5, 6]);
+        // Degenerate shapes must not panic or over-take.
+        assert!(select_consecutive_run(&[1, 2, 3], 0).is_empty());
+        assert_eq!(select_consecutive_run(&[1, 2], 5), vec![1, 2]);
+        assert!(select_consecutive_run(&[], 3).is_empty());
+        // A single block is trivially its own run - the 1-missing repair.
+        assert_eq!(select_consecutive_run(&[9, 40, 41], 1), vec![9]);
+    }
+
+    /// The parallel scan must leave EXACTLY the catalog the sequential
+    /// walk leaves. The case that would break a careless merge is a
+    /// critical body repeated across volumes: `parsed` is first-seen-wins
+    /// keyed by packet MD5, so a merge in completion order rather than
+    /// file order would store whichever thread finished first. A real
+    /// PAR2 set repeats its criticals into every volume by design, so
+    /// this fixture has that property without arranging it.
+    ///
+    /// Compared: the file list, every file's stamp-independent packet
+    /// occurrences in order, the parsed critical bodies keyed by MD5, and
+    /// the byte total. Anything the repair reads afterwards is derived
+    /// from those.
+    #[test]
+    fn parallel_scan_matches_sequential() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-catalog-par-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Four members, small blocks, high redundancy: many volumes, and
+        // every volume carries the critical packets again.
+        for m in 0..4u8 {
+            let mut bytes = vec![0u8; 96 * 1024];
+            for (i, b) in bytes.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_mul(31).wrapping_add(m.wrapping_mul(97));
+            }
+            std::fs::write(dir.join(format!("m{m}.bin")), &bytes).unwrap();
+        }
+        let members: Vec<crate::par2gen::Member> = (0..4u8)
+            .map(|m| crate::par2gen::Member {
+                name: format!("m{m}.bin"),
+                path: dir.join(format!("m{m}.bin")),
+            })
+            .collect();
+        crate::par2gen::create_into(
+            &dir,
+            &members,
+            "cat",
+            &crate::par2gen::Par2Spec {
+                redundancy_pct: 100,
+                block_size: Some(4096),
+            },
+        )
+        .expect("fixture");
+
+        let seq = {
+            let mut c = PacketCatalog::build_lazy(&dir).unwrap();
+            while c.scan_next().unwrap() {}
+            c
+        };
+        let par = PacketCatalog::build_scoped(&dir, PacketScope::Flat).unwrap();
+
+        assert!(
+            seq.files.len() > 2,
+            "fixture must have several packet files"
+        );
+        assert_eq!(seq.files.len(), par.files.len(), "file count");
+        assert_eq!(seq.bytes_scanned, par.bytes_scanned, "bytes scanned");
+        for (a, b) in seq.files.iter().zip(par.files.iter()) {
+            assert_eq!(a.path, b.path, "file order");
+            let (ao, bo) = (a.packets.as_ref().unwrap(), b.packets.as_ref().unwrap());
+            assert_eq!(ao.len(), bo.len(), "occurrence count for {:?}", a.path);
+            for (x, y) in ao.iter().zip(bo.iter()) {
+                assert_eq!(x.md5, y.md5, "occurrence md5 in {:?}", a.path);
+                assert_eq!(x.set_id, y.set_id, "occurrence set id in {:?}", a.path);
+                match (&x.kind, &y.kind) {
+                    (Kind::Plain, Kind::Plain) => {}
+                    (
+                        Kind::RecvSlic {
+                            exp: e1,
+                            off: o1,
+                            len: l1,
+                        },
+                        Kind::RecvSlic {
+                            exp: e2,
+                            off: o2,
+                            len: l2,
+                        },
+                    ) => {
+                        assert_eq!((e1, o1, l1), (e2, o2, l2), "slice locator in {:?}", a.path)
+                    }
+                    _ => panic!("packet kind differs in {:?}", a.path),
+                }
+            }
+        }
+        // The first-seen-wins map: same keys, and the same BODY under each.
+        assert_eq!(seq.parsed.len(), par.parsed.len(), "parsed critical count");
+        for (md5, c) in &seq.parsed {
+            let other = par.parsed.get(md5).expect("same parsed keys");
+            match (c, other) {
+                (Crit::Main(b1, i1), Crit::Main(b2, i2)) => {
+                    assert_eq!((b1, i1), (b2, i2), "Main body")
+                }
+                (Crit::FileDesc(f1, d1), Crit::FileDesc(f2, d2)) => {
+                    assert_eq!(f1, f2, "FileDesc id");
+                    assert_eq!((&d1.name, d1.length, d1.md5), (&d2.name, d2.length, d2.md5));
+                }
+                (Crit::Ifsc(f1, b1), Crit::Ifsc(f2, b2)) => {
+                    assert_eq!(f1, f2, "Ifsc id");
+                    assert_eq!(b1.len(), b2.len(), "Ifsc blocks");
+                }
+                _ => panic!("parsed critical kind differs"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

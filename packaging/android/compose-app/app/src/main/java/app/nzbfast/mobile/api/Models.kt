@@ -232,7 +232,7 @@ object Parse {
         return out
     }
 
-    /** Play gating (Codex sweep 5 Aug L3): the `media` chip the daemon
+    /** Play gating (review sweep 5 Aug L3): the `media` chip the daemon
      * latched during the download says whether the bytes are media; a
      * row recorded before the chip existed falls back to the stored
      * path's extension (mirrors the daemon's MEDIA_EXTS list). */

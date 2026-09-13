@@ -138,6 +138,7 @@ fn m_resume(
         // routinely, and a resume of a queue that was never paused
         // is not a moment worth marking.
         if set_paused_cancel_timer(d, false) {
+            tracing::info!(target: "pause", "downloads resumed");
             d.note_event("resume", "downloads resumed");
         }
         persist_pause(d);
@@ -410,7 +411,7 @@ fn m_change_cat(
                     }));
                 }
                 // Saved with the fence still held, rolled back whole on
-                // a refused store (Codex C10) - the relocation fence
+                // a refused store (review C10) - the relocation fence
                 // prevents the live scheduling race, not a restart after
                 // refused persistence.
                 Ok(fence) => {
@@ -651,7 +652,7 @@ fn m_set_password(
                     // acquisition: raised later, a recategorize
                     // could snapshot the flag as false, move the
                     // directory, and race the unlock's out_dir
-                    // write (Codex H7). A raise that finds the
+                    // write (review H7). A raise that finds the
                     // flag already up refuses - a second unlock
                     // task would clear it while the first still
                     // runs.
@@ -688,7 +689,7 @@ fn m_set_password(
                                           try again when it settles"}));
                     }
                     // The delete/retry interlock, closed from this
-                    // side (Codex sweep 3 Aug H1): both remove the
+                    // side (review sweep 3 Aug H1): both remove the
                     // record UNDER the history lock, and this
                     // verify runs under the same lock AFTER the
                     // finalizing raise - whichever committed second
@@ -1049,6 +1050,16 @@ fn m_stats(
                             }),
                             // Lifetime completion% (reliability
                             // ledger) for the Providers card.
+                            // PER HOST, deliberately, where the block
+                            // meter beside it is per account: two rows
+                            // on one hostname therefore print the SAME
+                            // figure, and that is the truth rather than
+                            // the aliasing `block_spent` had. Article
+                            // availability is a property of the
+                            // BACKBONE - the two accounts are asking one
+                            // provider for one spool - so splitting it
+                            // would only halve the sample and make both
+                            // answers noisier.
                             "completion_pct": d.reliability(&s.host).map(|(t, m)| {
                                 100.0 * (t.saturating_sub(m)) as f64 / t as f64
                             }),
@@ -1619,7 +1630,7 @@ pub(crate) fn retry_kept_notice(d: &Arc<Daemon>, path: &str) -> Value {
     // spanning a file read, a whole NZB parse and a directory claim.
     // Both adds carry allow_dupe, so nothing held the second one, and
     // `choose_out_dir` gave it its own suffixed folder: one press, two
-    // complete downloads of the same release (Codex sweep 3, L3). The
+    // complete downloads of the same release (review sweep 3, L3). The
     // loser now gets the ordinary "that notice is gone" answer.
     let claimed = {
         let mut k = d.delete_kept.lock_ok();
@@ -1906,7 +1917,7 @@ pub(crate) fn dispatch(
         // tracked paths, never joined to a path, so it can't reach
         // anything else on disk.
         //
-        // By IDENTITY first, name second (Codex sweep 2, 3 Aug L1). The
+        // By IDENTITY first, name second (review sweep 2, 3 Aug L1). The
         // queue payload used to expose only `file_name()`, and deletion
         // took the first tracked path whose basename matched: change
         // the watch directory while a rejected `same.nzb` sits in the
@@ -1964,7 +1975,7 @@ pub(crate) fn dispatch(
 /// add reads the new one as Free and takes it - two jobs writing one
 /// folder, which is the hole the 2 Aug sweep closed for `add`.
 ///
-/// Codex H5: the caller's Queued snapshot released every lock before
+/// Review H5: the caller's Queued snapshot released every lock before
 /// this point, and the scheduler flips a picked job to Downloading AND
 /// snapshots its out_dir in one job-lock critical section - so a job
 /// that started while `refile_out_dir` walked the lists would download
@@ -1982,12 +1993,12 @@ pub(crate) fn dispatch(
 /// through `persist_relocations`, the rename doors and the NZBGet
 /// category arm batch theirs (N jobs, one queue.json rewrite), and a
 /// refused save rolls the whole relocation back - record and bytes -
-/// so a restart restores a row that still agrees with the tree (Codex
+/// so a restart restores a row that still agrees with the tree (review
 /// C10). Not done here: both rename doors mutate again after this
 /// returns - `name`, then the password - so a save here would persist a
 /// half-applied record instead of the whole transaction.
 ///
-/// Codex F-06: returns the relocation fence, and the caller decides when
+/// Review finding F-06: returns the relocation fence, and the caller decides when
 /// it lifts. Every arm that only re-files gets what it wants by dropping
 /// the guard at the end of its own statement - the fence then covers the
 /// publish and the move, which is the whole window this call owns.
@@ -2022,7 +2033,7 @@ pub fn requeue_category(
     // this call does in two of them can be split by a start. Either the
     // runner gets there first and the Queued check below refuses this
     // whole transaction, or this lands first and the runner reads the
-    // fence. There is no third ordering (Codex F-06, extending the H5
+    // fence. There is no third ordering (review finding F-06, extending the H5
     // refusal that shares this critical section).
     let (fence, old_dir) = {
         let mut g = job.lock_ok();
@@ -2081,7 +2092,7 @@ pub fn requeue_category(
     // pointed the record somewhere else and pokes nothing, so the
     // primary run started at the new directory from zero and refetched
     // the whole release, and the old folder was named by no record at
-    // all (Codex sweep 3, M12). Both halves are guarded by
+    // all (review sweep 3, M12). Both halves are guarded by
     // `from.exists()`, so the live case and this one cannot double-move.
     if !d.poke_sidecar(|i| i == id) && old_dir != dir && old_dir.exists() {
         match crate::smart::move_tree(&old_dir, &dir) {
@@ -2122,7 +2133,7 @@ pub fn requeue_category(
 // type.
 pub struct Relocation {
     job: Arc<Mutex<Job>>,
-    // The undo set (Codex C10): what the record said before the
+    // The undo set (review C10): what the record said before the
     // transaction, so a queue save that REFUSES after the bytes moved
     // can put record and tree back together instead of leaving the
     // durable row naming an empty directory while the partial bytes sit
@@ -2167,7 +2178,7 @@ impl Relocation {
 /// The durability half of one or more `requeue_category` transactions:
 /// ONE queue save, taken with every fence still held. On refusal every
 /// relocation is rolled back - record and bytes together - so a restart
-/// restores a row that still agrees with the tree (Codex C10). Returns
+/// restores a row that still agrees with the tree (review C10). Returns
 /// whether the store took it; a caller answering an API owes the user a
 /// `status:false` on false.
 #[must_use = "a refused save has already been rolled back - report it"]

@@ -482,6 +482,9 @@ fn concurrent_callers_probe_a_dead_trash_only_once() {
 
     const CALLERS: usize = 4;
     const PROBE: std::time::Duration = std::time::Duration::from_millis(300);
+    // Sampled before the measured run as well as after it - see the bound
+    // at the end of this test.
+    let overhead_before = four_thread_gate_overhead(CALLERS);
     let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let start = std::sync::Arc::new(std::sync::Barrier::new(CALLERS));
     let began = std::time::Instant::now();
@@ -519,10 +522,52 @@ fn concurrent_callers_probe_a_dead_trash_only_once() {
         CALLERS - 1,
         "every caller but the prober must be told to delete directly: {verdicts:?}"
     );
+    // The bound this test has always meant: ONE probe was paid, not four.
+    // It cannot be written as a bare wall clock, because on a shared runner
+    // the four threads' spawn, barrier and mutex handoff cost MORE than the
+    // four probes the bound exists to exclude - windows-unit shard 3/6
+    // measured 1.31 s and 1.14 s of it on 6 Sep 2026 (0f01fd71, run
+    // 34069529604) against a 600 ms bound, with `probes == 1` passing on
+    // both tries: the mechanism was right and the clock was measuring the
+    // runner. Widening the constant does not fix that - 1.31 s is already
+    // past the 1.2 s four serial probes would cost, so no fixed bound
+    // separates the good case from the bad there.
+    //
+    // So measure this machine's own cost for the same four-thread shape and
+    // bound the PROBE COST on top of it. Bracketed either side of the run
+    // and taken at its worst, because one sample on a box that is busy for
+    // one of the three windows is the flake coming back.
+    let overhead = four_thread_gate_overhead(CALLERS).max(overhead_before);
     assert!(
-        elapsed < PROBE * 2,
-        "the callers took {elapsed:?} - a single {PROBE:?} probe should cover all {CALLERS}"
+        elapsed < overhead + PROBE * 2,
+        "the callers took {elapsed:?} over {overhead:?} of thread overhead - \
+         a single {PROBE:?} probe should cover all {CALLERS}"
     );
+}
+
+/// Wall time for `callers` threads to start together on a barrier and hand
+/// one mutex down the queue, doing nothing else: the floor under any timing
+/// of [`trash_delete_gated`] on this machine, and on a loaded CI runner the
+/// dominant term. Touches none of the trash globals, so it can be sampled
+/// either side of a measured run without disturbing it.
+fn four_thread_gate_overhead(callers: usize) -> std::time::Duration {
+    let gate = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let start = std::sync::Arc::new(std::sync::Barrier::new(callers));
+    let began = std::time::Instant::now();
+    let threads: Vec<_> = (0..callers)
+        .map(|_| {
+            let gate = gate.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                drop(gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("overhead sample thread");
+    }
+    began.elapsed()
 }
 
 fn rule(pattern: &str) -> Rule {

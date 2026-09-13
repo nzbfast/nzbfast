@@ -247,7 +247,13 @@ fn a_spot_only_database_is_pruned_analysed_and_folded_like_any_other() {
         // groups, spots live, and a `waiting` closure that is always
         // false there (it is `scan_groups && ...`), so the gate inside
         // is the only stand-down in play.
-        assert!(rt.block_on(maintenance_slice(d, false, true, &|| false)));
+        assert!(rt.block_on(maintenance_slice(
+            d,
+            false,
+            true,
+            &|| false,
+            &mut PassGate::detached()
+        )));
 
         assert_eq!(
             releases(d),
@@ -296,7 +302,13 @@ fn spot_only_maintenance_still_stands_down_for_a_download() {
             .enable_all()
             .build()
             .unwrap();
-        assert!(rt.block_on(maintenance_slice(d, false, true, &|| false)));
+        assert!(rt.block_on(maintenance_slice(
+            d,
+            false,
+            true,
+            &|| false,
+            &mut PassGate::detached()
+        )));
 
         d.index_jobs_active.fetch_sub(1, Ordering::AcqRel);
         assert_eq!(releases(d), 2, "nothing may be pruned while a job runs");

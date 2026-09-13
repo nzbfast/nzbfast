@@ -1289,7 +1289,17 @@ location / {
     proxy_set_header Host              $host;
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-}</code></pre>
+}
+
+# Apache (mod_proxy, mod_proxy_http, mod_headers)
+&lt;Location /&gt;
+    ProxyPass        http://127.0.0.1:6789/
+    ProxyPassReverse http://127.0.0.1:6789/
+    RequestHeader set X-Forwarded-Proto "https"
+    # Where the proxy does the authenticating, supply the key here and
+    # clients behind it never need one. Use set, not setifempty.
+    # RequestHeader set X-Api-Key "your-api-key"
+&lt;/Location&gt;</code></pre>
 <p>Lisää päälle se, mitä proxysi tarjoaa: basic auth, forward-auth-palvelu kuten Authelia tai Authentik, tai asiakasvarmenteet. Yksi asia yllättää kaikki - Sonarr, Radarr ja puhelinsovellukset eivät pysty suorittamaan selainkirjautumista, joten jätä niille reitti ohi. Useimmat proxyt osaavat päästää läpi pyynnön, jossa on kelvollinen <code>X-Api-Key</code>-otsake, ja vaatia todennuksen kaikelta muulta.</p>
 <div class="warn-box"><b>Älä vain ohjaa porttia 6789 reitittimessäsi.</b>
 Ilman määritettyä varmennetta koontinäyttö puhuu salaamatonta HTTP:tä, joten

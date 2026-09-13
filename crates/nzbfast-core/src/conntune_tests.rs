@@ -844,7 +844,7 @@ fn cap_ledger_banks_a_day_at_a_time() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex sweep 6, N7: the chip shows a WINDOW of days, so the
+/// Review sweep 6, N7: the chip shows a WINDOW of days, so the
 /// number beside it has to come from the same window.
 ///
 /// `granted_lo` is a lifetime minimum and nothing raises it when old
@@ -900,7 +900,7 @@ fn each_capped_day_carries_its_own_low() {
 /// and the days already in it are marked unknown rather than given
 /// a number none of them was observed at.
 ///
-/// Codex sweep 7, H1b: backfilling those days with the LIFETIME low
+/// Review sweep 7, H1b: backfilling those days with the LIFETIME low
 /// told N7's lie again, in a column that from then on claims to be
 /// per-day - so the invented figure outlived the transitional state
 /// that produced it and was believed by every later reader.

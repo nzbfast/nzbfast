@@ -936,7 +936,7 @@ async fn a_capacity_refusal_stands_the_second_ceiling_down_on_the_wire() {
     // The refusal this rig arms is `cap_ghost_ms`, which greets with
     // `502 max number of simultaneous IP addresses reached` - the
     // source-address shape. `ServerLive::note_cap` is skipped for it on
-    // purpose (Codex sweep 5, M9), `ServerLive::refusal` was cleared the
+    // purpose (review sweep 5, M9), `ServerLive::refusal` was cleared the
     // moment the account started serving again, and the latch the
     // ceiling arm reads is private to the pool. So before OWED 4 this
     // fleet spent the rest of its run pinned at the first ceiling with

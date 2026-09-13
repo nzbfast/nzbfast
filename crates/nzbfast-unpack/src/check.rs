@@ -886,7 +886,7 @@ fn strip_counter_brackets(stem: &str) -> String {
 /// withdrawing the declared name cap, mismatched block sizes cap the
 /// wrong set, and the false Impossible that guard exists to prevent is
 /// back - a worse direction than the split it was fixing, because a
-/// refused post is a post the user does not get (Codex sweep 6, N9).
+/// refused post is a post the user does not get (review sweep 6, N9).
 ///
 /// So only the counter goes: `[n/m]` and `(n/m)` wherever they sit,
 /// plus a bare `n/m` token, plus the whitespace and joining hyphen they
@@ -983,7 +983,7 @@ fn multiple_par2_sets(nzb: &Nzb) -> bool {
         // per-file: "[01/02] - set.par2" and "[02/02] - set.vol000+51.par2"
         // are one set whose stems differ only by a counter, and comparing
         // the whole prefix split them and dropped a trustworthy declared
-        // cap (Codex sweep 5, L8). Only the COUNTER is dropped: only for
+        // cap (review sweep 5, L8). Only the COUNTER is dropped: only for
         // raw subjects, because a QUOTED filename may legitimately
         // contain spaces, and merging two genuinely different sets is
         // the unsafe direction.
@@ -1002,7 +1002,7 @@ fn multiple_par2_sets(nzb: &Nzb) -> bool {
             // cap somebody else's set with a foreign block size, which
             // is the false-Impossible this detector exists to prevent.
             // Seeing one alongside any named stem is therefore already
-            // two sets (Codex sweep 5, L2).
+            // two sets (review sweep 5, L2).
             anonymous = true;
             if !stems.is_empty() {
                 return true;

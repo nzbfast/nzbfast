@@ -9,7 +9,7 @@
 # (`--no-default-features`), and the only job that compiles that
 # configuration is `slim-check` in ci-private.yml, which builds it for
 # the HOST. So an ordinary change under crates/ can break the iOS app,
-# the Android app, or both, with every gate in CLAUDE.md's numbered list
+# the Android app, or both, with every gate in CONTRIBUTING.md's numbered list
 # green. That is macapp.yml's argument for Swift and `slim-check`'s own
 # history for `--no-default-features`, one platform further out: a
 # configuration nobody compiles is a configuration that is already
@@ -29,7 +29,7 @@
 #       reports `unfulfilled_lint_expectation` the day it stops being
 #       true - but only when compiling for that target. This one has
 #       never been judged by anything. That is exactly the class
-#       CLAUDE.md's FIFTEENTH gate exists for, in the one configuration
+#       CONTRIBUTING.md's FIFTEENTH gate exists for, in the one configuration
 #       that gate cannot reach.
 #   crates/nzbkit-base/src/nntp.rs
 #       the bionic keepalive arms (TCP_KEEPIDLE, TCP_USER_TIMEOUT) and
@@ -136,7 +136,7 @@
 # taking the link on every push costs about a hundred seconds and folds
 # two jobs into one. It also removes a second copy of the NDK
 # resolution below, which is exactly the kind of hand-copied sibling
-# CLAUDE.md's ELEVENTH and FOURTEENTH gates exist because of.
+# CONTRIBUTING.md's ELEVENTH and FOURTEENTH gates exist because of.
 #
 # iOS stays a `cargo check`, and that is a trade rather than a saving:
 #
@@ -265,7 +265,7 @@ permissions:
   contents: read
 
 env:
-  # Agent sessions build with this set (see CLAUDE.md); incremental state
+  # Agent sessions build with this set (see CONTRIBUTING.md); incremental state
   # is per-edit-loop state a one-shot runner never reads back, and it
   # roughly doubles what a build writes.
   CARGO_INCREMENTAL: '0'
@@ -277,7 +277,7 @@ jobs:
   # links `libnzbfast_ffi.a`, so `-p nzbfast-ffi` is not a proxy for the
   # thing that ships, it IS the thing that ships. It pulls nzbfast in
   # with default-features off plus `ffi`, which is what compiles the
-  # module tree as the LIB target - the same dimension CLAUDE.md's host
+  # module tree as the LIB target - the same dimension CONTRIBUTING.md's host
   # clippy gate needs `-p nzbfast-ffi` for.
   #
   # `aarch64-apple-ios`, the DEVICE triple, not `-sim`. The simulator

@@ -42,7 +42,7 @@ fn finishing_tail(d: &Arc<Daemon>, g: &Job) -> bool {
 /// completion whatever this flag says. Setting it anyway labelled a job
 /// "paused" in every client while its files went on moving - and left
 /// the flag SET, so a later auto-retry put the job back in the queue
-/// with `paused` still true and `pick_job` skipped it forever (Codex
+/// with `paused` still true and `pick_job` skipped it forever (review
 /// sweep 2, 3 Aug M4).
 ///
 /// Shared so the SAB/API `mode=queue&name=pause` arm and the NZBGet
@@ -61,7 +61,7 @@ pub fn apply_pause(d: &Arc<Daemon>, g: &mut Job, pause: bool) -> bool {
     // while a global pause or a guard hold keeps `pick_job` away. So
     // pause -> resume -> pause under a global pause announced the first
     // idle edge and swallowed the second, which is the one thing the
-    // latch's "once per transition" contract promises not to do (Codex
+    // latch's "once per transition" contract promises not to do (review
     // sweep 14 Aug L2). Both callers hold the queue lock across this,
     // which is the same serialization the add's re-arm relies on
     // (daemon_enqueue.rs) and what keeps a concurrent notifier's
@@ -85,7 +85,7 @@ pub fn apply_pause(d: &Arc<Daemon>, g: &mut Job, pause: bool) -> bool {
 /// later.
 ///
 /// Shared so the SAB/API delete arm and the NZBGet JSON-RPC delete
-/// variants cannot drift (Codex sweep 14 Aug M4): the facade is a
+/// variants cannot drift (review sweep 14 Aug M4): the facade is a
 /// hand-copy of the REST path and this is the second REST fix it
 /// missed. Call after the rows are gone and no queue lock is held.
 pub(crate) fn note_queue_idle_unless_active(d: &Daemon, stopped_active: bool) {

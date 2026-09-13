@@ -864,7 +864,7 @@ fn same_dir_dot_component_resolves_equal() {
 /// the SAME Arc one generation on, so the ladder's late `Completed`
 /// landed on a QUEUED record - a state `pick_job` never picks, so the
 /// retry the user pressed never ran and only a second retry cleared it
-/// (Codex sweep 3, H2).
+/// (review sweep 3, H2).
 ///
 /// Staged rather than raced: the generation is bumped BEFORE the call,
 /// which is the same record the awaits would have handed back.
@@ -953,7 +953,7 @@ async fn a_late_unlock_never_settles_a_record_that_was_retried_out_from_under_it
 /// EVERY loss was transport. One confirmed 430 among a thousand timeouts
 /// therefore looked exactly like an aged dead post, and the run that a
 /// journal-resume retry would have finished was written off instead
-/// (Codex sweep 3, M8).
+/// (review sweep 3, M8).
 #[test]
 fn an_aged_post_still_retries_while_the_loss_is_ambiguous() {
     let cooldown = 900;

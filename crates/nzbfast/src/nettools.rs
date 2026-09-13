@@ -1186,7 +1186,7 @@ fn daemon_base(host: &str, port: u16) -> Result<String> {
 /// Linux and is refused outright by Windows - `"`, `\` and control
 /// characters are all illegal in a Win32 path - so it passed every
 /// local gate on this fleet and took `windows-unit` red on main. The
-/// rule is the CLAUDE.md SIXTEENTH gate's: a test fixture that only
+/// rule is the CONTRIBUTING.md SIXTEENTH gate's: a test fixture that only
 /// some platforms can build is a test only some platforms run.
 fn mime_filename(name: &str) -> String {
     name.chars()

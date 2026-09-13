@@ -15,7 +15,7 @@
 //! `MemBudget::auto` - a quarter of physical RAM - runs a desktop and a
 //! Simulator perfectly well, and shows up only as a phone the low-memory
 //! killer takes during PAR2 repair, on hardware nothing here compiles
-//! for. That is the same class as the gates CLAUDE.md's numbered list
+//! for. That is the same class as the gates CONTRIBUTING.md's numbered list
 //! keeps growing to catch, and this is the cheap version: ask the engine
 //! what budget it is running under.
 

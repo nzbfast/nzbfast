@@ -68,7 +68,7 @@ fn pace_step_strides_and_flushes_small_files_once() {
         pace_step(48 * MB, 48 * MB, 48 * MB, 48 * MB, 32 * MB),
         Some(PARKED)
     );
-    // Codex 7 Aug M3: duplicate/repair spans push `written` past
+    // Review 7 Aug M3: duplicate/repair spans push `written` past
     // `size` while unique coverage still has a gap - the watermark
     // must KEEP STRIDING (never park), or the genuine tail writes
     // unpaced and the burst the pacer exists to prevent comes back
@@ -466,7 +466,7 @@ fn an_external_repair_takes_custody_of_the_file_and_hands_it_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex F-21 (22 Aug 2026): `open_read` used to admit a reader under
+/// Review finding F-21 (22 Aug 2026): `open_read` used to admit a reader under
 /// the custody gate, RELEASE the gate, and only then open the path. A
 /// repair claiming custody in that gap owned the file before the
 /// descriptor existed - and Unix repair does not drain readers, so the
@@ -1743,7 +1743,7 @@ fn stage_dir(tag: &str) -> crate::testscratch::ScratchDir {
 #[test]
 fn coalescing_turns_a_run_of_articles_into_one_write() {
     // The window's charge is a PROCESS gauge, and `cargo test --lib`
-    // runs this whole crate in one process (CLAUDE.md's one-process
+    // runs this whole crate in one process (CONTRIBUTING.md's one-process
     // oracle): every FileWriter-level staging test takes this guard so
     // no two of them can have runs open at the same instant, which is
     // what `staged_bytes_are_charged_to_the_gauge_and_released` reads.
@@ -1793,7 +1793,7 @@ fn coalescing_turns_a_run_of_articles_into_one_write() {
 #[test]
 fn a_gap_opens_a_second_run_rather_than_forcing_a_write() {
     // The window's charge is a PROCESS gauge, and `cargo test --lib`
-    // runs this whole crate in one process (CLAUDE.md's one-process
+    // runs this whole crate in one process (CONTRIBUTING.md's one-process
     // oracle): every FileWriter-level staging test takes this guard so
     // no two of them can have runs open at the same instant, which is
     // what `staged_bytes_are_charged_to_the_gauge_and_released` reads.
@@ -1831,7 +1831,7 @@ fn a_gap_opens_a_second_run_rather_than_forcing_a_write() {
 #[test]
 fn a_staged_span_is_never_published_as_covered() {
     // The window's charge is a PROCESS gauge, and `cargo test --lib`
-    // runs this whole crate in one process (CLAUDE.md's one-process
+    // runs this whole crate in one process (CONTRIBUTING.md's one-process
     // oracle): every FileWriter-level staging test takes this guard so
     // no two of them can have runs open at the same instant, which is
     // what `staged_bytes_are_charged_to_the_gauge_and_released` reads.
@@ -1864,7 +1864,7 @@ fn a_staged_span_is_never_published_as_covered() {
 #[test]
 fn every_read_back_door_sees_staged_bytes() {
     // The window's charge is a PROCESS gauge, and `cargo test --lib`
-    // runs this whole crate in one process (CLAUDE.md's one-process
+    // runs this whole crate in one process (CONTRIBUTING.md's one-process
     // oracle): every FileWriter-level staging test takes this guard so
     // no two of them can have runs open at the same instant, which is
     // what `staged_bytes_are_charged_to_the_gauge_and_released` reads.
@@ -1905,7 +1905,7 @@ fn every_read_back_door_sees_staged_bytes() {
 #[test]
 fn drop_lands_the_run_and_abandon_close_throws_it_away() {
     // The window's charge is a PROCESS gauge, and `cargo test --lib`
-    // runs this whole crate in one process (CLAUDE.md's one-process
+    // runs this whole crate in one process (CONTRIBUTING.md's one-process
     // oracle): every FileWriter-level staging test takes this guard so
     // no two of them can have runs open at the same instant, which is
     // what `staged_bytes_are_charged_to_the_gauge_and_released` reads.
@@ -2476,4 +2476,92 @@ fn the_resume_mark_survives_bytes_held_in_the_window() {
         art.repeat(n)[..],
         "and reading the mark wrote every byte it describes"
     );
+}
+
+/// GH #71: the end-of-job release hands the descriptor back even when
+/// the sync that precedes it FAILS - which is the whole difference
+/// between [`FileWriter::release`] and [`FileWriter::park`], and the
+/// only reason both exist.
+///
+/// Park's early return on a sync error is correct for park's caller: an
+/// external par2 is about to rewrite those bytes, and letting it open a
+/// file whose last writes are still in our buffers is worse than
+/// declining. At the end of a job there is no such tool and no later
+/// write, so the same early return only leaks the descriptor for the
+/// life of the writer.
+///
+/// **The leak is invisible on a local disk and user-visible on NFS**,
+/// which is why it took a field report to find: `sync_data` essentially
+/// never fails on local storage, and NFS is also the one place where a
+/// still-open descriptor changes what `unlink` DOES - it silly-renames
+/// the file to `.nfs*` instead of removing it, so a delete-with-files
+/// leaves the directory standing with our own handles named inside it.
+///
+/// The failure is injected rather than waited for: a pipe's write end
+/// is a `File` whose sync cannot succeed on either unix target, so this
+/// reaches `release`'s error branch deterministically and in-process.
+/// The writer keeps its real `path` throughout - only the handle it
+/// would sync is unsyncable. The ERROR KIND is deliberately not
+/// asserted: macOS answers EBADF from `F_FULLFSYNC` and linux EINVAL
+/// from `fdatasync`, and which one arrives is not what this pins.
+#[cfg(unix)]
+#[test]
+fn release_hands_back_the_handle_even_when_the_sync_fails() {
+    use std::os::fd::FromRawFd;
+
+    let dir = std::env::temp_dir().join(format!("nzbfast-release-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A writer over a real path whose HANDLE is a pipe: everything the
+    // writer knows about itself is unchanged, and the sync it does on
+    // its way out cannot succeed. The read end rides back with it so the
+    // caller can drop both together and neither fd leaks or double-closes.
+    let unsyncable = |leaf: &str| -> (FileWriter, File) {
+        let w = FileWriter::create(&dir.join(leaf), 4).unwrap();
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` is a two-element array of the exact type
+        // `pipe(2)` fills, and the call is checked below before either
+        // element is read.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe()");
+        // SAFETY: both descriptors are freshly returned by that `pipe`
+        // and owned by nothing else, which is what `from_raw_fd`
+        // requires. Each is wrapped exactly once, so ownership is
+        // unique and the close happens once - the read end when the
+        // caller drops it, the write end when `release` clears the cell.
+        let (read_end, write_end) =
+            unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) };
+        *w.file.write_ok() = Some(write_end);
+        (w, read_end)
+    };
+
+    // The control: an ordinary writer releases cleanly and ends closed.
+    let ok = FileWriter::create(&dir.join("payload.bin"), 4).unwrap();
+    ok.write_at(0, b"abcd").unwrap();
+    ok.release().unwrap();
+    assert!(
+        ok.file.read_ok().is_none(),
+        "a clean release must end with the descriptor handed back"
+    );
+
+    // And the arm that matters.
+    let (w, _r) = unsyncable("unsyncable.bin");
+    w.release()
+        .expect_err("a pipe cannot be synced - the injection did not take");
+    assert!(
+        w.file.read_ok().is_none(),
+        "the descriptor is still held after a failed sync: this is the leak \
+         GH #71 reported, and the reason release() is not park()"
+    );
+
+    // Park is the other contract, pinned here so a future edit that
+    // collapses the two has to argue with a test rather than a comment.
+    let (p, _r2) = unsyncable("parked.bin");
+    p.park().expect_err("same injection, same failure");
+    assert!(
+        p.file.read_ok().is_some(),
+        "park KEEPS the handle when the sync fails - that is its contract, \
+         and release exists because it is the wrong one at end of job"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

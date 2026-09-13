@@ -267,7 +267,7 @@ pub fn encode(
 ///
 /// `long` is the arm with teeth: the writer is sized from this untrusted
 /// total, so a post declaring more than it ships used to retire every
-/// counter and complete GREEN with a hole in the file (Codex sweep
+/// counter and complete GREEN with a hole in the file (review sweep
 /// 3 Aug M7). `short` is the opposite lie and is the control: the bytes
 /// that arrive exceed the declaration, and a client sized from it must
 /// not truncate them.

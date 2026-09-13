@@ -1214,7 +1214,7 @@ impl MockServer {
                                 // `accept_cap` models. It used to say
                                 // "simultaneous IP addresses", which is
                                 // a different fact - and since those two
-                                // stopped sharing telemetry (Codex sweep
+                                // stopped sharing telemetry (review sweep
                                 // 5, M9) the wording has to match what
                                 // is being simulated.
                                 format!("502 max connections reached: {cap}\r\n").as_bytes(),

@@ -24,10 +24,33 @@ use super::*;
 /// It applies by SIZE, never by name: the extension is chosen by the
 /// poster, so letting `*.par2` past a bound that extensionless volumes
 /// have to clear would make the bound optional - rename the file and it
-/// is gone (Codex sweep 10 Aug, M4). A real recovery volume is orders of
-/// magnitude under this; a file over it is either not a volume at all or
-/// one no repair could afford to load.
-pub const MAX_PACKET_FILE_BYTES: u64 = 1 << 30;
+/// is gone (review sweep 10 Aug, M4).
+///
+/// **This used to be 1 GiB, on the reasoning that "a real recovery
+/// volume is orders of magnitude under this". That was wrong, and it
+/// cost repairs.** PAR2 volumes are sized by exponential doubling
+/// (`vol000+01`, `vol001+02`, `vol003+04`, ...), so the LARGEST volume
+/// holds about half the recovery set - measured at 45% of the parity.
+/// A set with roughly 2 GiB of parity therefore has a volume over
+/// 1 GiB, which is a 2.5 GB payload at 110% redundancy, ~10 GiB at 25%,
+/// or ~20 GiB at 10% - all ordinary, and the high-redundancy end is the
+/// rebuild-from-parity workflow. Both our creator and par2cmdline-turbo
+/// land that volume on a power-of-two block count, so it reaches 1 GiB
+/// EXACTLY and passes it on the repeated critical packets alone: 8,420
+/// bytes over in the case that found this, 110,108 in turbo's. The
+/// volume was skipped, 36% of the parity went with it, and the repair
+/// reported `Unrepairable` on a set turbo completes - from files our
+/// own creator had written.
+///
+/// The memory the old bound was really guarding is now bounded by the
+/// SCAN instead: `Catalog::scan_file` maps a volume past
+/// `SLURP_MAX_BYTES` rather than reading it whole, so a large file
+/// costs reclaimable page cache and not a private copy. That is why
+/// this can be a sanity bound rather than a memory one - a file past it
+/// is not a plausible recovery volume on any real post, and refusing it
+/// still bounds how much attacker-chosen input one directory entry can
+/// point the scanner at.
+pub const MAX_PACKET_FILE_BYTES: u64 = 64 << 30;
 
 /// Gather the PAR2 packet files in `dir`: `*.par2` by name, plus
 /// magic-sniffed files (obfuscated posts rename recovery volumes too, and

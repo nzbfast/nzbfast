@@ -58,7 +58,7 @@ fn nzb() -> Nzb {
     .expect("test NZB parses")
 }
 
-/// Codex 5 Aug M2 defect 1: a file the recovery set does not cover
+/// Review 5 Aug M2 defect 1: a file the recovery set does not cover
 /// must never become a cancellation candidate - repair cannot heal
 /// it, so abandoning its articles is permanent damage.
 #[test]
@@ -78,7 +78,7 @@ fn an_uncovered_companion_is_never_a_candidate() {
     );
 }
 
-/// Codex 5 Aug M2 defect 2: the damage guard charges the file's
+/// Review 5 Aug M2 defect 2: the damage guard charges the file's
 /// LARGEST still-possible segments at exact bytes. With 2 tiny
 /// segments done and one 400 KB straggler queued, the old average
 /// math advertised ~34 blocks of worst-case damage; the truth is 99.

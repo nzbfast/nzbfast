@@ -133,7 +133,7 @@ impl ServerProbe {
 /// bumping there would put the whole queue back on the wire every few
 /// seconds.
 ///
-/// The ORDER is the load-bearing part (Codex sweep I, 13 Aug 2026). A
+/// The ORDER is the load-bearing part (review sweep I, 13 Aug 2026). A
 /// poll landing between a bump and the store sees the new revision with
 /// the old hold, adopts that revision, and - because the later store
 /// carries no second bump - every matching poll after it omits the
@@ -510,7 +510,7 @@ pub(super) fn reset_hub_for_job(
     // from a fresh `Config::load` here: this function runs ON the
     // runner with the job already marked Downloading and no fetch task
     // to cancel yet, so a config path that stopped answering wedged the
-    // queue silently (Codex sweep H).
+    // queue silently (review sweep H).
     //
     // The arithmetic itself is `Daemon::block_pool_rules`, shared with
     // the prefetch sidecar rather than written out twice. This loop used
@@ -747,7 +747,7 @@ pub(super) fn detach_job_tail(d: &Arc<Daemon>, nzo_id: &str) -> DetachedTail {
     // ...and this job's connection ceilings, in the same window and for
     // the same reason: `pool_live` is still THIS job's. Banking was
     // watchdog-only, so a job shorter than one 1-5 s tick could be
-    // refused and leave nothing at all in the lifetime ledger (Codex
+    // refused and leave nothing at all in the lifetime ledger (review
     // sweep 6, N8). One episode banks once, whichever caller reaches it
     // first.
     super::stall::fold_and_bank_caps(d);
@@ -756,7 +756,7 @@ pub(super) fn detach_job_tail(d: &Arc<Daemon>, nzo_id: &str) -> DetachedTail {
     // since `pool_live` is not cleared when a job ends - but a refusal
     // seen only inside a sub-tick job whose pool a later job replaces,
     // or one on the last job before a queue-finished shutdown action
-    // ends the process, was banked nowhere (Codex sweep 7, L2).
+    // ends the process, was banked nowhere (review sweep 7, L2).
     super::stall::bank_refusals(d);
     // M29 oracle: take this job's per-article outcomes off the hub
     // before the next job installs its own sink. The FOLD into the
@@ -841,32 +841,38 @@ pub(super) fn settle_job_tail(
     let mut per_server_rel: Vec<(String, u64, u64)> = Vec::new();
     let mut prov_facts: Vec<crate::provquality::HostFacts> = Vec::new();
     if let Some(l) = &detached.pool_live {
-        // FOLD BY HOST BEFORE COMPARING, and this half MUST move with
-        // `Daemon::flush_run_usage`'s - see `Daemon::fold_bytes_by_host`
-        // for why either alone is worse than neither. `usage_flushed` is
-        // keyed by HOST and holds the SUM of every row on that host,
-        // while `l.servers` is one row per configured ACCOUNT and two
-        // config rows may legitimately share a host. Comparing a single
+        // FOLD BY ACCOUNT BEFORE COMPARING, and this half MUST move
+        // with `Daemon::flush_run_usage`'s - see
+        // `Daemon::fold_bytes_by_account` for why either alone is worse
+        // than neither. `usage_flushed` is keyed by ACCOUNT and holds
+        // the SUM of every row billing to that account, while
+        // `l.servers` is one row per configured server and two config
+        // rows may legitimately be one account (same host, same
+        // username - one bill at the provider). Comparing a single
         // row's counter against the pair's total under-bills here
         // exactly as it did there; comparing the pair's total against a
         // map that had NOT been folded would bill the whole job twice.
-        let per = Daemon::fold_bytes_by_host(
+        let per = Daemon::fold_bytes_by_account(
             &l.servers
                 .iter()
-                .map(|s| (s.host.clone(), s.bytes.load(Ordering::Relaxed)))
+                .map(|s| (Daemon::live_account(s), s.bytes.load(Ordering::Relaxed)))
                 .collect::<Vec<_>>(),
         );
-        for (host, bytes) in &per {
-            let billed = detached.usage_flushed.get(host).copied().unwrap_or(0);
+        for (acct, bytes) in &per {
+            let billed = detached.usage_flushed.get(acct).copied().unwrap_or(0);
             if *bytes > billed {
-                residual.push((host.clone(), bytes - billed));
+                residual.push((acct.clone(), bytes - billed));
             }
         }
         // The reliability ledger and the provider-quality facts stay
         // PER ROW, on the far side of the fold above. `add_reliability`
-        // accumulates into a host-keyed bucket itself, so two rows on
-        // one host already sum there and folding here would only move
-        // the same addition earlier; and `HostFacts` wants the ROW's
+        // accumulates into a host-keyed bucket itself - and stays that
+        // way, because article availability is a property of the
+        // BACKBONE and not of the account you bought on it, so two
+        // accounts on one provider printing one completion% is the
+        // truth rather than the aliasing `block_spent` had - so two
+        // rows on one host already sum there and folding here would
+        // only move the same addition earlier; and `HostFacts` wants the ROW's
         // own counters, which is what makes a single busy account
         // legible beside a quiet sibling on the same hostname.
         for s in &l.servers {

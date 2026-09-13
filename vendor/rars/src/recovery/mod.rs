@@ -4,6 +4,7 @@
 //! and a Cauchy encoder matrix. This crate intentionally exposes the field
 //! and matrix building blocks before wiring them into archive serialization.
 
+mod gf16_fold;
 pub mod rar3;
 pub mod rar5;
 pub mod stream;

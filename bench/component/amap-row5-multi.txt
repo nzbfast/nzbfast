@@ -1,0 +1,25 @@
+# Row 5, the pars-only shape over 21 members: the whole movie is
+# reconstructed from recovery blocks alone. No measured wild
+# population - see the scenarios file - kept as the extreme.
+ARTICLE 768000
+DELETE feature.part01.rar
+DELETE feature.part02.rar
+DELETE feature.part03.rar
+DELETE feature.part04.rar
+DELETE feature.part05.rar
+DELETE feature.part06.rar
+DELETE feature.part07.rar
+DELETE feature.part08.rar
+DELETE feature.part09.rar
+DELETE feature.part10.rar
+DELETE feature.part11.rar
+DELETE feature.part12.rar
+DELETE feature.part13.rar
+DELETE feature.part14.rar
+DELETE feature.part15.rar
+DELETE feature.part16.rar
+DELETE feature.part17.rar
+DELETE feature.part18.rar
+DELETE feature.part19.rar
+DELETE feature.part20.rar
+DELETE feature.part21.rar

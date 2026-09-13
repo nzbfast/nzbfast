@@ -442,7 +442,7 @@ pub async fn timed_fetch_multi(
     // guard fires. Aborting the task would drop the reaper's future and
     // leave a genuinely wedged worker running for good - reintroducing
     // the exact leak this guard exists to close, wearing a tidier fix.
-    // (Mechanism established by the Codex sweep session, 4 Aug.)
+    // (Mechanism established by the review sweep session, 4 Aug.)
     //
     // It needs no disarming. Once the run has finished the pool's last
     // strong Arc is gone, the handle's Weak no longer upgrades, and
@@ -1391,7 +1391,7 @@ pub struct DiversityReport {
 /// that each answered five of 100 requests and then reset look like they
 /// shared the same 95 gaps - a near-1.0 overlap, a "SAME infra" verdict
 /// and a "keep only one, add another backbone" recommendation drawn from
-/// nothing at all (Codex sweep 12 Aug F15).
+/// nothing at all (review sweep 12 Aug F15).
 fn missing_jaccard(a: &[bool], b: &[bool], common: usize) -> Option<f64> {
     let common = common.min(a.len()).min(b.len());
     if common == 0 {
@@ -1451,7 +1451,7 @@ pub async fn diversity(
                     // How many of the sample the server ANSWERED. A sweep
                     // that resets, times out or fails to flush leaves the
                     // rest of `vec` false, and false has to mean "unknown"
-                    // there rather than "missing" (Codex sweep 12 Aug F15).
+                    // there rather than "missing" (review sweep 12 Aug F15).
                     let mut answered = 0usize;
                     if let Ok(Ok((mut conn, _))) =
                         tokio::time::timeout(Duration::from_secs(12), Connection::connect(&s)).await
@@ -1479,7 +1479,7 @@ pub async fn diversity(
                             // mismatch breaks the sweep, which leaves
                             // `answered` short - and everything past it
                             // reads as unknown rather than as missing
-                            // (Codex sweep 12 Aug F15). A server that
+                            // (review sweep 12 Aug F15). A server that
                             // echoes no id at all still passes.
                             let expected = ids[recv].as_str();
                             match tokio::time::timeout(
@@ -2225,7 +2225,7 @@ mod tests {
     /// and then reset. Over what they actually answered there is no gap to
     /// share; counting the four unanswered entries as confirmed-missing
     /// made them look perfectly correlated, which is what produces a
-    /// "SAME infra - keep only one" recommendation out of nothing (Codex
+    /// "SAME infra - keep only one" recommendation out of nothing (review
     /// sweep 12 Aug F15).
     #[test]
     fn an_interrupted_sweep_does_not_invent_shared_gaps() {

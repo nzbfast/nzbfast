@@ -84,6 +84,21 @@ pub(super) fn payout_server(
 /// rules already cover the whole-server-degraded shape - but the
 /// hedge exists for the single-straggler-on-a-healthy-server shape,
 /// which is what this rig now builds.
+///
+/// 9 SEP 2026: IT DOES NOT, and this rig is named OUT of nightly's
+/// pool-rig filter until it is re-priced (claim
+/// `red-long-suites-c765a60a`). The premise above is written for ONE
+/// stall; the fixture below builds SIX on a server holding 3 of the 4
+/// connections. The slow-owner comparison is per WORKER and a stalled
+/// worker still divides the owner's rate, so two concurrent stalls put
+/// A at 13.3 KB/s against B's 40 and the 2x rule fires after all -
+/// rescuing at ~3 s where the `off > 9 s` precondition assumes the flat
+/// 8 s. Both legs sample that race: on an idle box the hedge-ON leg has
+/// twice finished fast with ZERO hedges issued, so the payout assertion
+/// passes for the wrong reason as often as the precondition fails. The
+/// engine is fine - every leg completes all 80 articles and wins all 6
+/// dups. Numbers, per-rule tallies and three re-pricing sketches:
+/// research/HEDGE-PAYOUT-RIG-CANNOT-ISOLATE-THE-HEDGE-2026-09-09.md
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "wall-clock payout measurement - flaky under suite load, run with --ignored"]
 async fn payout_hedge_rescues_stalls_in_under_a_second_not_eight() {
@@ -2358,15 +2373,146 @@ async fn a_zero_based_post_re_earns_the_same_verdict_once_per_file() {
     );
     assert_eq!(done, total, "every article must still be delivered");
     assert_eq!(bad, 0, "these bodies pass their own pcrc32");
+    // THE RUN-WIDE ARM IS WHAT THIS BRANCH CHANGES, and this assertion
+    // is the before/after. On main the answer is `nfiles` - the same
+    // verdict independently re-earned once per file, which is where the
+    // 66% went. Here it is `RUN_WIDE_AFTER`: the post says it twice and
+    // is believed for the rest of the run.
     assert_eq!(
-        standdown, nfiles as usize,
-        "one stand-down per file is the whole shape of the cost - {standdown} for \
-         {nfiles} files means the latch's scope has moved and this pin is stale"
+        standdown,
+        queue::RUN_WIDE_AFTER,
+        "the run-wide arm must earn its verdict exactly {} times and then stop \
+         paying: {standdown} stand-downs for {nfiles} files",
+        queue::RUN_WIDE_AFTER
     );
     assert!(
-        steers >= nfiles as usize,
-        "{steers} steers over {total} articles - a file shorter than the \
-         adjudication window should pay for very nearly all of itself: {notes:?}"
+        steers < total / 2,
+        "{steers} steers over {total} articles - the run-wide arm is not cutting \
+         the per-file adjudication windows, which is its whole purpose: {notes:?}"
+    );
+}
+
+/// The run-wide part latch, both sides priced (F-09 follow-up).
+///
+/// The rig is a post that is HALF honest: three files numbered from
+/// zero, which earn their per-file stand-downs legitimately, and then
+/// one file numbered correctly in which server A misfiles six ids -
+/// serving the NEXT article's body under the asked-for id. A genuine
+/// split-brain, in a file whose numbering is not in question.
+///
+/// THE WIN is the first assertion: the verdict is earned
+/// [`queue::RUN_WIDE_AFTER`] times and not once per file.
+///
+/// THE LOSS is the second, and it is asserted rather than described so
+/// that nobody meets it by surprise: once the run arm takes, the last
+/// file's wrong-part check is simply OFF, so ALL SIX misfiled bodies are
+/// owned where main steers 4-6 of them. The loss is total for the files
+/// the arm reaches, not partial.
+///
+/// Per section 4 of the F-09 cost write-up each of those six is a HOLE
+/// that par2 repairs and not corrupt bytes, because the consumer places
+/// a body at the offset the body's own yEnc header declares. That is
+/// what makes the trade arguable; it does not make it free.
+///
+/// The zero is deterministic and not a knife edge: the queue runs
+/// file-then-offset and the three 0-based files are 120 articles ahead
+/// of the victim's, so the arm is long since on by the time any of its
+/// ids is decoded. A red on the second assertion means the arm has
+/// stopped arming, which changes what the first one is measuring too.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_wide_part_latch_prices_both_sides() {
+    let per: u32 = 40;
+    let victim: u32 = 3;
+    let art = 8_000usize;
+    let data: Vec<u8> = (0..(per * art as u32)).map(|i| (i >> 2) as u8).collect();
+    let mk = || {
+        let mut arts = std::collections::HashMap::new();
+        let mut ids: Vec<ArticleReq> = Vec::new();
+        for f in 0..=victim {
+            let zero_based = f < victim;
+            for (i, chunk) in data.chunks(art).enumerate() {
+                let p = if zero_based { i as u32 } else { i as u32 + 1 };
+                let a = crate::yenc::encode(
+                    &format!("z{f}.bin"),
+                    data.len() as u64,
+                    Some((p, per)),
+                    (i * art) as u64 + 1,
+                    chunk,
+                );
+                let id = format!("<mx-{f}-{i}@mock>");
+                arts.insert(id.clone(), a);
+                ids.push(ArticleReq {
+                    id: id.into(),
+                    age_days: 0,
+                    part: i as u32 + 1,
+                    file: f,
+                });
+            }
+        }
+        (arts, ids)
+    };
+    let (arts_a, ids) = mk();
+    let (arts_b, _) = mk();
+    let swapped = [5usize, 11, 17, 23, 29, 35];
+    let swap: std::collections::HashMap<String, String> = swapped
+        .into_iter()
+        .map(|i| {
+            (
+                format!("<mx-{victim}-{i}@mock>"),
+                format!("<mx-{victim}-{}@mock>", i + 1),
+            )
+        })
+        .collect();
+    let total = ids.len();
+    let a = crate::mock::MockServer::start(
+        arts_a,
+        crate::mock::Chaos {
+            swap,
+            ..Default::default()
+        },
+    )
+    .await;
+    let b = crate::mock::MockServer::start(arts_b, Default::default()).await;
+    let cfg = PoolConfig {
+        crc_steer: true,
+        window: 2,
+        ..Default::default()
+    };
+    let servers = vec![payout_server(&a, 3, cfg.clone()), payout_server(&b, 1, cfg)];
+    let (_, done, bad, _, notes) = payout_leg_steered(servers, ids).await;
+    let vtag = format!("mx-{victim}-");
+    let vsteers = notes
+        .iter()
+        .filter(|n| n.contains("wrong article") && n.contains(&vtag))
+        .count();
+    let runwide = notes
+        .iter()
+        .filter(|n| n.contains("rest of the run"))
+        .count();
+    let standdown = notes.iter().filter(|n| n.contains("synthesized")).count();
+    println!(
+        "F-09 run-wide: {standdown} per-file stand-downs, {runwide} run-wide, \
+         {vsteers} of {} split-brain bodies steered in the honest file",
+        swapped.len()
+    );
+    assert_eq!(done, total, "every article must still be delivered");
+    assert_eq!(bad, 0, "every one of these bodies passes its own pcrc32");
+    assert_eq!(
+        runwide, 1,
+        "the run-wide arm must arm exactly once: {notes:?}"
+    );
+    assert_eq!(
+        standdown,
+        queue::RUN_WIDE_AFTER,
+        "THE WIN: the verdict is earned {} times, not once per file",
+        queue::RUN_WIDE_AFTER
+    );
+    assert_eq!(
+        vsteers, 0,
+        "THE LOSS, and it is the price of the win rather than a defect: with the \
+         run arm on, a genuine split-brain in a later file is OWNED and not \
+         steered. main steers 4 to 6 of these six. If this is ever not 0 the arm \
+         has stopped arming - fix that, do not relax this"
     );
 }
 

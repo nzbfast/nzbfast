@@ -925,7 +925,7 @@ pub struct Daemon {
     pub bench_interval: AtomicU64,
     /// Epoch-seconds of the last benchmark run (either kind).
     pub bench_last: AtomicU64,
-    /// Single-flight latch for system benchmarks (Codex sweep 10 Aug
+    /// Single-flight latch for system benchmarks (review sweep 10 Aug
     /// M14): two tabs, or a manual run racing the schedule, ran the
     /// 128 MiB compute + 512 MiB disk + provider-traffic workload
     /// concurrently and distorted each other's numbers. Claim through
@@ -2565,7 +2565,7 @@ impl Daemon {
             if g.paused || g.tombstone || g.state != JobState::Queued {
                 continue;
             }
-            // Codex F-06: a job whose destination is published but whose
+            // Review finding F-06: a job whose destination is published but whose
             // earlier progress is still being merged into it. SKIPPED
             // rather than refused at the start: `start_next` re-reads
             // the fence in the critical section that flips the state,
@@ -2613,7 +2613,7 @@ impl Daemon {
     pub fn bench_append(&self, entry: Value) {
         // Load-modify-write under the lock: two unlocked appends both
         // read the same history and one silently overwrote the other's
-        // row (Codex sweep 10 Aug M14).
+        // row (review sweep 10 Aug M14).
         let _serialised = self.bench_history_lock.lock_ok();
         let p = self.bench_history_path();
         let mut list = self.bench_history();

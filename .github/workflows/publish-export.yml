@@ -125,6 +125,19 @@ on:
       # export has to remove, which is what the --paths arm derives
       # and why it reddened without this line.
       - '.github/workflows/journeys.yml'
+      # The parfast GUI workflow, stripped for journeys.yml's reason:
+      # the app trees under `apps/` are not on the manifest, so a
+      # published copy would point at a tree the public repo has never
+      # had. Two other files are removed in the same block of
+      # publish-public.sh and are NOT on this list, which is the
+      # derivation working as designed rather than a gap: arm (c) of
+      # publish-export-completes.sh's `derive_inputs` takes every
+      # workflow the export NAMES, in any position, while the removal
+      # targets it reads as $TMP-anchored are deliberately excluded from
+      # arms (a) and (b). So a workflow that is only ever a removal
+      # target still has to be named here, and the --paths arm derived
+      # this one and reddened without the line.
+      - '.github/workflows/parfast-gui.yml'
       - '.github/workflows/publish-export.yml'
   schedule:
     # 07:20 UTC daily. Off the hour on purpose - GitHub queues scheduled runs

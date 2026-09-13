@@ -1555,7 +1555,7 @@ pub(crate) fn out_tree(out: &Path) -> Vec<(String, Vec<u8>)> {
     v
 }
 
-/// W4-17 (codex Wave 4, 30 Aug 2026) - the FILE-VERSUS-DIRECTORY
+/// W4-17 (review Wave 4, 30 Aug 2026) - the FILE-VERSUS-DIRECTORY
 /// namespace collision, both completion orders.
 ///
 /// `node` and `node/child.bin` are two valid FileDesc members with

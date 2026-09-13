@@ -19,4 +19,10 @@ targets = [
   # target is where 64-bit assumptions surface (usize is 32-bit), and a
   # target nobody can build without a setup step is one nobody checks.
   "armv7-unknown-linux-musleabihf",
+  # 64-bit ARM Linux, STATIC, for nightly's `aarch64-cross` job: the only
+  # place gf16's plain-NEON (no sha3) dispatch runs, under qemu on a
+  # Cortex-A72 model. The gnu target above is what the release tarball
+  # ships; this one exists because a static binary runs under qemu-user
+  # with no sysroot (the same reason the armv7 job is musl).
+  "aarch64-unknown-linux-musl",
 ]

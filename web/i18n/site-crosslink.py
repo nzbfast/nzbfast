@@ -51,7 +51,7 @@ question. `--selftest` settles it from the other end: it drives `relink` and
 the leak scan over synthetic fixture pages carrying known English hrefs and
 asserts they are rewritten and flagged, which proves the transform is alive
 whether or not any real page still has drift left in it. Same convention as
-nearly every gate in CLAUDE.md's list, and `web/i18n/site-check.py` is the
+nearly every gate in CONTRIBUTING.md's list, and `web/i18n/site-check.py` is the
 model for the frozen-roster shape.
 
     python3 web/i18n/site-crosslink.py --selftest

@@ -90,7 +90,7 @@ impl Shared {
     /// up if the provider then settled at a stable latency above it:
     /// every read timed out, every timeout produced no sample, and
     /// healthy articles failed forever on a link the flat 30 s path
-    /// would have served (Codex sweep 3 Aug M4). A timeout is evidence
+    /// would have served (review sweep 3 Aug M4). A timeout is evidence
     /// too - censored evidence ("at least this long"), so it is folded
     /// in as a doubling rather than a measurement, and the next
     /// successful sample decays it back down through the ordinary EWMA.
@@ -102,7 +102,7 @@ impl Shared {
     /// every one of them still spent at the flat floor (2 s when this
     /// was found), so a provider that settled just above it failed
     /// every article before the budget could widen a millisecond
-    /// (Codex sweep 2, 3 Aug M6). Escalating from the expired budget
+    /// (review sweep 2, 3 Aug M6). Escalating from the expired budget
     /// makes the next attempt's budget strictly larger than the one
     /// that just failed - 4 s, 8 s, ceiling at today's floor - so the
     /// retry allowance is spent probing upwards instead of re-testing
@@ -206,7 +206,7 @@ impl Shared {
     /// the outage gauge and this clamp describe the same observation -
     /// and this function used to reload it, so sessions finishing in
     /// between could stamp a ceiling of zero for an event that was
-    /// classified while two were held (Codex sweep 5, L7).
+    /// classified while two were held (review sweep 5, L7).
     pub(super) fn note_cap_bounce(&self, idx: usize, held: usize) {
         self.flap_cap_seen[idx].fetch_max(held, Ordering::AcqRel);
     }

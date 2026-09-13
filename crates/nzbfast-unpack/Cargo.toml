@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast-unpack"
-version = "1.4.0"
+version = "1.5.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -69,7 +69,7 @@ test-support = []
 [dev-dependencies]
 # The layer below, with ITS test seams switched on: `repair`'s parity
 # tests take `lanegate::HeavyCpu::unheld()`, and `identity::may_call_out`
-# (CLAUDE.md invariant 5a) reads `cfg!(feature = "test-support")` because
+# (project invariant 5a) reads `cfg!(feature = "test-support")` because
 # `cfg!(test)` is a property of ONE crate's build and this crate's tests
 # compile nzbfast-core as a plain dependency.
 nzbfast-core = { path = "../nzbfast-core", features = ["test-support"] }

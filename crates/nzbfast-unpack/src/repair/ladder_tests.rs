@@ -287,7 +287,7 @@ fn an_ordinary_unpack_failure_carries_no_reason() {
     // with the channel still empty, because the tail prefers whatever is
     // in it over its own three sentences.
     let mut why: Option<String> = None;
-    let nested = crate::unpack::extract_nested_why(&dir, None, 0, &mut why).unwrap();
+    let nested = crate::unpack::extract_nested_why(&dir, None, 0, &mut why, None).unwrap();
     assert!(!nested.produced(), "{nested:?}");
     assert_eq!(why, None, "the nested pass invented a reason");
     // …and the unlock, whose Err(None) is what keeps a wrong password

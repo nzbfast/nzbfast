@@ -1,0 +1,21 @@
+{
+    "version": "1.5.0-beta.1",
+    "description": "PAR2 create, verify and repair with par2cmdline's command shape and exit codes. A drop-in for par2 in scripts. Beta.",
+    "homepage": "https://nzbfast.github.io/nzbfast/",
+    "license": "GPL-3.0-or-later",
+    "url": "https://github.com/nzbfast/nzbfast/releases/download/v1.5.0/parfast-1.5.0-beta.1-windows-x64.zip",
+    "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "extract_dir": "parfast-1.5.0-beta.1-windows-x64",
+    "bin": [
+        "parfast.exe"
+    ],
+    "checkver": {
+        "github": "https://github.com/nzbfast/nzbfast"
+    },
+    "autoupdate": {
+        "url": "https://github.com/nzbfast/nzbfast/releases/download/v$version/parfast-$version-windows-x64.zip",
+        "hash": {
+            "url": "https://github.com/nzbfast/nzbfast/releases/download/v$version/SHA256SUMS.txt"
+        }
+    }
+}

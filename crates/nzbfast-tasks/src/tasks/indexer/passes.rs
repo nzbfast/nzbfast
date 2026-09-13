@@ -275,24 +275,52 @@ pub(crate) async fn maintenance_slice(
     has_groups: bool,
     scan_spots: bool,
     waiting: &(dyn Fn() -> bool + Sync),
+    gate: &mut PassGate,
 ) -> bool {
     // Re-asked between legs rather than once at the top: the reap runs
     // to a 30 s pass budget, and a job that starts inside it must stop
     // the two that follow. `waiting()` cannot carry that here - it is
     // `scan_groups && ...`, so on a Spot-only install it is always
     // false and the gate is the only stand-down there is.
+    //
+    // `gate.handback()` sits beside every one of those checks, and is
+    // the reason this function takes the gate at all
+    // (research/INDEX-LAP-DUTY-CYCLE-2026-09-02.md). The sizing note on
+    // the folds below already makes the argument for the write mutex -
+    // "more CALLS, never a longer hold, so a queued HTTP worker gets its
+    // window" - and stopped one level short: 200-odd slices handed back
+    // the write MUTEX between them and handed back the GATE never, so
+    // the tip watcher, the compactor and the seed-harvest replay, which
+    // are all hung on this gate, ran only in the interval sleep. The
+    // handback converts one 480 s hold into 120 holds of ~4 s, which is
+    // already the bound `HTTP_INDEX_WAIT` is written against.
+    //
+    // What the gate is HELD for across a leg is one leg's exclusivity,
+    // not the lap's: no state crosses a handback in memory. Every leg
+    // below reads its cursor back out of the database inside its own
+    // `with_index_mut` and stamps its clock only on completion, so a
+    // handback between two of them is indistinguishable from the lap
+    // ending after the first and starting again at the second - which
+    // is a thing that already happens on every stand-down and every
+    // restart. The interleaving that IS new is a peer's writes landing
+    // between two legs; that is safe here for the same reason, because
+    // no leg's next slice assumes anything about the rows the last one
+    // left. The one place a hold spans real work is INSIDE a slice, and
+    // that hold is untouched.
     let ok = || (has_groups || scan_spots) && daemon2.db_maintenance_ok();
     if ok() {
         retention_and_statistics(daemon2).await;
         if waiting() {
             return false;
         }
+        gate.handback().await;
     }
     if ok() {
         picker_index_backfill(daemon2).await;
         if waiting() {
             return false;
         }
+        gate.handback().await;
     }
     // After the build, never before: a picker index that has just
     // landed carries no `sqlite_stat1` row, which makes the next
@@ -303,12 +331,14 @@ pub(crate) async fn maintenance_slice(
         if waiting() {
             return false;
         }
+        gate.handback().await;
     }
     if ok() {
         segments_rebuild_pass(daemon2).await;
         if waiting() {
             return false;
         }
+        gate.handback().await;
     }
     // The message-id map backfill, same shape as the folds below: a
     // bounded loop of one-second slices, the write mutex released
@@ -330,6 +360,7 @@ pub(crate) async fn maintenance_slice(
         if done {
             break;
         }
+        gate.handback().await;
     }
     // ...and the same for the quality re-classification backfill, which
     // is dormant until a version bump - one kv read a lap - and then has
@@ -363,6 +394,7 @@ pub(crate) async fn maintenance_slice(
         if done {
             break;
         }
+        gate.handback().await;
     }
     // The folds get a bounded LOOP of one-second slices, not one slice:
     // one slice per ~18-minute lap is 80 seconds of fold work a day,
@@ -399,6 +431,7 @@ pub(crate) async fn maintenance_slice(
         if done {
             break;
         }
+        gate.handback().await;
     }
     // After the shatter fold, never before: a file the shatter fold has
     // just made whole is exactly the complete single-file row the
@@ -414,6 +447,7 @@ pub(crate) async fn maintenance_slice(
         if done {
             break;
         }
+        gate.handback().await;
     }
     // And after the session fold, for the mirror of that fold's reason:
     // this one's population is complete single-FILE rows, which is what
@@ -429,6 +463,7 @@ pub(crate) async fn maintenance_slice(
         if done {
             break;
         }
+        gate.handback().await;
     }
     // And after all three folds, the durable seed replay - the lane
     // that turns a saved NZB into an exact release name. Last on
@@ -468,6 +503,7 @@ pub(crate) async fn maintenance_slice(
         if done {
             break;
         }
+        gate.handback().await;
     }
     if ok() {
         enrich_unstamp_pass(daemon2);

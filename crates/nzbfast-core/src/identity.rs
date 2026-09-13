@@ -49,7 +49,7 @@ pub const TEST_CALLOUT_ALLOW: &str = "NZBFAST_TEST_ALLOW_CALLOUT";
 
 /// May this process put an enrichment request on the wire at all?
 ///
-/// The single source for CLAUDE.md invariant 5. `NZBFAST_NO_ENRICH` is
+/// The single source for project invariant 5. `NZBFAST_NO_ENRICH` is
 /// the test suite's "do not touch the real internet" switch, and every
 /// metadata lane is enrichment by another name - without the guard,
 /// every end-to-end daemon test whose fixture name carries a group tag

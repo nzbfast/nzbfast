@@ -410,7 +410,7 @@ pub(super) fn m_spot_search(
 /// `Config::load` on the blocking pool, for the two API probes that run
 /// under a `tokio::time::timeout`.
 ///
-/// TODO 162 item 1, the request-path half of the Codex sweep H audit: a
+/// TODO 162 item 1, the request-path half of the review sweep H audit: a
 /// synchronous `std::fs::read` inside a future cannot be cancelled, so
 /// wrapping one in `timeout` bounds every step AFTER it and none of the
 /// read itself. A config on a dropped SMB or NFS mount therefore held an

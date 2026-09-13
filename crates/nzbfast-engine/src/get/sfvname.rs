@@ -1691,6 +1691,7 @@ mod tests {
             }
         }
         let sets = vec![Arc::new(nzbkit::par2::Par2Set {
+            comment: None,
             recovery_set_id: [7u8; 16],
             block_size: 1000,
             files: vec![f("Real.Feature.MKV", 60_000), f("Placeholder.bin", 0)],

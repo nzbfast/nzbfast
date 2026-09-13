@@ -153,14 +153,14 @@ async fn a_primary_that_spends_its_budget_hands_the_article_down() {
         assert_eq!(&*w.id, "<a@x>");
         sh.charge_wire();
         sh.register_inflight(&w, 0);
-        let mut inflight: VecDeque<Work> = VecDeque::new();
-        inflight.push_back(w);
+        let mut sess = SessionState::from_inflight(VecDeque::new());
+        sess.inflight.push_back(w);
         requeue_or_fail(
             &sh,
             &tx,
             &cfg,
             ctx0,
-            &mut inflight,
+            &mut sess.inflight,
             FailCode::Transport,
             "rst",
             true,
@@ -299,7 +299,7 @@ async fn a_bare_430_defers_the_verdict_and_says_so() {
     // Dispatch it the way a worker would, so the queue below counts the
     // requeue and not the seeded entry.
     let dispatched = sh.queue.lock().await.pop_front().expect("the seeded work");
-    let mut inflight: VecDeque<Work> = [dispatched].into_iter().collect();
+    let mut sess = SessionState::from_inflight([dispatched].into_iter().collect());
     sh.charge_wire();
 
     let before = sh.deferred.load(Ordering::Relaxed);
@@ -308,11 +308,10 @@ async fn a_bare_430_defers_the_verdict_and_says_so() {
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         false,
         false,
-        &mut Default::default(),
+        &mut sess,
     )
     .await;
     assert_eq!(
@@ -335,18 +334,17 @@ async fn a_bare_430_defers_the_verdict_and_says_so() {
         .await
         .pop_front()
         .expect("the requeued work");
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+    let mut sess = SessionState::from_inflight([w].into_iter().collect());
     sh.charge_wire();
     handle_missing(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         false,
         false,
-        &mut Default::default(),
+        &mut sess,
     )
     .await;
     assert!(
@@ -377,7 +375,7 @@ async fn the_bare_430_recheck_jumps_the_queue() {
     let (tx, _rx) = mpsc::channel(8);
     let dispatched = sh.queue.lock().await.pop_front().expect("the seeded work");
     assert_eq!(&*dispatched.id, "<a@x>");
-    let mut inflight: VecDeque<Work> = [dispatched].into_iter().collect();
+    let mut sess = SessionState::from_inflight([dispatched].into_iter().collect());
     sh.charge_wire();
 
     handle_missing(
@@ -385,11 +383,10 @@ async fn the_bare_430_recheck_jumps_the_queue() {
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         false,
         false,
-        &mut Default::default(),
+        &mut sess,
     )
     .await;
     let q = sh.queue.lock().await;
@@ -430,26 +427,28 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
     };
     let ctx = ctx_for(&servers, 0);
     let (tx, mut rx) = mpsc::channel(8);
-    let mut ledger: VecDeque<Arc<str>> = VecDeque::new();
+    // ONE session across all three refusals: the bare-refusal ledger
+    // `void_soft_430` reads below is per-session state, and rebuilding
+    // the `SessionState` here would silently empty it.
+    let mut sess = SessionState::from_inflight(VecDeque::new());
 
     // A desynced session's refusal: bare, and about the article behind.
     let w = sh.queue.lock().await.pop_front().expect("the seeded work");
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+    sess.inflight.push_back(w);
     sh.charge_wire();
     handle_missing(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         false,
         false,
-        &mut ledger,
+        &mut sess,
     )
     .await;
     assert_eq!(
-        ledger.len(),
+        sess.bare_refused.len(),
         1,
         "a bare refusal goes in the session's ledger - it is the only \
          record of what a later desync proof would have to void"
@@ -458,7 +457,7 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
     // That session then reads an id that is not the one it asked for,
     // proving every refusal since its last checked id was positional
     // evidence off a misaligned socket.
-    sh.void_soft_430(&ledger, ctx.group_bits);
+    sh.void_soft_430(&sess.bare_refused, ctx.group_bits);
 
     // The next bare refusal is therefore FIRST evidence again.
     let w = sh
@@ -467,18 +466,17 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
         .await
         .pop_front()
         .expect("the requeued work");
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+    sess.inflight.push_back(w);
     sh.charge_wire();
     handle_missing(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         false,
         false,
-        &mut Default::default(),
+        &mut sess,
     )
     .await;
     assert!(
@@ -496,18 +494,17 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
         .await
         .pop_front()
         .expect("the requeued work");
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+    sess.inflight.push_back(w);
     sh.charge_wire();
     handle_missing(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         false,
         false,
-        &mut Default::default(),
+        &mut sess,
     )
     .await;
     assert!(
@@ -544,27 +541,37 @@ async fn the_re_armed_pass_is_capped_so_the_run_still_terminates() {
         let Some(w) = sh.queue.lock().await.pop_front() else {
             break; // resolved: the article left the queue for good
         };
-        let mut ledger: VecDeque<Arc<str>> = VecDeque::new();
-        let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+        let mut sess = SessionState::from_inflight([w].into_iter().collect());
         sh.charge_wire();
         handle_missing(
             &cfg,
             ctx,
             &sh,
             &tx,
-            &mut inflight,
             PooledBuf::unpooled(Vec::new()),
             false,
             false,
-            &mut ledger,
+            &mut sess,
         )
         .await;
-        sh.void_soft_430(&ledger, ctx.group_bits);
+        sh.void_soft_430(&sess.bare_refused, ctx.group_bits);
         if let Ok(FetchOutcome::Missing { id, .. }) = rx.try_recv() {
             assert_eq!(&*id, "<a@x>");
-            assert!(
-                round <= SOFT_REARM_CAP as usize + 1,
-                "resolved after {round} rounds"
+            // EXACT, not a ceiling. Every round here pairs a bare
+            // refusal with a proof of desync, so the article must
+            // re-arm its pass `SOFT_REARM_CAP` times and terminate on
+            // the round after - and the ceiling alone cannot tell that
+            // from an article that never re-armed at all and resolved
+            // on round 1. Measured: it was a ceiling until 10 Sep 2026,
+            // and a refactor that quietly voided an EMPTY ledger every
+            // round (so no re-arm ever happened) passed it. Only
+            // clippy's `unused_mut` over the orphaned local caught
+            // that; this assertion is what should have.
+            assert_eq!(
+                round,
+                SOFT_REARM_CAP as usize + 1,
+                "the article must ride the WHOLE re-arm ladder and \
+                 terminate one round past the cap"
             );
             return;
         }

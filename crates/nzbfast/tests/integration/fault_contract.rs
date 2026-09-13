@@ -656,12 +656,12 @@ fn get(config: &Path, nzb: &Path, out: &Path, extra_env: &[(String, String)]) ->
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
     // Keyless on purpose, the same deliberate opt-out the other CLI
     // suites take (see e2e.rs run_get_win), and no enrichment worker may
-    // reach the real internet from a test (CLAUDE.md invariant 5).
+    // reach the real internet from a test (project invariant 5).
     cmd.env("NZBFAST_OPEN", "1").env("NZBFAST_NO_ENRICH", "1");
     // The census lines this suite parses are INFO, and the child falls
     // back to ambient RUST_LOG when NZBFAST_LOG is unset - a parent
     // shell exporting RUST_LOG=warn silently emptied every census and
-    // failed all eight contract tests with no product defect (Codex
+    // failed all eight contract tests with no product defect (review
     // sweep 24 Aug, F-22; third recurrence of the class, see
     // tests/daemon.rs). Pin INFO at the child.
     cmd.env("NZBFAST_LOG", "info").env_remove("RUST_LOG");

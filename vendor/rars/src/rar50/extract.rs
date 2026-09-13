@@ -2821,7 +2821,15 @@ impl SolidChainDriver {
             return false;
         }
         let members = collect_solid_chain(volumes, coords, password_available);
-        let total: usize = members.iter().map(|m| m.output_size).sum();
+        // Saturating: `output_size` is the archive's own declared
+        // unpacked size, so a crafted set can push the sum past
+        // `usize::MAX` - an overflow panic in any checked build and a
+        // silent wrap in release, which would hand
+        // `solid_chain_worthwhile` a tiny figure for an enormous chain.
+        // Saturation answers "definitely not worthwhile" instead.
+        let total: usize = members
+            .iter()
+            .fold(0usize, |acc, m| acc.saturating_add(m.output_size));
         if members.len() < 2 || !session.decoder.solid_chain_worthwhile(total) {
             return false;
         }
@@ -5823,6 +5831,11 @@ mod tests {
             compression_level: None,
             dictionary_size: None,
             entropy: crate::Entropy::Os,
+            hash_record: crate::rar50::HashRecord::Crc32Only,
+            optimal_parse: false,
+            adaptive_entropy_blocks: true,
+            write_policy: None,
+            tokenizer_horizon_choice: false,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",
@@ -5857,6 +5870,11 @@ mod tests {
             compression_level: None,
             dictionary_size: None,
             entropy: crate::Entropy::Os,
+            hash_record: crate::rar50::HashRecord::Crc32Only,
+            optimal_parse: false,
+            adaptive_entropy_blocks: true,
+            write_policy: None,
+            tokenizer_horizon_choice: false,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",

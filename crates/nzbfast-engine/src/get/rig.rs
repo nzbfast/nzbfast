@@ -313,7 +313,7 @@ pub(super) struct ReplayPending {
     /// Restored files whose replay failed (open, read, or extractor
     /// write). Their article ids were moved to `completed` by the plan,
     /// so the pool never refetches them: a failure here is a permanent
-    /// hole the run must NOT finish over (Codex F-04, 22 Aug 2026).
+    /// hole the run must NOT finish over (review finding F-04, 22 Aug 2026).
     failed: std::sync::Mutex<Vec<String>>,
     /// TODO 158 item 2, belt-and-braces half: every replayed article is
     /// RE-JOURNALED under the route this run actually took, exactly as
@@ -749,7 +749,7 @@ pub(super) fn replay_or_adopt_restored(
             // this half stays UP FRONT even though the bytes do not:
             // claim its name before the pool opens, or an inner member
             // with the same sanitized name opens the very inode the
-            // replay will read (Codex sweep 3 Aug H3) - a fresh
+            // replay will read (review sweep 3 Aug H3) - a fresh
             // extractor starts with an empty name set, and `hash.bin`
             // containing a member named `hash.bin` is exactly the shape
             // the disk extractor stages into an isolated directory to
@@ -759,7 +759,7 @@ pub(super) fn replay_or_adopt_restored(
             // the sources are the earlier run's extracted outputs, and
             // a different archive's member sanitizing to the same name
             // would otherwise claim that inode and write into it before
-            // the delayed replay got to read it (Codex F-03, 22 Aug
+            // the delayed replay got to read it (review finding F-03, 22 Aug
             // 2026). Claimed under this slot; `claim_name` lets any slot
             // of the same archive group adopt it, which is the owning
             // archive re-creating its own inner writer.
@@ -909,7 +909,7 @@ mod replay_failure_tests {
     /// tell the extractor never received those bytes. A replay that
     /// could not read its source therefore has to be RECORDED - the run
     /// fails naming the file rather than settling over a permanent hole
-    /// (Codex F-04, 22 Aug 2026). Before the fix the open error printed
+    /// (review finding F-04, 22 Aug 2026). Before the fix the open error printed
     /// and returned `()`, and `failures` stayed empty.
     #[test]
     fn a_replay_whose_source_cannot_be_read_is_recorded_as_a_failure() {

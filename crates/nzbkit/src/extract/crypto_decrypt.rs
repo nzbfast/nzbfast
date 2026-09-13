@@ -240,7 +240,7 @@ impl Extractor {
                     // plaintext with no integrity verdict at all. By
                     // finish every volume is mapped, so `hash_only` is
                     // the truth: demote, and the shim reproduces the
-                    // posted bytes for the fallback (Codex sweep 12 Aug
+                    // posted bytes for the fallback (review sweep 12 Aug
                     // F2). The route may still differ by arrival order;
                     // what it may never be is MIXED, which is the gate's
                     // own contract.

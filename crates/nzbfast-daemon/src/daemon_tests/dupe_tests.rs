@@ -271,7 +271,7 @@ fn dupe_scope_exact_lets_a_different_release_of_the_same_episode_through() {
     });
 }
 
-/// Codex sweep K, 13 Aug 2026: admission and promotion asked different
+/// Review sweep K, 13 Aug 2026: admission and promotion asked different
 /// questions. Under `dupe_scope = "exact"` a different release of the
 /// same episode is admitted and runs; when it failed, `park` promoted
 /// held rows by the shared EPISODE key - including one held against a
@@ -628,7 +628,7 @@ fn the_same_post_memo_is_evicted_to_queue_membership() {
     });
 }
 
-/// Codex sweep J, 13 Aug 2026: the exact identity was built with an
+/// Review sweep J, 13 Aug 2026: the exact identity was built with an
 /// ASCII-only filter, so every non-Latin letter became a space. Two
 /// DIFFERENT CJK titles sharing a tag tail reduced to the same key and
 /// the second was held as a duplicate of the first, while a wholly

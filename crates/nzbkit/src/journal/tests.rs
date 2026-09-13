@@ -1080,7 +1080,7 @@ fn materialized_slot_restores_placements_as_identity() {
 /// the `M` line describes the file as it is now and is NOT rewritten,
 /// and an `X` retiring the volume file after the `M` drops the
 /// rewritten placements (which now name it).
-/// Codex sweep D, 13 Aug 2026: a PAR2 report renames a writerless
+/// Review sweep D, 13 Aug 2026: a PAR2 report renames a writerless
 /// slot after its `S` line landed, and the volume materializes
 /// under the VERIFIED name. Replay must rewrite the slot's
 /// placements onto the file that exists - the stale posted name
@@ -1131,7 +1131,7 @@ fn a_materialized_slot_renamed_after_its_s_line_restores_under_the_new_name() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Codex sweep 13 Aug R3: the reverse ordering - the slot
+/// Review sweep 13 Aug R3: the reverse ordering - the slot
 /// MATERIALIZES under its posted name, and the PAR2 verify renames
 /// it afterwards. The extractor re-fires the materialized hook on
 /// that rename, which lands here as a second `S new-name` + `M`

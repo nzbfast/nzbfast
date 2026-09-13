@@ -651,6 +651,7 @@ fn no_non_date_bucket_is_ever_billed_to_a_window() {
     for k in [
         "reliability",
         "block_base",
+        "account_lifetime",
         "quota_base",
         "zzz_future_bucket",
     ] {
@@ -663,6 +664,14 @@ fn no_non_date_bucket_is_ever_billed_to_a_window() {
             "{k} is not a day"
         );
     }
+    // ...and a SCALAR bucket is skipped rather than crashed on.
+    // `"ledger_v"` is a number, not a `{host: bytes}` map - the first
+    // bucket in this store that is - and a payload every SAB client
+    // parses is the wrong place to find out that a bucket shape was
+    // assumed.
+    let mut u = u.clone();
+    u.insert("ledger_v".into(), json!(2u64));
+    assert_eq!(server_stats_json(&u, today, &[]), base);
 }
 
 /// ...and the windows themselves still work, or the fix above could

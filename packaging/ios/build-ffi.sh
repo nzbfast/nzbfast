@@ -57,7 +57,7 @@ for ARCH in $ARCHLIST; do
     esac
 
     # CARGO_TARGET_DIR is deliberately NOT redirected into DerivedData: a
-    # shared checkout already carries one target/ per worktree (CLAUDE.md's
+    # shared checkout already carries one target/ per worktree (CONTRIBUTING.md's
     # disk section), and a second copy per DerivedData directory is the same
     # multiplication one level down.
     # `-p nzbfast-ffi` ALONE, and that is load-bearing rather than tidy:

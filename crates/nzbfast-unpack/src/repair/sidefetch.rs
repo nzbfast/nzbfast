@@ -301,7 +301,7 @@ pub async fn fetch_volumes(
 /// because an earlier file already owned the message id. That count is
 /// the only trace such a segment leaves anywhere, so a caller that
 /// judges a volume complete has to add it to the article failures the
-/// fetch reports (Codex F-02).
+/// fetch reports (review finding F-02).
 ///
 /// `#[must_use]`, and that attribute is the regression (sweep 9,
 /// finding 7): F-02 converted `fetch_volumes` and left the speculative
@@ -344,7 +344,7 @@ pub fn volume_reqs(
         if let std::collections::hash_map::Entry::Vacant(slot) = id_to_file.entry(b.clone()) {
             slot.insert(fi);
         } else {
-            // Codex F-02 (23 Aug 2026): the skip has to be COUNTED, not
+            // Review finding F-02 (23 Aug 2026): the skip has to be COUNTED, not
             // just taken. Nothing downstream can see it otherwise - no
             // request goes out, so no `Missing`/`Failed` outcome comes
             // back, so `VolumeFailures::for_file(fi)` stays 0 and the
@@ -807,7 +807,7 @@ pub async fn fetch_volume_articles_with(
     // [`volume_prealloc_cap`]. u64::MAX = no ceiling.
     prealloc_cap: u64,
     // Cancellation handle for callers that must be able to stop a
-    // side-fetch mid-volume: the speculative prefetch (Codex 5 Aug M3 -
+    // side-fetch mid-volume: the speculative prefetch (review 5 Aug M3 -
     // it could hold Cancel/Pause through a blackholed provider's whole
     // retry ladder) and, since §129, the postproc lane's tail, whose
     // repair fetches used to outlive the job the user deleted. See
@@ -949,7 +949,7 @@ pub async fn fetch_volume_articles_with(
 /// caller that installs per file then has to assume the worst: the
 /// dropped-volume refetch (`get/dropped.rs`) discarded EVERY renamed
 /// install whenever any article anywhere in the fetch failed, so one
-/// lost article of volume A threw away a complete volume B (Codex F-05,
+/// lost article of volume A threw away a complete volume B (review finding F-05,
 /// 22 Aug 2026).
 ///
 /// Every arm that knows the file index charges it. An outcome whose id
@@ -2278,7 +2278,7 @@ mod recovery_volume_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Codex H3: the posted `bytes=` total is as poster-controlled as
+    /// Review H3: the posted `bytes=` total is as poster-controlled as
     /// the yEnc `size=`, so "min(size, posted)" was the attacker picking
     /// both sides - one tiny article declaring two 100 GB numbers became
     /// a real fallocate. The article geometry caps it: a single-segment
@@ -2350,7 +2350,7 @@ mod recovery_volume_tests {
             omitted_1, 1,
             "the segment the second volume lost to the first owner must be \
              COUNTED - it is never requested, so no Missing outcome comes back \
-             and the failure map alone reads this volume as whole (Codex F-02)"
+             and the failure map alone reads this volume as whole (review finding F-02)"
         );
 
         assert_eq!(
@@ -2413,7 +2413,7 @@ mod recovery_volume_tests {
                 .contains(&0x22),
             "and it holds its own bytes, not the first volume's"
         );
-        // Codex F-02: the consumer charges only outcomes it receives,
+        // Review finding F-02: the consumer charges only outcomes it receives,
         // and an article that was never requested produces none - so
         // the omitted count is the ONLY thing that makes the second
         // volume's shortfall visible to a caller that installs per file.
@@ -2429,7 +2429,7 @@ mod recovery_volume_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Codex F-05 (22 Aug 2026): the consumer kept ONE fetch-wide
+    /// Review finding F-05 (22 Aug 2026): the consumer kept ONE fetch-wide
     /// failure count, so a caller installing per volume could not tell a
     /// volume that came back short from a whole one in the same fetch.
     /// The dropped-volume refetch therefore discarded EVERY renamed

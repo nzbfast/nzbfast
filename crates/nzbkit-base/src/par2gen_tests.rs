@@ -499,11 +499,20 @@ fn the_batched_parallel_fold_agrees_with_the_textbook_definition() {
             // one go: same slices out of all four, or the batching is
             // deciding an answer it has no business deciding.
             for budget in [bs, 2 * bs, 3 * bs, 1 << 24] {
-                let got: Vec<Vec<u8>> = recovery_slices(&slots, bs, n, first, count, budget, None)
-                    .unwrap()
-                    .iter()
-                    .map(|w| crate::gf16::words_as_bytes(w).to_vec())
-                    .collect();
+                let got: Vec<Vec<u8>> = recovery_slices(
+                    &slots,
+                    bs,
+                    n,
+                    first,
+                    count,
+                    budget,
+                    None,
+                    &CreateControl::default(),
+                )
+                .unwrap()
+                .iter()
+                .map(|w| crate::gf16::words_as_bytes(w).to_vec())
+                .collect();
                 assert_eq!(
                     got, want,
                     "bs={bs} first={first} count={count} budget={budget}"
@@ -674,14 +683,74 @@ fn a_concurrent_create_divides_what_is_left_instead_of_taking_a_second_share() {
         solo.claimed
     );
     // The bound the gauge buys: two lanes together stay inside one ceiling
-    // plus the floors that keep the second lane working, rather than two
-    // whole ceilings. The floors are the deliberate escape - a late create
+    // plus the FLOOR PLAN that keeps the second lane working, rather than two
+    // whole ceilings. The floor plan is the deliberate escape - a late create
     // pays extra passes over its own payload, it never blocks.
-    let floors = SCAN_POOL_MIN_BYTES + ACCUM_MIN_BYTES + READ_BUDGET;
+    //
+    // Derived from the same function the gauge uses, never summed from the
+    // constants: `SCAN_POOL_MIN_BYTES + ACCUM_MIN_BYTES + READ_BUDGET` is
+    // 64 MiB SHORT, because `read_arena_claim` doubles the read window while
+    // overlap is on. That is what took nightly's armv7-cross red on 6 Sep
+    // 2026 (two lanes claimed 1,477,013,504 against a 1,007,251,456 ceiling),
+    // and nothing about it is 32-bit: a process budget anywhere between about
+    // 512 MiB and 1.25 GiB has the first lane claim the ceiling EXACTLY and
+    // the second fall all the way to the floor plan, which is the only band
+    // where the term is visible. No box that runs this suite on a bigger
+    // budget can see it, which is why
+    // `the_two_lane_bound_holds_at_every_process_ceiling` walks the ceilings
+    // this one does not have.
+    let floors = admission_plan(0).2;
+    // `solo.claimed.max(ceiling)` is the same escape one level up: a budget
+    // smaller than a single floor plan cannot bound anything, and the first
+    // lane takes its floor plan there rather than blocking.
     assert!(
-        solo.claimed + second.claimed <= ceiling + floors,
+        solo.claimed + second.claimed <= solo.claimed.max(ceiling) + floors,
         "two lanes claimed {} against a {ceiling} ceiling and {floors} of floors",
         solo.claimed + second.claimed
+    );
+}
+
+/// The two-lane bound at ceilings THIS box does not have.
+///
+/// The test above can only ever observe one number - this machine's process
+/// budget - so the band where the admission floors actually bind is invisible
+/// to it on anything with a few GiB. Nightly's armv7 guest had a budget of
+/// 1,007,251,456 bytes, inside that band, and found the bound stated 64 MiB
+/// short; every other box in the fleet passed the same assertion because its
+/// first lane never reached the ceiling. Walking the arithmetic directly costs
+/// microseconds and covers the class on every machine.
+#[test]
+fn the_two_lane_bound_holds_at_every_process_ceiling() {
+    let floors = admission_plan(0).2;
+    let mut floor_bound_seen = 0usize;
+    let mut ceilings: Vec<u64> = (1..=4096u64).map(|mib| mib << 20).collect();
+    ceilings.extend((4..=256u64).map(|gib| gib << 30));
+    // The armv7 guest's own ceiling, pinned by value: it is the case that
+    // failed, and a grid that stepped over it would not have caught it.
+    ceilings.push(1_007_251_456);
+    for ceiling in ceilings {
+        let solo = admission_plan(ceiling).2;
+        let second = admission_plan(ceiling.saturating_sub(solo)).2;
+        assert!(
+            second <= solo,
+            "a create starting second must not claim more than the first at              a {ceiling} ceiling: {second} vs {solo}"
+        );
+        assert!(
+            solo + second <= solo.max(ceiling) + floors,
+            "two lanes claimed {} against a {ceiling} ceiling and {floors} of floors",
+            solo + second
+        );
+        if solo >= ceiling {
+            floor_bound_seen += 1;
+            assert_eq!(
+                second, floors,
+                "a second lane with nothing left must take exactly the floor                  plan at a {ceiling} ceiling"
+            );
+        }
+    }
+    assert!(
+        floor_bound_seen > 0,
+        "the grid never reached a ceiling where the floors bind, so the arm          that took armv7-cross red is not covered"
     );
 }
 
@@ -865,4 +934,432 @@ fn every_interleaved_copy_matches_the_index_packet_for_packet() {
             );
         }
     }
+}
+
+/// The lane order keeps every member's blocks in order, spreads members
+/// over eight lanes, skips empty members, and maps each position back to
+/// its original slice (the base log's owner).
+#[test]
+fn interleave_plan_keeps_member_order_and_slice_identity() {
+    // Members of 3, 0, 5, 1, 2, 9, 1, 1, 4, 2 blocks (ten members, so the
+    // ninth and tenth wait for a free lane).
+    let counts = [3usize, 0, 5, 1, 2, 9, 1, 1, 4, 2];
+    let mut plan = Vec::new();
+    for (mi, &n) in counts.iter().enumerate() {
+        for b in 0..n {
+            plan.push((mi, b as u64 * 64, 64usize));
+        }
+    }
+    let (out, slice_of, lane_of) = super::interleave_plan(&plan);
+    assert_eq!(out.len(), plan.len());
+    assert_eq!(slice_of.len(), plan.len());
+    // A permutation of the slices.
+    let mut seen = slice_of.clone();
+    seen.sort_unstable();
+    assert_eq!(seen, (0..plan.len()).collect::<Vec<_>>());
+    for (pos, &k) in slice_of.iter().enumerate() {
+        assert_eq!(out[pos], plan[k]);
+    }
+    // Per member: offsets ascend in output order, and one lane throughout.
+    for mi in 0..counts.len() {
+        let mut last = None;
+        let mut lane = None;
+        for (pos, &(m, off, _)) in out.iter().enumerate() {
+            if m != mi {
+                continue;
+            }
+            assert!(last.is_none_or(|l| off > l), "member {mi} out of order");
+            last = Some(off);
+            assert!(
+                lane.is_none_or(|l| l == lane_of[pos]),
+                "member {mi} changed lane"
+            );
+            lane = Some(lane_of[pos]);
+        }
+    }
+    // The first round is one block of each of the first eight non-empty
+    // members, in lane order.
+    let first_round: Vec<usize> = out[..8].iter().map(|&(m, _, _)| m).collect();
+    assert_eq!(first_round, vec![0, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(&lane_of[..8], &[0, 1, 2, 3, 4, 5, 6, 7]);
+}
+
+/// A member that SHRANK between the head scan and the map is refused,
+/// not mapped at its stale length.
+///
+/// `MappedPlan::open` passes the length `scan_heads` recorded and does
+/// not re-stat, and the plan indexes into the mapping immediately - so
+/// `bytes()` was a `from_raw_parts` over a length the mapping no longer
+/// had. On Windows the section is created 0/0, meaning the file's
+/// CURRENT size, so the slice ran straight off it.
+#[test]
+fn a_mapped_member_refuses_a_length_the_file_no_longer_has() {
+    let d = std::env::temp_dir().join(format!("nzbfast-maplen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let p = d.join("m.bin");
+    std::fs::write(&p, vec![7u8; 4096]).unwrap();
+    // The honest length maps.
+    let m = MappedMember::open(&p, 4096).expect("the real length maps");
+    assert_eq!(m.expect("a non-empty member maps").bytes().len(), 4096);
+    // A stale, longer length is refused rather than mapped.
+    assert!(
+        MappedMember::open(&p, 8192).is_err(),
+        "a length the file no longer has was mapped anyway"
+    );
+    // ...and so is a stale SHORTER one: either way the head scan and
+    // the map disagree about the member, and a plan built from the scan
+    // cannot be trusted over these bytes.
+    assert!(MappedMember::open(&p, 2048).is_err());
+    // An empty member is still "nothing to map", not an error.
+    let e = d.join("e.bin");
+    std::fs::write(&e, b"").unwrap();
+    assert!(
+        MappedMember::open(&e, 0)
+            .expect("an empty member is Ok")
+            .is_none()
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn mapped_tail_checksums_match_materialized_padding() {
+    for bs in [4usize, 64, 68, 32768, 32772, 131076] {
+        let mut sizes = vec![0, 1, 2, 3, bs / 2, bs - 1, bs];
+        sizes.extend([55, 56, 63, 64, 65, 32767, 32768, 32769]);
+        sizes.retain(|&n| n <= bs);
+        sizes.sort_unstable();
+        sizes.dedup();
+        for len in sizes {
+            let bytes = payload(len + 1, 173);
+            let tail = &bytes[1..]; // deliberately unaligned
+            let mut padded = vec![0u8; bs];
+            padded[..len].copy_from_slice(tail);
+            let expected = (Md5::digest(&padded).into(), crc32fast::hash(&padded));
+            assert_eq!(
+                mapped_tail_checksums(tail, bs),
+                expected,
+                "len={len} bs={bs}"
+            );
+        }
+    }
+}
+
+/// [`plan_files`] must name and SIZE exactly what the creator writes,
+/// under both critical layouts. This is the whole reason the door
+/// exists: a GUI preview that added packet headers up for itself would
+/// be a second copy of the format, and this is the assertion that there
+/// is only one.
+#[test]
+fn the_plan_preview_matches_what_the_creator_actually_writes() {
+    for critical in [CriticalLayout::Head, CriticalLayout::Interleaved] {
+        for (tag, recovery) in [("plan-small", 1usize), ("plan-mid", 20), ("plan-odd", 13)] {
+            let t = Tmp::new(&format!("{tag}-{critical:?}"));
+            let members = vec![
+                t.write("a.bin", &payload(30_000, 2)),
+                t.write("b.bin", &payload(12_000, 8)),
+                t.write("c.bin", &payload(5_000, 19)),
+            ];
+            let plan = CreatePlan::ENGINE.with_critical(critical);
+            let want = plan_files(
+                &members
+                    .iter()
+                    .map(|m| (m.name.clone(), std::fs::metadata(&m.path).unwrap().len()))
+                    .collect::<Vec<_>>(),
+                "set",
+                2048,
+                recovery,
+                plan,
+            );
+            let names =
+                create_into_exact(&t.0, &members, "set", Some(2048), recovery, plan).unwrap();
+            assert_eq!(
+                want.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+                names.iter().map(String::as_str).collect::<Vec<_>>(),
+                "{tag} {critical:?}: planned names"
+            );
+            for f in &want {
+                let got = std::fs::metadata(t.0.join(&f.name)).unwrap().len();
+                assert_eq!(
+                    f.bytes, got,
+                    "{tag} {critical:?}: {} planned {} bytes, wrote {got}",
+                    f.name, f.bytes
+                );
+            }
+            assert_eq!(
+                want.iter().map(|f| f.blocks).sum::<usize>(),
+                recovery,
+                "{tag} {critical:?}: every recovery slice is placed exactly once"
+            );
+        }
+    }
+}
+
+/// A create with no recovery at all still writes the index, and the
+/// plan says so rather than answering an empty list.
+#[test]
+fn the_plan_preview_of_a_zero_recovery_set_is_the_index_alone() {
+    let files = plan_files(
+        &[("a.bin".to_string(), 30_000)],
+        "set",
+        2048,
+        0,
+        CreatePlan::ENGINE,
+    );
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, "set.par2");
+    assert_eq!(files[0].blocks, 0);
+    assert!(files[0].bytes > 64, "the index carries the critical block");
+}
+
+// ---- the optional comment packet (plan 4.2 item 2) -------------------
+
+/// Create one small set twice over the same payload, once with a
+/// comment and once without, and hand back both directories' files.
+///
+/// Two Tmps rather than one, because the second create would otherwise
+/// write over the first set's volumes under the same base name.
+fn comment_pair(tag: &str, comment: &str) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let build = |t: &Tmp, c: Option<&str>| {
+        let members = vec![
+            t.write("Show.S01E01.mkv", &payload(40_000, 3)),
+            t.write("readme.nfo", &payload(9_000, 11)),
+        ];
+        let names = create_into_exact_with_comment(
+            &t.0,
+            &members,
+            "cmt",
+            Some(4096),
+            6,
+            CreatePlan::ENGINE,
+            c,
+        )
+        .expect("create");
+        read_all(&t.0, &names)
+    };
+    let with = Tmp::new(&format!("{tag}-with"));
+    let without = Tmp::new(&format!("{tag}-without"));
+    (build(&with, Some(comment)), build(&without, None))
+}
+
+#[test]
+fn a_comment_round_trips_through_the_engines_own_reader() {
+    let (with, _) = comment_pair("round", "Season pack, remuxed from the retail disc.");
+    assert_eq!(
+        parse(&with).comment.as_deref(),
+        Some("Season pack, remuxed from the retail disc.")
+    );
+}
+
+/// Every file of the set carries it, not only the index - the comment
+/// rides in the critical block, which is what makes a set whose index
+/// article was lost still describable from one volume.
+#[test]
+fn every_file_of_a_commented_set_carries_the_comment() {
+    let (with, _) = comment_pair("perfile", "hello from the index");
+    assert!(with.len() > 1, "the set has volumes to check");
+    for (i, blob) in with.iter().enumerate() {
+        assert_eq!(
+            parse(std::slice::from_ref(blob)).comment.as_deref(),
+            Some("hello from the index"),
+            "file {i} lost the comment"
+        );
+    }
+}
+
+/// THE LOAD-BEARING ONE. A create given no comment writes the bytes it
+/// has always written, because the critical block's LENGTH is what a
+/// volume's byte size is built from and four e2e fixtures poison or band
+/// a volume by its byte count.
+#[test]
+fn no_comment_is_byte_identical_to_the_plain_create() {
+    let t = Tmp::new("identical-plain");
+    let u = Tmp::new("identical-door");
+    let build = |t: &Tmp, door: bool| {
+        let members = vec![
+            t.write("Show.S01E01.mkv", &payload(40_000, 3)),
+            t.write("readme.nfo", &payload(9_000, 11)),
+        ];
+        let names = if door {
+            create_into_exact_with_comment(
+                &t.0,
+                &members,
+                "cmt",
+                Some(4096),
+                6,
+                CreatePlan::ENGINE,
+                None,
+            )
+        } else {
+            create_into_exact(&t.0, &members, "cmt", Some(4096), 6, CreatePlan::ENGINE)
+        }
+        .expect("create");
+        let blobs = read_all(&t.0, &names);
+        (names, blobs)
+    };
+    let (plain_names, plain) = build(&t, false);
+    let (door_names, door) = build(&u, true);
+    assert_eq!(plain_names, door_names);
+    assert_eq!(
+        plain, door,
+        "the comment door changed a set with no comment"
+    );
+    // And an EMPTY comment is the absence of one, which is what an
+    // untouched Comment field in a UI sends.
+    let v = Tmp::new("identical-empty");
+    let members = vec![
+        v.write("Show.S01E01.mkv", &payload(40_000, 3)),
+        v.write("readme.nfo", &payload(9_000, 11)),
+    ];
+    let names = create_into_exact_with_comment(
+        &v.0,
+        &members,
+        "cmt",
+        Some(4096),
+        6,
+        CreatePlan::ENGINE,
+        Some(""),
+    )
+    .expect("create");
+    assert_eq!(read_all(&v.0, &names), plain);
+}
+
+/// The comment costs exactly one packet in every file and nothing else
+/// moves: same file names, same volume count, and each file longer by
+/// the packet's own size times the copies that file carries.
+#[test]
+fn a_comment_adds_one_packet_and_changes_nothing_else() {
+    let (with, without) = comment_pair("sizes", "x");
+    assert_eq!(with.len(), without.len());
+    for (a, b) in with.iter().zip(&without) {
+        let grew = a.len() - b.len();
+        assert!(grew > 0 && grew.is_multiple_of(64 + 4), "grew by {grew}");
+    }
+}
+
+/// A non-ASCII comment takes the Unicode packet and nothing lossy
+/// happens on the way back.
+#[test]
+fn a_unicode_comment_round_trips_as_utf16() {
+    let (with, _) = comment_pair("uni", "Björk - Vespertine (日本盤)");
+    assert_eq!(
+        parse(&with).comment.as_deref(),
+        Some("Björk - Vespertine (日本盤)")
+    );
+    let has = |t: &[u8; 16]| with[0].windows(16).any(|w| w == t.as_slice());
+    assert!(has(crate::par2::TYPE_COMMUNI), "wrote the Unicode packet");
+    assert!(!has(crate::par2::TYPE_COMMASCI), "and only that one");
+}
+
+#[test]
+fn an_ascii_comment_takes_the_ascii_packet_alone() {
+    let (with, _) = comment_pair("ascii", "plain words");
+    let has = |t: &[u8; 16]| with[0].windows(16).any(|w| w == t.as_slice());
+    assert!(has(crate::par2::TYPE_COMMASCI), "wrote the ASCII packet");
+    assert!(!has(crate::par2::TYPE_COMMUNI), "and only that one");
+}
+
+/// The write rule IS the read rule: anything this engine will write, it
+/// reads back, and anything it will not read back it refuses to write.
+/// A comment that round-tripped as something else would be worse than
+/// either refusal alone.
+#[test]
+fn every_comment_this_engine_writes_reads_back() {
+    for text in [
+        "one line",
+        "two\nlines\twith a tab",
+        "trailing spaces   ",
+        "Björk",
+        "\u{1F600} emoji",
+        &"x".repeat(MAX_COMMENT_BYTES),
+    ] {
+        let t = Tmp::new("writes-reads");
+        let members = vec![t.write("a.bin", &payload(9_000, 2))];
+        let names = create_into_exact_with_comment(
+            &t.0,
+            &members,
+            "cmt",
+            Some(4096),
+            2,
+            CreatePlan::ENGINE,
+            Some(text),
+        )
+        .expect("create");
+        assert_eq!(
+            parse(&read_all(&t.0, &names)).comment.as_deref(),
+            Some(text),
+            "{text:?} did not read back"
+        );
+    }
+}
+
+#[test]
+fn a_comment_the_reader_would_refuse_is_refused_at_the_create() {
+    let t = Tmp::new("refuse");
+    let members = vec![t.write("a.bin", &payload(9_000, 2))];
+    let create = |c: &str| {
+        create_into_exact_with_comment(
+            &t.0,
+            &members,
+            "cmt",
+            Some(4096),
+            2,
+            CreatePlan::ENGINE,
+            Some(c),
+        )
+    };
+    for bad in ["esc \u{1b}[2J here", "nul \u{0} here", "bell \u{7}"] {
+        let e = create(bad).expect_err("a control character is refused");
+        assert!(format!("{e}").contains("control character"), "{e}");
+    }
+    let e = create(&"x".repeat(MAX_COMMENT_BYTES + 1)).expect_err("over the ceiling");
+    assert!(format!("{e}").contains("over the"), "{e}");
+}
+
+/// The preview and the create it previews cannot disagree about the
+/// comment either - `plan_files` exists precisely so a pane is not a
+/// second copy of the packet format.
+#[test]
+fn the_plan_preview_prices_the_comment_packet() {
+    let comment = "a comment long enough to be worth a line in the preview";
+    let t = Tmp::new("plan-comment");
+    let members = vec![
+        t.write("Show.S01E01.mkv", &payload(40_000, 3)),
+        t.write("readme.nfo", &payload(9_000, 11)),
+    ];
+    let names = create_into_exact_with_comment(
+        &t.0,
+        &members,
+        "cmt",
+        Some(4096),
+        6,
+        CreatePlan::ENGINE,
+        Some(comment),
+    )
+    .expect("create");
+    let shapes: Vec<(String, u64)> = members
+        .iter()
+        .map(|m| (m.name.clone(), std::fs::metadata(&m.path).unwrap().len()))
+        .collect();
+    let planned =
+        plan_files_with_comment(&shapes, "cmt", 4096, 6, CreatePlan::ENGINE, Some(comment));
+    let on_disk: Vec<(String, u64)> = names
+        .iter()
+        .map(|n| (n.clone(), std::fs::metadata(t.0.join(n)).unwrap().len()))
+        .collect();
+    let previewed: Vec<(String, u64)> = planned.iter().map(|f| (f.name.clone(), f.bytes)).collect();
+    assert_eq!(previewed, on_disk);
+    // And a comment the create would refuse is priced as no comment,
+    // matching a plain create rather than inventing a size.
+    assert_eq!(
+        plan_files_with_comment(
+            &shapes,
+            "cmt",
+            4096,
+            6,
+            CreatePlan::ENGINE,
+            Some("bad \u{1b}")
+        ),
+        plan_files(&shapes, "cmt", 4096, 6, CreatePlan::ENGINE)
+    );
 }

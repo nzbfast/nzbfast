@@ -2297,6 +2297,19 @@ impl LiveVerifier {
             *st = BlockState::Pending;
         }
         s.ok_prefix = 0;
+        // ...AND SO DOES THE §94 B PER-RANGE BITMAP. `vouched_end` reads
+        // it whenever the asked-for offset is past the watermark, so a
+        // bit left set here keeps answering "vouched" for a block whose
+        // Ok verdict this function just erased - an OVER-report, which
+        // `arm_vouch`'s own rationale names as the unsafe direction ("an
+        // under-report parks a reader, an over-report serves bytes the
+        // set has not vouched for"). Clearing cannot strand the chase:
+        // `readback_blocks` sets each block's bit again as the read-back
+        // re-earns it from disk, which is the same authority the
+        // verdicts themselves are being re-derived from.
+        if let Some(vb) = &s.vouch {
+            vb.clear();
+        }
         // ...AND SO DOES THE PREFIX DIGEST, for exactly the reason the
         // verdicts go: it hashed bytes that were then written a second
         // time, so only disk can say what is under that offset now. It
@@ -2482,7 +2495,12 @@ impl LiveVerifier {
             // way in. But `tentative` is false, so what it nominates is
             // proved or dropped on the spot rather than carried out of
             // this function unconfirmed.
-            let mut bound = !(dropped && head_bound) && s.try_match(slot, active, false);
+            //
+            // AND THE POPULATION THE LADDER READS CAN MOVE UNDER IT
+            // (10 Sep 2026, the zero-head flake - see `seen` below).
+            let may_rematch = !(dropped && head_bound);
+            let seen = s.unclaimed_head_candidates(active);
+            let mut bound = may_rematch && s.try_match(slot, active, false);
             if bound && s.head_nominated && !s.settle_binding(slot, active, &src) {
                 self.forget_binding(&mut s, slot, active);
                 bound = false;
@@ -2490,6 +2508,48 @@ impl LiveVerifier {
             if !bound {
                 bound =
                     s.try_match_whole(slot, active, &src) || s.try_match_named(slot, active, &src);
+            }
+            // THE TWO CONTENT TIERS ABOVE TAKE THE CLAIM MUTEX
+            // SEPARATELY, so the set of unclaimed descriptors this
+            // slot's head names can SHRINK between them. Each is sound
+            // about the count IT saw and together they cover the whole
+            // range - `try_match`'s md5-16k tier claims a candidate
+            // unique among the unclaimed, `try_match_whole` settles two
+            // or more by whole-file MD5 and then by per-block evidence -
+            // but a slot that sees TWO at the first and ONE at the
+            // second is answered by NEITHER: the first declined on
+            // ambiguity, and the second reads a lone candidate as one
+            // the first already took (`cands.len() < 2`) and returns.
+            // The slot finished unclaimed with the descriptor its own
+            // content names still free, and the set priced an INTACT
+            // member wholly missing - two catalog rows' worth of it,
+            // cc-n15-zero-head-twins-r100 and
+            // cc-n26-three-zero-head-members-one-damaged, flaking about
+            // one run in seven on a loaded box and passing the retry in
+            // CI.
+            //
+            // Nothing DERIVES that outcome: it is the ladder reading two
+            // different worlds, and which world each rung sees is worker
+            // order. So ask the population again, and where it shrank,
+            // re-run the ONE rung that answers the count it shrank to.
+            //
+            // ONE RETRY IS ENOUGH, and that is arithmetic rather than a
+            // budget. `try_match_whole` declines on the count only at
+            // exactly ONE, so a ladder that fell through it saw one
+            // candidate; claims taken at finish are held (the two
+            // hand-backs, `dropped` and `settle_binding`'s losing arm,
+            // both ran above), so the count cannot climb back to the two
+            // that would need the whole-file tier again.
+            //
+            // `may_rematch` carries M4-103's guard down: a slot whose
+            // head nomination was just taken away here must not walk
+            // straight back into the tier that made it.
+            if !bound && may_rematch && s.unclaimed_head_candidates(active) < seen {
+                bound = s.try_match(slot, active, false);
+                if bound && s.head_nominated && !s.settle_binding(slot, active, &src) {
+                    self.forget_binding(&mut s, slot, active);
+                    bound = false;
+                }
             }
             if bound && let Some(g) = self.gate.lock_ok().clone() {
                 g.engage(slot);
@@ -2548,7 +2608,7 @@ impl LiveVerifier {
             // no-IFSC slot has no block stream to advance it - so its
             // watermark sat at 0 forever, and any RAR/7z frontier reader
             // waiting on it blocked until chase_finish joined the worker
-            // and the job hung (Codex sweep 3 Aug M6). The whole-file
+            // and the job hung (review sweep 3 Aug M6). The whole-file
             // MD5 IS this slot's verdict, and it has now been taken, so
             // the gate is released either way: a hung worker is
             // unbounded, while a chase fed damaged bytes fails its own

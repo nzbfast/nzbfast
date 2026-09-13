@@ -68,6 +68,43 @@ impl SlotState {
         }
     }
 
+    /// How many descriptors this slot's complete head names that NOBODY
+    /// has claimed - the population BOTH finish-time content tiers read,
+    /// counted so `finish_slot_from` can tell that it moved under them.
+    ///
+    /// It exists because the two tiers take the claim mutex TWICE, and
+    /// between the two acquisitions a rival slot's claim can land. Each
+    /// tier is sound about the count IT saw and the two cover the whole
+    /// range between them - [`try_match`](Self::try_match)'s md5-16k tier
+    /// claims a candidate that is unique among the unclaimed,
+    /// [`try_match_whole`](Self::try_match_whole) settles two or more by
+    /// whole-file MD5 and then by per-block evidence - but a slot that
+    /// sees TWO and then ONE is answered by neither: the first declined
+    /// on ambiguity, and the second reads a lone candidate as "already
+    /// taken above" and returns. See `finish_slot_from`'s retry.
+    ///
+    /// The filter is `try_match`'s md5-16k filter verbatim - same length
+    /// bucket, same digest, same claim test - because the count is only
+    /// meaningful as a statement about THAT population. A slot with no
+    /// complete head names nothing and counts zero, which is the answer
+    /// that stops the retry for every shape neither tier was ever going
+    /// to take.
+    pub(super) fn unclaimed_head_candidates(&mut self, active: &Active) -> usize {
+        let want = self.head_want();
+        let Some(key) = self.head_key() else {
+            return 0;
+        };
+        let claimed = active.claimed.lock_ok();
+        active
+            .files()
+            .filter(|(fi, f)| {
+                claimed[*fi].is_none()
+                    && f.length.min(HEAD_LEN as u64) == want as u64
+                    && f.md5_16k == key
+            })
+            .count()
+    }
+
     pub(super) fn capture_head(&mut self, offset: u64, data: &[u8]) {
         let want = self.head_want();
         // In u64: `offset as usize` wrapped on a 32-bit target, so an
@@ -276,7 +313,7 @@ impl SlotState {
             // insensitively and both ended crossed - each verifying,
             // repairing and publishing under the other's name, up to
             // and including one rename unlinking the other's inode
-            // (Codex sweep 13 Aug R1).
+            // (review sweep 13 Aug R1).
             let (fold, sname) = self.name_keys.get_or_insert_with(|| {
                 (
                     name.to_ascii_lowercase(),

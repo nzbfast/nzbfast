@@ -89,7 +89,7 @@ async fn rate_limit_zero_is_unlimited() {
     assert!(t0.elapsed() >= Duration::from_millis(100));
 }
 
-/// Codex F-11 (22 Aug 2026): `throttle` used to load the cap and the
+/// Review finding F-11 (22 Aug 2026): `throttle` used to load the cap and the
 /// generation on the unlocked fast path and carry both into the locked
 /// pricing. A worker parked in that gap while `set` swapped cap, reset
 /// the clock and bumped the generation then reserved OLD-cap debt into
@@ -136,7 +136,7 @@ fn a_cap_swap_against_a_parked_worker_prices_at_the_new_cap() {
     );
 }
 
-/// Codex F-24 (22 Aug 2026): the line cap's decide-and-set on a
+/// Review finding F-24 (22 Aug 2026): the line cap's decide-and-set on a
 /// [`ConnTarget`] used to be a bare read, rule, write - so the §112
 /// live tuner could lower the same target between the read and the
 /// write and have the cap's older, higher value clobber it back up.

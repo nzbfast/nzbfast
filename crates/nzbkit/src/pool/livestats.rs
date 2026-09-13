@@ -132,7 +132,7 @@ pub struct LiveStats {
     /// aimed at that host.
     ///
     /// **Shape-agnostic, which is the point.** `ServerLive::note_cap`
-    /// is skipped for a source-address refusal on purpose (Codex sweep
+    /// is skipped for a source-address refusal on purpose (review sweep
     /// 5, M9: the sessions held at a `481 max simultaneous IP
     /// addresses reached` are an incidental count, not the account's
     /// connection ceiling, and "lower your connection count" is not the
@@ -313,6 +313,17 @@ pub struct ServerLive {
     /// `..Default::default()`), which is correct: nothing keyed by it
     /// exists on those paths.
     pub row_key: String,
+    /// This row's PERSISTED SPEND identity - the account its bytes are
+    /// billed to. See [`crate::config::ServerConfig::account_key`],
+    /// which mints it and carries the whole argument for why this is a
+    /// DIFFERENT key from `row_key` above: that one must never alias
+    /// two verbatim-duplicate rows (two socket pools), this one must,
+    /// because they are one account at the provider and one bill.
+    ///
+    /// Empty on a `ServerLive` built by hand, and the billing path
+    /// falls back to `host` when it is - which is exactly what those
+    /// paths billed before this field existed.
+    pub account: String,
     /// Connection budget: the number of workers the run intends to use
     /// on this server. Atomic because the live tuner (TODO 112) moves
     /// its [`ConnTarget`] mid-run and this gauge must follow; without a
@@ -565,7 +576,7 @@ pub struct Refusal {
     /// A capacity refusal about WHERE the account is used from, not how
     /// many sockets it grants. "Lower your connection count" is not the
     /// remedy for it, and the sessions held when it arrived are not a
-    /// ceiling (Codex sweep 5, M9).
+    /// ceiling (review sweep 5, M9).
     pub source_ips: bool,
     /// The server's status line, verbatim.
     pub line: String,
@@ -585,6 +596,11 @@ impl LiveStats {
                 .map(|((s, cfg), row_key)| ServerLive {
                     host: s.host.clone(),
                     row_key,
+                    // Minted from the config row rather than from the
+                    // fleet's order, which is the whole point of it:
+                    // the ledger it keys is persisted and a reorder in
+                    // Settings must not move a block base.
+                    account: s.account_key(),
                     // With a live target in force the number in use is
                     // the target, not the spawn count - slots above it
                     // park immediately. `PoolConfig::dialled` is that
@@ -819,6 +835,16 @@ mod row_key_tests {
                 .map(|s| s.row_key.as_str())
                 .collect::<Vec<_>>(),
             ["0#one.example", "0#dup.example", "1#dup.example"]
+        );
+        // ...and the ACCOUNT key beside it, which is the other identity
+        // and deliberately answers differently: the two duplicated rows
+        // are two socket pools (two row keys) and ONE bill (one account
+        // key). See `ServerConfig::account_key`.
+        assert_eq!(live.servers[1].account, live.servers[2].account);
+        assert_ne!(live.servers[0].account, live.servers[1].account);
+        assert_eq!(
+            crate::config::account_host(&live.servers[1].account),
+            "dup.example"
         );
     }
 }

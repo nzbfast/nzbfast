@@ -5,7 +5,7 @@
 name = "e4-declared-total-long"
 seed = 14
 note = """
-Ports the half of Codex sweep 2 (3 Aug, M2) that its own test calls
+Ports the half of review sweep 2 (3 Aug, M2) that its own test calls
 "the regression that matters more than the fix". Every part here is
 self-consistent - its =ypart range is true, its trailer states the real
 chunk length and the real CRC - and only the file-level total lies,

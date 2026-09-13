@@ -417,7 +417,7 @@ fn a_job_that_fails_mid_copy_never_lands_a_file() {
     );
 }
 
-/// Codex C08: the queue store refuses AFTER the rename landed. The
+/// Review C08: the queue store refuses AFTER the rename landed. The
 /// record push and the destination file are one custody transaction, so
 /// a save that cannot land takes both back - a restart must not restore
 /// a job that has never heard of a completed copy already on disk. The

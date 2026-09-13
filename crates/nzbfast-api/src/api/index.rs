@@ -1363,7 +1363,7 @@ fn m_groups_add_matching(
                     Err(e) => json!({"status": false, "error": e}),
                     // saved=false is "live now, reverts at restart" -
                     // dropping it reported a durable subscription over
-                    // an unwritable settings dir (Codex sweep 5 Aug L1).
+                    // an unwritable settings dir (review sweep 5 Aug L1).
                     Ok((_, saved)) => json!({"status": true, "added": added,
                                "matched": total, "capped": total > MAX_BULK,
                                "warning": (!saved).then(|| format!(
@@ -1450,7 +1450,7 @@ fn m_index_search(
         let q = params.get("q").cloned().unwrap_or_default();
         // index_read_checked, not with_index_read: a saturated read
         // pool is not "no matches", and the wall already reports the
-        // difference (Codex sweep 5 Aug M10). The UI keeps its list
+        // difference (review sweep 5 Aug M10). The UI keeps its list
         // on `status:false` and the next poll gets the real answer.
         let hits = match d.index_read_checked(|ix| ix.search(&q, 60).ok()) {
             Err(why) => {
@@ -1750,7 +1750,7 @@ fn m_wall2(
                     // healthy install reads as idle half the time. What
                     // that state has to tell apart is scanning-in-
                     // progress from scanning-not-happening-at-all, and
-                    // that is the stand-down reason (Codex sweep 7, L1).
+                    // that is the stand-down reason (review sweep 7, L1).
                     "groups": d.index_groups.lock_ok().len(),
                     "scanning": d.scan_active.load(Ordering::Relaxed),
                     "idxpaused": d.indexing_pause_reason().is_some(),
@@ -2430,7 +2430,7 @@ mod add_matching_tests {
     use crate::testutil::test_daemon;
     use std::os::unix::fs::PermissionsExt;
 
-    /// L1 (Codex sweep 5 Aug): the bulk subscribe discarded the whole
+    /// L1 (review sweep 5 Aug): the bulk subscribe discarded the whole
     /// `apply_and_save` result - groups joined the live scan list, the
     /// UI said "Added N groups", and an unwritable settings dir made
     /// the entire subscription vanish at the next restart. Live-plus-

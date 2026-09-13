@@ -1,0 +1,6 @@
+# Row 3a, a provider missing a whole stretch: 100 CONTIGUOUS articles inside
+# one volume. This is what nzbfast's shed/fill logic hands the tail when one
+# backbone never got part of a post, or a takedown removed a range, and it is
+# the reader's version of the old "101 blocks" leg.
+ARTICLE 768000
+feature.part09.rar 200-299

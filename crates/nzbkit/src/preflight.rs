@@ -998,7 +998,7 @@ pub async fn probe_par2_sets(servers: &[ServerConfig], ids: &[String]) -> Option
                     // three-server aggregate - leaving `served` false
                     // let a fleet of 32 hostile providers spend the
                     // per-server cap 32 times over, twice, which is the
-                    // ~512 MiB the aggregate exists to prevent (Codex
+                    // ~512 MiB the aggregate exists to prevent (review
                     // sweep 5, L1).
                     Err(crate::nntp::NntpError::TooLarge(_)) => {
                         served.store(true, std::sync::atomic::Ordering::Relaxed);

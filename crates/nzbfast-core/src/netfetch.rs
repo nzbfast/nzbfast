@@ -231,7 +231,7 @@ impl SourceOrigin {
     }
 }
 
-/// CLAUDE.md invariant 5, made structural: in a unit-test build every
+/// project invariant 5, made structural: in a unit-test build every
 /// destination outside loopback is REFUSED, whatever the environment
 /// says.
 ///
@@ -503,7 +503,7 @@ impl ureq::Resolver for OriginBoundResolver {
     }
 }
 
-/// [`SsrfGuardResolver`] plus the PRODUCTION half of CLAUDE.md
+/// [`SsrfGuardResolver`] plus the PRODUCTION half of CONTRIBUTING.md
 /// invariant 5: when `identity::may_call_out()` says no, every
 /// destination outside loopback is refused.
 ///
@@ -542,7 +542,7 @@ impl ureq::Resolver for EnrichResolver {
                 std::io::ErrorKind::PermissionDenied,
                 format!(
                     "enrichment is switched off, so {netloc} was not contacted \
-                     (CLAUDE.md invariant 5 - unset NZBFAST_NO_ENRICH \
+                     (project invariant 5 - unset NZBFAST_NO_ENRICH \
                      to allow it)"
                 ),
             ));

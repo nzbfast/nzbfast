@@ -264,7 +264,7 @@ async fn traversal_names_flatten_and_stay_contained() {
     assert_eq!(got, c);
 }
 
-/// X5-09 (codex Extreme Wave 5, 30 Aug 2026): a canonical-name
+/// X5-09 (review Extreme Wave 5, 30 Aug 2026): a canonical-name
 /// publication FAILURE must reach the verdict.
 ///
 /// The injection is the one `create_out_dirs` already refuses on

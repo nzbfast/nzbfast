@@ -84,7 +84,7 @@ impl Index {
     /// the top id as soon as that row is deleted - and maintenance folds
     /// and eviction both delete releases. A posted NZB that landed on a
     /// recycled id below the cursor was excluded FOREVER (10 Aug 2026
-    /// Codex sweep, M6: id 2 reused, `WHERE id > 2` returned zero).
+    /// review sweep, M6: id 2 reused, `WHERE id > 2` returned zero).
     /// `arrival_seq` is the monotonic counter that exists for exactly
     /// this hazard on the wall's side, it is never reused, and
     /// `idx_rel_arrival` makes it the same shape of range scan the id
@@ -350,7 +350,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// M6 (10 Aug 2026 Codex sweep): `releases.id` has no AUTOINCREMENT,
+    /// M6 (10 Aug 2026 review sweep): `releases.id` has no AUTOINCREMENT,
     /// so deleting the top row hands its id to the next insert - and
     /// maintenance folds and eviction do delete releases. Under the old
     /// `id > cursor` walk the recycled row was excluded forever.

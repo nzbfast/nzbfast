@@ -55,7 +55,7 @@ fn main() {
 }
 
 /// Compress the embedded pages that CANNOT change between builds, and
-/// compute their validators here rather than per request (R10 / Codex
+/// compute their validators here rather than per request (R10 / review
 /// C9).
 ///
 /// The 27 i18n catalogues and the 16 manuals are 9.0 MB of plain text

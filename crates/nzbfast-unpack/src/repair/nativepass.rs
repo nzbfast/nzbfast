@@ -79,13 +79,55 @@ pub(super) fn native_repair_pass(
     // caller dedupes by content before it renders anything, so a job
     // that runs this pass twice over the same set says it once.
     mismatches: &std::sync::Mutex<&mut Vec<(String, String)>>,
+    // The owner's recovery-work handle, or None on a CLI run. Both
+    // halves of the repair's control come off it: the progress the
+    // queue row draws, and the cancel the fold polls - see
+    // [`nzbkit::par2repair::control`] and
+    // [`crate::repair::SideCancel::repair_control`]. `None` builds
+    // an INERT control, which is the call this function made before
+    // 12 Sep 2026, branch for branch.
+    cancel: Option<&crate::repair::SideCancel>,
 ) -> NativeVerdict {
     if std::env::var_os("NZBFAST_NO_NATIVE_REPAIR").is_some() {
         return NativeVerdict::Backstop;
     }
     let t0 = Instant::now();
-    use nzbkit::par2repair::{RepairStatus, repair_dir_set_with_donors};
-    match repair_dir_set_with_donors(out_dir, &set.recovery_set_id, donor_dirs) {
+    use nzbkit::par2repair::{
+        CallerSite, CallerStage, RepairStatus, RetentionCaller,
+        repair_dir_set_with_donors_controlled_as,
+    };
+    // `probe` is the pre-purchase adoption probe (`adoption_narrowed_need`
+    // is its only caller), and it is a PAID attempt whose verdict may be
+    // thrown away - so the retention admission census sees it as its own
+    // caller and stage rather than as a second sighting of this one.
+    let caller = if probe {
+        RetentionCaller::new(CallerSite::AdoptionProbe).at_stage(CallerStage::Probe)
+    } else {
+        RetentionCaller::new(CallerSite::DownloadDiskRepair).at_stage(CallerStage::Final)
+    };
+    // THE CONTROLLED DOOR, since 12 Sep 2026. Same catalog semantics as
+    // the uncontrolled `repair_dir_set_with_donors_as` this replaced -
+    // complete build, flat scope, no in-place patching of existing
+    // volumes, directory-wide contest reading - plus a channel: the
+    // engine's verify/fold/solve/write phases report into the queue
+    // row, and their loops poll this job's cancel. It also makes this
+    // repair ATTENDED, which lifts the unattended unstructured ceiling
+    // `serve/mod.rs` sets - see `RepairControl::is_attended`.
+    //
+    // `_run` is the reporting WINDOW and its scope is load-bearing: the
+    // recovery-volume side-fetches between two passes run under the
+    // same `repairing` activity word, and a row that went on showing
+    // the last phase through them would be the static-word failure this
+    // whole change is about, wearing a percentage.
+    let control = cancel.map(|c| c.repair_control()).unwrap_or_default();
+    let _run = cancel.map(|c| c.repair_progress().enter());
+    match repair_dir_set_with_donors_controlled_as(
+        out_dir,
+        &set.recovery_set_id,
+        donor_dirs,
+        caller,
+        control,
+    ) {
         Ok(RepairStatus::NoDamage) => {
             info!(
                 target: "repair",
@@ -194,6 +236,22 @@ pub(super) fn native_repair_pass(
             }
             record_declared_name_mismatches(out_dir, &partial.per_file, &mut mismatches.lock_ok());
             native_shortfall(needed, have, adopted, probe)
+        }
+        // THE USER'S CANCEL IS NOT A FAILED REPAIR, and telling the two
+        // apart is the whole reason this arm is ahead of the one below.
+        // Falling through to par2cmdline would re-run the entire repair
+        // externally for a job that has just been deleted, and the warn
+        // would say the set is broken when nothing about it is - see
+        // `NativeVerdict::Cancelled` and the on-disk contract on
+        // `RepairError::Cancelled`.
+        Err(nzbkit::par2repair::RepairError::Cancelled) => {
+            info!(
+                target: "repair",
+                "repair stopped after {:.2?} - the job was cancelled (nothing was renamed \
+                 in, and any block already patched is one that was missing)",
+                t0.elapsed()
+            );
+            NativeVerdict::Cancelled
         }
         Err(e) => {
             warn!(target: "repair", "native repair failed ({e}) - falling back to par2cmdline");

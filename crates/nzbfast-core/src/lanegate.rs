@@ -78,7 +78,7 @@ async fn heavy_cpu() -> tokio::sync::OwnedSemaphorePermit {
 /// would have spread one job's version of it across the whole daemon.
 ///
 /// So: every await under the permit that is not CPU work goes through
-/// [`HeavyCpu::without_permit`] (Codex sweep 10 Aug H3, TODO §137.2).
+/// [`HeavyCpu::without_permit`] (review sweep 10 Aug H3, TODO §137.2).
 pub struct HeavyCpu(Option<tokio::sync::OwnedSemaphorePermit>);
 
 impl HeavyCpu {
@@ -129,7 +129,7 @@ impl HeavyCpu {
 ///
 /// A parked FIFO wait on the same semaphore the async path uses, moved
 /// off the scheduler with [`off_worker`] first. This used to be a
-/// 200 ms try/sleep poll loop on whatever thread called it (Codex
+/// 200 ms try/sleep poll loop on whatever thread called it (review
 /// sweep 8 Aug H11): from ordinary async task execution that thread is
 /// a runtime worker, and a worker that sleeps instead of yielding
 /// starves every task queued behind it - on a one-worker runtime the
@@ -277,7 +277,7 @@ fn register_locked(dir: &Path, bytes: u64) -> NeedGuard {
 
 /// One admission attempt against `vol`, ATOMIC under a single ledger
 /// lock hold: the read of the other tails' registered need and this
-/// unpack's own registration cannot be separated (Codex sweep 8 Aug
+/// unpack's own registration cannot be separated (review sweep 8 Aug
 /// M9 - check under one hold, register under a second let two
 /// same-volume tails both read zero in the window between them and
 /// both pass, engineering the exact concurrent-unpack ENOSPC the gate
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(g.id, 0);
     }
 
-    /// H11 (Codex sweep 8 Aug): a tail blocked on the heavy-CPU permit
+    /// H11 (review sweep 8 Aug): a tail blocked on the heavy-CPU permit
     /// must not park a scheduler worker. One worker on purpose - before
     /// the fix the waiter's 200 ms try/sleep loop occupied the only
     /// worker, the permit holder (parked across an await, exactly the
@@ -433,7 +433,7 @@ mod tests {
             .expect("deadlock: the blocking permit waiter starved the one-worker runtime (H11)");
     }
 
-    /// H3 (Codex sweep 10 Aug, TODO §137.2): the repair pass holds the
+    /// H3 (review sweep 10 Aug, TODO §137.2): the repair pass holds the
     /// heavy-CPU permit across its recovery-volume fetches, so the
     /// permit must be HANDED BACK for the duration of each one. The
     /// property, and the whole point of `without_permit`: while the
@@ -504,7 +504,7 @@ mod tests {
         );
     }
 
-    /// M9 (Codex sweep 8 Aug): the admission check and the registration
+    /// M9 (review sweep 8 Aug): the admission check and the registration
     /// are one atomic ledger transaction. Eight same-volume tails race
     /// for room that fits exactly one; exactly one may admit. Before
     /// the fix the read and the write took the lock separately, so any

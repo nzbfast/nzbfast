@@ -630,7 +630,7 @@ impl Daemon {
     /// which is the point: none of them changed a job, so there is no
     /// switch to announce.
     pub fn alt_switch(&self, failed_id: &str, spare_id: &str) -> Option<String> {
-        // §290 (Codex F-09/F-11). The gate is taken FIRST and held to
+        // §290 (review finding F-09/F-11). The gate is taken FIRST and held to
         // the end of the switch, so the ceilings are read and the spare
         // is unpaused without the automatic promotion or a hunt slipping
         // a second copy in between. It also carries `hunt::hunt_pick`'s
@@ -885,7 +885,7 @@ impl Daemon {
             // auto-retry (clause 3 admits one), so a refused append the
             // rewrite could still rescue would reload the stamp at the
             // next start and queue the parked row again beside the
-            // alternative that replaced it (Codex C11).
+            // alternative that replaced it (review C11).
             self.history_publish(&orig, || {
                 format!(
                     "{}: the replaced row's disarmed retry did not reach the \

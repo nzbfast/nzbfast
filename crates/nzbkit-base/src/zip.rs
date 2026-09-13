@@ -144,7 +144,7 @@ fn split_part(lower: &str) -> Option<(String, u32)> {
 /// grammar: no split tool numbers from zero, and accepting a junk
 /// same-stem `.000` sorted it FIRST in the group, so the magic gate
 /// sniffed the junk file and silently dropped the whole valid
-/// `.001`/`.002` set (Codex sweep 3 Aug M8).
+/// `.001`/`.002` set (review sweep 3 Aug M8).
 fn numeric_part(lower: &str) -> Option<(String, u32)> {
     let (head, tail) = lower.rsplit_once('.')?;
     if !(2..=4).contains(&tail.len()) || !tail.bytes().all(|c| c.is_ascii_digit()) {

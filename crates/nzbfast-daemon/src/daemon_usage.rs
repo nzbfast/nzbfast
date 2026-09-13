@@ -17,33 +17,91 @@
 
 use super::*;
 
+/// The never-pruned per-ACCOUNT byte bucket, `{account_key: bytes}` -
+/// the §96.5 block meter's numerator. Its sibling `"lifetime"` answers
+/// the same question per HOST; see [`Daemon::add_usage`] for why both
+/// exist and which reader wants which.
+pub(crate) const ACCOUNT_LIFETIME: &str = "account_lifetime";
+
+/// The usage store's schema stamp, and the ONE-SHOT guard on the
+/// per-account migration ([`Daemon::migrate_account_ledger`]).
+///
+/// A marker rather than "is `account_lifetime` missing for this row?",
+/// because those two questions have opposite right answers a week
+/// apart: at migration time a missing account bucket means "this spend
+/// predates the split, seed it from the host total", and afterwards it
+/// means "the user just added a new account, which starts at zero".
+/// Seeding the second case would hand somebody a block that reads as
+/// already spent on the day they bought it.
+pub(crate) const LEDGER_VERSION_KEY: &str = "ledger_v";
+
+/// Schema 2 is the per-account block meter. 1 (or absent) is the
+/// host-keyed ledger every install before 5 Sep 2026 carries.
+pub(crate) const LEDGER_VERSION: u64 = 2;
+
 impl Daemon {
-    /// M18b: bill per-server bytes of a finished download to today's
+    /// M18b: bill per-ACCOUNT bytes of a finished download to today's
     /// usage history (UTC days, like the quota) and persist. Best-effort.
-    pub fn add_usage(&self, per_server: &[(String, u64)]) {
+    ///
+    /// ONE STRING IN, THREE BUCKETS OUT, and the split is the whole
+    /// answer to "is a hostname an account?" - which it is not, and the
+    /// two readings of that question want different keys:
+    ///
+    /// - the DAY buckets and `"lifetime"` stay keyed by HOST, because
+    ///   every reader of them is asking about a provider: the SABnzbd
+    ///   `mode=server_stats` surface indexes them by hostname (a client
+    ///   walking its own server list would get a null for anything
+    ///   else), the history totals sum them, and the dashboard's usage
+    ///   table calls the column Provider.
+    /// - `"account_lifetime"` is keyed by the ACCOUNT
+    ///   ([`nzbkit::config::ServerConfig::account_key`]), because the
+    ///   §96.5 prepaid-block meter is money and a block belongs to one
+    ///   account. Never pruned, for the same reason `"lifetime"` is not:
+    ///   a block spans years.
+    ///
+    /// The caller passes the ACCOUNT key and the host falls out of it
+    /// ([`nzbkit::config::account_host`]), so the fifteen billing sites
+    /// carry one string rather than a pair. A caller that passes a bare
+    /// hostname - every pre-migration ledger entry and every hand-built
+    /// test rig - bills the host to both, which is exactly what it
+    /// billed before the split.
+    pub fn add_usage(&self, per_account: &[(String, u64)]) {
         let days = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| (d.as_secs() / 86_400) as i64)
             .unwrap_or(0);
         let (y, m, d) = civil_from_days(days);
-        let key = format!("{y:04}-{m:02}-{d:02}");
+        let today = format!("{y:04}-{m:02}-{d:02}");
         let mut u = self.usage.lock_ok();
-        for bucket in [key.as_str(), "lifetime"] {
+        for bucket in [today.as_str(), "lifetime"] {
             let day = u.entry(bucket.to_string()).or_insert_with(|| json!({}));
             if let Some(map) = day.as_object_mut() {
-                for (host, bytes) in per_server {
+                for (acct, bytes) in per_account {
                     if *bytes == 0 {
                         continue;
                     }
+                    let host = nzbkit::config::account_host(acct);
                     let cur = map.get(host).and_then(Value::as_u64).unwrap_or(0);
-                    map.insert(host.clone(), json!(cur + bytes));
+                    map.insert(host.to_string(), json!(cur + bytes));
                 }
+            }
+        }
+        let acc = u
+            .entry(ACCOUNT_LIFETIME.to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(map) = acc.as_object_mut() {
+            for (acct, bytes) in per_account {
+                if *bytes == 0 {
+                    continue;
+                }
+                let cur = map.get(acct).and_then(Value::as_u64).unwrap_or(0);
+                map.insert(acct.clone(), json!(cur + bytes));
             }
         }
         // Keep ~60 date buckets. The filter is what a key STARTS with,
         // so "lifetime" is never pruned - block accounts span years -
-        // and "reliability", "block_base" and "article_days" survive it
-        // the same way. The last of those is bounded per host inside
+        // and "reliability", "account_lifetime", "block_base" and
+        // "article_days" survive it the same way. The last of those is bounded per host inside
         // `add_reliability` instead, being a day map one level deeper.
         while u.keys().filter(|k| k.starts_with('2')).count() > 60 {
             let oldest = u.keys().find(|k| k.starts_with('2')).cloned();
@@ -184,42 +242,160 @@ impl Daemon {
             .unwrap_or(0)
     }
 
-    /// §96.5: bytes counted against `host`'s CURRENT prepaid block -
-    /// lifetime usage minus the offset stamped when the user last
-    /// marked the block refilled. This, not `usage_lifetime`, is what
-    /// every exhausted-block check compares against `block_bytes`. The
-    /// lifetime bucket itself is never rewound: it also answers the
-    /// history totals and `jobs_ever`, and a refill does not unhappen
-    /// the old spend.
-    pub fn block_spent(&self, host: &str) -> u64 {
+    /// Lifetime bytes billed to one ACCOUNT - the never-pruned
+    /// `"account_lifetime"` bucket, and the numerator of every block
+    /// meter. Its per-HOST sibling is [`Daemon::usage_lifetime`].
+    pub fn account_lifetime(&self, acct: &str) -> u64 {
+        self.usage
+            .lock_ok()
+            .get(ACCOUNT_LIFETIME)
+            .and_then(|v| v.get(acct))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    }
+
+    /// §96.5: bytes counted against this ACCOUNT's CURRENT prepaid
+    /// block - its lifetime usage minus the offset stamped when the
+    /// user last marked the block refilled. This, not `usage_lifetime`,
+    /// is what every exhausted-block check compares against
+    /// `block_bytes`. The lifetime buckets themselves are never
+    /// rewound: they also answer the history totals and `jobs_ever`,
+    /// and a refill does not unhappen the old spend.
+    ///
+    /// PER ACCOUNT AND NOT PER HOST, which is the 5 Sep 2026 fix. A
+    /// user may configure one hostname twice - a second account is how
+    /// people buy more connections, and a prepaid block bought from a
+    /// provider you already use lands on the same host more often than
+    /// not - and while this read was host-keyed the unlimited account's
+    /// bytes burned its block sibling's block, which stood a funded
+    /// account down early and made the "block nearly spent" surfaces
+    /// cry wolf. The key is
+    /// [`nzbkit::config::ServerConfig::account_key`], whose header
+    /// carries the whole argument for why it is neither `row_key` (that
+    /// one is an ordinal and this ledger outlives a Settings reorder)
+    /// nor a plaintext credential (this map is published by
+    /// `mode=usage`).
+    ///
+    /// TAKES AN ACCOUNT KEY, so pass `s.account_key()` and never
+    /// `s.host`. A bare hostname is its own account key by
+    /// [`nzbkit::config::account_host`]'s pass-through rule, which is
+    /// what keeps every pre-migration ledger and hand-built rig
+    /// self-consistent - but on a MIGRATED store it reads an account
+    /// that has never been billed, and answers a full block.
+    pub fn block_spent(&self, acct: &str) -> u64 {
         let base = self
             .usage
             .lock_ok()
             .get("block_base")
-            .and_then(|v| v.get(host))
+            .and_then(|v| v.get(acct))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        self.usage_lifetime(host).saturating_sub(base)
+        self.account_lifetime(acct).saturating_sub(base)
     }
 
-    /// §96.5: the user bought a new block for `host` - restart its
-    /// counter by stamping the current lifetime figure as the new base.
-    /// Persisted in the usage store's never-pruned `"block_base"`
-    /// bucket (not a date key, so the 60-day prune skips it the same
-    /// way it skips `"lifetime"` and `"reliability"`).
-    pub fn block_refilled(&self, host: &str) {
+    /// §96.5: the user bought a new block for this ACCOUNT - restart
+    /// its counter by stamping the current lifetime figure as the new
+    /// base. Persisted in the usage store's never-pruned
+    /// `"block_base"` bucket (not a date key, so the 60-day prune skips
+    /// it the same way it skips `"lifetime"` and `"reliability"`).
+    pub fn block_refilled(&self, acct: &str) {
         let mut u = self.usage.lock_ok();
         let lifetime = u
-            .get("lifetime")
-            .and_then(|v| v.get(host))
+            .get(ACCOUNT_LIFETIME)
+            .and_then(|v| v.get(acct))
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let base = u
             .entry("block_base".to_string())
             .or_insert_with(|| json!({}));
         if let Some(map) = base.as_object_mut() {
-            map.insert(host.to_string(), json!(lifetime));
+            map.insert(acct.to_string(), json!(lifetime));
         }
+        self.save_usage(&u);
+    }
+
+    /// Move a pre-5-Sep-2026 host-keyed usage store onto the
+    /// per-account block meter, ONCE, at daemon start.
+    ///
+    /// SEEDS EACH ACCOUNT WITH ITS HOST'S WHOLE LIFETIME TOTAL, which
+    /// looks wrong at a glance and is the only safe answer. The legacy
+    /// figure is a MERGE of every account on that host and there is no
+    /// information left in the store to split it, so the choice is
+    /// which way to be wrong: give the total to one row and its
+    /// siblings start at zero - telling somebody mid-block they have a
+    /// full block, which is the one failure this whole subject exists
+    /// to avoid - or give it to all of them, which is EXACTLY what
+    /// every one of them read yesterday. Nobody is worse off than they
+    /// were, nobody is told they have more block than they have, and
+    /// the accounts diverge correctly from the migration forward. The
+    /// legacy `block_base` offset rides along with it, so the arithmetic
+    /// on the day of the upgrade is unchanged to the byte.
+    ///
+    /// The host-keyed `"block_base"` entries are left in place rather
+    /// than deleted. Nothing reads them any more, but they are the only
+    /// surviving record of a pre-migration base for a row that happened
+    /// not to be in the config at migration time, and this store has no
+    /// other history.
+    ///
+    /// STATED LIMIT: a block row that was configured before the upgrade
+    /// but is absent from the config when this runs gets no seed, and
+    /// reads as a fresh block if it is added back. That is the reverse
+    /// of the failure above, and it is narrow - it needs the row to be
+    /// deleted and re-added across the one restart that migrates - but
+    /// it is real, and the residue kept above is what a support
+    /// conversation would reconstruct it from.
+    ///
+    /// A config that will not load leaves the store UNSTAMPED, so the
+    /// migration is simply retried at the next start rather than
+    /// marking an install migrated that seeded nothing.
+    pub fn migrate_account_ledger(&self) {
+        let Ok(cfg) = nzbkit::config::Config::load(&self.cfg_path) else {
+            return;
+        };
+        let mut u = self.usage.lock_ok();
+        if u.get(LEDGER_VERSION_KEY)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            >= LEDGER_VERSION
+        {
+            return;
+        }
+        let legacy = |bucket: &str, host: &str| -> u64 {
+            u.get(bucket)
+                .and_then(|v| v.get(host))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        };
+        let seeds: Vec<(String, u64, u64)> = cfg
+            .servers
+            .iter()
+            .map(|s| {
+                (
+                    s.account_key(),
+                    legacy("lifetime", &s.host),
+                    legacy("block_base", &s.host),
+                )
+            })
+            .collect();
+        for (acct, lifetime, base) in seeds {
+            for (bucket, v) in [(ACCOUNT_LIFETIME, lifetime), ("block_base", base)] {
+                let Some(map) = u
+                    .entry(bucket.to_string())
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                else {
+                    continue;
+                };
+                // Never over an existing entry: a store that was
+                // written by this schema and then downgraded and
+                // re-upgraded must not have its real per-account
+                // figures overwritten with a host merge.
+                if !map.contains_key(&acct) {
+                    map.insert(acct.clone(), json!(v));
+                }
+            }
+        }
+        u.insert(LEDGER_VERSION_KEY.to_string(), json!(LEDGER_VERSION));
         self.save_usage(&u);
     }
 
@@ -235,12 +411,13 @@ impl Daemon {
     /// store (inside `add_usage`) - both callers come through here, so
     /// the order cannot invert.
     ///
-    /// THE FOLD BELOW IS LOAD-BEARING; see [`Daemon::fold_bytes_by_host`]
-    /// for the whole story. A pool has one ROW per configured account and
-    /// this map has one KEY per HOST, and two config rows may share a
-    /// host, so comparing an unfolded row counter against the shared
-    /// high-water mark silently stopped billing about half of all paid
-    /// bytes for the life of the job.
+    /// THE FOLD BELOW IS LOAD-BEARING; see
+    /// [`Daemon::fold_bytes_by_account`] for the whole story. A pool has
+    /// one ROW per configured account and this map has one KEY per
+    /// ACCOUNT, and two config rows may be one account, so comparing an
+    /// unfolded row counter against the shared high-water mark silently
+    /// stopped billing about half of all paid bytes for the life of the
+    /// job.
     pub fn flush_run_usage(&self) {
         let mut flushed = self.run_usage_flushed.lock_ok();
         let per: Vec<(String, u64)> = self
@@ -251,11 +428,11 @@ impl Daemon {
             .map(|l| {
                 l.servers
                     .iter()
-                    .map(|s| (s.host.clone(), s.bytes.load(Ordering::Relaxed)))
+                    .map(|s| (Self::live_account(s), s.bytes.load(Ordering::Relaxed)))
                     .collect()
             })
             .unwrap_or_default();
-        let per = Self::fold_bytes_by_host(&per);
+        let per = Self::fold_bytes_by_account(&per);
         let deltas: Vec<(String, u64)> = per
             .iter()
             .filter_map(|(h, b)| {
@@ -272,8 +449,24 @@ impl Daemon {
         self.add_usage(&deltas);
     }
 
-    /// Sum a per-ROW list of cumulative bytes into one total per HOST,
-    /// first-seen order preserved.
+    /// The ACCOUNT a live pool row bills to, with the pre-`account`
+    /// fallback.
+    ///
+    /// A `ServerLive` built by hand carries an empty `account` (the ring
+    /// rigs use `..Default::default()`), and billing those to the
+    /// hostname is exactly what they billed before the field existed -
+    /// a bare host is its own account key, by
+    /// [`nzbkit::config::account_host`]'s pass-through rule.
+    pub fn live_account(s: &nzbkit::pool::ServerLive) -> String {
+        if s.account.is_empty() {
+            s.host.clone()
+        } else {
+            s.account.clone()
+        }
+    }
+
+    /// Sum a per-ROW list of cumulative bytes into one total per
+    /// ACCOUNT, first-seen order preserved.
     ///
     /// TWO CONFIG ROWS MAY SHARE ONE HOST. That is a supported shape,
     /// not a misconfiguration - a prepaid block account beside the main
@@ -281,11 +474,15 @@ impl Daemon {
     /// (`block_threshold_tick`'s latch comment below says the same thing
     /// about the crossing latch, and
     /// `block_threshold_tests::duplicate_host_entries_edge_trigger_independently`
-    /// pins it). Every ledger here is keyed on the HOSTNAME and stays
-    /// that way on purpose: `block_spent` is host-aggregated, and the
-    /// pool's per-host budgets and exclusions are read back by host in
-    /// `get::fleet` and `get::plan`. The pool, though, carries one ROW
-    /// per account. This is the join between the two.
+    /// pins it). What this folds ON moved from the hostname to the
+    /// ACCOUNT on 5 Sep 2026, when `block_spent` did: two rows that are
+    /// two accounts must bill separately, and two rows that are the same
+    /// account - same host, same username, which is one account at the
+    /// provider and one bill - must still fold, which is the shape the
+    /// bug below was found in. The pool's own budgets and exclusions
+    /// stay keyed by HOST (`get::fleet`, `get::plan`), because a host is
+    /// what they release and sideline. The pool carries one ROW per
+    /// account. This is the join between the three.
     ///
     /// WHAT IT FIXES, so nobody flattens it back. `flush_run_usage` used
     /// to compare EACH ROW's cumulative counter against the ONE
@@ -300,14 +497,13 @@ impl Daemon {
     /// usage.json, out of the day/lifetime/per-server totals, and out of
     /// every block-exhaustion decision that reads them.
     ///
-    /// RE-KEYING THE LEDGER PER ACCOUNT WAS CONSIDERED AND REJECTED.
-    /// `nzbkit::pool::handoff::ConnBudget::key` is host:port:username,
-    /// and `port` has a serde default while `username` defaults to
-    /// `None` - so two rows spelled `{"host":"h"}`, which is exactly
-    /// what the duplicate-host test writes, collapse to ONE key and
-    /// reproduce this bug unchanged. The fold closes it with no new
-    /// field, no key change and no nzbkit change, and leaves every
-    /// install whose hosts are all distinct byte-for-byte identical.
+    /// WHY IT STILL FOLDS AT ALL now the key is per account. Two rows
+    /// spelled `{"host":"h"}` - which is exactly what the duplicate-host
+    /// test writes - have one account key between them, deliberately
+    /// (see [`nzbkit::config::ServerConfig::account_key`]: a provider
+    /// cannot issue two accounts under one username, so those two rows
+    /// are one bill). They are still two pool rows with two counters,
+    /// so without this fold they reproduce the bug above unchanged.
     ///
     /// An associated function rather than a free one so it sits inside
     /// the ledger's own `impl` and reaches both callers
@@ -316,12 +512,12 @@ impl Daemon {
     /// folding one and not the other leaves settle comparing a row
     /// counter against a key it can no longer match and billing the
     /// whole job a second time.
-    pub fn fold_bytes_by_host(per: &[(String, u64)]) -> Vec<(String, u64)> {
+    pub fn fold_bytes_by_account(per: &[(String, u64)]) -> Vec<(String, u64)> {
         let mut out: Vec<(String, u64)> = Vec::with_capacity(per.len());
-        for (host, bytes) in per {
-            match out.iter_mut().find(|(h, _)| h == host) {
+        for (acct, bytes) in per {
+            match out.iter_mut().find(|(a, _)| a == acct) {
                 Some((_, total)) => *total = total.saturating_add(*bytes),
-                None => out.push((host.clone(), *bytes)),
+                None => out.push((acct.clone(), *bytes)),
             }
         }
         out
@@ -368,13 +564,15 @@ impl Daemon {
     ///    unlimited account on the host means it never needs releasing
     ///    at all.
     ///
-    /// STATED RESIDUE, deliberately not fixed here: two BLOCK rows on
-    /// one host still share one host-aggregated `block_spent`, so each
-    /// enforces against the same figure and the pair can spend more than
-    /// the host really has left. Closing that means keying the ledger
-    /// per ACCOUNT, which is a decision about the spend record itself
-    /// (and not one `ConnBudget::key` can carry - see
-    /// [`Daemon::fold_bytes_by_host`]), so it is out of scope here.
+    /// THE SPEND EACH ROW ENFORCES AGAINST IS ITS OWN since 5 Sep 2026
+    /// (`block_spent` takes an account key, not a host), which is what
+    /// makes rule 3 above mean what it says: `e.left` is now the largest
+    /// remaining across the host's block ACCOUNTS, rather than the
+    /// largest `block_bytes` minus one figure they all shared. The
+    /// residue this comment used to state - a pair of block rows on one
+    /// host able to spend more than the host really had left - is closed
+    /// with it. The ANSWER stays host-keyed for the reason above:
+    /// exclusion and release are things the pool does to a host.
     ///
     /// Nothing account-identifying reaches either answer: both are
     /// `s.host` and only `s.host`, because `excluded_hosts` is what
@@ -412,7 +610,7 @@ impl Daemon {
                 None => e.flat = true,
                 Some(b) => {
                     e.block = true;
-                    let spent = self.block_spent(&s.host);
+                    let spent = self.block_spent(&s.account_key());
                     if spent < b {
                         e.live = true;
                         e.left = e.left.max(b - spent);
@@ -542,7 +740,7 @@ impl Daemon {
     /// for every row without a second spelling of the arithmetic.
     pub fn block_standing(&self, s: &nzbkit::config::ServerConfig) -> BlockStanding {
         let total = s.block_bytes.unwrap_or(0);
-        let spent = self.block_spent(&s.host);
+        let spent = self.block_spent(&s.account_key());
         BlockStanding {
             host: s.host.clone(),
             enabled: s.enabled,

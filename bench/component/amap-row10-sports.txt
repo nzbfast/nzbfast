@@ -1,0 +1,4 @@
+# Row 10, a sports broadcast: one obfuscated mp4, no RAR, a 2% set that names
+# the release. One article gone, which is inside what 2% can repair.
+ARTICLE 768000
+8f3c1a90d47b62e5c0193ae7bd48f215.mp4 1900

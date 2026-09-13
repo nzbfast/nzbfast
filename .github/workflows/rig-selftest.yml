@@ -113,6 +113,7 @@ on:
       - '**/miami3.sh'
       - 'tools/rig-selftest-gate.py'
       - '**/nic-media-flip.sh'
+      - '**/box-state.sh'
       - '.github/workflows/rig-selftest.yml'
   workflow_dispatch:
 

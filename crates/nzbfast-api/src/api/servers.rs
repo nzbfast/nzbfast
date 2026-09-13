@@ -207,9 +207,13 @@ fn m_server_stats(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| (d.as_secs() / 86_400) as i64)
         .unwrap_or(0);
-    // Keyed by `host`, which is what the ledger bills to, so a
-    // configured server that HAS spent something lands on its own row
-    // rather than beside a duplicate.
+    // Keyed by `host`, which is what the ledger's DAY and `"lifetime"`
+    // buckets bill to - and they stay that way, where the block meter
+    // beside them went per account on 5 Sep 2026, because this is
+    // SABnzbd's `mode=server_stats` and a client walks its own server
+    // list and indexes `servers[hostname]`. Two accounts on one host
+    // therefore report one merged usage row here, which is "usage per
+    // provider" and is what the parity surface has to say.
     let configured: Vec<String> = current_servers(ctx.cfg_path)
         .iter()
         .filter_map(|s| s.get("host").and_then(Value::as_str))
@@ -466,17 +470,29 @@ fn m_server_delete(
     })
 }
 
-/// §96.5: restart a host's block-used counter after the user buys a
-/// new block, by stamping the current lifetime figure as the block's
+/// §96.5: restart one ACCOUNT's block-used counter after the user buys
+/// a new block, by stamping its current lifetime figure as the block's
 /// base - the lifetime ledger itself is never rewound (it also answers
-/// the history totals). Keyed by HOST, not index: the counter belongs
-/// to the account, and an index would re-point under a concurrent
-/// reorder.
+/// the history totals).
+///
+/// `value` NAMES THE HOST AND `index` PICKS THE ROW, and both are
+/// needed since the meter went per account (5 Sep 2026): a hostname may
+/// carry two accounts and only one of them has been topped up, while an
+/// index alone would re-point under a concurrent reorder. So the index
+/// is checked AGAINST the host and a disagreement is refused rather
+/// than guessed at - refilling the wrong account tells somebody
+/// mid-block that they have a full block, which is the failure the
+/// whole per-account key exists to avoid.
+///
+/// An absent or out-of-range `index` falls back to the single row on
+/// that host, which is what every client that predates the parameter
+/// sends and what all but a handful of installs have. A host with
+/// several rows and no usable index is refused, for the same reason.
 fn m_server_block_refilled(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
     params: &std::collections::HashMap<String, String>,
-    _ctx: &ApiCtx<'_>,
+    ctx: &ApiCtx<'_>,
     _api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
     Some(
@@ -486,12 +502,37 @@ fn m_server_block_refilled(
             .filter(|h| !h.is_empty())
         {
             Some(host) => {
-                d.block_refilled(host);
-                info!(
-                    target: "config",
-                    "block refilled for {host} - used counter restarted at zero"
-                );
-                json!({"status": true, "block_used": 0})
+                let Ok(cfg) = nzbkit::config::Config::load(ctx.cfg_path) else {
+                    return Some(json!({"status": false, "error": "config unreadable"}));
+                };
+                let idx = params.get("index").and_then(|v| v.parse::<usize>().ok());
+                let on_host: Vec<usize> = cfg
+                    .servers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.host == host)
+                    .map(|(i, _)| i)
+                    .collect();
+                let row = match idx.filter(|i| on_host.contains(i)) {
+                    Some(i) => Some(i),
+                    None => on_host.first().copied().filter(|_| on_host.len() == 1),
+                };
+                match row {
+                    Some(i) => {
+                        d.block_refilled(&cfg.servers[i].account_key());
+                        info!(
+                            target: "config",
+                            "block refilled for {host} (row {i}) - used counter restarted at zero"
+                        );
+                        json!({"status": true, "block_used": 0})
+                    }
+                    None if on_host.is_empty() => {
+                        json!({"status": false, "error": "no such server"})
+                    }
+                    None => json!({"status": false,
+                        "error": "that hostname has several accounts - say which \
+                                  one with index"}),
+                }
             }
             None => json!({"status": false, "error": "value must name the server host"}),
         },
@@ -715,7 +756,7 @@ fn m_feed_test(
             // The body always arrives pre-read: serve() drains every
             // POST to /api before it authorizes, so a handler that
             // read the socket here would be reading it after the
-            // authorization decision - the rotation window Codex
+            // authorization decision - the rotation window review
             // sweep 2's H1 closed. `unwrap_or_default()` and never a
             // fallback read: an empty body is a bad request, not a
             // reason to reach for the socket.
@@ -727,7 +768,7 @@ fn m_feed_test(
             } else {
                 // parse_feed_checked: a Test that got an HTTP 200
                 // login page back must say so, not report a
-                // healthy feed with zero items (Codex sweep 2,
+                // healthy feed with zero items (review sweep 2,
                 // 3 Aug ML1) - the whole point of the button is
                 // telling a broken url from a quiet one.
                 let r = fetch_url(&url).and_then(|f| {
@@ -959,6 +1000,11 @@ fn m_pooltest(
                         })
                         .collect();
                     let hosts: Vec<String> = c.servers.iter().map(|s| s.host.clone()).collect();
+                    // The same rows again, keyed for the LEDGER rather
+                    // than for display: two accounts on one hostname are
+                    // billed apart, and only the account key tells them
+                    // apart (`ServerConfig::account_key`).
+                    let accts: Vec<String> = c.servers.iter().map(|s| s.account_key()).collect();
                     tokio::runtime::Handle::current().block_on(async {
                         // Enough ids to keep a multi-gig line busy
                         // for the whole 8 s window - a small fixed
@@ -983,7 +1029,7 @@ fn m_pooltest(
                         let (gbps, per, granted, _) =
                             nzbkit::sysbench::timed_fetch_multi(pool, ids, usize::MAX, 8).await;
                         d.add_usage(
-                            &hosts
+                            &accts
                                 .iter()
                                 .cloned()
                                 .zip(per.iter().copied())
@@ -1651,7 +1697,7 @@ fn m_server_carry(
                     // a black-holed host, which is the case this 90 s
                     // guard exists for - and its bytes went out on the
                     // wire against the account either way.
-                    d.add_usage(&[(srv.host.clone(), bill.owed())]);
+                    d.add_usage(&[(srv.account_key(), bill.owed())]);
                     return json!({"status": false,
                         "error": format!("{}: the carry probe timed out", srv.host)});
                 }
@@ -1667,7 +1713,7 @@ fn m_server_carry(
             // From the counter, not from `rungs`: one spelling for what
             // this handler owes, so the answer path and the refusal
             // above cannot come to disagree about it.
-            d.add_usage(&[(srv.host.clone(), bill.owed())]);
+            d.add_usage(&[(srv.account_key(), bill.owed())]);
             if interrupted {
                 return json!({"status": false,
                     "error": "a download started while the test was running, and \
@@ -1961,7 +2007,7 @@ fn m_connladder(
                             // the climb wedged moved real bytes against
                             // the account, and a timeout is the one
                             // ending that used to drop them silently.
-                            d.add_usage(&[(srv.host.clone(), bill.owed())]);
+                            d.add_usage(&[(srv.account_key(), bill.owed())]);
                             json!({"status": false,
                                         "error": "connection ladder timed out"})
                         }
@@ -1984,7 +2030,7 @@ fn m_connladder(
                             // real bytes.
                             if hit.load(Ordering::Acquire) {
                                 let n = steps.iter().map(|s| s.bytes).sum();
-                                d.add_usage(&[(srv.host.clone(), n)]);
+                                d.add_usage(&[(srv.account_key(), n)]);
                                 return json!({"status": false, "downloading": true,
                                     "error": "a download started while the test was \
                                               running, so the rungs after it measured \
@@ -2056,7 +2102,7 @@ fn m_connladder(
                             // `unmerged` is what a re-measure that
                             // never came back still owes.
                             d.add_usage(&[(
-                                srv.host.clone(),
+                                srv.account_key(),
                                 steps.iter().map(|s| s.bytes).sum::<u64>() + unmerged,
                             )]);
                             //
@@ -2301,10 +2347,20 @@ fn m_diversity(
                             });
                             match rep {
                                 Ok(rep) => {
+                                    // Billed per ACCOUNT, and the keys
+                                    // come off `pool` POSITIONALLY:
+                                    // `sysbench::diversity` builds its
+                                    // report by zipping the servers it
+                                    // was handed, so row i of the report
+                                    // is row i of the pool. Two accounts
+                                    // on one hostname are two rows here
+                                    // and `p.host` cannot tell them
+                                    // apart.
                                     d.add_usage(
-                                        &rep.servers
+                                        &pool
                                             .iter()
-                                            .map(|p| (p.host.clone(), p.bytes))
+                                            .map(|s| s.account_key())
+                                            .zip(rep.servers.iter().map(|p| p.bytes))
                                             .collect::<Vec<_>>(),
                                     );
                                     let mut v = serde_json::to_value(&rep)

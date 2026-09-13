@@ -2,7 +2,7 @@
 //! pair `delete_durability_tests.rs` cannot ask about, because nothing
 //! this verb does destroys anything.
 //!
-//! The two verbs shared one arm until 4 Sep 2026 (Codex triage finding
+//! The two verbs shared one arm until 4 Sep 2026 (review triage finding
 //! 8, first named by the Cursor read-only sweep's item 17). Sonarr's
 //! `NzbgetProxy.RemoveItem` sends `HistoryDelete`, and its "Remove
 //! completed downloads" option fires it after every import, so under

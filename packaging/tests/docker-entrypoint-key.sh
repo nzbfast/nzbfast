@@ -40,7 +40,7 @@ bad()  { echo "  FAIL - $1"; FAIL=$((FAIL + 1)); }
 # "WARNING". The entrypoint now legitimately prints a second, unrelated
 # warning - a config directory that is not a mounted volume, which is
 # exactly what a mktemp fixture has - so a bare WARNING match made every
-# KEYED case fail while claiming the opposite of what it found (Codex
+# KEYED case fail while claiming the opposite of what it found (review
 # sweep 12 Aug, packaging red 1).
 run_case() {
   local desc=$1 setup=$2 expect=$3 wantwarn=${4:-}

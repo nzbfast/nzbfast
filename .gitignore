@@ -1,6 +1,26 @@
 .DS_Store
 /target
+# The parfast desktop GUI's DETACHED cargo workspace builds into its own
+# target directory (decision D2a - apps/parfast/Cargo.toml's header).
+# `/target` above is anchored at the repo root, so it does not reach
+# this one, and a workspace nothing ignores would have staged 3 GB of
+# artefacts on its first commit.
+/apps/parfast/target
 *.log
+# ...but NOT a research run log. A benchmark round's per-run stderr IS the
+# evidence its write-up cites, and this rule used to eat it: `git add <dir>`
+# staged those logs as nothing, silently, and a published round lost the
+# files it named. Scope stays research/ on purpose - bench/ exports, and its
+# logs must keep being ignored.
+!research/**/*.log
+# ...nor a log PUBLISHED on the site. website/parfast-bench/ is the evidence
+# behind website/parfast-benchmarks.html, whose lead says every log is
+# published beside it, and `*.log` above would have staged 90 of its 98 files
+# as nothing at all - the same silent eat the comment above records, one
+# directory over. These are scrubbed copies written by
+# website/tools/export_parfast_evidence.py; the originals under research/ are
+# what a round is banked as.
+!/website/parfast-bench/**/*.log
 
 # Local prototype config with server credentials - never commit
 config.local.json
@@ -8,6 +28,14 @@ config.local.json
 # Swift app build artifacts
 macapp/.build/
 macapp/build/
+# parfast desktop GUI (apps/parfast/mac): SwiftPM's cache, the assembled
+# .app, and the icon master the bundle script draws at build time.
+apps/parfast/mac/.build/
+apps/parfast/mac/build/
+# The universal staticlib make-app.sh lipos out of the detached cargo
+# workspace, and that workspace's own target dir.
+apps/parfast/mac/vendor/
+apps/parfast/target/
 # iOS spike harness bundle (built by packaging/ios/build-harness.sh)
 packaging/ios/NZBFastHarness.app/
 
@@ -24,6 +52,13 @@ packaging/ios/NZBFastHarness.app/
 
 # Bundle build output
 /dist/
+# ...and the two per-product dist directories. packaging/build-parfast-
+# bundles.sh has defaulted to /dist-parfast/ since it landed and nothing
+# ignored it, so a lane that built the CLI assets saw them as untracked
+# files in `git status` on a shared checkout - which is how an asset gets
+# staged by accident. The GUI script's default is listed beside it.
+/dist-parfast/
+/dist-parfast-gui/
 /packaging/*/nzbfast-*-getting-started.pdf
 
 # daemon runtime settings (written by the dashboard) + the persist
@@ -68,7 +103,7 @@ runtime.json
 # committed test fixture of the same name stays possible.
 /passwords.txt
 
-# per-machine Claude Code launch config + agent worktrees (worktrees
+# per-machine editor launch config + agent worktrees (worktrees
 # were only in .git/info/exclude before, which a fresh clone loses)
 .claude/launch.json
 .claude/worktrees/
@@ -112,3 +147,14 @@ research/torture-soak-2026-08-11/fixtures*/
 # committed package.json + package-lock.json. Dev-only and nothing here
 # ships - see the gate's header for why the pin is exact.
 /node_modules/
+
+# research/stage-roundbook-logs.sh copies five banked round logs to the flat
+# names research/extract.py reads them under. They are COPIES: the banked path
+# under research/rounds/ is the one committed, and a second copy in git would
+# be the shape where the two drift and nobody can say which the page was built
+# from. Re-make them with that script, never by committing them.
+/research/i5full.log
+/research/zfull.log
+/research/m5full.log
+/research/mswp.log
+/research/zswp2.log

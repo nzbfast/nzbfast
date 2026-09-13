@@ -56,6 +56,7 @@ fn scratch(tag: &str) -> crate::testscratch::ScratchDir {
 
 fn set_of(files: Vec<Par2File>) -> Par2Set {
     Par2Set {
+        comment: None,
         recovery_set_id: [0u8; 16],
         block_size: 76,
         files,

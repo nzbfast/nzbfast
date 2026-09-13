@@ -147,7 +147,7 @@
 # - reproduced verbatim against that same broken copy - still exited 0.
 # Both scripts already carried a `--selftest` (memory-gate: 102 checks;
 # hooks-gate: 11 cases) that nothing had ever run in CI - the same
-# hand-run shape the FIFTH, EIGHTEENTH and NINETEENTH gates in CLAUDE.md
+# hand-run shape the FIFTH, EIGHTEENTH and NINETEENTH gates in CONTRIBUTING.md
 # all warn decays within days of landing, and two of those three did
 # decay, on shipped releases. Each job below runs the selftest first,
 # same as every gate above, and then a second arm the selftest cannot
@@ -194,7 +194,7 @@
 # js-scope and api-contract gates, the one-process and packaging-tests
 # roster jobs, and `packaging-gates` - plus the selftest-roster and
 # tool-selftests jobs, which makes it nine and ten: the selftest roster
-# IS numbered in CLAUDE.md (the fortieth) and is not numbered here, and its `tool-selftests` companion is a runner rather than a
+# IS numbered in CONTRIBUTING.md (the fortieth) and is not numbered here, and its `tool-selftests` companion is a runner rather than a
 # gate. So there are forty-one steps below and twenty-nine numbers
 # above. Its subject is
 # `--bg`, the page ground, DEFINED once in web/ui-tokens.html and
@@ -217,7 +217,7 @@
 # ground - a real copy, in float channels - was not among them.
 # Twenty-two is `tools/claude-clippy-gate.py`, added 24 Aug 2026, and it
 # is the first gate in this family whose subject is the INSTRUCTIONS
-# rather than the code. CLAUDE.md tells a session "this exact line is
+# rather than the code. CONTRIBUTING.md tells a session "this exact line is
 # what gates a push" over and over - a host clippy line in its numbered
 # gate list, a Windows one quoted inside the entry about unix-only
 # symbols, a slim-build line written into a prose paragraph, a formatting
@@ -421,7 +421,7 @@
 # for each source in website/SCREENS-DERIVED.manifest, plus every
 # dimension, ratio and declaration arm, none of which needs image tooling
 # at all, while `make-screenshots.sh --check` proves the actual bytes on a
-# mac as a pre-release step. Neither alone would do - CLAUDE.md's bench2j
+# mac as a pre-release step. Neither alone would do - CONTRIBUTING.md's bench2j
 # entry is the precedent for what happens to a check that lives on one box
 # alone, and its subject rotted twice. Here rather than on main alone for
 # the reason every entry above gives, with the same twist as Twenty-six:
@@ -752,6 +752,20 @@ on:
       - 'Cargo.toml'
       - 'crates/**/Cargo.toml'
       - 'vendor/**/Cargo.toml'
+      - 'tools/detached-lock-gate.py'
+      # For `detached-lock-gate`, whose subject is a tree the root
+      # workspace does not name: `apps/parfast/` is a DETACHED cargo
+      # workspace (decision D2a) with its own committed Cargo.lock, and
+      # NOTHING in the list above matches any file in it - not its
+      # manifests (the two Cargo.toml lines are anchored at `crates/`
+      # and `vendor/`), not its lock (no pattern here matches a
+      # Cargo.lock at all), not its `.rs` files. Without this line the
+      # one gate that can see that tree would not fire on an edit made
+      # INSIDE it. The three Cargo.toml lines above are what fires it on
+      # the commit shape that actually caused the 12 Sep 2026 red - a
+      # dependency added to `crates/parfast`, a crate this workspace
+      # reaches by path.
+      - 'apps/**'
       - 'web/icons/**'
       - 'packaging/icon/**'
       - 'tools/icon-downstream-gate.py'
@@ -766,6 +780,7 @@ on:
       - '.claude/tools/memory-gate.py'
       - '.claude/tools/hooks-gate.py'
       - '.claude/tools/checkout-drift-hook.py'
+      - '.claude/tools/box-load-hook.py'
       - '.github/workflows/size-gate.yml'
       # For the `packaging-tests-roster` job below, whose subject is
       # every workflow in this directory: deleting a `run:` step from
@@ -1111,7 +1126,7 @@ jobs:
       # x86_64-unknown-linux-gnu` does not work from the dev Mac at all
       # (md5-asm and libsqlite3-sys want a C cross-toolchain and no
       # `brew install` supplies one), so unlike the Windows case in
-      # CLAUDE.md's SIXTEENTH entry there is no local run that sees it.
+      # CONTRIBUTING.md's SIXTEENTH entry there is no local run that sees it.
       # Measured: main went red on this FIVE times in eighty-four minutes
       # on 26 Aug 2026, the middle three being the SAME defect fixed by
       # three lanes independently inside ten minutes - because a red on
@@ -1272,7 +1287,7 @@ jobs:
       # two-clause remainder test wherever it lands, a `.par2` test on a
       # name that resolves one hop to a SUBJECT, and any `-> FileKind`
       # door outside nzb.rs that stops delegating. Plus a home arm, for
-      # the FOURTEENTH CLAUDE.md entry's reason - a rule narrowed back at
+      # the FOURTEENTH CONTRIBUTING.md entry's reason - a rule narrowed back at
       # its one home restores the defect at every call site at once with
       # no call-site diff anywhere to show it.
       # `--selftest` first, and it is the gate rather than the house
@@ -1999,6 +2014,56 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/test-target-gate.py --selftest && tools/test-target-gate.py
+      # ---- detached-lock-gate --------------------------------------
+      # A DETACHED cargo workspace commits its own Cargo.lock and reaches
+      # first-party crates BY PATH, so an ordinary dependency change in
+      # `crates/` refreshes the ROOT lock and silently leaves the other
+      # one describing a package that no longer exists. Every cargo line
+      # over `apps/parfast/` carries `--locked` on purpose, so the next
+      # push dies at RESOLUTION - before a line is linted or built - with
+      # `error: cannot update the lock file ... because --locked was
+      # passed to prevent this`. That took `fuzz-gate` plus
+      # `parfast-gui`'s `mac` and `windows` jobs red for about an hour on
+      # 12 Sep 2026 (fixed in 00140c9e3a, claim `red-fuzz-gate-7763d58a`)
+      # and no gate anywhere could see it: both one-process mechanisms
+      # ask the ROOT manifest, which does not name that tree, and the
+      # three tools that mention it read it for unrelated reasons. The
+      # diagnosis is not obvious from the JOB name either - "clippy
+      # (parfast GUI workspace)" was not a lint problem. The population
+      # is DERIVED from the workflows (every `cargo --manifest-path` line
+      # that can fire on this repository), never listed: 48 of the 50
+      # tracked Cargo.lock files here are frozen `research/par-*`
+      # prototypes no CI job builds, and gating those is exactly the
+      # false-refusal-prone gate that gets switched off.
+      # `crates/nzbkit/fuzz` is exempt on a FACT rather than by name - it
+      # gitignores its lock, so there is nothing to drift, which is also
+      # why its clippy line must never grow `--locked`. Build-free
+      # (tomllib over the manifests, a text scan of the lock), measured
+      # 0.07 s. Here rather than in ci-private alone for this family's
+      # standing reason: the lane that moves the dependency is the one
+      # lane that can be told.
+      # SINCE 12 Sep 2026 it also carries a PATCH-PARITY arm, which is the
+      # same blindness one table over: `[patch.crates-io]` applies from
+      # the WORKSPACE ROOT, so a detached workspace inherits none of it
+      # and `apps/parfast` was resolving `sevenz-rust2` and `lzma-rust2`
+      # from crates.io while every other binary here linked the vendored
+      # forks - the repo holding `lzma-rust2` 0.20.0 and 0.20.1 at once.
+      # Nothing showed it: no manifest states it and no build fails on
+      # it. The arm reads the LOCK and not the detached manifest's own
+      # `[patch]` table, because copying that table was NOT sufficient -
+      # cargo left the older-versioned patch UNUSED and exited 0 with a
+      # warning. One-directional like the arms beside it: a patched name
+      # the detached lock does not hold is silent, so the green state
+      # needs no waiver anywhere. The root `Cargo.toml` and `vendor/**/
+      # Cargo.toml` lines in the trigger list above are what fires this
+      # arm on a fork bump; `apps/**` fires it on the other side.
+      - name: detached workspace lock gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/detached-lock-gate.py --selftest && tools/detached-lock-gate.py
       # ---- shot-version-gate ---------------------------------------
       # Every dashboard capture in website/assets/ rendered the running
       # version in its header pill, and nothing held those images to the
@@ -2122,8 +2187,26 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: test -x .claude/tools/checkout-drift-hook.py && .claude/tools/checkout-drift-hook.py --selftest
+      # ---- box-load-hook -------------------------------------------
+      # THREE arms, and the middle one is the reason this job is not
+      # decorative. The runner is a DIFFERENT ps dialect (GNU, not BSD) from
+      # every box this was written on, and the script parses ps duration
+      # columns BY HAND - so a rejected flag or an unexpected shape would make
+      # the leak arm silently blind. `--hook` cannot catch that: with nothing
+      # to report it prints nothing and exits 0, which is exactly what a
+      # broken parser also does. `--check-ps` runs the real `ps` and FAILS
+      # unless the table actually parsed and pid 1 is in it. `--selftest` is
+      # hermetic and cannot see it; `--hook` is the settings.json arm and
+      # proves the module imports and runs end to end.
+      - name: box load hook
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: test -x .claude/tools/box-load-hook.py && .claude/tools/box-load-hook.py --selftest && .claude/tools/box-load-hook.py --check-ps && .claude/tools/box-load-hook.py --hook
       # ---- claude-clippy-gate --------------------------------------
-      # CLAUDE.md documents the clippy gate twice and ci-private runs it
+      # CONTRIBUTING.md documents the clippy gate twice and ci-private runs it
       # twice, and until 24 Aug 2026 nothing held the four in step - see
       # "Twenty-two" at the top of this file for the day main was red
       # with every documented gate green. `--selftest` first, and here it
@@ -2132,7 +2215,7 @@ jobs:
       # reads as a clean tree forever. Every arm is driven by a fixture
       # that must go red, including the two shapes that must NOT be - both
       # sides moved together in one commit, and a pure rewrap of the
-      # CLAUDE.md copy.
+      # CONTRIBUTING.md copy.
       - name: clippy doc gate
         # Run even when an earlier gate in this group failed - a
         # persistent red in one gate must not mask the verdicts of
@@ -2552,7 +2635,7 @@ jobs:
       # for the browser-journey suite that exists to catch what the source
       # scans over web/dashboard.html cannot: no `page.waitForTimeout` (a
       # fixed wait on this box is a guess about another session's cargo
-      # build), `retries: 0` in playwright.config.ts (CLAUDE.md's
+      # build), `retries: 0` in playwright.config.ts (CONTRIBUTING.md's
       # FORTY-FIRST gate's argument one suite over - a journey that only
       # passes on the second go has found something), and no test hook
       # added to the shipped markup. VERIFIED on origin/main 27 Aug 2026:
@@ -2574,7 +2657,7 @@ jobs:
       # the reason a bare `await api(...)` on a WRITE cannot tell a refusal
       # from an acceptance. So a refused write runs on into its success
       # toast and the user gets a green screen describing a change that
-      # never happened. Codex F-18 fixed 22 such sites and wrote the
+      # never happened. review finding F-18 fixed 22 such sites and wrote the
       # contract down as a COMMENT next to api(): a write goes through
       # mustOk() or reportRefusal(). Nothing held anybody to it, and the
       # measurement is the argument - the sweep that found the class named
@@ -2649,6 +2732,54 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: python3 web/i18n/site-check.py --selftest && python3 web/i18n/site-check.py
+      # ---- parfast-page-gate ---------------------------------------
+      # The third GENERATED-and-committed subject in this job, added
+      # 12 Sep 2026. website/parfast-benchmarks.html is built from the
+      # round book (research/page/roundbook.html) by
+      # website/tools/build_parfast_page.py, and website/parfast-bench/ is
+      # the evidence behind it, written by
+      # website/tools/export_parfast_evidence.py through
+      # tools/scrub-bench-logs.py. Both are committed, so both can go
+      # stale the way the cross-links and the nav could, and staleness
+      # here is worse than cosmetic in one direction: the page's lead
+      # says every log is published beside it, so a directory that has
+      # stopped matching the roster is a page making a false claim.
+      #
+      # The scrubber's `--selftest` FIRST, and it is the load-bearing
+      # half. That script is what stands between a bench log's `host=`
+      # line and the public site, and its one failure mode is the family
+      # failure mode here: a rule that has quietly stopped matching
+      # publishes the hostname and reports clean. Its arm drives every
+      # box in the map, both path families, the anonymity rules and the
+      # re-scan against packaging/private-patterns.txt.
+      #
+      # The page check runs against the COMMITTED round book rather than
+      # regenerating it, on purpose: research/extract.py reads ten logs
+      # and recomputes medians, and holding a floating-point pipeline
+      # byte-identical across two operating systems is a different and
+      # much weaker gate than holding a text transform to its input.
+      # Re-run the round book by hand (research/stage-roundbook-logs.sh,
+      # then extract.py and build_page.py) when a round lands.
+      #
+      # TWO pages come out of that one round book and both are checked
+      # here: the commentary page and the DATA-ONLY twin
+      # (website/parfast-benchmarks-data.html, added 12 Sep 2026), which
+      # is the artefact whose URL goes to a forum. The twin's builder
+      # refuses on any prose block it has not been told is data or
+      # argument, so this step is also what stops a later round quietly
+      # adding a claim to the page that is supposed to carry none.
+      - name: parfast page and evidence staleness gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tools/scrub-bench-logs.py --selftest
+          python3 website/tools/build_parfast_page.py --check
+          python3 website/tools/build_parfast_data_page.py --check
+          python3 website/tools/export_parfast_evidence.py
+          git diff --exit-code -- website/parfast-bench
       # ---- crosslink-gate ------------------------------------------
       # The first of the two gates here whose subject is GENERATED and
       # committed: site-crosslink.py rewrites the cross-page links on the
@@ -2710,7 +2841,7 @@ jobs:
   # and nowhere else, and pr-check.yml is `on: pull_request` with
   # `if: github.repository == 'nzbfast/nzbfast'` - a PUBLIC-repo
   # pull-request gate. This repo pushes straight to main, which is the
-  # flow documented throughout CLAUDE.md, so on this repo not one of
+  # flow documented throughout CONTRIBUTING.md, so on this repo not one of
   # those five steps has ever run. That is the same blind spot this whole
   # workflow exists for, stated at the head of this file for the gates in
   # ci-private's `check` job, one workflow over: a lane can break a
@@ -2733,7 +2864,7 @@ jobs:
   # version of this change. Because it is a 60-minute job whose own
   # header measures 40 of those minutes as two `cargo test` passes, plus
   # a windows-latest leg that bills at 2x on a private repo, and
-  # CLAUDE.md's "CI build is CPU-bound" paragraph says the levers on that
+  # CONTRIBUTING.md's "CI build is CPU-bound" paragraph says the levers on that
   # are spent. Firing all of that on every push to buy eleven seconds of
   # shell gates would be the most expensive possible way to run them, and
   # the private repo already covers the Rust half of pr-check far better,
@@ -2908,7 +3039,7 @@ jobs:
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The cross-machine work ledger. CLAUDE.md item 1a: git is the only
+      # The cross-machine work ledger. CONTRIBUTING.md item 1a: git is the only
       # channel that spans boxes, so this file is the LOCK, and a lane that
       # cannot mint or fold a claim correctly starts work another machine
       # already holds. 132 cases, 70 of them the `--src` guard that landed
@@ -2955,6 +3086,24 @@ jobs:
       # LIVE index schema, which no runner here has.
       - name: naming benchmark reporting
         run: research/namebench/run.py --selftest
+      # The arm-order audit over the banked jcross rounds
+      # (research/JCROSS-ARM-ORDER-AUDIT-2026-09-12.md). Both jcross drivers
+      # ordered three arms by REVERSING them until 12 Sep 2026, and reversing
+      # three arms does not move the middle one - so the arm under test was
+      # never first and never last in any round this repo has banked. This
+      # file is how the exposure of ten of them was measured, from the logs
+      # alone, and it is the thing a future reader will cite rather than
+      # re-derive. Its arm pins the two parser traps that would silently
+      # change every number it prints - a LEG line's
+      # `stage2_raw='joint scheduler, m=7680, ...'` carries its OWN `m=`, so a
+      # last-wins key=value dict files the leg under the wrong RUNG, and an
+      # unquoted split starts a new field mid-label - plus the rotation itself
+      # against jcross.py's rule, and that every banked round it names is still
+      # where it says. That last pin is the one with teeth: failing to FIND a
+      # round is failing, and a silently-skipped log would make the audit read
+      # clean over a corpus it never opened. Pure python, no network, ~0.1 s.
+      - name: jcross arm-order audit
+        run: tools/jcross-position-audit.py --selftest
       # Names the POLLUTER in a cross-test pollution failure. NOTE: its
       # "real libtest" pin - that `--exact` takes many filters and that
       # libtest sorts the filtered set by name - needs rustc, and this
@@ -2972,10 +3121,48 @@ jobs:
       # choosing - which is how the 126 was found at all.
       - name: segment codec
         run: python3 tools/segcodec.py --selftest
+      # zsh, WHICH THIS RUNNER DOES NOT SHIP, and the step below REFUSES
+      # without it rather than passing over the case that needs it. That
+      # refusal is correct and is why this install is here instead of a
+      # skip: `the_parfast_posix_probe_really_matches_the_extensions`
+      # drives the rig probe end to end under every shell the fleet
+      # actually answers ssh with, and the Apple rigs answer in ZSH,
+      # which does not word-split an unquoted expansion. The first cut of
+      # that probe carried its hasher in `H="shasum -a 256"` and reached
+      # ZERO files out of nineteen on an Apple rig, silently, while
+      # passing under `sh`. A run without zsh is that same silence in CI's
+      # clothes, so the fix is to GIVE the runner the shell, never to let
+      # the case sit out. ~2 s; main was red on exactly this from
+      # a5556ee721 until it was installed.
+      - name: zsh, for the rig probe's shell matrix
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
       # Judges what is deployed on three bench boxes against the repo at a
       # named commit. Six seconds, the slowest of the eleven.
       - name: bench deploy check
         run: tools/bench-deploy-check.py --selftest
+      # The bench harnesses' timed-leg discipline. Two things it pins, both
+      # of which cost real time when they were absent: that a tool's SUCCESS
+      # exit codes are per tool (MultiPar's par2j returns 16 after a repair
+      # that WORKED, so a bare `rc != 0` marks a good leg failed), and that
+      # the shell reader in `bench/lib/legrc.sh` and the Python reader in
+      # `bench/component/scen-summarise.py` agree on every (tool, rc) pair -
+      # they read ONE table, `bench/rc-ok.tsv`, and a second copy smuggled
+      # into either side fails this arm. It also pins that a MISSING table
+      # errors rather than defaulting, because defaulting is the silent
+      # version of the same bug. Bash + python3, no build, ~0.3 s.
+      - name: bench timed-leg rc discipline
+        run: bash bench/lib/legrc.sh --selftest
+      # The PAR2 algorithm-seam registry's parser. seam-sweep.py is a
+      # REPORT and not a gate - it reddens nothing, by its own design -
+      # but its `--stale` arm is the only thing that ASKS whether a
+      # crossover threshold has drifted from the code it was measured
+      # against, and it answers by parsing the seam census out of the
+      # tree. A census that quietly stopped parsing would report zero
+      # stale seams for ever, which reads exactly like a converged
+      # stack: the same failure shape the bench drift cron below is
+      # wired here for. Pure python, no build, ~0.2 s.
+      - name: par2 seam registry
+        run: tools/seam-sweep.py --selftest
       # The scheduled half of the same question. `bench-deploy-check.py`
       # answers "is a box behind"; nothing made anybody ASK, and the fleet
       # drifted unreported three times (22, 25, 31 Aug 2026). This is the
@@ -3016,7 +3203,7 @@ jobs:
       # a rate over a window is not a per-push question anyway, so running
       # it every push would re-answer the same question about forty times
       # per window. So the SELFTEST is what CI runs, which is the shape
-      # CLAUDE.md's FORTIETH gate asks for and the same one `claims ledger`
+      # CONTRIBUTING.md's FORTIETH gate asks for and the same one `claims ledger`
       # and `bench deploy check` above already take. 39 cases, hermetic: the
       # API is stubbed, `--junit` reads temp files, and the only thing it
       # touches outside its own fixtures is .github/workflows, from which it
@@ -3029,7 +3216,7 @@ jobs:
       # verbatim to the anonymous public repo, and the directory those
       # scripts live in is private vocabulary that packaging/leak-check.sh
       # refuses there - measured, the five-step version was refused by the
-      # pre-commit check before it could be committed. CLAUDE.md's TENTH
+      # pre-commit check before it could be committed. CONTRIBUTING.md's TENTH
       # gate reached for exactly this answer for exactly this reason, and
       # says so at its own site. The runner holds its list to what is
       # actually in that directory in BOTH directions, so it cannot go
@@ -3091,7 +3278,7 @@ jobs:
         run: python3 tools/bench/lane/report.py --selftest
       # bench2j-gate.py took no flags at all before 31 Aug 2026, so any
       # argument (a typo'd `--selftets`, say) was silently ignored and the
-      # ordinary check ran anyway. Its own CI job below and CLAUDE.md's
+      # ordinary check ran anyway. Its own CI job below and CONTRIBUTING.md's
       # documented line both stay `tools/bench2j-gate.py` bare (paired by
       # tools/claude-clippy-gate.py) - this is a SEPARATE step so adding
       # --selftest here does not touch that pair.
@@ -3148,7 +3335,7 @@ jobs:
       # commits.
       #
       # A destroyed record is not a cosmetic loss: it is an item another
-      # BOX may now start a second time, which CLAUDE.md item 1a calls
+      # BOX may now start a second time, which CONTRIBUTING.md item 1a calls
       # this repo's most repeated defect.
       #
       # The `--selftest` runs first and is the gate rather than the house

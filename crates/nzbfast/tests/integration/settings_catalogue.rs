@@ -172,19 +172,25 @@ fn settings_block(port: u16) -> serde_json::Map<String, serde_json::Value> {
 /// match is ever reformatted this stops finding arms and the count
 /// assertion below fails loudly, which is the right direction to fail.
 fn allowlist() -> Vec<String> {
-    // The table lives in TWO functions since TODO 106 split it: names the
-    // first half does not know fall through to `apply_setting_tail` in
-    // settings_apply.rs. Reading only the first half silently halved the
-    // allowlist - the count assertion below is what caught it, which is
-    // exactly the direction it was written to fail in.
+    // The table lives in FOUR functions: TODO 106 split it at the indexer
+    // block, and 7 Sep 2026 split it again into naming and indexer links
+    // (claim `debt-split-hot-files-7sep`). Names one link does not know
+    // fall through to the next, ending at `apply_setting_tail` in
+    // settings_apply.rs. Reading only some of them silently shrinks the
+    // allowlist - the count assertion below is what caught it BOTH times,
+    // which is exactly the direction it was written to fail in.
     let src = concat!(
         include_str!("../../../nzbfast-daemon/src/settings.rs"),
+        include_str!("../../../nzbfast-daemon/src/settings_apply_naming.rs"),
+        include_str!("../../../nzbfast-daemon/src/settings_apply_index.rs"),
         include_str!("../../../nzbfast-daemon/src/settings_apply.rs"),
     );
     let mut names = Vec::new();
     let mut inside = false;
     for line in src.lines() {
         if line.starts_with("pub fn apply_setting(")
+            || line.starts_with("pub(super) fn apply_setting_naming")
+            || line.starts_with("pub(super) fn apply_setting_index")
             || line.starts_with("pub(super) fn apply_setting_tail")
         {
             inside = true;
@@ -2038,7 +2044,7 @@ fn socks5_and_bind_ip_round_trip_without_echoing_the_proxy_password() {
 
     // Port 0 parses as a u16 and connects to nothing. Accepted, it saved
     // and then failed every fetch through this provider with an OS error
-    // where the form should have said so (Codex sweep 7, L5). The
+    // where the form should have said so (review sweep 7, L5). The
     // boundaries either side of it stay valid.
     let zero = http_post(
         d.port,

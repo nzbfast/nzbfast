@@ -42,6 +42,21 @@ fn match_length_scalar(
     max_length: usize,
     mut length: usize,
 ) -> usize {
+    // Compare full words before the byte tail. Both ranges are immutable,
+    // so overlapping repeats need no special handling. Little-endian words
+    // make trailing_zeros locate the first mismatching byte on any host.
+    // (nzbfast-local change, 5 Sep 2026; see VENDORING.md.)
+    while max_length - length >= 8 {
+        let at = pos + length;
+        let current = u64::from_le_bytes(input[at..at + 8].try_into().unwrap());
+        let previous =
+            u64::from_le_bytes(input[at - distance..at - distance + 8].try_into().unwrap());
+        let difference = current ^ previous;
+        if difference != 0 {
+            return length + difference.trailing_zeros() as usize / 8;
+        }
+        length += 8;
+    }
     while length < max_length && input[pos + length] == input[pos + length - distance] {
         length += 1;
     }
@@ -97,5 +112,34 @@ mod tests {
             match_length(&input, pos, 32, 64),
             reference_match_length(&input, pos, 32, 64)
         );
+    }
+    #[test]
+    fn match_length_matches_byte_oracle_at_every_word_boundary() {
+        for alignment in 0..16 {
+            let pos = 64 + alignment;
+            for distance in 1..=64 {
+                let input: Vec<u8> = (0..pos + 160)
+                    .map(|i| ((i % distance) * 37) as u8)
+                    .collect();
+                for mismatch in 0..=129 {
+                    let mut changed = input.clone();
+                    changed[pos + mismatch] ^= 0x80;
+                    for limit in [
+                        0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 160, 200,
+                    ] {
+                        let expected = reference_match_length(
+                            &changed,
+                            pos,
+                            distance,
+                            limit.min(changed.len() - pos),
+                        );
+                        assert_eq!(match_length(&changed, pos, distance, limit), expected,
+                            "alignment={alignment} distance={distance} mismatch={mismatch} limit={limit}");
+                    }
+                }
+            }
+        }
+        assert_eq!(match_length(b"abc", 1, 0, 2), 0);
+        assert_eq!(match_length(b"abc", 1, 2, 2), 0);
     }
 }

@@ -104,16 +104,30 @@ pub(super) fn backoff_immediate() -> bool {
 }
 
 /// The pre-byte budget an EWMA of `ewma_ms` earns: 4x it, clamped to
-/// [2 s, 10 s], with 0 ("unmeasured") budgeting at the ceiling.
+/// [`ADAPTIVE_FIRST_BYTE_MIN`, `ADAPTIVE_FIRST_BYTE_MAX`] - 4 s to
+/// 10 s as shipped, either end movable by the env overrides those two
+/// helpers read - with 0 ("unmeasured") budgeting at the ceiling.
+/// This said "[2 s, 10 s]" until 9 Sep 2026; the floor went to 4 s on
+/// 14 Aug 2026 and the sentence was left behind.
 ///
 /// Free function rather than a method so the escalation ladder in
 /// [`super::Shared::note_ttfb_timeout`] can be walked in a unit test
 /// without standing up a pool and a server.
 pub(super) fn ttfb_budget_ms(ewma_ms: u64) -> u64 {
+    let hi = adaptive_first_byte_max_ms();
     if ewma_ms == 0 {
-        return adaptive_first_byte_max_ms();
+        return hi;
     }
-    (4 * ewma_ms).clamp(adaptive_first_byte_min_ms(), adaptive_first_byte_max_ms())
+    // `min(hi)` on the FLOOR before the clamp, not tidiness: both ends
+    // are operator-set and independent - the floor is
+    // `NZBFAST_TTFB_FLOOR_MS` (unbounded) and the ceiling is
+    // `NZBFAST_READ_TIMEOUT_SECS` lifted over a 10 s base - so a floor
+    // set above the ceiling is a reachable configuration, and
+    // `u64::clamp` ASSERTS on `min > max` in release as well as debug.
+    // That panic lands on every pool worker at once. The ceiling wins
+    // the disagreement because it is the side a stall is still cut on.
+    let lo = adaptive_first_byte_min_ms().min(hi);
+    (4 * ewma_ms).clamp(lo, hi)
 }
 
 /// The pre-byte floor a SOLE-server fleet budgets against: double the

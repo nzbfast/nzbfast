@@ -651,7 +651,7 @@ async fn newznab_categories_follow_the_standard_tree() {
         // alias spellings mean the same operation. `t=moviesearch` and
         // `t=tv-search` used to pass dispatch but miss the kind
         // fallback, answering unfiltered - a movie search holding TV
-        // (Codex sweep 5 Aug M11).
+        // (review sweep 5 Aug M11).
         for t in ["movie", "moviesearch"] {
             let (_, body) = http_get(port, &format!("/api?t={t}"));
             assert_eq!(items(&body), 1, "t={t} was not movie-filtered: {body}");
@@ -2016,7 +2016,7 @@ fn id_suite_daemon(dir: &Path, db: &Path) -> impl Fn(u16) -> Command + use<> {
     }
 }
 
-/// Codex sweep 7, H2 + M4 + M1: what an external id means, over the wire.
+/// Review sweep 7, H2 + M4 + M1: what an external id means, over the wire.
 ///
 /// `titles.tmdb_id` is one column carrying four unrelated numbering
 /// schemes, and until it recorded WHICH, `kind` was the only clue - so a
@@ -2139,7 +2139,7 @@ async fn newznab_ids_respect_their_namespace_and_reach_every_key() {
     .unwrap();
 }
 
-/// Codex sweep 7, M1: the `tvdbid` promise follows COVERAGE, not the
+/// Review sweep 7, M1: the `tvdbid` promise follows COVERAGE, not the
 /// first row to land.
 ///
 /// The caps gate is data rather than code on purpose (TODO 187), but it
@@ -2208,7 +2208,7 @@ async fn newznab_promises_tvdbid_only_once_the_backfill_has_drained() {
     .unwrap();
 }
 
-/// Codex sweep 7, M3: correcting a card's identity drops the TVDB id
+/// Review sweep 7, M3: correcting a card's identity drops the TVDB id
 /// that belonged to the series it USED to be.
 ///
 /// `title_fill` never writes `tvdb` by design - one writer, the lane
@@ -2279,7 +2279,7 @@ async fn a_wall_identity_correction_drops_the_superseded_tvdb_id() {
         // candidate came from. The endpoint has always handed the
         // candidate's `provider` to the UI and always taken it back in
         // this payload; it simply dropped it on the way to the column,
-        // leaving an unlabelled id (Codex sweep 7, H2).
+        // leaving an unlabelled id (review sweep 7, H2).
         let (_, body) = http_get(port, "/api?t=tvsearch&tvmazeid=888");
         assert_eq!(items(&body), 1, "the corrected id did not resolve: {body}");
         assert!(body.contains("Cat.Show.S02E01"), "{body}");

@@ -115,7 +115,7 @@ pub(super) fn build_rig(
         deferred_bytes: AtomicU64::new(resume_deferred_bytes),
         // The same counter the resume seeding above already credited
         // its deferred bytes into - a live deferral has to reach it too
-        // (Codex sweep 2, 3 Aug ML2).
+        // (review sweep 2, 3 Aug ML2).
         fetch_done: fetch_done.clone(),
     });
     if !resume_sniffed_slots.is_empty() {

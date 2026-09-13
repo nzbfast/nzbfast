@@ -19,7 +19,7 @@
 # header is the design document this one follows: "NOTHING in CI had
 # ever compiled a line of Swift, so three lanes landed in
 # macapp/Sources/NzbFast/ inside one hour each relying on its author
-# having built by hand." Every gate in CLAUDE.md's numbered list is
+# having built by hand." Every gate in CONTRIBUTING.md's numbered list is
 # about crates/, web/, docs/, website/, packaging/ or research/, and not
 # one of them can see a Swift type error, a bad selector, or a call to
 # an API the deployment target does not have. `packaging` IS in
@@ -326,7 +326,7 @@ permissions:
   contents: read
 
 env:
-  # Agent sessions build with this set (see CLAUDE.md); incremental
+  # Agent sessions build with this set (see CONTRIBUTING.md); incremental
   # state is per-edit-loop state a one-shot runner never reads back, and
   # it roughly doubles what a build writes.
   CARGO_INCREMENTAL: '0'

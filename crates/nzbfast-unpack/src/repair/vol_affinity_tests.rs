@@ -31,6 +31,7 @@ fn pfile(name: &str) -> Par2File {
 
 fn pset(names: &[&str]) -> Par2Set {
     Par2Set {
+        comment: None,
         recovery_set_id: [0u8; 16],
         block_size: 4096,
         files: names.iter().copied().map(pfile).collect(),

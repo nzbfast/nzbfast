@@ -576,7 +576,7 @@ fn report_servers(d: &Daemon) -> String {
         // visible in Settings.
         let block = match s.block_bytes.filter(|b| *b > 0) {
             Some(total) => {
-                let used = d.block_spent(&s.host);
+                let used = d.block_spent(&s.account_key());
                 format!(
                     " · block {:.1} of {:.0} GB used{}",
                     used as f64 / 1e9,

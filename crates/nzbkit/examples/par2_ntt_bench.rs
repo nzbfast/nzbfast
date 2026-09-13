@@ -12,6 +12,18 @@
 //! Env: NZBFAST_NTT_BLOCK (bytes, 65536), NZBFAST_NTT_TOTAL (16384),
 //!      NZBFAST_NTT_MISS (1500), NZBFAST_NTT_ROUNDS (3), plus the
 //!      production knobs (NZBFAST_NTT_W, NZBFAST_NTT_THREADS).
+//!
+//! NZBFAST_NTT_EXP_SPAN (default: `miss`, a consecutive set) makes the
+//! recovery exponents SPARSE over `[0, span)` instead of consecutive -
+//! the fixture family `fastpar::NTT_MIN_WORK_PER_ROW` has never had. The
+//! transform evaluates every row in the span it is handed, while the
+//! fold only ever computes the `miss` rows it wants, so a sparse set is
+//! the one shape where the transform pays for rows nobody asked for and
+//! the fold does not. The exponents are deliberately IRREGULAR: an
+//! arithmetic progression relabels to a consecutive set
+//! (`fastpar::exponent_span`), so a plain stride would measure nothing.
+//! Read the effective span off the `ntt syndromes (... needed=N ...)`
+//! timing line under NZBFAST_REPAIR_TIMING=1 rather than assuming it.
 
 use nzbkit::gf16;
 use nzbkit::par2repair::{Reconstructor, SyndromePath, input_base_logs};
@@ -46,7 +58,16 @@ fn main() {
     let total = envn("NZBFAST_NTT_TOTAL", 16384);
     let miss = envn("NZBFAST_NTT_MISS", 1500);
     let rounds = envn("NZBFAST_NTT_ROUNDS", 3);
+    let exp_span = envn("NZBFAST_NTT_EXP_SPAN", miss);
     assert!(miss < total);
+    assert!(
+        exp_span >= miss,
+        "a span under the row count cannot hold {miss} distinct exponents"
+    );
+    assert!(
+        exp_span <= 65535,
+        "max exponent must stay inside the transform's group order"
+    );
     println!(
         "block {} KiB, {total} total, {miss} missing ({} present, {:.2} GiB corpus)",
         block >> 10,
@@ -78,21 +99,54 @@ fn main() {
         v
     };
 
-    // Recovery slices R_e = Σ g_i^e·D_i for e = 0..miss, generated with
-    // the same multi-fold the product uses (this is the expensive part
-    // of the setup; done once, off every clock).
+    // The exponents the recovery rows carry. Consecutive by default;
+    // with NZBFAST_NTT_EXP_SPAN set, `miss` distinct values spread over
+    // [0, span) with the ends pinned so the span is exactly what was
+    // asked for. Chosen off the same deterministic xorshift as the
+    // corpus, so a leg is reproducible, and SORTED because the plan
+    // reads them in order.
+    let exps: Vec<u32> = if exp_span == miss {
+        (0..miss as u32).collect()
+    } else {
+        let mut taken = vec![false; exp_span];
+        taken[0] = true;
+        taken[exp_span - 1] = true;
+        let mut n = 2;
+        while n < miss {
+            let c = (xorshift(&mut state) % exp_span as u64) as usize;
+            if !taken[c] {
+                taken[c] = true;
+                n += 1;
+            }
+        }
+        (0..exp_span)
+            .filter(|&i| taken[i])
+            .map(|i| i as u32)
+            .collect()
+    };
+    assert_eq!(exps.len(), miss);
+    println!(
+        "exponents: {miss} rows spanning {} (first {}, last {})",
+        exps[miss - 1] - exps[0] + 1,
+        exps[0],
+        exps[miss - 1]
+    );
+
+    // Recovery slices R_e = Σ g_i^e·D_i for the exponents above,
+    // generated with the same multi-fold the product uses (this is the
+    // expensive part of the setup; done once, off every clock).
     let logs = input_base_logs(total).unwrap();
     let t0 = Instant::now();
     let words = block / 2;
     let mut recovery_words: Vec<Vec<u16>> = vec![vec![0u16; words]; miss];
     let srcs: Vec<&[u8]> = slices.iter().map(|s| s.as_slice()).collect();
     nzbkit::par2repair::bench_fold(&mut recovery_words, &srcs, &|j, i| {
-        gf16::pow2(logs[i] as u64 * j as u64)
+        gf16::pow2(logs[i] as u64 * exps[j] as u64)
     });
     let recovery: Vec<(u32, Vec<u8>)> = recovery_words
         .into_iter()
         .enumerate()
-        .map(|(e, w)| (e as u32, gf16::words_as_bytes(&w).to_vec()))
+        .map(|(k, w)| (exps[k], gf16::words_as_bytes(&w).to_vec()))
         .collect();
     println!(
         "recovery generation: {:.1}s (setup, unclocked)",

@@ -27,7 +27,7 @@
 //! X5-18 was flaky - 2 runs in 8 over its bar, and once inside a full
 //! `--test e2e` run where nextest RETRIED it and reported "331 passed
 //! (1 flaky)" at exit 0. `--test e2e` is one of the seven heavy-tests
-//! targets CLAUDE.md's documented sweep excludes BY NAME, so per-push CI
+//! targets CONTRIBUTING.md's documented sweep excludes BY NAME, so per-push CI
 //! never runs this file and only nightly's `long-suites` would ever have
 //! seen it. Three things came out of fixing it, and every one of them
 //! applies to the next cost row anybody adds here:
@@ -318,7 +318,7 @@ fn prime(
 /// this row was flaky at 2 runs in 8 (4.05x and 4.39x against a 3.0 bar)
 /// and it failed inside a full `--test e2e` run and PASSED on nextest's
 /// retry, so the run reported "331 passed (1 flaky)" at exit 0 - a wedge
-/// that reaches no job's verdict, which is CLAUDE.md's FORTY-FIRST gate's
+/// that reaches no job's verdict, which is CONTRIBUTING.md's FORTY-FIRST gate's
 /// whole subject. Neither half of the estimator is optional:
 ///
 ///   * `REPS` makes the timed region long enough to be a measurement.

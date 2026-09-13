@@ -52,7 +52,7 @@ pub struct SniffCtl {
     pub deferred_articles: std::sync::atomic::AtomicUsize,
     pub deferred_bytes: std::sync::atomic::AtomicU64,
     /// The run's fetch-progress counter, so a deferral can settle the
-    /// bytes it just cancelled (Codex sweep 2, 3 Aug ML2).
+    /// bytes it just cancelled (review sweep 2, 3 Aug ML2).
     ///
     /// Every payload-classified article contributes to `fetch_plan` when
     /// the plan is published, and a terminal outcome credits it back -

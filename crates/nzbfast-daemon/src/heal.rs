@@ -518,7 +518,7 @@ pub(super) fn heal_one(
         // `enqueue` answers `Ok` for an add a pre-queue verdict
         // filed straight to history, so a missing row is not a bug
         // here - it is that. Say so rather than reporting a repair
-        // that will never run (the same shape Codex sweep F-08 found
+        // that will never run (the same shape review sweep F-08 found
         // on the hunt road).
         return Err("that repair was refused before it reached the queue - \
                     the log says why"

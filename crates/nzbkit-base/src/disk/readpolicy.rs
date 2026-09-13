@@ -30,7 +30,7 @@
 //!
 //! The policy is keyed on a probed device class and on the member's
 //! size, never on a pathname or a filesystem name - that rule is
-//! Codex's, from its own remaining item 5, and it is the reason
+//! the review's, from its own remaining item 5, and it is the reason
 //! [`device_class`] exists at all.
 //!
 //! Everything here is a HINT. A filesystem that refuses the fcntl, a
@@ -273,7 +273,7 @@ pub fn hints_for_path(path: &Path, len: u64) -> ReadHints {
 /// `detect_storage` canonicalises a sysfs path and reads a file, which
 /// is fine once per job and wasteful once per member of a 400-file set.
 ///
-/// Measured, per Codex's rule (its remaining item 5), never inferred
+/// Measured, per the review's rule (its remaining item 5), never inferred
 /// from the pathname. What each platform can actually see:
 ///
 /// * **Linux** - both halves exactly: `statfs` names the filesystem

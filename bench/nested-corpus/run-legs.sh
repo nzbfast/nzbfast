@@ -474,7 +474,15 @@ EOF
     local pfx=$OUTROOT/$LEGNAME/samp.$LABEL
     sampler_start "$base" "$pfx" nzbget "http://127.0.0.1:$NG_PORT" "$OUTROOT/nzbget-$LABEL.conf"
     local t0=$(now)
-    "$NZBGET" -c "$OUTROOT/nzbget-$LABEL.conf" -A "$NZB" >/dev/null 2>&1
+    # The submit sits INSIDE the timed region, so its exit code and stderr
+    # are part of the leg. A failed submit surfaces here as a timeout rather
+    # than as a fast win, but "the harness discarded the message" is exactly
+    # what cost two sessions on 9 Sep - see bench/component/README.md's
+    # trap list.
+    local subrc=0
+    "$NZBGET" -c "$OUTROOT/nzbget-$LABEL.conf" -A "$NZB" \
+        > "$OUTROOT/$LEGNAME/$LABEL.submit.out" 2> "$OUTROOT/$LEGNAME/$LABEL.submit.err" || subrc=$?
+    [[ $subrc == 0 ]] || log "  $LABEL submit rc=$subrc (see $OUTROOT/$LEGNAME/$LABEL.submit.err)"
     local st=$(wait_gone ng_done $before $t0 $(cap_for "$LABEL" "$LEGNAME"))
     local t1=$(now)
     # History BEFORE the shutdown - it carries the post-processing stage
@@ -488,6 +496,8 @@ EOF
     # payload tree is cleared.
     cp -f "$base/log" "$OUTROOT/$LEGNAME/$LABEL.log" 2>/dev/null || true
     local rc=0; [[ $st == timeout ]] && rc=124
+    # A submit that failed is a failed leg, never a time.
+    [[ $rc == 0 && $subrc != 0 ]] && rc=$subrc
     emit_leg "$LEGNAME" "$LABEL" $(secs $t0 $t1) "$pfx" "$rc:$hs" "$(classify "$MANIFEST" "$base/dst" $rc)"
     run_operator "$LEGNAME" "$LABEL" "$base"
 }
@@ -545,7 +555,15 @@ EOF
     [[ $cap -ne $TIMEOUT ]] && log "  sab cap: ${cap}s for $LEGNAME (operator-prompt leg; class is unaffected, wall is)"
     sampler_start "$base" "$pfx" sab "http://127.0.0.1:$SAB_PORT/api?apikey=harnesskey&output=json" "$OUTROOT/sabnzbd-bench.ini"
     local t0=$(now)
-    curl -s -F "name=@$NZB" "http://127.0.0.1:$SAB_PORT/api?mode=addfile&apikey=harnesskey" >/dev/null
+    # The submit sits INSIDE the timed region, so its exit code and stderr
+    # are part of the leg. A failed submit surfaces here as a timeout rather
+    # than as a fast win, but "the harness discarded the message" is exactly
+    # what cost two sessions on 9 Sep - see bench/component/README.md's
+    # trap list.
+    local subrc=0
+    curl -s -F "name=@$NZB" "http://127.0.0.1:$SAB_PORT/api?mode=addfile&apikey=harnesskey" \
+        > "$OUTROOT/$LEGNAME/sab.submit.out" 2> "$OUTROOT/$LEGNAME/sab.submit.err" || subrc=$?
+    [[ $subrc == 0 ]] || log "  sab submit rc=$subrc (see $OUTROOT/$LEGNAME/sab.submit.err)"
     local st=$(wait_gone sab_done $before $t0 $cap)
     local t1=$(now)
     # Queue AND history before the shutdown. The queue slot is where the
@@ -557,6 +575,8 @@ EOF
     curl -s "http://127.0.0.1:$SAB_PORT/api?mode=shutdown&apikey=harnesskey" >/dev/null
     sleep 3; kill $sab_pid 2>/dev/null
     local rc=0; [[ $st == timeout ]] && rc=124
+    # A submit that failed is a failed leg, never a time.
+    [[ $rc == 0 && $subrc != 0 ]] && rc=$subrc
     emit_leg "$LEGNAME" sab $(secs $t0 $t1) "$pfx" $rc "$(classify "$MANIFEST" "$base/complete" $rc)"
     run_operator "$LEGNAME" sab "$base"
 }
@@ -605,7 +625,15 @@ EOF
     local pfx=$OUTROOT/$LEGNAME/samp.rustnzb
     sampler_start "$base" "$pfx" rustnzb "http://127.0.0.1:$RN_PORT/api" "$OUTROOT/rustnzb-bench.toml"
     local t0=$(now)
-    curl -s -F "name=@$NZB" "http://127.0.0.1:$RN_PORT/api?mode=addfile" >/dev/null
+    # The submit sits INSIDE the timed region, so its exit code and stderr
+    # are part of the leg. A failed submit surfaces here as a timeout rather
+    # than as a fast win, but "the harness discarded the message" is exactly
+    # what cost two sessions on 9 Sep - see bench/component/README.md's
+    # trap list.
+    local subrc=0
+    curl -s -F "name=@$NZB" "http://127.0.0.1:$RN_PORT/api?mode=addfile" \
+        > "$OUTROOT/$LEGNAME/rustnzb.submit.out" 2> "$OUTROOT/$LEGNAME/rustnzb.submit.err" || subrc=$?
+    [[ $subrc == 0 ]] || log "  rustnzb submit rc=$subrc (see $OUTROOT/$LEGNAME/rustnzb.submit.err)"
     local st=$(wait_gone rn_done $before $t0 $(cap_for rustnzb "$LEGNAME"))
     local t1=$(now)
     curl -s "http://127.0.0.1:$RN_PORT/api?mode=history&output=json" > "$OUTROOT/$LEGNAME/rustnzb.history.json" 2>/dev/null
@@ -614,6 +642,8 @@ EOF
     # rustnzb writes its own timestamped log_file; keep it per leg.
     cp -f "$base/rustnzb.log" "$OUTROOT/$LEGNAME/rustnzb.log" 2>/dev/null || true
     local rc=0; [[ $st == timeout ]] && rc=124
+    # A submit that failed is a failed leg, never a time.
+    [[ $rc == 0 && $subrc != 0 ]] && rc=$subrc
     emit_leg "$LEGNAME" rustnzb $(secs $t0 $t1) "$pfx" $rc "$(classify "$MANIFEST" "$base/complete" $rc)"
     run_operator "$LEGNAME" rustnzb "$base"
 }

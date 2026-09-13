@@ -320,7 +320,7 @@ pub struct LossCauses<'a> {
     /// Decode/write errors charged to RECOVERY slots. Excluded from
     /// `derrs` on purpose - they are not payload damage - but they are
     /// still damage, and a journal-resume retry can fetch clean parity
-    /// from another provider (Codex sweep 5, M6).
+    /// from another provider (review sweep 5, M6).
     pub recovery_errs: u64,
     /// Servers with no usable connection at any point in the run.
     pub dead_servers: &'a [String],
@@ -710,14 +710,14 @@ fn append_evidence_clauses(msg: &mut String, causes: &LossCauses, derrs: u64, f:
     // duplicate was promoted. A phrase rather than a count, matching
     // the two exclusions that already work this way; the count in
     // the opening cannot serve, because it reads "0 decode/write
-    // errors" when there are none (Codex sweep 4, M3).
+    // errors" when there are none (review sweep 4, M3).
     // Recovery damage counts here as much as payload damage. The
     // census excludes it from `derrs` correctly - it is not a payload
     // failure - but the RETRY question is different: corrupt parity
     // beside a missing payload article is exactly the shape where a
     // fresh copy of that parity repairs the gap, and without this the
     // failure read as pure settled absence and lost its one automatic
-    // retry (Codex sweep 5, M6).
+    // retry (review sweep 5, M6).
     if derrs > 0 || causes.recovery_errs > 0 {
         msg.push_str(
             "; some of that loss is damaged articles rather than absent ones, \
@@ -1278,7 +1278,7 @@ pub fn post_age_from_message(msg: &str) -> Option<u32> {
 /// release is reported to the indexer as dead, the FailureLink re-grab
 /// runs and a held duplicate is promoted. By this module's own words a
 /// transport loss is "a fault on THIS machine or its link", and a
-/// journal-resume retry is exactly what heals it (Codex sweep 3, M8).
+/// journal-resume retry is exactly what heals it (review sweep 3, M8).
 ///
 /// Read back off the message because that is all a job record carries.
 /// Both clauses are emitted a few hundred lines above and the round trip

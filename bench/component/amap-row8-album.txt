@@ -1,0 +1,4 @@
+# Row 8, an album or audiobook: one RAR, a small set, one missing article.
+# The leg where startup cost is most of the job.
+ARTICLE 768000
+album.rar 233

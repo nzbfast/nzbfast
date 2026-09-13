@@ -612,7 +612,7 @@ impl SeedSink for CliSink {
 /// does, so a daemon later opened on this file re-walks its correlation
 /// backlog over the newly seeded pres.
 pub fn run_cli(db: &std::path::Path, days: u32, cap: u64) -> Result<String, String> {
-    // CLAUDE.md invariant 5, and the same answer the daemon's button
+    // project invariant 5, and the same answer the daemon's button
     // gives: the gate that fences every other outbound call fences this
     // one too, so a test or a sandboxed run cannot put requests on the
     // wire by reaching for the CLI instead.

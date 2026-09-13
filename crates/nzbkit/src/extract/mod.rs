@@ -1208,6 +1208,20 @@ impl Extractor {
         Self::with_resume(out_dir, n_slots, enabled, false)
     }
 
+    /// The directory this extractor writes into.
+    ///
+    /// A delete-with-files asks it whether a still-installed
+    /// post-completion streaming handle is the one holding the directory
+    /// it is about to remove (`StreamHub::release_handles_for_dir`).
+    /// Compared by exact path rather than canonicalized: the daemon
+    /// hands `Job::out_dir` to the pipeline and the delete arms read
+    /// that same stored value back, so the two are the same `PathBuf`
+    /// by construction and normalizing would only invent ways for them
+    /// to differ.
+    pub fn out_dir(&self) -> &Path {
+        &self.out_dir
+    }
+
     /// §94 A: can this slot's arriving bytes be PLACED rather than
     /// held? True once the slot has classified and, if it mapped, every
     /// parsed entry of it has a resolved base offset - which for a
@@ -2436,43 +2450,47 @@ impl Extractor {
         self.inner.lock_ok()
     }
 
-    /// Close the OS handle on every output file this extractor holds, at this
-    /// level and every nested one, so an EXTERNAL process can open them
-    /// exclusively. Pair with [`unpark_outputs`] - always, and on every exit
-    /// path - and see [`FileWriter::park`] for what parking does and does not
-    /// disturb.
-    ///
-    /// This exists for the external-par2 repair fallback: par2cmdline opens
-    /// its targets with share mode 0, so on Windows any handle we still hold
-    /// makes its open fail and it reports the file missing and declines to
-    /// repair (measured: `Could not open "payload.bin"` → `Target: missing` →
-    /// `Repair is not possible`). Nested levels wrote into the same tree and
-    /// pin it too, hence the recursion.
+    /// END OF JOB: give the OS back the handle on every output file this
+    /// extractor holds, at this level and every nested one.
     ///
     /// Needed because [`Self::finish`] syncs the writers but KEEPS them: the
     /// extractor holds output handles for the streaming endpoint's benefit,
     /// and it stays alive well past completion (the daemon leaves it
     /// installed for post-completion streaming, and the fetch task holds its
-    /// own `Arc` until it returns). So the handles are still there at repair
-    /// time, which runs BEFORE `finish` - and that ordering is why these park
-    /// rather than close: `finish` has yet to settle groups, verify inner
-    /// CRCs and run the decrypt pass, all of which need live writers.
+    /// own `Arc` until it returns). Nested levels wrote into the same tree
+    /// and pin it too, hence the recursion.
+    ///
+    /// Every writer is [`released`], never merely parked, and the two are a
+    /// different contract rather than a spelling: a release closes the
+    /// descriptor even when the flush or sync that precedes it FAILS, which
+    /// is right here (nothing writes these files again, so a retained handle
+    /// is a pure leak) and wrong for [`park_outputs_for_repair`] below
+    /// (an external tool is about to rewrite the bytes, and handing it a
+    /// file whose last writes are still buffered is worse than declining).
+    /// This walk used to park, and on NFS - where a sync failure is an
+    /// ordinary event and an open descriptor makes unlink silly-rename to
+    /// `.nfs*` rather than remove - that left a finished job's directory
+    /// undeletable until the daemon restarted. GH #71; see
+    /// [`FileWriter::release`] for the whole reading.
+    ///
+    /// The error is still returned so the caller can say what went wrong.
+    /// Both callers only warn, which is the right level: the handles are
+    /// back either way, and the job is over.
     ///
     /// Deliberately NOT used for the Windows folder rename that first
     /// motivated closing handles at all: that went in as
     /// `smart::move_dir_contents`, which moves the directory's CONTENTS and
-    /// needs no handles closed. Parking is visible to a concurrent /stream
-    /// read (it gets `NotConnected` instead of bytes), which is the honest
-    /// answer while an external tool rewrites those very bytes, but it is not
-    /// something to inflict on a path that has a handle-free alternative.
+    /// needs no handles closed.
     ///
-    /// [`unpark_outputs`]: Extractor::unpark_outputs
-    /// [`FileWriter::park`]: crate::disk::FileWriter::park
-    pub fn park_outputs(&self) -> io::Result<()> {
-        self.each_output(&|w| w.park())
+    /// [`released`]: crate::disk::FileWriter::release
+    /// [`FileWriter::release`]: crate::disk::FileWriter::release
+    /// [`park_outputs_for_repair`]: Extractor::park_outputs_for_repair
+    pub fn release_outputs(&self) -> io::Result<()> {
+        self.each_output(&|w| w.release())
     }
 
-    /// [`park_outputs`] plus the live-reader custody an EXTERNAL tool
+    /// [`FileWriter::park_for_repair`] over the tree, plus the live-reader
+    /// custody an EXTERNAL tool
     /// needs (sweep 8, M4): new by-path reader opens are held off, and
     /// on Windows the responses already holding a handle are revoked
     /// and drained, because par2cmdline opens its targets with share
@@ -2493,18 +2511,22 @@ impl Extractor {
     /// the mechanism that speaks for those files; [`FileWriter::abandon`]
     /// is, and it is set on that same demote path.
     ///
-    /// [`park_outputs`]: Extractor::park_outputs
+    /// [`FileWriter::park_for_repair`]: crate::disk::FileWriter::park_for_repair
     /// [`unpark_outputs`]: Extractor::unpark_outputs
     /// [`FileWriter::abandon`]: crate::disk::FileWriter::abandon
     pub fn park_outputs_for_repair(&self) -> io::Result<()> {
         self.each_output(&|w| w.park_for_repair())
     }
 
-    /// Reopen everything [`park_outputs`] closed, at this level and every
-    /// nested one. Idempotent, so it is safe to call on an error path that may
-    /// or may not have parked.
+    /// Reopen everything [`park_outputs_for_repair`] closed, at this level and
+    /// every nested one. Idempotent, so it is safe to call on an error path
+    /// that may or may not have parked.
     ///
-    /// [`park_outputs`]: Extractor::park_outputs
+    /// Deliberately NOT the counterpart of [`release_outputs`], which has
+    /// none: that walk ends the job, and nothing reopens after it.
+    ///
+    /// [`park_outputs_for_repair`]: Extractor::park_outputs_for_repair
+    /// [`release_outputs`]: Extractor::release_outputs
     pub fn unpark_outputs(&self) -> io::Result<()> {
         self.each_output(&|w| w.unpark())
     }

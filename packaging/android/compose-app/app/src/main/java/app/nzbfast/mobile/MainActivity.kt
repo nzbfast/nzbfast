@@ -68,7 +68,7 @@ sealed class Screen {
  * remote one, holding provider credentials - enqueue downloads of the
  * attacker's choosing, without knowing the API key and without the share
  * chooser ever appearing. We are the deputy; the confirmation is what
- * stops us being a confused one (Codex sweep 12 Aug F10).
+ * stops us being a confused one (review sweep 12 Aug F10).
  *
  * The in-app paths (file picker, pasted link) are NOT staged: those are
  * already an explicit action by the person holding the phone.
@@ -393,7 +393,7 @@ class MainActivity : ComponentActivity() {
      * names a PORT, the port outlives the process that bound it, and any
      * app on the phone may take it the moment it is free, so a connection
      * kept across a generation addresses the full API key to a stranger
-     * (Codex sweep 26 Aug, P1-2). [EngineIdentity.awaitVerified] is what
+     * (review sweep 26 Aug, P1-2). [EngineIdentity.awaitVerified] is what
      * earns it back, and it sends no key to do so.
      */
     private fun startDeviceEngine(message: String? = null, toHome: Boolean = false) {

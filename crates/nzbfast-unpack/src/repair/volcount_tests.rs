@@ -106,6 +106,7 @@ fn a_name_that_declares_no_count_is_left_to_the_callers_estimate() {
 
 fn pset(block_size: u64) -> nzbkit::par2::Par2Set {
     nzbkit::par2::Par2Set {
+        comment: None,
         recovery_set_id: [0u8; 16],
         block_size,
         files: vec![nzbkit::par2::Par2File {

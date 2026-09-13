@@ -88,7 +88,7 @@ const REFEED_WALK_DEPTH: usize = 6;
 /// was always refused; a symlinked FILE walked straight through the old
 /// is_dir test to the extension check, so `outside.nzb -> /elsewhere`
 /// planted in an extracted payload made a file OUTSIDE the completed
-/// job look like its output and queued it (Codex sweep 24 Aug, F-13).
+/// job look like its output and queued it (review sweep 24 Aug, F-13).
 /// `DirEntry::file_type` is lstat-shaped, which is what makes the test
 /// honest: a link reports is_symlink, never what it points at.
 fn scan_nzbs(root: &std::path::Path) -> Vec<PathBuf> {
@@ -228,7 +228,7 @@ fn refeed_one(
     // lstat, never stat: the walk refused symlinks by entry type,
     // and this closes the enumerate-then-open gap the same way - a
     // link that appeared since is refused rather than followed to a
-    // file outside the completed job (Codex sweep 24 Aug, F-13).
+    // file outside the completed job (review sweep 24 Aug, F-13).
     let Ok(meta) = std::fs::symlink_metadata(p) else {
         return;
     };
@@ -294,7 +294,7 @@ fn refeed_one(
             // for an add a pre-queue verdict filed straight to
             // history as Failed, and this arm used to log "paused,
             // waiting for you to start it" and emit `nzb.refeed`
-            // about a row that was never in the queue (Codex sweep
+            // about a row that was never in the queue (review sweep
             // 24 Aug, F-12).
             if stamp_refeed_depth(d, &e.nzo_id, depth + 1) {
                 info!(
@@ -338,7 +338,7 @@ fn refeed_one(
 /// re-publishes THAT record's Arc into the queue without re-running
 /// the hook or touching the depth. A retried child then completed
 /// at depth 0, below REFEED_MAX_DEPTH, and its output was scanned
-/// for grandchildren past the declared one-level cap (Codex sweep
+/// for grandchildren past the declared one-level cap (review sweep
 /// 24 Aug, F-12). Stamped wherever the record landed, and persisted
 /// there, so the cap survives the retry.
 fn stamp_refeed_depth(d: &Daemon, nzo_id: &str, depth: u8) -> bool {
@@ -369,7 +369,7 @@ fn stamp_refeed_depth(d: &Daemon, nzo_id: &str, depth: u8) -> bool {
     // one-level cap, so a refused append the rewrite could still
     // rescue would reload the record at depth 0 - a later retry of
     // it then completes below REFEED_MAX_DEPTH and its output is
-    // scanned for grandchildren past the declared cap (Codex C12).
+    // scanned for grandchildren past the declared cap (review C12).
     if let Some(job) = filed {
         d.history_publish(&job, || {
             format!(
@@ -626,7 +626,7 @@ mod tests {
     /// by accident of is_dir being false for links), so `outside.nzb ->
     /// /elsewhere/real.nzb` planted in an extracted payload queued a
     /// file from OUTSIDE the completed job - the exact thing the
-    /// "symlink-safe" doc promised could not happen (Codex sweep
+    /// "symlink-safe" doc promised could not happen (review sweep
     /// 24 Aug, F-13).
     #[cfg(unix)]
     #[test]

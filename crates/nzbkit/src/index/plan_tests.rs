@@ -13,6 +13,12 @@
 //! add, and left a finished job reading "Extracting" at 100% with the
 //! rest of the queue stuck behind it.
 //!
+//! The scan lap hands that gate back between its stages since 10 Sep
+//! 2026, and it does not help here: the handback is between calls, and
+//! a scan inside a single `with_index` closure spans none of them. This
+//! gate is still the only thing standing between a plan regression and
+//! that forty minutes.
+//!
 //! Every one of those has been an INVISIBLE regression: the statement is
 //! correct, the tests pass, and the plan only turns pathological once
 //! the table is big enough - which is to say on a real install, months

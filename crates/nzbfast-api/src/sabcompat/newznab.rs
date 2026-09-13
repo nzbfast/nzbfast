@@ -24,7 +24,7 @@ pub fn newznab_xml(
     // Dispatch took `t=tv-search` and `t=moviesearch`, but the
     // no-cat kind fallback below matched only the canonical names, so
     // the alias forms lost their implicit TV/movie filter and a movie
-    // search could come back holding TV (Codex sweep 5 Aug M11).
+    // search could come back holding TV (review sweep 5 Aug M11).
     let t = match t {
         "tv-search" => "tvsearch",
         "moviesearch" => "movie",
@@ -71,7 +71,7 @@ pub fn newznab_xml(
         // used to flip the promise on for the whole catalogue while
         // almost none of it was resolvable - Sonarr switches to tvdbid
         // the moment caps offers it, and every series the lane had not
-        // reached yet then answered empty (Codex sweep 7, M1). One
+        // reached yet then answered empty (review sweep 7, M1). One
         // unfilled row is enough to keep the promise back; the search
         // path honours the parameter regardless, so this can only ever
         // promise less than we deliver.
@@ -256,7 +256,7 @@ pub fn newznab_xml(
     // genuinely carry one external id - a show posted under two
     // spellings, or a film keyed with and without its year - and
     // resolving to an arbitrary single key answered with one arbitrary
-    // half of the title's releases (Codex sweep 7, M4). The first id
+    // half of the title's releases (review sweep 7, M4). The first id
     // parameter that actually RESOLVES wins, exactly as before: a sent
     // id we hold nothing for still lets a later one be tried.
     let mut title_keys: Vec<String> = Vec::new();
@@ -306,7 +306,7 @@ pub fn newznab_xml(
         ..Default::default()
     };
     // An unresolved id no longer throws away a query the client sent
-    // alongside it (Codex sweep 7, M1). The id search is a NARROWING of
+    // alongside it (review sweep 7, M1). The id search is a NARROWING of
     // the request, and our coverage of the id namespace is not the
     // client's problem: `tvdbid` is filled six rows at a time by an idle
     // backfill lane, so a series we hold releases for is routinely one

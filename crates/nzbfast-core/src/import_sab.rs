@@ -179,7 +179,7 @@ fn adopt_password_file(ini: &str, out_path: &Path) {
         return;
     }
     let settings = out_path.with_file_name("settings.json");
-    // The daemon's own loader rules apply here too (Codex sweep 3 Aug
+    // The daemon's own loader rules apply here too (review sweep 3 Aug
     // MH1): a torn primary with a good .bak must recover from the .bak,
     // and a store that exists but yields NOTHING must be refused - a
     // raw parse-to-{} would write a valid one-key settings.json that
@@ -651,7 +651,7 @@ enable = 1
 
     #[test]
     fn adopt_recovers_settings_from_backup_and_refuses_an_unreadable_store() {
-        // Codex sweep 3 Aug MH1: a torn settings.json with a good .bak
+        // Review sweep 3 Aug MH1: a torn settings.json with a good .bak
         // must never be replaced by a one-key file - the next daemon
         // start would trust the primary, refresh the .bak from it, and
         // every other saved setting would be gone for good.

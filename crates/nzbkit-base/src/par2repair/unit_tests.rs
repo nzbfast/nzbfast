@@ -136,6 +136,10 @@ const SET: [u8; 16] = [9u8; 16];
 /// its size-gate ceiling.
 mod padded_windows;
 
+/// Plan 4.2 item 1: in-fold progress and the cancel the fold honours -
+/// a child module for the same two reasons as `padded_windows` below.
+mod control_tests;
+
 /// G1 (wave-4 follow-up): where the donor-vanish pin stops - a child
 /// module for the same two reasons as `padded_windows` above.
 mod donor_pin_bounds;
@@ -158,6 +162,22 @@ mod donor_dir;
 /// the component cap - a child module for the same two reasons.
 mod donate_name_cap;
 
+/// TODO 331 item 1: the retention ADMISSION census's eight required
+/// validation cases - a child module for the same two reasons as
+/// `padded_windows` above.
+mod retention_census;
+
+/// P10, the `.par2`-named decoy: a set that declares no file names is
+/// not a set the renamed fallback may attempt - a child module for the
+/// same two reasons as `padded_windows` above.
+mod nameless_set;
+
+/// TODO 334: the surveying entry point's lazy catalog, provisional
+/// verify pass, contested-name restart and the scan report it shows an
+/// observer - a child module for the same two reasons as
+/// `padded_windows` above.
+mod scan_report;
+
 /// Donor PARITY - a donor directory's own recovery volumes harvested
 /// as slices for this set (claim `donor-parity-catalog-harvest`) - a
 /// child module for the same two reasons as `padded_windows` above.
@@ -165,7 +185,7 @@ mod donate_name_cap;
 /// which adopts a donor's PAYLOAD and excludes its par2.
 mod donor_parity;
 
-/// Codex sweep 10 Aug M4: the packet-file ceiling is a bound on how much
+/// Review sweep 10 Aug M4: the packet-file ceiling is a bound on how much
 /// attacker-chosen input one directory entry becomes in memory, and every
 /// packet file below is read WHOLE. The extension is the poster's choice,
 /// so a bound only extensionless volumes had to clear was no bound at
@@ -265,6 +285,55 @@ fn clean_set_reads_no_damage_and_names_its_files() {
     assert!(
         sniffed_packet_files(&dir).expect("sniff walks").is_empty(),
         "every packet file here is named *.par2"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The verify pass's retention sink sees exactly the blocks the CRC
+/// proved, in file order, at their global logs: the damaged block is
+/// dropped, the tail is kept at its declared length.
+#[test]
+fn the_verify_pass_retains_the_blocks_it_proves() {
+    let dir = tmpdir("retain-verify");
+    let data = payload(200, 11); // 4 slices, 8-byte tail
+    let meta = meta_for("a.bin", &data, BS);
+    let mut damaged = data.clone();
+    for x in &mut damaged[BS..2 * BS] {
+        *x ^= 0x5a;
+    }
+    let path = dir.join("a.bin");
+    std::fs::write(&path, &damaged).unwrap();
+    let corpus = retain::admit(10, BS)
+        .corpus
+        .expect("the default budget holds a block");
+    let out = {
+        let mut sink = corpus.sink();
+        verify_pass1_retaining(&path, &meta, BS, 1, 3, Some(&mut sink)).unwrap()
+    };
+    assert_eq!(out.present.as_deref(), Some(&[true, false, true, true][..]));
+    let (batches, held) = corpus.take();
+    assert_eq!(
+        held,
+        [
+            false, false, false, true, false, true, true, false, false, false
+        ]
+    );
+    let logs = input_base_logs(10).unwrap();
+    let slices: Vec<(u32, Vec<u8>)> = batches
+        .iter()
+        .flat_map(|b| {
+            b.slices
+                .iter()
+                .map(move |&(k, off, len)| (k, b.arena[off..off + len].to_vec()))
+        })
+        .collect();
+    assert_eq!(
+        slices,
+        vec![
+            (logs[3], data[..BS].to_vec()),
+            (logs[5], data[2 * BS..3 * BS].to_vec()),
+            (logs[6], data[3 * BS..].to_vec()),
+        ]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1208,6 +1277,204 @@ fn big_damaged_file_repairs_identically_through_the_pool() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// THE DISK DRIVER'S SLAB DIFFERENTIAL, over all three staging tiers.
+///
+/// The sibling test covers the mapped driver, which writes each slab
+/// straight out. This driver cannot: its patch phase consumes the whole
+/// rebuilt output, so a slabbed solve has to park that output somewhere
+/// first, and `RebuiltStore` has three answers - the solve's own buffers
+/// (`Whole`), an assembled copy in memory (`Assembled`), and a scratch
+/// file beside the members (`Spill`). All three must land the same
+/// bytes, and the spill arm additionally must not leave its scratch file
+/// behind.
+///
+/// Multi-file with a short tail and a missing tail block, for the same
+/// reasons the mapped differential is.
+#[test]
+fn a_slabbed_disk_repair_lands_the_same_bytes_through_every_staging() {
+    use super::reconstruct::{ForcedSlabWidth, ForcedSpill};
+    let bs = 4096usize;
+    let a = payload(3 * bs + 1001, 71);
+    let b = payload(2 * bs, 72);
+    let files: &[(&str, &[u8])] = &[("a.bin", &a), ("b.bin", &b)];
+
+    // (forced slab width, force the spill arm) - `None` is production.
+    let arms: [(Option<usize>, bool); 6] = [
+        (None, false),
+        (Some(bs), false),
+        (Some(bs / 2), false),
+        (Some(bs / 2), true),
+        (Some(1366), true),
+        (Some(586), false),
+    ];
+    for (wi, (forced, spill)) in arms.into_iter().enumerate() {
+        let dir = tmpdir(&format!("slabrepair{wi}"));
+        // Damage one block of each file, including a.bin's SHORT TAIL.
+        let mut da = a.clone();
+        let mut db = b.clone();
+        for blk in [1usize, 3] {
+            let at = blk * bs;
+            let end = (at + 64).min(da.len());
+            for x in &mut da[at..end] {
+                *x ^= 0x5a;
+            }
+        }
+        for x in &mut db[bs..bs + 64] {
+            *x ^= 0x5a;
+        }
+        std::fs::write(dir.join("a.bin"), &da).unwrap();
+        std::fs::write(dir.join("b.bin"), &db).unwrap();
+        std::fs::write(dir.join("set.par2"), par2_index(SET, bs, files)).unwrap();
+        std::fs::write(
+            dir.join("set.vol0+4.par2"),
+            par2_volume(SET, bs, files, &[0, 1, 2, 3]),
+        )
+        .unwrap();
+
+        let _w = forced.map(ForcedSlabWidth::set);
+        let _s = spill.then(ForcedSpill::on);
+        let got = repair_dir(&dir);
+        drop(_s);
+        drop(_w);
+
+        match got.unwrap_or_else(|e| panic!("arm {wi} ({forced:?}, spill={spill}) failed: {e:?}")) {
+            RepairStatus::Repaired(r) => assert_eq!(
+                r.blocks_rebuilt, 3,
+                "arm {wi} ({forced:?}, spill={spill}) rebuilt the wrong count"
+            ),
+            other => {
+                panic!("arm {wi} ({forced:?}, spill={spill}): expected Repaired, got {other:?}")
+            }
+        }
+        assert_eq!(
+            std::fs::read(dir.join("a.bin")).unwrap(),
+            a,
+            "arm {wi} ({forced:?}, spill={spill}) landed different bytes in a.bin"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("b.bin")).unwrap(),
+            b,
+            "arm {wi} ({forced:?}, spill={spill}) landed different bytes in b.bin"
+        );
+        // The scratch file is the spill arm's own, and a repair that
+        // leaves one behind has put a stray dotfile beside the user's
+        // media on every deep repair.
+        let strays: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("nzbfast-repair-slab"))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "arm {wi} left scratch behind: {strays:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// THE SLAB DIFFERENTIAL: a repair cut into slabs must land the same
+/// bytes as one that was not.
+///
+/// This is the acceptance gate for `reconstruct::plan_slabs`. Slabbing
+/// rests on a mathematical claim - that PAR2 reconstruction is
+/// elementwise along the byte axis inside a block, so a repair of the
+/// byte range `[c0, c1)` of every block is just a repair at
+/// `block_size = c1 - c0` - and the failure mode if that claim is wrong
+/// anywhere is not an error, it is SILENTLY WRONG BYTES in a rebuilt
+/// file. So the arms are compared against the pristine payload rather
+/// than against each other's error codes.
+///
+/// The fixture is chosen to put every offset case under the cut:
+///
+///  - a file whose length is NOT a multiple of the block size, so the
+///    last block is short and some slabs fall wholly past its end;
+///  - a missing block that IS that short tail, so the write path has to
+///    clip a slab to it;
+///  - three files, so the global slice index and the per-file offset
+///    arithmetic are both exercised;
+///  - slab counts that divide the block evenly (2) and that do not
+///    (3, 7), so the final short slab is covered.
+#[test]
+fn a_slabbed_repair_lands_the_same_bytes_as_a_whole_one() {
+    use super::reconstruct::ForcedSlabWidth;
+    let bs = 4096usize;
+    // 3 whole blocks + a 1,001-byte tail; 2 whole blocks; 1 block + 7 B.
+    let a = payload(3 * bs + 1001, 11);
+    let b = payload(2 * bs, 12);
+    let c = payload(bs + 7, 13);
+    let gfiles: &[(&str, &[u8])] = &[("a.bin", &a), ("b.bin", &b), ("c.bin", &c)];
+    let metas = [
+        meta_for("a.bin", &a, bs),
+        meta_for("b.bin", &b, bs),
+        meta_for("c.bin", &c, bs),
+    ];
+    let slices = global_slices(gfiles, bs);
+    let recovery: Vec<(u32, Vec<u8>)> = (0..4u32)
+        .map(|e| (e, generate_recovery(&slices, bs, e)))
+        .collect();
+
+    // One block missing from each file, including a.bin's SHORT TAIL
+    // (block 3) and c.bin's 7-byte one (block 1).
+    let holes: [(usize, usize); 4] = [(0, 1), (0, 3), (1, 0), (2, 1)];
+
+    struct BufIo(Vec<std::sync::Mutex<Vec<u8>>>);
+    impl VolumeIo for BufIo {
+        fn read(&self, f: usize, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            let d = self.0[f].lock().unwrap();
+            let off = off as usize;
+            buf.copy_from_slice(&d[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write(&self, f: usize, off: u64, data: &[u8]) -> std::io::Result<()> {
+            let mut d = self.0[f].lock().unwrap();
+            let off = off as usize;
+            d[off..off + data.len()].copy_from_slice(data);
+            Ok(())
+        }
+    }
+
+    // `None` is the production plan (one slab on any real budget, and
+    // the arm that must be untouched); the rest force the cut.
+    for forced in [None, Some(bs), Some(bs / 2), Some(1366), Some(586), Some(2)] {
+        let pristine = [a.clone(), b.clone(), c.clone()];
+        let mut damaged = pristine.clone();
+        let mut present: Vec<Vec<bool>> = metas
+            .iter()
+            .map(|m| vec![true; m.length.div_ceil(bs as u64) as usize])
+            .collect();
+        for &(fi, blk) in &holes {
+            present[fi][blk] = false;
+            let end = ((blk + 1) * bs).min(damaged[fi].len());
+            for x in &mut damaged[fi][blk * bs..end] {
+                *x = 0;
+            }
+        }
+        let io = BufIo(damaged.into_iter().map(std::sync::Mutex::new).collect());
+        let files: Vec<_> = metas.iter().cloned().zip(present).collect();
+
+        let _guard = forced.map(ForcedSlabWidth::set);
+        let got = repair_mapped(&files, bs, &recovery, &io, true);
+        drop(_guard);
+
+        let n = got.unwrap_or_else(|e| panic!("slab width {forced:?} must repair: {e:?}"));
+        assert_eq!(
+            n,
+            holes.len(),
+            "slab width {forced:?} rebuilt the wrong count"
+        );
+        for (fi, want) in pristine.iter().enumerate() {
+            let got = io.0[fi].lock().unwrap();
+            assert_eq!(
+                &*got, want,
+                "slab width {forced:?} landed different bytes in file {fi} - slabbing is \
+                 only sound because the solve is elementwise along the block's byte axis, \
+                 and this is the assertion that holds it"
+            );
+        }
+    }
+}
+
 /// The mapped driver's self-prove on a big rebuilt file (full IFSC,
 /// above the pool gate): the repair must succeed, the bytes must land
 /// identical, and a write that corrupts a byte OUTSIDE the rebuilt
@@ -1885,9 +2152,18 @@ fn a_torn_recovery_volume_reports_how_many_slices_are_usable() {
 /// build - which is also the shape of the answer item 14 was worried
 /// about, at the one dimension small enough to watch.
 #[test]
-fn the_disk_route_refuses_a_set_one_block_over_the_repair_matrix_cap() {
+fn the_disk_route_refuses_a_set_past_the_par2_slice_limit() {
     const DIM_BS: usize = 16;
-    let over = MAX_REPAIR_DIM + 1;
+    // The dimension guard is per-arm since 6 Sep 2026 - a fused kernel
+    // sends anything this large to Forney, which is bounded by MEMORY
+    // rather than by a matrix cap - so a well-formed index can no longer
+    // reach a dimension refusal on this route at all: the FILE's own
+    // slice count is checked first and is the tighter bound. That is the
+    // guard this route actually has, and the point of the test is
+    // unchanged - the refusal lands EARLY, before `load_selected_recovery`
+    // pins one block_size buffer per missing block, which at this m is
+    // what the old flat cap existed to avoid.
+    let over = MAX_INPUT_SLICES + 1;
     let dir = tmpdir("dimcap");
     // Never written to disk, so every one of its slices is missing.
     let big = payload(over * DIM_BS, 11);
@@ -1899,15 +2175,15 @@ fn the_disk_route_refuses_a_set_one_block_over_the_repair_matrix_cap() {
         body.extend_from_slice(&[0u8; DIM_BS]);
         vol.extend(pkt(SET, par2::TYPE_RECVSLIC, &body));
     }
-    std::fs::write(dir.join("set.vol0+8193.par2"), &vol).unwrap();
+    std::fs::write(dir.join("set.vol0+dim.par2"), &vol).unwrap();
     match repair_dir(&dir) {
         Err(RepairError::Malformed(m)) => {
             assert!(
-                m.contains(&format!("{over} missing blocks")) && m.contains("repair-matrix cap"),
-                "the dimension cap must be the stated reason: {m}"
+                m.contains(&format!("{over} slices")) && m.contains("PAR2 limit"),
+                "the slice limit must be the stated reason: {m}"
             );
         }
-        other => panic!("expected the repair-matrix cap refusal, got {other:?}"),
+        other => panic!("expected the slice-limit refusal, got {other:?}"),
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2709,3 +2985,251 @@ mod donate_claim_tests;
 /// module for the same two reasons as `padded_windows` above.
 #[cfg(test)]
 mod tree_adopt;
+
+/// Mapping a packet file parses it EXACTLY as reading it does.
+///
+/// `Catalog::scan_file` reads a volume whole up to `SLURP_MAX_BYTES` and
+/// maps anything larger, because the old behaviour - refusing the file
+/// outright past a 1 GiB ceiling - discarded the largest volume of any
+/// set with ~2 GiB of parity and then failed the repair for want of it.
+/// The parser is untouched by that change; only where the bytes live
+/// moves. This is the test that says so, and it is the half that would
+/// break silently: a mapping that parsed differently would corrupt the
+/// catalog rather than fail loudly.
+#[test]
+fn a_mapped_packet_file_parses_identically_to_a_read_one() {
+    let dir = tmpdir("mapscan");
+    let big = payload(4096, 77);
+    let files: &[(&str, &[u8])] = &[("m.bin", &big)];
+    let mut bytes = par2_index(SET, 512, files);
+    // A few recovery packets, so the locator arithmetic (body_offset)
+    // is exercised and not just the critical packets.
+    for e in 0..6u32 {
+        let mut body = e.to_le_bytes().to_vec();
+        body.extend_from_slice(&payload(512, e as u64));
+        bytes.extend(pkt(SET, par2::TYPE_RECVSLIC, &body));
+    }
+    let path = dir.join("mapped.par2");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let collect = |input: &[u8]| {
+        let mut out: Vec<([u8; 16], [u8; 16], usize, usize)> = Vec::new();
+        par2::scan_packets(input, |p| {
+            out.push((p.md5, p.ptype, p.body_offset, p.body.len()));
+        });
+        out
+    };
+    let read = collect(&std::fs::read(&path).unwrap());
+    let len = std::fs::metadata(&path).unwrap().len();
+    let map = crate::par2gen::MappedMember::open(&path, len)
+        .expect("mapping a file we just wrote")
+        .expect("non-empty");
+    let mapped = collect(map.bytes());
+
+    assert!(!read.is_empty(), "the fixture must contain packets at all");
+    assert_eq!(
+        mapped, read,
+        "a mapped scan must see exactly what a read scan sees"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The packet-file ceiling must stay clear of a REAL volume's size.
+///
+/// It was 1 GiB, on the reasoning that "a real recovery volume is orders
+/// of magnitude under this". PAR2 volumes double, so the largest holds
+/// ~45% of the parity: our own creator wrote a 1,073,750,244-byte volume
+/// - 8,420 over - which was skipped, taking 36% of the parity with it,
+/// and the repair then reported Unrepairable on a set turbo completes.
+/// A ceiling that a 2.5 GB payload at 110% redundancy can reach is not a
+/// sanity bound.
+#[test]
+fn the_packet_file_ceiling_clears_a_real_recovery_volume() {
+    const ONE_GIB: u64 = 1 << 30;
+    assert!(
+        super::MAX_PACKET_FILE_BYTES > 4 * ONE_GIB,
+        "a set with ~2 GiB of parity has a volume over 1 GiB; the ceiling \
+         must not be reachable by ordinary redundancy (is {})",
+        super::MAX_PACKET_FILE_BYTES
+    );
+}
+
+/// `-T`'s arithmetic, without touching the process-wide global that
+/// carries it (see `verify::file_lanes` for why this is a pure
+/// function): unset derives the machine, a published width pins the
+/// file axis, and both are clamped to the work so a wide `-T` over a
+/// short set does not buy idle workers.
+///
+/// The clamp is what keeps `-T` from re-scaling `-t`: `verify_all_targets`
+/// spends the `cpu_workers` budget as `cores * inner`, so pinning
+/// `cores` here widens each lane instead of changing the total.
+#[test]
+fn file_lanes_pins_the_file_axis_and_clamps_to_the_work() {
+    use super::verify::file_lanes;
+    // Unset is the pre-`-T` derivation, unchanged: the machine, clamped
+    // to the member count.
+    assert_eq!(file_lanes(None, 32, 24), 24);
+    assert_eq!(file_lanes(None, 8, 24), 8);
+    // A published width wins over the machine in BOTH directions - `-T1`
+    // on a 32-core box is the gentle run the switch promises, and a
+    // `-T24` under a narrow `-t` is still 24 files in flight.
+    assert_eq!(file_lanes(Some(1), 32, 24), 1);
+    assert_eq!(file_lanes(Some(24), 4, 24), 24);
+    // Clamped to the work, not to the machine: 24 lanes over 3 targets
+    // is 3.
+    assert_eq!(file_lanes(Some(24), 32, 3), 3);
+    // Never zero. An empty set never reaches here (`verify_all_targets`
+    // returns early), but a zero here would be a pool that spawns
+    // nothing and a queue nobody drains.
+    assert_eq!(file_lanes(Some(4), 32, 0), 1);
+    assert_eq!(file_lanes(None, 32, 0), 1);
+}
+
+/// THE CONTROLLED DOOR ON THE `repair_present_sets` FAMILY, and the one
+/// property that makes it different from the other family's door: the
+/// control is asked for ONCE PER SET.
+///
+/// This family repairs every present set in a directory, and the loop
+/// is the engine's - so a caller cannot bracket each set itself the way
+/// `get::latesets` brackets its own with a `RepairProgress::enter()`
+/// guard. The supplier IS that bracket, and it is only worth anything
+/// if it fires at each set's start rather than once for the directory.
+/// Pinned here with two damaged sets and a counter.
+#[test]
+fn the_present_sets_door_asks_for_a_control_once_per_set() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let dir = tmpdir("present-sets-controlled");
+    let mut names = Vec::new();
+    for s in 0..2u8 {
+        let data = payload(200, 60 + s as u64);
+        let name = format!("c{s}.bin");
+        let files: &[(&str, &[u8])] = &[(&name, &data)];
+        let mut damaged = data.clone();
+        damaged[70] ^= 0x5a;
+        std::fs::write(dir.join(&name), &damaged).unwrap();
+        std::fs::write(
+            dir.join(format!("c{s}.par2")),
+            par2_index([60 + s; 16], BS, files),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(format!("c{s}.vol0+2.par2")),
+            par2_volume([60 + s; 16], BS, files, &[0, 1]),
+        )
+        .unwrap();
+        names.push((name, data));
+    }
+
+    let asked = AtomicUsize::new(0);
+    let seen: Arc<Mutex<Vec<RepairPhase>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = {
+        let seen = seen.clone();
+        Arc::new(move |phase: RepairPhase, _d: u64, _t: u64| {
+            let mut s = seen.lock().unwrap_or_else(|p| p.into_inner());
+            if s.last() != Some(&phase) {
+                s.push(phase);
+            }
+        })
+    };
+    let supply = || {
+        asked.fetch_add(1, Ordering::Relaxed);
+        RepairControl::new(Some(sink.clone()), Some(PauseGate::new()))
+    };
+
+    let results = repair_present_sets_controlled_as(&dir, RetentionCaller::default(), &supply)
+        .expect("sets walk");
+    assert_eq!(results.len(), 2, "both sets qualify by name");
+    for r in &results {
+        assert!(
+            matches!(r.status, Ok(RepairStatus::Repaired(_))),
+            "set repaired: {:?}",
+            r.status
+        );
+    }
+    assert_eq!(
+        asked.load(Ordering::Relaxed),
+        2,
+        "the supplier must fire once per set - one control for the whole directory is what \
+         leaves a monotone bar reading 100% through every set after the first"
+    );
+    let phases = seen.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    assert!(
+        phases.contains(&RepairPhase::Verify) && phases.contains(&RepairPhase::Write),
+        "a repair that patched bytes reports at least its verify and its write: {phases:?}"
+    );
+    for (name, data) in &names {
+        assert_eq!(
+            &std::fs::read(dir.join(name)).unwrap(),
+            data,
+            "{name} healed"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A CANCELLED WALK STOPS ON THE SET IT WAS CANCELLED IN, rather than
+/// answering `Cancelled` about every set after it.
+///
+/// The gate is sticky, so without the break each remaining set would
+/// come straight back cancelled and the caller would log a run of
+/// verdicts that reads like N unreadable sets over a directory where
+/// the user simply pressed Cancel. The untouched payloads are asserted
+/// too: a cancelled pass must leave the sets it never reached alone.
+#[test]
+fn a_cancelled_present_sets_walk_stops_on_the_set_it_was_cancelled_in() {
+    let dir = tmpdir("present-sets-cancelled");
+    let mut damaged_bytes = Vec::new();
+    for s in 0..3u8 {
+        let data = payload(200, 70 + s as u64);
+        let name = format!("x{s}.bin");
+        let files: &[(&str, &[u8])] = &[(&name, &data)];
+        let mut damaged = data.clone();
+        damaged[70] ^= 0x5a;
+        std::fs::write(dir.join(&name), &damaged).unwrap();
+        std::fs::write(
+            dir.join(format!("x{s}.par2")),
+            par2_index([70 + s; 16], BS, files),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(format!("x{s}.vol0+2.par2")),
+            par2_volume([70 + s; 16], BS, files, &[0, 1]),
+        )
+        .unwrap();
+        damaged_bytes.push((name, damaged));
+    }
+
+    use std::sync::Arc;
+
+    let gate = PauseGate::new();
+    gate.cancel();
+    let control = RepairControl::new(
+        Some(Arc::new(|_: RepairPhase, _: u64, _: u64| {})),
+        Some(gate),
+    );
+    let supply = || control.clone();
+    let results = repair_present_sets_controlled_as(&dir, RetentionCaller::default(), &supply)
+        .expect("the WALK still succeeds - the cancel is a per-set verdict");
+    assert_eq!(
+        results.len(),
+        1,
+        "the walk stops on the cancelled set: {:?}",
+        results.iter().map(|r| &r.status).collect::<Vec<_>>()
+    );
+    assert!(
+        matches!(results[0].status, Err(RepairError::Cancelled)),
+        "the one outcome is the cancel: {:?}",
+        results[0].status
+    );
+    for (name, damaged) in &damaged_bytes {
+        assert_eq!(
+            &std::fs::read(dir.join(name)).unwrap(),
+            damaged,
+            "{name} is untouched - a cancelled walk repairs nothing it never reached, and \
+             the set it was cancelled in was stopped in its verify pass"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

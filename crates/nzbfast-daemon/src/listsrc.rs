@@ -339,7 +339,7 @@ fn apply_outcome(d: &Arc<Daemon>, src: &ListSource, outcome: &SyncOutcome) {
     // Without it the completion of a fetch started before a delete
     // reinserted the deleted source's items, wrote them to the spool,
     // republished its health and woke the watcher - so the account kept
-    // auto-grabbing and came back after a restart (Codex sweep 12 Aug F6a).
+    // auto-grabbing and came back after a restart (review sweep 12 Aug F6a).
     if !still_authorized(d, src) {
         info!(
             target: "list",
@@ -459,7 +459,7 @@ pub fn seed_lists(settings_path: &std::path::Path, spool: &std::path::Path) -> L
                 // revocation race (see `apply_outcome`) or a hand-edited
                 // settings file. Belt to that brace: nothing should be
                 // watched on behalf of an account that no longer exists
-                // (Codex sweep 12 Aug F6a).
+                // (review sweep 12 Aug F6a).
                 //
                 // Skipped entirely when the setting did not PARSE. There,
                 // an empty source list is ignorance rather than a fact, and
@@ -652,7 +652,7 @@ pub fn plex_link_poll(d: &Arc<Daemon>, pin_id: &str) -> std::result::Result<Valu
     // save_settings, not save_setting: the void wrapper discarded the
     // result and this action reported linked:true regardless, so on a
     // read-only or full settings filesystem the dashboard said the account
-    // was connected and the next restart had never heard of it (Codex sweep
+    // was connected and the next restart had never heard of it (review sweep
     // 12 Aug F8).
     if !save_settings(
         &d.settings_path,
@@ -696,7 +696,7 @@ pub fn plex_forget(d: &Arc<Daemon>, src_id: u64) -> std::result::Result<Value, S
     // security-significant direction: a Forget that answered status:true
     // after a failed write told the user the account was disconnected,
     // while the next restart reloaded the old bearer token and resumed
-    // reading the supposedly revoked Plex account (Codex sweep 12 Aug F8).
+    // reading the supposedly revoked Plex account (review sweep 12 Aug F8).
     if !save_settings(
         &d.settings_path,
         &[(
@@ -888,7 +888,7 @@ mod tests {
     /// reinserted the deleted source's items, persisted them, republished
     /// its health and woke the watcher, so a revoked Plex account kept
     /// auto-grabbing - and came back after a restart, because the spool
-    /// loader never filtered items against live sources either (Codex
+    /// loader never filtered items against live sources either (review
     /// sweep 12 Aug F6a).
     ///
     /// `apply_outcome` is that whole second half, so calling it with a
@@ -1162,7 +1162,7 @@ mod tests {
 
     /// The orphan drop: a spooled item whose `src` names a source that no
     /// longer exists is discarded, because nothing should be watched on
-    /// behalf of an account the user deleted (Codex sweep 12 Aug F6a).
+    /// behalf of an account the user deleted (review sweep 12 Aug F6a).
     #[test]
     fn a_spooled_item_of_a_deleted_source_is_dropped() {
         let t = TmpDir::new("seed-orphan");

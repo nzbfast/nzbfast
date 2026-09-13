@@ -34,7 +34,7 @@
 
 use super::*;
 
-/// How strong a piece of naming evidence is - the Codex ladder,
+/// How strong a piece of naming evidence is - the review ladder,
 /// strongest first. Stored in `name_claims.tier` as the stable `tag()`
 /// string, so variants may be added but tags must never be reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2005,13 +2005,13 @@ mod tests {
         teardown(&d, ix);
     }
 
-    // ---- H5: the apply_pn savepoint (Codex 10 Aug read-only sweep) ---
+    // ---- H5: the apply_pn savepoint (review 10 Aug read-only sweep) ---
     //
     // `apply_proven_name` is a read-decide-write across several
     // statements - claim insert, revoke, apply, correlation settle - and
     // a second WRITER PROCESS exists by design: the CLI census
     // (`nzbfast nzb-import --apply`) runs beside the daemon against the
-    // same WAL index. The savepoint makes the decision atomic. Codex
+    // same WAL index. The savepoint makes the decision atomic. review
     // filed the finding as needing "a genuine second-process regression
     // test" and nothing exercised either half of the contract.
     //

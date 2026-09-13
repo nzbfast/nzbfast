@@ -164,7 +164,7 @@ fn a_lane_tail_declines_a_retry_that_lands_while_it_is_deleting_files() {
     });
 }
 
-/// Codex sweep 6, N2: the window BEHIND the second generation check.
+/// Review sweep 6, N2: the window BEHIND the second generation check.
 ///
 /// `PARK_GEN_BARRIER` opens before that check, so the test above stages
 /// its retry where the guard can see it. Everything after the check -

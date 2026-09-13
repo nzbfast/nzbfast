@@ -155,7 +155,7 @@ fn probe_nonce() -> String {
 
 /// Do these two paths name ONE file object, as the filesystem sees it?
 ///
-/// X5-20 (codex Extreme Wave 5, 30 Aug 2026) is what this exists for:
+/// X5-20 (review Extreme Wave 5, 30 Aug 2026) is what this exists for:
 /// renaming one hardlink over another name for the SAME inode is a POSIX
 /// no-op that still returns `Ok(())`, so a caller that grades its rename
 /// by that return value alone reports a publish it did not perform and

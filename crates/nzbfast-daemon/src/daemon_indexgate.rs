@@ -160,7 +160,17 @@ impl Daemon {
     /// predicate behind a different cfg, which is the shape several
     /// gates in this tree exist to refuse. Nothing about the function
     /// depends on the feature; only who happened to ask did.
+    ///
+    /// A job behind the GLOBAL pause (or offline) is not runnable either,
+    /// whatever its own flag says. Until 10 Sep 2026 this read only the
+    /// per-job flag, so a queue held by a stray pause reported "a download
+    /// is running" every five seconds for 815 minutes and the indexer and
+    /// spots stood down for the whole 13 h - for a job the runner would
+    /// never pick.
     pub fn queue_has_runnable(&self) -> bool {
+        if self.paused.load(Ordering::Relaxed) || self.offline.load(Ordering::Relaxed) {
+            return false;
+        }
         self.queue.lock_ok().iter().any(|j| {
             let g = j.lock_ok();
             g.state == JobState::Queued && !g.paused

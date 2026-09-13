@@ -22,7 +22,7 @@ pub(super) fn parse_omdb(v: &serde_json::Value) -> Option<TitleMeta> {
         // NOT a TMDB id, whatever the column is called: it is the
         // numeric half of the IMDb tconst. Radarr's `tmdbid=` resolves
         // against that column, so without this label an OMDb-enriched
-        // film answered a TMDB id lookup (Codex sweep 7, H2).
+        // film answered a TMDB id lookup (review sweep 7, H2).
         id_src: "omdb".into(),
         overview: omdb_field(&v["Plot"]).unwrap_or("").to_string(),
         rating: omdb_field(&v["imdbRating"])
@@ -252,7 +252,7 @@ pub(super) fn form_encode(fields: &[(String, String)]) -> String {
 /// the __doPostBack that picks FREE, then fill + submit that form.
 pub fn omdb_signup(email: &str) -> Result<(), String> {
     const URL: &str = "https://www.omdbapi.com/apikey.aspx";
-    // The one DELIBERATE exception to CLAUDE.md invariant 5, stated here
+    // The one DELIBERATE exception to project invariant 5, stated here
     // rather than left for the next reader to rediscover: this runs only
     // when a person clicks "get a free key" in Settings, so it is a
     // user action, not background enrichment, and gating it would break

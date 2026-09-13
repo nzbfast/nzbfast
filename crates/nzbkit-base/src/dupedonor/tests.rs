@@ -46,6 +46,7 @@ fn synth_file(name: &str, length: usize, block_size: usize, seed: u64) -> (Vec<u
 
 fn set_of(files: Vec<Par2File>, block_size: u64) -> Par2Set {
     Par2Set {
+        comment: None,
         recovery_set_id: [0u8; 16],
         block_size,
         files,

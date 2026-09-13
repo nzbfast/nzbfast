@@ -106,7 +106,7 @@ class EngineService : Service() {
          * this app is still sending the install's full API key to, in
          * `X-Api-Key`, every two seconds. That is the disclosure
          * [EngineIdentity] exists to prevent, arriving one engine
-         * generation later (Codex sweep 26 Aug, P1-2). A collector - see
+         * generation later (review sweep 26 Aug, P1-2). A collector - see
          * MainActivity - drops the credential here and re-enters the
          * proof path.
          *
@@ -152,7 +152,7 @@ class EngineService : Service() {
          * NOW. The network callback only fires on a capability CHANGE:
          * without this, enabling the setting on an already-metered
          * network holds nothing until the network next moves, and
-         * disabling it leaves a [pausedForMetered] pause standing (Codex
+         * disabling it leaves a [pausedForMetered] pause standing (review
          * sweep 27 Aug, C15). Same shape as [foreground]: process-wide,
          * because the activity may not hold a binder to the service.
          */
@@ -353,7 +353,7 @@ class EngineService : Service() {
      * poll loop can refuse to send a dead generation's key. Without it
      * the loop can be asleep in [POLL_MS] when the engine dies, wake, and
      * send one more keyed request to a port that may already belong to a
-     * stranger (Codex sweep 27 Aug, C03). The null on [current] covers
+     * stranger (review sweep 27 Aug, C03). The null on [current] covers
      * the metered callback the same way; this covers the sleeper.
      */
     private val liveGen = java.util.concurrent.atomic.AtomicInteger(0)
@@ -368,7 +368,7 @@ class EngineService : Service() {
      * a phone shares one loopback namespace - so a client kept across an
      * engine generation is the install's full API key addressed to
      * whatever bound that port next. Holding one client for the life of
-     * the service would have put the Codex 26 Aug P1-2 disclosure back in,
+     * the service would have put the review 26 Aug P1-2 disclosure back in,
      * on the one poller that keeps running when nobody is looking.
      *
      * Both ways a poll fails say the same thing. A transport failure means
@@ -804,7 +804,7 @@ class EngineService : Service() {
                 // 0 = let the OS pick. The engine used to bind a fixed
                 // 6791, and every app on a phone shares ONE loopback
                 // namespace, so a port a sibling app can predict is a
-                // port it can pre-bind before us (Codex sweep 12 Aug F4).
+                // port it can pre-bind before us (review sweep 12 Aug F4).
                 // Identity is still proved by the runtime.json token, not
                 // by the port - see EngineIdentity - but a port nobody can
                 // name in advance is one nobody can lie in wait on.

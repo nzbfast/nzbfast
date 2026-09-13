@@ -5,7 +5,7 @@
 use crate::*;
 use nzbkit::pool::fetch_all_multi_ctl;
 use std::path::Path;
-use tracing::info;
+use tracing::{debug, info};
 
 mod vrig;
 use vrig::{Rig, build_rig, install_seek};
@@ -61,6 +61,24 @@ use workers::{
 fn note_activity_impl(hub: &Option<Arc<StreamHub>>, stream_owner: &str, tok: &'static str) {
     if let Some(h) = hub {
         h.activity.lock_ok().insert(stream_owner.to_string(), tok);
+        // The DURABLE half of the same record, and the sibling of
+        // `Daemon::note_tail_stage`'s line - same target, same wording,
+        // so one filter (`NZBFAST_LOG=lane=debug`) shows a job's whole
+        // tail whichever side wrote each stage.
+        //
+        // The map above is a LIVE CELL: it says where the pipeline is
+        // right now and keeps no history, so a section a job passed
+        // through in three milliseconds is unobservable a moment later.
+        // Everything that wanted to know a job had verified therefore
+        // had to catch it in flight, and the queue-payload assertion in
+        // `the_finishing_tail_is_named_and_never_borrows_the_next_job_s_bar`
+        // did exactly that - it hard-failed twice on the four-vCPU CI
+        // runner (nightlies 33491207417 and 33857298155) after landing
+        // one to three lucky samples out of ~400 polls on a good day.
+        // This line is what a reader (or a test) reads instead of
+        // racing, and it costs a formatted string per SECTION - four or
+        // five per job, never per article.
+        debug!(target: "lane", "{stream_owner}: tail stage -> {tok}");
     }
 }
 

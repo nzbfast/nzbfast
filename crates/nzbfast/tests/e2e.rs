@@ -4862,6 +4862,98 @@ async fn nested_recovery_record_heals_poster_damaged_inner() {
     assert_eq!(got, doc, "payload bytes differ after RR self-repair");
 }
 
+/// The shape the 6 Sep 2026 recovery-record census found in the wild and
+/// nothing here drove: a TOP-LEVEL multivolume RAR5 set carrying a
+/// recovery record in every volume, NO PAR2 anywhere, and one article
+/// MISSING on the wire (not poster-damaged bytes: a hole the decoder
+/// zero-fills). 200 of 2,354 fetched RAR releases carry no par2 volume
+/// (research/RR-RECOVERY-RECORD-CENSUS-2026-09-06.md section 5), and for
+/// those the record is the only parity there is. The set-less settle arm
+/// (`settle/noset.rs`) must reach `try_rar_rr_repair_why`, the record
+/// must rewrite the holed volume, and the job must go green with the
+/// payload byte-exact. The nested gauntlet above covers the record on an
+/// INNER archive behind a par2-covered outer, which is a different arm.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_record_only_post_heals_a_wire_missing_article() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    // Half-entropy so the packed stream is real LZ data, as the nested
+    // gauntlet uses; 300 KB packs ~2x, three 64 KiB-payload volumes.
+    let mut s = 0x243f6a8885a308d3u64;
+    let doc: Vec<u8> = (0..300_000usize)
+        .map(|i| {
+            if i % 2 == 0 {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 24) as u8
+            } else {
+                0
+            }
+        })
+        .collect();
+    let entries = [rars::rar50::CompressedEntry {
+        name: b"doc.bin",
+        data: &doc,
+        mtime: None,
+        attributes: 0o100644,
+        host_os: 1,
+    }];
+    let volumes = rars::rar50::Rar50VolumeWriter::new(rars::rar50::WriterOptions::default())
+        .compressed_entries(&entries)
+        .max_payload_per_volume(64 * 1024)
+        .recovery_percent(Some(20))
+        .finish()
+        .unwrap();
+    assert!(
+        volumes.len() >= 3,
+        "expected a multivolume set, got {}",
+        volumes.len()
+    );
+
+    let mut fx = Fixture::new("rronly");
+    for (i, bytes) in volumes.iter().enumerate() {
+        fx.add_file(&format!("set.part{:02}.rar", i + 1), bytes, 1500);
+    }
+    assert!(
+        fx.nzb_files.iter().all(|(n, _)| n.ends_with(".rar")),
+        "NZB must carry only rar volumes"
+    );
+    // Lose one article from the MIDDLE of volume 2: past the volume's
+    // headers, inside its payload, and before its recovery record. A
+    // 1,500-byte hole is well inside a 20% record on a ~66 KB volume.
+    let (_, segs) = &fx.nzb_files[1];
+    let victim = format!("<{}>", segs[segs.len() / 2].0);
+    assert!(
+        fx.articles.contains_key(&victim),
+        "victim article not in the fixture"
+    );
+    let chaos = Chaos {
+        missing: [victim].into(),
+        ..Default::default()
+    };
+    let srv = MockServer::start(fx.articles.clone(), chaos).await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+        .await
+        .unwrap();
+    assert!(ok, "get failed:\n{log}");
+    assert!(
+        log.contains("rewritten from recovery record"),
+        "recovery-record repair did not run:\n{log}"
+    );
+    let got = std::fs::read(fx.dir.join("out/doc.bin")).expect("payload extracted");
+    assert_eq!(
+        got, doc,
+        "payload bytes differ after RR repair of a wire hole"
+    );
+}
+
 /// Gauntlet (e): a PAR-ONLY post - the poster created a rar, generated a
 /// 100%-redundancy par2 set, deleted the rar, and posted only the pars.
 /// The NZB carries no data slots at all; the whole rar is reconstructed
@@ -5190,7 +5282,7 @@ async fn par_only_rebuild_greens_when_the_post_renamed_the_file() {
     );
 }
 
-/// Codex H2 (2 Aug sweep): the MIXED set - a clean .nfo that arrives
+/// Review H2 (2 Aug sweep): the MIXED set - a clean .nfo that arrives
 /// and reports beside a compressed .rar whose every article 430'd, with
 /// the one-pass chase off so the archive rides the after-download
 /// ladder. Whatever route the rebuild takes (mapped parity recreation
@@ -5946,7 +6038,7 @@ async fn corrupt_par2_index_still_fails_a_damaged_payload() {
     );
 }
 
-/// Codex H4: the NZB parser refuses a segment whose message-id is
+/// Review H4: the NZB parser refuses a segment whose message-id is
 /// wire-unsafe (CR/LF smuggling), but it used to drop the segment
 /// SILENTLY - a file whose every segment was refused entered the
 /// downloader with nothing to fetch and nothing missing, wrote zero
@@ -5980,7 +6072,7 @@ async fn a_file_of_refused_segments_fails_the_job_not_greens_it() {
     );
 }
 
-/// Codex sweep 3 Aug M7: a self-consistent yEnc part geometry can still
+/// Review sweep 3 Aug M7: a self-consistent yEnc part geometry can still
 /// leave most of the declared file unwritten. The decoder validates a
 /// part against its OWN `=ypart` range and deliberately not against
 /// `=ybegin size` (posters misstate totals), and the writer is sized
@@ -6012,7 +6104,7 @@ async fn a_lying_total_size_does_not_complete_green() {
     );
 }
 
-/// Codex sweep 2, 3 Aug M2: the M7 coverage census above was gated
+/// Review sweep 2, 3 Aug M2: the M7 coverage census above was gated
 /// GLOBALLY on `verifier.set().is_none() && deferred_arts == 0`, which
 /// is a per-slot question asked once for the whole job. Any PAR2 set
 /// anywhere therefore exempted every slot in the post - so a sparse

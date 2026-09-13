@@ -923,6 +923,11 @@ pub(super) fn boot(config: &Path, settings_path: &Path, opts: ServeOpts) -> Resu
         #[cfg(feature = "indexer")]
         index_gates,
     );
+    // Move a pre-5-Sep-2026 host-keyed usage store onto the per-account
+    // block meter, once. Before anything can read a block standing, and
+    // AFTER the daemon exists because it needs both the loaded ledger
+    // and `cfg_path`; a no-op on every subsequent start.
+    daemon.migrate_account_ledger();
     // Weakly, for the embedded host's reclamation test: one entry per
     // run, and a generation that survives its own stop is a leak that
     // shows up as a `Weak` still upgradable. Costs a pointer per run.

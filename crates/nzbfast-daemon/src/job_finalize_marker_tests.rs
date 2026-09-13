@@ -10,7 +10,7 @@ use super::*;
 use crate::testutil::test_daemon;
 use std::os::unix::fs::PermissionsExt;
 
-/// M6 (Codex sweep 5 Aug): `finalize_completed` wrote the
+/// M6 (review sweep 5 Aug): `finalize_completed` wrote the
 /// finalizing marker, ignored `save_queue()`'s answer, and began
 /// relocating the payload anyway - so a crash mid-move with an
 /// unwritable spool restored a clean Completed record over a

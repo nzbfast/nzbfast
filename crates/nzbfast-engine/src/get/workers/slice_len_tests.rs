@@ -87,6 +87,7 @@ fn volume(set_id: &[u8; 16], exps: &[u32], data_len: usize) -> Vec<u8> {
 
 fn set_of(id: [u8; 16], bs: usize) -> nzbkit::par2::Par2Set {
     nzbkit::par2::Par2Set {
+        comment: None,
         recovery_set_id: id,
         block_size: bs as u64,
         files: Vec::new(),

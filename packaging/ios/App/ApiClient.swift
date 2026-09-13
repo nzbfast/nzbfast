@@ -36,7 +36,7 @@ enum ApiError: LocalizedError {
 /// protects the daemon and arrives long after the phone has already
 /// allocated the file plus a payload-sized multipart copy of it - and a
 /// file URL handed over by the share sheet is chosen by whatever app
-/// shared it (Codex sweep 12 Aug F14).
+/// shared it (review sweep 12 Aug F14).
 let nzbSizeLimit = 64 << 20
 
 /// Read a shared or picked file, refusing anything past `nzbSizeLimit`.
@@ -277,7 +277,7 @@ final class ApiClient {
     /// lived full credential rode a query string past every reverse proxy
     /// and URL diagnostic between here and the daemon - the same leak the
     /// returned per-job token exists to avoid, reintroduced one layer up
-    /// (Codex sweep 12 Aug F17). `/m3u` has always accepted the header.
+    /// (review sweep 12 Aug F17). `/m3u` has always accepted the header.
     func playURL(for id: String) async throws -> URL {
         let url = config.baseURL
             .appendingPathComponent("m3u")

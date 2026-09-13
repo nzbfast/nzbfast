@@ -13,7 +13,7 @@ use super::*;
 /// right for a PREVIOUS run's copy and wrong for a file this same job put
 /// there: the second publish then renames over the first and the job
 /// finishes a payload short, with two "renamed" lines in the log and no
-/// error anywhere (Codex 3 Aug, "sanitized output-name collisions can
+/// error anywhere (review 3 Aug, "sanitized output-name collisions can
 /// still overwrite on disk" - dispositioned 23 Aug 2026).
 ///
 /// Two shapes reach it, and only the first is about the sanitizer:
@@ -27,7 +27,7 @@ use super::*;
 ///   under the Linux build) `README.nfo` and `readme.nfo` name ONE
 ///   object, and no sanitizer is involved at all. A set built on a
 ///   case-sensitive box carries both names legitimately.
-/// - W4-17 (codex Wave 4, 30 Aug 2026): `node` and `node/child.bin` are
+/// - W4-17 (review Wave 4, 30 Aug 2026): `node` and `node/child.bin` are
 ///   two valid FileDesc members that COLLIDE ON DISK while sharing no
 ///   complete string. One name is a file and the other needs it to be a
 ///   directory, so the claim map has to carry the prefix TOPOLOGY, not
@@ -466,7 +466,7 @@ fn publish(
             return None;
         }
     };
-    // X5-20 (codex Extreme Wave 5, 30 Aug 2026): the target may already
+    // X5-20 (review Extreme Wave 5, 30 Aug 2026): the target may already
     // BE this file under another name. `hash.bin` hardlinked as
     // `Real.Name.mkv` is one inode with two entries, and `fs::rename`
     // between two names for one inode is a POSIX no-op that still

@@ -340,11 +340,11 @@ pub fn try_unrar_outcome(
             } else {
                 stem.clone()
             };
-            // Per GROUP, like the zip and 7z arms (Codex sweep G): two
+            // Per GROUP, like the zip and 7z arms (review sweep G): two
             // encrypted sets in one directory need not share a password,
             // and handing every group the level's single resolved value
             // left the second set packed on a run that reported success
-            // (Codex sweep 13 Aug U1). The caller's password leads the
+            // (review sweep 13 Aug U1). The caller's password leads the
             // candidate order, so it is never shadowed by a harvest (U2).
             let group_pw = passwords::resolve_rar_group_password(dir, group, password);
             let pw = group_pw.as_deref().or(password);
@@ -1563,7 +1563,7 @@ pub(crate) fn extract_zip(
         // Per CONTAINER, not per level: two encrypted zips in one post
         // need not share a password, and resolving once for the level
         // handed the second one the first one's value and left it
-        // packed while reporting success (Codex sweep G, 13 Aug 2026).
+        // packed while reporting success (review sweep G, 13 Aug 2026).
         // The list is also a shortlist rather than a pick - a ZipCrypto
         // check byte accepts a wrong value once in 256 tries, so the
         // extraction below is what settles it (sweep F).

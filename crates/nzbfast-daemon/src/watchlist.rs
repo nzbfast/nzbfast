@@ -144,7 +144,7 @@ pub(crate) static SETTLE_CUSTODY_BARRIER: Mutex<
 /// on a NAS is seconds and the queue must not stall behind it. Landing
 /// in the window deleted the source out from under a move that had just
 /// started: a half-published payload with no record naming either side
-/// (Codex sweep 24 Aug, F-05).
+/// (review sweep 24 Aug, F-05).
 ///
 /// `history_change_cat` had already settled the shape - TAKE the fence,
 /// then re-verify the snapshot the claim was decided on - and this is
@@ -559,7 +559,7 @@ fn settle_pending_upgrades(
                 // Removing the row and its directory under it let the
                 // sidecar recreate files inside the deleted tree, mark
                 // the removed job Completed and park it back into
-                // history after the tombstone (Codex sweep 24 Aug,
+                // history after the tombstone (review sweep 24 Aug,
                 // F-05).
                 //
                 // Poked and then handed to the DRAIN, which is what the
@@ -685,7 +685,7 @@ fn settle_pending_upgrades(
                             d.note_delete_kept(&name, &dir, &why, None);
                         }
                         // Through `drop_spool` rather than a swallowed
-                        // `remove_file` (Codex sweep 24 Aug, F-04): the
+                        // `remove_file` (review sweep 24 Aug, F-04): the
                         // row is gone for good, so a spool copy whose
                         // unlink is refused would be re-adopted at the
                         // next start and the superseded release
@@ -722,7 +722,7 @@ fn settle_pending_upgrades(
                 // that set and nothing else, and deleting through it
                 // removed the source out from under `relocate_completed`
                 // - a half-published move with the record gone too
-                // (Codex sweep 24 Aug, F-05). The SAB and JSON-RPC
+                // (review sweep 24 Aug, F-05). The SAB and JSON-RPC
                 // history deletes have refused this shape since the
                 // 3 Aug sweep; parity here. Read AFTER the claim went
                 // up, which is the re-verify `history_change_cat` makes
@@ -1818,7 +1818,7 @@ pub(super) fn watchlist_grab(
                 // account - and the old check was `cfg.is_some_and(...)`, so
                 // a MISSING config passed it: the stale response still
                 // fetched its enclosure with the (removed) credentials, spent
-                // the account's daily grab and enqueued the download (Codex
+                // the account's daily grab and enqueued the download (review
                 // sweep 12 Aug F6c). A revoked indexer is not a budget
                 // question, so say which it is.
                 let Some(cfg) = cfg.filter(|c| c.enabled) else {
@@ -2282,7 +2282,7 @@ mod settle_tests {
         out
     }
 
-    /// Codex sweep 24 Aug, F-05, the sidecar half: settlement must take
+    /// Review sweep 24 Aug, F-05, the sidecar half: settlement must take
     /// the delete arms' custody transaction over a superseded release
     /// the prefetch sidecar is still writing into, not remove it beside
     /// them and not simply come back in a minute.
@@ -2378,7 +2378,7 @@ mod settle_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Codex sweep 24 Aug, F-05, the mover half: settlement must HOLD
+    /// Review sweep 24 Aug, F-05, the mover half: settlement must HOLD
     /// the mover's fence for the length of the removal, not read it
     /// once and act on the answer.
     ///

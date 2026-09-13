@@ -11,41 +11,53 @@
 # every byte, time, then gate on the rebuilt volumes being byte-identical to
 # the pristine ones.
 set -euo pipefail
+# Timed-leg discipline: rc captured, stderr kept, success decided per tool.
+# shellcheck source=../lib/legrc.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/legrc.sh"
+
 ROOT=${1:?usage: rev-race.sh <root> <rounds> <ours> <rar> <rarpar>}
 ROUNDS=${2:-3}
 OURS=${3:?ours}
 RAR=${4:-rar}
 RARPAR=${5:-rarpar}
 WORK=$ROOT/work
-
-now() { python3 -c 'import time; print(time.time())'; }
+leg_errdir "${REV_LOGS:-$ROOT/logs-rev}"
+obsn=0
 
 run_one() {
   local tool=$1
   rm -rf "$WORK"
   cp -c -R "$ROOT/damaged" "$WORK" 2>/dev/null || cp -R "$ROOT/damaged" "$WORK"
   cat "$WORK"/* > /dev/null 2>&1   # pre-warm
-  local t0 t1; t0=$(now)
+  local label="rev-$tool-$obsn" back=$PWD
+  # Timed, with rc and stderr kept: a tool that REFUSES this shape returns
+  # fast, and a discarded-stream harness records that as a win. See the
+  # README's trap list.
   case $tool in
-    ours)   ( "$OURS" "$WORK" >/dev/null 2>&1 || true ) ;;
+    ours)   leg_timed "$tool" "$label" "$OURS" "$WORK" ;;
     # RARLab's own reconstruct. It wants the first volume by name.
-    rar)    ( cd "$WORK" && "$RAR" rc "$(ls ./*.part01.rar 2>/dev/null || ls ./*.rar | head -1)" >/dev/null 2>&1 || true ) ;;
-    rarpar) ( "$RARPAR" rar restore-volumes "$WORK"/*.rev >/dev/null 2>&1 || true ) ;;
+    rar)    cd "$WORK"
+            leg_timed "$tool" "$label" "$RAR" rc "$(ls ./*.part01.rar 2>/dev/null || ls ./*.rar | head -1)"
+            cd "$back" ;;
+    rarpar) leg_timed "$tool" "$label" "$RARPAR" rar restore-volumes "$WORK"/*.rev ;;
+    *) echo "unknown tool $tool" >&2; return 0 ;;
   esac
-  t1=$(now)
+  # The OUTPUT gate stays, and stays separate from the exit code.
   local bad=0 missing=0
   for f in "$ROOT/pristine"/*.rar; do
     b=$(basename "$f")
     if [[ ! -f "$WORK/$b" ]]; then missing=$((missing+1)); continue; fi
     cmp -s "$f" "$WORK/$b" || bad=$((bad+1))
   done
-  local flag=""
-  (( missing == 0 && bad == 0 )) || flag="  !! NOT-RESTORED (missing=$missing wrong=$bad)"
-  python3 -c "print('  %-8s %8.3fs%s' % ('$tool', $t1-$t0, '$flag'))"
+  local gate=""
+  (( missing == 0 && bad == 0 )) || gate="!! NOT-RESTORED (missing=$missing wrong=$bad)"
+  printf '  %-8s %8.3fs rc=%-3s%s\n' "$tool" "$LEG_WALL" "$LEG_RC" "$(leg_flag "$LEG_STATUS" "$gate")"
 }
 
 echo "=== .rev restore ($ROUNDS rounds, warm protocol) ==="
+echo "    per-leg stderr: $LEG_ERRDIR"
 for _ in $(seq "$ROUNDS"); do
+  obsn=$((obsn + 1))
   for t in ours rar rarpar; do run_one "$t"; done
 done
 rm -rf "$WORK"

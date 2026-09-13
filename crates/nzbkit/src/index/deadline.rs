@@ -185,7 +185,15 @@ impl Index {
         let at = match budget {
             // Saturating, and `max(1)` so a zero-length budget still
             // means "armed" rather than reading as the disarmed stamp.
-            Some(d) => (st.base.elapsed().saturating_add(d).as_nanos() as u64).max(1),
+            // `try_from`, not `as`: `as_nanos()` is a u128 and u64 nanos
+            // run out at ~584 years, so a budget past that TRUNCATED to
+            // a stamp in the past and abandoned the query it was meant
+            // to give unlimited time. `NZBFAST_INDEX_READ_BUDGET_SECS`
+            // is parsed unbounded, so that is reachable from config.
+            // Saturating to `u64::MAX` reads as "effectively never".
+            Some(d) => u64::try_from(st.base.elapsed().saturating_add(d).as_nanos())
+                .unwrap_or(u64::MAX)
+                .max(1),
             None => 0,
         };
         st.fired.store(false, Ordering::Relaxed);

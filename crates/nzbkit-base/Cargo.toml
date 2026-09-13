@@ -181,6 +181,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    # par2gen's mapped inputs: CreateFileMappingW / MapViewOfFile /
+    # PrefetchVirtualMemory (Memory) and GetCurrentProcess (Threading).
+    "Win32_System_Memory",
+    "Win32_System_Threading",
     # logtee's Windows size cap: GetFileType (is stdout really a file?)
     # and GetFinalPathNameByHandleW (an APPEND handle cannot truncate
     # itself, so the cap needs the path to open a second one).
@@ -203,7 +207,7 @@ ktls = ["dep:ktls"]
 # Build-gate for the [[test]] target at the bottom of this file (TODO
 # 116b). EMPTY on purpose - it compiles no code in or out; its only
 # effect is whether cargo builds the target that names it in
-# `required-features`. The facade forwards it, so CLAUDE.md's
+# `required-features`. The facade forwards it, so CONTRIBUTING.md's
 # `--features nzbkit/heavy-tests` reaches this one too.
 heavy-tests = []
 # `renameclaim`, the rename-race harness, and nothing else. Its pins are

@@ -1,0 +1,18 @@
+# Row 2, a movie with a handful of holes spread across several volumes.
+# 12 articles over 3 of the 21 volumes, four apiece, spaced out inside each
+# volume so no two share a slice - this is the shape that replaces the old
+# "12 scattered 4 KiB holes" leg, which damaged 12 blocks with holes far
+# smaller than any article the wire loses.
+ARTICLE 768000
+feature.part03.rar 61
+feature.part03.rar 205
+feature.part03.rar 349
+feature.part03.rar 588
+feature.part11.rar 17
+feature.part11.rar 158
+feature.part11.rar 402
+feature.part11.rar 655
+feature.part18.rar 90
+feature.part18.rar 264
+feature.part18.rar 471
+feature.part18.rar 630

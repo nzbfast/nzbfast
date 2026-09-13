@@ -8,7 +8,7 @@
 #
 #     git grep -n "swift build\|macapp\|make-app" origin/main -- .github/
 #
-# returned nothing. Every gate in the numbered list in CLAUDE.md is
+# returned nothing. Every gate in the numbered list in CONTRIBUTING.md is
 # about crates/, web/, docs/, website/, packaging/ or research/, and not
 # one of them can see a Swift syntax error, a bad selector, or a call to
 # an API the deployment target does not have. `macapp` IS in

@@ -17,6 +17,14 @@ pub(crate) mod indexer;
 mod namehunt;
 #[cfg(feature = "indexer")]
 mod scoreboard;
+// The gate handback's interleaving test: a write queued on
+// `index_pass_gate` must land BETWEEN the maintenance slice's legs.
+// Hooked here rather than from `indexer.rs` because it drives
+// `maintenance_slice` from the outside, the way the lap does.
+#[cfg(all(test, feature = "indexer"))]
+#[path = "tasks/gate_handback_tests.rs"]
+mod gate_handback_tests;
+
 // The §77 post-health preflight, whole: the probe loop, its stand-down
 // predicates and its sampler. `download_idle` and `busy_tail` are read
 // back here by `spawn_memory_trim`, so the glob comes back in.
@@ -110,26 +118,59 @@ pub fn spawn_scheduler(
     let d = daemon.clone();
     tokio::spawn(async move {
         let mut last = local_minute_of_week();
+        // The absolute cursor beside the local one. A minute-of-week
+        // difference cannot tell a twelve-hour suspend from a DST step
+        // backwards; unix seconds can, because DST does not move them.
+        // See `sched::classify_tick`.
+        let mut last_utc = localtime::unix_secs();
         loop {
             // Half-minute tick so every minute boundary is seen promptly.
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             let now = local_minute_of_week();
-            // DST fall-back (or a clock step) moves local time
-            // BACKWARDS: the forward distance around the week would be
-            // huge - resync silently instead of replaying the week.
-            let forward = (now + WEEK_MINUTES - last) % WEEK_MINUTES;
-            if forward > 8 * 60 {
-                last = now;
-                continue;
-            }
+            let now_utc = localtime::unix_secs();
             let entries = d.schedule.lock_ok().clone();
-            while last != now {
-                last = (last + 1) % WEEK_MINUTES;
-                for e in entries.iter().filter(|e| e.fires_at(last)) {
-                    info!(target: "schedule", "{:?}", e.action);
-                    apply_action(&d, e.action.clone());
+            match classify_tick(last, now, last_utc, now_utc) {
+                Tick::Advance => {
+                    while last != now {
+                        last = (last + 1) % WEEK_MINUTES;
+                        for e in entries.iter().filter(|e| e.fires_at(last)) {
+                            info!(target: "schedule", "{:?}", e.action);
+                            apply_action(&d, e.action.clone());
+                        }
+                    }
+                }
+                // A suspend or a clock step. Land in the state the
+                // schedule implies for the minutes that were actually
+                // missed, WITHOUT replaying the one-shots in them -
+                // otherwise an overnight sleep leaves the queue paused
+                // through the whole next day (F3).
+                Tick::Reconcile { span } => {
+                    let (paused, limit) = catch_up_state(&entries, now, span);
+                    if let Some(p) = paused {
+                        apply_action(
+                            &d,
+                            if p {
+                                SchedAction::Pause
+                            } else {
+                                SchedAction::Resume
+                            },
+                        );
+                    }
+                    if let Some(l) = limit {
+                        d.set_speed_ceiling_from(l, "schedule");
+                    }
+                    // One line whether or not anything was owed: a
+                    // scheduler that quietly skipped a night is exactly
+                    // what took a day to find.
+                    info!(
+                        target: "schedule",
+                        "clock jump: {span} minute(s) missed, reconciled to \
+                         paused={paused:?} speedlimit={limit:?}"
+                    );
+                    last = now;
                 }
             }
+            last_utc = now_utc;
         }
     });
     Ok(())
@@ -626,7 +667,14 @@ pub fn spawn_index_scan(
             // 24D: custom categories, sampled per pass like gates so
             // a settings change applies from the next pass on.
             let cats = daemon2.custom_categories.read_ok().clone();
-            let index_pass = index_pass_gate.lock().await;
+            // Held as a `PassGate` rather than a bare guard so the
+            // stages below can hand it back between themselves: the
+            // peers hung on this mutex - the tip watcher, the index
+            // compactor, the seed-harvest replay - used to run only in
+            // the interval sleep, at a duty cycle of
+            // `interval / (interval + lap work)`, measured as low as
+            // 28.6% (research/INDEX-LAP-DUTY-CYCLE-2026-09-02.md).
+            let mut index_pass = PassGate::acquire(&index_pass_gate).await;
             // A job may have started while this task waited behind
             // the tip watcher or VACUUM. The foreground worker raises
             // its guard before waiting for this same gate, so this
@@ -757,6 +805,34 @@ pub fn spawn_index_scan(
             // gapfill carry cursors, the title seeding is idempotent,
             // and eviction is a no-op unless it is switched on.
             //
+            // And because they are resumable, the gate is HANDED BACK
+            // at each of them as well as dropped when a download is
+            // waiting: `index_pass.handback()` releases it and takes it
+            // again, so a lane queued behind the lap gets it first
+            // (tokio's mutex is a FIFO semaphore - the release hands the
+            // permit to the waiter, and the re-lock goes to the back of
+            // the queue). Every peer on this gate used to run only in
+            // the interval sleep; a lap of 2,246.6 s against a 900 s
+            // interval gave the tip watcher 28.6% of the passes it is
+            // configured for, and a restart cadence shorter than a lap
+            // gave it none at all, because the gate's only release was
+            // the end of a lap that never came
+            // (research/INDEX-LAP-DUTY-CYCLE-2026-09-02.md).
+            //
+            // What is new is the INTERLEAVING, not the resumability: a
+            // peer's writes can now land in the middle of a lap. That is
+            // safe for the same reason the stand-down is - no stage
+            // carries state across one of these points in memory, each
+            // re-reads its cursor from the database - and the one exact
+            // stats recompute still runs last, so it describes the
+            // database the lap leaves behind including whatever a peer
+            // wrote into it. The compactor is the one peer whose window
+            // this genuinely widens: it takes this gate with `try_lock`
+            // and can now win a mid-lap handback rather than only the
+            // interval sleep. It already refuses to start unless nothing
+            // is downloading and nothing is scanning, and the lap simply
+            // waits for it at the next re-lock.
+            //
             // `scan_groups &&` matters on a spots-only install: with
             // the indexer switched off this reason is permanently
             // "off", and short-circuiting on it would skip the
@@ -780,6 +856,7 @@ pub fn spawn_index_scan(
                 drop(index_pass);
                 continue;
             }
+            index_pass.handback().await;
             // M30: fresh posts get titles rows (→ enrichment) right
             // after the pass that indexed them - a wall page view
             // used to be the only seeder.
@@ -797,6 +874,7 @@ pub fn spawn_index_scan(
                 drop(index_pass);
                 continue;
             }
+            index_pass.handback().await;
             // A8: targeted gap-fill - re-hunt a few incomplete
             // releases' posting windows on the OTHER backbones.
             // Runs under the pass gate (the tip watcher stands
@@ -816,10 +894,19 @@ pub fn spawn_index_scan(
                 drop(index_pass);
                 continue;
             }
+            index_pass.handback().await;
             // M31a retention prune + the planner-statistics refresh,
             // both on their own clocks inside.
             let t_maint = Instant::now();
-            if !maintenance_slice(&daemon2, !groups.is_empty(), scan_spots, &waiting).await {
+            if !maintenance_slice(
+                &daemon2,
+                !groups.is_empty(),
+                scan_spots,
+                &waiting,
+                &mut index_pass,
+            )
+            .await
+            {
                 drop(index_pass);
                 continue;
             }
@@ -828,6 +915,7 @@ pub fn spawn_index_scan(
                 drop(index_pass);
                 continue;
             }
+            index_pass.handback().await;
             let t_evict = Instant::now();
             evict_between_passes(&daemon2).await;
             let t_evict = t_evict.elapsed();
@@ -854,10 +942,17 @@ pub fn spawn_index_scan(
             let interval = daemon2.index_interval_secs.load(Ordering::Relaxed).max(30);
             // The lap's stage breakdown, emitted where both halves of a
             // lap are known: the work above and the interval that
-            // follows it. A lap is `work + interval`, and on the shipped
-            // 900 s interval the work is the smaller half - so what a
-            // longer group phase costs the lap is bounded by what it
-            // costs the WORK, not by the lap.
+            // follows it. A lap is `work + interval`.
+            //
+            // This used to say the work is the smaller half on the
+            // shipped 900 s interval. It is not, and had not been for
+            // some time when INDEX-LAP-DUTY-CYCLE-2026-09-02.md measured
+            // it: 2,246.6 s of work against a 900 s interval is 71% of
+            // the lap, and the three clean laps that day ran 1,517.7,
+            // 2,246.6 and 2,538.8 s. The figure that used to follow from
+            // the false half - that the work bounds what a longer group
+            // phase costs - never depended on which half was bigger, so
+            // it stands: read the line, do not assume the shape.
             info!(
                 target: "index",
                 "lap work {:.1?}: spots {:.1?}, reclassify {:.1?}, {} group(s) {:.1?} \
@@ -985,7 +1080,7 @@ pub fn spawn_rss_poller(
         /// strings, and one global set meant two feeds publishing
         /// different items under guid `123` suppressed each other -
         /// including across restarts, so a rule-rejected item in feed A
-        /// permanently hid an accepted item in feed B (Codex sweep 12 Aug
+        /// permanently hid an accepted item in feed B (review sweep 12 Aug
         /// F12).
         ///
         /// Reads still fall back to the bare guid, because every entry
@@ -1126,7 +1221,7 @@ pub fn spawn_rss_poller(
                         // 200 that is not a feed (the login page a
                         // revoked apikey gets) has to reach the failure
                         // arm below, not be recorded as a healthy feed
-                        // with nothing new (Codex sweep 2, 3 Aug ML1).
+                        // with nothing new (review sweep 2, 3 Aug ML1).
                         let body = fetch_url(&url)?;
                         // The addresses the FEED answered from travel
                         // with its items: an item link is bound to the
@@ -1193,7 +1288,7 @@ pub fn spawn_rss_poller(
                 // stamped, its enclosure is fetched with the user's
                 // credentials and the result is enqueued. Deleting the feed
                 // or tightening its rules in that window used to change
-                // none of it (Codex sweep 12 Aug F6b).
+                // none of it (review sweep 12 Aug F6b).
                 //
                 // Re-read rather than trusted, and re-read AGAIN after the
                 // enclosure fetch below, because that is a second await.
@@ -1540,7 +1635,7 @@ enum ServerVerdict {
 /// after this bounded probe had just protected the same read - so a
 /// config path that stopped answering held the runner in that read with
 /// a job already marked Downloading and no fetch task yet to cancel
-/// (Codex sweep H, 13 Aug 2026). The healthy path costs nothing extra:
+/// (review sweep H, 13 Aug 2026). The healthy path costs nothing extra:
 /// the parse this probe already did IS the snapshot, and only the
 /// operator-file-missing case (where the loader searches for a SABnzbd
 /// ini, which this probe deliberately does not) reads a second time.
@@ -1802,7 +1897,7 @@ pub fn spawn_scheduled_bench(daemon: &Arc<Daemon>, config: &std::path::Path) {
             if stop.stopping() {
                 return;
             }
-            // Single-flight with the manual mode=sysbench run (Codex
+            // Single-flight with the manual mode=sysbench run (review
             // sweep 10 Aug M14): if one is in flight, re-check in a
             // minute rather than running a second workload beside it.
             let Some(_running) = d.bench_begin() else {

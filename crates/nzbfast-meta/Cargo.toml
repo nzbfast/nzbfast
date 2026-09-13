@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast-meta"
-version = "1.4.0"
+version = "1.5.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -31,7 +31,7 @@ getrandom = "0.4"
 hex = "0.4"
 # `wall`'s metadata providers (TMDB, OMDb, Wikidata, the digital-release
 # pages). Every one of them goes out through `nzbfast_core::netfetch`,
-# which is where the SSRF guard and CLAUDE.md invariant 5a live; this is
+# which is where the SSRF guard and project invariant 5a live; this is
 # the transport those agents are built on.
 ureq = "2"
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
@@ -51,7 +51,7 @@ indexer = ["nzbkit/indexer", "nzbfast-core/indexer"]
 
 [dev-dependencies]
 # The layer below, with ITS test seams switched on - above all
-# `identity::may_call_out` and `netfetch::deny_test_callout` (CLAUDE.md
+# `identity::may_call_out` and `netfetch::deny_test_callout` (CONTRIBUTING.md
 # invariant 5a). `cfg!(test)` is a property of ONE crate's build and this
 # crate's tests compile nzbfast-core as a plain dependency, so without
 # this `wall`'s provider tests would reach the real internet.

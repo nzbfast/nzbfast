@@ -43,7 +43,7 @@ use tracing::{info, warn};
 /// AND THE VERDICT, which must be LOUD. A failed replay's article ids
 /// sit in `completed`, so nothing downstream can tell the extractor
 /// never received those bytes: the run must fail rather than settle
-/// over the hole (Codex F-04). Deleting the journal makes the next
+/// over the hole (review finding F-04). Deleting the journal makes the next
 /// attempt a fresh fetch, where the providers still have the articles.
 fn settle_resume_replay(
     replay: &super::rig::ReplayPending,
@@ -335,6 +335,12 @@ pub(super) fn unpack_tail(
     note_activity: &(dyn Fn(&'static str) + Sync),
     hub: &Option<Arc<StreamHub>>,
     stream_owner: &str,
+    // The owner's recovery-work handle. It reaches exactly one thing
+    // below - the nested pass's per-level PAR2 repair, which is the only
+    // stretch of this ladder that can run for half an hour inside the
+    // repair engine with nothing to show. See
+    // `unpack::nested_par2_repair`.
+    cancel: Option<&crate::repair::SideCancel>,
     mut all_good: bool,
     mut reextract_failed: Option<String>,
     // See [`crate::get::settle::SettleVerdict::repaired`]: a repair may
@@ -647,7 +653,13 @@ pub(super) fn unpack_tail(
         let mut nested_why: Option<String> = None;
         let nested_res = {
             let _cpu = crate::lanegate::heavy_cpu_blocking();
-            extract_nested_why(out_dir, password, TAIL_NESTED_ENTRY_DEPTH, &mut nested_why)
+            extract_nested_why(
+                out_dir,
+                password,
+                TAIL_NESTED_ENTRY_DEPTH,
+                &mut nested_why,
+                cancel,
+            )
         };
         // Restore parked volumes before judging the result - they must be
         // back in place on every path, including the failure ones.
@@ -748,7 +760,7 @@ fn drop_replayed_sources(
         // Never delete a path an extraction PRODUCED. The preclaim
         // at replay time already stops an inner member taking a
         // restored source's name, so this is the second lock on the
-        // same door (Codex sweep 3 Aug H3): identity by path string
+        // same door (review sweep 3 Aug H3): identity by path string
         // alone once deleted the only output of the job while
         // reporting it green.
         if ex_report.extracted.iter().any(|(n, _)| n == &seed.name) {
@@ -798,7 +810,7 @@ fn drop_replayed_sources(
 ///   be the deliverable (see the nested pass's own note below).
 /// * A file the extraction PRODUCED is never removed, whatever it is
 ///   named. `drop_replayed_sources` carries the same lock for the same
-///   reason (Codex sweep 3 Aug H3): identity by path string alone once
+///   reason (review sweep 3 Aug H3): identity by path string alone once
 ///   deleted the only output of the job while reporting it green.
 ///
 /// Trash-aware: these are DOWNLOADED bytes and the verdict is a
@@ -1294,7 +1306,7 @@ pub(super) fn finish_job(
     print_failure_diagnostics(servers, stats);
     // Hand the OS back every output descriptor NOW, on the engine's own
     // failure path, not only in the daemon's post-processing tail. The
-    // tail's `park_outputs` runs after `fetch.await` in `run_tail`, and
+    // tail's `release_outputs` runs after `fetch.await` in `run_tail`, and
     // on the queue hand-over path the runner does not settle this run
     // until the PREDECESSOR'S drain ends (`worker.rs`'s history-order
     // guarantee) - so a failed successor's handles used to sit open for
@@ -1303,7 +1315,7 @@ pub(super) fn finish_job(
     // held for hours, and on the first night an unlinked 51.2 GB
     // extraction output pinned with them. Nothing streams a failed
     // job's quarantined bytes, so there is nothing these handles serve.
-    if let Err(e) = extractor.park_outputs() {
+    if let Err(e) = extractor.release_outputs() {
         warn!(target: "cleanup", "could not release the output handles: {e}");
     }
     if let Some(why) = reextract_failed {
@@ -1340,7 +1352,7 @@ pub(super) fn finish_job(
     // therefore classifies FailKind::Local. Local is not transient, so
     // the one automatic retry - which is exactly what would fetch clean
     // parity - never armed. Left to the repair openings below, which
-    // classify Unrepairable and do retry (Codex sweep 6, N3).
+    // classify Unrepairable and do retry (review sweep 6, N3).
     if census.incomplete > 0 || census.derrs > 0 {
         let causes = LossCauses {
             // Sweep 8, M7: PAYLOAD-only, every one of them. A cause
@@ -1949,7 +1961,7 @@ pub(super) async fn finish_run(
     // token says so. It is retired the moment that call returns - see
     // below.
     // The disk-unpack tail (eat-arm, unrar ladder, nested pass): see
-    // get/tail.rs. Off the scheduler core (Codex sweep 8 Aug H11): the
+    // get/tail.rs. Off the scheduler core (review sweep 8 Aug H11): the
     // tail is minutes of synchronous unrar work plus parked waits for
     // the heavy-CPU permit and the §129 disk admission, and all of it
     // used to run directly on this task's runtime worker - freezing
@@ -1978,6 +1990,7 @@ pub(super) async fn finish_run(
             &note_activity,
             hub,
             stream_owner,
+            cancel,
             all_good,
             reextract_failed,
             repaired,
@@ -2285,7 +2298,7 @@ mod tests {
         )
     }
 
-    /// Codex sweep 6, N3: damage confined to the RECOVERY volumes must
+    /// Review sweep 6, N3: damage confined to the RECOVERY volumes must
     /// keep the retry that fetches clean parity.
     ///
     /// M6 taught the retry-preserving marker about recovery errors,

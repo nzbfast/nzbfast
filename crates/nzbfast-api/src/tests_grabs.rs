@@ -419,7 +419,7 @@ fn the_dashboard_turns_an_http_error_into_a_visible_one() {
     assert!(src.contains("await apiPost('config', {name, value}, auth)"));
 }
 
-/// Codex sweep 2, 3 Aug MH1: a query string is not a private
+/// Review sweep 2, 3 Aug MH1: a query string is not a private
 /// channel. It reaches reverse-proxy access logs, the browser's own
 /// network panel and history, and any Referer that follows - so a
 /// setting whose VALUE is a credential must travel in a request
@@ -1710,7 +1710,7 @@ fn content_disposition_filename_shapes() {
         cd(&format!("attachment; filename=\"{}\"", "x".repeat(300))),
         None
     );
-    // Codex 7 Aug L3: a semicolon INSIDE the quoted value is part of
+    // Review 7 Aug L3: a semicolon INSIDE the quoted value is part of
     // the name, not a parameter boundary - the blind split named the
     // job "Show" and skewed folder + duplicate identity off it.
     assert_eq!(

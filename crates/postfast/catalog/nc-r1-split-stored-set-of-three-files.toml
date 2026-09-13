@@ -20,7 +20,7 @@ and only `::compressed_entries` took a slice, so a split STORE set
 holding more than one file had no emitter and `crate::container`
 refused it by name rather than approximating it. Gap H0 of
 research/POSTFAST-VS-NESTED-CORPUS-2026-09-03.md; closed 4 Sep 2026 by
-`Rar50VolumeWriter::stored_entries`, made in the fork at ~/Claude/rars
+`Rar50VolumeWriter::stored_entries`, made in the fork at the upstream rars fork
 and synced into vendor/rars, and checked against unrar 7.23 as well as
 against our own reader.
 

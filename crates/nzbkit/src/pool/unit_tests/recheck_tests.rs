@@ -360,18 +360,17 @@ async fn a_duplicates_refusal_folds_once_the_hold_it_waits_on_has_expired() {
         d.dup = true;
         d
     };
-    let mut inflight: VecDeque<Work> = [mk_dup()].into_iter().collect();
+    let mut sess = SessionState::from_inflight([mk_dup()].into_iter().collect());
     sh.charge_wire();
     handle_missing(
         &short,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         true,
         false,
-        &mut Default::default(),
+        &mut sess,
     )
     .await;
     assert!(
@@ -381,18 +380,17 @@ async fn a_duplicates_refusal_folds_once_the_hold_it_waits_on_has_expired() {
     );
 
     tokio::time::sleep(Duration::from_millis(30)).await;
-    let mut inflight: VecDeque<Work> = [mk_dup()].into_iter().collect();
+    let mut sess = SessionState::from_inflight([mk_dup()].into_iter().collect());
     sh.charge_wire();
     handle_missing(
         &short,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         true,
         false,
-        &mut Default::default(),
+        &mut sess,
     )
     .await;
     assert!(

@@ -1,6 +1,6 @@
 //! The never-adopt rule for the extraction scratch directories.
 //!
-//! Codex read-only sweep of 3 Aug 2026 listed "predictable extraction
+//! read-only review sweep of 3 Aug 2026 listed "predictable extraction
 //! staging remains vulnerable to pre-existing-path interference/deletion"
 //! among three older items it rechecked and left undispositioned.
 //! Re-derived 23 Aug 2026: the paths ARE predictable - `.nzbfast-nest*`

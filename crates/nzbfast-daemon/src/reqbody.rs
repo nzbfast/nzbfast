@@ -104,7 +104,7 @@ impl BodyBudget {
     /// upward by a chunk each per wait - 8 MiB per 5 s with the HTTP
     /// worker count, walking back to the multi-gigabyte figure this
     /// budget exists to prevent. It needed no credentials beyond the
-    /// add-only tier `addfile` accepts. Found by Codex on the 31 Jul
+    /// add-only tier `addfile` accepts. Found by review on the 31 Jul
     /// sweep; `stalled_holders_cannot_ratchet_the_pool_upward` is the
     /// regression test, and it reached 7x the cap in 600 ms against the
     /// old rule.
@@ -153,10 +153,10 @@ impl BodyBudget {
 /// the READ, before the body was parsed - so the parse phase (and a body
 /// retained for later arms, like the pre-auth form buffer) sat entirely
 /// outside the budget, and concurrent workers could each hold a full
-/// 256 MiB body "for free" while parsing (Codex H8). Callers that keep
+/// 256 MiB body "for free" while parsing (review H8). Callers that keep
 /// the bytes keep the guard beside them.
 ///
-/// Since Codex sweep 2's H1 the /api pre-read covers EVERY post, so this
+/// Since review sweep 2's H1 the /api pre-read covers EVERY post, so this
 /// window now spans dispatch for bodies that used to be read (and
 /// released) inside a handler - an untyped or `text/plain` POST among
 /// them. The extra exposure is bounded by [`api_body_cap`], which gives
@@ -188,7 +188,7 @@ pub const API_BODY_DEFAULT: u64 = 1 << 20;
 /// pre-read at the front controller), so this is where the endpoint's
 /// real limit has to be applied - the handlers' own capped-read
 /// fallbacks are unreachable now, and a flat ceiling would let a
-/// nominal 1 MiB endpoint buffer and parse 256 MiB (Codex sweep 2,
+/// nominal 1 MiB endpoint buffer and parse 256 MiB (review sweep 2,
 /// 3 Aug M1).
 ///
 /// Only the modes that legitimately carry bulk are listed; everything

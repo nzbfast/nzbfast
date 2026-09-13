@@ -12,7 +12,7 @@
 //!
 //! **The archives are written by a LIBRARY, and never by hand.** RAR
 //! comes from `rars`: the workspace member is `vendor/rars`, the
-//! mirror, and the fork at `~/Claude/rars` is where a writer change is
+//! mirror, and the fork at `the upstream rars fork` is where a writer change is
 //! made and synced in from (memory
 //! `nzbfast-rars-fork-location-and-drift`). 7z comes from the vendored
 //! `sevenz-rust2`, through [`crate::sevenz`], which is that module's
@@ -86,6 +86,7 @@
 //! `sample/s.bin`. That is a requirement rather than a courtesy - the
 //! bytes for it are on the wire.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
@@ -231,7 +232,7 @@ impl std::fmt::Display for ContainerError {
                  The profile loads because the selection is meaningful; the generator refuses \
                  it because emitting a DIFFERENT shape that happens to build would be a row \
                  that tests something nobody asked for. Widening a RAR writer is a change in \
-                 the fork at ~/Claude/rars, synced into vendor/rars - never a hand-edit of \
+                 the fork at the upstream rars fork, synced into vendor/rars - never a hand-edit of \
                  the vendored source"
             ),
             Self::Contradiction(why) => write!(f, "[container] {why}"),
@@ -293,6 +294,118 @@ impl std::fmt::Display for ContainerError {
 
 impl std::error::Error for ContainerError {}
 
+/// How hard the RAR 5 writer looks for matches, at the levels of the
+/// stack a profile asked to COMPRESS.
+///
+/// Not a profile field and not a plane. A profile describes a SHAPE a
+/// client has to handle, and this changes no shape at all: the archive
+/// carries the same members under the same names, the same volumes, the
+/// same headers, and comes back out through the same extraction path
+/// either way. Only the packed bytes move. So it is a deployment choice
+/// of exactly the class `crate::post`'s header describes - `--group`,
+/// `--spread-ms`, `--nfo` - and it rides the same route they do: a flag
+/// on the posting tool, carried down here, with the catalog and every
+/// fixture left on what the writer has always done.
+///
+/// **Why not a rung of the RAR 5 compression-level ladder**, which is
+/// the other obvious home (`rars`'s `encode_options_for_level`, levels
+/// 0..5 at candidate budgets 0/8/32/64/48/64):
+///
+/// - The rung numbers ARE the archive's method field
+///   (`compression_method_for_level`), and `validate_compression_level`
+///   refuses anything outside 0..5, so there is no rung to add. The
+///   parse would have to displace one that already means something.
+/// - The writer's own default is level `None`, which is off that ladder
+///   entirely: 256 candidates, lazy matching on, method byte 1. Every
+///   rung ON the ladder is a shallower search than that default - level
+///   5 is 64 candidates - so reaching the parse by selecting a level
+///   would cut the candidate budget to a quarter and move the method
+///   byte in the same breath. This crate selects no level today, and
+///   the point of wiring the small lever is not to move two larger ones
+///   past it.
+/// - Level 5 also carries the fallback candidate ladder
+///   (`encode_option_candidates_for_level` re-encodes each member at
+///   levels 4, 3, 2 and 1 and keeps whichever came out smallest), and
+///   the parse flag rides every one of those candidates. A level-5 rung
+///   would therefore pay the parse five times per member.
+/// - And the parse is orthogonal to the depth: it was measured at both
+///   128 KiB (the default until 7 Sep 2026) and at 32 MiB (the default
+///   since), worth about -2.4% of
+///   the archive for about 3.7x the creation CPU. A flag says
+///   "available at any depth", which is what the measurements say; a
+///   rung would say "only at 5", which is a fact about neither the
+///   format nor the measurement.
+///
+/// The remaining route, a `[container]` key in the profile schema, is
+/// refused by the first paragraph: the oracle would have a row whose
+/// two arms no reader can tell apart.
+///
+/// **The default is the lazy parser**, which is what every archive this
+/// crate has ever written used. Turning it on for a real post would be
+/// defensible - a post is created once and downloaded many times, and
+/// its creation CPU is a background one-off - but that is a change to a
+/// shipped default and it has not been made here.
+///
+/// **The same lever also selects the writer's sampled regional filters**
+/// (`FilterPolicy::Sampled`, 7 Sep 2026): every 262,143-byte region of a
+/// compressed member votes a byte-lane delta or executable transform on
+/// three cheap probes, and one encode carries the winners. It rides
+/// `optimal_parse` rather than being a second flag because it is the same
+/// choice - the smallest archive the writer knows how to make - and
+/// because the members it fires on (medical rasters, sensor records,
+/// float tables) are exactly the ones the parse alone loses by double
+/// digits against rar: mr 3,025,757 -> 2,642,508 and x-ray 5,161,783 ->
+/// 4,055,259 bytes at 32 MiB, from +11%/+24% over rar 7.23's exhaustive
+/// mode to 3.4%/2.3% under it. On a member no region votes for (text,
+/// source, already-compressed media, the mixed corpus) the archive is
+/// byte-identical and the probes cost a few percent of the encode.
+/// The measurements are in the private research record beside the
+/// ratio lab's (`research/rar5-ratio-lab/`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Packing {
+    /// Parse by least total estimated bits rather than greedily with a
+    /// lazy re-probe, and let every region of a member vote for a filter.
+    /// RAR 5 only: it is that writer's parser and that writer's filters,
+    /// and the RAR 4, 7z and zip arms have nothing here to select.
+    pub optimal_parse: bool,
+    /// The RAR 5 dictionary to ask for, in bytes; `None` is the writer's
+    /// default (32 MiB since 7 Sep 2026, rar's own). What the archive
+    /// declares is fitted to the largest member either way, so a post of
+    /// small files never asks an extractor for a window it cannot use;
+    /// the knob is for the one shape where more pays - a single large
+    /// compressible member for a desktop audience - or for a memory-poor
+    /// audience that wants less. RAR 5 only.
+    pub dictionary: Option<u64>,
+}
+
+impl Packing {
+    /// The RAR 5 writer's filter policy for this packing: the sampled
+    /// regional filters ride the optimal parse. (The writers refuse every
+    /// filter policy for a solid set; no container here is solid, see
+    /// `features`.)
+    fn filter_policy(self) -> rars::rar50::FilterPolicy {
+        if self.optimal_parse {
+            rars::rar50::FilterPolicy::Sampled
+        } else {
+            rars::rar50::FilterPolicy::None
+        }
+    }
+}
+
+impl Packing {
+    /// What the writer has always done: the lazy parser, every arm.
+    pub const LAZY: Self = Self {
+        optimal_parse: false,
+        dictionary: None,
+    };
+    /// The smallest archive these writers know how to make at the
+    /// default dictionary.
+    pub const SMALLEST: Self = Self {
+        optimal_parse: true,
+        dictionary: None,
+    };
+}
+
 /// Build the container a profile describes, or `None` for C0.
 ///
 /// Draw order, which is part of the determinism contract: this stage
@@ -305,6 +418,22 @@ pub fn wrap(
     profile: &Profile,
     sources: &[SourceFile],
     rng: &mut Rng,
+) -> Result<Option<Contained>, ContainerError> {
+    wrap_with(profile, sources, rng, Packing::LAZY)
+}
+
+/// [`wrap`] under a caller's [`Packing`].
+///
+/// A second entry point rather than a fourth argument on the one above,
+/// so that the catalog, the oracle and every fixture keep saying what
+/// they said: a container built from a profile alone is built the way
+/// it has always been built, and only a caller that has something to
+/// say about the packing has to say it.
+pub fn wrap_with(
+    profile: &Profile,
+    sources: &[SourceFile],
+    rng: &mut Rng,
+    packing: Packing,
 ) -> Result<Option<Contained>, ContainerError> {
     let c = &profile.container;
     if c.kind == ContainerKind::None {
@@ -350,9 +479,18 @@ pub fn wrap(
     for level in &stack[..levels - 1] {
         refuse_a_level_shape(&level.c)?;
     }
-    let mut members: Vec<(String, Vec<u8>)> = sources
+    // BORROWED, not copied. The payload is `sources`' already and the
+    // writers only ever read it; cloning it here was a second whole
+    // copy of the payload live for the length of the build - half of
+    // the 512 MiB floor both arms started from at
+    // `assemble::MAX_TOTAL_PAYLOAD`, measured 8 Sep 2026 with a
+    // counting global allocator over requested live heap.
+    // `Cow` and not a plain slice because the levels ABOVE the payload
+    // carry an inner archive that this function just wrote and that
+    // nothing else owns.
+    let mut members: Vec<(String, Cow<'_, [u8]>)> = sources
         .iter()
-        .map(|s| (s.rel.clone(), s.bytes.clone()))
+        .map(|s| (s.rel.clone(), Cow::Borrowed(s.bytes.as_slice())))
         .collect();
     let mut volumes: Vec<Vec<u8>> = Vec::new();
     // What comes OUT of the whole stack besides the payload: every
@@ -389,7 +527,7 @@ pub fn wrap(
     // the client to repair nothing. Here the ordering has to live
     // inside this loop, because the set a level's damage hides from is
     // that level's own, built one line earlier.
-    let mut wire: Option<Vec<(String, Vec<u8>)>> = None;
+    let mut wire: Option<Vec<(String, Cow<'_, [u8]>)>> = None;
     let mut wire_volumes: Option<Vec<Vec<u8>>> = None;
     let mut extras: Vec<usize> = Vec::with_capacity(levels);
     for (level, lv) in stack.iter().enumerate() {
@@ -399,9 +537,18 @@ pub fn wrap(
         // level is still the archive - which is what a reader of a
         // failing extraction looks at first.
         let siblings = draw_siblings(lc, &mut sib_rng);
-        members.extend(siblings.iter().cloned());
+        // A sibling is drawn here and owned by nobody else, so it joins
+        // the borrowed payload as an owned member. It is furniture -
+        // kilobytes - which is why this one is copied and the payload
+        // above it is not.
+        let as_members = |v: &[(String, Vec<u8>)]| -> Vec<(String, Cow<'_, [u8]>)> {
+            v.iter()
+                .map(|(n, b)| (n.clone(), Cow::Owned(b.clone())))
+                .collect()
+        };
+        members.extend(as_members(&siblings));
         if let Some(w) = wire.as_mut() {
-            w.extend(siblings.iter().cloned());
+            w.extend(as_members(&siblings));
         }
         escapes.extend(siblings.iter().cloned());
         landed.extend(siblings);
@@ -417,17 +564,17 @@ pub fn wrap(
         extras.push(members.len() - below);
         let outermost = level + 1 == levels;
         if outermost && lc.volume_bytes > 0 {
-            volumes = write_volume_set(lc, &members, salts[level])?;
+            volumes = write_volume_set(lc, &members, salts[level], packing)?;
             refuse_a_compressed_archive_that_stored(lc, &volumes)?;
             if let Some(w) = &wire {
-                wire_volumes = Some(write_volume_set(lc, w, salts[level])?);
+                wire_volumes = Some(write_volume_set(lc, w, salts[level], packing)?);
             }
             break;
         }
-        let bytes = write_one_archive(lc, &members, salts[level])?;
+        let bytes = write_one_archive(lc, &members, salts[level], packing)?;
         refuse_a_compressed_archive_that_stored(lc, std::slice::from_ref(&bytes))?;
         let wire_bytes = match &wire {
-            Some(w) => Some(write_one_archive(lc, w, salts[level])?),
+            Some(w) => Some(write_one_archive(lc, w, salts[level], packing)?),
             None => None,
         };
         if outermost {
@@ -472,10 +619,15 @@ pub fn wrap(
         // pin.
         let base = wire_bytes.unwrap_or_else(|| bytes.clone());
         let spoiled = spoil_a_level(profile, levels, level, base, &inner_name, rng)?;
-        let mut next_wire: Vec<(String, Vec<u8>)> = vec![(inner_name.clone(), spoiled)];
-        next_wire.extend(own_set.iter().cloned());
-        let mut next_clean: Vec<(String, Vec<u8>)> = vec![(inner_name, bytes)];
-        next_clean.extend(own_set);
+        let mut next_wire: Vec<(String, Cow<'_, [u8]>)> =
+            vec![(inner_name.clone(), Cow::Owned(spoiled))];
+        next_wire.extend(
+            own_set
+                .iter()
+                .map(|(n, b)| (n.clone(), Cow::Owned(b.clone()))),
+        );
+        let mut next_clean: Vec<(String, Cow<'_, [u8]>)> = vec![(inner_name, Cow::Owned(bytes))];
+        next_clean.extend(own_set.into_iter().map(|(n, b)| (n, Cow::Owned(b))));
         // The fork opens at the first damaged level and stays open.
         if wire.is_some() || next_wire != next_clean {
             wire = Some(next_wire);
@@ -998,6 +1150,28 @@ fn refuse_a_polyglot_the_client_never_has_to_read(c: &Container) -> Result<(), C
              (C9), or drop the polyglot key"
         )));
     }
+    // ZIP IS NOT A SCAN FAMILY, so it cannot be the first half of a
+    // disambiguation. `nzbkit::sfx::SfxFamily` is Rar and SevenZ only -
+    // a zip behind a stub is located from its TAIL on purpose, because a
+    // forward scan for `PK` claims ordinary programs - so
+    // `sfx_payload_at` walks straight past the zip and confirms the
+    // trailing archive. This arm read `is_sevenz()` and called
+    // everything else "rar", which let `kind = "zip-stored"` +
+    // `polyglot = "7z"` through as two distinct families: the emitted
+    // file is [stub][zip][7z], the client following C8's own
+    // earliest-confirmed rule opens the 7z, and the row measured the
+    // wrong archive. The mirror spelling (zip + `polyglot = "rar"`) was
+    // refused as "one format twice", which was the wrong reason for the
+    // right answer.
+    if c.kind.is_zip() {
+        return Err(ContainerError::Contradiction(format!(
+            "polyglot = {second:?} beside a zip container. C8 is format disambiguation and \
+             the client's forward scan has no zip family at all \
+             (nzbkit::sfx::SfxFamily is Rar and SevenZ; a zip is located from its tail), so \
+             it would never see the zip as a candidate and would settle on the {second} \
+             outright - the row would measure the second archive. Select a rar or 7z kind"
+        )));
+    }
     let first = if c.kind.is_sevenz() { "7z" } else { "rar" };
     if first == second {
         return Err(ContainerError::Contradiction(format!(
@@ -1257,11 +1431,268 @@ fn writer_err(c: &Container, e: rars::Error) -> ContainerError {
     }
 }
 
-/// One unsplit archive holding `members`.
-fn write_one_archive(
+/// The RAR5 writer options every arm of this file builds from, single
+/// archive and volume set alike.
+///
+/// ONE copy, and not because the two call sites happened to agree: they
+/// have to, or a profile would emit different bytes depending only on
+/// whether it was split, which is the one thing `volume_bytes` is
+/// supposed to decide. It is also what lets a test compare the streamed
+/// writers against the in-memory ones under the options PRODUCTION
+/// passes, rather than under a second copy of them that can drift.
+fn rar50_opts(
     c: &Container,
-    members: &[(String, Vec<u8>)],
+    entropy: rars::Entropy,
+    packing: Packing,
+) -> rars::rar50::WriterOptions {
+    let opts = rars::rar50::WriterOptions::new(target(c), features(c))
+        .with_entropy(entropy)
+        .with_optimal_parse(packing.optimal_parse)
+        // The writer's own allowances are host-sized and admitted by
+        // nothing: 128 MiB of block wave per pool thread floored at a
+        // GIBIBYTE, 512 MiB of parse hints, and a match-finder tree of
+        // ten bytes per dictionary byte. A 32-bit poster's whole budget
+        // is 1 GiB, so the floor alone outspent it. Charge the encode
+        // against the same budget the rest of the pipeline shares.
+        .with_write_policy(Some(nzbkit::mem::process_budget().rar_write_policy()));
+    match packing.dictionary {
+        Some(bytes) => opts.with_dictionary_size(bytes),
+        None => opts,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The RAR5 STORED arms, written STREAMED.
+//
+// The streamed entry points that landed in the fork on 6 Sep 2026 copy a
+// megabyte at a time from a `Read` into a `Write`, and are byte-identical
+// to the in-memory writers over the same members: the fork holds tests on
+// that, and `container/tests.rs` holds it again from this side, against
+// the writer each arm replaced under the options production passes.
+//
+// WHAT THIS BOUGHT, MEASURED 9 Sep 2026, release, one 512 MiB stored
+// member, in-memory arm -> streamed arm:
+//
+//   arm                        requested peak      peak process RSS
+//   single archive          1536 -> 1281 MiB      1028 -> 1031 MiB
+//   single archive, encrypted   1536 -> 1282 MiB   1028 -> 1031 MiB
+//   single archive, recovery 5%  2075 -> 2075 MiB  1111 -> 1109 MiB
+//   volume set                1059 -> 1038 MiB     1028 -> 1029 MiB
+//
+// So: about a sixth off the REQUESTED live-heap peak on the two single
+// archive arms, nothing on the recovery arm, and NOTHING ANYWHERE on peak
+// process RSS - three runs each, spread under 2 MiB. One change moving
+// the two metrics differently is not a surprise here: the same split
+// re-judged three landed RAR5 memory changes in Sep 2026, and it is why
+// a memory claim in this tree has to say WHICH peak it means. The
+// requested-peak column is the one that moved.
+//
+// WHAT IT DID NOT BUY, and the next lane must not read into it: this does
+// NOT bound end-to-end writer memory, and the 2,050.8 MiB -> 3.8 MiB
+// figure measured for a streamed STORED create belongs to a file-to-file
+// create and does not transfer here. postfast's own contract is in-memory
+// end to end - `wrap` takes `SourceFile { bytes: Vec<u8> }` and hands back
+// `Vec<Vec<u8>>` - so the members are resident before the writer is
+// called and the archive has to be materialised for the caller after it.
+// Both terms survive, which is the whole RSS figure. Bounding THAT is a
+// change to this crate's API, not a change of writer, and it is still
+// open. Neither figure says anything about a COMPRESSED create: those
+// arms have streamed counterparts too and are deliberately left where
+// they are, un-measured from here.
+//
+// STORED ONLY, for that last reason.
+
+/// The options a STREAMED stored write takes, or `None` when this shape
+/// has to stay on the in-memory writer.
+///
+/// The streamed entry points refuse solid sets, archive comments,
+/// quick-open and BLAKE2sp hash records, and the ENCRYPTED pair refuses a
+/// recovery record on top of that. [`features`] builds `store_only()`
+/// plus the encryption flags and the options carry the default
+/// `Crc32Only`, so no catalog row reaches those refusals today. They are
+/// ASKED rather than asserted so that a feature added to [`features`]
+/// tomorrow falls back to the writer that has always built it, instead of
+/// turning into a writer error at a call site that used to work.
+///
+/// The one flag this REWRITES is `recovery_record`, and only because the
+/// two halves of the fork disagree about it: no rar50 writer reads the
+/// flag (the percent alone decides, which is why [`features`] has never
+/// set it - only `rar15_40` couples them, and the RAR4 arm below says so
+/// in its own comment), while the streamed pair refuses a percent without
+/// it. Setting it moves no byte of the output, and
+/// `a_streamed_stored_archive_is_the_in_memory_bytes` holds that from
+/// here.
+fn streamed_stored_opts(
+    mut opts: rars::rar50::WriterOptions,
+    recovery: Option<u64>,
+    encrypted: bool,
+) -> Option<rars::rar50::WriterOptions> {
+    let f = opts.features;
+    if f.solid || f.archive_comment || f.quick_open {
+        return None;
+    }
+    if opts.hash_record != rars::rar50::HashRecord::Crc32Only {
+        return None;
+    }
+    if encrypted && recovery.is_some() {
+        return None;
+    }
+    opts.features.recovery_record = recovery.is_some();
+    Some(opts)
+}
+
+/// `members` as the streamed writers want them.
+///
+/// The size and the CRC32 are up front because a streamed file header
+/// PRECEDES the body it describes, so neither can be discovered while
+/// copying. Over a slice that is a second pass and no second copy;
+/// `crc32_of_reader` is the fork's own, so the checksum is the one its
+/// in-memory writers would have computed.
+fn streamed_stored_entries<B: AsRef<[u8]>>(
+    members: &[(String, B)],
+) -> rars::Result<Vec<rars::rar50::StreamedStoredEntry<'_, &[u8]>>> {
+    members
+        .iter()
+        .map(|(n, d)| {
+            let data = d.as_ref();
+            let (size, crc32) = rars::rar50::crc32_of_reader(&mut &data[..])?;
+            Ok(rars::rar50::StreamedStoredEntry {
+                name: n.as_bytes(),
+                mtime: None,
+                attributes: 0,
+                host_os: 0,
+                size,
+                crc32,
+                source: data,
+            })
+        })
+        .collect()
+}
+
+/// One stored archive, written streamed into a buffer.
+fn streamed_stored_archive<B: AsRef<[u8]>>(
+    opts: rars::rar50::WriterOptions,
+    recovery: Option<u64>,
+    members: &[(String, B)],
+) -> rars::Result<Vec<u8>> {
+    let mut entries = streamed_stored_entries(members)?;
+    let mut out = Vec::new();
+    rars::rar50::write_stored_archive_streamed_with_recovery(
+        opts,
+        recovery,
+        &mut entries,
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+/// One encrypted stored archive, written streamed into a buffer.
+fn streamed_encrypted_stored_archive<B: AsRef<[u8]>>(
+    opts: rars::rar50::WriterOptions,
+    password: &[u8],
+    members: &[(String, B)],
+) -> rars::Result<Vec<u8>> {
+    let mut entries = streamed_stored_entries(members)?;
+    let mut out = Vec::new();
+    rars::rar50::write_encrypted_stored_archive_streamed(opts, password, &mut entries, &mut out)?;
+    Ok(out)
+}
+
+/// A shared list of volume buffers plus the `open_volume` closure the
+/// streamed set writers take.
+///
+/// The set writers hand back the byte COUNTS and never the sinks, so each
+/// volume's bytes come back through a cell the closure keeps a second
+/// reference to. `Rc<RefCell<..>>` for the reason `extract_set` gives:
+/// one thread, and the sink has to be owned by the writer. The slot is
+/// reserved when a volume is OPENED rather than when it is sealed,
+/// because the writer holds two volumes at once - it seals a volume only
+/// once the next has opened, which is how it knows whether to set the
+/// end header's "another volume follows" flag - and opening order is
+/// volume order.
+fn volume_collector(
+    per_volume: usize,
+) -> (
+    Rc<RefCell<Vec<Rc<RefCell<Vec<u8>>>>>>,
+    impl FnMut(u64) -> std::io::Result<Collect>,
+) {
+    // RESERVED, and that is the whole reason this takes an argument. A
+    // volume is `per_volume` bytes of member data plus its headers, so
+    // its size is known before a byte of it is written - and a `Vec`
+    // left to find that out by doubling asks for the volume again on
+    // its way there, which measured as +190 MiB of requested peak over
+    // the in-memory set writer on a 512 MiB payload (9 Sep 2026). The
+    // in-memory writer does not pay it because it never grows a volume
+    // buffer blind. Process RSS did not move either way: this is the
+    // requested-live-heap metric `wrap`'s payload comment measures on,
+    // and the two do not track each other.
+    const VOLUME_HEADROOM: usize = 64 * 1024;
+    let reserve = per_volume.saturating_add(VOLUME_HEADROOM);
+    let parts: Rc<RefCell<Vec<Rc<RefCell<Vec<u8>>>>>> = Rc::new(RefCell::new(Vec::new()));
+    let open = {
+        let parts = Rc::clone(&parts);
+        move |_index: u64| {
+            let cell = Rc::new(RefCell::new(Vec::with_capacity(reserve)));
+            parts.borrow_mut().push(Rc::clone(&cell));
+            Ok(Collect(cell))
+        }
+    };
+    (parts, open)
+}
+
+/// The collected volumes, taken out of their cells rather than cloned.
+fn take_volumes(parts: Rc<RefCell<Vec<Rc<RefCell<Vec<u8>>>>>>) -> Vec<Vec<u8>> {
+    parts
+        .borrow()
+        .iter()
+        .map(|cell| std::mem::take(&mut *cell.borrow_mut()))
+        .collect()
+}
+
+/// A stored volume set, written streamed.
+fn streamed_stored_volumes<B: AsRef<[u8]>>(
+    opts: rars::rar50::WriterOptions,
+    recovery: Option<u64>,
+    per_volume: usize,
+    members: &[(String, B)],
+) -> rars::Result<Vec<Vec<u8>>> {
+    let mut entries = streamed_stored_entries(members)?;
+    let (parts, open) = volume_collector(per_volume);
+    rars::rar50::write_stored_volumes_streamed_with_recovery(
+        opts,
+        recovery,
+        per_volume,
+        &mut entries,
+        open,
+    )?;
+    Ok(take_volumes(parts))
+}
+
+/// An encrypted stored volume set, written streamed.
+fn streamed_encrypted_stored_volumes<B: AsRef<[u8]>>(
+    opts: rars::rar50::WriterOptions,
+    password: &[u8],
+    per_volume: usize,
+    members: &[(String, B)],
+) -> rars::Result<Vec<Vec<u8>>> {
+    let mut entries = streamed_stored_entries(members)?;
+    let (parts, open) = volume_collector(per_volume);
+    rars::rar50::write_encrypted_stored_volumes_streamed(
+        opts,
+        password,
+        per_volume,
+        &mut entries,
+        open,
+    )?;
+    Ok(take_volumes(parts))
+}
+
+/// One unsplit archive holding `members`.
+fn write_one_archive<B: AsRef<[u8]>>(
+    c: &Container,
+    members: &[(String, B)],
     seed: [u8; 32],
+    packing: Packing,
 ) -> Result<Vec<u8>, ContainerError> {
     if c.kind.is_zip() {
         return crate::zip::write_archive(members, c.kind.is_compressed()).map_err(|detail| {
@@ -1288,9 +1719,10 @@ fn write_one_archive(
     let recovery = (c.recovery_record_pct > 0).then_some(u64::from(c.recovery_record_pct));
     match c.version {
         RarVersion::Rar5 => {
-            let opts =
-                rars::rar50::WriterOptions::new(target(c), features(c)).with_entropy(entropy);
-            let w = rars::rar50::Rar50Writer::new(opts).recovery_percent(recovery);
+            let opts = rar50_opts(c, entropy, packing);
+            let w = rars::rar50::Rar50Writer::new(opts)
+                .recovery_percent(recovery)
+                .filter_policy(packing.filter_policy());
             let bytes = match (c.kind, c.encryption) {
                 (ContainerKind::None, _) => unreachable!("guarded by wrap"),
                 (
@@ -1303,38 +1735,46 @@ fn write_one_archive(
                     unreachable!("only a rar kind reaches the rar writers")
                 }
                 (ContainerKind::RarStored, Encryption::None) => {
-                    let e: Vec<_> = members
-                        .iter()
-                        .map(|(n, d)| rars::rar50::StoredEntry {
-                            name: n.as_bytes(),
-                            data: d,
-                            mtime: None,
-                            attributes: 0,
-                            host_os: 0,
-                        })
-                        .collect();
-                    w.stored_entries(&e).finish()
+                    match streamed_stored_opts(opts, recovery, false) {
+                        Some(sopts) => streamed_stored_archive(sopts, recovery, members),
+                        None => {
+                            let e: Vec<_> = members
+                                .iter()
+                                .map(|(n, d)| rars::rar50::StoredEntry {
+                                    name: n.as_bytes(),
+                                    data: d.as_ref(),
+                                    mtime: None,
+                                    attributes: 0,
+                                    host_os: 0,
+                                })
+                                .collect();
+                            w.stored_entries(&e).finish()
+                        }
+                    }
                 }
-                (ContainerKind::RarStored, _) => {
-                    let e: Vec<_> = members
-                        .iter()
-                        .map(|(n, d)| rars::rar50::EncryptedStoredEntry {
-                            name: n.as_bytes(),
-                            data: d,
-                            mtime: None,
-                            attributes: 0,
-                            host_os: 0,
-                            password: pw,
-                        })
-                        .collect();
-                    w.encrypted_stored_entries(&e).finish()
-                }
+                (ContainerKind::RarStored, _) => match streamed_stored_opts(opts, recovery, true) {
+                    Some(sopts) => streamed_encrypted_stored_archive(sopts, pw, members),
+                    None => {
+                        let e: Vec<_> = members
+                            .iter()
+                            .map(|(n, d)| rars::rar50::EncryptedStoredEntry {
+                                name: n.as_bytes(),
+                                data: d.as_ref(),
+                                mtime: None,
+                                attributes: 0,
+                                host_os: 0,
+                                password: pw,
+                            })
+                            .collect();
+                        w.encrypted_stored_entries(&e).finish()
+                    }
+                },
                 (ContainerKind::RarCompressed, Encryption::None) => {
                     let e: Vec<_> = members
                         .iter()
                         .map(|(n, d)| rars::rar50::CompressedEntry {
                             name: n.as_bytes(),
-                            data: d,
+                            data: d.as_ref(),
                             mtime: None,
                             attributes: 0,
                             host_os: 0,
@@ -1347,7 +1787,7 @@ fn write_one_archive(
                         .iter()
                         .map(|(n, d)| rars::rar50::EncryptedCompressedEntry {
                             name: n.as_bytes(),
-                            data: d,
+                            data: d.as_ref(),
                             mtime: None,
                             attributes: 0,
                             host_os: 0,
@@ -1384,7 +1824,7 @@ fn write_one_archive(
                         .iter()
                         .map(|(n, d)| rars::rar15_40::StoredEntry {
                             name: n.as_bytes(),
-                            data: d,
+                            data: d.as_ref(),
                             file_time: 0,
                             file_attr: 0,
                             host_os: 0,
@@ -1399,7 +1839,7 @@ fn write_one_archive(
                         .iter()
                         .map(|(n, d)| rars::rar15_40::FileEntry {
                             name: n.as_bytes(),
-                            data: d,
+                            data: d.as_ref(),
                             file_time: 0,
                             file_attr: 0,
                             host_os: 0,
@@ -1425,10 +1865,11 @@ fn write_one_archive(
 /// which a single member split across every volume does not need and
 /// which no shipped single-member row carries - so a one-member RAR4
 /// split stays on the writer it has always used.
-fn write_volume_set(
+fn write_volume_set<B: AsRef<[u8]>>(
     c: &Container,
-    members: &[(String, Vec<u8>)],
+    members: &[(String, B)],
     seed: [u8; 32],
+    packing: Packing,
 ) -> Result<Vec<Vec<u8>>, ContainerError> {
     let per_volume = usize::try_from(c.volume_bytes).unwrap_or(usize::MAX);
     if c.kind.is_sevenz() || c.kind.is_zip() {
@@ -1445,7 +1886,7 @@ fn write_volume_set(
         // hand-assembly was first written. Chunking a byte slice at a
         // fixed offset knows nothing about either format, so a second
         // copy in `crate::zip` would be a second copy of one rule.
-        let whole = write_one_archive(c, members, seed)?;
+        let whole = write_one_archive(c, members, seed, packing)?;
         return Ok(crate::sevenz::split_parts(&whole, per_volume));
     }
     let entropy = rars::Entropy::Seeded(seed);
@@ -1453,12 +1894,12 @@ fn write_volume_set(
     let one = &members[0];
     match c.version {
         RarVersion::Rar5 => {
-            let opts =
-                rars::rar50::WriterOptions::new(target(c), features(c)).with_entropy(entropy);
+            let opts = rar50_opts(c, entropy, packing);
             let recovery = (c.recovery_record_pct > 0).then_some(u64::from(c.recovery_record_pct));
             let w = rars::rar50::Rar50VolumeWriter::new(opts)
                 .max_payload_per_volume(per_volume)
-                .recovery_percent(recovery);
+                .recovery_percent(recovery)
+                .filter_policy(packing.filter_policy());
             let bytes = match (c.kind, c.encryption) {
                 (ContainerKind::None, _) => unreachable!("guarded by wrap"),
                 (
@@ -1475,43 +1916,58 @@ fn write_volume_set(
                     // set carries several members since the H0 writer
                     // arm landed. One member still splits across the
                     // volumes exactly as before - `stored_entries` with
-                    // a single entry packs it the same way.
-                    let e: Vec<_> = members
-                        .iter()
-                        .map(|(n, d)| rars::rar50::StoredEntry {
-                            name: n.as_bytes(),
-                            data: d,
-                            mtime: None,
-                            attributes: 0,
-                            host_os: 0,
-                        })
-                        .collect();
-                    w.stored_entries(&e).finish()
+                    // a single entry packs it the same way, and so does
+                    // the streamed set writer beside it.
+                    match streamed_stored_opts(opts, recovery, false) {
+                        Some(sopts) => {
+                            streamed_stored_volumes(sopts, recovery, per_volume, members)
+                        }
+                        None => {
+                            let e: Vec<_> = members
+                                .iter()
+                                .map(|(n, d)| rars::rar50::StoredEntry {
+                                    name: n.as_bytes(),
+                                    data: d.as_ref(),
+                                    mtime: None,
+                                    attributes: 0,
+                                    host_os: 0,
+                                })
+                                .collect();
+                            w.stored_entries(&e).finish()
+                        }
+                    }
                 }
                 (ContainerKind::RarStored, _) => {
                     // The whole slice, not `one`: the encrypted stored
                     // plural landed beside the singular on 4 Sep 2026,
                     // which is what stopped an encrypted split set
                     // being compressed-only.
-                    let e: Vec<_> = members
-                        .iter()
-                        .map(|(n, d)| rars::rar50::EncryptedStoredEntry {
-                            name: n.as_bytes(),
-                            data: d,
-                            mtime: None,
-                            attributes: 0,
-                            host_os: 0,
-                            password: pw,
-                        })
-                        .collect();
-                    w.encrypted_stored_entries(&e).finish()
+                    match streamed_stored_opts(opts, recovery, true) {
+                        Some(sopts) => {
+                            streamed_encrypted_stored_volumes(sopts, pw, per_volume, members)
+                        }
+                        None => {
+                            let e: Vec<_> = members
+                                .iter()
+                                .map(|(n, d)| rars::rar50::EncryptedStoredEntry {
+                                    name: n.as_bytes(),
+                                    data: d.as_ref(),
+                                    mtime: None,
+                                    attributes: 0,
+                                    host_os: 0,
+                                    password: pw,
+                                })
+                                .collect();
+                            w.encrypted_stored_entries(&e).finish()
+                        }
+                    }
                 }
                 (ContainerKind::RarCompressed, Encryption::None) => {
                     let e: Vec<_> = members
                         .iter()
                         .map(|(n, d)| rars::rar50::CompressedEntry {
                             name: n.as_bytes(),
-                            data: d,
+                            data: d.as_ref(),
                             mtime: None,
                             attributes: 0,
                             host_os: 0,
@@ -1524,7 +1980,7 @@ fn write_volume_set(
                         .iter()
                         .map(|(n, d)| rars::rar50::EncryptedCompressedEntry {
                             name: n.as_bytes(),
-                            data: d,
+                            data: d.as_ref(),
                             mtime: None,
                             attributes: 0,
                             host_os: 0,
@@ -1560,7 +2016,7 @@ fn write_volume_set(
                         .iter()
                         .map(|(n, d)| rars::rar15_40::StoredEntry {
                             name: n.as_bytes(),
-                            data: d,
+                            data: d.as_ref(),
                             file_time: 0,
                             file_attr: 0,
                             host_os: 0,
@@ -1573,7 +2029,7 @@ fn write_volume_set(
                 ContainerKind::RarStored => rars::rar15_40::write_stored_volumes(
                     rars::rar15_40::StoredEntry {
                         name: one.0.as_bytes(),
-                        data: &one.1,
+                        data: one.1.as_ref(),
                         file_time: 0,
                         file_attr: 0,
                         host_os: 0,
@@ -1588,7 +2044,7 @@ fn write_volume_set(
                         .iter()
                         .map(|(n, d)| rars::rar15_40::FileEntry {
                             name: n.as_bytes(),
-                            data: d,
+                            data: d.as_ref(),
                             file_time: 0,
                             file_attr: 0,
                             host_os: 0,
@@ -1601,7 +2057,7 @@ fn write_volume_set(
                 ContainerKind::RarCompressed => rars::rar15_40::write_compressed_volumes(
                     rars::rar15_40::FileEntry {
                         name: one.0.as_bytes(),
-                        data: &one.1,
+                        data: one.1.as_ref(),
                         file_time: 0,
                         file_attr: 0,
                         host_os: 0,
@@ -1769,7 +2225,11 @@ fn polyglot_tail(p: Polyglot) -> Result<Vec<u8>, ContainerError> {
             // source is the one that is reproducible at all - both
             // writers default to the OS, which the seed a write site
             // takes replaces for the duration of one archive.
-            write_one_archive(&c, &members, [0u8; 32])
+            // [`Packing::LAZY`], and not the caller's: a polyglot's
+            // second archive is STORED furniture, so there is no parse
+            // to select, and its bytes are fixed for the same reason
+            // its seed is.
+            write_one_archive(&c, &members, [0u8; 32], Packing::LAZY)
         }
     }
 }
@@ -1917,7 +2377,6 @@ fn read_the_set_back(
     extras: &[usize],
 ) -> Result<(), ContainerError> {
     let deepest = stack.len() - 1;
-    let mut set: Vec<Vec<u8>> = volumes.to_vec();
     // C9: the stub is stepped over rather than scanned past. This stage
     // wrote the prefix and knows how long it is, and only one of the two
     // readers would find the archive behind it anyway - `rars` scans for
@@ -1937,8 +2396,18 @@ fn read_the_set_back(
     // `tests::c9_leading_bytes_are_a_launcher_stub` and
     // `tests::c8_is_two_confirmed_archives_and_the_client_settles_on_the_earlier`,
     // which is a stronger check than a reader that happened to cope.
-    if outer.leading_bytes > 0 {
-        let head = set.first_mut().expect("a set holds at least a volume");
+    //
+    // The step is an OFFSET and not a copy of what is behind the stub.
+    // It was `head.split_off(at)` over a `volumes.to_vec()` until 8 Sep
+    // 2026 - a whole second copy of the posted set, which was the term
+    // that SET this crate's global peak on the stored arm (1,796 MiB
+    // at `assemble::MAX_TOTAL_PAYLOAD`, measured with a counting global
+    // allocator over requested live heap). The set below is `Cow` for
+    // that reason: the outermost level's volumes are borrowed where
+    // they lie, and only an INNER archive - which came out of the level
+    // above it and has nowhere else to live - is owned.
+    let stub = if outer.leading_bytes > 0 {
+        let head = volumes.first().expect("a set holds at least a volume");
         let at = usize::try_from(outer.leading_bytes).unwrap_or(usize::MAX);
         if head.len() <= at {
             return Err(ContainerError::RoundTrip(format!(
@@ -1946,8 +2415,15 @@ fn read_the_set_back(
                 head.len()
             )));
         }
-        *head = head.split_off(at);
-    }
+        at
+    } else {
+        0
+    };
+    let mut set: Vec<Cow<'_, [u8]>> = volumes
+        .iter()
+        .enumerate()
+        .map(|(i, v)| Cow::Borrowed(if i == 0 { &v[stub..] } else { v.as_slice() }))
+        .collect();
     // C14: what a level should hold beside the archive below it, keyed
     // by the level's index from the OUTSIDE, which is how this loop
     // counts.
@@ -1966,8 +2442,13 @@ fn read_the_set_back(
         // first and this level's siblings follow it, in the order
         // `wrap` wrote them.
         let below = if level == deepest { sources.len() } else { 1 };
-        let (carried, beside) = out.split_at(out.len().min(below));
-        set_aside.extend(beside.iter().cloned());
+        // Moved out of the extraction rather than cloned out of it: an
+        // inner archive is payload-sized and a sibling need not be
+        // small either, and nothing reads `out` again.
+        let mut carried = out;
+        let beside = carried.split_off(carried.len().min(below));
+        let held = carried.len() + beside.len();
+        set_aside.extend(beside);
         if level == deepest {
             let want: Vec<(String, usize)> = sources
                 .iter()
@@ -2016,23 +2497,23 @@ fn read_the_set_back(
         // or fewer would mean the generator had lost count of its own
         // nesting, which is the defect this check exists for.
         let want = 1 + extras[deepest - level];
-        if out.len() != want {
+        if held != want {
             return Err(ContainerError::RoundTrip(format!(
                 "nesting level {level} holds {} members and must hold {want} - the archive \
                  below it, {} sibling(s), and the {} recovery file(s) the level below packs \
                  up here",
-                out.len(),
+                held,
                 lc.siblings.len(),
                 extras[deepest - level] - lc.siblings.len()
             )));
         }
-        set = vec![
+        set = vec![Cow::Owned(
             carried
-                .first()
+                .into_iter()
+                .next()
                 .expect("a level holds at least the archive below it")
-                .1
-                .clone(),
-        ];
+                .1,
+        )];
     }
     unreachable!("the loop returns at the deepest level")
 }
@@ -2043,9 +2524,9 @@ fn read_the_set_back(
 /// The kind and not a signature sniff: this stage knows what it wrote,
 /// and sniffing would quietly read a level the writer built in the
 /// wrong format as though it were right.
-fn extract_kind(
+fn extract_kind<S: AsRef<[u8]>>(
     kind: ContainerKind,
-    set: &[Vec<u8>],
+    set: &[S],
     password: Option<&[u8]>,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
     if kind.is_zip() {
@@ -2076,7 +2557,10 @@ fn as_password_str(p: &[u8]) -> &str {
 
 /// Extract one RAR archive or volume set into (name, bytes), in archive
 /// order.
-fn extract_set(set: &[Vec<u8>], password: Option<&[u8]>) -> Result<Vec<(String, Vec<u8>)>, String> {
+fn extract_set<S: AsRef<[u8]>>(
+    set: &[S],
+    password: Option<&[u8]>,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let options = match password {
         Some(p) => ArchiveReadOptions::with_password(p),
         None => ArchiveReadOptions::new(),
@@ -2084,7 +2568,7 @@ fn extract_set(set: &[Vec<u8>], password: Option<&[u8]>) -> Result<Vec<(String, 
     let mut archives = Vec::with_capacity(set.len());
     for (i, bytes) in set.iter().enumerate() {
         archives.push(
-            ArchiveReader::read_with_options(bytes, options)
+            ArchiveReader::read_with_options(bytes.as_ref(), options)
                 .map_err(|e| format!("volume {} does not parse: {e}", i + 1))?,
         );
     }
@@ -2104,9 +2588,13 @@ fn extract_set(set: &[Vec<u8>], password: Option<&[u8]>) -> Result<Vec<(String, 
     let taken = Rc::try_unwrap(out)
         .map_err(|_| "the extractor kept its writer alive past the walk".to_string())?
         .into_inner();
+    // Taken OUT of each cell rather than cloned out of it. The clone
+    // was a second whole copy of everything the archive holds, live
+    // beside the first, and on the round trip that is the payload:
+    // a third 256 MiB term inside `read_the_set_back` at the cap.
     Ok(taken
         .into_iter()
-        .map(|(name, cell)| (name, cell.borrow().clone()))
+        .map(|(name, cell)| (name, std::mem::take(&mut *cell.borrow_mut())))
         .collect())
 }
 

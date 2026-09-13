@@ -24,6 +24,9 @@
 # against the pristine archive AND against `rar r`'s own repaired output, so
 # a tool that "succeeds" without actually reconstructing is caught.
 set -euo pipefail
+# Timed-leg discipline: rc captured, stderr kept, success decided per tool.
+# shellcheck source=../lib/legrc.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/legrc.sh"
 
 ROOT=${1:?usage: rr-race.sh <root> <rounds> <ours-bin> <rar> [sizes]}
 ROUNDS=${2:-3}
@@ -34,8 +37,7 @@ SIZES=${5:-16 32 128 512 2048}
 W=$ROOT
 mkdir -p "$W"
 cd "$W"
-
-now() { python3 -c 'import time; print(time.time())'; }
+leg_errdir "${RR_LOGS:-$ROOT/logs-rr}"
 
 damage() { # damage <name>
   local name=$1
@@ -58,23 +60,37 @@ for mb in $SIZES; do
     echo "$name.pristine.rar missing - build it with rr-build.sh" >&2
     continue
   fi
-  best_ours=999; best_rar=999; gate=OK
+  best_ours=999; best_rar=999; gate=OK; obsn=0
   for _ in $(seq "$ROUNDS"); do
+    obsn=$((obsn + 1))
     damage "$name"
     rm -f "$name.ours.rar"
-    t0=$(now); "$OURS" "$W/$name.dmg.rar" "$W/$name.ours.rar" >/dev/null 2>&1 || gate=OURS_FAIL; t1=$(now)
-    o=$(python3 -c "print(f'{$t1-$t0:.3f}')")
-    cmp -s "$name.ours.rar" "$name.pristine.rar" || gate=OURS_DIFF
+    # rc AND stderr, both kept. A repair that REFUSES returns fast, and a
+    # `>/dev/null 2>&1 || true` leg publishes that as the best time of the
+    # round. See the component README's trap list.
+    leg_timed ours "$name-ours-$obsn" "$OURS" "$W/$name.dmg.rar" "$W/$name.ours.rar"
+    o=$LEG_WALL; [[ $LEG_STATUS == OK ]] || gate="OURS_FAIL(rc=$LEG_RC)"
+    # Only when the exit code was fine: an rc failure EXPLAINS the diff, so
+    # it must not be overwritten by the diff it caused.
+    [[ $gate != OK ]] || cmp -s "$name.ours.rar" "$name.pristine.rar" || gate=OURS_DIFF
 
     damage "$name"
     rm -f "fixed.$name.dmg.rar"
-    t0=$(now); "$RAR" r -idq "$name.dmg.rar" >/dev/null 2>&1 || true; t1=$(now)
-    t=$(python3 -c "print(f'{$t1-$t0:.3f}')")
-    cmp -s "fixed.$name.dmg.rar" "$name.pristine.rar" || gate=RAR_DIFF
+    leg_timed rar "$name-rar-$obsn" "$RAR" r -idq "$name.dmg.rar"
+    t=$LEG_WALL; [[ $LEG_STATUS == OK ]] || gate="RAR_FAIL(rc=$LEG_RC)"
+    [[ $gate != OK ]] || cmp -s "fixed.$name.dmg.rar" "$name.pristine.rar" || gate=RAR_DIFF
 
+    # Only a leg that PASSED both gates is eligible for the best-of: a
+    # failure is fast, so folding it into a `min` is how a refusal becomes
+    # the published number.
+    [[ $gate == OK ]] || continue
     best_ours=$(python3 -c "print(min($best_ours,$o))")
     best_rar=$(python3 -c "print(min($best_rar,$t))")
   done
-  python3 -c "print('%-8s %8.3f %8.3f  %s (%.1fx)' % ('${mb}MB', $best_ours, $best_rar, '$gate', $best_rar/$best_ours))"
+  if [[ $gate != OK || $best_ours == 999 ]]; then
+    printf '%-8s %8s %8s  %s (stderr: %s)\n' "${mb}MB" FAILED FAILED "$gate" "$LEG_ERRDIR"
+  else
+    python3 -c "print('%-8s %8.3f %8.3f  %s (%.1fx)' % ('${mb}MB', $best_ours, $best_rar, '$gate', $best_rar/$best_ours))"
+  fi
   rm -f "$name.dmg.rar" "$name.ours.rar" "fixed.$name.dmg.rar"
 done

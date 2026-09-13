@@ -191,7 +191,13 @@ fn one_lap_heals_every_stored_row_the_classifier_now_reads_differently() {
             .enable_all()
             .build()
             .unwrap();
-        assert!(rt.block_on(maintenance_slice(d, false, true, &|| false)));
+        assert!(rt.block_on(maintenance_slice(
+            d,
+            false,
+            true,
+            &|| false,
+            &mut PassGate::detached()
+        )));
 
         let healed = rows(d);
         assert!(
@@ -264,7 +270,13 @@ fn the_quality_leg_stands_down_for_a_download() {
             .enable_all()
             .build()
             .unwrap();
-        assert!(rt.block_on(maintenance_slice(d, false, true, &|| false)));
+        assert!(rt.block_on(maintenance_slice(
+            d,
+            false,
+            true,
+            &|| false,
+            &mut PassGate::detached()
+        )));
         d.index_jobs_active.fetch_sub(1, Ordering::AcqRel);
 
         assert!(

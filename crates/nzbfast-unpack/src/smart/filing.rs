@@ -107,7 +107,7 @@ pub fn tv_organize(
             // payload takes the one its bytes sniff as. Filing it under
             // its hash instead put an unowned file in a SHARED season
             // folder - Play could not find it and delete-with-files
-            // dropped the history row and left it there (Codex sweep 5,
+            // dropped the history row and left it there (review sweep 5,
             // M1). `ext` above is still the on-disk name, which is what
             // the non-video branches below key off.
             let ext = video_ext(&path).unwrap_or(ext);
@@ -325,7 +325,7 @@ pub fn tv_rename(dir: &Path, stem: &str, suffix: &str, titles: &EpisodeTitles) -
     // beside a hash-named feature could take the episode name and become
     // what Play offers, leaving the real feature under its hash. Sample
     // names are excluded here by NAME alone, because since #43 they need
-    // not carry an extension (Codex sweep 5, M4).
+    // not carry an extension (review sweep 5, M4).
     let mut plan: Vec<(PathBuf, String, String, String)> = Vec::new();
     for entry in rd.flatten() {
         let path = entry.path();
@@ -673,7 +673,7 @@ pub fn nameless_video(dir: &Path) -> Option<PathBuf> {
         // sniffs as EBML counted as a second video here - so the lone
         // feature stopped being lone, this returned None, and the
         // feature kept its hash through both identify and synthesised
-        // naming (Codex sweep 6, N1). The DELETE sweep stays on
+        // naming (review sweep 6, N1). The DELETE sweep stays on
         // `is_sample_clip`; nothing here removes a file.
         .filter(|p| p.is_file() && !is_sample_named(p) && video_ext(p).is_some())
         .collect();
@@ -847,7 +847,7 @@ pub fn rename_movie(parent: &Path, out_dir: &Path, base: &str) -> Option<PathBuf
     // since #43, and selecting on the NAME alone meant the ordinary movie
     // arm saw zero features, renamed the job folder, and left the feature
     // inside it under its hash - while the fallback that would have
-    // handled it runs only when `movie_name` returned None (Codex sweep
+    // handled it runs only when `movie_name` returned None (review sweep
     // 5, M2). Sample exclusion is by name, for the same reason.
     let videos: Vec<&PathBuf> = files
         .iter()

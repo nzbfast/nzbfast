@@ -332,7 +332,7 @@ impl Index {
         max_age_secs: i64,
         now: i64,
     ) -> rusqlite::Result<usize> {
-        // One transaction over the whole prune (Codex sweep 2, 3 Aug
+        // One transaction over the whole prune (review sweep 2, 3 Aug
         // M5). The two deletes and the orphan repair below used to
         // autocommit separately, so a crash - or a failure in the
         // second statement after the first had committed - left
@@ -358,7 +358,7 @@ impl Index {
             }
         }
         // pre_corr has no FK onto predb, and predb ids are plain rowids
-        // SQLite reuses after the maximum is deleted (Codex sweep 3 Aug
+        // SQLite reuses after the maximum is deleted (review sweep 3 Aug
         // M2). Dangling references are not inert:
         //  - an orphaned SUGGESTED row wedges out every future valid
         //    candidate scoring below it (the upsert takes only
@@ -373,7 +373,7 @@ impl Index {
         // reference to 0, the same "pre gone" shape a pruned hint
         // already presents through its INNER JOIN.
         //
-        // UNCONDITIONAL, not `if removed > 0` (Codex sweep 2, 3 Aug
+        // UNCONDITIONAL, not `if removed > 0` (review sweep 2, 3 Aug
         // M5). Gating the repair on this call's own delete count meant
         // a store that already held dangling rows - left by a crash, or
         // by the pre-transaction version failing between its two
@@ -939,7 +939,7 @@ impl Index {
     ///    identified PAR2 (FileDesc packets carry real filenames), the
     ///    single-`.7z` shape (B3: the archive header carries it), and
     ///    the Pesto Message-ID grammar (a real-name tiny PAR2 sits one
-    ///    counter away). Codex's audit showed those lanes DOMINATED the
+    ///    counter away). the review's audit showed those lanes DOMINATED the
     ///    suggestion pool while byte probes of the same rows prove the
     ///    correlated guesses are exact-wrong - a guess is strictly
     ///    worse than the probe, so those rows are not correlation's.
@@ -1069,7 +1069,7 @@ impl Index {
         // candidates are exactly what SUGGEST exists for. A saturated
         // candidate window fails closed too: the runner-up and sibling
         // clauses below are proofs about a MAXIMUM over the whole
-        // window, and a truncated sample cannot give them (Codex sweep
+        // window, and a truncated sample cannot give them (review sweep
         // 3 Aug M1). The SPARSE end of the same range fails closed as
         // well, and did not until 2 Sep 2026: a window holding ONE
         // candidate gave the margin clause nothing to compare against,

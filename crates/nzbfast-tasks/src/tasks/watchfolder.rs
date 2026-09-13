@@ -204,7 +204,7 @@ fn consume_source_file(d: &Arc<Daemon>, p: &std::path::Path, sig: (u64, u64), na
     // renamed a DIFFERENT x.nzb over the path in that window had its
     // replacement trashed, unread, while the old bytes went to the queue.
     // The replacement is left exactly where it is and the next pass picks
-    // it up (Codex sweep 12 Aug F7).
+    // it up (review sweep 12 Aug F7).
     if watch_sig(p) != Some(sig) {
         info!(
             target: "watch",
@@ -276,17 +276,6 @@ pub fn spawn_watch_folder(daemon: &Arc<Daemon>) {
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
                 .unwrap_or_default();
-        fn save_watch_seen(
-            path: &std::path::Path,
-            seen: &std::collections::HashMap<PathBuf, (u64, u64, String)>,
-        ) {
-            // Best-effort like save_queue: a failed write costs one
-            // re-dedupe against the queue/history shas after a restart,
-            // never a wrong download.
-            if let Ok(b) = serde_json::to_vec(seen) {
-                let _ = std::fs::write(path, b);
-            }
-        }
         // Filesystem notifications, so a drop is picked up in the time
         // it takes to write the file rather than on the next poll.
         //
@@ -378,336 +367,15 @@ pub fn spawn_watch_folder(daemon: &Arc<Daemon>) {
                 }
             }
             if let Some(dir) = dir {
-                // The pass is all stats and whole-file reads - and the
-                // watched folder is often an SMB/NFS share, where any of
-                // them can stall. It runs on a tokio worker, so demote
-                // the thread for the pass (there is no await anywhere
-                // inside it).
-                crate::persist::blocking_db(|| {
-                    {
-                        let mut this_pass = std::collections::HashMap::new();
-                        for (p, category) in watch_scan(&dir, recursive) {
-                            // A file that already failed is skipped until
-                            // its mtime or size changes (re-saving it is
-                            // the user's retry).
-                            let Some(sig) = watch_sig(&p) else { continue };
-                            let settled = prev_pass.get(&p) == Some(&sig);
-                            this_pass.insert(p.clone(), sig);
-                            // Ingested earlier with keep-mode on and unchanged
-                            // since: already downloaded from here. Checked
-                            // before anything reads the file, so a kept
-                            // folder full of settled .nzbs costs stats, not
-                            // reads - and never lands in watch_failed as an
-                            // "already queued" warning it does not deserve.
-                            if watch_seen.get(&p).is_some_and(|(t, l, _)| (*t, *l) == sig) {
-                                continue;
-                            }
-                            // Completeness is now the gate, and stillness
-                            // only decides when to give up waiting for it.
-                            //
-                            // Stillness ALONE used to be the gate, and it is
-                            // not sound: a copy that stalls for two passes
-                            // looks identical to a finished one, and a clean
-                            // cut between </file> and </nzb> parses happily
-                            // as a SHORTER release. Measured on a stalled
-                            // 2-file nzb truncated after the first </file>:
-                            // queued as a 1-file release, and the user's
-                            // original deleted behind it - unrecoverable,
-                            // and silent. That predates the watcher; it is
-                            // just reachable in 5 s rather than never.
-                            //
-                            // So an incomplete file is never ingested. If it
-                            // also stops changing, say so and stop retrying
-                            // it - a visible complaint with the file still on
-                            // disk beats a fragment queued in its place.
-                            let complete = std::fs::read(&p)
-                                .ok()
-                                .is_some_and(|b| nzb_looks_complete(&b));
-                            if !complete {
-                                if settled
-                                    && d.watch_failed_insert(
-                                        p.clone(),
-                                        (sig.0, sig.1, watchfail::TRUNCATED.into(), String::new()),
-                                    )
-                                {
-                                    info!(
-                                        target: "watch",
-                                        "{} looks truncated - no closing </nzb> tag, \
-                                         and it has stopped changing. Left alone; re-save it \
-                                         to retry.",
-                                        p.display()
-                                    );
-                                }
-                                continue;
-                            }
-                            if d.watch_failed
-                                .lock_ok()
-                                .get(&p)
-                                .is_some_and(|(t, l, _, _)| (*t, *l) == sig)
-                            {
-                                continue;
-                            }
-                            if let Ok(bytes) = std::fs::read(&p) {
-                                // Re-check the signature AFTER the read.
-                                // The settle test compared two passes and
-                                // then read seconds later, so a re-save
-                                // landing in that window was read as a
-                                // torn prefix - which still parses, since
-                                // the XML reader simply stops at the last
-                                // whole <file> - queued as if it were the
-                                // whole release, and then the user's
-                                // freshly written file was DELETED below.
-                                // That is the exact outcome the two-pass
-                                // settle exists to prevent, surviving in
-                                // the gap between the stat and the read.
-                                if watch_sig(&p) != Some(sig) {
-                                    info!(
-                                        target: "watch",
-                                        "{} changed while being read - leaving it \
-                                         for the next pass",
-                                        p.display()
-                                    );
-                                    continue;
-                                }
-                                // Is this exact NZB already waiting in the
-                                // queue? Deleting the file was the only
-                                // durable "consumed" marker, and the
-                                // in-memory skip list does not survive a
-                                // restart - so a share that refuses the
-                                // unlink, a crash between the queue write
-                                // and the delete, or a deliberately-kept
-                                // file after ENOSPC all meant the next
-                                // start downloaded the whole release
-                                // again. A name without an SxxEyy or year
-                                // has no dupe_key to catch it either.
-                                // The queue IS persisted, so ask it.
-                                let sha = nzb_sha(&bytes);
-                                // The id, not just the fact: the strip's whole
-                                // job here is to point at the record that made
-                                // this file redundant, and a name lookup in the
-                                // page picks the wrong row for a re-post.
-                                let queued_id = d.queue.lock_ok().iter().find_map(|j| {
-                                    let g = j.lock_ok();
-                                    (g.nzb_sha == sha).then(|| g.nzo_id.clone())
-                                });
-                                if let Some(queued_id) = queued_id {
-                                    info!(
-                                        target: "watch",
-                                        "{} is already queued - leaving the file \
-                                         alone rather than downloading it twice",
-                                        p.display()
-                                    );
-                                    d.watch_failed_insert(
-                                        p.clone(),
-                                        (sig.0, sig.1, watchfail::ALREADY_QUEUED.into(), queued_id),
-                                    );
-                                    continue;
-                                }
-                                // ...and once it finishes, it is not in the
-                                // queue any more - it is in HISTORY, which is
-                                // persisted through the same file and carries
-                                // the same nzb_sha. Asking only the queue meant
-                                // a source file that cannot be deleted (a
-                                // read-only share, a NAS that refuses the
-                                // unlink) was re-ingested on every single
-                                // daemon start, re-downloading the whole
-                                // release each time; the in-memory skip list
-                                // covers the running process and nothing more.
-                                //
-                                // Completed rows only. A FAILED job's source
-                                // file is exactly the one a user wants
-                                // retried - a takedown that later refills, a
-                                // provider outage - so a failure must not
-                                // become a permanent refusal to look at it.
-                                let done = d.history.lock_ok().iter().find_map(|j| {
-                                    let j = j.lock_ok();
-                                    (j.nzb_sha == sha && j.state == JobState::Completed)
-                                        .then(|| j.nzo_id.clone())
-                                });
-                                if let Some(done_id) = done {
-                                    info!(
-                                        target: "watch",
-                                        "{} has already been downloaded - leaving the \
-                                         file alone rather than downloading it twice. To \
-                                         download it again, delete its History entry first, \
-                                         or add the NZB from the dashboard",
-                                        p.display()
-                                    );
-                                    d.watch_failed_insert(
-                                        p.clone(),
-                                        (sig.0, sig.1, watchfail::ALREADY_DONE.into(), done_id),
-                                    );
-                                    continue;
-                                }
-                                let name = p
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .to_string();
-                                // The success path is the one moment nothing
-                                // explained: the file simply vanishes from
-                                // the folder (a browser's download list says
-                                // "Removed", and Gary read that as nzbfast
-                                // deleting his download). Say it in the log,
-                                // and remember it so an open dashboard can
-                                // toast it - named by the folder it came
-                                // from, which is what the user recognises.
-                                let mut folder = dir
-                                    .file_name()
-                                    .map(|f| f.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| dir.display().to_string());
-                                // A subfolder pickup names the folder the
-                                // user actually dropped into - which is
-                                // also the category the job just got.
-                                if !category.is_empty() {
-                                    folder = format!("{folder}/{category}");
-                                }
-                                // §129 1b(b): the pickup goes on the
-                                // lifecycle ring, which is
-                                // sequence-cursored - it used to ride a
-                                // bounded `watch_picked` array on the
-                                // queue payload that the page diffed
-                                // against a seen-set of its own, and
-                                // that payload is only re-sent when the
-                                // queue revision moves.
-                                //
-                                // A pickup DOES move it (enqueue is
-                                // what raised this), so unlike the
-                                // give-up trip the old transport was
-                                // not late - it was just a second
-                                // mechanism for a moment the ring
-                                // already knew how to carry.
-                                let note_pickup = || {
-                                    info!(
-                                        target: "watch",
-                                        "picked up {name} from {folder} - queued"
-                                    );
-                                    d.life_emit(
-                                        "watch.picked",
-                                        serde_json::json!({"name": name, "folder": folder}),
-                                    );
-                                };
-                                match d.enqueue(
-                                    &bytes, &name, &category, -100, None, None, "watch", false,
-                                ) {
-                                    // Delete the user's file only once the
-                                    // queue record is DURABLE.
-                                    //
-                                    // `enqueue` used to persist best-effort
-                                    // and return Ok either way, and this
-                                    // deleted on Ok - so ENOSPC or EIO on
-                                    // queue.json plus a later crash lost both
-                                    // the record and the source, with nothing
-                                    // left to recover from. It now says
-                                    // whether its own save landed (A12), so
-                                    // the second `save_queue` that used to
-                                    // sit in this guard is gone. The job is
-                                    // live in memory regardless, so on a
-                                    // failed commit we keep their .nzb and
-                                    // record the failure: that stops the next
-                                    // scan re-enqueueing a duplicate, and
-                                    // leaves the file for the restart - where
-                                    // `recover_orphaned_spool` re-adopts the
-                                    // spool copy first and this poller then
-                                    // finds the file ALREADY_QUEUED by sha.
-                                    Ok(Enqueued { durable: true, .. }) => {
-                                        note_pickup();
-                                        // Keep-mode: the user wants the file
-                                        // (collectors, sharing it for a bug
-                                        // report), so the durable marker is
-                                        // the seen-set instead of the
-                                        // deletion. Read live, per pickup.
-                                        if d.watch_keep_nzb.load(Ordering::Relaxed) {
-                                            watch_seen
-                                                .insert(p.clone(), (sig.0, sig.1, sha.clone()));
-                                            save_watch_seen(&seen_path, &watch_seen);
-                                            d.watch_failed_remove(&p);
-                                            continue;
-                                        }
-                                        if consume_source_file(&d, &p, sig, &name) {
-                                            this_pass.remove(&p);
-                                        }
-                                    }
-                                    Ok(_) => {
-                                        // Queued in memory even though the
-                                        // save failed, so the pickup is
-                                        // still worth announcing.
-                                        note_pickup();
-                                        warn!(
-                                            target: "watch",
-                                            "{name} queued but the queue could not be \
-                                             saved - keeping your file at {}",
-                                            p.display()
-                                        );
-                                        d.watch_failed_insert(
-                                            p,
-                                            (
-                                                sig.0,
-                                                sig.1,
-                                                watchfail::UNSAVED.to_string(),
-                                                String::new(),
-                                            ),
-                                        );
-                                    }
-                                    Err(err) => {
-                                        info!(target: "watch", "{name} rejected: {err}");
-                                        // Complete but unusable. With the
-                                        // quarantine on, the file moves to
-                                        // <watch>/rejected/ with a note
-                                        // saying why; the strip entry
-                                        // follows it to the new path so
-                                        // the dashboard still explains it.
-                                        // A failed move falls back to
-                                        // leave-in-place, which is also
-                                        // the off behaviour.
-                                        let mut fp = p.clone();
-                                        if d.watch_move_rejected.load(Ordering::Relaxed) {
-                                            match quarantine_rejected(&dir, &p, &err.to_string()) {
-                                                Ok(newp) => {
-                                                    info!(
-                                                        target: "watch",
-                                                        "{name} moved to {} with a note \
-                                                         explaining the problem",
-                                                        newp.display()
-                                                    );
-                                                    this_pass.remove(&p);
-                                                    fp = newp;
-                                                }
-                                                Err(e) => warn!(
-                                                    target: "watch",
-                                                    "{name} could not be moved to the \
-                                                     rejected folder ({e}); leaving it in place"
-                                                ),
-                                            }
-                                        }
-                                        d.watch_failed_insert(
-                                            fp,
-                                            (sig.0, sig.1, err.to_string(), String::new()),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        // Only names this pass actually saw carry over, so
-                        // an ingested or deleted file leaves nothing behind.
-                        prev_pass = this_pass;
-                    }
-                    // Files the user deleted or moved drop off the list.
-                    // Through the bumping helper: this retain is exactly
-                    // where a ghost row was born - the entry left the map
-                    // here while every idle dashboard kept rendering it,
-                    // and its delete button answered "no such rejected
-                    // file" from then on.
-                    d.watch_failed_prune_missing();
-                    // ...and off the keep-mode seen-set, so it never grows
-                    // past what the folder actually holds. Persisted only
-                    // when something actually left.
-                    let before = watch_seen.len();
-                    watch_seen.retain(|p, _| p.exists());
-                    if watch_seen.len() != before {
-                        save_watch_seen(&seen_path, &watch_seen);
-                    }
-                });
+                watch_pass(
+                    &d,
+                    dir,
+                    recursive,
+                    &mut prev_pass,
+                    &mut watch_seen,
+                    &seen_path,
+                )
+                .await;
             }
             // Wake on whichever comes first: the backstop interval, or
             // the filesystem watcher saying the folder changed. The poll
@@ -726,6 +394,358 @@ pub fn spawn_watch_folder(daemon: &Arc<Daemon>) {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 }
             }
+        }
+    });
+}
+
+/// One watch-folder PASS: list the folder, decide which `.nzb` files are
+/// provably settled, ingest them, and record what was done - the whole
+/// body of the poller's `if let Some(dir)` arm.
+///
+/// Out of [`spawn_watch_folder`] on 7 Sep 2026 (claim
+/// `debt-split-hot-files-7sep`) at 472 of the size gate's 500-line
+/// function ceiling. Verbatim, three indent levels out: the poller is
+/// now the arming and the wake, and this is the work. `save_watch_seen`
+/// came with it - it is only ever called from here.
+async fn watch_pass(
+    d: &Arc<Daemon>,
+    dir: PathBuf,
+    recursive: bool,
+    prev_pass: &mut std::collections::HashMap<PathBuf, (u64, u64)>,
+    watch_seen: &mut std::collections::HashMap<PathBuf, (u64, u64, String)>,
+    seen_path: &std::path::Path,
+) {
+    fn save_watch_seen(
+        path: &std::path::Path,
+        seen: &std::collections::HashMap<PathBuf, (u64, u64, String)>,
+    ) {
+        // Best-effort like save_queue: a failed write costs one
+        // re-dedupe against the queue/history shas after a restart,
+        // never a wrong download.
+        if let Ok(b) = serde_json::to_vec(seen) {
+            let _ = std::fs::write(path, b);
+        }
+    }
+    // The pass is all stats and whole-file reads - and the
+    // watched folder is often an SMB/NFS share, where any of
+    // them can stall. It runs on a tokio worker, so demote
+    // the thread for the pass (there is no await anywhere
+    // inside it).
+    crate::persist::blocking_db(|| {
+        {
+            let mut this_pass = std::collections::HashMap::new();
+            for (p, category) in watch_scan(&dir, recursive) {
+                // A file that already failed is skipped until
+                // its mtime or size changes (re-saving it is
+                // the user's retry).
+                let Some(sig) = watch_sig(&p) else { continue };
+                let settled = prev_pass.get(&p) == Some(&sig);
+                this_pass.insert(p.clone(), sig);
+                // Ingested earlier with keep-mode on and unchanged
+                // since: already downloaded from here. Checked
+                // before anything reads the file, so a kept
+                // folder full of settled .nzbs costs stats, not
+                // reads - and never lands in watch_failed as an
+                // "already queued" warning it does not deserve.
+                if watch_seen.get(&p).is_some_and(|(t, l, _)| (*t, *l) == sig) {
+                    continue;
+                }
+                // Completeness is now the gate, and stillness
+                // only decides when to give up waiting for it.
+                //
+                // Stillness ALONE used to be the gate, and it is
+                // not sound: a copy that stalls for two passes
+                // looks identical to a finished one, and a clean
+                // cut between </file> and </nzb> parses happily
+                // as a SHORTER release. Measured on a stalled
+                // 2-file nzb truncated after the first </file>:
+                // queued as a 1-file release, and the user's
+                // original deleted behind it - unrecoverable,
+                // and silent. That predates the watcher; it is
+                // just reachable in 5 s rather than never.
+                //
+                // So an incomplete file is never ingested. If it
+                // also stops changing, say so and stop retrying
+                // it - a visible complaint with the file still on
+                // disk beats a fragment queued in its place.
+                let complete = std::fs::read(&p)
+                    .ok()
+                    .is_some_and(|b| nzb_looks_complete(&b));
+                if !complete {
+                    if settled
+                        && d.watch_failed_insert(
+                            p.clone(),
+                            (sig.0, sig.1, watchfail::TRUNCATED.into(), String::new()),
+                        )
+                    {
+                        info!(
+                            target: "watch",
+                            "{} looks truncated - no closing </nzb> tag, \
+                             and it has stopped changing. Left alone; re-save it \
+                             to retry.",
+                            p.display()
+                        );
+                    }
+                    continue;
+                }
+                if d.watch_failed
+                    .lock_ok()
+                    .get(&p)
+                    .is_some_and(|(t, l, _, _)| (*t, *l) == sig)
+                {
+                    continue;
+                }
+                if let Ok(bytes) = std::fs::read(&p) {
+                    // Re-check the signature AFTER the read.
+                    // The settle test compared two passes and
+                    // then read seconds later, so a re-save
+                    // landing in that window was read as a
+                    // torn prefix - which still parses, since
+                    // the XML reader simply stops at the last
+                    // whole <file> - queued as if it were the
+                    // whole release, and then the user's
+                    // freshly written file was DELETED below.
+                    // That is the exact outcome the two-pass
+                    // settle exists to prevent, surviving in
+                    // the gap between the stat and the read.
+                    if watch_sig(&p) != Some(sig) {
+                        info!(
+                            target: "watch",
+                            "{} changed while being read - leaving it \
+                             for the next pass",
+                            p.display()
+                        );
+                        continue;
+                    }
+                    // Is this exact NZB already waiting in the
+                    // queue? Deleting the file was the only
+                    // durable "consumed" marker, and the
+                    // in-memory skip list does not survive a
+                    // restart - so a share that refuses the
+                    // unlink, a crash between the queue write
+                    // and the delete, or a deliberately-kept
+                    // file after ENOSPC all meant the next
+                    // start downloaded the whole release
+                    // again. A name without an SxxEyy or year
+                    // has no dupe_key to catch it either.
+                    // The queue IS persisted, so ask it.
+                    let sha = nzb_sha(&bytes);
+                    // The id, not just the fact: the strip's whole
+                    // job here is to point at the record that made
+                    // this file redundant, and a name lookup in the
+                    // page picks the wrong row for a re-post.
+                    let queued_id = d.queue.lock_ok().iter().find_map(|j| {
+                        let g = j.lock_ok();
+                        (g.nzb_sha == sha).then(|| g.nzo_id.clone())
+                    });
+                    if let Some(queued_id) = queued_id {
+                        info!(
+                            target: "watch",
+                            "{} is already queued - leaving the file \
+                             alone rather than downloading it twice",
+                            p.display()
+                        );
+                        d.watch_failed_insert(
+                            p.clone(),
+                            (sig.0, sig.1, watchfail::ALREADY_QUEUED.into(), queued_id),
+                        );
+                        continue;
+                    }
+                    // ...and once it finishes, it is not in the
+                    // queue any more - it is in HISTORY, which is
+                    // persisted through the same file and carries
+                    // the same nzb_sha. Asking only the queue meant
+                    // a source file that cannot be deleted (a
+                    // read-only share, a NAS that refuses the
+                    // unlink) was re-ingested on every single
+                    // daemon start, re-downloading the whole
+                    // release each time; the in-memory skip list
+                    // covers the running process and nothing more.
+                    //
+                    // Completed rows only. A FAILED job's source
+                    // file is exactly the one a user wants
+                    // retried - a takedown that later refills, a
+                    // provider outage - so a failure must not
+                    // become a permanent refusal to look at it.
+                    let done = d.history.lock_ok().iter().find_map(|j| {
+                        let j = j.lock_ok();
+                        (j.nzb_sha == sha && j.state == JobState::Completed)
+                            .then(|| j.nzo_id.clone())
+                    });
+                    if let Some(done_id) = done {
+                        info!(
+                            target: "watch",
+                            "{} has already been downloaded - leaving the \
+                             file alone rather than downloading it twice. To \
+                             download it again, delete its History entry first, \
+                             or add the NZB from the dashboard",
+                            p.display()
+                        );
+                        d.watch_failed_insert(
+                            p.clone(),
+                            (sig.0, sig.1, watchfail::ALREADY_DONE.into(), done_id),
+                        );
+                        continue;
+                    }
+                    let name = p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    // The success path is the one moment nothing
+                    // explained: the file simply vanishes from
+                    // the folder (a browser's download list says
+                    // "Removed", and Gary read that as nzbfast
+                    // deleting his download). Say it in the log,
+                    // and remember it so an open dashboard can
+                    // toast it - named by the folder it came
+                    // from, which is what the user recognises.
+                    let mut folder = dir
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| dir.display().to_string());
+                    // A subfolder pickup names the folder the
+                    // user actually dropped into - which is
+                    // also the category the job just got.
+                    if !category.is_empty() {
+                        folder = format!("{folder}/{category}");
+                    }
+                    // §129 1b(b): the pickup goes on the
+                    // lifecycle ring, which is
+                    // sequence-cursored - it used to ride a
+                    // bounded `watch_picked` array on the
+                    // queue payload that the page diffed
+                    // against a seen-set of its own, and
+                    // that payload is only re-sent when the
+                    // queue revision moves.
+                    //
+                    // A pickup DOES move it (enqueue is
+                    // what raised this), so unlike the
+                    // give-up trip the old transport was
+                    // not late - it was just a second
+                    // mechanism for a moment the ring
+                    // already knew how to carry.
+                    let note_pickup = || {
+                        info!(
+                            target: "watch",
+                            "picked up {name} from {folder} - queued"
+                        );
+                        d.life_emit(
+                            "watch.picked",
+                            serde_json::json!({"name": name, "folder": folder}),
+                        );
+                    };
+                    match d.enqueue(&bytes, &name, &category, -100, None, None, "watch", false) {
+                        // Delete the user's file only once the
+                        // queue record is DURABLE.
+                        //
+                        // `enqueue` used to persist best-effort
+                        // and return Ok either way, and this
+                        // deleted on Ok - so ENOSPC or EIO on
+                        // queue.json plus a later crash lost both
+                        // the record and the source, with nothing
+                        // left to recover from. It now says
+                        // whether its own save landed (A12), so
+                        // the second `save_queue` that used to
+                        // sit in this guard is gone. The job is
+                        // live in memory regardless, so on a
+                        // failed commit we keep their .nzb and
+                        // record the failure: that stops the next
+                        // scan re-enqueueing a duplicate, and
+                        // leaves the file for the restart - where
+                        // `recover_orphaned_spool` re-adopts the
+                        // spool copy first and this poller then
+                        // finds the file ALREADY_QUEUED by sha.
+                        Ok(Enqueued { durable: true, .. }) => {
+                            note_pickup();
+                            // Keep-mode: the user wants the file
+                            // (collectors, sharing it for a bug
+                            // report), so the durable marker is
+                            // the seen-set instead of the
+                            // deletion. Read live, per pickup.
+                            if d.watch_keep_nzb.load(Ordering::Relaxed) {
+                                watch_seen.insert(p.clone(), (sig.0, sig.1, sha.clone()));
+                                save_watch_seen(seen_path, watch_seen);
+                                d.watch_failed_remove(&p);
+                                continue;
+                            }
+                            if consume_source_file(d, &p, sig, &name) {
+                                this_pass.remove(&p);
+                            }
+                        }
+                        Ok(_) => {
+                            // Queued in memory even though the
+                            // save failed, so the pickup is
+                            // still worth announcing.
+                            note_pickup();
+                            warn!(
+                                target: "watch",
+                                "{name} queued but the queue could not be \
+                                 saved - keeping your file at {}",
+                                p.display()
+                            );
+                            d.watch_failed_insert(
+                                p,
+                                (sig.0, sig.1, watchfail::UNSAVED.to_string(), String::new()),
+                            );
+                        }
+                        Err(err) => {
+                            info!(target: "watch", "{name} rejected: {err}");
+                            // Complete but unusable. With the
+                            // quarantine on, the file moves to
+                            // <watch>/rejected/ with a note
+                            // saying why; the strip entry
+                            // follows it to the new path so
+                            // the dashboard still explains it.
+                            // A failed move falls back to
+                            // leave-in-place, which is also
+                            // the off behaviour.
+                            let mut fp = p.clone();
+                            if d.watch_move_rejected.load(Ordering::Relaxed) {
+                                match quarantine_rejected(&dir, &p, &err.to_string()) {
+                                    Ok(newp) => {
+                                        info!(
+                                            target: "watch",
+                                            "{name} moved to {} with a note \
+                                             explaining the problem",
+                                            newp.display()
+                                        );
+                                        this_pass.remove(&p);
+                                        fp = newp;
+                                    }
+                                    Err(e) => warn!(
+                                        target: "watch",
+                                        "{name} could not be moved to the \
+                                         rejected folder ({e}); leaving it in place"
+                                    ),
+                                }
+                            }
+                            d.watch_failed_insert(
+                                fp,
+                                (sig.0, sig.1, err.to_string(), String::new()),
+                            );
+                        }
+                    }
+                }
+            }
+            // Only names this pass actually saw carry over, so
+            // an ingested or deleted file leaves nothing behind.
+            *prev_pass = this_pass;
+        }
+        // Files the user deleted or moved drop off the list.
+        // Through the bumping helper: this retain is exactly
+        // where a ghost row was born - the entry left the map
+        // here while every idle dashboard kept rendering it,
+        // and its delete button answered "no such rejected
+        // file" from then on.
+        d.watch_failed_prune_missing();
+        // ...and off the keep-mode seen-set, so it never grows
+        // past what the folder actually holds. Persisted only
+        // when something actually left.
+        let before = watch_seen.len();
+        watch_seen.retain(|p, _| p.exists());
+        if watch_seen.len() != before {
+            save_watch_seen(seen_path, watch_seen);
         }
     });
 }
@@ -827,7 +847,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// L4 sweep 10 Aug (Codex L3): with "bad.nzb" through "bad
+    /// L4 sweep 10 Aug (review L3): with "bad.nzb" through "bad
     /// (1000).nzb" all taken, the collision loop used to exit while the
     /// chosen destination still existed - POSIX rename then REPLACED
     /// that incumbent (a different rejected file the user had not

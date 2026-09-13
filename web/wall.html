@@ -1183,7 +1183,7 @@ let wtotal = 0, wseq = 0, wloading = false, wsig = '';
 // `idxPaused` is the daemon's own stand-down answer, which the same
 // reply carries: groups being chosen is not the same as the scanner
 // being able to run, and an install that is offline or paused claimed
-// to be scanning indefinitely on an empty page (Codex sweep 7, L1).
+// to be scanning indefinitely on an empty page (review sweep 7, L1).
 // Deliberately the stand-down reason and not the mid-pass bit: that one
 // is false for the whole post-pass database section and the gap between
 // passes, so a healthy install would flip copy every poll.
@@ -3282,7 +3282,7 @@ async function watchThis(season){
   // outgrows anything else - around 25 watched titles - at which point
   // the daemon correctly answers 414 and the star silently does not
   // save, while adding the same title from Settings (which has posted
-  // past 1500 chars since Codex F-18) works. `mode=config` takes the
+  // past 1500 chars since review finding F-18) works. `mode=config` takes the
   // same name/value pair in a body.
   const j=await apiPost('config',{name:'watchlist', value:JSON.stringify(list)});
   toast(j.status?'☆ '+t('wall.watching','Watching {title}{series}: grabs happen automatically',
@@ -3996,7 +3996,7 @@ async function wallFetch(reset){
       // The group count and the scan bit ride in it for the same
       // reason: on an EMPTY page they are the whole story, and the page
       // itself never changes, so choosing the first newsgroup in
-      // another tab left "Choose newsgroups" up forever (Codex sweep 7,
+      // another tab left "Choose newsgroups" up forever (review sweep 7,
       // L1). Every input to the empty state belongs in this signature.
       const sig=`${qs} ${unmTotal} ${idxGroups} ${idxPaused?1:0} ${JSON.stringify(page)}`;
       if(sig===wsig && cards.length>=page.length){
@@ -4436,7 +4436,7 @@ function navPillName(){
   // Re-key the label rather than stripping its marker. Removing
   // data-i18n left this call with nothing to find on the retry after
   // the catalogue landed, so every translated locale kept the English
-  // word (Codex sweep 7, L4); handing it to applyI18n instead means
+  // word (review sweep 7, L4); handing it to applyI18n instead means
   // the ordinary translation pass owns it from here on.
   const lbl=pill.querySelector('[data-i18n="hdr.wall"],[data-i18n="hdr.find"]');
   if(lbl){ lbl.textContent=t('hdr.find','find'); lbl.dataset.i18n='hdr.find'; }

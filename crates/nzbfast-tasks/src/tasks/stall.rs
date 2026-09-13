@@ -150,7 +150,7 @@ pub(crate) fn fold_caps_for_test(d: &Arc<Daemon>) -> Vec<(String, usize)> {
 /// reason `fold_and_bank_caps` below is: the tick sleeps 1-5 s first, so
 /// a refusal seen only inside a shorter job whose pool a later job
 /// replaces was never copied at all, and neither was one on the last job
-/// before a queue-finished shutdown action ended the process (Codex
+/// before a queue-finished shutdown action ended the process (review
 /// sweep 7, L2). Idempotent - the record is keyed by host and rewritten
 /// wholesale, so both callers reaching it costs one map insert.
 pub(crate) fn bank_refusals(d: &Arc<Daemon>) {
@@ -180,7 +180,7 @@ pub(crate) fn bank_refusals(d: &Arc<Daemon>) {
 /// caller - so a job shorter than one tick (1-5 s) could be refused,
 /// finish, and have the next job replace `pool_live` before anything
 /// ever looked. The lifetime ledger, whose whole job is to be the
-/// record a user sends their provider, silently missed the day (Codex
+/// record a user sends their provider, silently missed the day (review
 /// sweep 6, N8). Called from the runner's tail as well, where
 /// `pool_live` still points at the job that has just ended.
 ///
@@ -203,7 +203,7 @@ fn fold_caps(d: &Arc<Daemon>) -> Vec<(String, usize)> {
         // Done here as well as in the payload builder because the idle
         // `planned_servers` row has no live gauge to consult at all: it
         // reads this map alone, so a ceiling only the payload builder
-        // retired came back the moment the queue drained (Codex sweep 6,
+        // retired came back the moment the queue drained (review sweep 6,
         // N4).
         let held = s.connected.load(Ordering::Relaxed);
         if seen.get(&s.host).is_some_and(|c| c.disproven_by(held)) {
@@ -229,7 +229,7 @@ fn fold_caps(d: &Arc<Daemon>) -> Vec<(String, usize)> {
         // stamped today's date on a refusal that happened days ago - an
         // idle daemon could turn one Monday event into "capped on 30 of
         // the last 30 days", which is exactly the sentence meant to be
-        // evidence for a provider (Codex sweep 5, M7). `since` is
+        // evidence for a provider (review sweep 5, M7). `since` is
         // first-write-wins per episode, so it identifies one.
         if e.banked == since {
             continue;

@@ -1,0 +1,4 @@
+# Row 5, the pars-only shape, single member: the payload is not in the NZB at
+# all and the recovery set does the whole job.
+ARTICLE 768000
+DELETE feature.mkv

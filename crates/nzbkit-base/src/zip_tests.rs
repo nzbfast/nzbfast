@@ -111,7 +111,7 @@ fn bare_numeric_parts_need_the_magic() {
 
 #[test]
 fn a_junk_dot_000_does_not_hide_the_valid_set() {
-    // Codex sweep 3 Aug M8: `.000` grouped with `.001`/`.002` and,
+    // Review sweep 3 Aug M8: `.000` grouped with `.001`/`.002` and,
     // sorting first, was the one part the magic gate sniffed - a
     // junk same-stem `.000` made the whole valid split set vanish.
     let d = tmp("numeric-000");

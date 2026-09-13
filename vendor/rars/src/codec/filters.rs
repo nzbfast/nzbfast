@@ -50,6 +50,9 @@ pub(crate) fn encode_in_place(
     match op {
         FilterOp::E8 => e8e9_encode(data, file_offset, false),
         FilterOp::E8E9 => e8e9_encode(data, file_offset, true),
+        // nzbfast-local change, 5 Sep 2026 — no transpose or scratch is
+        // needed for a single channel. See VENDORING.md.
+        FilterOp::Delta { channels: 1 } => delta_encode_one_channel(data),
         FilterOp::Delta { channels } => {
             let encoded = delta_encode(data, channels, messages)?;
             data.copy_from_slice(&encoded);
@@ -154,11 +157,10 @@ pub(crate) fn delta_decode(
 /// decoders now carry one across the whole member. Keeping the initialized
 /// prefix also avoids zero-filling
 /// bytes that the channel reconstruction immediately overwrites.
-/// Each channel validates one contiguous source slice, then a strided
-/// destination iterator performs the byte loop without loop-carried source
-/// and destination indexes. This preserves malformed-input handling without
-/// paying for source validation on every byte.
-/// (nzbfast-local change, 20 Aug and 3 Sep 2026 - re-apply on the next
+/// Common channel counts reconstruct contiguous output rows from separate
+/// source planes. Other counts validate each contiguous source slice and use
+/// a strided destination iterator without loop-carried source/destination indexes.
+/// (nzbfast-local change, 20 Aug, 3 Sep and 5 Sep 2026 - re-apply on the next
 /// rars re-sync, see vendor/rars/VENDORING.md.)
 pub(crate) fn delta_decode_into(
     data: &[u8],
@@ -176,6 +178,21 @@ pub(crate) fn delta_decode_into(
         out.resize(data.len(), 0);
     } else {
         out.truncate(data.len());
+    }
+    match channels {
+        2 => {
+            delta_rows::<2>(data, out);
+            return Ok(());
+        }
+        3 => {
+            delta_rows::<3>(data, out);
+            return Ok(());
+        }
+        4 => {
+            delta_rows::<4>(data, out);
+            return Ok(());
+        }
+        _ => {}
     }
     let mut encoded = data;
     for channel in 0..channels.min(out.len()) {
@@ -196,6 +213,44 @@ pub(crate) fn delta_decode_into(
     }
     debug_assert!(encoded.is_empty());
     Ok(())
+}
+
+// nzbfast-local change, 5 Sep 2026 — reconstruct common channel counts
+// a row at a time. Independent channel accumulators shorten the dependency
+// chain while contiguous output stores avoid revisiting each cache line.
+// Keep the generic channel-major path for other counts; see VENDORING.md.
+fn delta_rows<const N: usize>(data: &[u8], out: &mut [u8]) {
+    // The first len % N planes contain one extra byte. Splitting by these
+    // exact counts keeps both full rows and a partial final row in bounds.
+    let mut encoded = data;
+    let mut planes = [&[][..]; N];
+    for (channel, plane) in planes.iter_mut().enumerate() {
+        let count = data.len() / N + usize::from(channel < data.len() % N);
+        (*plane, encoded) = encoded.split_at(count);
+    }
+    let mut prev = [0u8; N];
+    let mut rows = out.chunks_exact_mut(N);
+    for (row, dest) in rows.by_ref().enumerate() {
+        for channel in 0..N {
+            prev[channel] = prev[channel].wrapping_sub(planes[channel][row]);
+            dest[channel] = prev[channel];
+        }
+    }
+    for (channel, dest) in rows.into_remainder().iter_mut().enumerate() {
+        *dest = prev[channel].wrapping_sub(planes[channel][data.len() / N]);
+    }
+}
+
+// Keep this vectorizable loop out of the shared filter dispatcher. Inlining
+// it regressed multi-channel encoding in the measured release build.
+#[inline(never)]
+fn delta_encode_one_channel(data: &mut [u8]) {
+    let mut prev = 0u8;
+    for byte in data {
+        let current = *byte;
+        *byte = prev.wrapping_sub(current);
+        prev = current;
+    }
 }
 
 pub(crate) fn delta_encode(
@@ -234,6 +289,59 @@ impl DeltaErrorMessages {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delta_single_channel_in_place_matches_scalar_at_vector_boundaries() {
+        for len in (0..=129).chain([255, 256, 257, 4095, 4096, 4097, 65539]) {
+            let data: Vec<u8> = (0..len).map(|i| ((i * 179 + i / 3) & 255) as u8).collect();
+            let mut prev = 0u8;
+            let expected: Vec<u8> = data
+                .iter()
+                .map(|&byte| {
+                    let encoded = prev.wrapping_sub(byte);
+                    prev = byte;
+                    encoded
+                })
+                .collect();
+            let mut actual = data.clone();
+            encode_in_place(
+                FilterOp::Delta { channels: 1 },
+                &mut actual,
+                0,
+                DeltaErrorMessages::generic(),
+            )
+            .unwrap();
+            assert_eq!(actual, expected);
+            let mut decoded = Vec::new();
+            delta_decode_into(&actual, 1, DeltaErrorMessages::generic(), &mut decoded).unwrap();
+            assert_eq!(decoded, data);
+        }
+    }
+
+    #[test]
+    fn delta_rows_match_scalar_through_partial_rows_and_reused_buffers() {
+        let mut scratch = vec![0xa5; 1000];
+        for channels in 1..=32 {
+            for len in (0..=129).chain([255, 256, 257, 4095, 4096, 4097, 65539]) {
+                let data: Vec<u8> = (0..len).map(|i| ((i * 179 + i / 3) & 255) as u8).collect();
+                let expected = reference_delta_decode(&data, channels);
+                delta_decode_into(&data, channels, DeltaErrorMessages::generic(), &mut scratch)
+                    .unwrap();
+                assert_eq!(scratch, expected, "channels={channels}, len={len}");
+            }
+        }
+        for channels in [0, 33, usize::MAX] {
+            let before = scratch.clone();
+            assert!(delta_decode_into(
+                &[1, 2, 3],
+                channels,
+                DeltaErrorMessages::generic(),
+                &mut scratch
+            )
+            .is_err());
+            assert_eq!(scratch, before);
+        }
+    }
 
     fn x86_sample() -> Vec<u8> {
         let mut data = b"prefix ".to_vec();

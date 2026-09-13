@@ -179,6 +179,81 @@ fn only_a_name_that_identifies_content_refuses_the_sniff() {
     }
 }
 
+/// A TRAILING DOT (or space) does not launder a payload name past the
+/// polyglot guard.
+///
+/// `payload_content_name` read the extension through `Path::extension`,
+/// which answers `Some("")` for `Movie.mkv.` - no entry in
+/// `PAYLOAD_CONTENT_EXTS` is the empty string, so the name "identified
+/// nothing", the offset-0 sniff was allowed to believe `Rar!` magic
+/// sitting in a real movie, and the file the user asked for is replaced
+/// by whatever the archive claimed with the job reporting Completed.
+/// That is the exact direction `archive_sniff_eligible_name`'s own
+/// rationale says must never lose: "Declining can only ever cost speed;
+/// believing can cost the file."
+///
+/// Windows drops trailing dots and spaces at the filesystem, so they are
+/// free for a poster to add and invisible once the file is written.
+#[test]
+fn trailing_dots_do_not_launder_a_payload_name() {
+    for n in [
+        "Movie.mkv.",
+        "Movie.mkv..",
+        "Movie.mkv ",
+        "Movie.mkv. ",
+        "MOVIE.MKV.",
+        "disc.iso.",
+        "Track.flac.",
+    ] {
+        assert!(
+            !archive_sniff_eligible_name(n),
+            "{n} still identifies content"
+        );
+    }
+    // The control the fix must NOT break: a name whose only extension is
+    // the dot itself identifies nothing and stays eligible, exactly as a
+    // bare hash does.
+    for n in ["d41d8cd98f00b204.", ".", "..", "mkv", ".mkv"] {
+        assert!(archive_sniff_eligible_name(n), "{n} identifies nothing");
+    }
+}
+
+/// `vol_sort_key` survives an attacker-chosen rollover extension.
+///
+/// The old-style continuation arm computed `10u64.pow(tail.len() - 1)`
+/// from the POSTED name's own extension length. `.r` plus twenty digits
+/// is 10^20, past `u64::MAX`: a panic in any overflow-checked build and
+/// a wrapped, meaningless sort key in release.
+#[test]
+fn vol_sort_key_survives_an_oversized_rollover_extension() {
+    use crate::names::vol_sort_key;
+    // 20 digits parses as a u64, so it reaches the span multiply and
+    // overflows there; the arm falls through to this function's
+    // not-a-volume default, which sorts LAST. A substituted 0 would have
+    // sorted it ahead of the real volumes beside it.
+    assert_eq!(
+        vol_sort_key("v.r00000000000000000001").0,
+        u64::MAX,
+        "a key that cannot fit is not a volume, not a wrapped one"
+    );
+    // 20 nines does not even parse as a u64, so it never reaches the
+    // multiply - pinned so the two rejection routes cannot drift apart.
+    assert_eq!(vol_sort_key("v.z99999999999999999999").0, u64::MAX);
+    // The last rung that DOES fit still keys, so the guard is not
+    // swallowing the real ladder.
+    assert_eq!(
+        vol_sort_key("v.r9999999999999999999").0,
+        10_000_000_000_000_000_000
+    );
+    // The controls: the real ladder still keys the way it always did,
+    // and still orders across the r->s boundary.
+    assert_eq!(vol_sort_key("v.r00").0, 1);
+    assert_eq!(vol_sort_key("v.r99").0, 100);
+    assert_eq!(vol_sort_key("v.s00").0, 101);
+    assert_eq!(vol_sort_key("v.rar").0, 0);
+    assert!(vol_sort_key("v.r99").0 < vol_sort_key("v.s00").0);
+}
+
 /// The two arms that ALREADY had this rule, pinned from both sides so a
 /// later lane cannot "simplify" one of the four into disagreeing with
 /// the others. Their verdicts on the same bytes are what showed the RAR

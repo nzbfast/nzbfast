@@ -650,7 +650,7 @@ pub(super) fn m_history(
                 // marker and then re-verifies the record is still
                 // present, so a check outside this lock could pass
                 // just before the marker went up while the move
-                // still proceeded (Codex H7).
+                // still proceeded (review H7).
                 let busy: Vec<String> = {
                     let m = d.moving.lock_ok();
                     value
@@ -681,7 +681,7 @@ pub(super) fn m_history(
                 );
                 // A doomed record whose unlock task is `finalizing`
                 // is mid-extraction/rename/move on disk right now
-                // (Codex sweep 3 Aug H1) - same refusal as `moving`
+                // (review sweep 3 Aug H1) - same refusal as `moving`
                 // above, but checked against the PLAN rather than
                 // the value string, so the `all`/`failed`/
                 // `completed` sweeps hit it too (and a bulk sweep
@@ -916,6 +916,11 @@ pub(super) fn m_history(
                     to_remove.iter().map(|(_, dir, _, _)| dir.clone()).collect();
                 crate::earlyfile::early_unlink(&early_gone);
                 for (name, dir, filed, tail) in to_remove {
+                    // GH #71: this job's own post-completion streaming
+                    // handles are the one thing in the daemon that can
+                    // still be holding the directory we are about to
+                    // remove.
+                    d.hub.release_handles_for_dir(&dir);
                     let outcome = remove_job_files(&dir, &name, filed, &tail);
                     if let FilesGone::Kept(why) = outcome {
                         kept.push((name, dir, why));

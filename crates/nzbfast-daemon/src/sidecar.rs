@@ -97,7 +97,7 @@ fn job_generation(g: &Job) -> (u32, u64, std::path::PathBuf) {
 /// sidecar's Ok arrived afterwards to flip the freshly re-queued record
 /// to Completed, run the whole completion tail on payload the delete had
 /// already removed, and park the retry into history - consuming the
-/// button the user had just pressed (Codex sweep 14 Aug M3).
+/// button the user had just pressed (review sweep 14 Aug M3).
 ///
 /// The window is not a race: the sidecar's cancel flag is read once,
 /// right after the network phase, so a delete landing during the disk
@@ -574,8 +574,8 @@ pub fn spawn_sidecar(
                 })
                 .await
             };
-            // Bill what moved to the per-server usage history either way
-            // (block accounts must see every byte).
+            // Bill what moved to the per-ACCOUNT usage history either
+            // way (block accounts must see every byte).
             let per: Vec<(String, u64)> = hub
                 .pool_live
                 .lock_ok()
@@ -583,10 +583,17 @@ pub fn spawn_sidecar(
                 .map(|l| {
                     l.servers
                         .iter()
-                        .map(|s| (s.host.clone(), s.bytes.load(Ordering::Relaxed)))
+                        .map(|s| (Daemon::live_account(s), s.bytes.load(Ordering::Relaxed)))
                         .collect()
                 })
                 .unwrap_or_default();
+            // NOT folded, where the main job's tail is
+            // (`Daemon::fold_bytes_by_account`), and the difference is
+            // real rather than an oversight: the fold exists to compare
+            // a row counter against a high-water map, and the sidecar
+            // bills its whole run ONCE with no such map. Two rows that
+            // are one account arrive as two entries under one key and
+            // `add_usage` accumulates them, which is the same total.
             d.add_usage(&per);
             // M29 3d: fold the sidecar's per-article hit/430 outcomes into
             // the availability ledger, exactly as the primary job does at
@@ -776,7 +783,7 @@ pub fn spawn_sidecar(
             // them against the account's connection cap until its own
             // idle timeout - the same occupancy the wind-down clears
             // for the main hub (read-only sweep 2 M9, re-found by
-            // Codex sweep 3 M13). `.get()`, NOT `warm()`: the accessor
+            // review sweep 3 M13). `.get()`, NOT `warm()`: the accessor
             // CONSTRUCTS the pool and spawns a keepalive tick, so
             // asking for it here would create the very thing we are
             // emptying. Bounded - each `quit()` carries its own
@@ -823,7 +830,7 @@ mod sidecar_tests {
     /// the old prefetch's Ok flips the freshly re-queued record to
     /// Completed, runs the whole completion tail over payload the delete
     /// already removed, and parks the retry straight back into history:
-    /// the button the user pressed does nothing at all (Codex sweep 14
+    /// the button the user pressed does nothing at all (review sweep 14
     /// Aug M3).
     #[test]
     fn a_late_prefetch_ok_never_claims_the_record_it_was_retried_out_of() {
@@ -879,7 +886,7 @@ mod sidecar_tests {
     /// a fire-and-forget poke. The pipeline was still draining, and a
     /// slot writer is created lazily on its file's first article - so
     /// the next file of any multi-file release recreated the directory
-    /// and laid a fresh payload in it that no record named (Codex sweep
+    /// and laid a fresh payload in it that no record named (review sweep
     /// 14 Aug M2).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_delete_waits_for_the_sidecar_before_removing_its_files() {

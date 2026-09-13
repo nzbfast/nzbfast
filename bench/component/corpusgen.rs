@@ -1,6 +1,7 @@
 // Deterministic corpus payload generator for the extraction shootout.
 //
 //   corpusgen <outdir>
+//   corpusgen rand <file> <bytes>     any length of the rand.bin stream
 //
 // Writes, byte-for-byte identically on every machine:
 //   rand.bin   1 GiB incompressible      -> the `store` shape
@@ -204,7 +205,29 @@ fn gen_mixed(vocab: &[Vec<u8>], pool: &[u8], len: usize, seed: u64) -> Vec<u8> {
 }
 
 fn main() -> std::io::Result<()> {
-    let out = std::env::args().nth(1).expect("usage: corpusgen <outdir>");
+    let out = std::env::args().nth(1).expect("usage: corpusgen <outdir> | corpusgen rand <file> <bytes>");
+
+    // `corpusgen rand <file> <bytes>` writes an arbitrary length of the SAME
+    // stream `rand.bin` carries (same seed, same xoshiro256** sequence), so a
+    // 10 GiB scenario payload has the 1 GiB rand.bin as its own prefix and no
+    // second seed enters the rig. The scenario fixtures
+    // (`par2-scenarios-build.sh`) need 10 GiB and 2.4 GiB of it; without this
+    // they would either re-roll a payload per machine or concatenate rand.bin
+    // ten times, and a payload that repeats at 1 GiB is not incompressible -
+    // periodicity in the payload moves par2cmdline-turbo's sliding scan and
+    // has flattered us by ~7% before.
+    if out == "rand" {
+        let args: Vec<String> = std::env::args().collect();
+        let path = args.get(2).expect("usage: corpusgen rand <file> <bytes>");
+        let len: usize = args
+            .get(3)
+            .expect("usage: corpusgen rand <file> <bytes>")
+            .parse()
+            .expect("byte count");
+        eprintln!("{path} ({len} bytes of the rand.bin stream)");
+        return write_random(Path::new(path), len, 0xC0FFEE01);
+    }
+
     let out = Path::new(&out);
     fs::create_dir_all(out)?;
 

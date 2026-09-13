@@ -157,6 +157,23 @@ pub(super) struct FrontierState {
     /// arrival frontier, so a `release_gates` that unblocks the §94 B
     /// gate could otherwise drop it straight onto the unbounded
     /// hole-wait below with nothing left to wake it (TODO 255).
+    ///
+    /// BOTH blocking readers honour it, at both of their unbounded
+    /// parks - the repair pause and the hole wait. That is four guards
+    /// for one live caller, and the RAR pair is DELIBERATELY ahead of
+    /// its use: the only production `seal()` today is
+    /// [`super::sevenz::SevenZSet::seal_parts`], which walks the 7z
+    /// set's own parts, and a RAR chase volume is a separate buffer
+    /// minted where the chase attaches - so the two cannot meet on
+    /// today's code and the RAR guards are unreachable in production.
+    /// They are not dead code to delete. They are the invariant this
+    /// flag names - a sealed buffer never parks a reader - held whole,
+    /// so that whatever seals a chase buffer next inherits it instead
+    /// of re-finding the 23 Aug 2026 lost wakeup the hard way. The RAR
+    /// reader went without them from this flag's introduction to 11 Sep
+    /// 2026, under a comment claiming a parity with the 7z reader that
+    /// it did not have. `a_finish_seal_ends_both_blocking_reads` covers
+    /// all four, and tells the two readers apart.
     pub(super) sealed: bool,
     /// Bytes at the FRONT of `data` that a drop-behind trim has planned
     /// to spill and is writing out with no lock held (TODO 37 item 1).
@@ -1682,8 +1699,16 @@ impl rars::BlockingRangeSource for FrontierBuffer {
             if let Some(reason) = &st.abort {
                 return Err(io::Error::other(format!("chase source aborted: {reason}")));
             }
-            // Same repair pause as `read_covered_blocking`.
-            if st.paused {
+            // Same repair pause as `read_covered_blocking`, and that
+            // INCLUDES its finish-seal override: a seal means the repair
+            // pass is over, so an unresumed pause must not strand this
+            // reader either - fall through to serve or error (TODO 255).
+            // Until 11 Sep 2026 this was a bare `if st.paused` under a
+            // comment that already claimed it was the same guard. It was
+            // not, and the missing half is unbounded: `seal()` notifies,
+            // this reader wakes, finds `paused` still set and parks
+            // again, for the life of the process.
+            if st.paused && !st.sealed {
                 let t = super::chasestat::mark();
                 st = self.arrived.wait(st).unwrap();
                 super::chasestat::pause_park(t);
@@ -1775,6 +1800,21 @@ impl rars::BlockingRangeSource for FrontierBuffer {
                 buf[..take].copy_from_slice(&v[a..a + take]);
                 st.served = st.served.max(offset + take as u64);
                 return Ok(take);
+            }
+            // Sealed and still a hole, the RAR twin of the guard at the
+            // foot of `read_covered_blocking`: the download is over,
+            // these bytes are never coming, and every wake `seal()`
+            // sends finds this same hole - so parking here is parking
+            // forever (TODO 255). Checked only after every serve arm
+            // above, so a volume that IS complete still answers its
+            // worker to a clean finish and keeps one-pass; only a
+            // genuinely missing byte becomes the error that demotes.
+            // Ahead of the §156.1 pager wake below because a sealed
+            // buffer can never receive the bytes a spill makes room for.
+            if st.sealed {
+                return Err(io::Error::other(format!(
+                    "chase source sealed at offset {offset}: bytes never arrived"
+                )));
             }
             // §156.1: parking at a hole in a volume marked `lost` IS the
             // wedge - and when the set fully arrived before the engine
@@ -2991,6 +3031,96 @@ mod tests {
             }
         };
         (gate, got)
+    }
+
+    /// TODO 255: THE FINISH SEAL, at both unbounded parks of both
+    /// blocking readers.
+    ///
+    /// `seal()` says no byte will ever be routed to this buffer again.
+    /// A reader parked at a hole, or parked on a repair pause that will
+    /// never be resumed, therefore has nothing left that can wake it
+    /// usefully: the seal's own `notify_all` wakes it once, it re-checks,
+    /// finds the same hole or the same pause, and parks again - for the
+    /// life of the process, taking `finish()`'s join with it. That is
+    /// the 23 Aug 2026 lost wakeup in a second dress, which is why the
+    /// case above and this one share a harness.
+    ///
+    /// `read_covered_blocking` guarded both parks from the start. The
+    /// rars `BlockingRangeSource` reader guarded NEITHER until 11 Sep
+    /// 2026, so a suite that swept only one reader - or swept both but
+    /// through the same entry point - would have reported this whole
+    /// class green. Hence `forward`: the false arm is the reader that
+    /// was always right, and it is here as the control that says the
+    /// case itself is sound when the true arm fails.
+    ///
+    /// Both cases are bounded by `read_in_the_gate_window`'s
+    /// `recv_timeout`, never a join: drop either new guard and the
+    /// forward arm fails as `Parked` at the full timeout with a name on
+    /// it, rather than wedging the suite the way the defect wedges the
+    /// engine.
+    #[test]
+    fn a_finish_seal_ends_both_blocking_reads() {
+        for forward in [false, true] {
+            let who = if forward {
+                "forward (rars::BlockingRangeSource)"
+            } else {
+                "random-access (read_covered_blocking)"
+            };
+            // AT A HOLE. An empty 1000-byte buffer is a hole at 0, so
+            // the read reaches the gate and then has nothing to serve.
+            // Sealed from INSIDE the gate window, so this also pins the
+            // guard as being on the far side of the relock: a seal that
+            // lands while the state lock is released notifies an empty
+            // condvar, exactly as the abort above does.
+            let (gate, got) = read_in_the_gate_window(1000, |_| {}, |b| b.seal(), forward);
+            assert!(gate.fired(), "{who}: the gate window never opened");
+            match got {
+                WindowRead::Returned(Err(e)) => assert!(
+                    e.to_string().contains("sealed"),
+                    "{who}: ended on the wrong error: {e}"
+                ),
+                other => panic!(
+                    "{who}: a finish seal at a hole must end the read, got {other:?} \
+                     (Parked = the `sealed` check before the hole wait is missing, so the \
+                     reader is on a condvar whose one remaining notify has already fired)"
+                ),
+            }
+            // UNDER AN UNRESUMED PAUSE. The pause park sits ABOVE the
+            // gate, so a reader without the override never reaches the
+            // window at all and `act` could not carry this case - both
+            // flags are primed instead. The seal is what has to let the
+            // reader through a pause that no `set_paused(false)` is ever
+            // coming to clear, on down to the hole error below it.
+            let (gate, got) = read_in_the_gate_window(
+                1000,
+                |b| {
+                    b.set_paused(true);
+                    b.seal();
+                },
+                |_| {},
+                forward,
+            );
+            match got {
+                WindowRead::Returned(Err(e)) => assert!(
+                    e.to_string().contains("sealed"),
+                    "{who}: ended on the wrong error: {e}"
+                ),
+                other => panic!(
+                    "{who}: a finish seal must override an unresumed repair pause, got \
+                     {other:?} (Parked = the pause park is a bare `if st.paused`, so the \
+                     seal cannot reach the reader and nothing else will)"
+                ),
+            }
+            // Only meaningful once the read got PAST the pause, which is
+            // why it trails the match rather than leading it as above:
+            // a reader stuck on the pause never consults the gate, and
+            // "the window never opened" would then be reported instead
+            // of the seal regression that caused it.
+            assert!(
+                gate.fired(),
+                "{who}: the read left the pause but never reached the gate"
+            );
+        }
     }
 
     /// THE 23 AUG 2026 LOST WAKEUP, pinned deterministically - both

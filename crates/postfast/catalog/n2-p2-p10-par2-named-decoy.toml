@@ -1,5 +1,6 @@
 # P10 over P2: the only file in the post that announces itself as parity
-# is the one file that is not parity. A GAP ROW - see [expect].
+# is the one file that is not parity. A gap row until 10 Sep 2026; the
+# engine handles it now and it is graded on its exact tree.
 
 [layout]
 name = "n2-p2-p10-par2-named-decoy"
@@ -29,8 +30,9 @@ junk. It clears every rung but the last: the set it declares has no
 FileDesc packet, so it names no member, checks nothing and can rebuild
 nothing. `crate::recovery`'s `create_decoy` argues the shape at length.
 
-WHAT THE ROW MEASURES TODAY, three arms, run 4 Sep 2026 on this same
-profile with only the decoy's bytes changed:
+WHAT THE ROW MEASURED WHEN IT LANDED, three arms, run 4 Sep 2026 on
+this same profile with only the decoy's bytes changed. All three were
+RED, and the row was a gap row:
 
   * The shipped decoy (Main + Creator + junk): the client ACTIVATES it -
     `[par2] set live: 0 file(s), block size 4096` - and only at settle
@@ -43,29 +45,55 @@ profile with only the decoy's bytes changed:
     verify`. The verifier goes off and never comes back.
   * Junk with no packet magic at all: the same line, the same end state.
 
-So all three are red today and the row's greenness does not yet depend
-on how deep the decoy goes. What the depth buys is the row's value
-AFTER the fix: the second and third arms fail at ACTIVATION, and a fix
-that only retries the sniffed volumes when activation fails would leave
-the shipped arm broken, because there activation SUCCEEDS on a set that
-names nothing. The strongest arm is the one that stays load-bearing.
+The row's greenness did not depend on how deep the decoy went. What the
+depth buys is the row's value AFTER the fix: the second and third arms
+fail at ACTIVATION and the first does not, so a fix that only retried
+when activation FAILED would leave the shipped arm broken. The shipped
+arm is the one that stays load-bearing, and it is the one this profile
+posts.
+
+WHAT FIXED IT, 10 Sep 2026, and it is deliberately not in the in-stream
+activation path at all. Both arms converge at settle - the F11 guard
+already turns "a live set that names nothing" into "no set" - and the
+pass that can rescue the job from there was already written and simply
+unreachable. `get::settle::noset::disk_par2_fallback` magic-sniffs the
+deferred volumes on disk and adopts the token-named payload back under
+its FileDesc name, and it ran only when the DOWNLOAD had gone wrong. On
+this post the download is perfect: every article arrives and decodes,
+so the job read as complete and shipped an obfuscated filename. Two
+changes, one at each end of that:
+
+  * `settle_without_set` now also enters the fallback arm when the
+    directory pass it already runs read a recovery set off disk whose
+    member is not there under the name it gives, AND volumes were
+    identified in-stream by packet magic. The volume FETCH inside the
+    arm keeps the old condition: this door is opened for NAMING, and on
+    a job whose payload all arrived there is nothing to buy with wire.
+  * `par2repair`'s renamed-set fallback skips a set that declares NO
+    file names. That fallback attempts every set in the directory, so
+    it attempted the decoy's - whose Main packet lists a file id no
+    FileDesc describes - got `Malformed`, and failed the whole
+    directory, taking the real set's verdict with it. A set that names
+    nothing is no set, which is the same rule F11 applies one layer up.
+    A set with SOME descriptors missing, a genuinely damaged index, is
+    untouched and still reports its error.
 
 THE DEFECT THIS PINS. `nzbfast get` classifies by NZB subject, so the
 `.par2`-named decoy is the job's only par2-main slot and the only input
 in-stream activation ever sees; the real set rides under tokens and is
 deferred by the in-stream sniff as recovery data. Whether activation
 then succeeds on a set naming nothing or fails outright, in-stream
-naming is disarmed for the whole job and the settle-time disk pass
-finds the real set too late - it reports the described member missing
-while its bytes sit beside it under a token. A poster who ships one
-`.par2`-named blob therefore costs an obfuscated post every real name
-in it. The fix is engine work in the in-stream activation and settle
-paths, it is not this row's, and it is tracked outside the catalog.
+naming is disarmed for the whole job. A poster who ships one
+`.par2`-named blob therefore cost an obfuscated post every real name in
+it. The end state now matches
+`cc-n02-p2-opaque-recovery-names`, which is this row with the decoy
+plane removed and is its control arm.
 
 `p3-p10-decoy-beside-an-announced-set` is the same decoy beside a set
-the post ANNOUNCES, and it passes: two sets are adopted, the one that
-names nothing does not stop the one that does, and the decoy lands
-byte-exact. The pair says exactly where the line is.
+the post ANNOUNCES, and it passed throughout: two sets are adopted, the
+one that names nothing does not stop the one that does, and the decoy
+lands byte-exact. It is the arm that had to stay green through the fix,
+and did.
 """
 
 [source]
@@ -84,18 +112,11 @@ decoy = { name = "extras.par2", bytes = 3072 }
 article_bytes = 40000
 
 [expect]
-complete = false
-# None of the payload arrives under the name the layout carries for it.
-# The bytes DO arrive - every article is served and every article is
-# fetched - and they land under the wire token, which is the client's
-# own answer rather than anything this profile asked for, so it is not
-# written here.
-arrives = []
-# ...and the run reports success anyway, which is why `exits` is
-# written: unset, `complete = false` would expect a non-zero exit and
-# the row would be pinning a failure the client never reports.
-exits = "zero"
-gap = "the `.par2`-named decoy is the job's only par2-main slot, so in-stream activation sees it and nothing else; the real set rides under tokens, is deferred as recovery data, and never names the payload, which lands under its wire token while the run reports success"
+# Graded on the EXACT tree since 10 Sep 2026: the payload under the name
+# its FileDesc gives it, and the decoy beside it byte-exact - the same
+# two assertions `p3-p10-decoy-beside-an-announced-set` makes. The gap
+# row's `arrives`/`exits`/`gap` keys are gone with the gap.
+complete = true
 
 [expect.ladder]
 reaches = ""

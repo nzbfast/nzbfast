@@ -135,19 +135,27 @@ fn the_late_set_pass_repairs_every_damaged_set_when_nobody_cancels() {
 ///
 /// THE BOUND IS WORK AND NOT TIME. `stopped` is read at the top of the
 /// round loop and again at the top of the set loop, both BEFORE any call
-/// to `repair_dir_set_with_donors_scoped`, so the pass can never begin a
-/// repair with the latch up - which for a latch raised before the call
-/// is ZERO repairs, and for one raised mid-pass is at most the one
-/// already in flight. That second half is a fact about WHERE the reads
-/// are and is pinned as one, in
-/// `shape_tests::the_late_set_pass_can_be_cancelled_between_sets`: a
-/// test that tried to race a real latch against a real repair would be
-/// asserting on the scheduler.
+/// to `repair_dir_set_with_donors_scoped_controlled_as`, so the pass can
+/// never begin a repair with the latch up - which for a latch raised
+/// before the call is ZERO repairs, as this test drives. That the pass
+/// also cannot begin ANOTHER one after a mid-pass latch is a fact about
+/// WHERE the reads are and is pinned as one, in
+/// `shape_tests::the_late_set_pass_reads_the_cancel_at_both_edges_and_
+/// inside_the_repair`: a test that tried to race a real latch against a
+/// real repair would be asserting on the scheduler.
 ///
-/// NEVER MID-REPAIR, which is the design and not a limitation.
+/// **AND MID-REPAIR, SINCE 12 Sep 2026.** This paragraph read "NEVER
+/// MID-REPAIR, which is the design and not a limitation.
 /// `repair_dir_set_with_donors_scoped` writes files; torn down halfway
 /// it leaves a set half-applied, and no caller afterwards could tell
-/// that from a set that simply failed.
+/// that from a set that simply failed." Both premises are gone: the
+/// pass hands the engine a `RepairControl` built from this very handle,
+/// so the hashing, feed, solve and patch loops poll it; what a torn-down
+/// repair leaves is specified on `RepairError::Cancelled` and is
+/// MONOTONE (no temp renamed in, and only blocks that were already
+/// missing filled); and the caller afterwards tells it from a failure by
+/// matching that variant, which the set loop's `Err(Cancelled) => break`
+/// does. The old reasoning was right for a cut nobody had specified.
 #[test]
 fn a_cancelled_job_stops_the_late_set_pass_before_it_repairs_anything() {
     let dir = std::env::temp_dir().join(format!(

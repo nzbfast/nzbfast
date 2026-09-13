@@ -197,7 +197,7 @@ impl PostprocLane {
         // generation, so every fence below it - the verdict, the stats,
         // finalize, the hooks, park - passed happily and did to the live
         // retry exactly what read-only sweep 2's H1 fence exists to stop
-        // (Codex sweep 3, H1). The fence was at the wrong end of the wait.
+        // (review sweep 3, H1). The fence was at the wrong end of the wait.
         let gen0 = {
             let mut j = t.job.lock_ok();
             j.state = JobState::Finishing;
@@ -436,10 +436,24 @@ impl Drop for BacklogTicket {
 /// job. So a deleted job went on asking a provider for volumes
 /// nobody would read, for as long as the retry ladder took.
 ///
-/// Only the network is stopped. A repair already patching bytes runs
-/// to its end and parks - cutting it mid-write would leave a
-/// half-patched file behind, and the tombstone makes the outcome a
-/// no-op either way.
+/// THE REPAIR IS STOPPED TOO, since 12 Sep 2026. This said "Only the
+/// network is stopped. A repair already patching bytes runs to its end
+/// and parks - cutting it mid-write would leave a half-patched file
+/// behind", which was the right caution against a cut nothing had
+/// specified. It is specified now: `SideCancel::cancel` raises the
+/// job's `par2repair::PauseGate`, the engine's hashing, feed, solve and
+/// patch loops poll it, and `RepairError::Cancelled` states what is
+/// left - nothing at all before the patch, and during it every
+/// temp-staged member removed, none renamed in, and an in-place member
+/// with some subset of its MISSING blocks filled. That is MONOTONE, so
+/// the file is no worse than it was and a re-run repairs it from the
+/// same recovery data. The half-patched file the old caution feared
+/// cannot happen.
+///
+/// A repair inside the ONE window that is not polled - the solve's
+/// work-stealing unit grid, where a parked worker would starve the
+/// pool - still finishes that grid first, which is seconds on a
+/// structured set. See `par2repair::control::PauseGate`.
 ///
 /// Unknown ids are silently skipped: a queued job that never ran, a
 /// CLI run, a job already parked.
@@ -817,48 +831,7 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
     // slot, which the lane's own backpressure already accounts for and
     // reports as a hold.
     #[cfg(feature = "indexer")]
-    if !oracle_samples.is_empty() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|t| t.as_secs() as i64)
-            .unwrap_or(0);
-        let d3 = d2.clone();
-        let n = oracle_samples.len();
-        // Read into a local so the job lock is not held across the
-        // activity lock inside `with_index_for_tail` (see `tail_id`
-        // below for the ordering rule).
-        let fold_id = job2.lock_ok().nzo_id.clone();
-        // A blocking SQLite fold does not belong on an async worker,
-        // and this one has a whole tail waiting behind it either way.
-        //
-        // BOUNDED, and that bound is load-bearing. On 20 Aug 2026 an
-        // index scan lane wedged mid-I/O against a provider that had
-        // stopped answering and held the index write mutex while it
-        // sat there; this fold waited 8m46s for it, and because the
-        // fold runs before `fetch.await` the whole tail waited with it,
-        // showing the user a finishing row that did nothing for nine
-        // minutes. The runner is already protected from that exact
-        // shape (`index_gate_rendezvous`, issue #38's second wedge);
-        // the tail was not.
-        //
-        // Giving up loses availability samples for one job, which is
-        // sampled telemetry and the cheapest thing in this function.
-        // The job's own completion is not negotiable against it.
-        let folded = tokio::task::spawn_blocking(move || {
-            d3.with_index_for_tail(&fold_id, |ix| ix.oracle_ingest(&oracle_samples, now).ok())
-                .is_some()
-        })
-        .await
-        .unwrap_or(false);
-        if !folded {
-            info!(
-                target: "oracle",
-                "index busy for {}s - dropping {n} availability sample(s) rather than \
-                 holding this job's post-processing behind it",
-                Daemon::TAIL_INDEX_WAIT.as_secs()
-            );
-        }
-    }
+    fold_oracle_samples(&d2, &job2, oracle_samples).await;
     let res = match fetch.await {
         Ok(r) => r,
         Err(e) => Err(anyhow::anyhow!("download task panicked: {e}")),
@@ -867,7 +840,7 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
     // every output file descriptor before anything else runs.
     //
     // `Extractor::finish` deliberately KEEPS its writers open
-    // (see `park_outputs`), and the hub leaves the extractor
+    // (see `release_outputs`), and the hub leaves the extractor
     // installed until the NEXT job starts - so on an idle
     // daemon a finished job's handles are held indefinitely.
     // On unix an unlinked file with a live descriptor keeps
@@ -889,7 +862,7 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
     // `find_completed_media` - and the sweeps and renames in
     // `finalize_completed` are happier with them closed.
     if let Some(ex) = &shaper
-        && let Err(e) = ex.park_outputs()
+        && let Err(e) = ex.release_outputs()
     {
         warn!(target: "cleanup", "could not release the output handles: {e}");
     }
@@ -1058,65 +1031,7 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
                     j.state = JobState::Completed;
                     j.fetched = true;
                 }
-                Err(e) => {
-                    j.state = JobState::Failed;
-                    j.fail_message = e.to_string();
-                    // TODO 307 item 1: the pipeline's own verdict, taken
-                    // off the error rather than read back out of the
-                    // sentence it just wrote. `None` for an error no
-                    // producer classified - an `io::Error` from a move,
-                    // a config fault - and the classifier below then
-                    // answers exactly what it always did.
-                    j.fail_code = crate::failkind::code_of_error(e);
-                    // TODO §77: fold the pre-flight sample into
-                    // the failure evidence. "It was already
-                    // short when you added it" and "it rotted
-                    // out from under the download" call for
-                    // different things - a replacement from the
-                    // indexer versus a retry - and after the
-                    // fact nothing else can tell them apart.
-                    //
-                    // APPENDED, never prefixed: `fail_kind`, the
-                    // *arr health mapping and the diag tests all
-                    // key on the opening clause, exactly as the
-                    // segment census does in `incomplete_reason`.
-                    if let Some(h) = j.health.as_ref()
-                        && j.fail_kind().post_unavailable()
-                        && let Some(clause) = crate::health::failure_clause(h)
-                    {
-                        j.fail_message.push_str(&clause);
-                    }
-                    // A disk that filled up during the unpack is
-                    // the one failure where the fix is entirely
-                    // in the user's hands and the cost of the
-                    // retry is near zero: the spent-volume sweep
-                    // only removes volumes after a SUCCESSFUL
-                    // extraction, so the downloaded parts are
-                    // still on disk and mode=retry resumes from
-                    // the article journal without re-fetching a
-                    // byte. Say so, with the amount to free -
-                    // the extracted payload is roughly the size
-                    // of the set. APPENDED, same rule as the
-                    // health clause above.
-                    // Not for the mid-download halt: its verdict
-                    // already says the fetch resumes from the
-                    // journal, and "only the unpack re-runs"
-                    // would be flatly wrong for it.
-                    if crate::disk_full_failure(&j.fail_message)
-                        && !crate::disk_full_mid_download(&j.fail_message)
-                    {
-                        let clause = format!(
-                            "; free about {:.1} GB on that disk and hit Retry - the downloaded archive parts are kept, so nothing is re-downloaded and only the unpack re-runs",
-                            j.total_bytes as f64 / 1e9
-                        );
-                        j.fail_message.push_str(&clause);
-                    }
-                    // Keep the console block that explains the
-                    // one-liner. Failures are where a user
-                    // needs the log MOST and where it is least
-                    // likely to still be there when they look.
-                    j.fail_detail = crate::fail_detail_snapshot(log_mark);
-                }
+                Err(e) => record_failure(&mut j, e, log_mark),
             }
             j.downloaded_bytes = dl_bytes;
             j.elapsed_secs = dl_secs;
@@ -1261,6 +1176,130 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
     // this job into history mid-tail, and a retry of that row re-queues
     // the same Arc. Parking it then would consume the retry.
     d2.park_gen(job2, Some(gen0));
+}
+
+/// M29: fold one job's per-article outcomes into the availability
+/// ledger, on the lane.
+///
+/// Out of [`run_tail`] on 7 Sep 2026 (claim `debt-split-hot-files-7sep`)
+/// at 472 of the size gate's 500-line function ceiling. Verbatim,
+/// including the bound and the reasoning behind it; the emptiness guard
+/// came in with it.
+#[cfg(feature = "indexer")]
+async fn fold_oracle_samples(
+    d2: &Arc<Daemon>,
+    job2: &Arc<Mutex<Job>>,
+    oracle_samples: Vec<nzbkit::oracle::Sample>,
+) {
+    if !oracle_samples.is_empty() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|t| t.as_secs() as i64)
+            .unwrap_or(0);
+        let d3 = d2.clone();
+        let n = oracle_samples.len();
+        // Read into a local so the job lock is not held across the
+        // activity lock inside `with_index_for_tail` (see `tail_id`
+        // below for the ordering rule).
+        let fold_id = job2.lock_ok().nzo_id.clone();
+        // A blocking SQLite fold does not belong on an async worker,
+        // and this one has a whole tail waiting behind it either way.
+        //
+        // BOUNDED, and that bound is load-bearing. On 20 Aug 2026 an
+        // index scan lane wedged mid-I/O against a provider that had
+        // stopped answering and held the index write mutex while it
+        // sat there; this fold waited 8m46s for it, and because the
+        // fold runs before `fetch.await` the whole tail waited with it,
+        // showing the user a finishing row that did nothing for nine
+        // minutes. The runner is already protected from that exact
+        // shape (`index_gate_rendezvous`, issue #38's second wedge);
+        // the tail was not.
+        //
+        // Giving up loses availability samples for one job, which is
+        // sampled telemetry and the cheapest thing in this function.
+        // The job's own completion is not negotiable against it.
+        let folded = tokio::task::spawn_blocking(move || {
+            d3.with_index_for_tail(&fold_id, |ix| ix.oracle_ingest(&oracle_samples, now).ok())
+                .is_some()
+        })
+        .await
+        .unwrap_or(false);
+        if !folded {
+            info!(
+                target: "oracle",
+                "index busy for {}s - dropping {n} availability sample(s) rather than \
+                 holding this job's post-processing behind it",
+                Daemon::TAIL_INDEX_WAIT.as_secs()
+            );
+        }
+    }
+}
+
+/// Everything the record wears when the run FAILED: the state, the
+/// message, the failure code, the clauses the message earns, and the
+/// diagnostic snapshot.
+///
+/// Out of [`run_tail`]'s terminal-state match on 7 Sep 2026 (claim
+/// `debt-split-hot-files-7sep`) at 472 of the size gate's 500-line
+/// function ceiling. Verbatim, one indent level out; every comment came
+/// with the statement it explains.
+fn record_failure(j: &mut Job, e: &anyhow::Error, log_mark: u64) {
+    j.state = JobState::Failed;
+    j.fail_message = e.to_string();
+    // TODO 307 item 1: the pipeline's own verdict, taken
+    // off the error rather than read back out of the
+    // sentence it just wrote. `None` for an error no
+    // producer classified - an `io::Error` from a move,
+    // a config fault - and the classifier below then
+    // answers exactly what it always did.
+    j.fail_code = crate::failkind::code_of_error(e);
+    // TODO §77: fold the pre-flight sample into
+    // the failure evidence. "It was already
+    // short when you added it" and "it rotted
+    // out from under the download" call for
+    // different things - a replacement from the
+    // indexer versus a retry - and after the
+    // fact nothing else can tell them apart.
+    //
+    // APPENDED, never prefixed: `fail_kind`, the
+    // *arr health mapping and the diag tests all
+    // key on the opening clause, exactly as the
+    // segment census does in `incomplete_reason`.
+    if let Some(h) = j.health.as_ref()
+        && j.fail_kind().post_unavailable()
+        && let Some(clause) = crate::health::failure_clause(h)
+    {
+        j.fail_message.push_str(&clause);
+    }
+    // A disk that filled up during the unpack is
+    // the one failure where the fix is entirely
+    // in the user's hands and the cost of the
+    // retry is near zero: the spent-volume sweep
+    // only removes volumes after a SUCCESSFUL
+    // extraction, so the downloaded parts are
+    // still on disk and mode=retry resumes from
+    // the article journal without re-fetching a
+    // byte. Say so, with the amount to free -
+    // the extracted payload is roughly the size
+    // of the set. APPENDED, same rule as the
+    // health clause above.
+    // Not for the mid-download halt: its verdict
+    // already says the fetch resumes from the
+    // journal, and "only the unpack re-runs"
+    // would be flatly wrong for it.
+    if crate::disk_full_failure(&j.fail_message) && !crate::disk_full_mid_download(&j.fail_message)
+    {
+        let clause = format!(
+            "; free about {:.1} GB on that disk and hit Retry - the downloaded archive parts are kept, so nothing is re-downloaded and only the unpack re-runs",
+            j.total_bytes as f64 / 1e9
+        );
+        j.fail_message.push_str(&clause);
+    }
+    // Keep the console block that explains the
+    // one-liner. Failures are where a user
+    // needs the log MOST and where it is least
+    // likely to still be there when they look.
+    j.fail_detail = crate::fail_detail_snapshot(log_mark);
 }
 
 #[cfg(test)]
@@ -1689,7 +1728,7 @@ mod tests {
     /// stale tail through: Completed and the old run's statistics onto
     /// the queued record, finalization over the retry's directory, the
     /// pp-script and every notification target fired, and park consuming
-    /// the retry (Codex sweep 3, H1).
+    /// the retry (review sweep 3, H1).
     ///
     /// Driven through `SUBMIT_GEN_BARRIER`, which opens in exactly that
     /// interval - `TAIL_GEN_BARRIER` cannot reach it, because it sits on

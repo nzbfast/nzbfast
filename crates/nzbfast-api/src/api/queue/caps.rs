@@ -34,7 +34,7 @@ pub(super) fn cap_payload(d: &Daemon, s: &nzbkit::pool::ServerLive) -> Option<Va
     // one AFTER the job that met it - whose gauge is empty. Without
     // this half the row went on reading "using 100 of 38" until the
     // daemon restarted, which is the wrong connection budget presented
-    // as a measurement (Codex sweep 6, N4).
+    // as a measurement (review sweep 6, N4).
     let seen = {
         let mut m = d.capped_hosts.lock_ok();
         let held = s.connected.load(Ordering::Relaxed);

@@ -1,5 +1,5 @@
 //! Posted-NZB ingestion (research: REDTEAM-indexer-competitive 5c,
-//! Codex handoff section 4; build-order item #6).
+//! review handoff section 4; build-order item #6).
 //!
 //! Uploaders sometimes post the `.nzb` beside the content it describes.
 //! Our scanner already indexes those posts as one-file releases named

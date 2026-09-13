@@ -21,9 +21,9 @@ workspace = true
 # pulling sqlite in.
 nzbkit = { path = "../nzbkit", default-features = false }
 # The archive writers (rar13, rar15_40, rar50). The workspace member is
-# the vendor mirror; the fork at ~/Claude/rars is where a writer change
+# the vendor mirror; the fork at the upstream rars fork is where a writer change
 # is made and synced in from - never edit vendor/rars/src directly.
-rars = { path = "../../vendor/rars" }
+rars = { path = "../../vendor/rars", features = ["parallel"] }
 # H1: the 7z writer, for the container plane's non-RAR arm. NOT a new
 # dependency - `vendor/sevenz-rust2` is already in the tree and already
 # in the lockfile, read by nzbkit, nzbkit-base, nzbfast-unpack and

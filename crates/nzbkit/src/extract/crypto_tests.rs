@@ -32,7 +32,7 @@ fn encrypted_single_volume_decrypts_in_stream() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Codex sweep 13 Aug C1, half one: an encrypted span routed WITHOUT
+/// Review sweep 13 Aug C1, half one: an encrypted span routed WITHOUT
 /// CryptoState commits its output to the ciphertext route AT ENQUEUE,
 /// under the routing lock. The physical pwrites run after the lock
 /// drops, so `written()` lags the commitment - the latch is what a
@@ -83,7 +83,7 @@ fn a_ciphertext_route_is_latched_at_enqueue_not_at_write_time() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Codex sweep 13 Aug C1, half two: the gate CONSULTS the latch. This
+/// Review sweep 13 Aug C1, half two: the gate CONSULTS the latch. This
 /// set satisfies every plaintext-once condition (stored check, right
 /// password, zero bytes written) - the exact state a second span sees
 /// mid-window - and the pre-latched route must still refuse it, or the
@@ -322,7 +322,7 @@ fn checkless_encrypted_store_set_wrong_password_demotes_not_publishes() {
 /// password check set `verified = true`, and the demotion filter let it
 /// through. Result: plaintext published with no integrity verdict at
 /// all, on an archive whose ciphertext may have been damaged before the
-/// yEnc/PAR2 pass ever saw it (Codex sweep 12 Aug F2).
+/// yEnc/PAR2 pass ever saw it (review sweep 12 Aug F2).
 ///
 /// A CORRECT password, deliberately: the point is that a verified key is
 /// not a verified payload.

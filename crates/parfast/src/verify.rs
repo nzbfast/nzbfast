@@ -63,6 +63,22 @@ pub struct Loaded {
     pub data_dir: PathBuf,
     /// Every `.par2` file the load walked, so `-p` knows what to purge.
     pub par_files: Vec<PathBuf>,
+    /// Recovery packets the load framed but did not verify, per file
+    /// (a quiet verify defers them - see [`load_with`]); empty when the
+    /// load verified everything. Settled by [`ensure_recovery`], once,
+    /// when a verdict needs the count.
+    pub deferred: Vec<Deferred>,
+    /// The settled recovery block count, once [`ensure_recovery`] ran.
+    pub recovery_validated: Option<usize>,
+}
+
+/// One file's deferred recovery packets: skipped on disk by the seeking
+/// walk (the ordinary case - nothing of them was read), or framed in a
+/// whole read kept resident (the fallback for a file the seeking walk
+/// could not frame).
+pub enum Deferred {
+    OnDisk(PathBuf, Vec<(u64, u64)>),
+    Resident(Vec<u8>, Vec<(usize, usize)>),
 }
 
 impl Loaded {
@@ -87,6 +103,31 @@ impl Loaded {
     pub fn data_path(&self, name: &str) -> PathBuf {
         nzbkit::disk::join_out_name(&self.data_dir, &nzbkit::disk::sanitize_out_name(name))
     }
+
+    /// Every path the set PROTECTS, keyed for comparison - the guard
+    /// that stops a member being mistaken for a disposable file.
+    ///
+    /// The key is case-folded because two member names that differ only
+    /// in case are ONE file on macOS and Windows, so a byte-equal path
+    /// test would miss the alias and hand the member to a delete. Over-
+    /// matching on a case-sensitive filesystem is the safe direction:
+    /// the only thing it can cost is a backup taking `.2` where `.1` was
+    /// free, and the only thing under-matching costs is the payload.
+    /// Sanitizing is already handled - the keys come out of
+    /// [`Loaded::data_path`], which is the one place a FileDesc name
+    /// becomes a path, so an alias two names share resolves to one key.
+    pub fn protected_keys(&self) -> std::collections::HashSet<String> {
+        self.set
+            .files
+            .iter()
+            .map(|f| path_key(&self.data_path(&f.name)))
+            .collect()
+    }
+}
+
+/// How a path is compared against [`Loaded::protected_keys`].
+pub fn path_key(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
 }
 
 /// The whole-set picture, once every member has been looked at.
@@ -208,7 +249,29 @@ pub fn locate(opts: &Options, sink: &mut Sink) -> Result<(PathBuf, PathBuf, [u8;
     Ok((named, dir, want))
 }
 
+/// [`load_with`] verifying every packet: the repair path's load, whose
+/// cost hides under the engine's own survey on another thread anyway.
 pub fn load(opts: &Options, sink: &mut Sink) -> Result<Loaded, u8> {
+    load_with(opts, sink, false)
+}
+
+/// `NZBFAST_PARFAST_LOAD=whole`: the A/B arm that holds the old
+/// whole-read load reachable, for BOTH loads that replaced it - the
+/// repair's scan-report load (TODO 334) and the verify's seeking one.
+/// The property each of them rests on is that it prints the same bytes
+/// as the whole read, and an arm is how a test says so.
+///
+/// ONE spelling, because a second copy is a second answer: a run with
+/// the variable set must take the whole read in every command, or the
+/// arm proves nothing about the command whose copy disagreed.
+pub fn whole_load_forced() -> bool {
+    std::env::var_os("NZBFAST_PARFAST_LOAD").as_deref() == Some(std::ffi::OsStr::new("whole"))
+}
+
+/// The set from the named file and its siblings. With `may_defer`, a
+/// QUIET load leaves the recovery packets unverified (see below); the
+/// verify command asks for that, the repair command does not.
+pub fn load_with(opts: &Options, sink: &mut Sink, may_defer: bool) -> Result<Loaded, u8> {
     let (named, dir, want) = locate(opts, sink)?;
 
     let mut order = vec![named.clone()];
@@ -220,6 +283,7 @@ pub fn load(opts: &Options, sink: &mut Sink) -> Result<Loaded, u8> {
     // reads at all.
     let mut members: Vec<&[u8]> = Vec::new();
     let mut par_files = Vec::new();
+    let mut deferred_at: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
     // ONE scan of the candidate files, not two. Both `packet_census`
     // and `Par2Set::parse` walk through `scan_packets`, which
     // MD5-verifies every packet, so censusing each file for its
@@ -234,9 +298,92 @@ pub fn load(opts: &Options, sink: &mut Sink) -> Result<Loaded, u8> {
     // path is taken only where the answer is the set the named file
     // itself declares, and anything else re-parses the filtered blobs
     // exactly as before.
-    let read: Vec<Option<Vec<u8>>> = order.iter().map(|p| std::fs::read(p).ok()).collect();
+    // The candidate files read CONCURRENTLY, up to eight at a time: on a
+    // Windows page cache a read is a ~2.9 GB/s kernel copy, so the
+    // published corpus's 108 MB of volumes was ~37 ms read one after
+    // another at the head of every verify and repair (i5-10600KF,
+    // 5 Sep 2026, the parfast-overhead lane), against a 240 ms verify.
+    // A VERIFY frames the volumes by SEEKING first: each packet's
+    // header read at its offset, the recovery payloads (the bulk of
+    // every volume) skipped and their spans kept, the critical packets
+    // read whole - so a clean set never reads its parity at all, and a
+    // damaged one reads it a PACKET at a time when its verdict asks
+    // (`ensure_recovery`), rather than a volume at a time.
+    // A file the walk cannot frame (a header out of place) sends the
+    // whole load down the whole-read path below, which resyncs.
+    //
+    // The DEFAULT level takes the same door (10 Sep 2026). It cannot
+    // defer - `Loaded N new packets including M recovery blocks` is a
+    // count of packets that HASHED, and it prints before anything else
+    // - so `load_sparse` checks each recovery span there and then; what
+    // it stops doing is holding the volume while it does. Peak RSS on
+    // the 2 GiB / 100%-parity fixture, damaged, M3 Ultra 10 Sep 2026:
+    // 2.24 GB before at the default level and 2.30 GB under `-q`,
+    // against 0.10 GB either way after - which is what a CLEAN quiet
+    // verify of the same set already cost (0.09 GB), because holding
+    // the volumes was the whole of the difference. Wall came down with
+    // it, 0.55 s to 0.42 s and 0.66 s to 0.46 s, medians of three:
+    // the bytes are read and hashed either way, so what went is the
+    // page faults on 2.3 GB of heap.
+    let defer = may_defer && !sink.shows(Level::Normal);
+    let sparse: Option<Vec<Option<par2::SparseFrame>>> = if may_defer && !whole_load_forced() {
+        let frames: Vec<Option<par2::SparseFrame>> = order
+            .iter()
+            .map(|p| {
+                let f = std::fs::File::open(p).ok()?;
+                let len = f.metadata().ok()?.len();
+                par2::sparse_frame(&f, len)
+            })
+            .collect();
+        // A missing sibling is "not present" on either path; a present
+        // file that would not frame is the fallback's job.
+        let framed_or_absent = order
+            .iter()
+            .zip(&frames)
+            .all(|(p, fr)| fr.is_some() || !p.exists());
+        framed_or_absent.then_some(frames)
+    } else {
+        None
+    };
+    if let Some(frames) = sparse {
+        return load_sparse(opts, sink, dir, want, order, frames, defer);
+    }
+    let read: Vec<Option<Vec<u8>>> = {
+        let fan = order.len().clamp(1, 8);
+        let per = order.len().div_ceil(fan);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = order
+                .chunks(per)
+                .map(|paths| {
+                    s.spawn(move || -> Vec<Option<Vec<u8>>> {
+                        paths.iter().map(|p| std::fs::read(p).ok()).collect()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("parfast volume reader panicked"))
+                .collect()
+        })
+    };
     let present: Vec<&[u8]> = read.iter().flatten().map(Vec::as_slice).collect();
-    let (parsed, censuses) = par2::Par2Set::parse_censused(&present);
+    // A QUIET verify defers the recovery packets: nothing printed at
+    // `-q` carries their count, and a clean set never needs it, so
+    // their MD5s (the bulk of the volumes' bytes) are not computed
+    // unless a verdict asks - `ensure_recovery`, from the bytes kept
+    // here. At the default level the per-file `Loaded N new packets
+    // including M recovery blocks` lines print before anything else and
+    // need the verified count, so that path hashes everything as it
+    // always did. i5-10600KF, a clean 10 GiB set with 1 GiB of parity,
+    // round AV (6 Sep 2026): 2.00-2.16 s against 2.10-2.13, CPU 16.2
+    // against 17.6-17.8; reading the volumes is the part that stays
+    // (the index alone verifies in 1.61-1.67).
+    let (parsed, censuses, deferred_spans) = if defer {
+        par2::Par2Set::parse_deferred(&present)
+    } else {
+        let (parsed, censuses) = par2::Par2Set::parse_censused(&present);
+        (parsed, censuses, Vec::new())
+    };
     let censused = match &parsed {
         Ok(set) if set.recovery_set_id == want => Some(censuses),
         _ => None,
@@ -297,25 +444,442 @@ pub fn load(opts: &Options, sink: &mut Sink) -> Result<Loaded, u8> {
         );
         par_files.push(path.clone());
         members.push(bytes.as_slice());
+        if let Some(spans) = deferred_spans.get(at).filter(|v| !v.is_empty()) {
+            deferred_at.push((at, spans.clone()));
+        }
     }
 
-    // The fast path already has the answer; only the fallback re-parses.
-    let reparsed = match censused {
-        Some(_) => parsed,
-        None => Par2Set::parse(&members),
+    // The fast path already has the answer; only the fallback re-parses
+    // - and a re-parse verifies everything, so it owes nothing.
+    let (reparsed, deferred_at) = match censused {
+        Some(_) => (parsed, deferred_at),
+        None => (Par2Set::parse(&members), Vec::new()),
     };
+    drop(members);
+    // The deferred files' bytes move into the result (no copy); every
+    // other file's are dropped here as before.
+    let mut read = read;
+    let deferred: Vec<Deferred> = deferred_at
+        .into_iter()
+        .filter_map(|(at, spans)| {
+            read.iter_mut()
+                .flatten()
+                .nth(at)
+                .map(|bytes| Deferred::Resident(std::mem::take(bytes), spans))
+        })
+        .collect();
     match reparsed {
         Ok(set) => Ok(Loaded {
             data_dir: opts.basepath.clone().unwrap_or_else(|| dir.clone()),
             set,
             dir,
             par_files,
+            deferred,
+            recovery_validated: None,
         }),
         Err(_) => {
             sink.err("You must specify a Recovery file.");
             Err(crate::EXIT_INSUFFICIENT_DATA)
         }
     }
+}
+
+/// The seeking load (see [`load_with`]): the same walk over the
+/// candidates as the whole-read path - membership by census, the
+/// `Loading` lines, `par_files` for `-p` - over each file's critical
+/// packets, with the recovery packets never held.
+///
+/// `defer` is the `-q` half. Deferred, a recovery packet is censused
+/// on its header's unverified CLAIMS and its span left on disk for
+/// [`ensure_recovery`] to check if a verdict ever asks; nothing printed
+/// at `-q` carries the count, so a clean set never reads its parity.
+///
+/// UNDEFERRED - the default level, whose `Loaded N new packets
+/// including M recovery blocks` line is a count of packets that hashed
+/// and prints before the first target is looked at - each span is read
+/// and MD5-checked here, one packet at a time into a reused buffer
+/// (`par2::verify_recovery_file`). The census is then the same packets
+/// the whole read censused, minus the file order between criticals and
+/// recovery, which no count on this walk reads: `new` and
+/// `new_recovery` are first-seen-MD5 tallies over a file's packets as
+/// a SET, and a duplicate inside one file is a duplicate whichever end
+/// of the list it sits at.
+///
+/// The set's recovery block count cannot come from the parse here -
+/// `members` is the criticals - so it is re-spelt from the verified
+/// packets the same way [`load_scanned`] re-spells it: longest slice
+/// per exponent over the admitted files' packets of THIS set, counted
+/// where [`par2::slice_fits_block`] says the slice can serve. It lands
+/// in `recovery_blocks_seen` AND in `recovery_validated`, so `survey`
+/// and [`ensure_recovery`] read one number.
+fn load_sparse(
+    opts: &Options,
+    sink: &mut Sink,
+    dir: PathBuf,
+    want: [u8; 16],
+    order: Vec<PathBuf>,
+    frames: Vec<Option<par2::SparseFrame>>,
+    defer: bool,
+) -> Result<Loaded, u8> {
+    let present: Vec<&[u8]> = frames
+        .iter()
+        .flatten()
+        .map(|fr| fr.bytes.as_slice())
+        .collect();
+    let (parsed, censuses) = par2::Par2Set::parse_censused(&present);
+    let censused = match &parsed {
+        Ok(set) if set.recovery_set_id == want => Some(censuses),
+        _ => None,
+    };
+    let mut seen: std::collections::HashSet<[u8; 16]> = std::collections::HashSet::new();
+    let mut members: Vec<&[u8]> = Vec::new();
+    let mut par_files = Vec::new();
+    let mut deferred: Vec<Deferred> = Vec::new();
+    // Exponent -> longest slice, over the admitted files' verified
+    // recovery packets of THIS set; empty while deferring.
+    let mut exps: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    let mut nth = 0usize;
+    for (path, frame) in order.iter().zip(&frames) {
+        let Some(frame) = frame else {
+            continue;
+        };
+        let at = nth;
+        nth += 1;
+        let mut census = match &censused {
+            Some(all) => all[at].clone(),
+            None => par2::packet_census(&frame.bytes),
+        };
+        let spans: Vec<(u64, u64)> = frame.recovery.iter().map(|r| (r.offset, r.len)).collect();
+        // The recovery packets. Deferred, as their headers CLAIM them,
+        // verified later if ever; otherwise read span by span and
+        // censused exactly as a whole read would have censused them,
+        // the packets that fail their own MD5 simply absent.
+        //
+        // Before the membership test, because that is where the whole
+        // read applies it: a file whose criticals name another set but
+        // whose parity is ours is admitted by both, and a file admitted
+        // by neither costs the same hashes on either path.
+        let verified: Vec<par2::PacketInfo> = if defer {
+            Vec::new()
+        } else {
+            par2::verify_recovery_file(path, &spans)
+        };
+        if defer {
+            census.extend(frame.recovery.iter().map(|r| par2::PacketInfo {
+                md5: r.md5,
+                set_id: r.set_id,
+                recovery_exponent: r.exponent,
+                body_len: usize::try_from(r.len.saturating_sub(64)).unwrap_or(usize::MAX),
+            }));
+        } else {
+            census.extend(verified.iter().copied());
+        }
+        if !census.iter().any(|p| p.set_id == want) {
+            continue;
+        }
+        for p in &verified {
+            let Some(e) = p.recovery_exponent.filter(|_| p.set_id == want) else {
+                continue;
+            };
+            let v = exps.entry(e).or_insert(0);
+            *v = (*v).max(p.body_len.saturating_sub(4));
+        }
+        let name = display_name(&dir, path);
+        sink.line(Level::Terse, &format!("Loading \"{name}\"."));
+        let mut new = 0usize;
+        let mut new_recovery = 0usize;
+        for p in &census {
+            if seen.insert(p.md5) {
+                new += 1;
+                if p.recovery_exponent.is_some() {
+                    new_recovery += 1;
+                }
+            }
+        }
+        sink.line(
+            Level::Normal,
+            &if new == 0 {
+                "No new packets found".to_string()
+            } else if new_recovery == 0 {
+                format!("Loaded {new} new packets")
+            } else {
+                format!("Loaded {new} new packets including {new_recovery} recovery blocks")
+            },
+        );
+        par_files.push(path.clone());
+        members.push(frame.bytes.as_slice());
+        if defer && !spans.is_empty() {
+            deferred.push(Deferred::OnDisk(path.clone(), spans));
+        }
+    }
+    let reparsed = match censused {
+        Some(_) => parsed,
+        None => Par2Set::parse(&members),
+    };
+    match reparsed {
+        Ok(mut set) => {
+            // The parse saw the criticals only, so its own count is 0
+            // here whatever the volumes hold; undeferred, this walk has
+            // the answer and both readers of it take the same number.
+            let recovery_validated = if defer {
+                None
+            } else {
+                let bs = usize::try_from(set.block_size).unwrap_or(usize::MAX);
+                let n = exps
+                    .values()
+                    .filter(|slice| par2::slice_fits_block(**slice, bs))
+                    .count();
+                set.recovery_blocks_seen = n;
+                Some(n)
+            };
+            Ok(Loaded {
+                data_dir: opts.basepath.clone().unwrap_or_else(|| dir.clone()),
+                set,
+                dir,
+                par_files,
+                deferred,
+                recovery_validated,
+            })
+        }
+        Err(_) => {
+            sink.err("You must specify a Recovery file.");
+            Err(crate::EXIT_INSUFFICIENT_DATA)
+        }
+    }
+}
+
+/// The repair path's load since 10 Sep 2026 (TODO 334): the same walk,
+/// the same lines and the same `Loaded` as [`load`], with the recovery
+/// volumes' bytes READ AND HASHED BY NOBODY HERE. The engine's own
+/// packet scan already validated every packet in the directory on the
+/// repair thread, and `report` is what it found; this reads each
+/// candidate file's critical packets through the seeking walk
+/// (`par2::sparse_frame`, the quiet verify's path), parses the set from
+/// those, and prints each file's `Loaded N new packets including M
+/// recovery blocks` line from the report - first-seen by packet MD5 in
+/// THIS walk's order, which is the reference's order and not the
+/// catalog's.
+///
+/// WHY. `load` reads every volume whole and MD5s every packet to count
+/// them, on the main thread, while the engine hashes the very same
+/// bytes on the worker: 2 GiB read and hashed twice on a 2 GiB set with
+/// 100% parity, and once the engine's catalog scan was overlapped with
+/// its verify pass that duplicate was the entire critical path of the
+/// CLI-versus-driver gap (~11% at m=1,500 on an M3 Ultra; Codex's
+/// measurement; TODO 334).
+/// The report is what the engine hashed, so printing from it is
+/// printing what the reference prints: a corrupt packet is absent from
+/// both.
+///
+/// THE COUNT is the parser's own rule, re-spelt from the same inputs:
+/// distinct exponents among the admitted files' recovery packets of
+/// THIS set, longest slice per exponent, counted where
+/// [`par2::slice_fits_block`] says the slice can serve. That is
+/// `Par2Set::recovery_blocks_seen` over the files `load` would have
+/// admitted, and it lands in the same field so every reader downstream
+/// is unchanged; `deferred` is empty and `recovery_validated` is set,
+/// so [`ensure_recovery`] never hashes a byte.
+///
+/// FALLS BACK to [`load`] - the whole read, whose output is the pinned
+/// one - whenever it cannot answer identically: a present candidate the
+/// seeking walk cannot frame (a header out of place), or one the report
+/// does not mention (the catalog skipped it, or it is not a packet file
+/// at all). Both are exact conditions, not heuristics, so the fast path
+/// never prints a line the slow one would not.
+pub fn load_scanned(
+    opts: &Options,
+    sink: &mut Sink,
+    report: &par2repair::ScanReport,
+) -> Result<Loaded, u8> {
+    let (named, dir, want) = locate(opts, sink)?;
+    let mut order = vec![named.clone()];
+    order.extend(siblings(&dir, &named));
+    // By FILE NAME rather than path: the catalog lists `dir/<name>` and
+    // the named file is spelt however argv spelt it, and every candidate
+    // here lives in `dir` (the glob is one directory deep, and so is the
+    // catalog's flat scope).
+    let by_name: std::collections::HashMap<&std::ffi::OsStr, &par2repair::PacketFileScan> = report
+        .files
+        .iter()
+        .filter_map(|f| f.path.file_name().map(|n| (n, f)))
+        .collect();
+    // WHICH FILES TO OPEN AT ALL. The bytes this loader needs for
+    // itself are the CRITICAL packets, and only the first copy of each:
+    // a volume repeats the index's Main/FileDesc/IFSC packets and adds
+    // its recovery slices, and the report already names every one of
+    // those slices. Until 10 Sep 2026 every present file was framed
+    // (`sparse_frame`, two `pread`s per recovery packet, on this thread,
+    // while the engine sat in `after_survey` waiting for the answer):
+    // 65,000 seeks over a 2 GiB / 100%-parity set, 75 ms of a 1.5 s
+    // repair, measured phase for phase against the bench driver
+    // (`research/PARFAST-CLI-GAP-RESIDUE-2026-09-10.md`). A file is
+    // framed only when the report shows a non-recovery packet whose MD5
+    // no earlier admitted file carried; for an ordinary set that is the
+    // index and nothing else. The frames the parser sees are the same
+    // packets in the same order - a duplicate the parser would have
+    // deduped by MD5 is simply never read.
+    //
+    // A present candidate the report does not mention, or one that must
+    // be framed and cannot be, sends the whole load down `load`, before
+    // a line is printed - the exact conditions the old check applied.
+    let mut crit_seen: std::collections::HashSet<[u8; 16]> = std::collections::HashSet::new();
+    let mut frames: Vec<Option<par2::SparseFrame>> = Vec::with_capacity(order.len());
+    for p in &order {
+        if !p.exists() {
+            frames.push(None);
+            continue;
+        }
+        let Some(scan) = p.file_name().and_then(|n| by_name.get(n)) else {
+            return load(opts, sink);
+        };
+        let admitted = scan.packets.iter().any(|q| q.set_id == want);
+        let mut need = false;
+        if admitted {
+            for q in scan.packets.iter().filter(|q| q.recovery.is_none()) {
+                if crit_seen.insert(q.md5) {
+                    need = true;
+                }
+            }
+        }
+        if !need {
+            frames.push(None);
+            continue;
+        }
+        let framed = std::fs::File::open(p)
+            .ok()
+            .and_then(|f| f.metadata().ok().map(|m| (f, m.len())))
+            .and_then(|(f, len)| par2::sparse_frame(&f, len));
+        match framed {
+            Some(fr) => frames.push(Some(fr)),
+            None => return load(opts, sink),
+        }
+    }
+
+    let present: Vec<&[u8]> = frames
+        .iter()
+        .flatten()
+        .map(|fr| fr.bytes.as_slice())
+        .collect();
+    let (parsed, _censuses) = par2::Par2Set::parse_censused(&present);
+    let on_named_set = matches!(&parsed, Ok(set) if set.recovery_set_id == want);
+    let mut seen: std::collections::HashSet<[u8; 16]> = std::collections::HashSet::new();
+    let mut members: Vec<&[u8]> = Vec::new();
+    let mut par_files = Vec::new();
+    // Exponent -> longest slice, over the admitted files' packets of
+    // THIS set: the parser's own tally, and judged below the same way.
+    let mut exps: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for (path, frame) in order.iter().zip(&frames) {
+        if !path.exists() {
+            continue;
+        }
+        let scan = path
+            .file_name()
+            .and_then(|n| by_name.get(n))
+            .expect("every present candidate was checked against the report above");
+        // Membership is the same test the other two loaders apply: a
+        // sibling carrying none of THIS set's packets is not ours,
+        // however its name globbed (see `load_with`).
+        if !scan.packets.iter().any(|p| p.set_id == want) {
+            continue;
+        }
+        let name = display_name(&dir, path);
+        sink.line(Level::Terse, &format!("Loading \"{name}\"."));
+        let mut new = 0usize;
+        let mut new_recovery = 0usize;
+        for p in &scan.packets {
+            if seen.insert(p.md5) {
+                new += 1;
+                if p.recovery.is_some() {
+                    new_recovery += 1;
+                }
+            }
+            if let Some(r) = p.recovery.filter(|_| p.set_id == want) {
+                let slice = usize::try_from(r.slice_len).unwrap_or(usize::MAX);
+                let e = exps.entry(r.exponent).or_insert(0);
+                *e = (*e).max(slice);
+            }
+        }
+        sink.line(
+            Level::Normal,
+            &if new == 0 {
+                "No new packets found".to_string()
+            } else if new_recovery == 0 {
+                format!("Loaded {new} new packets")
+            } else {
+                format!("Loaded {new} new packets including {new_recovery} recovery blocks")
+            },
+        );
+        par_files.push(path.clone());
+        if let Some(frame) = frame {
+            members.push(frame.bytes.as_slice());
+        }
+    }
+    let reparsed = if on_named_set {
+        parsed
+    } else {
+        Par2Set::parse(&members)
+    };
+    match reparsed {
+        Ok(mut set) => {
+            let bs = usize::try_from(set.block_size).unwrap_or(usize::MAX);
+            let recovery_blocks = exps
+                .values()
+                .filter(|n| par2::slice_fits_block(**n, bs))
+                .count();
+            set.recovery_blocks_seen = recovery_blocks;
+            Ok(Loaded {
+                data_dir: opts.basepath.clone().unwrap_or_else(|| dir.clone()),
+                set,
+                dir,
+                par_files,
+                deferred: Vec::new(),
+                recovery_validated: Some(recovery_blocks),
+            })
+        }
+        Err(_) => {
+            sink.err("You must specify a Recovery file.");
+            Err(crate::EXIT_INSUFFICIENT_DATA)
+        }
+    }
+}
+
+/// The set's recovery block count, settled: what the load verified plus
+/// every deferred packet that checks now, from the bytes the load kept,
+/// hashed in parallel and then released. Runs once; a load that
+/// deferred nothing answers from the parse.
+/// Callers reach for this only when a verdict needs the count - a
+/// damaged survey - which is the whole point of deferring.
+pub fn ensure_recovery(loaded: &mut Loaded) -> usize {
+    if let Some(n) = loaded.recovery_validated {
+        return n;
+    }
+    let mut count = loaded.set.recovery_blocks_seen;
+    if !loaded.deferred.is_empty() {
+        let mut exps: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for d in std::mem::take(&mut loaded.deferred) {
+            let found = match d {
+                Deferred::Resident(bytes, spans) => par2::validate_recovery_spans(
+                    &bytes,
+                    &spans,
+                    &loaded.set.recovery_set_id,
+                    loaded.set.block_size,
+                ),
+                Deferred::OnDisk(path, spans) => par2::validate_recovery_file(
+                    &path,
+                    &spans,
+                    &loaded.set.recovery_set_id,
+                    loaded.set.block_size,
+                ),
+            };
+            for (e, data) in found {
+                let v = exps.entry(e).or_insert(0);
+                *v = (*v).max(data);
+            }
+        }
+        count += exps.len();
+    }
+    loaded.recovery_validated = Some(count);
+    count
 }
 
 /// The base name a set's volumes share: the file name without `.par2`,
@@ -408,6 +972,84 @@ pub fn display_name(dir: &Path, path: &Path) -> String {
 /// Verify every member, printing the reference's `Opening` and `Target`
 /// lines, and return the accounting.
 pub fn survey(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> Survey {
+    survey_bits(loaded, opts, sink).0
+}
+
+/// What a LONG-LIVED caller is shown while the verify pass runs, and
+/// the one point at which it may call the pass off.
+///
+/// The in-process caller needs neither: it reads its table when the
+/// pass is done. A GUI needs both - a progress bar over a 200 GiB set
+/// that says nothing for eleven minutes is indistinguishable from a
+/// hang, and a Cancel button that cannot be honoured until the last
+/// member is hashed is not a Cancel button. Since 12 Sep 2026 the binary
+/// is a caller of the second kind too: `control::CliWatch` is Ctrl-C and
+/// a `Scanning:` meter.
+///
+/// Both methods are called from the HASHING LANES, so an implementation
+/// must be `Sync` and must not assume an order: `member_done` fires as
+/// each member finishes, which is not the set's order. Blocking inside
+/// [`should_continue`](Self::should_continue) is how a pause is
+/// implemented and is safe HERE - a lane holds no engine scope between
+/// members - but it parks a whole lane, so a paused verify is a stopped
+/// verify and not a slowed one, which is what a Pause button means.
+pub trait SurveyWatch: Sync {
+    /// Before a lane picks up its next member. `false` abandons the
+    /// pass: nothing has been written (a verify only reads), so the
+    /// directory is untouched and [`survey_watched`] answers `None`.
+    fn should_continue(&self) -> bool {
+        true
+    }
+    /// One more member has been hashed. `done` counts members finished
+    /// across every lane, out of `total` that exist on disk.
+    fn member_done(&self, _done: usize, _total: usize) {}
+}
+
+/// The watch a caller that wants neither passes - the in-process one.
+impl SurveyWatch for () {}
+
+/// [`survey_bits`] that reports its progress and can be called off.
+///
+/// `None` is the caller's own refusal coming back, and it is the ONLY
+/// thing it means: an I/O failure is a member verdict (`Missing`), not
+/// an abandonment.
+pub fn survey_watched(
+    loaded: &Loaded,
+    opts: &Options,
+    sink: &mut Sink,
+    watch: &dyn SurveyWatch,
+) -> Option<(Survey, Vec<Vec<bool>>)> {
+    let (survey, bits, stopped) = survey_inner(loaded, opts, sink, watch);
+    (!stopped).then_some((survey, bits))
+}
+
+/// [`survey`], plus the per-block presence bitmap it already computed.
+///
+/// One pass, two answers. The bitmap is `scan_members_for_blocks`'s
+/// output - the aligned grid reconciled with the engine's rolling scan -
+/// indexed by the SET's file order and, within a file, by block index;
+/// a missing member gets an empty row. It is what a block map DRAWS,
+/// and until 12 Sep 2026 the only way to get it was to run the whole
+/// verify a second time or to read `Pass1Out.present` (a `#[doc(hidden)]`
+/// field whose tri-state a second reader would have to re-derive).
+///
+/// [`survey`] is this function with the bitmap dropped, deliberately:
+/// two entry points that each decided a verdict would be two answers to
+/// "is this file damaged", which is the thing this module exists not to
+/// do.
+pub fn survey_bits(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> (Survey, Vec<Vec<bool>>) {
+    let (survey, bits, _) = survey_inner(loaded, opts, sink, &());
+    (survey, bits)
+}
+
+/// The one verify pass every entry above is a view of. The third
+/// element is the watch's refusal.
+fn survey_inner(
+    loaded: &Loaded,
+    opts: &Options,
+    sink: &mut Sink,
+    watch: &dyn SurveyWatch,
+) -> (Survey, Vec<Vec<bool>>, bool) {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let bs = loaded.set.block_size;
@@ -451,6 +1093,8 @@ pub fn survey(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> Survey {
     let slice = usize::try_from(bs).ok().filter(|&n| n > 0);
 
     let cursor = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let stop = std::sync::atomic::AtomicBool::new(false);
     let mut verdicts: Vec<Option<Pass1Out>> = (0..paths.len()).map(|_| None).collect();
     if let Some(slice) = slice.filter(|_| !present.is_empty()) {
         // Each lane keeps its OWN results and hands them back through the
@@ -462,6 +1106,19 @@ pub fn survey(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> Survey {
                     scope.spawn(|| {
                         let mut mine = Vec::new();
                         loop {
+                            // The refusal is checked BEFORE the member is
+                            // claimed, so a stopped pass leaves the
+                            // remaining members unclaimed rather than
+                            // claimed-and-unverified: the `verdicts`
+                            // slot of anything this lane skips stays
+                            // `None`, and a `None` slot is `Missing`,
+                            // which is a verdict nobody should read off
+                            // an abandoned pass. `survey_watched`
+                            // answers `None` for exactly that reason.
+                            if !watch.should_continue() {
+                                stop.store(true, Ordering::Relaxed);
+                                break;
+                            }
                             let k = cursor.fetch_add(1, Ordering::Relaxed);
                             let Some(&i) = present.get(k) else { break };
                             let path = paths[i].as_ref().expect("present index has a path");
@@ -478,6 +1135,10 @@ pub fn survey(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> Survey {
                                     .ok()
                                     .filter(|p| p.exists);
                             mine.push((i, got));
+                            watch.member_done(
+                                done.fetch_add(1, Ordering::Relaxed) + 1,
+                                present.len(),
+                            );
                         }
                         mine
                     })
@@ -502,6 +1163,50 @@ pub fn survey(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> Survey {
         }
     }
 
+    // A REFUSED PASS PRINTS NOTHING AND DECIDES NOTHING. Everything
+    // below this line - the rolling scan, the `Opening:` lines, the
+    // per-member verdicts - reads `verdicts`, and a stopped pass left
+    // part of it unvisited. Reporting from it would call every member a
+    // lane never reached `Missing`.
+    if stop.load(Ordering::Relaxed) {
+        return (
+            Survey {
+                targets: Vec::new(),
+                total_blocks,
+                available_blocks: 0,
+                recovery_blocks: loaded.set.recovery_blocks_seen,
+            },
+            Vec::new(),
+            true,
+        );
+    }
+
+    // THE ROLLING SCAN, over whatever the aligned pass above could not
+    // prove. par2cmdline's default verify rolls a block-sized CRC32
+    // window over every source file, so a member carrying a prefix or a
+    // mid-file insertion still reports every block present at its real
+    // offset; the aligned grid alone reported `Found 0 of 30 data
+    // blocks` on a set the reference reads as `Found 30 of 30`, and the
+    // repair behind it then refused work the reference completes
+    // (`research/CLI-SUBSTITUTION-2026-09-03.md`, G4). It is the
+    // ENGINE's scan - the same window `adopt::sliding_scan` runs for a
+    // repair - and not a second spelling of it here.
+    //
+    // A CLEAN SET PAYS NOTHING: the engine's door opens no file when
+    // every member is already proven whole, so the ordinary verify is
+    // the same two passes it always was.
+    let found = par2repair::scan_members_for_blocks(
+        &loaded.set.files,
+        &paths,
+        &(0..names.len())
+            .map(|i| match &verdicts[i] {
+                Some(p) => proven_bits(p, counts[i]),
+                None => Vec::new(),
+            })
+            .collect::<Vec<_>>(),
+        usize::try_from(bs).unwrap_or(0),
+    );
+
     // And the output is emitted in the set's order, which is what makes
     // this change invisible to a script and to the conformance table:
     // nothing is interleaved between these lines, so the same bytes come
@@ -518,7 +1223,7 @@ pub fn survey(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> Survey {
         let blocks = counts[i];
         match &verdicts[i] {
             Some(p) => {
-                let have = present_blocks(p, blocks);
+                let have = found[i].iter().filter(|&&ok| ok).count().min(blocks);
                 available += have;
                 targets.push((
                     name,
@@ -535,12 +1240,16 @@ pub fn survey(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> Survey {
             None => targets.push((name, Target::Missing)),
         }
     }
-    Survey {
-        targets,
-        total_blocks,
-        available_blocks: available,
-        recovery_blocks: loaded.set.recovery_blocks_seen,
-    }
+    (
+        Survey {
+            targets,
+            total_blocks,
+            available_blocks: available,
+            recovery_blocks: loaded.set.recovery_blocks_seen,
+        },
+        found,
+        false,
+    )
 }
 
 /// [`survey`]'s answer built from the ENGINE's verify pass instead of a
@@ -596,10 +1305,52 @@ pub fn survey_from_engine(
         .iter()
         .map(|f| by_name.get(f.name.as_str()).copied())
         .collect::<Option<Vec<_>>>()?;
+    // THE ROLLING SCAN, exactly as [`survey`] runs it and for the same
+    // reason - the repair prints the SAME `Target:` lines and then
+    // decides on them, so a count that stops at the aligned grid here
+    // refuses work the reference completes (G4; see [`survey`]).
+    //
+    // WHY NOTHING IS DECLARED PROVEN for a member that is not intact,
+    // where [`survey`] hands the scan its real bitmap: a
+    // [`nzbkit::par2repair::MemberSurvey`] carries a COUNT and not a
+    // map, and guessing WHICH slices that count refers to would put
+    // the wrong slices in the scan's wanted set. It costs nothing to
+    // be honest about it - the scan reads a candidate file whole
+    // whatever is wanted from it, and the rolling window passes over
+    // the aligned offsets too, so the blocks the engine's pass already
+    // proved are re-found where they sit.
+    let paths: Vec<Option<PathBuf>> = resolved
+        .iter()
+        .zip(&loaded.set.files)
+        .map(|(m, f)| m.exists.then(|| loaded.data_path(&f.name)))
+        .collect();
+    let proven: Vec<Vec<bool>> = resolved
+        .iter()
+        .zip(&loaded.set.files)
+        .map(|(m, f)| {
+            let blocks = if bs == 0 {
+                0
+            } else {
+                f.length.div_ceil(bs) as usize
+            };
+            if m.intact {
+                vec![true; blocks]
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+    let found = par2repair::scan_members_for_blocks(
+        &loaded.set.files,
+        &paths,
+        &proven,
+        usize::try_from(bs).unwrap_or(0),
+    );
+
     let mut targets = Vec::with_capacity(loaded.set.files.len());
     let mut total_blocks = 0usize;
     let mut available = 0usize;
-    for (file, m) in loaded.set.files.iter().zip(resolved) {
+    for (i, (file, m)) in loaded.set.files.iter().zip(resolved).enumerate() {
         let blocks = if bs == 0 {
             0
         } else {
@@ -616,7 +1367,12 @@ pub fn survey_from_engine(
             available += blocks;
             targets.push((name, Target::Found));
         } else {
-            let have = m.blocks_present.min(blocks);
+            let have = found[i]
+                .iter()
+                .filter(|&&ok| ok)
+                .count()
+                .max(m.blocks_present)
+                .min(blocks);
             available += have;
             targets.push((
                 name,
@@ -656,13 +1412,26 @@ pub fn survey_from_engine(
 ///   with no IFSC packets has no bitmap at all and nothing is provable
 ///   block by block, which is zero.
 fn present_blocks(pass: &Pass1Out, blocks: usize) -> usize {
+    proven_bits(pass, blocks).iter().filter(|&&ok| ok).count()
+}
+
+/// The same three arms as [`present_blocks`], as a BITMAP rather than a
+/// count, because the rolling scan needs to know WHICH slices are still
+/// owed and not merely how many.
+///
+/// One rule, one place: [`present_blocks`] is this function counted, so
+/// the tri-state above cannot be read two ways.
+fn proven_bits(pass: &Pass1Out, blocks: usize) -> Vec<bool> {
     if pass.clean {
-        return blocks;
+        return vec![true; blocks];
     }
-    pass.present
-        .as_ref()
-        .map_or(0, |b| b.iter().filter(|&&ok| ok).count())
-        .min(blocks)
+    let mut bits = vec![false; blocks];
+    if let Some(present) = pass.present.as_ref() {
+        for (b, &ok) in bits.iter_mut().zip(present.iter()) {
+            *b = ok;
+        }
+    }
+    bits
 }
 
 /// Verify ONE member and print its `Opening` and `Target` lines. The
@@ -855,6 +1624,15 @@ pub fn print_damage_detail(survey: &Survey, sink: &mut Sink) {
 /// candidate actually MATCHES is the engine's `adopt_blocks`, by
 /// checksum, and duplicating that here would be a second answer to the
 /// same question over the same bytes.
+///
+/// AND IT IS NOT THE ROLLING SCAN, which a reader has mistaken it for
+/// once already: a member sitting AT its FileDesc name is claimed here
+/// and so never a candidate, however far its bytes have been shifted
+/// inside it. That question - "is this member's block anywhere in this
+/// file" - belongs to [`survey`] and is answered by
+/// `nzbkit::par2repair::scan_members_for_blocks`. Reading this walk as
+/// the whole of parfast's misplaced-block story is what left G4 open
+/// (`research/CLI-SUBSTITUTION-2026-09-03.md`).
 pub fn extra_candidates(loaded: &Loaded, survey: &Survey) -> Vec<PathBuf> {
     let claimed: std::collections::HashSet<PathBuf> = survey
         .targets
@@ -945,22 +1723,42 @@ fn print_repairable_detail(survey: &Survey, sink: &mut Sink) {
 
 /// `-p`: remove the backup files a repair left and then the par files
 /// themselves. Only ever called on a clean or repaired set.
-pub fn purge(loaded: &Loaded, sink: &mut Sink) {
+///
+/// `created` is the provenance list: the backup copies THIS run made
+/// (`repair::back_up_damaged`), and nothing else. It used to be derived
+/// instead - synthesise `<member>.1` through `<member>.9` for every
+/// member of the set, keep whatever `exists()`, delete it - and a name
+/// is not provenance. A set that legitimately protects both `payload.bin`
+/// and `payload.bin.1` had its SECOND MEMBER deleted by `parfast r -p`
+/// on a CLEAN set, the recovery volumes went in the same run, and every
+/// step exited 0: unrecoverable data loss with no diagnostic. Any
+/// pre-existing numbered file went the same way, member or not.
+///
+/// This is also what the reference does. par2cmdline's `-p` removes its
+/// own `backuplist`, populated as it renames each damaged original
+/// aside; it never walks the directory for things that look like
+/// backups. So a second `-p` run over an already-repaired set leaves the
+/// earlier `.1` alone on both, and the captured `repair-purge` row -
+/// whose `rand.bin.1` this run made - is unchanged.
+///
+/// The protected-member screen below is belt to that braces. Provenance
+/// alone would do it, but a delete list is the one place in this crate
+/// where being wrong costs the payload, so a path that is a member's is
+/// refused however it got here.
+pub fn purge(loaded: &Loaded, created: &[PathBuf], sink: &mut Sink) {
     sink.line(Level::Terse, "");
     // The backup half is announced ONLY when there is a backup to
     // remove: the captured `sweep/p` row purges an intact set and prints
     // `Purge par files.` with no backup header above it, while
     // `repair-purge` has a `rand.bin.1` and prints both.
-    let backups: Vec<(String, PathBuf)> = loaded
-        .set
-        .files
+    let protected = loaded.protected_keys();
+    let mut seen = std::collections::HashSet::new();
+    let backups: Vec<(String, PathBuf)> = created
         .iter()
-        .flat_map(|f| (1..=9u32).map(move |n| format!("{}.{n}", f.name)))
-        .map(|name| {
-            let path = loaded.data_path(&name);
-            (name, path)
-        })
-        .filter(|(_, p)| p.exists())
+        .filter(|p| !protected.contains(&path_key(p)))
+        .filter(|p| seen.insert(path_key(p)))
+        .filter(|p| p.exists())
+        .map(|p| (display_name(&loaded.data_dir, p), p.clone()))
         .collect();
     if !backups.is_empty() {
         sink.line(Level::Terse, "Purge backup files.");
@@ -981,18 +1779,41 @@ pub fn purge(loaded: &Loaded, sink: &mut Sink) {
 }
 
 /// `v` / `verify`, and the first half of `r` / `repair`.
-pub fn run(opts: &Options, sink: &mut Sink, _repairing: bool) -> u8 {
+pub fn run(opts: &Options, sink: &mut Sink, repairing: bool) -> u8 {
+    run_watched(opts, sink, repairing, &())
+}
+
+/// [`run`] with a [`SurveyWatch`] over the pass. A refusal comes back
+/// as "repair possible" with nothing printed past the set summary: a
+/// verify only reads, so the directory is as it was, and the caller
+/// that refused (the binary's Ctrl-C, through `lib.rs`) says so.
+pub fn run_watched(
+    opts: &Options,
+    sink: &mut Sink,
+    _repairing: bool,
+    watch: &dyn SurveyWatch,
+) -> u8 {
     sink.set_level(opts.level);
-    let loaded = match load(opts, sink) {
+    let mut loaded = match load_with(opts, sink, true) {
         Ok(l) => l,
         Err(code) => return code,
     };
     print_set_summary(&loaded, sink);
-    let survey = survey(&loaded, opts, sink);
+    let Some((mut survey, _bits)) = survey_watched(&loaded, opts, sink, watch) else {
+        return crate::EXIT_REPAIR_POSSIBLE;
+    };
+    // The verdict on a damaged set reads the recovery count; a clean
+    // one never does, and a quiet load deferred it - see `load`.
+    if survey.damaged() {
+        survey.recovery_blocks = ensure_recovery(&mut loaded);
+    }
     print_targets(&survey, sink);
     let code = print_verdict(&loaded, &survey, sink);
+    // A verify made no backups, so there is nothing but the par files
+    // to purge. That is the reference's answer too: `-p` removes the
+    // run's own backup list, and a run that repaired nothing has none.
     if opts.purge && code == crate::EXIT_SUCCESS {
-        purge(&loaded, sink);
+        purge(&loaded, &[], sink);
     }
     code
 }

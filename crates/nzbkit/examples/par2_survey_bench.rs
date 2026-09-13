@@ -10,7 +10,7 @@
 //! satisfy - and the pool only runs when the member is TRUNCATED. Both
 //! shapes are ordinary in the wild (a recovery set that itself lost
 //! articles; a download that stopped) and neither has a rig, which is
-//! why the two Codex lane items over this code had to be measured
+//! why the two review lane items over this code had to be measured
 //! in-library (research/PAR2-TWO-LANES-COMPARED-2026-09-03.md).
 //!
 //! The fixture is written to disk, pre-warmed, and hashed back: the line

@@ -240,7 +240,7 @@ async fn a_capacity_refusal_yields_connections_instead_of_hammering() {
 /// zero.
 ///
 /// The mock words its accept cap as a CONNECTION limit, which is what
-/// `accept_cap` models. Since Codex sweep 5 M9 a simultaneous-IP refusal
+/// `accept_cap` models. Since review sweep 5 M9 a simultaneous-IP refusal
 /// is deliberately NOT recorded as a connection ceiling - the sessions
 /// held at one are incidental, and calling them the account's cap sends
 /// the user at the wrong remedy - so the wording has to be accurate.
@@ -666,7 +666,7 @@ async fn one_dead_server_does_not_seal_work_the_live_one_can_still_do() {
     assert_exactly_one_outcome_each(&ids, &seen);
 }
 
-/// Codex sweep 2, 3 Aug M6. A budget trained down to the floor
+/// Review sweep 2, 3 Aug M6. A budget trained down to the floor
 /// by pipelined ~0 ms samples has to be able to climb back out
 /// WITHIN the article retry allowance (four charged attempts by
 /// default), or a provider that settles just above the floor fails

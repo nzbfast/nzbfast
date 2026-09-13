@@ -236,6 +236,68 @@ impl Rar50ExecutionPolicy {
     }
 }
 
+/// Memory allowance for RAR 5 WRITING, the counterpart of
+/// [`Rar50ExecutionPolicy`] on the encode side.
+///
+/// It exists because the writer's allocations were admitted by nothing.
+/// Measured 8 Sep 2026 on the 1 GiB mixed corpus, a single compressed
+/// member needed 1.4 to 2.1 GiB of live heap BEYOND the caller's input at
+/// every dictionary from 128 KiB to 32 MiB, out of four pools that took no
+/// budget argument: the match finder's tree (ten bytes for every byte of
+/// dictionary, 320 MiB at `-md32m`), the parse hints (a flat 512 MiB cap),
+/// the block wave's per-thread scratch (128 MiB a thread, floored at a
+/// GIBIBYTE) and the output archive. A 32-bit target's whole
+/// `MemBudget::max_total()` is 1 GiB, so the scratch FLOOR alone exceeded
+/// everything the phone posting path could budget, and asking for a wider
+/// dictionary silently bought a tree ten times its size.
+/// (nzbfast-local change, 8 Sep 2026; see VENDORING.md.)
+///
+/// The policy is advisory in the same sense the read side's is: it selects
+/// how many blocks are in flight and how wide a dictionary is admitted. The
+/// first is byte-neutral by construction. The second is NOT - a narrower
+/// dictionary is a different archive - so it only ever REDUCES what the
+/// caller asked for, the way the payload fit does, and never raises it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Rar50WritePolicy {
+    /// Total encoder working-memory allowance in bytes, split between the
+    /// block wave and the parse hints. See [`Self::from_working_memory`].
+    pub working_memory_limit: u64,
+    /// Largest dictionary this budget admits, whatever is asked for. The
+    /// tree match finder holds ten bytes per dictionary byte, so a caller
+    /// that cannot afford the tree gets a narrower window rather than an
+    /// allocation its target cannot make.
+    pub max_dictionary: u64,
+}
+
+impl Rar50WritePolicy {
+    /// Ten bytes of match-finder tree per byte of dictionary: two four-byte
+    /// child slots per cyclic position and one four-byte hash head per two
+    /// positions. Measured, not estimated - see the 8 Sep 2026 handoff.
+    const TREE_BYTES_PER_DICTIONARY_BYTE: u64 = 10;
+
+    /// The RAR 5.0 dictionary floor (128 KiB), which every reader supports
+    /// and no budget reduces below.
+    pub const MIN_DICTIONARY: u64 = 128 * 1024;
+
+    /// A policy from a total working-memory allowance. A quarter of it may
+    /// go to the match-finder tree, which is what fixes the widest
+    /// dictionary this budget can admit; the encoder splits the rest
+    /// between its block wave and its parse hints.
+    ///
+    /// The dictionary is never reduced below [`Self::MIN_DICTIONARY`], the
+    /// RAR 5 floor: a budget too small even for that is a caller error to
+    /// report, not a dictionary to invent.
+    pub fn from_working_memory(working_memory_limit: u64) -> Self {
+        let for_tree = working_memory_limit / 4;
+        Self {
+            working_memory_limit,
+            max_dictionary: (for_tree / Self::TREE_BYTES_PER_DICTIONARY_BYTE)
+                .max(Self::MIN_DICTIONARY),
+        }
+    }
+}
+
 impl<'a> ArchiveReadOptions<'a> {
     /// Creates read options without a password.
     pub fn new() -> Self {

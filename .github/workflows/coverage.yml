@@ -143,7 +143,7 @@ jobs:
         run: cargo llvm-cov clean --workspace
       # Two floors, measured per crate, because one workspace-wide number
       # would let a regression in the weak crate hide behind the strong
-      # one. NZBFAST_NO_ENRICH is CLAUDE.md invariant 5 - the bin suite
+      # one. NZBFAST_NO_ENRICH is project invariant 5 - the bin suite
       # runs product code that consults it at the network boundary.
       # Product files only - see the measurement-policy paragraph in the
       # header for why mock/sysbench/benchserve sit outside the metric.
@@ -221,7 +221,7 @@ jobs:
       # red for hours with nobody on it - not a coverage regression, a
       # target that stopped meaning anything. Crate-split step 4.5
       # (2 Sep) made `crates/nzbfast/src/lib.rs` carry the module tree
-      # and turned `main.rs` into a shim (CLAUDE.md "Build and test"),
+      # and turned `main.rs` into a shim (CONTRIBUTING.md "Build and test"),
       # so `--bins` runs main.rs's own unit tests - zero of them - and
       # reports coverage over main.rs's 3 lines alone, floor 46 or not.
       # `--lib` is the target that now holds the code. Re-baselined

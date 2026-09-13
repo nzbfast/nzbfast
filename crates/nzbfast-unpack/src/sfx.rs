@@ -675,7 +675,7 @@ mod sfx_tests {
         // merely mis-labelled - the direct read failed, `carve_sfx`
         // declined offset 0, and extraction reported false without the
         // plain path ever seeing the file. Every one of these extensions,
-        // because the gate lists three (Codex sweep 12 Aug F13).
+        // because the gate lists three (review sweep 12 Aug F13).
         for name in ["bare2.bin", "bare3.sfx"] {
             std::fs::copy(sevenz, dir.join(name)).unwrap();
             assert!(!is_sfx_archive(&dir.join(name)), "{name}: offset 0");

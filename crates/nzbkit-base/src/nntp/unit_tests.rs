@@ -1693,7 +1693,7 @@ fn real_provider_refusal_lines_land_on_the_right_arm() {
     // Same control-flow arm, different FACT. Telemetry that reads an
     // IP-limit refusal as a socket count reports an incidental number as
     // the account's connection ceiling and offers the wrong remedy
-    // (Codex sweep 5, M9).
+    // (review sweep 5, M9).
     use crate::nntp::{CapacityLimit, capacity_limit};
     assert_eq!(
         capacity_limit("481 max simultaneous IP addresses reached"),

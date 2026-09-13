@@ -857,7 +857,7 @@ pub fn finished_media_path(d: &Daemon, job: &Arc<Mutex<Job>>) -> Option<PathBuf>
 /// (a launchd-started daemon reaching a TCC-gated Downloads folder), a
 /// network mount has not woken, a handle went stale. Everything below
 /// erased both into `None`, and the history re-derivation then recorded
-/// "no payload" for a disk it had never managed to read (Codex sweep 7,
+/// "no payload" for a disk it had never managed to read (review sweep 7,
 /// M6).
 ///
 /// The check is at the ROOT of the walk on purpose. That is where a

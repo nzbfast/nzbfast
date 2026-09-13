@@ -155,7 +155,7 @@ fn pending_job_of(d: &Arc<Daemon>, name: &str, cat: &str, bytes: usize) -> Arc<M
 /// `serve::daemon::daemon_tests`'s picker spin - because it has already
 /// been RE-MEASURED once, from 30 s to 60 s in `cea15ceed`, hours after
 /// it was written. Four sites each spelling their own 60 is a fifth
-/// measurement that moves one and leaves three, which is CLAUDE.md's
+/// measurement that moves one and leaves three, which is CONTRIBUTING.md's
 /// fourteenth gate's argument about a threshold in four copy-paste
 /// sibling drivers. That entry also records which sites must NOT take
 /// it, which is the half a grep gets wrong.

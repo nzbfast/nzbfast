@@ -245,7 +245,7 @@ impl Daemon {
         // into queue.json, and the crash lands before the stale seq-N
         // history row was cleaned up. Discarding the routed copy then
         // silently reverted the whole retry - the completed run reappeared
-        // as its previous failure (Codex sweep 13 Aug Q3). Ties keep the
+        // as its previous failure (review sweep 13 Aug Q3). Ties keep the
         // store's copy, which is the pre-stamp behaviour.
         let mut superseded: std::collections::HashSet<String> = std::collections::HashSet::new();
         let routed: Vec<Job> = routed
@@ -286,7 +286,7 @@ impl Daemon {
         // queue copy is nonterminal (Finishing), `job_wire` restores a
         // nonterminal row as Queued, and nothing deduplicated the two: the
         // job then showed as Queued AND Failed, and the queued copy
-        // downloaded the whole release again (Codex sweep 12 Aug F1).
+        // downloaded the whole release again (review sweep 12 Aug F1).
         //
         // §158 resolved every such pair in history's favour, which is
         // right for the park and quietly reverts a retry - both directions

@@ -1649,7 +1649,7 @@ pub(super) async fn run_set_repair(
         // ghosted .rar. The old test was `reports.is_empty() &&
         // ...`, which read the .nfo's report as proof nothing
         // was recreated and greened the mixed job still packed
-        // (Codex H2, 2 Aug). A recreated bare payload passes
+        // (review H2, 2 Aug). A recreated bare payload passes
         // through the re-extract untouched (no volumes → success).
         let recreated_set = plans.iter().any(|p| !p.missing.is_empty());
         if repaired && (damage_in_mapped || recreated_set) {

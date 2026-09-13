@@ -46,7 +46,7 @@ object Exporter {
      * numbered copies of the same file on every poll.
      *
      * TWO THINGS KEEP THE SKIP HONEST, because a name is not an identity
-     * (Codex sweep 27 Aug, C01). The destination folder is keyed to
+     * (review sweep 27 Aug, C01). The destination folder is keyed to
      * [nzoId] through a marker file, so a second job with the same
      * displayed name gets its own folder rather than being silently
      * skipped against the first one's bytes. And a file only ever gets

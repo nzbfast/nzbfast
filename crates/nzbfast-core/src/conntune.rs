@@ -338,7 +338,7 @@ pub fn knee_of(steps: &[nzbkit::sysbench::LadderStep]) -> Option<Knee> {
 /// with stale state the user has disowned.
 ///
 /// Through the same backup-aware loader every other settings read uses
-/// (Codex sweep 2, 3 Aug ML3). A bare `read` + parse treats a torn or
+/// (review sweep 2, 3 Aug ML3). A bare `read` + parse treats a torn or
 /// half-written settings.json as "no setting", which for this key means
 /// the default - ON. The daemon meanwhile loads the .bak and correctly
 /// knows the user turned it OFF, so the two authorities disagreed and
@@ -422,7 +422,7 @@ pub struct Capped {
     /// `capped_since` stamp. The watchdog re-reads a STICKY gauge every
     /// tick, so banking on every read turned one Monday refusal on an
     /// idle daemon into a 30-of-30-day support record. Banking an
-    /// EPISODE once is the fix (Codex sweep 5, M7).
+    /// EPISODE once is the fix (review sweep 5, M7).
     pub banked: u64,
 }
 
@@ -437,7 +437,7 @@ impl Capped {
     /// Needed separately because the pool's gauge can only retire a cap
     /// IT recorded - the next job starts with an empty one, so a fleet
     /// that quietly holds 100 after a plan upgrade left the row reading
-    /// "using 100 of 38" until the daemon restarted (Codex sweep 6, N4).
+    /// "using 100 of 38" until the daemon restarted (review sweep 6, N4).
     ///
     /// [`ServerLive::retire_cap_if_exceeded`]: nzbkit::pool::ServerLive::retire_cap_if_exceeded
     pub fn disproven_by(&self, held: usize) -> bool {
@@ -472,14 +472,14 @@ pub struct CapSeen {
     /// calendar days - read "capped at 10 today" off a refusal a
     /// hundred days old while today's was 38. A number that old,
     /// presented as today's observation, is the opposite of the
-    /// evidence this ledger exists to be (Codex sweep 6, N7).
+    /// evidence this ledger exists to be (review sweep 6, N7).
     ///
     /// `default` so a ledger written before this field existed still
     /// loads; a length that does not match `days` means exactly that,
     /// and those days carry `DAY_LO_UNKNOWN` once the column is
     /// aligned. Handing them the lifetime figure instead would have
     /// re-told exactly the lie above, permanently and in a column that
-    /// now claims to be per-day (Codex sweep 7, H1b).
+    /// now claims to be per-day (review sweep 7, H1b).
     #[serde(default)]
     pub day_lo: Vec<usize>,
 }
@@ -1372,13 +1372,13 @@ pub fn note_capped(config: &Path, host: &str, granted: usize, now: u64) -> bool 
     // An older ledger has no per-day column at all. Align it, but mark
     // those days unknown: the lifetime low is not what any of them was
     // granted, and writing it here would preserve that misattribution
-    // for as long as the day is retained (Codex sweep 7, H1b).
+    // for as long as the day is retained (review sweep 7, H1b).
     if c.day_lo.len() != c.days.len() {
         c.day_lo = vec![DAY_LO_UNKNOWN; c.days.len()];
     }
     // A lower ceiling on a day already recorded still has to land, even
     // when the LIFETIME low does not move - that day's own number is
-    // what the windowed chip reads (Codex sweep 6, N7).
+    // what the windowed chip reads (review sweep 6, N7).
     let day_moved = !fresh_day && c.day_lo.last().is_some_and(|&lo| granted < lo);
     let moved = granted > c.granted_hi || granted < c.granted_lo;
     if !fresh_day && !moved && !day_moved {

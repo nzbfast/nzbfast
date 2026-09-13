@@ -75,6 +75,31 @@ pub struct Options {
     pub limit: bool,
     pub recovery_files: Option<u32>,
     pub recurse: bool,
+    /// `--fast`: arm the EXPERIMENTAL joint solve for this run. Not a
+    /// reference switch - see [`apply_switch`]'s long-option arm for
+    /// why a non-reference spelling is safe here and what it costs.
+    pub fast: bool,
+    /// `--comment`: the set's comment, written as the spec's optional
+    /// text packet. Not a reference switch either - par2cmdline
+    /// implements neither comment packet, which is exactly why this is a
+    /// long option and not a letter.
+    ///
+    /// Accepted on every command and read only by `create`, for
+    /// `--fast`'s reason: refusing it on verify would break a wrapper
+    /// that passes one set of switches to all three.
+    pub comment: Option<String>,
+    /// `--std-naming`: write the PAR2 spec's own `vol<first>-<last>`
+    /// volume names rather than par2cmdline's `vol<first>+<count>`.
+    /// Not a reference switch. See [`crate::create::final_volume_names`]
+    /// for the two spellings and [`apply_switch`] for why the long form.
+    pub std_naming: bool,
+    /// `--volume-blocks=N`: the largest number of recovery slices ONE
+    /// volume may carry. Not a reference switch, and the only way to
+    /// say it: the reference's dialect has exactly one volume ceiling,
+    /// `-l`, which is a bound on the largest SOURCE file and cannot
+    /// express an arbitrary one. Both are ceilings, so when both are
+    /// given the tighter wins - see [`crate::create::volume_ceiling`].
+    pub volume_blocks: Option<u64>,
     /// `-a`, with the reference's `.par2` suffix already appended when
     /// the switch did not carry one. NOT folded into `par2` at parse
     /// time, because the two commands resolve the pair differently:
@@ -202,6 +227,24 @@ fn number(spell: char, value: &str) -> Result<u64, ParseError> {
         .map_err(|_| ParseError::msg(format!("Invalid option specified: -{spell}{value}")))
 }
 
+/// `--comment=`, spelled once so the parse, the refusal and the
+/// value-taking list below cannot drift apart.
+const COMMENT: &str = "comment=";
+/// `--volume-blocks=`, spelled once so the parse and its refusal
+/// cannot drift apart.
+const VOLUME_BLOCKS: &str = "volume-blocks=";
+
+/// Every long option that takes a VALUE, in the `name=` spelling its own
+/// arm matches on - one entry per option and no second copy of a name.
+///
+/// It exists because a GNU-style long option has TWO spellings,
+/// `--opt=value` and `--opt value`, and the second needs the argument
+/// LOOP rather than [`apply_switch`]: only the loop holds the iterator
+/// the value comes off. Listing them here is what lets the loop join the
+/// separated form into the attached one without knowing what any of them
+/// mean.
+const LONG_OPTS_WITH_VALUE: [&str; 2] = [COMMENT, VOLUME_BLOCKS];
+
 fn parse_options(command: Command, args: &[String]) -> Result<Options, ParseError> {
     let mut o = Options::default();
     let mut bare: Vec<PathBuf> = Vec::new();
@@ -231,11 +274,42 @@ fn parse_options(command: Command, args: &[String]) -> Result<Options, ParseErro
             bare.push(PathBuf::from(arg));
             continue;
         }
+        // GNU-style long options that take a VALUE accept both spellings,
+        // `--opt=text` and `--opt text`, because that is what "GNU-style"
+        // means to anyone who types one. The separated form is joined
+        // here, where the iterator is, and then falls through the
+        // ordinary split - so `apply_switch` below sees exactly one shape
+        // and the reference's own attached-value dialect (`-a<name>`) is
+        // untouched. The reference has no long option at all, so nothing
+        // it accepts can be swallowed by this.
+        //
+        // `body` is the argument with ONE dash already stripped, so a
+        // long option reaches here as `-comment`; the list holds the
+        // `comment=` spelling each arm below matches on, which is why
+        // both ends are trimmed rather than a second spelling stored.
+        //
+        // `--volume-blocks` was attached-only when `91c643b134` landed
+        // it hours before this; joining it here is strictly additive -
+        // nothing that parsed before stops parsing - and keeps the
+        // dialect ONE rule rather than two long options that disagree
+        // about their own spelling. The one behaviour change is that a
+        // missing value now says so instead of `Unknown option`.
+        let body = match LONG_OPTS_WITH_VALUE
+            .iter()
+            .find(|n| body.strip_prefix('-') == Some(n.trim_end_matches('=')))
+        {
+            None => std::borrow::Cow::Borrowed(body),
+            Some(name) => {
+                let Some(v) = it.next() else {
+                    return Err(ParseError::msg(format!("Option {arg} requires a value.")));
+                };
+                std::borrow::Cow::Owned(format!("-{name}{v}"))
+            }
+        };
         let mut chars = body.chars();
         let spell = chars.next().expect("body is non-empty");
         let value: String = chars.collect();
         apply_switch(command, &mut o, &mut archive, spell, &value)?;
-        let _ = &mut it;
     }
     // -S without -N is the reference's own refusal, and it is checked
     // AFTER the whole line because the two may arrive in either order.
@@ -369,6 +443,99 @@ fn apply_switch(
                 message: String::new(),
                 show_usage: true,
             });
+        }
+        // The first of the long options spec R.3 reserves for what
+        // parfast can do and the reference cannot: it arms the joint
+        // Forney solve for this process, the same arm
+        // `NZBFAST_FORNEY_JOINT=1` sets.
+        //
+        // It was off by default for a measured reason, not a cautious
+        // one: 15.9-39.7% off the whole repair wall at 13,104 to 29,484
+        // missing blocks, and a small LOSS at 3,276, where stage 2 gave
+        // back more than stage 1 won
+        // (`research/JOINT-FORNEY-INTEGRATION-2026-09-10.md` sections
+        // 6.5 and 6.7).
+        //
+        // The shallow loss was LOCALISED and gated out on 11 Sep 2026:
+        // it was stage 2's factored evaluation alone, and the two
+        // stages now take their arms separately, with stage 2's keyed
+        // on `forney::joint::JOINT_FACTOR_MIN_M` = 8,192 measured
+        // missing blocks (`research/JOINT-STAGE2-DEPTH-GATE-2026-09-11.md`).
+        //
+        // THE ROUND THIS COMMENT ASKED FOR HAS NOW RUN, and the default
+        // moved with it on aarch64:
+        // `research/JOINT-CROSSOVER-PER-CLASS-2026-09-11.md` re-measured
+        // the WHOLE arm against the shipped solve with the split in, on
+        // two Apple generations, 14 rungs, with a paired A/A at every
+        // rung - not one rung is a loss, and the band that used to lose
+        // is exactly the band where stage 2 now declines. So on aarch64
+        // the switch is now redundant rather than inert: it forces on an
+        // arm that is already the default, which is still worth keeping
+        // because `NZBFAST_FORNEY_JOINT=0` can turn it off and this
+        // overrides that.
+        //
+        // On x86 it remains the only way in, and that is provenance
+        // rather than preference - both x86 boxes on the fleet held rig
+        // locks for publication rounds the day the round ran, so neither
+        // class has been measured with the split in. `joint_default_on`
+        // carries the gap and the note carries the two command lines.
+        //
+        // Accepted on every command, including `create`, where it does
+        // nothing. That is deliberate: refusing it there would make a
+        // wrapper that passes `--fast` to all three commands fail on
+        // one of them, and the reference's own `creating_only` refusals
+        // exist to match par2cmdline, which has nothing to match here.
+        '-' if value == "fast" => o.fast = true,
+        // `--comment=<text>` (and `--comment <text>`, joined into this
+        // shape by the loop above): the set's comment, written as the
+        // spec's optional `CommASCI` / `CommUni` packet. The second of
+        // the long options spec R.3 reserves, and it is a long option
+        // for the strongest form of that rule's own reason - par2cmdline
+        // implements NEITHER comment packet, so there is no reference
+        // spelling to match and a short letter picked here would be a
+        // letter its next release is free to take.
+        //
+        // The text is passed to the engine unchanged and is validated
+        // THERE (`par2gen::check_comment`), not here: the rule about
+        // what may be in a comment is the same rule the parser applies
+        // when reading one back, and it belongs beside the packet
+        // format rather than beside the argument dialect.
+        '-' if let Some(text) = value.strip_prefix(COMMENT) => {
+            o.comment = Some(text.to_string());
+        }
+        // The spec's own volume spelling, `vol<first>-<last>`, instead
+        // of par2cmdline's `vol<first>+<count>`. A rename after the
+        // writer has finished, exactly as the reference's own field
+        // widths are - a PAR2 volume's packets carry no filename of
+        // their own, so only the directory entry moves.
+        //
+        // Accepted on every command for the same reason `--fast` is:
+        // a wrapper that passes one long option to all three must not
+        // fail on the two where it does nothing.
+        '-' if value == "std-naming" => o.std_naming = true,
+        // An explicit ceiling on one volume's recovery slice count.
+        // The engine has honoured an arbitrary ceiling all along
+        // (`par2gen::CreatePlan::max_blocks_per_volume`); what was
+        // missing was a way to SAY it, because the reference's dialect
+        // has exactly one volume ceiling and `-l` means one specific
+        // thing. A GNU-style long option is what spec R.3 leaves for
+        // this: a new single-dash letter would collide with
+        // par2cmdline's next release and break the drop-in claim in
+        // silence.
+        '-' if value.starts_with(VOLUME_BLOCKS) => {
+            let rest = &value[VOLUME_BLOCKS.len()..];
+            let n = rest.parse::<u64>().ok().filter(|&n| n > 0);
+            match n {
+                Some(n) => o.volume_blocks = Some(n),
+                // Our own option, so our own wording: the reference
+                // never emits this for a long switch and a script that
+                // greps stderr cannot confuse the two.
+                None => {
+                    return Err(ParseError::msg(format!(
+                        "Invalid option specified: --{VOLUME_BLOCKS}{rest}"
+                    )));
+                }
+            }
         }
         // A LONG option the reference does not know is refused in
         // different words from a short one: `Unknown option: --zzz`

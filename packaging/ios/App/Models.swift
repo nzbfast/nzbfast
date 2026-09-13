@@ -125,7 +125,7 @@ struct HistorySlot: Codable, Identifiable {
     /// the `media` chip when it was latched, else the stored path's own
     /// extension (rows recorded before the chip existed). Everything
     /// else - ISOs, software, archive-only jobs - used to show a dead
-    /// Play action (Codex sweep 5 Aug L3). Extensions mirror the
+    /// Play action (review sweep 5 Aug L3). Extensions mirror the
     /// daemon's MEDIA_EXTS list.
     var looksPlayable: Bool {
         guard isCompleted else { return false }

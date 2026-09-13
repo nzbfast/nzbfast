@@ -1,4 +1,4 @@
-//! Codex read-only sweep H2: an FFI stop must reclaim the WHOLE daemon
+//! read-only review sweep H2: an FFI stop must reclaim the WHOLE daemon
 //! generation, not just the engine thread.
 //!
 //! `nzbfast_stop()` joins the engine thread and shuts the runtime down,

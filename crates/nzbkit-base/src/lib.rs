@@ -80,6 +80,7 @@ pub mod par2;
 pub mod par2gen;
 pub(crate) mod par2ntt;
 pub mod par2repair;
+pub mod par2seams;
 pub mod pesto;
 pub mod predb;
 pub mod predb_corr;

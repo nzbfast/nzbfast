@@ -310,7 +310,7 @@ impl Daemon {
         // fails; PROPERs always download.
         //
         // WHICH rows this add may be a duplicate OF is `exempt`, whose
-        // three answers - and why the narrow one exists (§290, Codex
+        // three answers - and why the narrow one exists (§290, review
         // F-09) - are set out on [`DupeExempt`]. A `hold_for` spare
         // forgives everything: the caller has settled that row's fate.
         let key = dupe_key(&stem);
@@ -370,7 +370,7 @@ impl Daemon {
             // The spool copy was written above; a refused add must not
             // leave it behind - and a refused UNLINK must not either,
             // which is why this is `drop_spool` and not a swallowed
-            // `remove_file` (Codex sweep 24 Aug, F-04): the survivor is
+            // `remove_file` (review sweep 24 Aug, F-04): the survivor is
             // adoptable, so the discarded duplicate would download at
             // the next start.
             drop_spool(&spool_path);
@@ -606,7 +606,7 @@ impl Daemon {
                     // `drop_spool`, not a swallowed `remove_file`: the
                     // refused spare has no record anywhere, so a copy
                     // whose unlink fails is re-adopted at the next start
-                    // (Codex sweep 24 Aug, F-04).
+                    // (review sweep 24 Aug, F-04).
                     drop_spool(p);
                 }
                 anyhow::bail!("the pre-queue script refused this spare: {why}");
@@ -659,7 +659,7 @@ impl Daemon {
         // for the same nzo_id, which is a webhook consumer watching a
         // job start before it exists. The idle latch re-arms inside the
         // same critical section for the same reason - and it must be
-        // INSIDE, not merely before it (Codex sweep 14 Aug M3): stored
+        // INSIDE, not merely before it (review sweep 14 Aug M3): stored
         // ahead of the lock, a notifier that had already scanned the
         // empty queue could take its false-to-true CAS after this add
         // published, emitting queue.idle over a runnable job and
@@ -788,7 +788,7 @@ impl Daemon {
             // Never queued, so nothing names the spool copy - and
             // `recover_orphaned_spool` adopts exactly that shape at the
             // next start. `drop_spool` so a refused unlink is masked
-            // rather than left adoptable (Codex sweep 24 Aug, F-04).
+            // rather than left adoptable (review sweep 24 Aug, F-04).
             if let Some(p) = &spare_spool {
                 drop_spool(p);
             }

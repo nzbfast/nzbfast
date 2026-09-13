@@ -153,9 +153,21 @@ const PAYLOAD_CONTENT_EXTS: &[&str] = &[
 
 /// Does this name positively identify the file as finished payload?
 fn payload_content_name(lower: &str) -> bool {
-    std::path::Path::new(lower)
-        .extension()
-        .is_some_and(|e| PAYLOAD_CONTENT_EXTS.contains(&&*e.to_string_lossy()))
+    // The extension is taken off the RAW NAME, not through
+    // `Path::extension`, because a POSTED name is attacker-chosen and
+    // `Path::extension` answers `Some("")` for a trailing dot: it reads
+    // `Movie.mkv.` as extension-less, no entry matches, the guard below
+    // decides the name identifies nothing, and a `Movie.mkv.` carrying
+    // `Rar!` magic gets chased and unpacked - the exact "believing the
+    // magic costs the file" outcome `archive_sniff_eligible_name` exists
+    // to refuse. Trailing dots and spaces are stripped first (Windows
+    // drops them at the filesystem, so they are free to add and invisible
+    // once written), then the tail after the last remaining dot is the
+    // extension.
+    let trimmed = lower.trim_end_matches(['.', ' ']);
+    trimmed
+        .rsplit_once('.')
+        .is_some_and(|(stem, ext)| !stem.is_empty() && PAYLOAD_CONTENT_EXTS.contains(&ext))
 }
 
 /// May the offset-0 sniff read this POSTED name's bytes as a RAR or 7z
@@ -285,15 +297,27 @@ pub fn vol_sort_key(name: &str) -> (u64, String) {
         // .t00 = 201… (each letter is another 10^digits volumes). Keying
         // only 'r' broke base-resolution at the r→s boundary on 100+
         // volume sets.
+        // CHECKED end to end, and the arm only fires when the key FITS:
+        // `tail` is the tail of a POSTED name, so both the digit count
+        // and `n` are attacker-chosen. 10^20 is already past `u64::MAX`,
+        // so `.r` plus twenty digits panicked at the `pow` in any
+        // overflow-checked build and wrapped to a meaningless key in
+        // release; the letter multiply and the `+ n` can each overflow
+        // one rung later. Falling THROUGH on overflow (rather than
+        // substituting a key) is what keeps the failure safe: the name
+        // takes this function's not-a-volume default of `u64::MAX` and
+        // sorts last, where a fabricated 0 would have sorted it AHEAD of
+        // the real volumes it sits beside.
         if tail.len() >= 2
             && (b'r'..=b'z').contains(&tail.as_bytes()[0])
             && let Ok(n) = tail[1..].parse::<u64>()
+            && let Some(key) = 10u64
+                .checked_pow((tail.len() - 1) as u32)
+                .and_then(|span| u64::from(tail.as_bytes()[0] - b'r').checked_mul(span))
+                .and_then(|base| base.checked_add(n))
+                .and_then(|k| k.checked_add(1))
         {
-            let span = 10u64.pow((tail.len() - 1) as u32);
-            return (
-                (tail.as_bytes()[0] - b'r') as u64 * span + n + 1,
-                lower.clone(),
-            );
+            return (key, lower.clone());
         }
         // WinRAR numeric volume naming: .001, .002 …
         if tail.len() >= 2

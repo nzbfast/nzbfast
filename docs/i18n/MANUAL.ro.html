@@ -1300,7 +1300,17 @@ location / {
     proxy_set_header Host              $host;
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-}</code></pre>
+}
+
+# Apache (mod_proxy, mod_proxy_http, mod_headers)
+&lt;Location /&gt;
+    ProxyPass        http://127.0.0.1:6789/
+    ProxyPassReverse http://127.0.0.1:6789/
+    RequestHeader set X-Forwarded-Proto "https"
+    # Where the proxy does the authenticating, supply the key here and
+    # clients behind it never need one. Use set, not setifempty.
+    # RequestHeader set X-Api-Key "your-api-key"
+&lt;/Location&gt;</code></pre>
 <p>Adaugă deasupra ce oferă proxy-ul tău: autentificare basic, un serviciu de forward-auth precum Authelia sau Authentik, ori certificate de client. Un lucru îi prinde pe toți - Sonarr, Radarr și aplicațiile de telefon nu pot parcurge o autentificare din browser, așa că lasă-le o cale pe lângă. Majoritatea proxy-urilor pot lăsa să treacă o cerere cu un antet <code>X-Api-Key</code> valid și pot cere autentificare pentru tot restul.</p>
 <div class="warn-box"><b>Nu redirecționa pur și simplu portul 6789 pe router.</b>
 Fără un certificat configurat, panoul vorbește HTTP simplu, deci cheia ta API și

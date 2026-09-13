@@ -71,7 +71,7 @@ const OVER_FETCH_CAP: usize = 200;
 /// unanswerable rows at the head - a TVmaze 404, a merged show id -
 /// occupy the whole batch on every pass forever, and the eligible rows
 /// behind them are never even fetched. A transient outage does the same
-/// thing for up to the backoff ceiling (Codex sweep 7, M2: the TVDB
+/// thing for up to the backoff ceiling (review sweep 7, M2: the TVDB
 /// queue was the one lane still filtering after its LIMIT).
 ///
 /// So: over-fetch by the number of keys currently in backoff, drop those,
@@ -192,7 +192,7 @@ fn tvdb_backfill(
         // Over-fetched then filtered, like its sibling lanes -
         // it used to be the one queue that took its six rows
         // first and skipped them afterwards, so six shows TVmaze
-        // permanently 404s on pinned the lane for good (Codex
+        // permanently 404s on pinned the lane for good (review
         // sweep 7, M2).
         let tv = eligible_batch(
             6,
@@ -1323,7 +1323,7 @@ mod eligibility_tests {
         keys.iter().map(|k| ((*k).to_string(), (1, next))).collect()
     }
 
-    /// Codex sweep 7, M2: a run of skipped rows at the HEAD of a lane's
+    /// Review sweep 7, M2: a run of skipped rows at the HEAD of a lane's
     /// priority order must not starve the eligible rows behind them.
     ///
     /// The queues this draws from are head-stable - the order is fixed

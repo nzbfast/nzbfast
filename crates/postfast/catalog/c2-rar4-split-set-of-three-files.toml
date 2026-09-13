@@ -15,7 +15,7 @@ each split ONE member across the volumes, so a RAR4 set holding more
 than one file had no emitter and `crate::container` refused it by name
 rather than approximating it. The plurals are
 `::write_stored_volume_set` and `::write_compressed_volume_set`, made in
-the fork at ~/Claude/rars and hand-ported into vendor/rars.
+the fork at the upstream rars fork and hand-ported into vendor/rars.
 
 The RAR4 set needed one thing its RAR5 twin did not. A single member is
 split across EVERY volume, so the split flags alone chain the set and

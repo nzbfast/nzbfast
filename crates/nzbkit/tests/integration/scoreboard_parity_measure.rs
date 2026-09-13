@@ -13,7 +13,7 @@
 //! thing being measured.
 //!
 //! ```sh
-//! SB_MEASURE_DB=$HOME/Claude/nzbfast-data/index.db \
+//! SB_MEASURE_DB=$HOME/nzbfast-data/index.db \
 //!   cargo test -p nzbkit --test scoreboard_parity_measure -- --ignored --nocapture
 //! ```
 //!

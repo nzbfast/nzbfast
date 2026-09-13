@@ -99,7 +99,7 @@ pub fn update_tune_hint(
     // reads as "nothing measured". Treating it as measured summed its
     // zero Gbps, so the hint could claim the fleet covers half the line
     // and recommend a faster provider on the strength of a host nobody
-    // had timed (Codex sweep 5, M8).
+    // had timed (review sweep 5, M8).
     let is_measured = |h: &str| tuned.get(h).is_some_and(|t| t.connections > 0);
     if expected_bps > 0 && !measured.is_empty() && measured.iter().all(|s| is_measured(&s.host)) {
         let cap_bytes: f64 = measured.iter().map(|s| tuned[&s.host].gbps).sum::<f64>() * 1e9 / 8.0;

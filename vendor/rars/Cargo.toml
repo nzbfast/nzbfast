@@ -9,14 +9,18 @@ publish = false
 
 [lints.rust]
 # `deny`, not `forbid`, since 2026-08-22: src/rar50/blake2sp/many.rs carries
-# the crate's ONE unsafe block (entering the NEON blake2s kernel) under a
-# local `#[allow(unsafe_code)]`; its comment has the argument. Everything
-# else is still refused, and `cargo test -p rars --lib`'s
-# `unsafe_is_confined_to_the_neon_entry` test pins the count at one.
+# the crate's first unsafe block (entering the NEON blake2s kernel) under a
+# local `#[allow(unsafe_code)]`; its comment has the argument. Since
+# 2026-09-06 src/recovery/gf16_fold.rs is the second home, the SIMD GF(2^16)
+# fold kernels for recovery records, under the same argument (feature-gated
+# intrinsics over slices the safe wrappers bound). Everything else is still
+# refused, and `cargo test -p rars --lib`'s
+# `unsafe_is_confined_to_the_neon_entry` test pins the count at two files.
 unsafe_code = "deny"
 unused_must_use = "deny"
 
 [features]
+ratio-lab = []
 fast = []
 parallel = ["dep:rayon"]
 
@@ -45,3 +49,7 @@ zeroize = { version = "1.8", default-features = false, features = ["alloc", "zer
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+
+[[example]]
+name = "ratio_lab"
+required-features = ["ratio-lab"]

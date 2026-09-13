@@ -373,10 +373,16 @@ fn stsd_first_entry(p: &[u8]) -> Option<(String, Option<(u32, u32)>)> {
         return None;
     }
     let entry_size = u32::from_be_bytes(p[8..12].try_into().ok()?) as usize;
-    if entry_size < 8 || 8 + entry_size > p.len() {
+    // `checked_add`, not `8 + entry_size`: `entry_size` is a
+    // wire-declared u32 and `usize` is 32 bits on the shipped armv7
+    // musl target, so a declared size near `u32::MAX` wraps the sum to
+    // a small number, the bound test passes, and the slice on the next
+    // line panics on its own inverted range.
+    let end = 8usize.checked_add(entry_size)?;
+    if entry_size < 8 || end > p.len() {
         return None;
     }
-    let entry = &p[8..8 + entry_size];
+    let entry = &p[8..end];
     let fourcc = std::str::from_utf8(&entry[4..8]).ok()?;
     if !fourcc.is_ascii() {
         return None;

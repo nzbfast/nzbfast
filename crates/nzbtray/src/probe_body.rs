@@ -68,7 +68,7 @@ pub fn apikey(data_dir: &Path) -> Option<String> {
 /// runtime.json to hold it to) attaches but never yields one:
 /// sending the stored API key to a listener whose identity is only
 /// a reply shape hands any local port-squatter daemon control and,
-/// through `mode=server_secret`, the provider password (Codex sweep
+/// through `mode=server_secret`, the provider password (review sweep
 /// 10 Aug M10).
 ///
 /// The token is the WHOLE point of the type (§148): `keyed_url` /
@@ -558,7 +558,7 @@ impl Verdict {
     /// stays keyless, because a reply SHAPE is not an identity and
     /// sending the key to something we cannot tell from an impostor
     /// hands over daemon control and, through `mode=server_secret`, the
-    /// provider password (Codex sweep 10 Aug M10).
+    /// provider password (review sweep 10 Aug M10).
     pub fn proves_identity(self) -> bool {
         self == Verdict::Proven
     }
@@ -585,7 +585,7 @@ pub fn classify(connected: bool, body: Option<&str>, token: Option<&str>, nonce:
         return Verdict::Stranger;
     }
     // Proven only when a token was actually challenged. The legacy arm
-    // attaches but must not carry the stored key (Codex sweep 10 Aug
+    // attaches but must not carry the stored key (review sweep 10 Aug
     // M10); a spawn we performed ourselves overrides it at the spawn
     // site.
     if token.is_some() {
@@ -1362,7 +1362,7 @@ mod tests {
         assert!(!tls_for(6789, &data_dir("rt-missing", None, None)));
     }
 
-    /// Codex sweep 10 Aug M10: legacy adoption (a listener accepted
+    /// Review sweep 10 Aug M10: legacy adoption (a listener accepted
     /// on reply shape alone, with no runtime.json token to
     /// challenge) must be NON-SECRET-BEARING. A local port-squatter that
     /// printed our JSON used to receive the stored full API key on
@@ -1541,7 +1541,7 @@ mod tests {
     }
 
     /// The second-instance hand-off's candidate list, which is the
-    /// half of Codex sweep F-16 that a host can run. `mod app` is
+    /// half of review sweep F-16 that a host can run. `mod app` is
     /// `cfg(windows)`, so the win32 loop around this cannot be tested
     /// on the machines these tests run on; what CAN be pinned is the
     /// decision it makes on every pass, which is where the defect was.

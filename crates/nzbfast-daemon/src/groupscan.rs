@@ -850,7 +850,7 @@ pub fn measure_system(
                 let billed: Vec<(String, u64)> = servers
                     .iter()
                     .zip(&per_server)
-                    .map(|(s, &b)| (s.host.clone(), b))
+                    .map(|(s, &b)| (s.account_key(), b))
                     .collect();
                 d.add_usage(&billed);
                 Ok(g)

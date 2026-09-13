@@ -72,7 +72,7 @@ pub(crate) fn move_by_offset(d: &Arc<Daemon>, ids: &[i64], offset: i64) -> bool 
 /// - Pausing a job also stops its prefetch (same as the /api handler):
 ///   the sidecar is the one part of a "paused" job that would keep
 ///   downloading.
-/// - Through the shared transition, not a bare flag write (Codex sweep
+/// - Through the shared transition, not a bare flag write (review sweep
 ///   2, 3 Aug M4). Setting `paused` on a job in its verify/repair/
 ///   unpack tail changes nothing about the tail - it runs to
 ///   completion - but the flag STAYS, and an auto-retry then requeued
@@ -84,7 +84,7 @@ pub(crate) fn move_by_offset(d: &Arc<Daemon>, ids: &[i64], offset: i64) -> bool 
 ///   answering success - hence `suspend_matching`.
 /// - Pausing the last runnable job idles the queue with no park, and
 ///   this facade answered true without saying so while the REST arm
-///   has announced it since the 10 Aug sweep (Codex sweep 14 Aug M4).
+///   has announced it since the 10 Aug sweep (review sweep 14 Aug M4).
 ///   Resume takes the same call, deliberately: it never EMITS on its
 ///   own (the latch keeps a still-idle queue silent), and the re-arm a
 ///   resume owes lives inside `apply_pause`, under the queue lock the
@@ -140,7 +140,7 @@ pub(crate) fn rename_by_ids(d: &Arc<Daemon>, ids: &[i64], newname: &str) -> bool
     }
     // Persisted HERE, with every fence still held, not left to
     // `jr_editqueue`'s tail save: a refused store has to roll the moved
-    // trees back under the fences, and by the tail they are gone (Codex
+    // trees back under the fences, and by the tail they are gone (review
     // C10). The label goes back first, before any fence lifts, so no
     // job can start carrying the new name over the restored path.
     if d.save_queue() {
@@ -191,7 +191,7 @@ pub(crate) fn set_parameter(d: &Arc<Daemon>, ids: &[i64], param: &str) -> bool {
 /// `requeue_category` this wraps - and both fronts do it, with the
 /// returned fence still held and the save's verdict checked: a refused
 /// store rolls the whole edit back, label and moved bytes together
-/// (Codex C10). It stays a caller's job because the two doors keep
+/// (review C10). It stays a caller's job because the two doors keep
 /// writing after this returns (the password, on the SAB side), and one
 /// save at the end of the batch stores the whole edit rather than a
 /// half-applied record - and renames N jobs in one queue.json rewrite
@@ -208,7 +208,7 @@ pub(crate) fn rename_queued(
         return Err("empty name");
     }
     let cat = job.lock_ok().category.clone();
-    // Codex F-06: the fence is BOUND, so it covers the label write too.
+    // Review finding F-06: the fence is BOUND, so it covers the label write too.
     // The directory swap and the move behind it are fenced by
     // `requeue_category` itself, but this door publishes a second thing
     // after that call returns, and dropping the guard on the `?` would
@@ -311,7 +311,7 @@ pub(crate) fn rename_arm(
     // Saved with every fence still held, and its verdict checked: a
     // refused store rolls the whole edit back - label, password, record
     // and moved bytes - before the fences lift, so nothing can start
-    // against a half-undone rename (Codex C10).
+    // against a half-undone rename (review C10).
     if d.save_queue() {
         json!({"status": true})
     } else {

@@ -47,7 +47,7 @@ pub struct TitleMeta {
     /// without its namespace is not readable: the TV lane alone writes
     /// TVmaze, AniList and TMDB ids into it, and readers that guessed
     /// from `kind` alone resolved one provider's id in another's
-    /// (Codex sweep 7, H2). Every parser in this file sets it; the
+    /// (review sweep 7, H2). Every parser in this file sets it; the
     /// enricher carries it through to `TitleFill::id_src`.
     pub id_src: String,
     pub overview: String,
@@ -279,7 +279,7 @@ pub fn tmdb_lookup(api_key: &str, kind: &Kind, title: &str, year: u32) -> Option
 /// Paced JSON GET. Every provider call in this file goes through a
 /// bucket - see `ratelimit` for why the numbers are what they are.
 ///
-/// And every one of them goes through CLAUDE.md invariant 5 here, for
+/// And every one of them goes through project invariant 5 here, for
 /// the reason `identity::may_call_out` states: gating at the CLIENT
 /// means a new call site cannot forget it. `expected::maybe_refresh`
 /// forgot for a day - it carried its own copy of the env read, spelled
@@ -929,7 +929,7 @@ const WIKI_UA: &str = "nzbfast/0.1 (personal media indexer; wall metadata)";
 /// BUCKET rather than into a private sleep, so the whole lane backs off
 /// instead of just this one call.
 fn get_json_ua(p: Provider, url: &str) -> Option<serde_json::Value> {
-    // CLAUDE.md invariant 5, the same three lines `get_json` carries -
+    // project invariant 5, the same three lines `get_json` carries -
     // these three helpers are the same shape and must behave alike.
     // Until 1 Sep 2026 only `get_json` refused, and a census of a real
     // daemon caught this one putting www.wikidata.org on the wire from
@@ -1268,7 +1268,7 @@ fn parse_anilist(v: &serde_json::Value) -> Option<TitleMeta> {
         tmdb_id: id,
         // An AniList MEDIA id on what is usually a kind='tv' row. It
         // addresses nothing but AniList - in particular the TVDB
-        // backfill must never hand it to TVmaze (Codex sweep 7, H2).
+        // backfill must never hand it to TVmaze (review sweep 7, H2).
         id_src: "anilist".into(),
         overview: strip_tags(m["description"].as_str().unwrap_or("")),
         rating: m["averageScore"].as_f64().unwrap_or(0.0) / 10.0,
@@ -1398,7 +1398,7 @@ fn provider_flag_id(s: &str) -> i64 {
 /// blank an album permanently. Waiting out ~50 s in a background worker
 /// is cheap; losing the card is not.
 fn get_json_paced(p: Provider, url: &str) -> Option<serde_json::Value> {
-    // CLAUDE.md invariant 5, the same three lines `get_json` carries.
+    // project invariant 5, the same three lines `get_json` carries.
     // Not measured on the wire itself - the census that found this gap
     // caught its sibling `get_json_ua` - and gated anyway, because the
     // defect is that three identically-shaped helpers behaved
@@ -1833,8 +1833,15 @@ pub fn imdb_ratings_fetch() -> Option<Vec<(String, f64, u64)>> {
         .take(64 * 1024 * 1024)
         .read_to_end(&mut gz)
         .ok()?;
+    // The DECOMPRESSED side is capped too. The 64 MiB above bounds only
+    // what arrives on the wire; a gzip stream expands ~1000:1 at its
+    // limit, so the cap on the compressed body alone left the size of
+    // this `String` entirely to the remote host. 512 MiB is well past
+    // the real dataset (~25 MB gzipped, ~250 MB of TSV as of Sep 2026)
+    // and short of a machine.
     let mut tsv = String::new();
     flate2::read::GzDecoder::new(&gz[..])
+        .take(512 * 1024 * 1024)
         .read_to_string(&mut tsv)
         .ok()?;
     Some(parse_imdb_ratings(&tsv, 100))
@@ -1871,7 +1878,7 @@ pub fn fetch_image_res(url: &str) -> Result<Vec<u8>, ArtMiss> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(ArtMiss::NoImage);
     }
-    // CLAUDE.md invariant 5. Not only for the spawn-gated enrichment
+    // project invariant 5. Not only for the spawn-gated enrichment
     // worker: `fetch_image` is public and two dashboard handlers call it
     // with a URL straight off the request - `m_wall_art` (paste a poster
     // URL) and `m_wall_fix` (apply a candidate's art). Both were

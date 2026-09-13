@@ -6,7 +6,9 @@
 //! question. What is left is the repair itself, the re-verify, and the
 //! `-p` purge.
 
-use nzbkit::par2repair::{self, AfterSurvey, MemberSurvey, RepairStatus};
+use nzbkit::par2repair::{
+    self, AfterSurvey, MemberSurvey, RepairStatus, ScanReport, SurveyObserver,
+};
 
 use crate::cli::Options;
 use crate::out::{Level, Sink};
@@ -32,10 +34,61 @@ enum Stopped {
     /// for itself. Correct, and the cost of the pass this exists to
     /// remove.
     Unmatched,
+    /// A [`RepairWatch`] called the repair off: at the handshake, or
+    /// through its control from inside the engine. Nothing is printed
+    /// for it HERE: a host that refused already knows why, and the
+    /// binary's Ctrl-C (`control.rs`, 12 Sep 2026) says "Cancelled" in
+    /// `lib.rs`, after the meter's pending line is ended. No captured
+    /// conformance row covers it - the reference has no cancel.
+    Cancelled,
 }
+
+/// What a LONG-LIVED caller is shown before the fold, the one point at
+/// which it may call the repair off cleanly, and what it hears from
+/// inside the fold.
+///
+/// [`before_fold`](Self::before_fold) is the engine's own
+/// [`AfterSurvey`] handshake: the verify pass is done, the packet walk
+/// is done, and NOTHING has been written, so a refusal there leaves the
+/// directory exactly as it was, and this crate spells it
+/// `Stopped::Cancelled` and exits "repair possible".
+///
+/// [`control`](Self::control) is the SECOND door, since 12 Sep 2026
+/// (plan 4.2 item 1): progress out of the hashing, fold, solve and
+/// write loops, a cancel those loops poll, and a pause they park on.
+/// A cancel raised through it does NOT come back as `Ok(None)` - the
+/// engine unwinds with `RepairError::Cancelled` and this crate turns
+/// that into the same "repair possible" code, because nothing about the
+/// set is wrong. What a cancelled repair leaves on disk is stated on
+/// that variant.
+///
+/// Both are defaulted, so the in-process watch - which watches nothing
+/// and refuses nothing - is still `impl RepairWatch for ()`. The binary
+/// passes `control::CliWatch`: Ctrl-C through the gate, progress to the
+/// terminal (12 Sep 2026).
+pub trait RepairWatch {
+    /// The survey the repair is about to act on. `false` calls it off.
+    fn before_fold(&self, _survey: &Survey) -> bool {
+        true
+    }
+    /// Progress out, cancel in, pause parked. Asked ONCE, before the
+    /// verify pass. See `nzbkit::par2repair::control`.
+    fn control(&self) -> par2repair::RepairControl {
+        par2repair::RepairControl::default()
+    }
+}
+
+/// The watch the CLI passes: it watches nothing and refuses nothing.
+impl RepairWatch for () {}
 
 /// `r` / `repair`.
 pub fn run(opts: &Options, sink: &mut Sink) -> u8 {
+    run_watched(opts, sink, &())
+}
+
+/// [`run`] that shows a caller the survey before the fold and lets it
+/// call the repair off. See [`RepairWatch`].
+pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> u8 {
     sink.set_level(opts.level);
     // WHICH set and WHERE, before anything expensive. The engine's own
     // pass needs nothing from us but these two, so it can run BESIDE
@@ -49,50 +102,160 @@ pub fn run(opts: &Options, sink: &mut Sink) -> u8 {
     let mut surveyed: Option<Survey> = None;
     let mut loaded_slot: Option<Loaded> = None;
     let mut early: Option<u8> = None;
+    // What `back_up_damaged` made, kept outside the scope because the
+    // batch itself is handed to the engine thread and joined there,
+    // while `-p` needs the list after the fold. Provenance is the ONLY
+    // thing that makes a numbered file safe to delete - see
+    // `verify::purge`.
+    let mut created: Vec<std::path::PathBuf> = Vec::new();
 
-    // TWO PASSES THAT NEEDED EACH OTHER ONLY FOR THEIR ORDER.
+    // ONE PASS OVER THE PACKETS, AND THE ORDER IS HELD BY THE CHANNELS.
     //
-    // `verify::load` reads and MD5-scans every packet in the set - 108 MB
-    // of recovery volumes on the published corpus, ~26 ms - to print the
-    // reference's `Loading` / `Loaded N new packets` lines and to count
-    // the recovery blocks. The engine's survey re-derives all of that
-    // for itself from the same directory. Neither needs the other's
-    // output, so the only thing that made this a 26 ms prologue was the
-    // PRINTED ORDER: every `Loading` line precedes every `Opening:` line
-    // and the conformance table pins that.
+    // The reference prints a `Loading` / `Loaded N new packets` pair per
+    // file, every one of them BEFORE the first `Opening:` line, and the
+    // conformance table pins that order. Until 10 Sep 2026 `verify::load`
+    // earned those lines by reading and MD5-scanning every packet in the
+    // set on this thread while the engine's catalog hashed the very same
+    // bytes on the worker: 26 ms twice on the published corpus's 108 MB,
+    // but 2 GiB twice on a 2 GiB set with 100% parity - and once the
+    // engine's scan overlapped its verify pass, that duplicate was the
+    // whole critical path of the CLI-versus-driver gap (TODO 334).
     //
-    // So they run together and the order is held by the channel instead.
-    // The engine builds its catalog and verifies the payload on the
-    // worker; the main thread loads and prints; the observer hands its
-    // survey over and BLOCKS until the main thread has finished printing
-    // and decided. The engine's verify is ~106 ms against the load's
-    // ~26 ms, so in practice the main thread is always waiting on the
-    // worker and never the other way round.
+    // Now the engine does the one pass and REPORTS it: the observer's
+    // `packets_scanned` hands over every validated packet identity as
+    // soon as the scan completes, the main thread prints the `Loading`
+    // lines from that (`verify::load_scanned`, which reads only the
+    // critical packets for itself), then takes the survey and prints the
+    // rest. `NZBFAST_PARFAST_LOAD=whole` keeps the old load reachable as
+    // the A/B arm, and an engine that fails before its scan completes
+    // drops the report channel, which sends the load down that same old
+    // path so a failing run prints exactly what it always printed.
     //
     // Nothing races on the filesystem: until the observer answers
     // `Repair` the engine only READS, and the fold - the only writer -
     // starts after the main thread has finished with the directory.
-    let engine = std::thread::scope(|scope| {
-        let (tx_members, rx_members) = std::sync::mpsc::channel::<Vec<MemberSurvey>>();
-        let (tx_action, rx_action) = std::sync::mpsc::channel::<AfterSurvey>();
-        let edir = dir.clone();
-        let worker = scope.spawn(move || {
-            let mut observe = |members: &[MemberSurvey]| {
-                // A dead receiver means the main thread gave up before
-                // it could decide; stopping is the safe answer, and it
-                // leaves the directory untouched.
-                if tx_members.send(members.to_vec()).is_err() {
-                    return AfterSurvey::Stop;
+    // The engine's observer. `after_survey` is the channel handshake
+    // described above; `before_write` is where the backup copies
+    // (`back_up_damaged`, started by `announce` on the main thread and
+    // handed over with the action) are waited for - they read the
+    // damaged originals, the fold reads them too, and the first write to
+    // any of them is what must not overtake the copy. Whatever the
+    // engine never reached (a failure before the patch) is joined by the
+    // main thread after the scope, so a backup is always whole or absent
+    // by the time this command exits.
+    struct Observer {
+        tx_report: std::sync::mpsc::Sender<ScanReport>,
+        tx_members: std::sync::mpsc::Sender<Vec<MemberSurvey>>,
+        rx_action: std::sync::mpsc::Receiver<(AfterSurvey, BackupBatch)>,
+        pending: BackupBatch,
+        /// The watch's, taken once on the main thread before the engine
+        /// thread is spawned - the trait's contract is that it is the
+        /// same value every time, and this observer crosses a thread.
+        control: par2repair::RepairControl,
+    }
+    impl SurveyObserver for Observer {
+        fn packets_scanned(&mut self, report: &ScanReport) {
+            // Unbounded channel: this never blocks the repair thread,
+            // and a main thread that is not listening (the A/B arm, or
+            // one that already failed) simply never reads it.
+            let _ = self.tx_report.send(report.clone());
+        }
+        fn after_survey(&mut self, members: &[MemberSurvey]) -> AfterSurvey {
+            // A dead receiver means the main thread gave up before it
+            // could decide; stopping is the safe answer, and it leaves
+            // the directory untouched.
+            if self.tx_members.send(members.to_vec()).is_err() {
+                return AfterSurvey::Stop;
+            }
+            match self.rx_action.recv() {
+                Ok((action, backups)) => {
+                    self.pending = backups;
+                    action
                 }
-                rx_action.recv().unwrap_or(AfterSurvey::Stop)
+                Err(_) => AfterSurvey::Stop,
+            }
+        }
+        fn before_write(&mut self) {
+            join_backups(std::mem::take(&mut self.pending));
+        }
+        fn control(&self) -> par2repair::RepairControl {
+            self.control.clone()
+        }
+        fn adoption_exclusions(&self) -> &[std::path::PathBuf] {
+            // ON by default since 5 Sep 2026 (the review's lead): a backup this
+            // repair just made is a copy of a damaged file and can carry no
+            // block the original lacks, so scanning it as a donor is pure
+            // cost (0.846 -> 0.680 s on the review's 50 MiB-backup fixture; flat
+            // on rigs whose backups are not candidates). Older numbered
+            // backups stay donors. `NZBFAST_SKIP_NEW_BACKUP_SCAN=0` scans
+            // them again, the A/B arm.
+            if std::env::var_os("NZBFAST_SKIP_NEW_BACKUP_SCAN").as_deref()
+                != Some(std::ffi::OsStr::new("0"))
+            {
+                &self.pending.created
+            } else {
+                &[]
+            }
+        }
+    }
+    let (engine, leftover) = std::thread::scope(|scope| {
+        let (tx_report, rx_report) = std::sync::mpsc::channel::<ScanReport>();
+        let (tx_members, rx_members) = std::sync::mpsc::channel::<Vec<MemberSurvey>>();
+        let (tx_action, rx_action) = std::sync::mpsc::channel::<(AfterSurvey, BackupBatch)>();
+        let edir = dir.clone();
+        // The bare arguments AFTER the recovery-set name. par2cmdline
+        // takes them as extra data files / donor directories to scan,
+        // and the engine's adoption pass has taken a donor list since
+        // X6-02 - but both entries here passed `&[]`, so
+        // `parfast r set.par2 /backup` walked the set's own directory
+        // and nothing else while the reference adopted from `/backup`
+        // and repaired. The engine screens every candidate by checksum,
+        // so handing it a path that holds nothing useful costs a walk
+        // and changes no outcome.
+        let donors: Vec<std::path::PathBuf> = opts.files.clone();
+        let control = watch.control();
+        // For the load fallback below: a cancel during the engine's scan
+        // must not be answered with a whole-read load of the set.
+        let cancelled_early = control.clone();
+        let worker = scope.spawn(move || {
+            let mut observe = Observer {
+                tx_report,
+                tx_members,
+                rx_action,
+                pending: BackupBatch::default(),
+                control,
             };
-            par2repair::repair_dir_set_surveyed(&edir, &want, &[], &mut observe)
+            let status = par2repair::repair_dir_set_surveyed_as(
+                &edir,
+                &want,
+                &donors,
+                &mut observe,
+                par2repair::RetentionCaller::new(par2repair::CallerSite::ParfastRepair),
+            );
+            (status, observe.pending)
         });
 
         let mut action = AfterSurvey::Stop;
-        match verify::load(opts, sink) {
+        let mut backups = BackupBatch::default();
+        // The engine's scan report, or the old whole-read load when there
+        // is none coming: the A/B arm, or an engine that failed before its
+        // scan completed (the sender dropped with the worker's observer).
+        let loaded_res = if load_from_scan() {
+            match rx_report.recv() {
+                Ok(report) => verify::load_scanned(opts, sink, &report),
+                // The engine unwound before its scan reported, and if
+                // that was a cancel there is nothing to load for: the
+                // exit code is the handshake refusal's, and the fold
+                // never started.
+                Err(_) if cancelled_early.cancelled() => Err(crate::EXIT_REPAIR_POSSIBLE),
+                Err(_) => verify::load(opts, sink),
+            }
+        } else {
+            verify::load(opts, sink)
+        };
+        match loaded_res {
             Err(code) => early = Some(code),
-            Ok(loaded) => {
+            Ok(mut loaded) => {
                 verify::print_set_summary(&loaded, sink);
                 // `-B` names where the DATA is; the engine resolves a
                 // FileDesc name against the directory it is handed, and
@@ -126,8 +289,26 @@ pub fn run(opts: &Options, sink: &mut Sink) -> u8 {
                     // join below carries it out of the scope.
                     if let Ok(members) = rx_members.recv() {
                         match verify::survey_from_engine(&loaded, &members, sink) {
-                            Some(survey) => {
-                                action = announce(&loaded, opts, &survey, sink, &mut stopped);
+                            Some(mut survey) => {
+                                // A quiet load deferred the recovery
+                                // packets; the damaged verdicts below read
+                                // the count (see `verify::load`).
+                                if survey.damaged() {
+                                    survey.recovery_blocks = verify::ensure_recovery(&mut loaded);
+                                }
+                                (action, backups) =
+                                    announce(&loaded, opts, &survey, sink, &mut stopped);
+                                // The caller's refusal, after `announce`
+                                // so the survey it sees is the one the
+                                // reference would have printed, and
+                                // before the action is sent so the
+                                // engine never starts the fold.
+                                if !watch.before_fold(&survey) {
+                                    action = AfterSurvey::Stop;
+                                    backups = BackupBatch::default();
+                                    stopped = Some(Stopped::Cancelled);
+                                }
+                                created = backups.created.clone();
                                 surveyed = Some(survey);
                             }
                             None => stopped = Some(Stopped::Unmatched),
@@ -137,14 +318,34 @@ pub fn run(opts: &Options, sink: &mut Sink) -> u8 {
                 loaded_slot = Some(loaded);
             }
         }
-        let _ = tx_action.send(action);
+        let _ = tx_action.send((action, backups));
         worker.join().expect("engine survey thread panicked")
     });
+    join_backups(leftover);
 
     if let Some(code) = early {
         return code;
     }
     let loaded = loaded_slot.expect("load either failed into `early` or filled this");
+    // A CANCEL RAISED THROUGH THE CONTROL comes back as an ERROR and not
+    // as `Ok(None)`, because the engine unwinds from wherever it was -
+    // the hashing loop, the fold, the solve, the patch - rather than
+    // answering the survey handshake. It is not a failed repair and must
+    // not print like one: nothing is wrong with the set, and "repair
+    // possible" is what `Stopped::Cancelled` already says for the
+    // refusal at the handshake. BEFORE the re-survey: a cancel that
+    // landed in the engine's verify pass left the handshake unanswered,
+    // which reads as `Unmatched` below, and answering a Ctrl-C with a
+    // second full verify on this thread is the opposite of a cancel.
+    if matches!(engine, Err(par2repair::RepairError::Cancelled)) {
+        return stop_code(
+            &loaded,
+            opts,
+            Some(Stopped::Cancelled),
+            surveyed.as_ref(),
+            sink,
+        );
+    }
     if let Some(Stopped::Unmatched) = stopped {
         return run_resurveying(&loaded, opts, sink);
     }
@@ -152,12 +353,37 @@ pub fn run(opts: &Options, sink: &mut Sink) -> u8 {
         // `Ok(None)` is our own `Stop` coming back: `announce` printed
         // the block already, so only the exit code is left. Anything
         // else and the engine folded.
-        Ok(None) => return stop_code(&loaded, opts, stopped, sink),
+        Ok(None) => return stop_code(&loaded, opts, stopped, surveyed.as_ref(), sink),
         Ok(Some(st)) => Ok(st),
         Err(e) => Err(e),
     };
-    let survey = surveyed.expect("the engine folded, so the observer ran and kept its survey");
-    finish(&loaded, opts, &survey, status, sink)
+    let Some(survey) = surveyed else {
+        // The engine folded BEFORE it reached the survey observer, so
+        // there is no survey for `finish` to report against and its
+        // error is the whole verdict. Reachable, not defensive: the
+        // engine refuses a set whose Main packet names a file id with
+        // no FileDesc packet (`par2repair`'s pre-verify walk), while
+        // `verify::load` DROPS that id and hands back an Ok set - so
+        // ordinary index damage lands here. `stop_code` degrades the
+        // same way one arm above rather than panicking; this used to
+        // `expect`, which aborted the process with an exit code
+        // outside the dialect this crate's whole interface is.
+        if let Err(e) = &status {
+            sink.err(&format!("Repair failed: {e}"));
+        }
+        return crate::EXIT_REPAIR_FAILED;
+    };
+    finish(&loaded, opts, &survey, status, &created, sink)
+}
+
+/// Does the repair's load print from the engine's scan report
+/// (`verify::load_scanned`) rather than reading and hashing the set for
+/// itself? ON unless the whole-read arm is forced - the two loads print
+/// the same bytes, and that is the property the arm exists to keep
+/// checkable. Verify's own seeking load answers the same switch, from
+/// the same predicate ([`verify::whole_load_forced`]).
+fn load_from_scan() -> bool {
+    !verify::whole_load_forced()
 }
 
 /// Everything par2cmdline prints between the `Target:` table and the
@@ -172,7 +398,7 @@ fn announce(
     survey: &Survey,
     sink: &mut Sink,
     stopped: &mut Option<Stopped>,
-) -> AfterSurvey {
+) -> (AfterSurvey, BackupBatch) {
     verify::print_targets(survey, sink);
     if !survey.damaged() {
         sink.line(Level::Terse, "");
@@ -181,7 +407,7 @@ fn announce(
             "All files are correct, repair is not required.",
         );
         *stopped = Some(Stopped::Clean);
-        return AfterSurvey::Stop;
+        return (AfterSurvey::Stop, BackupBatch::default());
     }
     sink.line(Level::Terse, "");
     verify::print_extra_scan(loaded, survey, sink);
@@ -216,42 +442,134 @@ fn announce(
             ),
         );
         *stopped = Some(Stopped::NotPossible);
-        return AfterSurvey::Stop;
+        return (AfterSurvey::Stop, BackupBatch::default());
     }
     sink.line(Level::Terse, "Repair is possible.");
     print_plan(survey, sink);
 
     // `-O` is rename-only: par2cmdline fixes files that are perfect
     // matches under another name and does NOT reconstruct anything, so
-    // it stops here with the verify verdict rather than solving.
+    // it stops here rather than solving. The renames themselves are
+    // done by `stop_code`, after the engine has let go of the
+    // directory - the same reason `-p` is deferred to there.
     if opts.rename_only {
         *stopped = Some(Stopped::RenameOnly);
-        return AfterSurvey::Stop;
+        return (AfterSurvey::Stop, BackupBatch::default());
     }
 
     sink.line(Level::Terse, "");
     print_solve_detail(sink);
-    back_up_damaged(loaded, survey);
-    AfterSurvey::Repair
+    (AfterSurvey::Repair, back_up_damaged(loaded, survey))
 }
 
 /// The exit code for a run that stopped before the fold, plus the one
 /// filesystem action left over: `-p` on a clean set. Held back until
 /// here rather than done inside the observer, which runs while the
 /// engine still holds the directory's packet catalog.
-fn stop_code(loaded: &Loaded, opts: &Options, stopped: Option<Stopped>, sink: &mut Sink) -> u8 {
+fn stop_code(
+    loaded: &Loaded,
+    opts: &Options,
+    stopped: Option<Stopped>,
+    survey: Option<&Survey>,
+    sink: &mut Sink,
+) -> u8 {
     match stopped {
         Some(Stopped::Clean) => {
+            // Clean: nothing was damaged, so `back_up_damaged` never
+            // ran and this run created no backup to remove.
             if opts.purge {
-                verify::purge(loaded, sink);
+                verify::purge(loaded, &[], sink);
             }
             crate::EXIT_SUCCESS
         }
         Some(Stopped::NotPossible) => crate::EXIT_REPAIR_NOT_POSSIBLE,
-        Some(Stopped::RenameOnly) => crate::EXIT_REPAIR_POSSIBLE,
+        Some(Stopped::RenameOnly) => match survey {
+            Some(s) => rename_only(loaded, s, sink),
+            // Unreachable: `announce` sets `RenameOnly` from a survey it
+            // is holding, and both call sites pass that survey on.
+            None => crate::EXIT_REPAIR_POSSIBLE,
+        },
+        // A caller's own refusal. Nothing was written, so the set is
+        // exactly as repairable as it was; "repair possible" is the
+        // honest code, and the caller that refused knows why it did.
+        Some(Stopped::Cancelled) => crate::EXIT_REPAIR_POSSIBLE,
         // Unreachable: the engine stops only when the observer says so,
         // and every `Stop` above records why first.
         Some(Stopped::Unmatched) | None => crate::EXIT_REPAIR_FAILED,
+    }
+}
+
+/// `-O`: rename every perfectly-matching file that is sitting under the
+/// wrong name, and reconstruct nothing.
+///
+/// This used to be a printed verdict and no filesystem action at all:
+/// `announce` reached "Repair is possible." (the extra-file arm keeps
+/// that gate open), then stopped and exited 1 with every file exactly
+/// where it was. The help calls `-O` "useful for quickly fixing renamed
+/// files", so advertising it while renaming nothing was the whole
+/// defect - a complete payload at `a1b2c3d4` beside a set whose
+/// FileDesc says `movie.mkv` is the ordinary obfuscated-post shape, and
+/// the reference renames it and exits 0.
+///
+/// Matching is by the FileDesc's own whole-file MD5, which is what
+/// "perfect match" means here: `verify_file_md5_path` returns false on a
+/// length mismatch before it reads a byte, so the walk costs one hash
+/// over the candidates that are the right size and nothing over the
+/// rest. A candidate is consumed by the first target it matches, and a
+/// target whose name is already occupied on disk is left alone - this
+/// command may not overwrite.
+///
+/// Run AFTER the engine has stopped, never from inside the observer:
+/// the engine still holds the directory's packet catalog open there,
+/// which is the same reason the `-p` purge waits until here.
+fn rename_only(loaded: &Loaded, survey: &Survey, sink: &mut Sink) -> u8 {
+    let mut candidates = extra_candidates(loaded, survey);
+    let mut renamed = 0usize;
+    for (name, target) in &survey.targets {
+        if !matches!(target, Target::Missing) {
+            continue;
+        }
+        let Some(file) = loaded.set.files.iter().find(|f| &f.name == name) else {
+            continue;
+        };
+        let dest = loaded.data_path(name);
+        if dest.exists() {
+            continue;
+        }
+        let Some(pos) = candidates
+            .iter()
+            .position(|c| nzbkit::par2::verify_file_md5_path(c, file).unwrap_or(false))
+        else {
+            continue;
+        };
+        let src = candidates.remove(pos);
+        match std::fs::rename(&src, &dest) {
+            Ok(()) => {
+                renamed += 1;
+                let from = src
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                sink.line(Level::Terse, &format!("Renamed \"{from}\" to \"{name}\"."));
+            }
+            Err(e) => sink.err(&format!("Could not rename to \"{name}\": {e}")),
+        }
+    }
+    // Everything the set was missing is now at its own name and nothing
+    // was damaged, so the set is whole without a single recovery block -
+    // which is the outcome `-O` exists to reach.
+    let outstanding = survey
+        .targets
+        .iter()
+        .filter(|(_, t)| !matches!(t, Target::Found))
+        .count();
+    if renamed > 0 && renamed == outstanding {
+        sink.line(Level::Terse, "");
+        sink.line(Level::Terse, "Repair complete.");
+        crate::EXIT_SUCCESS
+    } else {
+        crate::EXIT_REPAIR_POSSIBLE
     }
 }
 
@@ -263,12 +581,82 @@ fn stop_code(loaded: &Loaded, opts: &Options, stopped: Option<Stopped>, sink: &m
 fn run_resurveying(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> u8 {
     let survey = verify::survey(loaded, opts, sink);
     let mut stopped: Option<Stopped> = None;
-    if announce(loaded, opts, &survey, sink, &mut stopped) == AfterSurvey::Stop {
-        return stop_code(loaded, opts, stopped, sink);
+    let (action, backups) = announce(loaded, opts, &survey, sink, &mut stopped);
+    if action == AfterSurvey::Stop {
+        return stop_code(loaded, opts, stopped, Some(&survey), sink);
     }
+    // The batch is consumed by the join; `-p` still needs to know what
+    // it made, so the destinations are taken off it first.
+    let created = backups.created.clone();
+    // No `before_write` on this entry point, so the copies finish here,
+    // in front of the fold, as they always did on this path.
+    join_backups(backups);
     let set_id = loaded.set.recovery_set_id;
-    let status = par2repair::repair_dir_set_with_donors(&loaded.dir, &set_id, &[]);
-    finish(loaded, opts, &survey, status, sink)
+    let status = par2repair::repair_dir_set_with_donors_as(
+        &loaded.dir,
+        &set_id,
+        &opts.files,
+        par2repair::RetentionCaller::new(par2repair::CallerSite::ParfastResurvey),
+    );
+    finish(loaded, opts, &survey, status, &created, sink)
+}
+
+/// How many bytes the run may say it wrote, and whether to say anything
+/// at all - the arithmetic behind [`finish`]'s "Wrote N bytes to disk",
+/// split out because the shortfall arm is the half worth a test and the
+/// rest of `finish` needs a directory and an engine run to reach.
+///
+/// `damaged` is every target the survey did not find, with the length
+/// its FileDesc declares. `published` is `None` on a verdict that
+/// rebuilt the whole set (every damaged target is now on disk), and on a
+/// shortfall it is the names the engine actually published - so a
+/// shortfall that published nothing returns `None` and prints no line,
+/// rather than claiming the payload.
+fn wrote_bytes(damaged: &[(String, u64)], published: Option<&[String]>) -> Option<u64> {
+    let bytes: u64 = damaged
+        .iter()
+        .filter(|(n, _)| published.is_none_or(|p| p.contains(n)))
+        .map(|(_, len)| len)
+        .sum();
+    if published.is_some() && bytes == 0 {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// The lines that say how much of a repair was COPIED rather than
+/// computed, or nothing when none of it was.
+///
+/// The plan line above ("N recovery blocks will be used to repair") is
+/// printed from the survey BEFORE the engine runs, so it counts every
+/// missing block as a block to reconstruct. The engine then finds any
+/// missing block whose bytes already sit intact somewhere on disk - in a
+/// donor, an extra file, or another member of the set itself
+/// (`par2repair::adopt::harvest_in_set`) - and copies those instead of
+/// solving for them. Until 10 Sep 2026 nothing told the user. A field
+/// fixture whose ten members were near-copies of one another produced
+/// "350 recovery blocks will be used" and then adopted 349 of them, and
+/// the resulting 8 s "repair" was benchmarked as a 1,399-block decode for
+/// a whole round; par2j prints `Duplicate slice count` / `Input File
+/// Slice lost` in the same position and was readable at a glance. This
+/// is that line. Normal level, like the plan line it corrects, so `-q`
+/// silences both together.
+fn adoption_lines(adopted: usize, rebuilt: usize, adopted_from: &[String]) -> Vec<String> {
+    if adopted == 0 {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "{adopted} block(s) recovered from duplicate slices already on disk; {rebuilt} rebuilt from recovery data."
+    )];
+    if !adopted_from.is_empty() {
+        const SHOWN: usize = 5;
+        let mut from = adopted_from[..adopted_from.len().min(SHOWN)].join(", ");
+        if adopted_from.len() > SHOWN {
+            from.push_str(&format!(" and {} more", adopted_from.len() - SHOWN));
+        }
+        lines.push(format!("Duplicate slices found in: {from}"));
+    }
+    lines
 }
 
 /// The block after the fold: the byte count, the re-verify of what was
@@ -278,6 +666,9 @@ fn finish(
     opts: &Options,
     survey: &Survey,
     status: Result<RepairStatus, par2repair::RepairError>,
+    // The backup copies this run made, for `-p`. Provenance, not a name
+    // shape - see `verify::purge`.
+    created: &[std::path::PathBuf],
     sink: &mut Sink,
 ) -> u8 {
     // The reference's own reading of this line is the OUTPUT it
@@ -288,15 +679,48 @@ fn finish(
     // figure is the honest one to report here - a caller reads it as
     // "how much repaired data now exists", and reporting 1,368 where
     // the reference reports 24,576 would answer a question nobody asked.
+    //
+    // A SHORTFALL is the case that rule must NOT be applied to, and was
+    // until 7 Sep 2026. `RepairStatus::Unrepairable` is an `Ok`, and it
+    // publishes only the members whose own blocks were all accounted
+    // for without a Reed-Solomon pass (`partial`) - on the everyday
+    // shortfall, none at all. Summing every non-`Found` target there
+    // announced a whole-payload write that never happened: a 2 GiB
+    // single-member set whose recovery data came up short printed
+    // "Wrote 2147483648 bytes to disk" into a directory that still held
+    // no data file at all, and a 10 GiB one claimed 10 GB. That reads as
+    // a repair which wrote the WRONG bytes rather than one which wrote
+    // none, and a full day was spent looking for the former.
+    let published: Option<&[String]> = match &status {
+        Ok(RepairStatus::Unrepairable { partial, .. }) => Some(&partial.files_patched),
+        _ => None,
+    };
     if status.is_ok() {
-        let bytes: u64 = survey
+        let damaged: Vec<(String, u64)> = survey
             .targets
             .iter()
             .filter(|(_, t)| !matches!(t, Target::Found))
-            .filter_map(|(n, _)| loaded.set.files.iter().find(|f| &f.name == n))
-            .map(|f| f.length)
-            .sum();
-        sink.line(Level::Normal, &format!("Wrote {bytes} bytes to disk"));
+            .filter_map(|(n, _)| {
+                loaded
+                    .set
+                    .files
+                    .iter()
+                    .find(|f| &f.name == n)
+                    .map(|f| (n.clone(), f.length))
+            })
+            .collect();
+        if let Some(bytes) = wrote_bytes(&damaged, published) {
+            sink.line(Level::Normal, &format!("Wrote {bytes} bytes to disk"));
+        }
+        if let Ok(RepairStatus::Repaired(report)) = &status {
+            for l in adoption_lines(
+                report.blocks_adopted,
+                report.blocks_rebuilt,
+                &report.adopted_from,
+            ) {
+                sink.line(Level::Normal, &l);
+            }
+        }
     }
     sink.line(Level::Terse, "");
     sink.line(Level::Terse, "");
@@ -362,7 +786,7 @@ fn finish(
             }
             sink.line(Level::Terse, "Repair complete.");
             if opts.purge {
-                verify::purge(loaded, sink);
+                verify::purge(loaded, created, sink);
             }
             crate::EXIT_SUCCESS
         }
@@ -445,7 +869,31 @@ fn engine_proved(
 /// original aside would make every one of those blocks missing and turn
 /// a two-block repair into a whole-file reconstruction. Peak disk is the
 /// same either way - the reference also ends up holding both copies.
-fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) {
+///
+/// BESIDE the fold, not in front of it. The copies only read the
+/// damaged originals, which is all the fold does with them too, so they
+/// run on their own threads and the engine waits for them in
+/// [`SurveyObserver::before_write`], immediately before the first byte
+/// is written to any target. Measured on the 1 GiB / 21-member corpus
+/// on an i5-10600KF desktop (Windows 11, where `std::fs::copy` really
+/// moves the bytes - macOS clones and pays nothing): the serial copy was
+/// 0.06 s of the 3-block leg, 0.19 s of the 101-block leg and 0.45 s of
+/// the 1,500-block leg, all of it in front of a fold that takes 0.25 to
+/// 6 s. The
+/// `.n` names are still chosen here, serially, so numbering does not
+/// depend on which copy starts first; at most four copies run at once,
+/// so a set of many damaged members does not fan a thread per file out
+/// against the fold's own workers.
+fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) -> BackupBatch {
+    // A `.n` that the SET declares is not a free slot, even when
+    // nothing is at it yet. `exists()` alone says a missing member's
+    // path is free, so a set protecting both `payload.bin` and
+    // `payload.bin.1` - with `.1` the member that is missing and about
+    // to be reconstructed - would have the backup written AT the repair
+    // target, and `-p` would then delete the member it just made.
+    // Skipping to the next number costs nothing and cannot collide.
+    let protected = loaded.protected_keys();
+    let mut jobs: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for (name, t) in &survey.targets {
         if matches!(t, Target::Found | Target::Missing) {
             continue;
@@ -453,11 +901,46 @@ fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) {
         let src = loaded.data_path(name);
         for n in 1..=9u32 {
             let dst = loaded.data_path(&format!("{name}.{n}"));
-            if !dst.exists() {
-                let _ = std::fs::copy(&src, &dst);
+            if !dst.exists() && !protected.contains(&verify::path_key(&dst)) {
+                jobs.push((src, dst));
                 break;
             }
         }
+    }
+    if jobs.is_empty() {
+        return BackupBatch::default();
+    }
+    let created = jobs.iter().map(|(_, dst)| dst.clone()).collect();
+    let lanes = jobs.len().min(4);
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(jobs));
+    let lanes = (0..lanes)
+        .map(|_| {
+            let queue = std::sync::Arc::clone(&queue);
+            std::thread::spawn(move || {
+                loop {
+                    let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
+                    let Some((src, dst)) = next else { return };
+                    let _ = std::fs::copy(&src, &dst);
+                }
+            })
+        })
+        .collect();
+    BackupBatch { lanes, created }
+}
+
+/// Copy lanes and only their newly selected destinations. Existing numbered
+/// backups remain donor candidates. Joining still precedes every target write.
+#[derive(Default)]
+struct BackupBatch {
+    lanes: Vec<std::thread::JoinHandle<()>>,
+    created: Vec<std::path::PathBuf>,
+}
+
+/// Wait for every backup copy handed over. A lane that panicked has
+/// nothing to report that the missing `.n` file does not already say.
+fn join_backups(backups: BackupBatch) {
+    for h in backups.lanes {
+        let _ = h.join();
     }
 }
 
@@ -499,4 +982,78 @@ fn print_solve_detail(sink: &mut Sink) {
     sink.line(Level::Verbose, "Constructing: done.");
     sink.line(Level::Verbose, "Solving: done.");
     sink.line(Level::Verbose, "");
+}
+
+#[cfg(test)]
+mod tests {
+    /// Nothing adopted prints nothing: the plan line already told the
+    /// whole truth, and a "0 block(s) recovered" line would put a new
+    /// sentence under every ordinary repair for no information.
+    #[test]
+    fn adoption_lines_are_silent_when_nothing_was_adopted() {
+        assert!(super::adoption_lines(0, 350, &[]).is_empty());
+        assert!(super::adoption_lines(0, 0, &["m01.bin".to_string()]).is_empty());
+    }
+
+    /// The near-copy field fixture: 349 of 350 blocks copied from a
+    /// sibling member, one solved. The count line carries both numbers,
+    /// and the donors are named.
+    #[test]
+    fn adoption_lines_name_the_count_and_the_donors() {
+        let from = vec!["m01.bin".to_string(), "m02.bin".to_string()];
+        let lines = super::adoption_lines(349, 1, &from);
+        assert_eq!(
+            lines,
+            vec![
+                "349 block(s) recovered from duplicate slices already on disk; 1 rebuilt from recovery data.".to_string(),
+                "Duplicate slices found in: m01.bin, m02.bin".to_string(),
+            ]
+        );
+    }
+
+    /// Ten members means nine possible donors; the line names five and
+    /// counts the rest rather than printing a paragraph.
+    #[test]
+    fn adoption_lines_truncate_a_long_donor_list() {
+        let from: Vec<String> = (1..=9).map(|k| format!("m{k:02}.bin")).collect();
+        let lines = super::adoption_lines(1398, 1, &from);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[1],
+            "Duplicate slices found in: m01.bin, m02.bin, m03.bin, m04.bin, m05.bin and 4 more"
+        );
+    }
+
+    use super::wrote_bytes;
+
+    /// The full-rebuild shortfall this function exists for: every member
+    /// missing, the engine short of recovery blocks, nothing published.
+    /// The line must not be printed at all - "Wrote 2147483648 bytes to
+    /// disk" over an empty directory reads as a repair that wrote the
+    /// WRONG bytes, and was reported as one.
+    #[test]
+    fn a_shortfall_that_published_nothing_claims_no_write() {
+        let damaged = vec![("d.bin".to_string(), 2_147_483_648u64)];
+        assert_eq!(wrote_bytes(&damaged, Some(&[])), None);
+    }
+
+    /// A shortfall that DID publish a member counts that member, and
+    /// only that member - the courtesy publish is real bytes on disk.
+    #[test]
+    fn a_shortfall_counts_only_what_it_published() {
+        let damaged = vec![("a.bin".to_string(), 10u64), ("b.bin".to_string(), 32u64)];
+        let published = ["b.bin".to_string()];
+        assert_eq!(wrote_bytes(&damaged, Some(&published)), Some(32));
+    }
+
+    /// A whole-set repair keeps the reference's reading: every damaged
+    /// member's declared length, whatever the engine physically wrote.
+    #[test]
+    fn a_completed_repair_counts_every_damaged_member() {
+        let damaged = vec![("a.bin".to_string(), 10u64), ("b.bin".to_string(), 32u64)];
+        assert_eq!(wrote_bytes(&damaged, None), Some(42));
+        // ...including the degenerate "nothing was damaged" case, which
+        // is a zero the caller still prints.
+        assert_eq!(wrote_bytes(&[], None), Some(0));
+    }
 }

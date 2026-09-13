@@ -891,3 +891,116 @@ fn a_prefixed_volume_is_not_offered_as_an_adoption_source() {
          carrying no magic is still a donor: {names:?}"
     );
 }
+
+// --- the verify-side door: `scan_members_for_blocks` -----------------
+//
+// G4 of `research/CLI-SUBSTITUTION-2026-09-03.md`: par2cmdline's DEFAULT
+// verify rolls a block window over its source files, so a member that
+// has been shifted still reports every block present, and `parfast`'s
+// aligned-grid pass read the same set as `Found 0 of 30 data blocks`
+// where the reference reads `Found 30 of 30`. These pin both halves of
+// the door that closed it - what it now finds, and what its length
+// screen deliberately declines to look for.
+
+/// One member of a synthetic set, its content, and the paths vector the
+/// door takes.
+fn one_member(rng: &mut Rng, dir: &Path, bs: usize) -> (Vec<Par2File>, Vec<u8>, PathBuf) {
+    let (targets, contents) = make_targets(rng, dir, bs, 1);
+    let path = targets[0].path.clone();
+    let files: Vec<Par2File> = targets.into_iter().map(|t| t.file).collect();
+    (
+        files,
+        contents.into_iter().next().expect("one member"),
+        path,
+    )
+}
+
+#[test]
+fn a_prefixed_member_is_found_at_its_real_offset() {
+    let bs = 512;
+    let mut rng = Rng(0x5CA7);
+    let dir = tmpdir("scan-prefix");
+    let (files, content, path) = one_member(&mut rng, &dir, bs);
+    let n = files[0].blocks.len();
+    // The audit's own shape: junk prepended, so nothing sits on the grid.
+    let mut shifted = vec![b'X'; 700];
+    shifted.extend_from_slice(&content);
+    std::fs::write(&path, &shifted).expect("write shifted member");
+
+    let out = scan_members_for_blocks(&files, &[Some(path)], &[vec![false; n]], bs);
+    assert_eq!(
+        out[0].iter().filter(|&&ok| ok).count(),
+        n,
+        "every declared block is in the file, at an offset the aligned grid cannot see"
+    );
+}
+
+#[test]
+fn a_member_at_its_declared_length_is_never_reopened() {
+    // THE LENGTH SCREEN, pinned deliberately rather than incidentally:
+    // this file DOES carry the missing block, at an unaligned offset,
+    // and the scan still does not go looking - because keeping the
+    // declared length while moving a block takes an insertion and a
+    // deletion that cancel, which is no corruption a download produces
+    // and is the one case the screen gives up. See the screen itself.
+    let bs = 512;
+    let mut rng = Rng(0xD15C);
+    let dir = tmpdir("scan-samelen");
+    let (files, content, path) = one_member(&mut rng, &dir, bs);
+    let n = files[0].blocks.len();
+    assert!(n >= 2, "the fixture needs a block to move");
+    let mut same: Vec<u8> = vec![b'Z'; 7];
+    same.extend_from_slice(&content[..content.len() - 7]);
+    assert_eq!(same.len(), content.len(), "the shift kept the length");
+    std::fs::write(&path, &same).expect("write same-length member");
+
+    let proven = vec![false; n];
+    let out = scan_members_for_blocks(&files, &[Some(path)], std::slice::from_ref(&proven), bs);
+    assert_eq!(out[0], proven, "the screen held and nothing was scanned");
+}
+
+#[test]
+fn a_fully_proven_set_opens_nothing() {
+    // The clean verify. Every path below is a file that does not exist,
+    // so anything that opened one would fail the run rather than pass it.
+    let bs = 512;
+    let mut rng = Rng(0xC1EA);
+    let dir = tmpdir("scan-clean");
+    let (files, _content, path) = one_member(&mut rng, &dir, bs);
+    let n = files[0].blocks.len();
+    assert!(!path.exists(), "the fixture never wrote this member");
+
+    let out = scan_members_for_blocks(&files, &[Some(path)], &[vec![true; n]], bs);
+    assert_eq!(out[0], vec![true; n]);
+}
+
+#[test]
+fn a_blocks_neighbour_credits_the_member_that_declares_it() {
+    // A block is credited to its OWNER wherever it is found, which is
+    // what lets one member's shifted copy account for another's slice.
+    let bs = 512;
+    let mut rng = Rng(0xBEE7);
+    let dir = tmpdir("scan-neighbour");
+    let (targets, contents) = make_targets(&mut rng, &dir, bs, 2);
+    let files: Vec<Par2File> = targets.iter().map(|t| t.file.clone()).collect();
+    let counts: Vec<usize> = files.iter().map(|f| f.blocks.len()).collect();
+    // Member 0 is missing outright; member 1's file carries BOTH bodies
+    // behind a prefix, so its length is not its declared one either.
+    let mut both = vec![b'Q'; 33];
+    both.extend_from_slice(&contents[0]);
+    both.extend_from_slice(&contents[1]);
+    std::fs::write(&targets[1].path, &both).expect("write the carrier");
+
+    let out = scan_members_for_blocks(
+        &files,
+        &[None, Some(targets[1].path.clone())],
+        &[vec![false; counts[0]], vec![false; counts[1]]],
+        bs,
+    );
+    assert_eq!(
+        out[0].iter().filter(|&&ok| ok).count(),
+        counts[0],
+        "the absent member's blocks are credited to it, found in a neighbour's file"
+    );
+    assert_eq!(out[1].iter().filter(|&&ok| ok).count(), counts[1]);
+}

@@ -122,7 +122,7 @@ class NzbfastClient(private val baseUrl: String, private val apiKey: String) {
      * The iOS twin never had one: `ApiClient.playURL(for:)` throws, and
      * its own comment records the lesson ("the long-lived full
      * credential rode a query string past every reverse proxy and URL
-     * diagnostic", Codex sweep 12 Aug). Android reintroduced on the
+     * diagnostic", review sweep 12 Aug). Android reintroduced on the
      * fallback path what iOS had removed on the mint path.
      */
     fun streamUrl(nzoId: String): String? {

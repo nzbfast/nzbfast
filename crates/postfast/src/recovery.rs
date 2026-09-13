@@ -158,6 +158,9 @@ pub enum RecoveryError {
     /// have. Named against the source list because that is what an
     /// author would fix.
     NoSuchMember { name: String, plane: &'static str },
+    /// A `covers` list that names nothing: an explicit empty array,
+    /// which selects no member and leaves the set with no base name.
+    CoversNothing(&'static str),
     /// The two sets of P9 would cover the same member, so neither is
     /// independent of the other.
     SetsOverlap(String),
@@ -221,6 +224,13 @@ impl std::fmt::Display for RecoveryError {
                  packets in the inner set's files AFTER the outer set was cut over them, so \
                  the outer set would describe bytes the post no longer carries and would \
                  report the whole inner set damaged. Select one",
+            ),
+            Self::CoversNothing(plane) => write!(
+                f,
+                "[recovery] {plane} is an empty list, so the set would cover no member at \
+                 all. A recovery set is derived from the members it covers - its base name \
+                 comes from the first of them - so there is nothing to build. Name at least \
+                 one member, or drop [recovery]"
             ),
             Self::SetsOverlap(n) => write!(
                 f,
@@ -682,6 +692,15 @@ fn select_named(
     names: &[String],
     plane: &'static str,
 ) -> Result<Vec<usize>, RecoveryError> {
+    // An empty list deserializes as `Covers::Names(vec![])` and used to
+    // reach `base_name`, which indexes `members[0]`: `covers = []`
+    // panicked the generator instead of being refused by name. The
+    // caller screens `second_covers` for empty before it gets here (an
+    // absent second set is the neutral state), so this only ever fires
+    // on a list the profile actually wrote.
+    if names.is_empty() {
+        return Err(RecoveryError::CoversNothing(plane));
+    }
     let mut out = Vec::with_capacity(names.len());
     for n in names {
         // Matched against the RELATIVE path, which is the name the
@@ -1191,6 +1210,28 @@ mod tests {
             }
             other => panic!("expected NoSuchMember, got {other}"),
         }
+    }
+
+    /// An EMPTY `covers` list is refused by name, not by panic.
+    ///
+    /// `covers = []` deserializes as `Covers::Names(vec![])`, selected
+    /// no member, and reached `base_name`, which indexes `members[0]` -
+    /// so the generator index-panicked on a profile that should simply
+    /// have been told a set covering nothing cannot be built.
+    #[test]
+    fn an_empty_covers_list_is_refused() {
+        match refusal(TWO, "[recovery]\nkind = \"par2\"\ncovers = []\n") {
+            RecoveryError::CoversNothing(plane) => assert_eq!(plane, "covers"),
+            other => panic!("expected CoversNothing, got {other}"),
+        }
+        // An absent second set is the neutral state, so an empty
+        // `second_covers` is the ONE empty list that is not a
+        // contradiction: it builds the primary set and stops.
+        let (_, r) = built(
+            TWO,
+            "[recovery]\nkind = \"par2\"\ncovers = [\"movie.mkv\"]\nsecond_covers = []\n",
+        );
+        assert_eq!(names_of(&r), vec!["movie.par2"]);
     }
 
     /// P9: two independent sets in one post, each under a base of its

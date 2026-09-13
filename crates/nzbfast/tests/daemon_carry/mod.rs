@@ -488,10 +488,10 @@ fn id_tee(upstream: std::net::SocketAddr) -> (u16, std::sync::Arc<std::sync::Mut
 /// answer is: here, and it is already in the nightly heavy-suite family
 /// by being here - the `daemon` target is build-gated behind
 /// `heavy-tests` and its home is nightly.yml's `long-suites`, with its
-/// own wedge check after it (CLAUDE.md invariant 4 and TODO 116b). An
+/// own wedge check after it (project invariant 4 and TODO 116b). An
 /// eighth heavy `[[test]]` target would buy cost isolation and cost
 /// four coordination surfaces that can drift apart - Cargo.toml,
-/// nightly.yml, ci-private's `-E` list and CLAUDE.md's sweep prose -
+/// nightly.yml, ci-private's `-E` list and CONTRIBUTING.md's sweep prose -
 /// plus a third copy of the daemon-spawning `http` helper this module
 /// gets for free from its parent. This suite already spawns ~130 real
 /// daemons; it can afford 298 MB of temp for the one test that reaches

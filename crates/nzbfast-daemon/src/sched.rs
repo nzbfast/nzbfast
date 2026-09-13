@@ -38,7 +38,11 @@ pub enum SchedAction {
 pub struct SchedEntry {
     /// Mon=0 .. Sun=6.
     pub days: [bool; 7],
-    /// Minutes after midnight (UTC).
+    /// Minutes after midnight, in the machine's LOCAL timezone - this
+    /// said UTC until 10 Sep 2026 and was never true on a Unix host,
+    /// where `local_minute_of_week` has always been what it is compared
+    /// against. It WAS true on Windows, by accident, and that accident
+    /// is F2.
     pub minute: u32,
     pub action: SchedAction,
 }
@@ -50,38 +54,25 @@ impl SchedEntry {
     }
 }
 
-/// Current UTC time as a minute-of-week (Mon 00:00 = 0 .. Sun 23:59 = 10079).
-pub(super) fn utc_minute_of_week() -> u32 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let day = ((secs / 86_400 + 3) % 7) as u32; // epoch day 0 was a Thursday
-    day * 1440 + (secs % 86_400 / 60) as u32
-}
+// `utc_minute_of_week` was here until 10 Sep 2026. It existed only as
+// `local_minute_of_week`'s fallback, and the fallback moved down with
+// the rest of the platform reading - `nzbfast_core::localtime` is where
+// the UTC arm lives now, and where its tests are. `dead_code` is part of
+// clippy's `-D warnings` gate, so leaving the wrapper standing was not
+// an option; the shape it had is `localtime::utc_civil(secs).minute_of_week()`.
 
 /// Minute-of-week (0 = Monday 00:00) in the machine's LOCAL timezone -
 /// people schedule around their own nights, not UTC's. Falls back to UTC
 /// where localtime isn't available.
+///
+/// The platform reading is `nzbfast_core::localtime`, shared with the
+/// quota ledger's local midnight. It used to be a `#[cfg(unix)]` block
+/// right here with NO Windows arm behind it, so every Windows build ran
+/// its weekly schedule on UTC while the dashboard and the manual both
+/// promised local time. Do not re-inline it: the two sites are only
+/// guaranteed to agree while there is one of them.
 pub fn local_minute_of_week() -> u32 {
-    #[cfg(unix)]
-    {
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as libc::time_t;
-        // SAFETY: `libc::tm` is a plain C struct of integers and a
-        // pointer; all-zero is a valid bit pattern, and localtime_r
-        // overwrites it before anything is read.
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        // SAFETY: both pointers are live locals of the expected types,
-        // and the exclusive borrow rules out overlap.
-        if !unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
-            let day = (tm.tm_wday as u32 + 6) % 7; // tm_wday: 0 = Sunday
-            return day * 1440 + tm.tm_hour as u32 * 60 + tm.tm_min as u32;
-        }
-    }
-    utc_minute_of_week()
+    localtime::local_or_utc_civil().minute_of_week()
 }
 
 /// "mon-fri", "sat,sun", "all", or any comma list of names/ranges
@@ -193,6 +184,31 @@ pub fn parse_schedule(json: &str) -> Result<Vec<SchedEntry>> {
 /// to the later entry in the file. None = no entry of that kind has fired.
 /// Pure - `now` is injected, never read from the clock here.
 pub fn effective_state(entries: &[SchedEntry], now: u32) -> (Option<bool>, Option<u64>) {
+    // A whole week IS the "everything that ever fires" window, so this
+    // is `catch_up_state` and not a second copy of its loop.
+    catch_up_state(entries, now, WEEK_MINUTES)
+}
+
+/// The standing state implied by the last `span` minutes ending at `now`
+/// - i.e. by the window `(now - span, now]` of minutes-of-week.
+///
+/// The same "most recent wins, a tie goes to the later entry" rule as
+/// [`effective_state`], but bounded: `None` for a component means no
+/// rule of that kind fired INSIDE the window, and the daemon's current
+/// value for it must be left exactly as it is. That bound is the whole
+/// point. Reconciling a wake-up against the unbounded state would reach
+/// back a week and undo a manual pause the user made days before the
+/// machine went to sleep; reconciling against the window replays only
+/// what the sleeping daemon actually missed.
+///
+/// `span == 0` fires nothing: no time passed, so nothing was missed.
+/// `span >= WEEK_MINUTES` is [`effective_state`] exactly.
+///
+/// Edge actions (`ServerEnable`, `QuotaReset`) are ignored here for the
+/// same reason [`effective_state`] ignores them: they are one-shots, and
+/// replaying a night of config edits at wake-up would be a worse bug
+/// than the one this fixes. Pure - `now` is injected.
+pub fn catch_up_state(entries: &[SchedEntry], now: u32, span: u32) -> (Option<bool>, Option<u64>) {
     let mut paused: Option<(u32, bool)> = None; // (distance back, state)
     let mut limit: Option<(u32, u64)> = None;
     for e in entries {
@@ -202,6 +218,12 @@ pub fn effective_state(entries: &[SchedEntry], now: u32) -> (Option<bool>, Optio
             }
             let mow = d as u32 * 1440 + e.minute;
             let dist = (now + WEEK_MINUTES - mow) % WEEK_MINUTES;
+            // `dist == 0` is a rule firing at `now` itself, which the
+            // window includes; `dist == span` is the minute BEFORE it
+            // opened, which it does not.
+            if dist >= span {
+                continue;
+            }
             match e.action {
                 SchedAction::Pause | SchedAction::Resume => {
                     if paused.is_none_or(|(best, _)| dist <= best) {
@@ -219,6 +241,70 @@ pub fn effective_state(entries: &[SchedEntry], now: u32) -> (Option<bool>, Optio
         }
     }
     (paused.map(|(_, p)| p), limit.map(|(_, v)| v))
+}
+
+/// The longest gap the scheduler will walk minute by minute, firing
+/// every rule in it including the one-shots. Past this the wake-up is
+/// reconciled instead - see [`classify_tick`].
+pub const MAX_REPLAY_MINUTES: u32 = 8 * 60;
+
+/// `forward` and `elapsed` are integer minutes read from two different
+/// clocks half a minute apart, so the local one may legitimately lead by
+/// a minute or so. Anything past this is a real discontinuity.
+const TICK_SLACK_MINUTES: u64 = 5;
+
+/// What one scheduler tick should do, given where the cursor was and
+/// what both clocks now say. Pure; the loop in `tasks::spawn_scheduler`
+/// is nothing but this plus the two effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tick {
+    /// Ordinary catch-up: walk every minute in `(last, now]` and fire
+    /// each entry that matches, one-shots included.
+    Advance,
+    /// The local clock did not advance the way real time did, or so much
+    /// real time passed that walking it would replay a backlog. Move the
+    /// cursor to `now` and reconcile the STANDING state implied by the
+    /// last `span` minutes - `catch_up_state(entries, now, span)` - so
+    /// nothing one-shot is replayed.
+    Reconcile { span: u32 },
+}
+
+/// Classify a tick from the local minute-of-week cursor AND the absolute
+/// clock.
+///
+/// The absolute clock is the load-bearing half. The guard this replaces
+/// looked only at the modular local distance and read any gap over eight
+/// hours as a backwards clock step, so an ordinary overnight suspend was
+/// discarded whole: a schedule that paused at 20:00 and resumed at 07:00
+/// left the queue paused all of the next day, and an old speed limit
+/// stayed applied the same way. A minute-of-week difference genuinely
+/// cannot tell the two apart - unix seconds can, because a DST step does
+/// not move them.
+///
+/// The three ways a tick is NOT an ordinary advance:
+///
+/// * the absolute clock went backwards - a real clock step, and nothing
+///   elapsed to replay (`span` is 0);
+/// * more than [`MAX_REPLAY_MINUTES`] of real time passed - a suspend,
+///   or a daemon that lost its scheduler thread to a stall;
+/// * local time ran further forward than real time did - a DST spring
+///   forward (+1h in a minute) or a fall back, which shows up as a
+///   `forward` of nearly a whole week.
+pub fn classify_tick(last: u32, now: u32, last_utc: u64, now_utc: u64) -> Tick {
+    let elapsed = now_utc.saturating_sub(last_utc) / 60;
+    let forward = u64::from((now + WEEK_MINUTES - last) % WEEK_MINUTES);
+    if now_utc < last_utc
+        || elapsed > u64::from(MAX_REPLAY_MINUTES)
+        || forward > elapsed + TICK_SLACK_MINUTES
+    {
+        // The window is measured in REAL minutes, capped at a week:
+        // past that every rule has fired at least once and the bounded
+        // window is the unbounded state anyway.
+        return Tick::Reconcile {
+            span: elapsed.min(u64::from(WEEK_MINUTES)) as u32,
+        };
+    }
+    Tick::Advance
 }
 
 /// Minutes from `now` (a minute-of-week) until the schedule's next

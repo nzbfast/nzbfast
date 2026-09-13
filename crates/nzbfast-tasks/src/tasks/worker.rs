@@ -459,7 +459,7 @@ fn emit_started(d: &Daemon, j: &Job) {
 /// `pick_insurance_job` both drop the job lock before returning, so
 /// everything they checked can move in the gap.
 ///
-/// `relocating` is Codex F-06: a recategorize fits entirely inside the
+/// `relocating` is review finding F-06: a recategorize fits entirely inside the
 /// gap, and starting into the destination races `move_tree`. `tombstone`
 /// is the same gap class - a delete landing there has already begun
 /// unlinking the payload and the spooled .nzb, so starting spends

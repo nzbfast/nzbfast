@@ -396,8 +396,12 @@ fn the_late_set_pass_is_a_bounded_fixpoint() {
          depth 0 it is the single snapshot W4-12 loses the payload to, and \
          deeper it is a re-scan per SET"
     );
+    // The anchor gained `_controlled_` on 12 Sep 2026, when the pass
+    // started passing a `par2repair::RepairControl` - same entry family,
+    // same argument list plus the control. The POINTER moved and the
+    // claim did not.
     assert_eq!(
-        only_depth(LATESETS, "repair_dir_set_with_donors_scoped("),
+        only_depth(LATESETS, "repair_dir_set_with_donors_scoped_controlled_as("),
         Ok(2),
         "the late-set repair must be the body of the ONE set loop inside the \
          ONE round loop - anything else is a third loop nothing here bounds"
@@ -410,8 +414,38 @@ fn the_late_set_pass_is_a_bounded_fixpoint() {
     );
 }
 
-/// X5-13, and the half no behavioural row can reach: the pass may be
-/// cancelled BETWEEN sets and never inside one.
+/// X5-13, and the half no behavioural row can reach: WHERE the pass
+/// reads the cancel.
+///
+/// **THIS TEST WAS `the_late_set_pass_can_be_cancelled_between_sets_
+/// and_never_inside_one` UNTIL 12 Sep 2026**, and the second half of
+/// that name was a real claim this file defended: "never by pushing one
+/// INSIDE `repair_dir_set_with_donors_scoped` - a repair torn down
+/// halfway leaves a set half-applied, which is strictly worse than the
+/// wait it saves and which no caller afterwards could tell from a set
+/// that simply failed." Both of that argument's premises are now false,
+/// which is why the name moved (grep the old one to find this):
+/// `par2repair::control` specifies what a torn-down repair leaves -
+/// nothing at all before the patch, and during it temps removed, none
+/// renamed in, and an in-place member with a subset of its MISSING
+/// blocks filled, which is MONOTONE - and `RepairError::Cancelled` is a
+/// verdict of its own, so a caller afterwards tells it from a failure by
+/// matching on it. The set loop's `Err(Cancelled) => break` is that
+/// caller.
+///
+/// So the claim is now THREE EDGES, and each one alone is satisfiable by
+/// a broken pass:
+///
+/// - the ROUND edge, before the census (`disk_sets_scoped` walks and
+///   PARSES every par2 file in the directory, the second-longest thing
+///   here);
+/// - the SET edge, before the repair call in the same loop - it still
+///   earns its place, because the catalog build and the verify pass are
+///   paid before the fold reaches its first cancel poll, and a check
+///   after the call bounds nothing;
+/// - and the REPAIR itself, which is the new one: the call must hand
+///   the engine a control, or a cancel raised during a half-hour fold
+///   waits for it.
 ///
 /// `cancel_tests` grades what a latch raised BEFORE the call does - zero
 /// repairs, measured in bytes on disk. The bound the row actually claims
@@ -421,22 +455,9 @@ fn the_late_set_pass_is_a_bounded_fixpoint() {
 /// be asserting on the scheduler, which is this week's whole flake
 /// theme. So it is pinned here, the way the round cap next door is.
 ///
-/// THREE FACTS, and each one alone is satisfiable by a broken pass.
-/// Both edges must exist (a check at the round edge only leaves a whole
-/// round of set repairs uninterruptible, which on a par2-of-par2 post is
-/// the entire pass); the SET edge must come before the repair call in
-/// the same loop (after it, the check has already paid for the thing it
-/// was meant to refuse); and the ROUND edge must come before the census
-/// (`disk_sets_scoped` walks and PARSES every par2 file in the
-/// directory, which is the second-longest thing here).
-///
-/// FIX A HIT by moving the read, never by deleting it, and never by
-/// pushing one INSIDE `repair_dir_set_with_donors_scoped` - a repair
-/// torn down halfway leaves a set half-applied, which is strictly worse
-/// than the wait it saves and which no caller afterwards could tell from
-/// a set that simply failed.
+/// FIX A HIT by moving the read, never by deleting it.
 #[test]
-fn the_late_set_pass_can_be_cancelled_between_sets_and_never_inside_one() {
+fn the_late_set_pass_reads_the_cancel_at_both_edges_and_inside_the_repair() {
     let code = code_only(LATESETS).expect("latesets.rs lexes");
     let checks = loop_depths(&code, "stopped(cancel,").expect("latesets.rs braces balance");
     let mut depths: Vec<usize> = checks.values().copied().collect();
@@ -452,7 +473,7 @@ fn the_late_set_pass_can_be_cancelled_between_sets_and_never_inside_one() {
         .keys()
         .next()
         .expect("the pass takes a census");
-    let repair = *loop_depths(&code, "repair_dir_set_with_donors_scoped(")
+    let repair = *loop_depths(&code, "repair_dir_set_with_donors_scoped_controlled_as(")
         .expect("latesets.rs braces balance")
         .keys()
         .next()
@@ -472,8 +493,34 @@ fn the_late_set_pass_can_be_cancelled_between_sets_and_never_inside_one() {
     assert!(
         at(2) < repair,
         "the SET edge must be read before the repair it is meant to refuse - \
-         a check after `repair_dir_set_with_donors_scoped` bounds nothing, \
-         because the expensive thing has already run"
+         a check after `repair_dir_set_with_donors_scoped_controlled_as` bounds \
+         nothing, because the expensive thing has already run"
+    );
+    // THE THIRD EDGE, inside the repair. Two halves, because either
+    // alone is a pass that cannot be stopped mid-fold: the control has
+    // to be BUILT from the job's own handle (a `RepairControl::default()`
+    // argument would compile, satisfy the entry's signature and carry no
+    // cancel at all), and the verdict has to be MATCHED (without the
+    // arm, a cancelled set falls into the `Err(e) if mine` arm below it,
+    // which logs "could not be read" and sets `good = false` over files
+    // that verify perfectly well).
+    let built = *loop_depths(&code, "SideCancel::repair_control")
+        .expect("latesets.rs braces balance")
+        .keys()
+        .next()
+        .expect(
+            "the set loop must build the repair control from the job's own \
+             SideCancel - a default control passes the signature and honours nothing",
+        );
+    assert!(
+        built < repair,
+        "the control must be built before the repair it is handed to"
+    );
+    assert!(
+        code.contains("Err(nzbkit::par2repair::RepairError::Cancelled) => break"),
+        "a cancelled repair must be its own arm, ahead of the `Err(e) if mine` one - \
+         otherwise a deleted job's tail reports a set nobody can read and refuses to \
+         green files that verify"
     );
 }
 

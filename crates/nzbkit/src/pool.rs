@@ -121,7 +121,7 @@ impl ConnGauge {
             // first seconds rediscovering a cap - but nothing retired it
             // on contradiction, so after a plan upgrade a row could read
             // "using 100 of 38" and still claim "capped at 38" until the
-            // daemon restarted (Codex sweep 5, L6). Deliberately keyed
+            // daemon restarted (review sweep 5, L6). Deliberately keyed
             // on connections we actually GOT: an idle provider sitting
             // below its cap says nothing either way.
             l.servers[idx].retire_cap_if_exceeded(now);

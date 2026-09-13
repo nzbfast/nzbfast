@@ -1,4 +1,4 @@
-//! §290 (Codex sweep 24 Aug, findings F-09 and F-11): the one
+//! §290 (review sweep 24 Aug, findings F-09 and F-11): the one
 //! reserve-then-admit primitive every door that spends a COPY of a
 //! release has to pass through.
 //!

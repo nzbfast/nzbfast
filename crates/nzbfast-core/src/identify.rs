@@ -287,7 +287,7 @@ const MAX_ROWS: usize = 400;
 /// The window is `{post_year - 1, post_year}` because posts of a film's
 /// retail release routinely land the year after its theatrical one.
 ///
-/// No CLAUDE.md invariant 5 gate of its own, deliberately. Both callers
+/// No project invariant 5 gate of its own, deliberately. Both callers
 /// are already deliberate - `nettools::identify_cmd` is a CLI
 /// subcommand the user typed, and `mover::identify_video` runs behind
 /// the "identify by runtime" setting - so what needs to hold is only

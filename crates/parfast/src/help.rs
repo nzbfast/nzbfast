@@ -12,7 +12,28 @@
 //!
 //! What the waiver is allowed to rest on, and what this module must
 //! therefore keep true: the screen below is the reference's screen with
-//! the PROGRAM NAME substituted and nothing else moved. Same switches,
+//! the PROGRAM NAME substituted, the same switches in the same sections
+//! in the same order, and nothing moved EXCEPT where the reference's
+//! text states a fact that is not true of this program.
+//!
+//! There is exactly one of those, and it is `-T`. The reference says
+//! "(2 are the default)"; parfast's default is `min(cpu_workers, file
+//! count)` - full width - because `verify::file_threads` falls back to
+//! `nzbkit::mem::cpu_workers`. Inheriting the reference's number told a
+//! user they were opting IN to parallelism they already had, which is
+//! worse than a cosmetic divergence: it invites them to set a value that
+//! can only turn parallelism DOWN. Found 10 Sep 2026 while auditing a
+//! benchmark that passed `-T16` to both tools believing it was symmetric
+//! - it was not, because turbo gains up to 2.1x from the switch and
+//! parfast is flat across it (measured 1.03-1.07x, inside noise).
+//!
+//! Changing this line is safe against conformance and that was checked
+//! rather than assumed: `run.py` captures the REFERENCE's help into
+//! `inventory/` and parses it for the spellings a drop-in must ACCEPT; it
+//! never diffs our screen against theirs, and it could not, since ours
+//! says parfast throughout and carries `--fast`. The in-crate test that
+//! does read our screen is `every_inventoried_switch_appears_on_our_help
+//! _screen`, which checks switch SPELLINGS, not the prose beside them. Same switches,
 //! same sections, same order, same placeholders - so
 //! `run.py`'s own help parser reads the identical command and switch
 //! sets out of either screen. `switch_screen_matches_inventory` in the
@@ -82,7 +103,7 @@ Options: (all uses)
   -m<n>    : Memory (in MB) to use (default is half of total physical memory)
   -t<n>    : Number of threads used for main processing ({n} detected)
   -T<n>    : Number of files hashed in parallel
-             (2 are the default)
+             (default: one per core, capped at the file count)
   --       : Treat all following arguments as filenames
 Options: (verify or repair)
   -p       : Purge backup files and par files on successful recovery or
@@ -91,6 +112,9 @@ Options: (verify or repair)
              useful for quickly fixing renamed files)
   -N       : Data skipping (find badly mispositioned data blocks)
   -S<n>    : Skip leaway (distance +/- from expected block position, default {leaway})
+  --fast   : Use the fast solver for the final rebuild step. It is
+             already the default; where it cannot run, parfast says
+             why on stderr.
 Options: (create)
   -b<n>    : Set the Block-Count (default {blocks})
   -s<n>    : Set the Block-Size (don't use both -b and -s)
@@ -119,6 +143,24 @@ Example:
 /// `-V`.
 pub fn version_line() -> String {
     format!("parfast version {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// `-VV`, the source this binary was built from.
+///
+/// `-V` carries the package version, which is bumped per RELEASE and so says
+/// nothing about which commit inside that release cycle is running. That gap
+/// invalidated a day of benchmark rounds on 10 Sep 2026: two boxes were
+/// measured on binaries five commits stale, one of them missing the very gate
+/// recalibration the round was built to bracket, and neither binary could be
+/// asked. `build.rs` resolves the commit; this prints it.
+///
+/// It goes in `-VV` and NOT in `-V` on purpose. The `version` row is compared
+/// line for line by `tools/conformance/run.py`, and the waiver it carries in
+/// `tools/conformance/allow/par2.txt` rests on that line naming parfast and
+/// otherwise matching the reference's shape. `version-copyright` is waived
+/// whole, so this is the one place an extra identity line is free.
+pub fn build_line() -> String {
+    format!("built from {}", env!("PARFAST_BUILD_COMMIT"))
 }
 
 /// `-VV`, appended after the version line.
@@ -212,6 +254,27 @@ mod tests {
             !version_line().starts_with("par2cmdline"),
             "the version line must not impersonate the reference - the harness's banner \
              filter would then strip it and three rows would pass by lying"
+        );
+    }
+
+    /// The build stamp has to SAY something. An empty or malformed stamp is
+    /// the same defect as no stamp, and it would be invisible until somebody
+    /// tried to identify a benchmark binary months later.
+    #[test]
+    fn build_line_names_a_source() {
+        let line = build_line();
+        assert!(
+            line.starts_with("built from "),
+            "the -VV build line must be self-describing, got {line:?}"
+        );
+        let id = line.trim_start_matches("built from ").trim();
+        assert!(!id.is_empty(), "build stamp is empty: {line:?}");
+        // Either a real commit (optionally marked dirty) or the honest
+        // admission. Anything else means build.rs invented something.
+        let core = id.trim_end_matches("-dirty");
+        assert!(
+            core == "unknown" || core.chars().all(|c| c.is_ascii_hexdigit()),
+            "build stamp is neither a commit nor \"unknown\": {id:?}"
         );
     }
 

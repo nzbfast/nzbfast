@@ -54,7 +54,7 @@ pub use nzbfast_core::tools::{MutexExt, RwLockExt};
 // `use` can be unused where a `mod` never could.
 #[cfg(feature = "indexer")]
 pub(crate) use nzbfast_core::servers;
-pub(crate) use nzbfast_core::{conntune, diag, failkind, health, persist, streamhub};
+pub(crate) use nzbfast_core::{conntune, diag, failkind, health, localtime, persist, streamhub};
 #[cfg(feature = "indexer")]
 pub(crate) use nzbfast_core::{identity, interests, logging};
 pub(crate) use nzbfast_engine::get;

@@ -1270,7 +1270,17 @@ location / {
     proxy_set_header Host              $host;
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-}</code></pre>
+}
+
+# Apache (mod_proxy, mod_proxy_http, mod_headers)
+&lt;Location /&gt;
+    ProxyPass        http://127.0.0.1:6789/
+    ProxyPassReverse http://127.0.0.1:6789/
+    RequestHeader set X-Forwarded-Proto "https"
+    # Where the proxy does the authenticating, supply the key here and
+    # clients behind it never need one. Use set, not setifempty.
+    # RequestHeader set X-Api-Key "your-api-key"
+&lt;/Location&gt;</code></pre>
 <p>Legg på det proxyen din tilbyr: basic auth, en forward-auth-tjeneste som Authelia eller Authentik, eller klientsertifikater. Én ting overrasker alle - Sonarr, Radarr og telefonappene kan ikke fullføre en nettleserinnlogging, så la dem slippe forbi. De fleste proxyer kan slippe gjennom en forespørsel med et gyldig <code>X-Api-Key</code>-hode og kreve autentisering for alt annet.</p>
 <div class="warn-box"><b>Ikke bare videresend port 6789 på ruteren.</b>
 Uten et konfigurert sertifikat snakker panelet ren HTTP, så API-nøkkelen din og

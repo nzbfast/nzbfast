@@ -91,7 +91,7 @@ pub(super) struct MigrateState {
     /// version is NOT stamped for those, so the next boot runs again;
     /// this is the bound on "again", because a volume that is gone for
     /// good would otherwise walk the whole history at every start of
-    /// this build forever (Codex sweep 7, M5/M6).
+    /// this build forever (review sweep 7, M5/M6).
     #[serde(default)]
     attempts: u32,
     /// Which build those attempts were spent on. Separate from
@@ -173,7 +173,7 @@ pub fn hist_notice(d: &Daemon) -> Option<MigrateNotice> {
 /// file IS the flag, so an outright write spent a notice the user
 /// had not read yet - a second pass raising its own strip destroyed
 /// the first one's counts with nobody having dismissed anything
-/// (Codex sweep 7, L3). The two counts merge differently because
+/// (review sweep 7, L3). The two counts merge differently because
 /// they mean different things: a row the first pass corrected is
 /// right now and the second pass will not correct it again, so
 /// corrections are of disjoint rows and add up, while the same
@@ -214,7 +214,7 @@ fn raise_hist_notice(d: &Daemon, notice: &MigrateNotice) {
 /// whole of spending it - the file's existence is the flag. A
 /// failure there leaves the strip owed and the next payload builds
 /// it again, so reporting success would make the status field a
-/// word that means nothing (Codex sweep 7, L3). No caller reads it
+/// word that means nothing (review sweep 7, L3). No caller reads it
 /// today, which is why the user is not currently told a falsehood:
 /// the dashboard re-renders the strip from the live payload and it
 /// visibly fails to go away.
@@ -374,7 +374,7 @@ pub(super) enum RowOutcome {
     /// build over both - so a daemon started by launchd before its NAS
     /// came up counted every row on it as a deleted payload and sealed
     /// them for the lifetime of the build, which is precisely the build
-    /// whose labels this pass exists to fix (Codex sweep 7, M6).
+    /// whose labels this pass exists to fix (review sweep 7, M6).
     Unreadable,
 }
 
@@ -388,10 +388,10 @@ pub(super) struct PassOutcome {
     /// Rows with a label, no stored frame size, and no file to re-read.
     pub(super) kept: u32,
     /// Rows whose re-derivation was right but whose append to
-    /// `history.jsonl` did not land (Codex sweep 7, M5).
+    /// `history.jsonl` did not land (review sweep 7, M5).
     pub(super) unwritten: u32,
     /// Rows whose payload could not be READ - not proven absent, just
-    /// unreachable this time round (Codex sweep 7, M6). Deliberately
+    /// unreachable this time round (review sweep 7, M6). Deliberately
     /// not folded into `kept`: `kept` is a sentence to the user about
     /// rows nothing will ever improve, and these are rows the next boot
     /// will try again.
@@ -462,7 +462,7 @@ pub(super) fn run_pass(d: &Arc<Daemon>) -> PassOutcome {
             // in-memory field is the easy half; the row the user reads
             // after the next restart is the whole point of the pass, and
             // a store that refused the append leaves that row wrong
-            // however tidy this process's memory looks (Codex sweep 7,
+            // however tidy this process's memory looks (review sweep 7,
             // M5).
             //
             // Not `history_publish`: its rewrite fallback publishes the
@@ -532,7 +532,7 @@ pub(super) fn migrate_once(d: &Arc<Daemon>) {
     // rows for the lifetime of the build - so a pass that did not finish
     // cleanly leaves the file alone and the next boot simply runs again,
     // which `a_second_pass_finds_nothing_left_to_do` pins as nearly free
-    // (Codex sweep 7, M5 and M6). It records the attempt instead, so
+    // (review sweep 7, M5 and M6). It records the attempt instead, so
     // "again" is bounded.
     // A shutdown is not a failed attempt. Returning before the counter
     // below leaves both the stamp and the retry budget untouched, so the

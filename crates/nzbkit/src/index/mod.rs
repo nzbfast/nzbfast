@@ -488,6 +488,13 @@ impl Index {
     /// runner in `stop_sidecar` with the finished job stuck reading
     /// "Extracting" at 100% and the rest of the queue behind it.
     ///
+    /// Still the whole reason for the seek after 10 Sep 2026, when the
+    /// scan lap started handing `index_pass_gate` back BETWEEN its
+    /// stages. A handback is between calls; this is one statement inside
+    /// one `with_index` closure, and no handback point falls inside it.
+    /// A forty-minute scan here holds the write mutex, and with it the
+    /// gate, for forty minutes exactly as it did.
+    ///
     /// The seek costs three `idx_rel_posted` range probes (measured at
     /// 5 ms against that same database). What it gives up is strict
     /// stalest-first ordering over the whole table: the sample is

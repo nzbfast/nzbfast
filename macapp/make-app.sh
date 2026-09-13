@@ -135,6 +135,39 @@ PLIST
 # ad-hoc signature - sign the nested engine FIRST, then the app, so the
 # outer seal covers the signed payload (signing can later be swapped for
 # a real identity without restructuring).
+# STRIP THE DEBUG MAP BEFORE SIGNING, or the wrapper ships this
+# machine's absolute paths. `swift build` records one absolute path per
+# object file in the linked binary's debug map (the N_OSO stabs) -
+# .build/apple/Intermediates.noindex/.../Objects-normal/<arch>/<name>.o -
+# and nothing in the Rust remap reaches it, because it is the Swift
+# linker's output and not cargo's. 30 such paths, naming the build
+# worktree, were measured in the 1.5.0 wrapper on 12 Sep 2026 and in
+# v1.4.0's PUBLISHED DMG, which had passed the asset scan on the way
+# out (that gate read Mach-O files with `strings FILE`, which does not
+# see them; fixed the same day).
+#
+# ORDER IS LOAD-BEARING: strip invalidates a signature, so it must run
+# BEFORE codesign and never after. `-S` removes the debug symbol table
+# and leaves the universal binary otherwise intact; panic backtraces in
+# the ENGINE are unaffected, since that is a separate Rust binary this
+# does not touch.
+# Named, not globbed, and FATAL if it is not there: a strip that
+# silently found nothing is this leak shipping again with a green log.
+[ -f "$APP/Contents/MacOS/NzbFast" ] || {
+    echo "no wrapper at $APP/Contents/MacOS/NzbFast to strip" >&2; exit 1; }
+strip -S "$APP/Contents/MacOS/NzbFast"
+
+# AND PROVE IT, rather than trusting the line above to have worked. The
+# strip is what removes the debug map; this is what fails the build if
+# it ever stops doing so - a new Swift target, a reordered step, a
+# toolchain that records paths somewhere else. It reads the same
+# packaging/private-patterns.txt every other gate reads, and it streams
+# the binary rather than letting `strings` parse it, which is the exact
+# distinction that hid this for 28 releases. Header: that script.
+"$REPO/packaging/assert-no-private-strings.sh" \
+    "$APP/Contents/MacOS/NzbFast" \
+    "$APP/Contents/Resources/bin/nzbfast"
+
 codesign --force -s - "$APP/Contents/Resources/bin/nzbfast"
 codesign --force -s - "$APP"
 codesign --verify --deep --strict "$APP"

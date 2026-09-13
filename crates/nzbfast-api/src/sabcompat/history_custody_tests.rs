@@ -43,7 +43,7 @@ const NZB: &[u8] = br#"<?xml version="1.0"?>
 /// reached disk and downloads the release the user just deleted for
 /// good. This facade swallowed the `remove_file` outright, so the whole
 /// fault was invisible - the REST history delete has gone through
-/// `hold_or_drop_spool` (and so `drop_spool`) since Codex F-05, and
+/// `hold_or_drop_spool` (and so `drop_spool`) since review finding F-05, and
 /// which client type the user configured decided whether the bug was
 /// reachable, exactly as it did for the active-job delete before it.
 ///

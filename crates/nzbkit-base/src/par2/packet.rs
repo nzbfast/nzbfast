@@ -180,6 +180,176 @@ fn scan_packets_parallel<'a, F: FnMut(RawPacket<'a>)>(
     Ok(())
 }
 
+/// [`scan_packets`] with the recovery packets DEFERRED: every packet
+/// whose header names `PAR 2.0\0RecvSlic` is framed and handed to
+/// `defer` as its `(start, end)` span WITHOUT its MD5 being computed;
+/// every other packet is hashed and verified exactly as `scan_packets`
+/// does, and reaches `f` in file order. The caller owes the deferred
+/// spans a later [`verify_span`] before it trusts anything about them
+/// beyond their existence - which is why this walk exists: `parfast`'s
+/// verify has to read a set's volumes to learn the set, but for a
+/// clean set it never needs to know whether the recovery data in them
+/// is sound, and hashing it was ~10-15% of a clean verify's wall (M3
+/// Ultra, 10 GiB / 1 GiB of parity, 6 Sep 2026).
+///
+/// The type is read off the UNVERIFIED header. A corrupt packet whose
+/// bytes happen to say RecvSlic is deferred and fails its later
+/// verification; a corrupt packet that says anything else fails its
+/// MD5 here, exactly as before. Neither ends anywhere it could not have
+/// ended under the hashing walk. Any bad MD5 among the hashed packets
+/// falls back to the serial scan over the WHOLE input, hashing every
+/// packet and deferring nothing (the +1 resume inside a corrupt extent
+/// is the serial scan's, and it must see every byte).
+pub(crate) fn scan_packets_deferring<'a>(
+    input: &'a [u8],
+    mut f: impl FnMut(RawPacket<'a>),
+    mut defer: impl FnMut(usize, usize),
+) {
+    let spans = packet_spans(input);
+    if spans.is_empty() {
+        return;
+    }
+    let hashed: Vec<(usize, usize)> = spans
+        .iter()
+        .copied()
+        .filter(|&(start, _)| &input[start + 48..start + 64] != super::TYPE_RECVSLIC)
+        .collect();
+    let ok = std::sync::atomic::AtomicBool::new(true);
+    if !hashed.is_empty() {
+        let threads = crate::mem::cpu_workers().min(hashed.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= hashed.len() || !ok.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                        let (start, end) = hashed[i];
+                        let stored: [u8; 16] = input[start + 16..start + 32].try_into().unwrap();
+                        if Md5::digest(&input[start + 32..end]).as_slice() != stored {
+                            ok.store(false, std::sync::atomic::Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+    }
+    if !ok.into_inner() {
+        scan_packets_serial(input, f);
+        return;
+    }
+    for &(start, end) in &spans {
+        if &input[start + 48..start + 64] == super::TYPE_RECVSLIC {
+            defer(start, end);
+        } else {
+            f(RawPacket {
+                md5: input[start + 16..start + 32].try_into().unwrap(),
+                set_id: input[start + 32..start + 48].try_into().unwrap(),
+                ptype: input[start + 48..start + 64].try_into().unwrap(),
+                body: &input[start + 64..end],
+                body_offset: start + 64,
+            });
+        }
+    }
+}
+
+/// A file framed by SEEKING rather than read whole: each packet's
+/// 64-byte header is read at its offset, a recovery packet's span is
+/// recorded (with its 4-byte exponent, one more small read) and its
+/// payload skipped, and every other packet is read whole into `bytes`
+/// - a valid packet stream of the file's critical packets, for
+/// [`super::Par2Set::parse`]. On a set whose members prove clean the
+/// recovery payloads, the bulk of every volume, are never read at all
+/// (i5-10600KF, a clean 10 GiB set with 1 GiB of parity: the index
+/// alone verifies in 1.61-1.67 s against 2.08-2.14 with the volumes
+/// read and hashed, 6 Sep 2026).
+///
+/// `None` on any structural anomaly - a header not at the expected
+/// offset, a length that does not fit - because the in-memory walks
+/// resync by scanning for the magic byte by byte and this walk cannot;
+/// the caller then reads the file whole and takes that path. Nothing
+/// here is MD5-verified: the critical packets are verified by the
+/// parse that follows, the recovery packets by [`verify_span`] over a
+/// later read, the same two gates the whole-read path applies.
+pub struct SparseFrame {
+    /// Every non-recovery packet, whole, in file order.
+    pub bytes: Vec<u8>,
+    /// Every recovery packet's place and unverified header claims.
+    pub recovery: Vec<SparseRecovery>,
+}
+
+/// One recovery packet a [`sparse_frame`] walk skipped.
+pub struct SparseRecovery {
+    pub offset: u64,
+    pub len: u64,
+    pub md5: [u8; 16],
+    pub set_id: [u8; 16],
+    pub exponent: Option<u32>,
+}
+
+pub fn sparse_frame(f: &std::fs::File, file_len: u64) -> Option<SparseFrame> {
+    let mut bytes = Vec::new();
+    let mut recovery = Vec::new();
+    let mut off = 0u64;
+    let mut hdr = [0u8; 64];
+    while off + HEADER_LEN <= file_len {
+        crate::disk::read_exact_at(f, &mut hdr, off).ok()?;
+        if hdr[..8] != *MAGIC {
+            return None;
+        }
+        let len = u64::from_le_bytes(hdr[8..16].try_into().unwrap());
+        if len < HEADER_LEN || len % 4 != 0 || off.checked_add(len)? > file_len {
+            return None;
+        }
+        if hdr[48..64] == *super::TYPE_RECVSLIC {
+            let exponent = (len >= HEADER_LEN + 4)
+                .then(|| {
+                    let mut e = [0u8; 4];
+                    crate::disk::read_exact_at(f, &mut e, off + HEADER_LEN)
+                        .ok()
+                        .map(|()| u32::from_le_bytes(e))
+                })
+                .flatten();
+            recovery.push(SparseRecovery {
+                offset: off,
+                len,
+                md5: hdr[16..32].try_into().unwrap(),
+                set_id: hdr[32..48].try_into().unwrap(),
+                exponent,
+            });
+        } else {
+            let start = bytes.len();
+            bytes.resize(start + usize::try_from(len).ok()?, 0);
+            crate::disk::read_exact_at(f, &mut bytes[start..], off).ok()?;
+        }
+        off += len;
+    }
+    Some(SparseFrame { bytes, recovery })
+}
+
+/// A deferred span's MD5, checked: `Some(packet)` when the bytes
+/// verify, `None` when they do not (or the span no longer fits the
+/// input, which is what a file that changed underneath looks like).
+pub(crate) fn verify_span(input: &[u8], start: usize, end: usize) -> Option<RawPacket<'_>> {
+    if start + (HEADER_LEN as usize) > end || end > input.len() {
+        return None;
+    }
+    let stored: [u8; 16] = input[start + 16..start + 32].try_into().unwrap();
+    if Md5::digest(&input[start + 32..end]).as_slice() != stored {
+        return None;
+    }
+    Some(RawPacket {
+        md5: stored,
+        set_id: input[start + 32..start + 48].try_into().unwrap(),
+        ptype: input[start + 48..start + 64].try_into().unwrap(),
+        body: &input[start + 64..end],
+        body_offset: start + 64,
+    })
+}
+
 /// Returns the total bytes fed to MD5, which is the quantity `budget` below
 /// bounds; callers other than [`scan_packets_counted`] may ignore it.
 pub(super) fn scan_packets_serial<'a>(input: &'a [u8], mut f: impl FnMut(RawPacket<'a>)) -> u64 {
@@ -287,7 +457,7 @@ pub(crate) fn parse_main(body: &[u8]) -> Option<(u64, Vec<[u8; 16]>, Vec<[u8; 16
     // crafted Main packet passed the length test (and under
     // overflow-checks - dev, test, fuzz - it panics instead). 64-bit
     // targets could never wrap it; the division is the same test on
-    // every width (Codex sweep 24 Aug, F-02).
+    // every width (review sweep 24 Aug, F-02).
     if block_size == 0
         || block_size % 4 != 0
         || block_size > MAX_BLOCK_SIZE
@@ -354,30 +524,12 @@ pub(crate) fn parse_unifilen(body: &[u8]) -> Option<([u8; 16], String)> {
         return None; // file id plus at least one code unit
     }
     let fid: [u8; 16] = body[0..16].try_into().unwrap();
-    let raw = &body[16..];
-    // An odd trailing byte is half a code unit. `chunks_exact` would drop
-    // it in silence, which is the half-take this refuses to do.
-    if !raw.len().is_multiple_of(2) {
-        return None;
-    }
-    let (bytes, le) = match raw.get(..2) {
-        Some([0xFF, 0xFE]) => (&raw[2..], true),
-        Some([0xFE, 0xFF]) => (&raw[2..], false),
-        _ => (raw, true),
-    };
-    let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|c| {
-            if le {
-                u16::from_le_bytes(*c)
-            } else {
-                u16::from_be_bytes([c[0], c[1]])
-            }
-        })
-        .collect();
-    let decoded = String::from_utf16(&units).ok()?;
+    // An odd trailing byte is half a code unit, and a BOM is two bytes of
+    // unambiguous evidence: both are `decode_utf16_field`'s, which is the
+    // one spelling of this decode the two optional UTF-16 packets share.
+    // It refuses the odd byte rather than dropping it in silence, which
+    // is the half-take this has always refused to do.
+    let decoded = decode_utf16_field(&body[16..])?;
     // The packet body is padded to a multiple of 4 bytes, so a name of an
     // odd number of code units carries one trailing NUL unit.
     let name = decoded.trim_end_matches('\0');
@@ -467,4 +619,116 @@ pub(crate) fn parse_ifsc(body: &[u8]) -> Option<([u8; 16], Vec<BlockCheck>)> {
         })
         .collect();
     Some((fid, blocks))
+}
+
+/// Body of an ASCII Text ("comment") packet: the comment text, padded
+/// with NULs to a multiple of four. Optional, and carried by MultiPar,
+/// QuickPar and MacPAR rather than by par2cmdline, which emits and
+/// reads none.
+///
+/// # It accepts UTF-8, not only ASCII
+///
+/// The spec names the packet ASCII and every byte a conforming producer
+/// writes is, so ASCII is what [`super::super::par2gen`] writes into one.
+/// Reading is the looser half on purpose: a producer that put UTF-8 in
+/// here has said something true about the set that the strict reading
+/// would throw away, and there is no second field it could corrupt -
+/// a comment nominates nothing and keys nothing. Bytes that are not
+/// valid UTF-8 are refused rather than lossily mapped, under
+/// [`parse_unifilen`]'s rule: this packet is OPTIONAL, so refusing it
+/// leaves the set exactly as usable as if it had never been written,
+/// and that is what buys the strict side.
+pub(crate) fn parse_comm_ascii(body: &[u8]) -> Option<String> {
+    clean_comment(std::str::from_utf8(body).ok()?)
+}
+
+/// Body of a Unicode Text ("comment") packet: 16 bytes that are the MD5
+/// of the analogous ASCII packet's body where one exists and zeros
+/// where it does not, then the comment as UTF-16.
+///
+/// The MD5 field is READ PAST and never checked. It is a cross-reference
+/// between two optional packets, and the only thing a mismatch could
+/// tell a reader is that a producer wrote two different comments - which
+/// is what the `Claim` over both packet types already answers, in a way
+/// that does not depend on which of them the walk reached first
+/// (W4-10). Checking it here would make the ASCII packet's survival a
+/// precondition for the Unicode one's, which is a worse answer for a
+/// volume that carries only one of the pair.
+pub(crate) fn parse_comm_uni(body: &[u8]) -> Option<String> {
+    if body.len() < 18 {
+        return None; // the MD5 field plus at least one code unit
+    }
+    clean_comment(&decode_utf16_field(&body[16..])?)
+}
+
+/// The one acceptance rule both comment packets answer to, so a set
+/// carrying the pair cannot have one of them accepted and the other
+/// refused over a byte they share.
+///
+/// Trailing NULs are the spec's own padding to a multiple of four and
+/// are trimmed. What is left must be non-empty and must carry no
+/// control character other than the three that make a comment a
+/// comment - newline, carriage return and tab.
+///
+/// # Why a control byte is refused rather than stripped
+///
+/// A comment is written to a terminal by `parfast` and to a label by the
+/// desktop app, and an ESC there is an escape sequence that rewrites
+/// what the reader sees - the one thing in a PAR2 set that an attacker
+/// can choose freely and that lands in front of a human unaltered. A
+/// filename cannot take this answer, because the decoded name is a
+/// comparison key and dropping a descriptor drops a FILE from the set
+/// ([`parse_filedesc`]'s own note). A comment keys nothing and holds
+/// nothing else, so the refusal costs exactly the comment - and
+/// [`super::super::par2gen`] refuses to WRITE one of these, so the two
+/// halves are the same rule and a set this engine created always reads
+/// back.
+///
+/// `char::is_control` covers C0, DEL and C1, so the ESC forms and the
+/// eight-bit CSI are all refused. WHAT IT DOES NOT COVER, stated so the
+/// next reader does not have to re-derive it: the bidirectional
+/// overrides (U+202E and friends), which can make displayed text read
+/// in the wrong order but cannot rewrite a screen or move a cursor.
+/// That is a rendering question for whatever draws the comment, and
+/// widening this rule to answer it would refuse legitimate right-to-left
+/// comments outright - which is the lossy half of exactly the trade this
+/// function otherwise takes the strict side of.
+fn clean_comment(text: &str) -> Option<String> {
+    let text = text.trim_end_matches('\0');
+    if text.is_empty()
+        || text
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+/// UTF-16 text with an optional BOM, as both optional packets that carry
+/// a name or a comment spell it. `None` for a length that is not a whole
+/// number of code units or a sequence that does not decode - never a
+/// lossy mapping and never a half-take.
+fn decode_utf16_field(raw: &[u8]) -> Option<String> {
+    if !raw.len().is_multiple_of(2) {
+        return None;
+    }
+    let (bytes, le) = match raw.get(..2) {
+        Some([0xFF, 0xFE]) => (&raw[2..], true),
+        Some([0xFE, 0xFF]) => (&raw[2..], false),
+        _ => (raw, true),
+    };
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| {
+            if le {
+                u16::from_le_bytes(*c)
+            } else {
+                u16::from_be_bytes([c[0], c[1]])
+            }
+        })
+        .collect();
+    String::from_utf16(&units).ok()
 }

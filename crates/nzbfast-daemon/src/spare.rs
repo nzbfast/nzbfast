@@ -600,7 +600,7 @@ impl Daemon {
             // adopts any spooled NZB no record names, so leaving it
             // behind would put the dropped spare back in the queue at the
             // next start - with nothing to hold it against. `drop_spool`
-            // rather than a swallowed `remove_file` (Codex sweep 24 Aug,
+            // rather than a swallowed `remove_file` (review sweep 24 Aug,
             // F-04): a REFUSED unlink leaves exactly that adoptable
             // survivor, so it is masked or emptied instead.
             drop_spool(path);

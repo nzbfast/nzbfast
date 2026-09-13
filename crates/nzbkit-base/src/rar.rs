@@ -229,6 +229,10 @@ pub struct VolumeMapper {
     /// RAR5 main-header volume number (0-based; absent on the first
     /// volume and in RAR4) - the obfuscation-proof volume ordering.
     pub volume_number: Option<u64>,
+    /// The main header declared an embedded recovery record (RAR5 flag
+    /// 0x0008, RAR4 MHD_PROTECT). Read off the volume's HEAD, so it is
+    /// known while the tail that holds the record is still in flight.
+    pub recovery_record: bool,
     /// True once the end-of-archive block (or EOF at `volume_size`) is
     /// reached - `entries` is then complete.
     pub complete: bool,
@@ -702,6 +706,7 @@ impl VolumeMapper {
             entries: Vec::new(),
             blocker: None,
             volume_number: None,
+            recovery_record: false,
             complete: false,
             volume_size,
             archive_base,
@@ -755,6 +760,7 @@ impl VolumeMapper {
             entries,
             blocker: None,
             volume_number: None,
+            recovery_record: false,
             complete: true,
             volume_size,
             archive_base: 0,
@@ -1132,9 +1138,13 @@ impl VolumeMapper {
                         BlockResult::Skip {
                             next,
                             volume_number,
+                            recovery_record,
                         } => {
                             if volume_number.is_some() {
                                 self.volume_number = volume_number;
+                            }
+                            if recovery_record {
+                                self.recovery_record = true;
                             }
                             if !self.advance_to(next) {
                                 return;
@@ -1358,10 +1368,15 @@ enum BlockResult {
     },
     End,
     /// Non-file block: next block starts at `next`. Main headers carry
-    /// the RAR5 volume number when present.
+    /// the RAR5 volume number when present, and say whether the archive
+    /// declares an embedded recovery record (RAR5 archive flag 0x0008,
+    /// RAR4 MHD_PROTECT 0x0040) - the one fact a repair rung needs
+    /// BEFORE it decides to materialize a chased set, since the record
+    /// itself sits at the volume's tail and is not on disk until then.
     Skip {
         next: u64,
         volume_number: Option<u64>,
+        recovery_record: bool,
     },
     File {
         entry: FileEntry,
@@ -1369,11 +1384,36 @@ enum BlockResult {
     },
 }
 
-/// Read a RAR5 vint. Returns (value, bytes consumed) or None if truncated.
+/// Read a RAR5 vint. Returns (value, bytes consumed) or None if
+/// truncated. A value too large for a `u64` SATURATES.
+///
+/// The tenth byte carries only one usable bit: `7 * 9 == 63`, so
+/// anything above `1` there is shifted straight off the top of the
+/// word. The shift itself is legal (63 < 64) and never panicked, but
+/// the value silently WRAPPED - a payload of `0x02` produced `0`, and a
+/// hostile file header could therefore declare a 10-byte unpacked size
+/// and have `VolumeMapper::advance` map an EMPTY member over a real
+/// data area and skip it. Every neighbouring arithmetic on these fields
+/// is checked; this one was not.
+///
+/// Saturating rather than refusing, because the two callers want
+/// different things from a malformed field and both are served by a
+/// number too big to use: the extra-area record walk reads the record's
+/// TYPE after its size and must keep doing so (`v5_hostile_extra_record
+/// _size_terminates` pins that a hostile size does not hide an
+/// encryption record), while every consumer of a size gets a figure
+/// their checked arithmetic already refuses. `None` here would have
+/// stopped the record walk one field early and let a crafted size
+/// conceal the flag behind it.
 fn vint(b: &[u8]) -> Option<(u64, usize)> {
     let mut v: u64 = 0;
     for i in 0..10.min(b.len()) {
-        v |= ((b[i] & 0x7f) as u64) << (7 * i);
+        let payload = b[i] & 0x7f;
+        if i == 9 && payload > 1 {
+            v = u64::MAX;
+        } else {
+            v |= (payload as u64) << (7 * i);
+        }
         if b[i] & 0x80 == 0 {
             return Some((v, i + 1));
         }
@@ -1538,6 +1578,7 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
             // (vint) when flag 0x02 is set. A volume archive (flag 0x01)
             // without an explicit number is the FIRST volume (0).
             let mut volume_number = None;
+            let mut recovery_record = false;
             if let Some((aflags, n)) = vint(&hdr[p..]) {
                 if aflags & 0x02 != 0 {
                     if let Some((vn, _)) = vint(&hdr[p + n..]) {
@@ -1546,10 +1587,15 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
                 } else if aflags & 0x01 != 0 {
                     volume_number = Some(0);
                 }
+                // MHFL_PROTECT: `rar -rr` sets it on every volume it
+                // writes a record into (rar 7.23 measured: flags 0x9 on a
+                // -rr3 volume set, 0x1 without).
+                recovery_record = aflags & 0x08 != 0;
             }
             BlockResult::Skip {
                 next,
                 volume_number,
+                recovery_record,
             }
         }
         2 | 3 => {
@@ -1559,6 +1605,7 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
                 return BlockResult::Skip {
                     next,
                     volume_number: None,
+                    recovery_record: false,
                 };
             }
             let Some((file_flags, n)) = vint(&hdr[p..]) else {
@@ -1683,6 +1730,7 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
         _ => BlockResult::Skip {
             next,
             volume_number: None,
+            recovery_record: false,
         }, // main header (1), unknown types
     }
 }
@@ -1878,7 +1926,7 @@ fn parse_block_v4_at(h: &[u8], base: u64, hdr_span: Option<u64>) -> BlockResult 
     // saying so. The `-hp` path has always checked it (there it also
     // adjudicates the password); RAR5 checks its own at both entry
     // points. The plaintext RAR4 path did not, so damaged or crafted
-    // header bytes were trusted (Codex sweep 10 Aug, M5).
+    // header bytes were trusted (review sweep 10 Aug, M5).
     //
     // Only on the plaintext entry: an encrypted block arrives here with
     // `hdr_span` set, and `parse_block_v4_enc_with` has already checked
@@ -1924,6 +1972,9 @@ fn parse_block_v4_at(h: &[u8], base: u64, hdr_span: Option<u64>) -> BlockResult 
                 BlockResult::Skip {
                     next,
                     volume_number: None,
+                    // MHD_PROTECT: the rar 3.00 recovery fixture reads
+                    // main flags 0x40.
+                    recovery_record: flags & 0x0040 != 0,
                 }
             }
         }
@@ -2057,6 +2108,7 @@ fn parse_block_v4_at(h: &[u8], base: u64, hdr_span: Option<u64>) -> BlockResult 
         _ => BlockResult::Skip {
             next,
             volume_number: None,
+            recovery_record: false,
         },
     }
 }

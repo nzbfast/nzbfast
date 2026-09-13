@@ -1325,7 +1325,17 @@ location / {
     proxy_set_header Host              $host;
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-}</code></pre>
+}
+
+# Apache (mod_proxy, mod_proxy_http, mod_headers)
+&lt;Location /&gt;
+    ProxyPass        http://127.0.0.1:6789/
+    ProxyPassReverse http://127.0.0.1:6789/
+    RequestHeader set X-Forwarded-Proto "https"
+    # Where the proxy does the authenticating, supply the key here and
+    # clients behind it never need one. Use set, not setifempty.
+    # RequestHeader set X-Api-Key "your-api-key"
+&lt;/Location&gt;</code></pre>
 <p>Leg erbovenop wat je proxy biedt: basic auth, een forward-auth-dienst als Authelia of Authentik, of clientcertificaten. Eén ding verrast iedereen - Sonarr, Radarr en de telefoon-apps kunnen geen browser-login doorlopen, laat ze er dus langs. De meeste proxy's kunnen een verzoek met een geldige <code>X-Api-Key</code>-header doorlaten en de rest om authenticatie vragen.</p>
 <div class="warn-box"><b>Zet poort 6789 niet zomaar open op je router.</b>
 Zonder geconfigureerd certificaat spreekt het dashboard gewoon HTTP, dus je

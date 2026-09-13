@@ -326,7 +326,7 @@ impl Daemon {
     /// want the signal sent and ignore it; `requeue_category` needs the
     /// answer, because the sidecar's exit path is what moves a
     /// re-pointed job's part-downloaded files - and with no sidecar
-    /// live, nobody else does (Codex sweep 3, M12).
+    /// live, nobody else does (review sweep 3, M12).
     pub fn poke_sidecar(self: &Arc<Self>, hit: impl Fn(&str) -> bool) -> bool {
         // Inline first, so the transfer is already stopping by the time the
         // delete/pause API call returns.
@@ -397,7 +397,7 @@ impl Daemon {
     /// and `ensure_plain_writer` opens a slot's writer LAZILY - on that
     /// file's first article - so the next file of any multi-file release
     /// ran `create_dir_all` and laid a fresh payload in the directory
-    /// the user had just deleted, named by no record at all (Codex sweep
+    /// the user had just deleted, named by no record at all (review sweep
     /// 14 Aug M2).
     ///
     /// NOT deferred to `park` instead: the abort's ordinary outcome is
@@ -456,6 +456,7 @@ impl Daemon {
             // The request answered long ago, so a refusal here has no
             // response left to ride back on - same as park's deferred
             // removal, and the notice is how it reaches the user.
+            d.hub.release_handles_for_dir(&dir);
             if let FilesGone::Kept(why) = remove_job_files(&dir, &name, filed, &tail) {
                 // No NZB to offer: the delete handler removed this job's
                 // spool copy when it took the row out of the queue, long
@@ -487,7 +488,7 @@ impl Daemon {
     /// A single-record caller takes it here rather than growing a third
     /// choreography beside those two. Watchlist upgrade settlement WAS
     /// that third choreography, and it removed a superseded release's
-    /// directory with no reservation at all (Codex sweep 24 Aug, F-05).
+    /// directory with no reservation at all (review sweep 24 Aug, F-05).
     ///
     /// `sidecar` is the [`Self::sidecar_owner`] snapshot, taken BEFORE
     /// the queue lock for the reason that function gives. `None` comes
@@ -513,6 +514,7 @@ impl Daemon {
             self.remove_after_sidecar_drain(target.clone(), name, dir, filed, tail);
             return None;
         }
+        self.hub.release_handles_for_dir(&dir);
         let outcome = remove_job_files(&dir, &name, filed, &tail);
         self.reserved.lock_ok().remove(&dir);
         Some(outcome)
@@ -601,7 +603,7 @@ impl Daemon {
     /// pressing "download it again", or letting the notice age off the
     /// 12-entry ring - then removed the NZB the history row's retry
     /// button needs, and the retry failed with a raw ENOENT out of the
-    /// NZB read (Codex sweep 3, M11; reachable from JSON-RPC
+    /// NZB read (review sweep 3, M11; reachable from JSON-RPC
     /// GroupDelete / GroupDupeDelete on an ACTIVE job). A notice with
     /// no NZB is an ordinary one - it keeps the folder handle and loses
     /// only the button, which the surviving history row provides.
@@ -740,7 +742,7 @@ impl Daemon {
     /// non-stale path avoids this by re-reading the generation and
     /// returning before it removes (sweep 4, M4c); the stale branch is
     /// where that condition is true by definition, so it asks a
-    /// different question instead (Codex sweep 5, M5).
+    /// different question instead (review sweep 5, M5).
     fn release_custody_if_unclaimed(&self, id: &str) {
         if find_job(self.queue.lock_ok().iter(), id).is_some() {
             return;
@@ -790,7 +792,7 @@ impl Daemon {
             // and later re-queued - so a flag left set carried the
             // user's old delete forward into the RETRY's own park,
             // which removed a freshly completed release just before
-            // filing its Completed row (Codex sweep 14 Aug H1).
+            // filing its Completed row (review sweep 14 Aug H1).
             // Cleared unconditionally, not only when the removal
             // reported the files gone: a Trash refusal already
             // reaches the user through `note_delete_kept` below, and
@@ -811,6 +813,7 @@ impl Daemon {
             // request answered - so a refusal here has no response
             // left to ride back on, and the notice is the only way it
             // reaches them at all.
+            self.hub.release_handles_for_dir(&out_dir);
             if let FilesGone::Kept(why) = remove_job_files(&out_dir, &stem, filed, &tail) {
                 // ...and the spool copy becomes the notice's offer to
                 // run it again - but ONLY where `gone_nzb` already
@@ -1105,7 +1108,7 @@ impl Daemon {
         // land a HIGHER counter on a history row the retry has already
         // superseded - which resolves the wrong way at the next
         // `load_queue` and quietly undoes the retry. Combining them
-        // makes that ordering unrepresentable (Codex sweep 6, N2).
+        // makes that ordering unrepresentable (review sweep 6, N2).
         {
             let mut g = job.lock_ok();
             if gen0.is_some_and(|g0| Self::record_generation(&g) != g0) {
@@ -1172,7 +1175,7 @@ impl Daemon {
         // a slow disk - was a window in which a retry could push the
         // SAME record back onto the queue, only for the retain to pull
         // it straight out again by id and the arms below to file it
-        // into history. The user's retry vanished (Codex sweep 6, N2).
+        // into history. The user's retry vanished (review sweep 6, N2).
         //
         // `retries` alone, not the whole generation: this park has just
         // stamped its own `move_seq`, so the tuple no longer matches by
@@ -1652,7 +1655,7 @@ impl Daemon {
         if !self.alt.auto_switch.load(Ordering::Relaxed) {
             return;
         }
-        // §290 (Codex F-11). Held the whole way down, so the winner is
+        // §290 (review finding F-11). Held the whole way down, so the winner is
         // weighed and unpaused without a hunt or a click slipping a
         // second copy in between. Taken BEFORE any store lock, which is
         // the order every door takes (see `altspend`).
@@ -1856,7 +1859,7 @@ impl Daemon {
             return;
         }
         // The scan, the CAS and the emit share ONE hold of the queue
-        // lock (Codex sweep 14 Aug M3). Dropped between scan and CAS,
+        // lock (review sweep 14 Aug M3). Dropped between scan and CAS,
         // an enqueue could slip into the gap - re-arm the latch, push
         // its job, publish job.added - and this thread's CAS then
         // succeeded on the stale scan, announcing queue.idle over a
@@ -2100,6 +2103,7 @@ impl CustodyBatch {
         crate::earlyfile::early_unlink(&self.early_gone);
         let mut kept: Vec<(String, std::path::PathBuf, String)> = Vec::new();
         for (name, dir, filed, tail) in self.doomed {
+            d.hub.release_handles_for_dir(&dir);
             if let FilesGone::Kept(why) = remove_job_files(&dir, &name, filed, &tail) {
                 kept.push((name, dir, why));
             }
@@ -2133,7 +2137,7 @@ impl CustodyBatch {
 /// question there. Under `dupe_scope = "exact"` it is NOT: a
 /// different release of the same episode is admitted and runs,
 /// so its failure promoted rows held against a still-completed
-/// original (Codex sweep K). An empty `held_for` is a row from
+/// original (review sweep K). An empty `held_for` is a row from
 /// before the field existed and keeps the old behaviour: for
 /// those rows only, the caller's `dupe_key` filter is the whole
 /// gate. A row that NAMES the failed job outranks the key
@@ -2147,7 +2151,7 @@ fn held_against(g: &Job, failed_id: &str, failed_key: &str) -> bool {
     g.held_for == failed_id
 }
 
-// §290 (Codex F-11): the ceilings the automatic promotion now consults.
+// §290 (review finding F-11): the ceilings the automatic promotion now consults.
 // A separate file under the size gate, and a CHILD of this module so it
 // can reach `promote_held_alternative`, which nothing outside calls.
 #[cfg(test)]

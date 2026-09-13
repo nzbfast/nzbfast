@@ -579,7 +579,7 @@ fn a_slow_index_read_cannot_starve_the_http_pool() {
 
     // And the same honesty for search: a saturated pool used to be
     // flattened to `results: []`, which the dashboard drew as "nothing
-    // matched" over a list it then threw away (Codex sweep 5 Aug M10).
+    // matched" over a list it then threw away (review sweep 5 Aug M10).
     let t = Instant::now();
     let s = api(port, "mode=index_search&q=wedge");
     assert!(

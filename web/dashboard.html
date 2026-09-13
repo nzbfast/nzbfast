@@ -259,6 +259,15 @@ header a.pill.on{background:var(--ctl-bg-on);border-color:var(--acc);color:var(-
 header .selwrap .selic,header .selwrap .selcaret{color:var(--ctl-fg)}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 body.paused .hero .num,body.paused #speedChart{opacity:.5}
+/* The pause control itself changes colour while the queue is held, not
+   only its label: a header reading "Resume" in the same grey as every
+   other ghost button went unnoticed for 13 hours once, after a stray
+   keystroke paused the queue on a freshly relaunched window (Space is
+   the pause-all hotkey). Filled amber rather than the outline-only
+   `button.warn` look, so it reads as a STATE the page is in and not as
+   one more warning action. */
+body.paused #pauseBtn{color:var(--warn);border-color:var(--warn);background:color-mix(in srgb,var(--warn) 18%,transparent);font-weight:600}
+body.paused #pauseBtn:hover{background:color-mix(in srgb,var(--warn) 30%,transparent)}
 #tip{position:fixed;pointer-events:none;background:var(--surface-2);border:1px solid var(--line);
   border-radius:7px;padding:5px 9px;font-size:12px;font-variant-numeric:tabular-nums;
   box-shadow:0 3px 10px rgba(0,0,0,.3);opacity:0;transition:opacity .1s;z-index:9}
@@ -2447,7 +2456,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
      the same swatch and the same host name, so a key here stated the
      mapping a second time - a tester read the two as different facts and
      asked which one was authoritative. The rows ARE the key: they are
-     pinned to hostOrder like the chart is, so a row keeps its colour
+     pinned to rowOrder like the chart is, so a row keeps its colour
      wherever the speed re-sort moves it. -->
   <div class="chartwrap" id="provChartWrap" style="height:60px;margin-bottom:8px"><canvas id="provChart"></canvas></div>
 <!-- The provider blocks are the growable part: one per configured
@@ -4516,7 +4525,7 @@ stripKbdHint();
 // follow: the catalogue arrives after injectHelp has already run, so
 // each one has to be rebuilt afterwards. Restamping them by hand meant
 // History was left announcing English on all 27 translated locales
-// while Queue was fine (Codex sweep 7, L4). Both sides now read the
+// while Queue was fine (review sweep 7, L4). Both sides now read the
 // same map, so a third card cannot be half-wired.
 function helpHints(){
   return {
@@ -4820,8 +4829,44 @@ const sampleT = [];
 // draw it twice.
 let poolEvents = [];
 let lastServerBytes = {}, lastT = 0;  // for per-provider rate derivation
-const provHist = {};                  // host -> [MB/s samples]
-let hostOrder = [];                   // color identity: first-seen order, never resorted
+const provHist = {};                  // row key -> [MB/s samples]
+let rowOrder = [];                    // color identity: first-seen order, never resorted
+// A HOSTNAME IS NOT A ROW IDENTITY, and every structure above is keyed
+// by what this returns because of it. Two accounts on the same provider
+// are two configured servers, two fleet rows and two independent byte
+// counters, and the engine has minted a per-row key for exactly that
+// reason since the fleet build was written - `row_keys` in
+// crates/nzbkit/src/pool/livestats.rs, whose header carries the whole
+// argument, including why the ordinal is counted WITHIN a host (a bare
+// list index is a different number in the two places that mint it the
+// moment any server is switched off). That key is deliberately kept out
+// of every API body, so the rule is re-derived here from the payload's
+// own order, which IS the fleet order it was minted from.
+//
+// Keyed by host, one bucket held two rows' counters: `lastServerBytes`
+// was overwritten by the first row, so the second row's delta came out
+// negative and clamped to 0, and the one shared history took two pushes
+// a tick - [rate, 0, rate, 0, ...]. That is a sawtooth, drawn TWICE
+// because rowOrder held the host twice (in two different colours, one
+// stacked on the other), over a series growing at double every other
+// series' rate - which, since drawStacked right-aligns by INDEX and
+// takes its length from the longest, left the whole visible window
+// holding that one duplicated trace and everybody else at zero. So a
+// nine-backbone fleet pulling 448 MB/s drew as a bare sawtooth with no
+// floor under it, and both rows printed the same rate. Reported 5 Sep
+// 2026 off a fleet with vipernews.com configured twice.
+function rowKeys(servers){
+  const seen={};
+  return (servers||[]).map(sv=>{
+    const n=seen[sv.host]||0; seen[sv.host]=n+1;
+    // Ordinal FIRST, one '#', then the host verbatim - the engine's
+    // encoding, and injective for the same reason its header gives: a
+    // host may itself contain a '#', and spelled the other way round
+    // two keys could collide.
+    return n+'#'+sv.host;
+  });
+}
+const rowHost=k=>k.slice(k.indexOf('#')+1);
 // Provider DISPLAY order: re-sorted by performance every provSortSecs
 // seconds (browser-local setting; 0 = keep server order), FLIP-animated.
 let provOrder = [], lastProvSort = 0;
@@ -5285,7 +5330,7 @@ async function api(mode, extra, authKey, post){
 // try/catch around one is dead code, because there is nothing left to
 // reject. That is how a rejected save came to toast success and reload
 // the page, and how a grab the daemon never took said "Added to the
-// queue" (Codex F-18).
+// queue" (review finding F-18).
 //
 // So a write goes through mustOk: it hands back the answer when the
 // daemon took it, and THROWS the daemon's own reason otherwise, which
@@ -6062,17 +6107,17 @@ function renderEvTip(){
   if(cv) cv.addEventListener('mouseenter', dismissEvTip, {once:true});
 }
 // Stacked area of per-provider rates (same right-anchored scroll).
-function drawStacked(cv, hosts, frac=0){
+function drawStacked(cv, rows, frac=0){
   const {ctx,w,h}=fit(cv); ctx.clearRect(0,0,w,h);
-  const len=Math.max(...hosts.map(hn=>provHist[hn]?.length||0),0);
+  const len=Math.max(...rows.map(k=>provHist[k]?.length||0),0);
   if(len<2) return;
   const vis=visN(w), s0=Math.max(0,len-vis);
-  const totals=Array.from({length:len},(_, i)=>hosts.reduce((a,hn)=>a+((provHist[hn]||[])[i]||0),0));
+  const totals=Array.from({length:len},(_, i)=>rows.reduce((a,k)=>a+((provHist[k]||[])[i]||0),0));
   const max=Math.max(...totals.slice(s0),0.001), pad=3, step=w/(vis-1);
   const x=i=>w-((len-1-i)+frac)*step, y=v=>h-pad-(v/max)*(h-pad*2);
   const base=new Array(len).fill(0);
-  hosts.forEach((hn,hi)=>{
-    const s=provHist[hn]||[], col=PC[hi%PC.length];
+  rows.forEach((k,hi)=>{
+    const s=provHist[k]||[], col=PC[hi%PC.length];
     ctx.beginPath();
     for(let i=s0;i<len;i++) i>s0?ctx.lineTo(x(i),y(base[i]+(s[i]||0))):ctx.moveTo(x(i),y(base[i]+(s[i]||0)));
     for(let i=len-1;i>=s0;i--) ctx.lineTo(x(i),y(base[i]));
@@ -7075,7 +7120,8 @@ async function tick(){
     // the delta. (A page opened mid-job baselines from its first tick.)
     const actDl=q.slots.find(s=>s.status==='Downloading');
     if(actDl && jobBase.id!==actDl.nzo_id)
-      jobBase={id:actDl.nzo_id, bytes:Object.fromEntries((st.servers||[]).map(sv=>[sv.host,sv.bytes||0]))};
+      jobBase={id:actDl.nzo_id, bytes:Object.fromEntries(
+        rowKeys(st.servers).map((k,i)=>[k,st.servers[i].bytes||0]))};
     if(!actDl) jobBase={id:null,bytes:{}};
     // A row missing from a PAGE has not left the queue - only close the
     // drawer when the payload could have contained it.
@@ -9377,7 +9423,7 @@ function pipeline(s,mbps,queued,done,failed){
   // went looking for why nothing had downloaded.
   const srefs=s.server_refusals||[];
   // Fed only while servers are reported. This card DOES hide itself, so
-  // it never showed the sawtooth - but hostOrder outlives the servers
+  // it never showed the sawtooth - but rowOrder outlives the servers
   // list and keeps drawStacked running, so the phase is frozen here too
   // rather than left as the one series that still relies on being
   // invisible to be correct.
@@ -9392,44 +9438,60 @@ function pipeline(s,mbps,queued,done,failed){
   document.getElementById('provChartWrap').style.display = anyLive?'':'none';
   if(servers.length){
     provc.style.display='';
-    if(!hostOrder.length) hostOrder=servers.map(x=>x.host);
+    // Per ROW, never per host - see rowKeys, which carries why.
+    const keys=rowKeys(servers), byRow=Object.fromEntries(keys.map((k,i)=>[k,servers[i]]));
+    // Extended, not just seeded: a fleet that grows mid-session (a
+    // server switched on, a job whose plan opens one the last job did
+    // not) otherwise never enters this list at all, so it is missing
+    // from the chart and `indexOf` hands its swatch PC[-1] - undefined,
+    // an uncoloured square. provOrder below has always appended; this
+    // was seeded once and left.
+    keys.forEach(k=>{ if(!rowOrder.includes(k)) rowOrder.push(k); });
     const rates={};
-    servers.forEach(sv=>{
-      const prev=lastServerBytes[sv.host]; const r=(dt>0&&prev!=null)?Math.max(0,(sv.bytes-prev))/1e6/dt:0;
-      rates[sv.host]=r; lastServerBytes[sv.host]=sv.bytes;
-      if(!provHist[sv.host]) provHist[sv.host]=new Array(speedHist.length-1).fill(0);
-      push(provHist[sv.host], r);
+    keys.forEach((k,i)=>{
+      const sv=servers[i];
+      const prev=lastServerBytes[k]; const r=(dt>0&&prev!=null)?Math.max(0,(sv.bytes-prev))/1e6/dt:0;
+      rates[k]=r; lastServerBytes[k]=sv.bytes;
+      // Seeded to the length the other series already have, so every
+      // history stays index-aligned: drawStacked stacks by index, and a
+      // series that joined late and started short would draw its
+      // samples against the wrong moment of everyone else's.
+      if(!provHist[k]) provHist[k]=new Array(speedHist.length-1).fill(0);
+      push(provHist[k], r);
     });
     const agg=Object.values(rates).reduce((a,b)=>a+b,0);
     document.getElementById('provsum').textContent=tn('prov.backbones',servers.length,'{n} backbone','{n} backbones')+' · '+fmtRate(agg);
-    drawStacked(document.getElementById('provChart'), hostOrder);
+    drawStacked(document.getElementById('provChart'), rowOrder);
     // Display order: re-sorted by performance every provSortSecs (0 =
-    // keep server order). Colors stay pinned to hostOrder (first-seen),
+    // keep server order). Colors stay pinned to rowOrder (first-seen),
     // so a row keeps its swatch wherever it moves. The reorder itself is
     // FLIP-animated below so rows visibly slide to their new spot.
-    if(!provOrder.length) provOrder=servers.map(x=>x.host);
-    servers.forEach(sv=>{ if(!provOrder.includes(sv.host)) provOrder.push(sv.host); });
+    if(!provOrder.length) provOrder=keys.slice();
+    keys.forEach(k=>{ if(!provOrder.includes(k)) provOrder.push(k); });
     const sortSecs=provSortSecs();
     let firstRects=null;
     if(sortSecs>0 && now-lastProvSort>=sortSecs){
       lastProvSort=now;
       // Rank: current rate, then session bytes, then name (stable idle order).
-      const by=Object.fromEntries(servers.map(x=>[x.host,x]));
-      const score=h=>(rates[h]||0)*1e15+((by[h]||{}).bytes||0);
-      const sorted=[...provOrder].sort((a,b)=>score(b)-score(a)||a.localeCompare(b));
+      const score=k=>(rates[k]||0)*1e15+((byRow[k]||{}).bytes||0);
+      // Name, THEN key: the tiebreak is there to hold idle rows still,
+      // and sorting the keys directly would order the whole card by
+      // ordinal first - every second account in the fleet sinking below
+      // every first one, which is not an alphabetical list of anything.
+      const sorted=[...provOrder].sort((a,b)=>score(b)-score(a)
+        ||rowHost(a).localeCompare(rowHost(b))||a.localeCompare(b));
       if(sorted.join('\n')!==provOrder.join('\n')){
         firstRects={};
         document.querySelectorAll('#servers .srv').forEach(el=>{
           const r=el.getBoundingClientRect();
-          firstRects[el.dataset.host]={x:r.left,y:r.top};
+          firstRects[el.dataset.rk]={x:r.left,y:r.top};
         });
         provOrder=sorted;
       }
     }
-    const byHost=Object.fromEntries(servers.map(x=>[x.host,x]));
-    setHtml('servers',provOrder.filter(h=>byHost[h]).map(h=>{
-      const sv=byHost[h];
-      const r=rates[sv.host]||0, share=agg>0?100*r/agg:0, col=PC[hostOrder.indexOf(sv.host)%PC.length];
+    setHtml('servers',provOrder.filter(k=>byRow[k]).map(k=>{
+      const sv=byRow[k];
+      const r=rates[k]||0, share=agg>0?100*r/agg:0, col=PC[rowOrder.indexOf(k)%PC.length];
       // The settings model (TODO 112): the server's configured
       // `connections` is a FACT about the account - the most the
       // provider offers, entered by the user, never written by any
@@ -9556,7 +9618,7 @@ function pipeline(s,mbps,queued,done,failed){
       const tuned=(tuneApplies(kn)&&kn.connections<asked&&sv.budget<=kn.connections)
         ? ` · <span class="dim" title="${escA(t('prov.tuned.title','auto-tune measured this provider is fastest at {n} connections, so downloads use {n} rather than the {m} you set: asking a provider for more than it will grant is often several times slower. Turn it off in Settings, under Auto-tune connections.',{n:kn.connections,m:asked}))}">${t('prov.tuned','auto-tuned from {m}',{m:asked})}</span>${tuneAgeChip(kn)}`
         : '';
-      return `<div class="srv" data-host="${escA(sv.host)}">
+      return `<div class="srv" data-rk="${escA(k)}" data-host="${escA(sv.host)}">
         <span class="host" title="${escA(sv.host)}"><span class="sw" aria-hidden="true" style="background:${col}"></span>${esc(sv.host.replace(/^(news|reader)\./,''))}</span>
         <span>${sv.idle
           ? `<span class="util">${t('prov.willuse','up to {n} connections next download',{n:sv.budget})}${tuned}</span>`
@@ -9570,7 +9632,7 @@ function pipeline(s,mbps,queued,done,failed){
     // reduced-motion users - the reorder still happens, instantly).
     if(firstRects && !matchMedia('(prefers-reduced-motion: reduce)').matches){
       document.querySelectorAll('#servers .srv').forEach(el=>{
-        const f=firstRects[el.dataset.host]; if(!f) return;
+        const f=firstRects[el.dataset.rk]; if(!f) return;
         const r=el.getBoundingClientRect();
         const dx=f.x-r.left, dy=f.y-r.top;
         if(!dx&&!dy) return;
@@ -9594,7 +9656,7 @@ function pipeline(s,mbps,queued,done,failed){
     // read "at its connection limit" at a glance while the sentence
     // directly beneath it correctly talked about addresses - the exact
     // misdirect the split was written to stop, on the card people
-    // actually reach for when nothing is downloading (Codex sweep 6,
+    // actually reach for when nothing is downloading (review sweep 6,
     // N5).
     provc.style.display='';
     document.getElementById('provsum').textContent=t('prov.idle','not downloading right now');
@@ -9839,7 +9901,31 @@ function actLine(s){
     case 'server_refused':return t('queue.act.srvrefused','{s} rejected the sign-in ({n}s) - check its username and password',{s:d,n:s.activity_secs||0});
     case 'fetching':return d?t('queue.act.fetching','downloading from {s}',{s:d}):t('queue.act.downloading','downloading');
     case 'verifying':return t('queue.act.verifying','verifying');
-    case 'repairing':return t('queue.act.repairing','repairing');
+    // The four phases of an engine repair, since 12 Sep 2026, and the
+    // same failure `extracting` below it answers: a set with real
+    // damage folds for minutes (half an hour at the sizes the daemon
+    // used to refuse outright) and this said one static word for all
+    // of it, which reads as a hang. `pct` is the WHOLE repair banded
+    // across the four phases by the daemon, so it rises once through
+    // them rather than resetting four times; the phase word says which
+    // part of the work is running, because their costs are unrelated
+    // and a bar with no label cannot say why it slowed down. Absent -
+    // no `s.repair` - for the stretches of a repairing section that are
+    // not an engine repair at all, chiefly the recovery-volume
+    // side-fetches, where the bare word is still the true answer.
+    case 'repairing':{
+      const r=s.repair;
+      if(r){
+        const n=Math.round(r.pct||0);
+        switch(r.phase){
+          case 'verify':return t('queue.act.rep.verify','repairing: checking the files, {n}%',{n});
+          case 'fold':return t('queue.act.rep.fold','repairing: reading the good blocks, {n}%',{n});
+          case 'solve':return t('queue.act.rep.solve','repairing: rebuilding the missing blocks, {n}%',{n});
+          case 'write':return t('queue.act.rep.write','repairing: writing the repaired files, {n}%',{n});
+        }
+      }
+      return t('queue.act.repairing','repairing');
+    }
     // TODO 205: the DISK unpack ladder, with numbers when it has them.
     // It runs for minutes on a big obfuscated set (issue #47: 130
     // volumes on a NAS), and until now it printed this one word for
@@ -10694,7 +10780,7 @@ const LOOK_KEYS = ['nzbfastTheme','nzbfastAccent','nzbfastFontScale','nzbfastDen
 // Appearance cleared `uiCompact` and not `uiDense`, so factory defaults
 // came back as the dense grid without the compact spacing it is built
 // to sit on, and an exported Dense look arrived somewhere else as
-// neither (Codex sweep 7, M8). Everything that owns the whole look -
+// neither (review sweep 7, M8). Everything that owns the whole look -
 // export, import, reset - drives off LOOK_ALL.
 const LOOK_FLAGS = ['uiCompact','uiDense'];
 const LOOK_ALL = LOOK_KEYS.concat(LOOK_FLAGS);
@@ -10800,7 +10886,7 @@ async function importLook(input){
     // A file that names no layout describes the shipped one, so the
     // receiving browser's own arrangement goes with it. Skipping the
     // write instead left the recipient's cards under the sender's
-    // palette - a hybrid the file never described (Codex sweep 7, M8).
+    // palette - a hybrid the file never described (review sweep 7, M8).
     if(typeof j.layout==='string') localStorage.layoutPrefs=j.layout;
     else localStorage.removeItem('layoutPrefs');
     toast(t2('toast.lookimported','Appearance loaded. Reloading…'));
@@ -10813,7 +10899,7 @@ function resetAppearance(){
   localStorage.removeItem('layoutPrefs');
   // The preset identity goes with the look it named. Left behind, the
   // fingerprint no longer matches anything and factory defaults read
-  // back as "Dense (modified)" (Codex sweep 6, N10).
+  // back as "Dense (modified)" (review sweep 6, N10).
   localStorage.removeItem('nzbfastPreset'); localStorage.removeItem('nzbfastPresetSig');
   toast(t2('toast.lookreset','Appearance reset to defaults.'));
   setTimeout(()=>location.reload(), 500);
@@ -11220,7 +11306,9 @@ function drawerHtml(s){
       (wr?`<div class="jfhead two">${esc(t('drawer.files.unpack','being unpacked right now'))}</div>${wr}`:'');
     const v=st.verify||{};
     const vline=v.blocks_total>0?`<div class="dim" style="font-size:12px;margin-top:7px">${t('lane.verify','verifying')} ${v.blocks_done}/${v.blocks_total} ${t('drawer.blocks','blocks')}${v.blocks_bad?` · <span class="bad">${t('lane.bad','{n} bad',{n:v.blocks_bad})}</span>`:' · '+t('tile.clean','clean')}</div>`:'';
-    const srv=(st.servers||[]).map(x=>({host:x.host,b:Math.max(0,(x.bytes||0)-(jobBase.bytes[x.host]||0))})).filter(x=>x.b>0);
+    const bkeys=rowKeys(st.servers);
+    const srv=(st.servers||[]).map((x,i)=>({host:x.host,
+      b:Math.max(0,(x.bytes||0)-(jobBase.bytes[bkeys[i]]||0))})).filter(x=>x.b>0);
     const tot=srv.reduce((a,x)=>a+x.b,0);
     const sline=tot>0?`<div class="dsrv">${srv.map(x=>`<span>${esc(x.host.replace(/^(news|reader)\./,''))} <b>${fmtBytes(x.b)}</b> · ${(100*x.b/tot).toFixed(0)}%</span>`).join('')}</div>`:'';
     // Where this job came from, while it downloads. Gary's report: a
@@ -12027,7 +12115,7 @@ async function saveWatchlist(btn){ await busy(btn,t('busy.applying','Applying…
   }).filter(w=>w.title);
   // setCfg answers false on a refused save and has already toasted the
   // daemon's reason; claiming "applied" over the top of it would leave
-  // the person believing a list the daemon never took (Codex F-18).
+  // the person believing a list the daemon never took (review finding F-18).
   if(!await setCfg('watchlist', rows.length?JSON.stringify(rows):'')) return;
   toast(t('toast.wlApplied','Watchlist applied. Checking now.'));
   setTimeout(refreshWatchStatus, 1500);
@@ -12081,7 +12169,7 @@ async function saveInterests(box){
     // A refused save leaves the tick where the click put it, describing
     // an opt-in the daemon never recorded, and setCfg has already said
     // why - so put the box back and stop rather than toasting "Saved"
-    // over it (Codex F-18).
+    // over it (review finding F-18).
     if(!await setCfg('index_interests', keys.join(','))){ box.checked=!box.checked; return; }
     // The daemon rewrites the scan list, so re-read both rather than
     // guessing what it did.
@@ -12119,7 +12207,7 @@ async function watchFrom(kind,title,year,btn){ await busy(btn,'…', async()=>{
   // promise a watch the daemon never recorded - and the refusal path's
   // loadSettings() repaints the SETTINGS page, not these rows, so the
   // title would sit there under a green promise nothing reloads away
-  // (Codex F-18, the same guard saveWatchlist takes over this setting).
+  // (review finding F-18, the same guard saveWatchlist takes over this setting).
   if(!await setCfg('watchlist', JSON.stringify(list))) return;
   wlOwn=list;
   if(!document.querySelector('#wlrows :focus')) renderWatchlist(list);
@@ -13027,6 +13115,19 @@ function shClose(){
   b.classList.remove('on');
   modalClose(document.getElementById('shmodal'));
 }
+// Space pauses the WHOLE queue, so it sits out a short cooloff after
+// the page loads and after the window regains focus. The wrapper takes
+// focus on launch and a relaunch lands the page under whatever the user
+// is typing into: on 10 Sep 2026 one stray Space paused the queue 1.5 s
+// after a deploy and it sat held for 13 h. Three seconds is longer than
+// a keystroke that was already in flight and shorter than a person
+// arriving to press it on purpose; the navigation keys below are
+// harmless and stay unguarded. A keyboard pause also says so in a
+// toast, because the keystroke itself leaves nothing on screen to
+// explain the held queue.
+const KBD_COOLOFF_MS=3000;
+let kbdQuietUntil=Date.now()+KBD_COOLOFF_MS;
+addEventListener('focus', ()=>{ kbdQuietUntil=Date.now()+KBD_COOLOFF_MS; });
 addEventListener('keydown', e=>{
   if(e.defaultPrevented||e.ctrlKey||e.metaKey||e.altKey) return;
   const el=e.target;
@@ -13045,7 +13146,14 @@ addEventListener('keydown', e=>{
     ||document.getElementById('ctxmenu')) return;
   switch(e.key){
     case '?': e.preventDefault(); shOpenSheet(); break;
-    case ' ': e.preventDefault(); togglePause(); break;
+    case ' ':
+      e.preventDefault();
+      if(Date.now()<kbdQuietUntil) break;
+      togglePause();
+      toast(paused
+        ? t('kbd.paused','Paused with the Space key - press Space again, or Resume, to carry on.')
+        : t('say.resumed','Downloads resumed.'));
+      break;
     case 'j': kbdMove(1); break;
     case 'k': kbdMove(-1); break;
     case 'x': kbdToggleSel(); break;
@@ -13176,7 +13284,7 @@ async function fsApply(path){
     // setCfg answers false on a refused save and has already toasted the
     // daemon's reason. "Set to X" over the top of that would name a path
     // the daemon never took, and the field would keep showing it: a
-    // control that failed must snap back, not lie (Codex F-18). The
+    // control that failed must snap back, not lie (review finding F-18). The
     // restore is explicit rather than left to the refusal path's own
     // loadSettings(), which skips whichever field has focus.
     if(!await setCfg(key,val)){ if(el) el.value=prev; return; }
@@ -18102,7 +18210,7 @@ function notifyRowData(r){
 async function testNotify(btn){ await busy(btn,t('busy.testing','Testing…'), async()=>{
   const el=btn.closest('.notifyrow'), row=notifyRowData(el);
   if(!row.url){ toast(t('set.notify.nourl','add the server URL first'), true); return; }
-  // Body, not `&value=` (Codex sweep 2, 3 Aug MH1). The row carries the
+  // Body, not `&value=` (review sweep 2, 3 Aug MH1). The row carries the
   // target's webhook token and its custom body template, and a POST
   // whose parameters sit in the query string discloses both to every
   // access log on the way - `method:'POST'` alone moves nothing.
@@ -18262,13 +18370,13 @@ function capChip(cl, conns, today){
   // keeps `granted_lo` as a lifetime minimum and nothing raises it when
   // old days drain, so a refusal at 10 a hundred days ago and one at 38
   // today rendered as "capped at 10 today" - the oldest number in the
-  // file, presented as this morning's observation (Codex sweep 6, N7).
+  // file, presented as this morning's observation (review sweep 6, N7).
   // `day_lo` is index-for-index with `days`. A ledger from before it
   // existed has none, and the days it recorded carry conntune's
   // DAY_LO_UNKNOWN once the column is aligned: those days are real and
   // the count still counts them, but no number was ever observed for
   // them, so the sentence drops the figure rather than borrowing the
-  // lifetime one (Codex sweep 7, H1b).
+  // lifetime one (review sweep 7, H1b).
   const allLo=(cl&&cl.day_lo)||[], perDay=allLo.length===allDays.length;
   const UNKNOWN_LO=Number.MAX_SAFE_INTEGER;
   const kept=allDays.map((d,i)=>[d, perDay?allLo[i]:UNKNOWN_LO]).filter(p=>p[0]>today-30);
@@ -18280,7 +18388,7 @@ function capChip(cl, conns, today){
   // row, so the whole list went unassigned and Settings showed no
   // servers at all; loadSettings died there too, leaving the schedule,
   // feed, indexer, category and notify rows empty behind it (hit live
-  // on a six-server install, 19 Aug; Codex sweep 7, H1).
+  // on a six-server install, 19 Aug; review sweep 7, H1).
   if(!cdays.length) return '';
   const lows=kept.map(p=>p[1]).filter(v=>v<UNKNOWN_LO);
   const capLo=lows.length?Math.min(...lows):null;
@@ -18687,13 +18795,15 @@ function showIdleEffective(e){
 // Advanced: reveal the stored cleartext password so it can be copied to
 // another instance. The server list masks it; this is the explicit ask.
 // §96.5: the user bought a new block - restart the used counter at
-// zero. Keyed by host (the counter belongs to the account); the
-// lifetime usage history is kept, only the block's baseline moves.
+// zero. The counter belongs to the ACCOUNT, and one hostname may carry
+// two, so the row index rides along with the host and the daemon
+// refuses the pair if they disagree; the lifetime usage history is
+// kept, only the block's baseline moves.
 async function blockRefilled(btn){ await busy(btn,t('busy.saving','Saving…'), async()=>{
   const s=srvEditIdx>=0?srvList[srvEditIdx]:null;
   if(!s||!s.host) return;
   if(!confirm(t('set.srv.blockref.confirm','Restart the used counter for {host} at zero? Do this after buying a new block - the usage history is kept.',{host:s.host}))) return;
-  const j=await api('server_block_refilled',`&value=${encodeURIComponent(s.host)}`);
+  const j=await api('server_block_refilled',`&value=${encodeURIComponent(s.host)}&index=${srvEditIdx}`);
   if(!j.status){ toast(tErr(j.error)||t('err.failed','failed'), true); return; }
   toast(t('toast.blockref','Block counter restarted at zero.'));
   document.getElementById('sv_blockrefrow').style.display='none';
@@ -19714,7 +19824,7 @@ function saveSetupLine(){
   // bare .then() ran the success arm over the top of the daemon's own
   // red toast and left "Line speed saved." as the last thing on screen.
   // The checklist step would then read as done next render, describing a
-  // line speed the daemon never took (Codex F-18).
+  // line speed the daemon never took (review finding F-18).
   setCfg('line_speed', n+u.value).then(ok=>{
     if(!ok) return;
     // NOT `loadStatus&&loadStatus()`, which is what stood here and threw:
@@ -19882,7 +19992,7 @@ function presetSig(){
 // each of them to refresh the indicator is how three were missed - Dense
 // stayed lit and still read "Dense" after the theme had been changed
 // under it - so the signature is WATCHED instead, from the poll loop,
-// and the row is redrawn only when it has actually moved (Codex sweep 6,
+// and the row is redrawn only when it has actually moved (review sweep 6,
 // N10).
 let lastPresetSig=null;
 function watchPresetState(){
@@ -20339,7 +20449,7 @@ function renderPrefetchNow(){
 }
 function drawAllCharts(frac){
   drawSpeed(frac);
-  if(hostOrder.length) drawStacked(document.getElementById('provChart'),hostOrder,provLive?frac:0);
+  if(rowOrder.length) drawStacked(document.getElementById('provChart'),rowOrder,provLive?frac:0);
   drawRes(resLive?frac:0);
   drawBurn(burnLive?frac:0);
 }
@@ -20385,7 +20495,7 @@ function redrawOne(cv){
     case 'speedChart': drawSpeed(chartFrac); break;
     case 'resChart':   drawRes(chartFrac); break;
     case 'burnChart':  drawBurn(burnLive?chartFrac:0); break;
-    case 'provChart':  if(hostOrder.length) drawStacked(cv, hostOrder, chartFrac); break;
+    case 'provChart':  if(rowOrder.length) drawStacked(cv, rowOrder, chartFrac); break;
     case 'histChart':  drawHistogram(); break;
     case 'vhChart':    drawVerifyHealth(); break;
     case 'usageChart': redrawUsage(); break;
@@ -20936,7 +21046,7 @@ function densePack(items,K,pins){
   // produce - met C while B was still unplaced and auto-placed it. The
   // card then sat somewhere else entirely while its menu still offered
   // Unstack and the announcement had already said it sits under B
-  // (Codex sweep 7, M9). A round that places nothing is the real cycle,
+  // (review sweep 7, M9). A round that places nothing is the real cycle,
   // and only that falls back to auto.
   let pend=wait;
   while(pend.length){

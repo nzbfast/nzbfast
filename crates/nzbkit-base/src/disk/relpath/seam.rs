@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 
 thread_local! {
-    /// THREAD-local and not a shared static (CLAUDE.md's test-global-gate
+    /// THREAD-local and not a shared static (CONTRIBUTING.md's test-global-gate
     /// class): each test's own thread arms and consumes its own hook, so
     /// two tests racing this file's own tests cannot fight over one flag
     /// the way a process-global would. Consumed by its single trip inside

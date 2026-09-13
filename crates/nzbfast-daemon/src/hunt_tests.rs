@@ -784,7 +784,7 @@ fn placed(d: &Daemon, name: &str) -> (bool, i32, String) {
     (g.paused, g.priority, g.held_for.clone())
 }
 
-/// **§290 (Codex F-09), the residue.** A hunted replacement is a
+/// **§290 (review finding F-09), the residue.** A hunted replacement is a
 /// duplicate of the row it replaces and of NOTHING ELSE.
 ///
 /// `hunt_enqueue` passed a bare `allow_dupe = true` until 25 Aug 2026,

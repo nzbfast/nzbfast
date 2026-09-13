@@ -63,7 +63,7 @@ fn payload_sources_name_every_volume_of_a_split_file() {
 }
 
 /// §94 A: the crash-resume replay preclaims a restored file's name so an
-/// inner member cannot open the same inode as a live source (Codex sweep
+/// inner member cannot open the same inode as a live source (review sweep
 /// 3 Aug H3) - but the claim must not lock the SLOT'S OWN plain writer
 /// out of the file it is replaying.
 ///
@@ -137,7 +137,7 @@ fn a_second_slot_wanting_one_overlong_name_still_gets_a_file() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// §94 A map mode (Codex F-03): the replay preclaims the SOURCE file
+/// §94 A map mode (review finding F-03): the replay preclaims the SOURCE file
 /// it reads (the earlier run's extracted member) under the volume's
 /// slot. The archive re-creating that very member must adopt the name
 /// - the inner writer is made by whichever slot's bytes reach it, not

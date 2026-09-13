@@ -39,7 +39,7 @@ internal object Http {
      * already allocated the whole stream plus a payload-sized multipart
      * copy of it - and a content URI handed over by a share intent is
      * served by whatever app sent it, which is free to return an
-     * arbitrarily long stream and to lie about its length (Codex sweep
+     * arbitrarily long stream and to lie about its length (review sweep
      * 12 Aug F14).
      */
     const val NZB_SIZE_LIMIT: Int = 64 shl 20

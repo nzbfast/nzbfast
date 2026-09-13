@@ -1,6 +1,6 @@
 [package]
 name = "parfast"
-version = "0.90.0-beta.1"
+version = "1.5.0-beta.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -25,9 +25,36 @@ path = "src/main.rs"
 # copied here and must never be: chip 13's decision D1 is one engine in
 # this workspace, so every PAR2 commit - the AVX-512 fold, the repair
 # race, whatever lands next - reaches this binary on its next build with
-# no sync step. The interim diff-synced copy at ~/Claude/parfast is
+# no sync step. The interim diff-synced copy at the parfast reference tree is
 # superseded and its HANDOFF.md says so.
 #
 # `default-features = false` because base's default turns `indexer` on
 # and a PAR2 command-line tool has no business linking sqlite.
 nzbkit = { path = "../nzbkit", default-features = false }
+
+# ONLY to give `NZBFAST_REPAIR_TIMING` somewhere to land. The engine
+# emits its phase lines as tracing EVENTS, so a binary with no subscriber
+# drops them silently - which is what this CLI did until 9 Sep 2026,
+# while the bench driver beside it installed one and printed the lot.
+# Measuring the product then meant measuring the driver instead, and the
+# 13-17% the two differ by went unattributed for exactly that reason.
+#
+# A real dependency and NOT an optional feature, deliberately: a sink
+# behind a default-off feature means the binary anyone benchmarks is not
+# the binary anyone ships, which is the same class of mistake this is
+# here to fix. The lean feature set is nzbkit's own line - no env-filter,
+# so no regex - and nothing is installed at runtime unless the variable
+# is set (`lib.rs`).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt"] }
+
+# Ctrl-C. The engine's cancel is a gate its loops poll
+# (`par2repair::control`, 12 Sep 2026); this crate's job is to flip it
+# from a signal, which is a `signal()` on unix and a console handler on
+# Windows, both from crates the tree already carries. `ctrlc` was tried
+# first and pulls `dispatch2`, `block2` and `objc2` onto the macOS build
+# for the same forty lines (`control.rs`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }

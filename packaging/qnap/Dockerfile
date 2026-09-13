@@ -4,13 +4,19 @@
 # with `sed -i "s/SCRIPT_LEN/..."`, and BSD sed reads the next argument as
 # a backup suffix, so the substitution that patches the self-extractor's
 # header length never happens. Rather than shim around that one call and
-# hope nothing else in 2,400 lines of GNU-assuming shell bites, the
-# package is built in a container - the same one CI uses, so a developer
-# and the release build produce the same bytes.
+# hope nothing else in 2,400 lines of GNU-assuming shell bites, QDK is
+# run in this container - the same revision CI pins, so a developer and
+# the release build produce the same bytes.
 #
 #   docker build -t nzbfast-qdk --build-arg QDK_COMMIT=$(tail -1 packaging/qnap/qdk-pin.txt) packaging/qnap
 #
-# make-qpkg.sh builds this image itself when it needs it.
+# make-qpkg.sh builds this image itself when it needs it. It is for a
+# LINUX host without QDK installed, and NOT the macOS answer, even though
+# qbuild is fine inside it: make-qpkg.sh stages into `mktemp -d`, macOS
+# mktemp ignores $TMPDIR, and colima does not share /var/folders into its
+# VM - so the bind mount hands qbuild an empty /work and it reports
+# `qpkg.cfg: No such file`. make-qpkg.sh refuses on macOS at the top and
+# points at the qnap-qpkg workflow; its host-check comment has the rest.
 FROM ubuntu:24.04
 
 # rsync is what qbuild uses to stage shared/; it is not in the base image.

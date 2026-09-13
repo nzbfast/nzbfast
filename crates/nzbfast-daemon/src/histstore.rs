@@ -71,7 +71,7 @@ pub(super) static COMPACT_BARRIER: std::sync::Mutex<Option<(String, Arc<std::syn
 /// reason the guard exists - and "the record is right here and the
 /// store refused the line". Only the second is a fault, and a caller
 /// that logs or reports on a bool logs the daemon's healthy races too
-/// (Codex sweep 7, M5 follow-up).
+/// (review sweep 7, M5 follow-up).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HistWrite {
     /// The record's current state is on disk.
@@ -148,7 +148,7 @@ impl Daemon {
             // welded the first post-recovery record onto them into one
             // unreadable line, so the NEXT replay dropped this record
             // with the tear - a park or tombstone written after a crash
-            // was silently gone two restarts later (Codex sweep 24 Aug,
+            // was silently gone two restarts later (review sweep 24 Aug,
             // F-03). One leading newline turns the weld back into "torn
             // line, then this record", the shape replay already
             // handles. Read through the same handle: `append` binds
@@ -215,7 +215,7 @@ impl Daemon {
     /// semicolon, and `history_write_locked` is the only append path
     /// there is: a store that cannot be appended to logs an error and
     /// carries on, which is right for a live daemon but left every
-    /// caller believing its mutation had persisted (Codex sweep 7, M5).
+    /// caller believing its mutation had persisted (review sweep 7, M5).
     /// [`HistWrite`] rather than a bool because the not-present arm
     /// writes nothing either, and that one is not a fault - see the
     /// enum's own note.
@@ -541,7 +541,7 @@ impl Daemon {
     /// names the record at all. A kill in there and the row is gone from
     /// both stores: no DELETED/MANUAL record for the dupe check or the
     /// retry button, and for `GroupParkDelete` - whose whole contract is
-    /// "files KEPT" - a full payload on disk that nothing names (Codex
+    /// "files KEPT" - a full payload on disk that nothing names (review
     /// sweep 14 Aug M1).
     ///
     /// The terminal keys are overridden in the JSON rather than written
@@ -739,7 +739,7 @@ impl Daemon {
     /// N+2, appending its terminal history row. The retry's id-only
     /// tombstone then landed after that row and, last-line-wins, deleted
     /// it - while the next queue save omits the parked job too. Lost
-    /// from both stores, no crash required (Codex sweep 13 Aug Q1).
+    /// from both stores, no crash required (review sweep 13 Aug Q1).
     ///
     /// Bounded by the mover's OWN stamp, the tombstone still buries the
     /// row it is meant to bury (the seq-N record the move pulled out of
@@ -833,7 +833,7 @@ impl Daemon {
         // end. A snapshot built from memory alone drops exactly that row,
         // and "Save queue" runs this compaction on a live daemon: a crash
         // before park's final upsert then left the job in neither store -
-        // the very hole `park_prewrite` exists to close (Codex sweep
+        // the very hole `park_prewrite` exists to close (review sweep
         // 13 Aug Q2). Parks register in `hist_inflight` around that
         // interval; carry their latest disk line into the snapshot.
         // ...and a record the caller is REMOVING is not carried forward
@@ -1317,7 +1317,7 @@ impl Daemon {
         // goes with it - through `drop_spool`, because the tombstone IS
         // durable by now and a copy whose unlink is refused would be
         // re-adopted at the next start as a fresh download of a release
-        // retention just aged out (Codex sweep 24 Aug, F-04).
+        // retention just aged out (review sweep 24 Aug, F-04).
         for p in spooled {
             drop_spool(&p);
         }
@@ -1430,7 +1430,7 @@ mod store_tests {
     /// straight onto the torn bytes, welding the first post-recovery
     /// record into the same unreadable line - so the SECOND replay
     /// dropped both, and a park or tombstone written right after a
-    /// crash was silently gone (Codex sweep 24 Aug, F-03). The append
+    /// crash was silently gone (review sweep 24 Aug, F-03). The append
     /// path now starts a fresh line when the tail lacks its newline.
     /// Both tear shapes: invalid UTF-8, and syntactically torn JSON.
     #[test]
@@ -1522,7 +1522,7 @@ mod store_tests {
     /// nzo_id in BOTH files - and until this fix nothing deduplicated
     /// them, so the job came back as Queued (job_wire restores a
     /// nonterminal `Finishing` row that way) AND as Failed, and the
-    /// queued copy downloaded the whole release again (Codex sweep 12 Aug
+    /// queued copy downloaded the whole release again (review sweep 12 Aug
     /// F1).
     ///
     /// This writes the exact split-brain state a kill produces, restores
@@ -1998,7 +1998,7 @@ mod store_tests {
     /// lost it from BOTH stores: no DELETED/MANUAL row for the dupe
     /// check or the retry button, and under `GroupParkDelete` (files
     /// KEPT by contract) a whole payload on disk that nothing named
-    /// (Codex sweep 14 Aug M1).
+    /// (review sweep 14 Aug M1).
     #[test]
     fn a_deleted_active_job_is_durable_before_park_can_file_it() {
         let dir = tmp("del-prewrite");
@@ -2082,7 +2082,7 @@ mod store_tests {
     /// The C8 measuring stick: replay a REAL `history.jsonl` and report
     /// what it cost.
     ///
-    /// Codex audit C8 proposes an indexed on-disk history store, and the
+    /// Review audit C8 proposes an indexed on-disk history store, and the
     /// handoff holds it "conditional on real long-lived history scale".
     /// That condition needs a number, and a number needs a rig that runs
     /// against a real file rather than a synthetic one - the per-row cost

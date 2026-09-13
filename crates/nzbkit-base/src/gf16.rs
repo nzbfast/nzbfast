@@ -106,6 +106,66 @@ fn affine_matrix(products: &[u16; 8], take: fn(u16) -> u8) -> u64 {
     m
 }
 
+/// `pw[k] = c · x^k` in GF(2^16) for k in 0..16 - the products of `c`
+/// by the sixteen powers of two, off one xtime chain (shift, reduce by
+/// 0x1100B). Sixteen shifts and at most sixteen XORs, reading no table
+/// at all.
+///
+/// This is the basis EVERY multiply-by-`c` table in this module is
+/// built from, because multiplication by a fixed `c` is GF(2)-linear in
+/// its other operand: any table entry is the XOR of the chain elements
+/// its index has bits set for ([`split_tables`] and
+/// [`nibble_tables_chain`] are the same subset walk over different
+/// index widths). Shared so the two constructions cannot drift.
+fn power_chain(c: u16) -> [u16; 16] {
+    let mut pw = [0u16; 16];
+    let mut v = c;
+    for slot in pw.iter_mut() {
+        *slot = v;
+        let carry = v & 0x8000 != 0;
+        v <<= 1;
+        if carry {
+            v ^= 0x100B;
+        }
+    }
+    pw
+}
+
+/// The split byte tables for multiply-by-`c`: `lo[b] = c · b` and
+/// `hi[b] = c · (b << 8)`, the pair a scalar word product reads as
+/// `lo[w & 0xff] ^ hi[w >> 8]`.
+///
+/// Built by the subset walk over [`power_chain`] rather than by 512
+/// calls to [`mul`] - some 16 shifts and 510 XORs over a 1 KB working
+/// set, where the log/antilog form is 512 branchy round trips through
+/// the 512 KB table pair. Identical output, pinned over all 65,536
+/// coefficients by `split_tables_match_mul`.
+///
+/// **This is the whole fold on a target with no SIMD kernel** (armv7,
+/// or any arch that is neither aarch64 nor x86_64), where
+/// [`multi_fold_width`] is 0 and [`FoldTable`] keeps these tables -
+/// so a build like that paid the 512 multiplies once per (row, source)
+/// whatever the width, and at the stripe widths a deep PAR2 repair
+/// folds in it cost more to set a row's table up than to fold the row.
+/// Measured under qemu-arm-static on a real armv7 binary, 11 Sep 2026:
+/// see `research/JOINT-STAGE2-DEPTH-GATE-2026-09-11.md` section 7.1.
+/// The nibble arm had already been moved off the multiplies on 2 Sep
+/// for the same reason on x86; this is the arm that was left behind,
+/// because no box on this fleet selects it.
+fn split_tables(c: u16) -> ([u16; 256], [u16; 256]) {
+    let pw = power_chain(c);
+    let mut lo = [0u16; 256];
+    let mut hi = [0u16; 256];
+    for b in 0..8 {
+        let (bl, bh) = (pw[b], pw[b + 8]);
+        for i in 0..(1usize << b) {
+            lo[i | (1 << b)] = lo[i] ^ bl;
+            hi[i | (1 << b)] = hi[i] ^ bh;
+        }
+    }
+    (lo, hi)
+}
+
 /// The SIMD nibble tables for multiply-by-`c` (see [`MulTable::nl`]).
 ///
 /// Built from the field's linearity rather than 64 multiplies: the
@@ -118,18 +178,47 @@ fn affine_matrix(products: &[u16; 8], take: fn(u16) -> u8) -> u64 {
 /// tiles down to was a measurable share of the call (2 Sep 2026,
 /// i5-10600KF). Pinned to the multiply by `nibble_tables_match_mul`.
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-fn nibble_tables(c: u16) -> ([[u8; 16]; 4], [[u8; 16]; 4]) {
-    // pw[k] = c · x^k in GF(2^16) for k in 0..16.
-    let mut pw = [0u16; 16];
-    let mut v = c;
-    for slot in pw.iter_mut() {
-        *slot = v;
-        let carry = v & 0x8000 != 0;
-        v <<= 1;
-        if carry {
-            v ^= 0x100B;
+fn nibble_tables(c: u16) -> NibbleTables {
+    // The tables are GF(2)-linear in `c`, so the tables for `c` are the
+    // XOR of the tables for its four nibbles - sixty-four fixed table
+    // pairs, 8 KiB, built once per process from the chain below. That
+    // is 128 byte-XORs where the chain is ~16 shifts and ~60 XORs plus
+    // 128 stores: measured ~37 -> ~9 ns per build on an i5-10600KF (the
+    // review lane's `coefficient-basis` experiment, 4 Sep 2026), which is
+    // what the callers that still build per call pay - the NTT combine
+    // stages, Forney's stage-one fold, and every fused call whose caller
+    // did not prepare its coefficients (`FoldCoeff`). Pinned to the
+    // chain over every one of the 65,536 coefficients.
+    static BASIS: OnceLock<Box<[[NibbleTables; 16]; 4]>> = OnceLock::new();
+    let basis = BASIS.get_or_init(|| {
+        Box::new(std::array::from_fn(|j| {
+            std::array::from_fn(|n| nibble_tables_chain((n as u16) << (4 * j)))
+        }))
+    });
+    let a = &basis[0][(c & 15) as usize];
+    let b = &basis[1][((c >> 4) & 15) as usize];
+    let d = &basis[2][((c >> 8) & 15) as usize];
+    let e = &basis[3][(c >> 12) as usize];
+    let mut out: NibbleTables = ([[0u8; 16]; 4], [[0u8; 16]; 4]);
+    for j in 0..4 {
+        for n in 0..16 {
+            out.0[j][n] = a.0[j][n] ^ b.0[j][n] ^ d.0[j][n] ^ e.0[j][n];
+            out.1[j][n] = a.1[j][n] ^ b.1[j][n] ^ d.1[j][n] ^ e.1[j][n];
         }
     }
+    out
+}
+
+/// The low- and high-byte nibble tables of one coefficient (see
+/// [`MulTable::nl`]).
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+type NibbleTables = ([[u8; 16]; 4], [[u8; 16]; 4]);
+
+/// [`nibble_tables`] from first principles - the xtime chain and the
+/// subset walk - which builds the basis above and pins it in the tests.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn nibble_tables_chain(c: u16) -> NibbleTables {
+    let pw = power_chain(c);
     let mut nl = [[0u8; 16]; 4];
     let mut nh = [[0u8; 16]; 4];
     for (j, (nlj, nhj)) in nl.iter_mut().zip(nh.iter_mut()).enumerate() {
@@ -150,12 +239,7 @@ fn nibble_tables(c: u16) -> ([[u8; 16]; 4], [[u8; 16]; 4]) {
 
 impl MulTable {
     pub fn new(c: u16) -> MulTable {
-        let mut lo = [0u16; 256];
-        let mut hi = [0u16; 256];
-        for b in 0..256u16 {
-            lo[b as usize] = mul(c, b);
-            hi[b as usize] = mul(c, b << 8);
-        }
+        let (lo, hi) = split_tables(c);
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         let (nl, nh) = nibble_tables(c);
         #[cfg(target_arch = "x86_64")]
@@ -533,9 +617,12 @@ pub struct FoldTable {
 }
 
 impl FoldTable {
-    /// Also much cheaper to BUILD than [`MulTable::new`]: 64 field
-    /// multiplies (plus, on x86_64, the nibble-table affine lookup)
-    /// instead of 512 - the fold builds one per (row, source).
+    /// Cheaper to BUILD than [`MulTable::new`] as well as smaller: a
+    /// 128 B basis XOR (plus, on x86_64, the affine lookup) against the
+    /// 1 KB subset walk of [`split_tables`] - the fold builds one per
+    /// (row, source). Off both SIMD arches this type IS
+    /// [`split_tables`], so there the two constructors cost the same
+    /// and the size is the only difference left.
     pub fn new(c: u16) -> FoldTable {
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         {
@@ -549,12 +636,7 @@ impl FoldTable {
         }
         #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
-            let mut lo = [0u16; 256];
-            let mut hi = [0u16; 256];
-            for b in 0..256u16 {
-                lo[b as usize] = mul(c, b);
-                hi[b as usize] = mul(c, b << 8);
-            }
+            let (lo, hi) = split_tables(c);
             FoldTable { lo, hi }
         }
     }
@@ -602,6 +684,43 @@ impl FoldTable {
     }
 }
 
+/// `dst ^= c · src` for ONE source over a bare coefficient: what every
+/// fused caller runs on the words [`xor_mul_multi_into`] left behind -
+/// the sub-granule tail on a part with a kernel, and the WHOLE fold on
+/// a part without one ([`multi_fold_width`] 0: armv7, any arch that is
+/// neither aarch64 nor x86_64, or an `NZBFAST_GF16_MULTI=0` A/B).
+///
+/// The two degenerate coefficients are answered without building a
+/// table, which is the point of the function: `c = 0` contributes
+/// nothing, and `c = 1` is a bytewise XOR. Both are common in the
+/// transform folds - a radix-r DFT matrix has its whole k = 0 row and
+/// n = 0 column equal to one, so 5 of 9 radix-3 coefficients and 9 of
+/// 25 radix-5 coefficients are the identity - and on a kernel-less
+/// build each of those used to cost a full [`FoldTable`] build to fold
+/// a stripe that can be fifteen words wide. The fused kernels already
+/// shortcut all-ones groups; this is the same rule where a group of
+/// one is all there is.
+///
+/// `src` is raw little-endian PAR2 bytes and may be shorter than `dst`,
+/// exactly as [`MulTable::xor_mul_into`] documents.
+pub fn xor_mul_single_into(dst: &mut [u16], src: &[u8], c: u16) {
+    if c == 0 {
+        return;
+    }
+    if c == 1 {
+        assert!(src.len().div_ceil(2) <= dst.len(), "src longer than dst");
+        let words = src.len() / 2;
+        for (d, s) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
+            *d ^= u16::from_le_bytes(*s);
+        }
+        if src.len() % 2 == 1 {
+            dst[words] ^= src[src.len() - 1] as u16;
+        }
+        return;
+    }
+    FoldTable::new(c).xor_mul_into(dst, src);
+}
+
 /// How many sources [`xor_mul_multi_into`] fuses per pass on this
 /// build, or 0 when no multi kernel exists and callers should stay on
 /// the per-source [`MulTable`] path.
@@ -625,7 +744,10 @@ pub fn multi_fold_width() -> usize {
             // 16-ymm file below.
             return 12;
         }
-        if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
+        if forced_nibble_kernel().is_some() {
+            return 4;
+        }
+        if gfni256_available() {
             // The affine2x group width: 6 matrix PAIRS plus the two
             // accumulators, the data register and the deinterleave mask
             // fill the 16-ymm register file exactly (ParPar's
@@ -750,6 +872,134 @@ pub fn multi_fold_schedule_granule_words(fan_in: usize) -> usize {
     16
 }
 
+/// A fold coefficient with what the selected fused kernel would
+/// otherwise build for it on EVERY call, built once.
+///
+/// The x86 nibble-shuffle kernels ([`xor_mul_multi_avx2`] and its SSSE3
+/// twin - every AVX2 part without GFNI, which is Intel before Ice Lake
+/// and AMD before Zen 4) need eight 16-byte tables per coefficient, and
+/// [`nibble_tables`] builds them in ~16 shifts and ~60 XORs. Cheap
+/// against a whole-block fold; not cheap against a 1 KiB stripe. The
+/// NTT's dense leaf folds 1 KiB per call at its shipped stripe width and
+/// its coefficients are the SAME 256 kernel values for every leaf of
+/// every transform, so it was rebuilding the same tables tens of
+/// thousands of times per leaf: measured on an i5-10600KF (AVX2, no
+/// GFNI), widening the stripe 4x - which only divides the table builds
+/// - took the 1,500-block transform from 4.6 s to 3.1 s, and hoisting
+/// the build out entirely took it to ~3.2 s at the shipped width with
+/// the dense back-substitution -17% beside it (same box; the forced arm
+/// on a Zen 4 read -39% and -17%). A caller that reuses a coefficient
+/// prepares it once and hands the tables in through
+/// [`xor_mul_multi_prepared`].
+///
+/// On every other kernel this is just the coefficient: NEON splats
+/// three bytes, GFNI reads a 2 KiB static bit-dependency table, and
+/// neither has a per-call build worth hoisting. So the struct is small
+/// off x86 and 130 bytes on it, and a caller prepares what it reuses,
+/// not everything it folds.
+#[derive(Clone, Copy)]
+pub struct FoldCoeff {
+    c: u16,
+    #[cfg(target_arch = "x86_64")]
+    nl: [[u8; 16]; 4],
+    #[cfg(target_arch = "x86_64")]
+    nh: [[u8; 16]; 4],
+}
+
+impl FoldCoeff {
+    pub fn new(c: u16) -> FoldCoeff {
+        // Only the nibble kernels read the tables. On a GFNI part the
+        // prepare used to build them anyway, once per (row, group) sweep
+        // of the tiled fold - and the Core Ultra 9's 101-block leg read
+        // 8-10% SLOWER with prepared coefficients than without them
+        // (4 Sep 2026), which was that build and nothing else. Leave them
+        // zero where no kernel will look.
+        #[cfg(target_arch = "x86_64")]
+        let (nl, nh) = if nibble_kernel_selected() {
+            nibble_tables(c)
+        } else {
+            ([[0u8; 16]; 4], [[0u8; 16]; 4])
+        };
+        FoldCoeff {
+            c,
+            #[cfg(target_arch = "x86_64")]
+            nl,
+            #[cfg(target_arch = "x86_64")]
+            nh,
+        }
+    }
+
+    /// The coefficient itself.
+    #[inline]
+    pub fn coeff(&self) -> u16 {
+        self.c
+    }
+
+    /// A coefficient WITH its nibble tables whatever the dispatch
+    /// selected: the two nibble kernels build their per-call tables
+    /// through this, because they read them by definition. `new` leaves
+    /// the tables zero on a part whose dispatch never lands on a nibble
+    /// kernel, and until 5 Sep 2026 the kernels' own per-call build went
+    /// through `new` too - so the AVX2 shuffle kernel, called DIRECTLY
+    /// (the gf16 tests force every kernel the CPU can run, whatever
+    /// dispatch would pick), folded with zero tables on any GFNI part:
+    /// `xor_mul_multi_matches_single_source_folds` red on every CI runner
+    /// of the Ice Lake / Zen 4 class and green on Cascade Lake / Zen 3,
+    /// which read as an intermittent failure on identical code
+    /// (linux-tests, 35f1d06d). Production never reached it - the
+    /// dispatch chain only hands a nibble kernel coefficients on a part
+    /// where `new` builds the tables - but a kernel must not depend on
+    /// a global selection for its own inputs.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn with_tables(c: u16) -> FoldCoeff {
+        let (nl, nh) = nibble_tables(c);
+        FoldCoeff { c, nl, nh }
+    }
+}
+
+/// [`xor_mul_multi_into`] over prepared coefficients: the same kernels,
+/// the same contract and the same return, with the nibble kernels'
+/// per-call table build taken from the [`FoldCoeff`]s instead of rebuilt.
+/// Every other kernel reads the coefficient back out and runs unchanged.
+pub fn xor_mul_multi_prepared(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[&FoldCoeff]) -> usize {
+    debug_assert_eq!(srcs.len(), coeffs.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Only the two nibble kernels consume the prepared tables; every
+        // other arm of `xor_mul_multi_into`'s dispatch chain (the XOR
+        // shortcut for all-ones, the GFNI kernels) wants the bare
+        // coefficient, so it is handed the coefficients and reaches the
+        // identical arm it would have reached. Keep this predicate the
+        // same shape as that chain's.
+        if prepared_tables_enabled()
+            && !(coeffs.len() == srcs.len()
+                && coeffs.iter().all(|c| c.c == 1)
+                && !avx512_gfni_available())
+            && !avx512_gfni_available()
+            && !gfni256_available()
+        {
+            if is_x86_feature_detected!("avx2") && forced_nibble_kernel() != Some("ssse3") {
+                // SAFETY: AVX2 verified above; every source covers dst's
+                // full byte length, debug_asserted in the callee.
+                return unsafe { xor_mul_multi_avx2_prepared(dst, srcs, coeffs) };
+            }
+            if is_x86_feature_detected!("ssse3") {
+                // SAFETY: SSSE3 verified above; same coverage contract.
+                return unsafe { xor_mul_multi_ssse3_prepared(dst, srcs, coeffs) };
+            }
+        }
+    }
+    let mut bare = [0u16; 16];
+    if coeffs.len() <= bare.len() {
+        for (b, c) in bare.iter_mut().zip(coeffs) {
+            *b = c.c;
+        }
+        return xor_mul_multi_into(dst, srcs, &bare[..coeffs.len()]);
+    }
+    let bare: Vec<u16> = coeffs.iter().map(|c| c.c).collect();
+    xor_mul_multi_into(dst, srcs, &bare)
+}
+
 /// Multi-source fused fold: `dst[i] ^= Σ_s coeffs[s] · src_s[i]`, the
 /// technique that makes ParPar's fold fast at high row counts (ours
 /// previously re-loaded and re-stored `dst` once per source; this loads
@@ -835,13 +1085,13 @@ pub fn xor_mul_multi_into(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[u16]) -> us
             // kernel clamps its chunk range to the shortest source.
             return unsafe { xor_mul_multi_gfni512(dst, srcs, coeffs) };
         }
-        if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
+        if gfni256_available() {
             // SAFETY: GFNI and AVX2 verified by the detect above; the
             // kernel clamps its chunk range to the shortest source, so it
             // never reads or writes past any slice.
             return unsafe { xor_mul_multi_gfni(dst, srcs, coeffs) };
         }
-        if is_x86_feature_detected!("avx2") {
+        if is_x86_feature_detected!("avx2") && forced_nibble_kernel() != Some("ssse3") {
             // SAFETY: AVX2 verified by the detect above; the kernel clamps
             // its chunk range to the shortest source.
             return unsafe { xor_mul_multi_avx2(dst, srcs, coeffs) };
@@ -1018,18 +1268,78 @@ fn affine_matrices_fast(c: u16) -> [u64; 4] {
     ]
 }
 
+/// `NZBFAST_GF16_FORCE=avx2` / `=ssse3`: run the nibble-shuffle kernels
+/// on a part that would dispatch to a GFNI one. A research knob, read
+/// once, nothing ships it. It exists because the fleet has exactly ONE
+/// box that reaches those kernels natively (an i5-10600KF), and it is
+/// shared: forcing the arm on a Zen 4 or a Core Ultra gives the AVX2
+/// kernel a differential test on real silicon and an A/B for its own
+/// per-call costs. It does NOT give that box's rate - a forced arm on a
+/// part with a faster shuffle unit is not the i5 - so a number from a
+/// forced arm is a ratio between two settings of the same kernel, never
+/// a leg to publish. Both dispatch chains and `multi_fold_width` read
+/// it, so the scheduler and the kernel agree on the arm.
+#[cfg(target_arch = "x86_64")]
+fn forced_nibble_kernel() -> Option<&'static str> {
+    static F: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    F.get_or_init(|| {
+        std::env::var("NZBFAST_GF16_FORCE")
+            .ok()
+            .filter(|v| v == "avx2" || v == "ssse3")
+    })
+    .as_deref()
+}
+
+/// The 256-bit GFNI arm's predicate (`gfni` + `avx2`), false under
+/// [`forced_nibble_kernel`].
+#[cfg(target_arch = "x86_64")]
+fn gfni256_available() -> bool {
+    forced_nibble_kernel().is_none()
+        && is_x86_feature_detected!("gfni")
+        && is_x86_feature_detected!("avx2")
+}
+
 /// Whether the 512-bit GFNI fold may run: the ISA bits, and not
 /// `NZBFAST_GF16_AVX512=0`, the A/B knob against the 256-bit kernel on
-/// the same box. Read once.
+/// the same box, and not [`forced_nibble_kernel`]. Read once.
 #[cfg(target_arch = "x86_64")]
-fn avx512_gfni_available() -> bool {
+pub(crate) fn avx512_gfni_available() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        !std::env::var_os("NZBFAST_GF16_AVX512").is_some_and(|v| v == "0")
+        forced_nibble_kernel().is_none()
+            && !std::env::var_os("NZBFAST_GF16_AVX512").is_some_and(|v| v == "0")
             && is_x86_feature_detected!("avx512f")
             && is_x86_feature_detected!("avx512bw")
             && is_x86_feature_detected!("gfni")
     })
+}
+
+/// Whether the fused-fold dispatch lands on a nibble-shuffle kernel
+/// (AVX2 or SSSE3 without GFNI, or a forced arm) - the only kernels
+/// that read a [`FoldCoeff`]'s tables. Read once.
+#[cfg(target_arch = "x86_64")]
+fn nibble_kernel_selected() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        forced_nibble_kernel().is_some()
+            || (!avx512_gfni_available()
+                && !gfni256_available()
+                && (is_x86_feature_detected!("avx2") || is_x86_feature_detected!("ssse3")))
+    })
+}
+
+/// `NZBFAST_GF16_PREPARED=0`: [`xor_mul_multi_prepared`] rebuilds the
+/// nibble tables per call from the coefficient, exactly as
+/// [`xor_mul_multi_into`] does - the other arm of the FoldCoeff A/B in
+/// one binary. The callers still build their `FoldCoeff`s, so this arm
+/// pays a little MORE than the pre-FoldCoeff code did (the dense
+/// back-substitution's per-sweep build is ~3% of its sweep, the leaf's
+/// per-plan build is nothing), which only understates the win. Read
+/// once; nothing ships it.
+#[cfg(target_arch = "x86_64")]
+fn prepared_tables_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var_os("NZBFAST_GF16_PREPARED").is_some_and(|v| v == "0"))
 }
 
 /// The 512-bit twin of [`xor_mul_multi_gfni`]: the same affine2x layout
@@ -1337,36 +1647,85 @@ unsafe fn xor_mul_multi_avx2(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[u16]) ->
     if units == 0 {
         return 0;
     }
-    // `NZBFAST_GF16_AVX2_GROUP` (1..4) narrows the group for A/Bs -
-    // at 2 the eight table vectors of each source fit the register
-    // file beside the accumulators and data. Read once.
-    static GROUP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    let group = *GROUP.get_or_init(|| {
-        std::env::var("NZBFAST_GF16_AVX2_GROUP")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .map_or(4, |g| g.clamp(1, 4))
-    });
+    let group = avx2_group_width();
     let mut g0 = 0usize;
     while g0 < srcs.len() {
         let g1 = (g0 + group).min(srcs.len());
         let s = &srcs[g0..g1];
-        let c = &coeffs[g0..g1];
+        // The per-call table build a caller with reuse hoists through
+        // `FoldCoeff` (see `xor_mul_multi_prepared`); here it is per group.
+        let built: [FoldCoeff; 4] = std::array::from_fn(|i| {
+            FoldCoeff::with_tables(if g0 + i < g1 { coeffs[g0 + i] } else { 0 })
+        });
+        let refs: [&FoldCoeff; 4] = [&built[0], &built[1], &built[2], &built[3]];
         // SAFETY: avx2 is enabled on this fn per #[target_feature]
         // (runtime-verified at the dispatch site); `units` is clamped to
         // the shortest source and to dst's byte length, the callee's
         // bounds contract.
-        unsafe {
-            match g1 - g0 {
-                1 => xor_mul_multi_avx2_n::<1>(dst, s, c, units),
-                2 => xor_mul_multi_avx2_n::<2>(dst, s, c, units),
-                3 => xor_mul_multi_avx2_n::<3>(dst, s, c, units),
-                _ => xor_mul_multi_avx2_n::<4>(dst, s, c, units),
-            }
-        }
+        unsafe { xor_mul_multi_avx2_group(dst, s, &refs[..g1 - g0], units) };
         g0 = g1;
     }
     units * 16
+}
+
+/// [`xor_mul_multi_avx2`] over prepared coefficients - the same unit
+/// clamp, group width and kernel bodies, tables taken from the
+/// [`FoldCoeff`]s.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn xor_mul_multi_avx2_prepared(
+    dst: &mut [u16],
+    srcs: &[&[u8]],
+    coeffs: &[&FoldCoeff],
+) -> usize {
+    if srcs.is_empty() {
+        return 0;
+    }
+    let usable = srcs.iter().fold(dst.len() * 2, |m, s| m.min(s.len()));
+    let units = usable / 32;
+    if units == 0 {
+        return 0;
+    }
+    let group = avx2_group_width();
+    let mut g0 = 0usize;
+    while g0 < srcs.len() {
+        let g1 = (g0 + group).min(srcs.len());
+        // SAFETY: as in `xor_mul_multi_avx2` - avx2 enabled here, `units`
+        // clamped to the shortest source and to dst.
+        unsafe { xor_mul_multi_avx2_group(dst, &srcs[g0..g1], &coeffs[g0..g1], units) };
+        g0 = g1;
+    }
+    units * 16
+}
+
+/// `NZBFAST_GF16_AVX2_GROUP` (1..4) narrows the group for A/Bs - at 2
+/// the eight table vectors of each source fit the register file beside
+/// the accumulators and data. Read once.
+#[cfg(target_arch = "x86_64")]
+fn avx2_group_width() -> usize {
+    static GROUP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *GROUP.get_or_init(|| {
+        std::env::var("NZBFAST_GF16_AVX2_GROUP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(4, |g| g.clamp(1, 4))
+    })
+}
+
+/// One group of at most four sources through the monomorphised body.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn xor_mul_multi_avx2_group(dst: &mut [u16], s: &[&[u8]], c: &[&FoldCoeff], units: usize) {
+    // SAFETY: the caller's contract, forwarded: avx2 enabled, `units`
+    // clamped to every source and to dst.
+    unsafe {
+        match s.len() {
+            1 => xor_mul_multi_avx2_n::<1>(dst, s, c, units),
+            2 => xor_mul_multi_avx2_n::<2>(dst, s, c, units),
+            3 => xor_mul_multi_avx2_n::<3>(dst, s, c, units),
+            _ => xor_mul_multi_avx2_n::<4>(dst, s, c, units),
+        }
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1374,7 +1733,7 @@ unsafe fn xor_mul_multi_avx2(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[u16]) ->
 unsafe fn xor_mul_multi_avx2_n<const N: usize>(
     dst: &mut [u16],
     srcs: &[&[u8]],
-    coeffs: &[u16],
+    coeffs: &[&FoldCoeff],
     units: usize,
 ) {
     use std::arch::x86_64::*;
@@ -1400,10 +1759,9 @@ unsafe fn xor_mul_multi_avx2_n<const N: usize>(
         let mut th = [[_mm256_setzero_si256(); 4]; N];
         let mut src_ptr = [std::ptr::null::<u8>(); N];
         for s in 0..N {
-            let (nl, nh) = nibble_tables(coeffs[s]);
             for j in 0..4 {
-                tl[s][j] = bc(&nl[j]);
-                th[s][j] = bc(&nh[j]);
+                tl[s][j] = bc(&coeffs[s].nl[j]);
+                th[s][j] = bc(&coeffs[s].nh[j]);
             }
             src_ptr[s] = srcs[s].as_ptr();
         }
@@ -1538,18 +1896,40 @@ unsafe fn xor_mul_multi_ssse3(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[u16]) -
     while g0 < srcs.len() {
         let g1 = (g0 + 4).min(srcs.len());
         let s = &srcs[g0..g1];
-        let c = &coeffs[g0..g1];
+        let built: [FoldCoeff; 4] = std::array::from_fn(|i| {
+            FoldCoeff::with_tables(if g0 + i < g1 { coeffs[g0 + i] } else { 0 })
+        });
+        let refs: [&FoldCoeff; 4] = [&built[0], &built[1], &built[2], &built[3]];
         // SAFETY: ssse3 is enabled on this fn per #[target_feature]
         // (runtime-verified at the dispatch site); `chunks` is clamped to
         // the shortest source and to dst's byte length.
-        unsafe {
-            match g1 - g0 {
-                1 => xor_mul_multi_ssse3_n::<1>(dst, s, c, chunks),
-                2 => xor_mul_multi_ssse3_n::<2>(dst, s, c, chunks),
-                3 => xor_mul_multi_ssse3_n::<3>(dst, s, c, chunks),
-                _ => xor_mul_multi_ssse3_n::<4>(dst, s, c, chunks),
-            }
-        }
+        unsafe { xor_mul_multi_ssse3_group(dst, s, &refs[..g1 - g0], chunks) };
+        g0 = g1;
+    }
+    chunks * 16
+}
+
+/// [`xor_mul_multi_ssse3`] over prepared coefficients.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn xor_mul_multi_ssse3_prepared(
+    dst: &mut [u16],
+    srcs: &[&[u8]],
+    coeffs: &[&FoldCoeff],
+) -> usize {
+    if srcs.is_empty() {
+        return 0;
+    }
+    let usable = srcs.iter().fold(dst.len() * 2, |m, s| m.min(s.len()));
+    let chunks = usable / 32;
+    if chunks == 0 {
+        return 0;
+    }
+    let mut g0 = 0usize;
+    while g0 < srcs.len() {
+        let g1 = (g0 + 4).min(srcs.len());
+        // SAFETY: as in `xor_mul_multi_ssse3`.
+        unsafe { xor_mul_multi_ssse3_group(dst, &srcs[g0..g1], &coeffs[g0..g1], chunks) };
         g0 = g1;
     }
     chunks * 16
@@ -1557,10 +1937,24 @@ unsafe fn xor_mul_multi_ssse3(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[u16]) -
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "ssse3")]
+unsafe fn xor_mul_multi_ssse3_group(dst: &mut [u16], s: &[&[u8]], c: &[&FoldCoeff], chunks: usize) {
+    // SAFETY: the caller's contract, forwarded.
+    unsafe {
+        match s.len() {
+            1 => xor_mul_multi_ssse3_n::<1>(dst, s, c, chunks),
+            2 => xor_mul_multi_ssse3_n::<2>(dst, s, c, chunks),
+            3 => xor_mul_multi_ssse3_n::<3>(dst, s, c, chunks),
+            _ => xor_mul_multi_ssse3_n::<4>(dst, s, c, chunks),
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
 unsafe fn xor_mul_multi_ssse3_n<const N: usize>(
     dst: &mut [u16],
     srcs: &[&[u8]],
-    coeffs: &[u16],
+    coeffs: &[&FoldCoeff],
     chunks: usize,
 ) {
     use std::arch::x86_64::*;
@@ -1576,10 +1970,9 @@ unsafe fn xor_mul_multi_ssse3_n<const N: usize>(
         let mut th = [[_mm_setzero_si128(); 4]; N];
         let mut src_ptr = [std::ptr::null::<u8>(); N];
         for s in 0..N {
-            let (nl, nh) = nibble_tables(coeffs[s]);
             for j in 0..4 {
-                tl[s][j] = ld(&nl[j]);
-                th[s][j] = ld(&nh[j]);
+                tl[s][j] = ld(&coeffs[s].nl[j]);
+                th[s][j] = ld(&coeffs[s].nh[j]);
             }
             src_ptr[s] = srcs[s].as_ptr();
         }
@@ -1714,6 +2107,41 @@ unsafe fn xor_mul_multi_neon(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[u16]) ->
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,sha3")]
 unsafe fn xor_mul_multi_neon_sha3(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[u16]) -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        // ON by default on Apple silicon since 5 Sep 2026: the adjacent
+        // PMULL/XOR sequence (ParPar's Apple selection) measured on an M3
+        // Ultra, same binary, mirrored: 1 MiB create 0.466 -> 0.444 s,
+        // 64 KiB create 0.571 -> 0.541, 101-block repair 0.504 -> 0.471,
+        // heavy repair flat (0.656 vs 0.657); the review's kernel screen +8-19%
+        // at eight sources. `NZBFAST_APPLE_PMULL_FUSION=0` is the EOR3
+        // accumulation, the A/B arm.
+        static FUSED: OnceLock<bool> = OnceLock::new();
+        if *FUSED.get_or_init(|| std::env::var("NZBFAST_APPLE_PMULL_FUSION").as_deref() != Ok("0"))
+        {
+            // SAFETY: this caller enables neon+sha3, with the same buffer
+            // preconditions as the existing kernel and the same tail boundary.
+            return unsafe {
+                match srcs.len() {
+                    8 => xor_mul_multi_fused::<8>(dst, srcs, coeffs),
+                    // Partial groups get a compile-time count too. The
+                    // tail of any fold is one, and a source window that
+                    // is not a multiple of the width ends in one: the
+                    // generic arm carries `srcs.len()` into every chunk
+                    // and keeps the coefficient array addressed rather
+                    // than pinned. Measured on the M3 Ultra in the commit
+                    // that added this; one and two sources did NOT pay
+                    // and are deliberately left on the generic arm.
+                    3 => xor_mul_multi_fused::<3>(dst, srcs, coeffs),
+                    4 => xor_mul_multi_fused::<4>(dst, srcs, coeffs),
+                    5 => xor_mul_multi_fused::<5>(dst, srcs, coeffs),
+                    6 => xor_mul_multi_fused::<6>(dst, srcs, coeffs),
+                    7 => xor_mul_multi_fused::<7>(dst, srcs, coeffs),
+                    _ => xor_mul_multi_fused::<0>(dst, srcs, coeffs),
+                }
+            };
+        }
+    }
     // Monomorphize the full-width case: a compile-time source count lets
     // LLVM fully unroll the inner loop and pin the coefficient array in
     // registers (ParPar generates its kernels per srcCount for the same
@@ -1889,549 +2317,1618 @@ pub fn words_as_bytes(w: &[u16]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(w.as_ptr().cast(), w.len() * 2) }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn known_values() {
-        // 2^16 mod the generator polynomial: 0x1100B with bit 16 dropped.
-        assert_eq!(pow2(16), 0x100B);
-        assert_eq!(pow2(0), 1);
-        assert_eq!(pow2(1), 2);
-        // Full cycle wraps to 1.
-        assert_eq!(pow2(ORDER as u64), 1);
-    }
-
-    #[test]
-    fn field_axioms_sampled() {
-        let xs = [1u16, 2, 3, 0x100B, 0x8000, 0xFFFF, 12345];
-        for &a in &xs {
-            assert_eq!(mul(a, 1), a);
-            assert_eq!(mul(a, 0), 0);
-            assert_eq!(mul(a, inv(a)), 1, "a·a⁻¹ = 1 for {a:#x}");
-            for &b in &xs {
-                assert_eq!(mul(a, b), mul(b, a));
-                for &c in &xs {
-                    assert_eq!(mul(a, mul(b, c)), mul(mul(a, b), c));
-                    // Distributivity over XOR (field addition).
-                    assert_eq!(mul(a, b ^ c), mul(a, b) ^ mul(a, c));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn mul_table_matches_scalar_mul() {
-        for c in [0u16, 1, 2, 0x1234, 0xFFFF] {
-            let t = MulTable::new(c);
-            for w in [0u16, 1, 0xFF, 0x100, 0xABCD, 0xFFFF] {
-                assert_eq!(t.mul(w), mul(c, w), "c={c:#x} w={w:#x}");
-            }
-        }
-    }
-
-    #[test]
-    fn xor_mul_words_matches_per_word_mul() {
-        let mut state = 0x243F6A8885A308D3u64;
-        let mut rng = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
+/// [`xor_mul_multi_avx2_n`] over sources already split into their low
+/// and high bytes (see [`PreparedSources`]): the same eight `vpshufb`
+/// per source chunk with the two `vpackuswb` gone. On a Skylake-class
+/// core all three are the one shuffle port, so this is 8 port-5 uops
+/// per 64 source bytes where the interleaved kernel spends 10 - the
+/// ~20% the port-5 arithmetic on that class of core allows. Destinations
+/// stay interleaved (one
+/// `vpunpck` pair per group, as before).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn xor_mul_multi_planar_n<const N: usize>(
+    dst: &mut [u16],
+    srcs: &[&[u8]],
+    coeffs: &[&FoldCoeff],
+    units: usize,
+) {
+    use std::arch::x86_64::*;
+    debug_assert_eq!(srcs.len(), N);
+    debug_assert!(srcs.iter().all(|s| s.len() >= units * 32));
+    // Whole 64-byte chunks for the 256-bit body, then - when `units` is
+    // odd - one 32-byte unit at half width below.
+    let chunks = units / 2;
+    // SAFETY: avx2 is enabled here per #[target_feature] (runtime-
+    // verified at the dispatch site). All pointer accesses stay within
+    // the first units * 32 bytes of each slice: the caller
+    // (xor_mul_multi_avx2) clamps `units` to the shortest source and to
+    // dst's byte length, per the debug_asserts above.
+    unsafe {
+        let bc = |t: &[u8; 16]| {
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(t.as_ptr() as *const __m128i))
         };
-        for c in [0u16, 1, 2, 0x1234, 0xABCD, 0xFFFF] {
-            let t = MulTable::new(c);
-            for len in [0usize, 1, 15, 16, 17, 64, 4097] {
-                let src: Vec<u16> = (0..len).map(|_| rng() as u16).collect();
-                let base: Vec<u16> = (0..len).map(|_| rng() as u16).collect();
-                let mut want = base.clone();
-                for (d, s) in want.iter_mut().zip(&src) {
-                    *d ^= mul(c, *s);
-                }
-                let mut got = base.clone();
-                t.xor_mul_words(&mut got, &src);
-                assert_eq!(got, want, "c={c:#x} len={len}");
-            }
-        }
-    }
-
-    #[test]
-    fn xor_mul_into_handles_short_and_odd_src() {
-        let c = 0x1234u16;
-        let t = MulTable::new(c);
-        let src = [1u8, 2, 3, 4, 5]; // odd length: last word is 0x0005
-        let mut dst = vec![0u16; 4];
-        t.xor_mul_into(&mut dst, &src);
-        assert_eq!(dst[0], mul(c, u16::from_le_bytes([1, 2])));
-        assert_eq!(dst[1], mul(c, u16::from_le_bytes([3, 4])));
-        assert_eq!(dst[2], mul(c, 5));
-        assert_eq!(dst[3], 0, "beyond src stays untouched (zero pad)");
-    }
-
-    /// The multi-source fused kernel must equal per-source table folds
-    /// exactly: every group width up to the platform maximum, coefficient
-    /// classes incl. 0/1/low-byte-only/high-byte-only, random data, and
-    /// a non-zero starting dst so the accumulate is exercised. This is
-    /// the differential oracle for the ParPar-style pmull port - a wrong
-    /// Barrett reduction silently corrupts every repair.
-    #[test]
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    fn nibble_tables_match_mul() {
-        // Every nibble position and value, for a spread of coefficients
-        // including the ones whose xtime chain crosses the reduction.
-        let mut state = 0xC0FFEE1234567890u64;
-        let mut coeffs: Vec<u16> = vec![0, 1, 2, 3, 0x8000, 0x8001, 0xFFFF, 0x100B, 0x1234];
-        for _ in 0..2000 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            coeffs.push(state as u16);
-        }
-        for c in coeffs {
-            let (nl, nh) = nibble_tables(c);
+        // Per source: the four low-byte and four high-byte nibble tables,
+        // one 128-bit table broadcast to both lanes. Past one source
+        // these are `pshufb` memory operands, which is fine: they stay in
+        // L1 and the port that matters is the shuffle port, not a load.
+        let mut tl = [[_mm256_setzero_si256(); 4]; N];
+        let mut th = [[_mm256_setzero_si256(); 4]; N];
+        let mut src_ptr = [std::ptr::null::<u8>(); N];
+        for s in 0..N {
             for j in 0..4 {
-                for n in 0..16u16 {
-                    let p = mul(c, n << (4 * j));
-                    assert_eq!(nl[j][n as usize], p as u8, "c={c:04x} j={j} n={n}");
-                    assert_eq!(nh[j][n as usize], (p >> 8) as u8, "c={c:04x} j={j} n={n}");
-                }
+                tl[s][j] = bc(&coeffs[s].nl[j]);
+                th[s][j] = bc(&coeffs[s].nh[j]);
             }
+            src_ptr[s] = srcs[s].as_ptr();
         }
-    }
-
-    /// The scheduling granule must be the SELECTED kernel's real
-    /// destination chunk, not a guess: a buffer of exactly one granule is
-    /// consumed whole, and - where the granule is wider than 16 - half a
-    /// granule is consumed by nothing at all. That second half is the
-    /// point. `fold_parallel` and `fold_chunk_multi` align their column
-    /// units and cache tiles to this number precisely so no unit ends
-    /// mid-chunk and falls to the per-source remainder path, so a kernel
-    /// that later changes its chunk width must fail here rather than
-    /// quietly cost the scheduler a fold table per (row, group, source).
-    ///
-    /// This pins the SHIPPING geometry, so it reads the unforced
-    /// function: `NZBFAST_GF16_GRANULE` deliberately overrides it and
-    /// nothing here sets that variable (a `OnceLock` read is per
-    /// process, and the one-process suite would carry a forced value
-    /// into every later test in the binary).
-    #[test]
-    fn schedule_granule_is_the_selected_kernels_chunk() {
-        let fan_in = multi_fold_width();
-        let granule = multi_fold_schedule_granule_words(fan_in);
-        assert!(
-            granule == 16 || granule == 32,
-            "granule {granule} is not one of the two kernel chunk widths"
-        );
-        assert_eq!(
-            granule == 32,
-            cfg!(target_arch = "x86_64") && fan_in == 12,
-            "only the twelve-source 512-bit GFNI arm consumes 32 words \
-             (fan_in={fan_in}, arch x86_64={})",
-            cfg!(target_arch = "x86_64")
-        );
-        // A box only ever dispatches to its BEST kernel, so the checks
-        // above see exactly one arm - and that is how the AVX2 nibble
-        // arm shipped scheduled at 16 words while consuming 64 bytes
-        // (3 Sep 2026, red on the 4-vCPU x86-64 CI runner). It is
-        // unreachable by dispatch on both parts the granule was
-        // developed on: aarch64 folds 32-byte chunks and a Zen 4 with
-        // AVX-512 GFNI takes the 512-bit arm. So pin EVERY arm this CPU
-        // can run against the granule its row of the table claims, not
-        // just the selected one - the arm a future GFNI-everywhere fleet
-        // stops dispatching to is exactly the arm that rots.
-        #[cfg(target_arch = "x86_64")]
-        {
-            // 64 bytes covers the widest arm's granule; each probe reads
-            // only the first `want * 2`.
-            let wide: Vec<u8> = (0..64).map(|i| i as u8).collect();
-            let srcs = [wide.as_slice()];
-            let whole = |want: usize, got: usize, arm: &str| {
-                assert_eq!(
-                    got, want,
-                    "{arm} must consume its {want}-word granule whole"
+        let nib = _mm256_set1_epi8(0x0f);
+        let dst_bytes = dst.as_mut_ptr() as *mut u8;
+        for ch in 0..chunks {
+            let off = ch * 64;
+            let mut plo = _mm256_setzero_si256();
+            let mut phi = _mm256_setzero_si256();
+            for s in 0..N {
+                let sp = src_ptr[s].add(off) as *const __m256i;
+                let slo = _mm256_loadu_si256(sp);
+                let shi = _mm256_loadu_si256(sp.add(1));
+                let n0 = _mm256_and_si256(slo, nib);
+                let n1 = _mm256_and_si256(_mm256_srli_epi16(slo, 4), nib);
+                let n2 = _mm256_and_si256(shi, nib);
+                let n3 = _mm256_and_si256(_mm256_srli_epi16(shi, 4), nib);
+                plo = _mm256_xor_si256(
+                    plo,
+                    _mm256_xor_si256(
+                        _mm256_xor_si256(
+                            _mm256_shuffle_epi8(tl[s][0], n0),
+                            _mm256_shuffle_epi8(tl[s][1], n1),
+                        ),
+                        _mm256_xor_si256(
+                            _mm256_shuffle_epi8(tl[s][2], n2),
+                            _mm256_shuffle_epi8(tl[s][3], n3),
+                        ),
+                    ),
                 );
-            };
-            if is_x86_feature_detected!("avx2") {
-                let mut dst = vec![0u16; 16];
-                // SAFETY: AVX2 verified by the detect; the source covers
-                // dst's full byte length.
-                let got = unsafe { xor_mul_multi_avx2(&mut dst, &srcs, &[0x1234]) };
-                whole(16, got, "the AVX2 nibble kernel");
+                phi = _mm256_xor_si256(
+                    phi,
+                    _mm256_xor_si256(
+                        _mm256_xor_si256(
+                            _mm256_shuffle_epi8(th[s][0], n0),
+                            _mm256_shuffle_epi8(th[s][1], n1),
+                        ),
+                        _mm256_xor_si256(
+                            _mm256_shuffle_epi8(th[s][2], n2),
+                            _mm256_shuffle_epi8(th[s][3], n3),
+                        ),
+                    ),
+                );
             }
-            if is_x86_feature_detected!("ssse3") {
-                let mut dst = vec![0u16; 16];
-                // SAFETY: SSSE3 verified by the detect; source as above.
-                let got = unsafe { xor_mul_multi_ssse3(&mut dst, &srcs, &[0x1234]) };
-                whole(16, got, "the SSSE3 nibble kernel");
-            }
-            if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
-                let mut dst = vec![0u16; 16];
-                // SAFETY: GFNI and AVX2 verified by the detect; source as
-                // above.
-                let got = unsafe { xor_mul_multi_gfni(&mut dst, &srcs, &[0x1234]) };
-                whole(16, got, "the GFNI affine2x kernel");
-            }
-            if is_x86_feature_detected!("avx512f")
-                && is_x86_feature_detected!("avx512bw")
-                && is_x86_feature_detected!("gfni")
-            {
-                let mut dst = vec![0u16; 32];
-                // SAFETY: the three features verified by the detects;
-                // source as above.
-                let got = unsafe { xor_mul_multi_gfni512(&mut dst, &srcs, &[0x1234]) };
-                whole(32, got, "the 512-bit GFNI kernel");
-            }
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            let wide: Vec<u8> = (0..32).map(|i| i as u8).collect();
-            let srcs = [wide.as_slice()];
-            let mut dst = vec![0u16; 16];
-            // SAFETY: plain NEON is baseline on aarch64; the source
-            // covers dst's full byte length.
-            let got = unsafe { xor_mul_multi_neon(&mut dst, &srcs, &[0x1234]) };
-            assert_eq!(
-                got, 16,
-                "the NEON PMULL kernel must consume its granule whole"
+            let dp = dst_bytes.add(off) as *mut __m256i;
+            let d0 = _mm256_loadu_si256(dp);
+            let d1 = _mm256_loadu_si256(dp.add(1));
+            _mm256_storeu_si256(dp, _mm256_xor_si256(d0, _mm256_unpacklo_epi8(plo, phi)));
+            _mm256_storeu_si256(
+                dp.add(1),
+                _mm256_xor_si256(d1, _mm256_unpackhi_epi8(plo, phi)),
             );
-            if std::arch::is_aarch64_feature_detected!("sha3") {
-                let mut dst = vec![0u16; 16];
-                // SAFETY: sha3 verified by the detect; source as above.
-                let got = unsafe { xor_mul_multi_neon_sha3(&mut dst, &srcs, &[0x1234]) };
-                assert_eq!(
-                    got, 16,
-                    "the NEON sha3 kernel must consume its granule whole"
-                );
-            }
-        }
-        if fan_in == 0 {
-            return; // no fused kernel selected; the table path schedules
-        }
-        let src: Vec<u8> = (0..granule * 2).map(|i| i as u8).collect();
-        let srcs = [src.as_slice()];
-        let mut dst = vec![0u16; granule];
-        assert_eq!(
-            xor_mul_multi_into(&mut dst, &srcs, &[0x1234]),
-            granule,
-            "one granule must be consumed whole, or every aligned unit \
-             still ends mid-chunk"
-        );
-        if granule > 16 {
-            let mut half = vec![0u16; granule / 2];
-            assert_eq!(
-                xor_mul_multi_into(&mut half, &srcs, &[0x1234]),
-                0,
-                "half a granule must reach no kernel chunk, or the \
-                 granule is wider than the kernel actually needs"
-            );
-        }
-    }
-
-    #[test]
-    fn xor_mul_multi_matches_single_source_folds() {
-        let width = multi_fold_width();
-        if width == 0 {
-            return; // no multi kernel on this arch (yet)
-        }
-        let mut state = 0x0123456789ABCDEFu64;
-        let mut rng = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        let coeff_pool = [
-            0u16, 1, 2, 0x00FF, 0xFF00, 0x0101, 0x100B, 0x8000, 0xFFFF, 0x1234, 0xABCD,
-        ];
-        // `width + 2` deliberately overshoots the group width: callers
-        // never do, but the kernels accept it (the x86 affine2x kernel
-        // splits internally into register-resident groups; the aarch64
-        // kernels loop sources), and the split path must stay correct.
-        for n in 1..=width + 2 {
-            for words in [16usize, 17, 32, 48, 160, 4096, 4097] {
-                let srcs_owned: Vec<Vec<u8>> = (0..n)
-                    .map(|_| (0..words * 2).map(|_| rng() as u8).collect())
-                    .collect();
-                let srcs: Vec<&[u8]> = srcs_owned.iter().map(|v| v.as_slice()).collect();
-                let coeffs: Vec<u16> = (0..n)
-                    .map(|i| coeff_pool[(rng() as usize + i) % coeff_pool.len()])
-                    .collect();
-                let base: Vec<u16> = (0..words).map(|_| rng() as u16).collect();
-                let mut want = base.clone();
-                for (s, c) in srcs.iter().zip(&coeffs) {
-                    MulTable::new(*c).xor_mul_into(&mut want, s);
-                }
-                let mut got = base.clone();
-                let done = xor_mul_multi_into(&mut got, &srcs, &coeffs);
-                // Kernels work in whole chunks (16 words on aarch64, 32
-                // on x86); whatever they leave is finished per-source.
-                assert!(
-                    done <= words && done.is_multiple_of(16),
-                    "chunk accounting n={n} words={words} done={done}"
-                );
-                for (s, c) in srcs.iter().zip(&coeffs) {
-                    MulTable::new(*c).xor_mul_into(&mut got[done..], &s[done * 2..]);
-                }
-                assert_eq!(got, want, "n={n} words={words} coeffs={coeffs:x?}");
-                // All-one is a dedicated direct-XOR SIMD kernel (the
-                // exponent-0 repair row). Pin it for every source
-                // count and chunk boundary rather than relying on the
-                // random coefficient pool to happen to select it.
-                let ones = vec![1u16; n];
-                let mut want_ones = base.clone();
-                for src in &srcs {
-                    MulTable::new(1).xor_mul_into(&mut want_ones, src);
-                }
-                let mut got_ones = base.clone();
-                let done = xor_mul_multi_into(&mut got_ones, &srcs, &ones);
-                for src in &srcs {
-                    MulTable::new(1).xor_mul_into(&mut got_ones[done..], &src[done * 2..]);
-                }
-                assert_eq!(got_ones, want_ones, "all-one n={n} words={words}");
-                // Drive BOTH aarch64 kernels directly - runtime dispatch
-                // only ever exercises the best one this CPU has.
-                #[cfg(target_arch = "aarch64")]
-                {
-                    let mut got = base.clone();
-                    // SAFETY: plain NEON is baseline on aarch64; every src
-                    // holds words * 2 bytes, covering dst's byte length.
-                    let done = unsafe { xor_mul_multi_neon(&mut got, &srcs, &coeffs) };
-                    for (s, c) in srcs.iter().zip(&coeffs) {
-                        MulTable::new(*c).xor_mul_into(&mut got[done..], &s[done * 2..]);
-                    }
-                    assert_eq!(got, want, "plain-neon n={n} words={words}");
-                    if std::arch::is_aarch64_feature_detected!("sha3") {
-                        let mut got = base.clone();
-                        // SAFETY: sha3 verified by the detect above;
-                        // source coverage as above.
-                        let done = unsafe { xor_mul_multi_neon_sha3(&mut got, &srcs, &coeffs) };
-                        for (s, c) in srcs.iter().zip(&coeffs) {
-                            MulTable::new(*c).xor_mul_into(&mut got[done..], &s[done * 2..]);
-                        }
-                        assert_eq!(got, want, "sha3 n={n} words={words}");
-                    }
-                }
-                // Same forcing for the x86 GFNI multi kernel (dispatch
-                // covers it only on gfni+avx2 hardware, which is also
-                // the only place it can run - but force it so the test
-                // name pins WHICH kernel failed).
-                #[cfg(target_arch = "x86_64")]
-                if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
-                    let mut got = base.clone();
-                    // SAFETY: GFNI and AVX2 verified by the detect above;
-                    // the kernel clamps to the shortest source.
-                    let done = unsafe { xor_mul_multi_gfni(&mut got, &srcs, &coeffs) };
-                    for (s, c) in srcs.iter().zip(&coeffs) {
-                        MulTable::new(*c).xor_mul_into(&mut got[done..], &s[done * 2..]);
-                    }
-                    assert_eq!(got, want, "gfni-multi n={n} words={words}");
-                }
-                #[cfg(target_arch = "x86_64")]
-                if is_x86_feature_detected!("avx512f")
-                    && is_x86_feature_detected!("avx512bw")
-                    && is_x86_feature_detected!("gfni")
-                {
-                    let mut got = base.clone();
-                    // SAFETY: the three features verified by the detects
-                    // above; the kernel clamps to the shortest source.
-                    let done = unsafe { xor_mul_multi_gfni512(&mut got, &srcs, &coeffs) };
-                    assert!(
-                        done.is_multiple_of(16),
-                        "gfni512 chunk accounting done={done}"
-                    );
-                    for (s, c) in srcs.iter().zip(&coeffs) {
-                        MulTable::new(*c).xor_mul_into(&mut got[done..], &s[done * 2..]);
-                    }
-                    assert_eq!(got, want, "gfni512-multi n={n} words={words}");
-                }
-                // And the two shuffle kernels, which dispatch never picks
-                // on a GFNI box but which every other x86 runs.
-                #[cfg(target_arch = "x86_64")]
-                if is_x86_feature_detected!("avx2") {
-                    let mut got = base.clone();
-                    // SAFETY: AVX2 verified by the detect above; the
-                    // kernel clamps to the shortest source.
-                    let done = unsafe { xor_mul_multi_avx2(&mut got, &srcs, &coeffs) };
-                    assert!(done.is_multiple_of(16), "avx2 chunk accounting done={done}");
-                    for (s, c) in srcs.iter().zip(&coeffs) {
-                        MulTable::new(*c).xor_mul_into(&mut got[done..], &s[done * 2..]);
-                    }
-                    assert_eq!(got, want, "avx2-multi n={n} words={words}");
-                }
-                #[cfg(target_arch = "x86_64")]
-                if is_x86_feature_detected!("ssse3") {
-                    let mut got = base.clone();
-                    // SAFETY: SSSE3 verified by the detect above; same clamp.
-                    let done = unsafe { xor_mul_multi_ssse3(&mut got, &srcs, &coeffs) };
-                    assert!(
-                        done.is_multiple_of(16),
-                        "ssse3 chunk accounting done={done}"
-                    );
-                    for (s, c) in srcs.iter().zip(&coeffs) {
-                        MulTable::new(*c).xor_mul_into(&mut got[done..], &s[done * 2..]);
-                    }
-                    assert_eq!(got, want, "ssse3-multi n={n} words={words}");
-                }
-            }
-        }
-    }
-
-    /// The uneven-source fixture the two clamp tests below share: a 47-byte
-    /// source beside a 96-byte one, so only ONE 32-byte chunk is legal and a
-    /// kernel that clamped to the LONGEST source would read out of bounds.
-    /// Returns (sources, starting dst, the scalar oracle's answer).
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    fn xor_multi_clamp_fixture() -> (Vec<Vec<u8>>, Vec<u16>, Vec<u16>) {
-        let srcs = vec![vec![0x5a; 47], vec![0xa5; 96]];
-        let base: Vec<u16> = (0..64).map(|i| i as u16 * 257).collect();
-        let mut want = base.clone();
-        for src in &srcs {
-            MulTable::new(1).xor_mul_into(&mut want[..16], &src[..32]);
-        }
-        (srcs, base, want)
-    }
-
-    /// Each direct-XOR kernel gets its own test rather than one test with
-    /// per-arch arms inside it: a reference under a STATEMENT `#[cfg]` does
-    /// not carry that cfg to a reader (`cfg-symbol-gate` reads the enclosing
-    /// item's), so the kernel and the only thing that names it share one
-    /// `#[cfg]` line here.
-    #[test]
-    #[cfg(target_arch = "aarch64")]
-    fn xor_multi_neon_clamps_to_shortest_source() {
-        let (srcs, mut got, want) = xor_multi_clamp_fixture();
-        let refs: Vec<&[u8]> = srcs.iter().map(Vec::as_slice).collect();
-        // SAFETY: NEON is baseline on aarch64; the intentionally uneven
-        // source lengths exercise the kernel's shortest-source clamp.
-        let done = unsafe { xor_multi_neon(&mut got, &refs) };
-        assert_eq!(done, 16);
-        assert_eq!(got, want);
-    }
-
-    #[test]
-    #[cfg(target_arch = "x86_64")]
-    fn xor_multi_x86_clamps_to_shortest_source() {
-        let (srcs, base, want) = xor_multi_clamp_fixture();
-        let refs: Vec<&[u8]> = srcs.iter().map(Vec::as_slice).collect();
-        // Both x86 kernels are driven directly - runtime dispatch only ever
-        // exercises the best one this CPU has, which would leave the SSE2
-        // fallback untested on every box in the fleet.
-        let mut got = base.clone();
-        // SAFETY: SSE2 is baseline on x86_64; uneven source lengths
-        // exercise the shortest-source clamp.
-        let done = unsafe { xor_multi_sse2(&mut got, &refs) };
-        assert_eq!(done, 16);
-        assert_eq!(got, want);
-        if is_x86_feature_detected!("avx2") {
-            let mut got = base;
-            // SAFETY: AVX2 verified by the detect above; same clamp.
-            let done = unsafe { xor_multi_avx2(&mut got, &refs) };
-            assert_eq!(done, 16);
-            assert_eq!(got, want);
-        }
-    }
-
-    /// `xor_mul_into` must match a straight per-word GF multiply for every
-    /// length across, and just past, the NEON 32-byte chunk boundary and
-    /// odd tails - on aarch64 this is the NEON path vs a scalar oracle,
-    /// with a non-zero starting `dst` so the accumulate (`^=`) is exercised.
-    #[test]
-    fn xor_mul_into_matches_scalar_all_lengths() {
-        let mut state = 0x9E3779B97F4A7C15u64;
-        let mut rng = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        for c in [0u16, 1, 2, 0x00FF, 0x0101, 0x1234, 0xABCD, 0xFFFF] {
-            let t = MulTable::new(c);
-            for len in [0usize, 1, 2, 3, 15, 16, 31, 32, 33, 64, 65, 127, 4096, 4097] {
-                let src: Vec<u8> = (0..len).map(|_| rng() as u8).collect();
-                let words = len.div_ceil(2);
-                let base: Vec<u16> = (0..words + 3).map(|_| rng() as u16).collect();
-                // Oracle: start from `base`, add c·word per src word.
-                let mut want = base.clone();
-                for (i, s) in src.chunks(2).enumerate() {
-                    let w = if s.len() == 2 {
-                        u16::from_le_bytes([s[0], s[1]])
-                    } else {
-                        s[0] as u16
-                    };
-                    want[i] ^= mul(c, w);
-                }
-                let mut got = base.clone();
-                t.xor_mul_into(&mut got, &src);
-                assert_eq!(got, want, "c={c:#x} len={len}");
-
-                // On x86_64 also drive each kernel directly - runtime
-                // dispatch would only ever exercise the best one the CPU
-                // has (e.g. AVX2 shadowing SSSE3).
-                #[cfg(target_arch = "x86_64")]
-                {
-                    if is_x86_feature_detected!("ssse3") {
-                        let mut got = base.clone();
-                        // SAFETY: SSSE3 verified by the detect above; got
-                        // holds words + 3 elements, a word for every byte
-                        // pair of src.
-                        let done = unsafe { fold_ssse3(&t.nl, &t.nh, &mut got, &src) };
-                        MulTable::xor_mul_scalar(&t.lo, &t.hi, &mut got[done..], &src[done * 2..]);
-                        assert_eq!(got, want, "ssse3 c={c:#x} len={len}");
-                    }
-                    if is_x86_feature_detected!("avx2") {
-                        let mut got = base.clone();
-                        // SAFETY: AVX2 verified by the detect above; got
-                        // covers src as above.
-                        let done = unsafe { fold_avx2(&t.nl, &t.nh, &mut got, &src) };
-                        MulTable::xor_mul_scalar(&t.lo, &t.hi, &mut got[done..], &src[done * 2..]);
-                        assert_eq!(got, want, "avx2 c={c:#x} len={len}");
-                    }
-                    if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
-                        let mut got = base.clone();
-                        // SAFETY: GFNI and AVX2 verified by the detect
-                        // above; got covers src as above.
-                        let done = unsafe { fold_gfni(&t.affine, &mut got, &src) };
-                        MulTable::xor_mul_scalar(&t.lo, &t.hi, &mut got[done..], &src[done * 2..]);
-                        assert_eq!(got, want, "gfni c={c:#x} len={len}");
-                    }
-                }
-            }
-        }
-    }
-
-    /// [`FoldTable`] must match the same per-word oracle as
-    /// [`MulTable::xor_mul_into`] at every length class - in particular
-    /// the sub-chunk tails and the odd trailing byte, which exercise
-    /// the nibble-table scalar path the compact table falls back on.
-    #[test]
-    fn fold_table_matches_scalar_all_lengths() {
-        let mut state = 0xD1B54A32D192ED03u64;
-        let mut rng = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        for c in [0u16, 1, 2, 0x00FF, 0x0101, 0x1234, 0xABCD, 0xFFFF] {
-            let t = FoldTable::new(c);
-            for len in [0usize, 1, 2, 3, 15, 16, 31, 32, 33, 64, 65, 127, 4096, 4097] {
-                let src: Vec<u8> = (0..len).map(|_| rng() as u8).collect();
-                let words = len.div_ceil(2);
-                let base: Vec<u16> = (0..words + 3).map(|_| rng() as u16).collect();
-                let mut want = base.clone();
-                for (i, s) in src.chunks(2).enumerate() {
-                    let w = if s.len() == 2 {
-                        u16::from_le_bytes([s[0], s[1]])
-                    } else {
-                        s[0] as u16
-                    };
-                    want[i] ^= mul(c, w);
-                }
-                let mut got = base.clone();
-                t.xor_mul_into(&mut got, &src);
-                assert_eq!(got, want, "fold-table c={c:#x} len={len}");
-            }
         }
     }
 }
+
+/// Split every 64-byte chunk of `src` into 32 low bytes then 32 high
+/// bytes - the layout [`xor_mul_multi_planar_n`] consumes. ParPar's
+/// `separate_low_high`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn prepare_planar(src: &[u8], out: &mut [u8]) {
+    use std::arch::x86_64::*;
+    assert_eq!(src.len(), out.len());
+    assert!(src.len().is_multiple_of(64));
+    // SAFETY: avx2 is enabled on this fn per #[target_feature] and the
+    // caller (`PreparedSources::prepare`) only reaches it after
+    // `enabled()` verified the feature at runtime; every load and store
+    // is at `off` or `off + 32` with `off + 64 <= len`, inside both
+    // slices by the two asserts above (equal lengths, a multiple of 64).
+    unsafe {
+        let mask = _mm256_set1_epi16(255);
+        for off in (0..src.len()).step_by(64) {
+            let a = _mm256_loadu_si256(src.as_ptr().add(off).cast());
+            let b = _mm256_loadu_si256(src.as_ptr().add(off + 32).cast());
+            let lo = _mm256_packus_epi16(_mm256_and_si256(a, mask), _mm256_and_si256(b, mask));
+            let hi = _mm256_packus_epi16(_mm256_srli_epi16(a, 8), _mm256_srli_epi16(b, 8));
+            _mm256_storeu_si256(out.as_mut_ptr().add(off).cast(), lo);
+            _mm256_storeu_si256(out.as_mut_ptr().add(off + 32).cast(), hi);
+        }
+    }
+}
+
+/// [`prepare_planar`] in place: the same per-64-byte split (low bytes of
+/// 32 words, then their high bytes) written back over the source. Each
+/// chunk's two loads complete before its two stores, so the transform
+/// is exact in place.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn prepare_planar_in_place(buf: &mut [u8]) {
+    use std::arch::x86_64::*;
+    assert!(buf.len().is_multiple_of(64));
+    // SAFETY: avx2 per #[target_feature], verified at runtime by the
+    // caller (`prepack_planar_in_place` refuses unless
+    // `PreparedSources::enabled()`); every access is at `off` or
+    // `off + 32` with `off + 64 <= len` by the assert above.
+    unsafe {
+        let mask = _mm256_set1_epi16(255);
+        for off in (0..buf.len()).step_by(64) {
+            let p = buf.as_mut_ptr().add(off);
+            let a = _mm256_loadu_si256(p.cast());
+            let b = _mm256_loadu_si256(p.add(32).cast());
+            let lo = _mm256_packus_epi16(_mm256_and_si256(a, mask), _mm256_and_si256(b, mask));
+            let hi = _mm256_packus_epi16(_mm256_srli_epi16(a, 8), _mm256_srli_epi16(b, 8));
+            _mm256_storeu_si256(p.cast(), lo);
+            _mm256_storeu_si256(p.add(32).cast(), hi);
+        }
+    }
+}
+
+/// Pack a whole source block into the planar layout ONCE, at read time,
+/// so every later fold over it (`xor_mul_multi_planar_prepacked`) skips
+/// the per-tile split [`PreparedSources`] does. The layout is local to
+/// each 64-byte chunk, so any 64-byte-aligned tile of a packed block is
+/// itself a packed tile. Returns false, touching nothing, when the
+/// planar kernel is not the one selected (then the caller folds the
+/// interleaved bytes as usual) or the length is not a multiple of 64.
+///
+/// The creator's direct fold (5 Sep 2026, create-pipeline lane): with
+/// 103 rows split across six row threads the tiled fold split every
+/// source six times over; packed at read it is split once, on the
+/// reader thread.
+pub fn prepack_planar_in_place(buf: &mut [u8]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if !PreparedSources::enabled() || !buf.len().is_multiple_of(64) {
+            return false;
+        }
+        // SAFETY: enabled() verified avx2 at runtime; length checked.
+        unsafe { prepare_planar_in_place(buf) };
+        true
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = buf;
+        false
+    }
+}
+
+/// Fold up to four ALREADY-PACKED planar sources (see
+/// [`prepack_planar_in_place`]) into `dst`. Every source must be the
+/// same length, a multiple of 64 bytes; returns the words folded
+/// (`min(source bytes / 2, dst words)` rounded down to 32 words). A
+/// caller handing interleaved bytes here gets wrong arithmetic, not
+/// unsafety - the type-less entry exists for sources that live in a
+/// caller's arena, where [`PreparedSources`] would copy them.
+pub fn xor_mul_multi_planar_prepacked(
+    dst: &mut [u16],
+    srcs: &[&[u8]],
+    coeffs: &[&FoldCoeff],
+) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        assert!(PreparedSources::enabled());
+        assert!(!srcs.is_empty() && srcs.len() <= 4);
+        assert_eq!(srcs.len(), coeffs.len());
+        let bytes = srcs[0].len();
+        assert!(bytes.is_multiple_of(64) && srcs.iter().all(|s| s.len() == bytes));
+        planar_fold(dst, srcs, coeffs)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (dst, srcs, coeffs);
+        0
+    }
+}
+
+/// The planar kernel over `srcs` in the packed layout (1..=4 of them,
+/// equal lengths, multiples of 64 bytes - the callers check).
+#[cfg(target_arch = "x86_64")]
+fn planar_fold(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[&FoldCoeff]) -> usize {
+    assert!(is_x86_feature_detected!("avx2"));
+    let units = srcs
+        .iter()
+        .map(|s| s.len() / 64 * 2)
+        .min()
+        .unwrap_or(0)
+        .min(dst.len() / 32 * 2);
+    if units == 0 {
+        return 0;
+    }
+    // SAFETY: AVX2 checked above; units bounds every source and the
+    // destination; fan-in is 1..=4 and each monomorph receives that
+    // exact count.
+    unsafe {
+        match srcs.len() {
+            1 => xor_mul_multi_planar_n::<1>(dst, srcs, coeffs, units),
+            2 => xor_mul_multi_planar_n::<2>(dst, srcs, coeffs, units),
+            3 => xor_mul_multi_planar_n::<3>(dst, srcs, coeffs, units),
+            4 => xor_mul_multi_planar_n::<4>(dst, srcs, coeffs, units),
+            _ => unreachable!(),
+        }
+    }
+    units * 16
+}
+
+/// Sources of one fused-fold group, split once into their low and high
+/// bytes and reused across every destination row of the tile.
+///
+/// The interleaved AVX2 kernel separates a source's bytes on every call,
+/// i.e. once per destination row; the tiled fold walks 17 rows per
+/// group on the 101-block leg and 250 on a dense back-substitution, and
+/// the NTT leaf 256, so the split was repeated that many times. Doing it
+/// once per (group, tile) into this scratch and folding from it is the
+/// review lane's `layout.patch` (4 Sep 2026), measured on the tip on an
+/// i5-10600KF, two mirrored rounds: 101-block fold 1.23-1.34 s -> 1.08,
+/// wall 1.58-1.74 -> 1.39-1.47 against turbo's 1.84-1.89 - the
+/// kernel-bound leg that tied turbo now beats it by 1.3x (parfast 1.2x).
+/// On a Zen 4's forced-AVX2 arm it is flat (two shuffle ports); GFNI and
+/// NEON never take it. Only the nibble kernels read this; a caller with
+/// fewer than eight rows keeps the interleaved kernel (the split costs
+/// a pass of its own and pays back over rows - the review's microprobe lost
+/// at one row and was mixed at three).
+///
+/// `NZBFAST_FOLD_PLANAR=0` is the A/B arm. The type is opaque so an
+/// ordinary slice cannot be mistaken for packed data.
+#[derive(Default)]
+pub struct PreparedSources {
+    // Only the x86 arms read it; off x86 the type is an empty marker
+    // whose `prepare` always refuses.
+    #[cfg(target_arch = "x86_64")]
+    data: Vec<Vec<u8>>,
+}
+impl PreparedSources {
+    pub fn enabled() -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            static ENABLED: OnceLock<bool> = OnceLock::new();
+            *ENABLED
+                .get_or_init(|| std::env::var("NZBFAST_FOLD_PLANAR").ok().as_deref() != Some("0"))
+                && is_x86_feature_detected!("avx2")
+                && forced_nibble_kernel() != Some("ssse3")
+                && !gfni256_available()
+                && !avx512_gfni_available()
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+    pub fn prepare(&mut self, srcs: &[&[u8]]) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !Self::enabled() || srcs.is_empty() || srcs.len() > 4 {
+                return false;
+            }
+            let bytes = srcs[0].len();
+            if bytes == 0 || !bytes.is_multiple_of(64) || srcs.iter().any(|s| s.len() != bytes) {
+                return false;
+            }
+            self.data.resize_with(srcs.len(), Vec::new);
+            for (out, src) in self.data.iter_mut().zip(srcs) {
+                out.resize(bytes, 0);
+                // SAFETY: enabled checks AVX2; length equality and complete
+                // 64-byte chunks were checked above and resize matches them.
+                unsafe {
+                    prepare_planar(src, out);
+                }
+            }
+            true
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = srcs;
+            false
+        }
+    }
+    pub fn fold(&self, dst: &mut [u16], coeffs: &[&FoldCoeff]) -> usize {
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(self.data.len(), coeffs.len());
+            let mut refs: [&[u8]; 4] = [&[]; 4];
+            for (d, s) in refs.iter_mut().zip(&self.data) {
+                *d = s;
+            }
+            // Private data is only created by prepare, which bounded the
+            // fan-in at four and checked the lengths.
+            planar_fold(dst, &refs[..self.data.len()], coeffs)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (dst, coeffs);
+            0
+        }
+    }
+}
+
+// Research candidate: preserve adjacent multiply/XOR pairs on Apple.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,sha3")]
+unsafe fn xor_mul_multi_fused<const NC: usize>(
+    dst: &mut [u16],
+    srcs: &[&[u8]],
+    coeffs: &[u16],
+) -> usize {
+    use std::arch::aarch64::*;
+    let chunks = (dst.len() * 2) / 32;
+    if chunks == 0 || srcs.is_empty() {
+        return 0;
+    }
+    // SAFETY: NEON (incl. pmull on poly8) is baseline on aarch64, no
+    // feature check needed (see the doc above). All pointer accesses stay
+    // within the first chunks * 32 bytes: in bounds for dst by
+    // chunks = (dst.len() * 2) / 32, and for each source by
+    // xor_mul_multi_into's documented precondition (debug_asserted there)
+    // that every source covers dst's full byte length.
+    unsafe {
+        let mut c_lo = [vdupq_n_p8(0); 16];
+        let mut c_hi = [vdupq_n_p8(0); 16];
+        let mut c_mid = [vdupq_n_p8(0); 16];
+        let n = if NC > 0 { NC } else { srcs.len().min(16) };
+        for s in 0..n {
+            c_lo[s] = vdupq_n_p8(coeffs[s] as u8);
+            c_hi[s] = vdupq_n_p8((coeffs[s] >> 8) as u8);
+            c_mid[s] = vreinterpretq_p8_u8(veorq_u8(
+                vreinterpretq_u8_p8(c_lo[s]),
+                vreinterpretq_u8_p8(c_hi[s]),
+            ));
+        }
+        let macl = |sum: poly16x8_t, d: poly8x16_t, c: poly8x16_t| -> poly16x8_t {
+            let result;
+            core::arch::asm!("pmull {r:v}.8h, {d:v}.8b, {c:v}.8b", "eor {r:v}.16b, {r:v}.16b, {s:v}.16b",
+                r=out(vreg) result, d=in(vreg) d, c=in(vreg) c, s=in(vreg) sum, options(pure,nomem,nostack));
+            result
+        };
+        let mach = |sum: poly16x8_t, d: poly8x16_t, c: poly8x16_t| -> poly16x8_t {
+            let result;
+            core::arch::asm!("pmull2 {r:v}.8h, {d:v}.16b, {c:v}.16b", "eor {r:v}.16b, {r:v}.16b, {s:v}.16b",
+                r=out(vreg) result, d=in(vreg) d, c=in(vreg) c, s=in(vreg) sum, options(pure,nomem,nostack));
+            result
+        };
+        let dst_bytes = dst.as_mut_ptr() as *mut u8;
+        for ch in 0..chunks {
+            let off = ch * 32;
+            // Seed the accumulators from source 0 instead of zeroing
+            // them and XORing it in: `macl`/`mach` are pmull+eor pairs,
+            // so the first source's six eors are all against zero. Only
+            // a compile-time count can do this - the generic arm cannot
+            // hoist the non-empty check out of the chunk loop - and the
+            // established eight-source arm is left exactly as measured.
+            let seeded = NC > 0 && NC < 8;
+            let (mut low1, mut low2, mut mid1, mut mid2, mut high1, mut high2) = if seeded {
+                let first = vld2q_u8(srcs[0].as_ptr().add(off));
+                let lo = vreinterpretq_p8_u8(first.0);
+                let hi = vreinterpretq_p8_u8(first.1);
+                let mid = vreinterpretq_p8_u8(veorq_u8(first.0, first.1));
+                (
+                    vmull_p8(vget_low_p8(lo), vget_low_p8(c_lo[0])),
+                    vmull_high_p8(lo, c_lo[0]),
+                    vmull_p8(vget_low_p8(mid), vget_low_p8(c_mid[0])),
+                    vmull_high_p8(mid, c_mid[0]),
+                    vmull_p8(vget_low_p8(hi), vget_low_p8(c_hi[0])),
+                    vmull_high_p8(hi, c_hi[0]),
+                )
+            } else {
+                (
+                    vdupq_n_p16(0),
+                    vdupq_n_p16(0),
+                    vdupq_n_p16(0),
+                    vdupq_n_p16(0),
+                    vdupq_n_p16(0),
+                    vdupq_n_p16(0),
+                )
+            };
+            for (s, &src) in srcs[..n].iter().enumerate().skip(usize::from(seeded)) {
+                let d = vld2q_u8(src.as_ptr().add(off));
+                let dlo = vreinterpretq_p8_u8(d.0);
+                let dhi = vreinterpretq_p8_u8(d.1);
+                let dmid = vreinterpretq_p8_u8(veorq_u8(d.0, d.1));
+                low1 = macl(low1, dlo, c_lo[s]);
+                low2 = mach(low2, dlo, c_lo[s]);
+                mid1 = macl(mid1, dmid, c_mid[s]);
+                mid2 = mach(mid2, dmid, c_mid[s]);
+                high1 = macl(high1, dhi, c_hi[s]);
+                high2 = mach(high2, dhi, c_hi[s]);
+            }
+            let (out_lo, out_hi) = clmul_reduce(low1, low2, mid1, mid2, high1, high2);
+            let dp = dst_bytes.add(off);
+            let mut vb = vld2q_u8(dp);
+            vb.0 = veorq_u8(vb.0, out_lo);
+            vb.1 = veorq_u8(vb.1, out_hi);
+            vst2q_u8(dp, vb);
+        }
+    }
+    chunks * 16
+}
+
+/// The additive FFT's butterfly over whole rows, one pass: forward
+/// `(u, v) <- (u + c v, u + c v + v)`, inverse `(u, v) <- (u + c (v + u),
+/// v + u)`. Processes whole 32-byte chunks and returns the u16 WORDS
+/// processed; the caller runs any remainder itself (the additive leaf's
+/// rows are whole chunks by admission). On Apple silicon this is the
+/// fused PMULL kernel's single-source multiply with both stores in the
+/// same chunk pass, so the pair's rows are read and written once where
+/// a multiply pass plus an XOR pass read them twice; elsewhere it is
+/// exactly those two passes.
+///
+/// The coefficient arrives PREPARED, because the x86 nibble arm reads
+/// its tables and the additive leaf holds one [`FoldCoeff`] per (stage,
+/// block) for the life of the plan: building them per butterfly would
+/// pay `nibble_tables`' ~16 shifts and ~60 XORs against a span as short
+/// as one 32-byte unit.
+pub fn butterfly(u: &mut [u16], v: &mut [u16], c: &FoldCoeff, inverse: bool) -> usize {
+    debug_assert_eq!(u.len(), v.len());
+    let words = (u.len().min(v.len()) * 2 / 32) * 16;
+    #[cfg(target_arch = "x86_64")]
+    let coeff = c;
+    let c = c.coeff();
+    // The additive FFT's block 0 at every stage has twiddle s_i(0) = 0,
+    // and its top inverse stage is all zeros: 511 of a 512-point
+    // transform's 2,304 butterflies. Both directions collapse to
+    // `v ^= u`. A twiddle of 1 is XOR-only too.
+    if c == 0 {
+        for (d, s) in v[..words].iter_mut().zip(u[..words].iter()) {
+            *d ^= *s;
+        }
+        return words;
+    }
+    if c == 1 {
+        if inverse {
+            for (d, s) in v[..words].iter_mut().zip(u[..words].iter()) {
+                *d ^= *s;
+            }
+            for (d, s) in u[..words].iter_mut().zip(v[..words].iter()) {
+                *d ^= *s;
+            }
+        } else {
+            for (d, s) in u[..words].iter_mut().zip(v[..words].iter()) {
+                *d ^= *s;
+            }
+            for (d, s) in v[..words].iter_mut().zip(u[..words].iter()) {
+                *d ^= *s;
+            }
+        }
+        return words;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // NO FEATURE DETECT, and dropping the one that stood here is a
+        // win on every aarch64 part without sha3 (11 Sep 2026).
+        //
+        // This arm used to read `is_aarch64_feature_detected!("sha3")`,
+        // so a part without it fell to `butterfly_two_pass` - a multiply
+        // pass plus an XOR pass, reading and writing both rows TWICE
+        // where this kernel does it once. No INTRINSIC needs sha3 here:
+        // `vmull_p8`, `veorq_u8`, `vld2q_u8`/`vst2q_u8` and reinterprets,
+        // and `veor3q` appears exactly once in this file, in the
+        // multi-fold, whose own sha3 detect IS load-bearing.
+        //
+        // BUT THE INTRINSICS WERE ONLY HALF THE QUESTION, and dropping
+        // the detect on that half alone shipped a SIGILL - nine tests
+        // died ILL on nightly/aarch64-cross's Cortex-A72 model, 12 Sep
+        // 2026. `butterfly_neon` still carried `#[target_feature(enable
+        // = "neon,sha3")]`, and that attribute licenses LLVM to
+        // SYNTHESIZE sha3: it fused the inlined `clmul_reduce`'s XOR
+        // chains into NINE `eor3` on `aarch64-unknown-linux-musl` at opt
+        // 2. A detect is not the only thing that can promise a feature -
+        // the attribute promises it too, and the two have to be dropped
+        // TOGETHER. It reads `enable = "neon"` now and emits no sha3.
+        // NO BOX ON THIS FLEET COULD SEE IT: sha3 is BASELINE on
+        // `aarch64-apple-darwin`, so Apple codegen is byte-for-byte the
+        // same either way (9 `eor3` before and after).
+        //
+        // `scale_neon` runs the SAME `vmull_p8` on every aarch64 with no
+        // detect AND no attribute, on the stated grounds that pmull on
+        // poly8 is baseline - the right treatment of the pair all along.
+        //
+        if fused_butterfly_enabled() {
+            // SAFETY: NEON incl. pmull on poly8 is baseline on aarch64,
+            // so there is no feature precondition; both rows are the
+            // same length, the kernel's precondition, debug_asserted
+            // above.
+            return unsafe { butterfly_neon(u, v, c, inverse) };
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    if fused_butterfly_enabled() {
+        if gfni256_available() && gfni_rowop_armed() {
+            // SAFETY: gfni+avx2 verified by `gfni256_available`; both
+            // rows are the same length, the kernel's precondition,
+            // debug_asserted above.
+            return unsafe { butterfly_gfni(u, v, c, inverse) };
+        }
+        if nibble_kernel_selected()
+            && forced_nibble_kernel() != Some("ssse3")
+            && is_x86_feature_detected!("avx2")
+        {
+            // SAFETY: avx2 verified by the detect above; the nibble
+            // tables this kernel reads are populated exactly when
+            // `nibble_kernel_selected` (see `FoldCoeff::new`); both rows
+            // are the same length, debug_asserted above.
+            return unsafe { butterfly_avx2(u, v, coeff, inverse) };
+        }
+    }
+    butterfly_two_pass(u, v, c, inverse)
+}
+
+/// `NZBFAST_GF16_BUTTERFLY_FUSED=0`: the butterfly falls back to
+/// [`butterfly_two_pass`] - a fold-kernel call for `u ^= c v` and then a
+/// plain XOR pass for `v ^= u`, which reads and writes both rows twice.
+/// It is the A/B arm for the fused kernels, in one binary, and it is
+/// read once.
+///
+/// # On aarch64 as well since 11 Sep 2026, and not for symmetry
+///
+/// Dropping the sha3 detect above - and, on 12 Sep 2026, the sha3 in the
+/// kernel's `#[target_feature]`, which is the half that was NOT vestigial
+/// and cost a SIGILL; see the note there - gave every
+/// non-sha3 aarch64 part the fused kernel in place of
+/// [`butterfly_two_pass`], and NO BOX ON THIS FLEET IS NON-SHA3 - the
+/// Apple parts and the Snapdragon all report it - so the change could
+/// not be measured on the hardware it is for. This knob is what makes
+/// it measurable anyway: the two ARMS are the same two implementations
+/// whichever CPU selects them, so A/B-ing them on a box that has sha3
+/// measures the change itself. Only the magnitude is the measuring
+/// box's; the sign is the memory traffic's, and that is the claim.
+fn fused_butterfly_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var_os("NZBFAST_GF16_BUTTERFLY_FUSED").is_some_and(|v| v == "0"))
+}
+
+/// `NZBFAST_GF16_ROWOP_GFNI=0` disarms [`butterfly_gfni`]. **ON by
+/// default since 11 Sep 2026**, on the evidence below; it was off for
+/// four days before that, and the history is kept because the reason it
+/// was off is the reason to trust the measurement that turned it on.
+///
+/// **THE SPELLING INVERTED WHEN THE DEFAULT DID, AND AN A/B HARNESS
+/// WRITTEN BEFORE THAT WILL SILENTLY MEASURE ON AGAINST ON.** It was
+/// `=1` to arm, so a round's "unarmed" arm was the variable UNSET or set
+/// to empty. Both of those now mean ARMED. The off arm is `=0` and
+/// nothing else. Check any harness older than 11 Sep 2026 before
+/// believing a flat result from it.
+///
+/// **This gate decides the BUTTERFLY alone.** `scale` stopped waiting on
+/// it earlier the same day (see [`scale_kernel`]), and
+/// [`inplace_scale_preferred`] stopped on the flip, so `=0` turns off
+/// the fused butterfly and nothing else. A reader who remembers this
+/// gate deciding three things is remembering a tree older than
+/// `9d91798cec`.
+///
+/// The history, kept because it is why the flip is trustworthy:
+/// **it was OFF, and that was not caution for its own sake.** Until 11 Sep 2026 the reason was that neither had ever
+/// executed: no box on this fleet was known to have GFNI while the
+/// Zenbook was down, and a GitHub x86-64 runner has it only by luck of
+/// the draw (the fleet mixes Zen 3 without and Ice Lake with, which is
+/// how `forney::joint`'s kernel assertions flapped on 10 Sep). Their
+/// multiply core is [`xor_mul_multi_gfni_n`] with one source,
+/// transcribed, and their XOR ordering is the same as
+/// [`butterfly_avx2`] and [`butterfly_neon`], both differential-
+/// tested on real hardware - so they were very likely right. "Very
+/// likely right" is what this file's own worst defect was: the 512-bit
+/// GFNI arm's 64-byte granule (`69cbf2e2`), wrong on exactly the parts
+/// no local box selects, and PAR2 parity computed with a wrong butterfly
+/// is silent until someone needs to repair with it.
+///
+/// A GFNI part with this unset takes [`butterfly_two_pass`] - what it
+/// took before the fused kernels landed, so nothing regresses.
+///
+/// **THE KERNELS HAVE NOW EXECUTED, AND THEY ARE NOT WHAT BLOCKS THE
+/// FLIP** (11 Sep 2026, `research/GFNI-ROWOP-EVIDENCE-2026-09-11.md`).
+/// The leaf differential and this file's butterfly and scale tests are
+/// green with this set, on an EPYC 9354P (Zen 4, avx512f+avx512bw+gfni)
+/// and a Core Ultra 9 386H (gfni+avx2), each against an unarmed control,
+/// and `perf` names [`butterfly_gfni`] and [`scale_gfni`] in the armed
+/// profile and neither in the control's.
+///
+/// **What blocked it was a second consumer, and that is now FIXED.**
+/// Setting this USED TO MAKE [`scale_available`] true, which was the
+/// only thing refusing `par2repair::forney::joint` on a GFNI part (it no
+/// longer decides that - see below) - so arming it
+/// opened a path that had never run on one. That path's tail fold asks
+/// [`xor_mul_multi_prepared`] for a 32-byte destination (`joint` pads a
+/// short last stripe to a multiple of 16 WORDS, because 32 bytes is the
+/// unit every OTHER kernel takes), and [`xor_mul_multi_gfni512`]
+/// declines exactly that, because it consumes 64 bytes at a time.
+/// `forney::tail`'s full-coverage assert fired and the repair panicked
+/// from a scoped worker - `69cbf2e2`'s granule class a second time, in a
+/// second place, on AVX-512 GFNI parts only, and loud rather than
+/// silent: an `assert_eq!`, so it fired in release and wrote no parity.
+/// `Plan::finish_row_stripe` now runs the remainder per source the way
+/// every other caller of the fused fold already did, and carries a
+/// regression test that is PORTABLE by construction - an 8-word stripe
+/// is 16 bytes, under every kernel's granule, so it fails on aarch64 and
+/// on a part with no GFNI at all, and this class no longer needs the one
+/// box in the fleet that can select the 64-byte kernel to be caught.
+///
+/// **So the recipe this gate used to give was necessary and not
+/// sufficient.** Before flipping the default, all three of:
+/// 1. those four differentials, armed and with an unarmed control;
+/// 2. `cargo test -p nzbkit-base --lib --features test-support` IN ONE
+///    PROCESS, armed, green - the step that found the blocker, and one
+///    no filter naming the four tests can reach;
+/// 3. both on a host where [`avx512_gfni_available`] is TRUE, because
+///    the dispatch this flip opens differs between the two GFNI classes
+///    and only one of them was broken.
+///
+/// **All three are green on the EPYC as of 11 Sep 2026, and the default
+/// is STILL OFF, because what is missing now is not correctness but a
+/// MEASUREMENT.** Nobody has shown arming the BUTTERFLY is faster on an
+/// AVX-512 part, and it is not obvious that it is: unarmed, the
+/// butterfly there folds through a 64-byte-wide kernel, and armed it is
+/// a fused 256-bit one, so arming moves work OFF the wider kernel -
+/// `perf` read 79 sample units on [`xor_mul_multi_gfni512`] unarmed
+/// against 56 armed.
+///
+/// **The one whole-repair reading that argued AGAINST the flip should be
+/// discounted entirely, not read as weak evidence** (11 Sep 2026). It is
+/// one rep on a Core Ultra 9, 10 Sep, 147.7 s armed against 134.6 s
+/// unarmed. `OLED Care Screensaver.scr` was running on that box from
+/// 2026-09-07T20:02:35Z and had taken 46,746 CPU seconds by 03:24Z on
+/// 11 Sep, so the 10 Sep rep is inside that window. It is BURSTY - about
+/// fifteen of sixteen cores when it wakes and nothing when it does not -
+/// which is why this matters more than a noise figure would: the rep is
+/// not a noisy reading of a real quantity, it is a coin flip on whether
+/// the screensaver was awake, and the box was not in a known state. Two
+/// rounds queued behind it aborted with
+/// `BOX-BUSY foreign_cpu=1564.1 ceiling=160 cores=16`. It is stopped and
+/// disabled now. This docstring hedged that rep correctly at the time
+/// ("inside that box's noise and is not an answer either"); nothing here
+/// is a retraction, but the hedge is now the whole of it.
+///
+/// **The SECOND consumer is gone, and that changes what this gate is
+/// for.** Until 11 Sep 2026 this also decided [`scale_kernel`], and
+/// through it `scale_available`, and through THAT whether
+/// `par2repair::forney::joint` would run stage 1 at all - so a GFNI part
+/// with this unset had `parfast --fast` silently do nothing (TODO 340).
+/// `scale` has no wider competitor to be moved off, so it no longer
+/// waits here: see [`scale_kernel`], and
+/// `research/FAST-MODE-X86-GFNI-2026-09-11.md` for the round that
+/// settled it. What is left under this gate is the BUTTERFLY alone,
+/// which is the only place the trade above is real.
+///
+/// A GFNI part with this unset therefore takes [`butterfly_two_pass`],
+/// which is what it took before the fused kernels landed, so nothing
+/// regresses - and it now does so with joint stage 1 running.
+///
+/// The same EPYC round measured the flip as well, as its `armed` arm
+/// against a decoupled `--fast`: 4.70 s against 5.03 at m = 16,384,
+/// 6.66 against 6.82 at 24,576, 7.28 against 8.01 at 30,000, medians of
+/// three. That is a further 3 to 9% and it points the SAME way at every
+/// depth, which is the first evidence in favour this gate has ever had -
+/// but it is one shared VM that has been withdrawn from quotation, and
+/// a default flip wants a quotable box. Flip it on a measurement, not on
+/// a green suite.
+///
+/// **THE BUTTERFLY TRADE IS NOW MEASURED, ON A QUOTABLE BOX, AND IT
+/// FAVOURS ARMING** (11 Sep 2026, claim `rowop-flip-zen5-ab-11sep`,
+/// `research/GFNI-ROWOP-EVIDENCE-2026-09-11.md` section 12). The round
+/// above is a shared VM withdrawn from quotation; this one is a matched
+/// PAIR of idle Ryzen 7 9800X3D desktops (Zen 5, the same AVX-512 GFNI
+/// class), so every figure is two independent boxes agreeing rather than
+/// one box repeated. `par2ntt::additive`'s own `phase_split` rig
+/// isolates the butterfly from everything else, and on both boxes
+/// [`butterfly_gfni`] runs the forward transform in 0.038 ms against
+/// [`butterfly_two_pass`]'s 0.052-0.053 and the inverse in 0.040
+/// against 0.054-0.055. **So the wider fold kernel loses the trade this
+/// gate was opened for: about -27% on the butterflies, not a
+/// regression.**
+///
+/// **Read that round's whole-repair figures with care - they PREDATE
+/// `scale` leaving this gate** (they were taken on `4c97bd6000`), so
+/// their -8.5%/-7.7% on `ntt syndromes` and -2.0%/-2.3% on wall carry
+/// the in-place scale AND the butterfly together. Decomposed by the same
+/// rig, the butterfly is 0.030 ms of the 0.041 ms total and the scale
+/// 0.011, i.e. about 73/27 - so roughly a quarter of that round's win is
+/// already banked by the decoupling above and needs no flip, and what
+/// this gate still decides is the other three quarters.
+///
+/// One condition on all of it, and it is not this gate's: `par2ntt`'s
+/// additive leaf is only admitted at a leaf fill of 128 sources or more,
+/// and below that these kernels are never called at all - so arming can
+/// buy nothing there, which the PLANNER says (`leaf_fill` reports
+/// `additive 0` before a stripe is transformed) rather than a stopwatch.
+/// That round's first attempt spent 40 reps a side discovering it the
+/// slow way. **Any A/B of this gate MUST report
+/// `par2ntt::FlatPlan::leaf_fill` (`NZBFAST_NTT_FILL=1`) beside its
+/// timings**, or it cannot tell "ran and bought nothing" from "never
+/// ran" - the trap round BL hit on 7 Sep 2026 and this one nearly
+/// repeated.
+///
+/// **When that gate is cleared is CLOSED FORM, not a survey question.**
+/// Base logs are coprime to 65535 = 3*5*17*257, so exactly 2*4*16 = 128
+/// of the 255 leaves are live and fill is `present slices in the WINDOW
+/// / 128` (+-1). The gate is therefore cleared at **16,384 present
+/// slices in one retention window**, and the window is bounded in BYTES
+/// (`min(present, budget / block_size)`), so a large block size starves
+/// the fill however big the set is. Checked against real PAR2 constant
+/// sequences at 2,048 / 8,192 / 16,384 / 16,512 / 29,696 present, giving
+/// fills 16 / 64 / 128 / 129 / 232, and it predicts the Zen 5 round's
+/// two fixtures exactly (8,192 present -> fill 64, refused; 28,672 ->
+/// 224, admitted). So whether this flip is worth anything to a given
+/// user is computed, not guessed.
+///
+/// **FLIPPED ON 11 Sep 2026, on the evidence above.** What
+/// changed on a GFNI part: [`butterfly`] takes [`butterfly_gfni`]
+/// instead of [`butterfly_two_pass`] (~27% on the forward and inverse
+/// transforms), and [`inplace_scale_preferred`] stopped answering no,
+/// so `par2ntt`'s additive leaf scales in place instead of folding
+/// through a zeroed temporary (~58%). Both of those were measured on the
+/// Zen 5 pair and neither was measured slower anywhere. Nothing off a
+/// GFNI part changes at all.
+///
+/// **And since `9856e25f19` a bare `parfast r` is the JOINT arm on an
+/// AVX-512 GFNI part, so an A/B of this gate that means "the shipped
+/// solve" must set `NZBFAST_FORNEY_JOINT=0` explicitly or it races the
+/// on arm against itself.** The doors, checked in both directions
+/// (`=0`, `=off` and `=shipped` all take the shipped solve, and `--fast`
+/// overrides an explicit env off in that direction only), are
+/// `research/JOINT-DEFAULT-FLIP-ALREADY-LANDED-2026-09-11.md` section 3. The Zen 5 round above predates that commit
+/// and is not affected (checked both by ancestry and by every one of its
+/// 120 legs carrying a `back-substitution (forney)` line, which only the
+/// shipped path emits); a repeat on current `main` does not have that
+/// luxury.
+///
+/// Read once.
+#[cfg(target_arch = "x86_64")]
+fn gfni_rowop_armed() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var_os("NZBFAST_GF16_ROWOP_GFNI").is_some_and(|v| v == "0"))
+}
+
+/// The portable butterfly: the fold kernel for the multiply, a plain
+/// pass for the XOR.
+fn butterfly_two_pass(u: &mut [u16], v: &mut [u16], c: u16, inverse: bool) -> usize {
+    let words = (u.len() * 2 / 32) * 16;
+    let (u, v) = (&mut u[..words], &mut v[..words]);
+    if inverse {
+        for (d, s) in v.iter_mut().zip(u.iter()) {
+            *d ^= *s;
+        }
+    }
+    // SAFETY: `v[..words]` is a live, initialised u16 slice of exactly
+    // `words` elements, so the same memory read as `words * 2` bytes is in
+    // bounds and initialised; the fold kernel only reads it, and `u` is a
+    // different slice, so no aliasing with the write.
+    let vb = unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, words * 2) };
+    let done = xor_mul_multi_into(u, &[vb], &[c]);
+    // `words` is sized to the 32-BYTE unit that every kernel here consumes
+    // except one: the 512-bit GFNI arm takes 64 bytes at a time and returns
+    // 0 for anything shorter. A span of 32 to 63 bytes therefore left this
+    // function having done no multiply at all while still reporting `words`
+    // - and the caller has no remainder path, `par2ntt::additive` asserts
+    // this covered the WHOLE span - so on an AVX-512 GFNI part the fold was
+    // silently skipped in release and only the debug assertion that used to
+    // stand here caught it. That is what took unit-one-process red on
+    // 69cbf2e2 (run 34085236302, left 0 right 16); the job's own three
+    // shapes did not include this one, because it is not a process
+    // question at all - a runner WITH that instruction set fails where a
+    // runner without it passes.
+    //
+    // Finish whatever the multi kernel declined. `MulTable::xor_mul_into`
+    // covers any length, tail included, so the span is always complete
+    // after this and the returned `words` is true by construction. On every
+    // other kernel `done == words` and this is not entered.
+    if done < words {
+        MulTable::new(c).xor_mul_into(&mut u[done..], &vb[done * 2..]);
+    }
+    if !inverse {
+        for (d, s) in v.iter_mut().zip(u.iter()) {
+            *d ^= *s;
+        }
+    }
+    words
+}
+
+/// [`butterfly`] on every aarch64 part: the single-source arm of
+/// [`xor_mul_multi_fused`] with the pair's second row updated in the
+/// same chunk pass.
+///
+/// **The attribute enables `neon` and NOTHING ELSE: a feature added back
+/// to it is a SIGILL on every part without that feature, whatever the
+/// intrinsics say** - see the note at the dispatch site in [`butterfly`].
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn butterfly_neon(u: &mut [u16], v: &mut [u16], c: u16, inverse: bool) -> usize {
+    use std::arch::aarch64::*;
+    let chunks = (u.len().min(v.len()) * 2) / 32;
+    if chunks == 0 {
+        return 0;
+    }
+    // SAFETY: NEON incl. pmull on poly8 is baseline on aarch64 and this
+    // kernel asks for nothing beyond it, so there is no feature
+    // precondition; every access stays within the first chunks * 32 bytes
+    // of each row, in bounds by construction of `chunks` from the shorter
+    // row.
+    unsafe {
+        let c_lo = vdupq_n_p8(c as u8);
+        let c_hi = vdupq_n_p8((c >> 8) as u8);
+        let c_mid = vreinterpretq_p8_u8(veorq_u8(
+            vreinterpretq_u8_p8(c_lo),
+            vreinterpretq_u8_p8(c_hi),
+        ));
+        let pml = |d: poly8x16_t, c: poly8x16_t| -> poly16x8_t {
+            vmull_p8(vget_low_p8(d), vget_low_p8(c))
+        };
+        let pmh = |d: poly8x16_t, c: poly8x16_t| -> poly16x8_t { vmull_high_p8(d, c) };
+        let ub = u.as_mut_ptr() as *mut u8;
+        let vb = v.as_mut_ptr() as *mut u8;
+        for ch in 0..chunks {
+            let off = ch * 32;
+            let mut du = vld2q_u8(ub.add(off));
+            let mut dv = vld2q_u8(vb.add(off));
+            if inverse {
+                // v <- v + u first; the multiply reads the new v.
+                dv.0 = veorq_u8(dv.0, du.0);
+                dv.1 = veorq_u8(dv.1, du.1);
+            }
+            let dlo = vreinterpretq_p8_u8(dv.0);
+            let dhi = vreinterpretq_p8_u8(dv.1);
+            let dmid = vreinterpretq_p8_u8(veorq_u8(dv.0, dv.1));
+            let (out_lo, out_hi) = clmul_reduce(
+                pml(dlo, c_lo),
+                pmh(dlo, c_lo),
+                pml(dmid, c_mid),
+                pmh(dmid, c_mid),
+                pml(dhi, c_hi),
+                pmh(dhi, c_hi),
+            );
+            du.0 = veorq_u8(du.0, out_lo);
+            du.1 = veorq_u8(du.1, out_hi);
+            if !inverse {
+                dv.0 = veorq_u8(dv.0, du.0);
+                dv.1 = veorq_u8(dv.1, du.1);
+            }
+            vst2q_u8(ub.add(off), du);
+            vst2q_u8(vb.add(off), dv);
+        }
+    }
+    chunks * 16
+}
+
+/// [`butterfly`] on an x86 part WITHOUT GFNI: [`xor_mul_multi_avx2_n`]'s
+/// single-source nibble-shuffle body with the pair's second row updated
+/// in the same chunk pass. The two-pass form reads and writes `u` twice
+/// and `v` twice; this reads each once and writes each once, which is
+/// what the i5's 256 KB L2 pays for at the additive leaf's 512-row
+/// working set. Whole 32-byte units, u16 WORDS returned.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn butterfly_avx2(u: &mut [u16], v: &mut [u16], c: &FoldCoeff, inverse: bool) -> usize {
+    use std::arch::x86_64::*;
+    let units = (u.len().min(v.len()) * 2) / 32;
+    if units == 0 {
+        return 0;
+    }
+    // Whole 64-byte chunks through the 256-bit body, then - when `units`
+    // is odd - one 32-byte unit at half width, exactly as
+    // `xor_mul_multi_avx2_n` splits it.
+    let chunks = units / 2;
+    // SAFETY: avx2 is enabled here per #[target_feature] (runtime-
+    // verified at the dispatch site). Every access stays within the
+    // first `units * 32` bytes of each row, in bounds by construction of
+    // `units` from the shorter row.
+    unsafe {
+        let bc = |t: &[u8; 16]| {
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(t.as_ptr() as *const __m128i))
+        };
+        let tl: [__m256i; 4] = std::array::from_fn(|j| bc(&c.nl[j]));
+        let th: [__m256i; 4] = std::array::from_fn(|j| bc(&c.nh[j]));
+        let nib = _mm256_set1_epi8(0x0f);
+        let lo8 = _mm256_set1_epi16(0x00ff);
+        // c * (d0, d1), the 64-byte product in the source's own byte
+        // order: `xor_mul_multi_avx2_n`'s body with one source and the
+        // destination XOR left to the caller.
+        let prod = |d0: __m256i, d1: __m256i| -> (__m256i, __m256i) {
+            let slo = _mm256_packus_epi16(_mm256_and_si256(d0, lo8), _mm256_and_si256(d1, lo8));
+            let shi = _mm256_packus_epi16(_mm256_srli_epi16(d0, 8), _mm256_srli_epi16(d1, 8));
+            let n0 = _mm256_and_si256(slo, nib);
+            let n1 = _mm256_and_si256(_mm256_srli_epi16(slo, 4), nib);
+            let n2 = _mm256_and_si256(shi, nib);
+            let n3 = _mm256_and_si256(_mm256_srli_epi16(shi, 4), nib);
+            let plo = _mm256_xor_si256(
+                _mm256_xor_si256(
+                    _mm256_shuffle_epi8(tl[0], n0),
+                    _mm256_shuffle_epi8(tl[1], n1),
+                ),
+                _mm256_xor_si256(
+                    _mm256_shuffle_epi8(tl[2], n2),
+                    _mm256_shuffle_epi8(tl[3], n3),
+                ),
+            );
+            let phi = _mm256_xor_si256(
+                _mm256_xor_si256(
+                    _mm256_shuffle_epi8(th[0], n0),
+                    _mm256_shuffle_epi8(th[1], n1),
+                ),
+                _mm256_xor_si256(
+                    _mm256_shuffle_epi8(th[2], n2),
+                    _mm256_shuffle_epi8(th[3], n3),
+                ),
+            );
+            (
+                _mm256_unpacklo_epi8(plo, phi),
+                _mm256_unpackhi_epi8(plo, phi),
+            )
+        };
+        let ub = u.as_mut_ptr() as *mut u8;
+        let vb = v.as_mut_ptr() as *mut u8;
+        for ch in 0..chunks {
+            let off = ch * 64;
+            let up = ub.add(off) as *mut __m256i;
+            let vp = vb.add(off) as *mut __m256i;
+            let mut u0 = _mm256_loadu_si256(up);
+            let mut u1 = _mm256_loadu_si256(up.add(1));
+            let mut v0 = _mm256_loadu_si256(vp);
+            let mut v1 = _mm256_loadu_si256(vp.add(1));
+            if inverse {
+                // v <- v + u first; the multiply reads the new v.
+                v0 = _mm256_xor_si256(v0, u0);
+                v1 = _mm256_xor_si256(v1, u1);
+            }
+            let (p0, p1) = prod(v0, v1);
+            u0 = _mm256_xor_si256(u0, p0);
+            u1 = _mm256_xor_si256(u1, p1);
+            if !inverse {
+                v0 = _mm256_xor_si256(v0, u0);
+                v1 = _mm256_xor_si256(v1, u1);
+            }
+            _mm256_storeu_si256(up, u0);
+            _mm256_storeu_si256(up.add(1), u1);
+            _mm256_storeu_si256(vp, v0);
+            _mm256_storeu_si256(vp.add(1), v1);
+        }
+        if !units.is_multiple_of(2) {
+            // The odd 32-byte unit in 128-bit lanes: identical algebra,
+            // because `packus`/`unpack` are per-128-bit-lane in the wide
+            // body and `bc` built each table by broadcasting its 128-bit
+            // form, so the low lane IS the table.
+            let off = chunks * 64;
+            let nib128 = _mm_set1_epi8(0x0f);
+            let lo8_128 = _mm_set1_epi16(0x00ff);
+            let lane = _mm256_castsi256_si128;
+            let prod128 = |d0: __m128i, d1: __m128i| -> (__m128i, __m128i) {
+                let slo = _mm_packus_epi16(_mm_and_si128(d0, lo8_128), _mm_and_si128(d1, lo8_128));
+                let shi = _mm_packus_epi16(_mm_srli_epi16(d0, 8), _mm_srli_epi16(d1, 8));
+                let n0 = _mm_and_si128(slo, nib128);
+                let n1 = _mm_and_si128(_mm_srli_epi16(slo, 4), nib128);
+                let n2 = _mm_and_si128(shi, nib128);
+                let n3 = _mm_and_si128(_mm_srli_epi16(shi, 4), nib128);
+                let plo = _mm_xor_si128(
+                    _mm_xor_si128(
+                        _mm_shuffle_epi8(lane(tl[0]), n0),
+                        _mm_shuffle_epi8(lane(tl[1]), n1),
+                    ),
+                    _mm_xor_si128(
+                        _mm_shuffle_epi8(lane(tl[2]), n2),
+                        _mm_shuffle_epi8(lane(tl[3]), n3),
+                    ),
+                );
+                let phi = _mm_xor_si128(
+                    _mm_xor_si128(
+                        _mm_shuffle_epi8(lane(th[0]), n0),
+                        _mm_shuffle_epi8(lane(th[1]), n1),
+                    ),
+                    _mm_xor_si128(
+                        _mm_shuffle_epi8(lane(th[2]), n2),
+                        _mm_shuffle_epi8(lane(th[3]), n3),
+                    ),
+                );
+                (_mm_unpacklo_epi8(plo, phi), _mm_unpackhi_epi8(plo, phi))
+            };
+            let up = ub.add(off) as *mut __m128i;
+            let vp = vb.add(off) as *mut __m128i;
+            let mut u0 = _mm_loadu_si128(up);
+            let mut u1 = _mm_loadu_si128(up.add(1));
+            let mut v0 = _mm_loadu_si128(vp);
+            let mut v1 = _mm_loadu_si128(vp.add(1));
+            if inverse {
+                v0 = _mm_xor_si128(v0, u0);
+                v1 = _mm_xor_si128(v1, u1);
+            }
+            let (p0, p1) = prod128(v0, v1);
+            u0 = _mm_xor_si128(u0, p0);
+            u1 = _mm_xor_si128(u1, p1);
+            if !inverse {
+                v0 = _mm_xor_si128(v0, u0);
+                v1 = _mm_xor_si128(v1, u1);
+            }
+            _mm_storeu_si128(up, u0);
+            _mm_storeu_si128(up.add(1), u1);
+            _mm_storeu_si128(vp, v0);
+            _mm_storeu_si128(vp.add(1), v1);
+        }
+    }
+    units * 16
+}
+
+/// [`butterfly`] on a GFNI part: [`xor_mul_multi_gfni_n`]'s affine2x
+/// body with one source and the pair's second row updated in the same
+/// 32-byte chunk pass. UNMEASURED on this fleet - no box here has GFNI
+/// (the Zenbook is down) - so it is written to the same shape as the
+/// AVX2 arm above and covered by the same differential, and the leaf's
+/// x86 numbers in the handoff are the i5's nibble arm.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "gfni,avx2")]
+unsafe fn butterfly_gfni(u: &mut [u16], v: &mut [u16], c: u16, inverse: bool) -> usize {
+    use std::arch::x86_64::*;
+    let chunks = (u.len().min(v.len()) * 2) / 32;
+    if chunks == 0 {
+        return 0;
+    }
+    // SAFETY: gfni+avx2 are enabled here per #[target_feature] (runtime-
+    // verified at the dispatch site). Every access stays within the first
+    // `chunks * 32` bytes of each row, in bounds by construction of
+    // `chunks` from the shorter row.
+    unsafe {
+        let m = affine_matrices_fast(c);
+        let mat_n = _mm256_set_epi64x(m[3] as i64, m[0] as i64, m[3] as i64, m[0] as i64);
+        let mat_s = _mm256_set_epi64x(m[1] as i64, m[2] as i64, m[1] as i64, m[2] as i64);
+        let deint = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+            0, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15,
+        ));
+        let inter = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+            0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15,
+        ));
+        let ub = u.as_mut_ptr() as *mut u8;
+        let vb = v.as_mut_ptr() as *mut u8;
+        for ch in 0..chunks {
+            let off = ch * 32;
+            let up = ub.add(off) as *mut __m256i;
+            let vp = vb.add(off) as *mut __m256i;
+            let mut uu = _mm256_loadu_si256(up);
+            let mut vv = _mm256_loadu_si256(vp);
+            if inverse {
+                vv = _mm256_xor_si256(vv, uu);
+            }
+            let data = _mm256_shuffle_epi8(vv, deint);
+            let acc_n = _mm256_gf2p8affine_epi64_epi8::<0>(data, mat_n);
+            let acc_s = _mm256_gf2p8affine_epi64_epi8::<0>(data, mat_s);
+            // 0x4E = _MM_SHUFFLE(1,0,3,2): swap the qwords of each lane,
+            // bringing the cross-half contributions home.
+            let res = _mm256_xor_si256(acc_n, _mm256_shuffle_epi32::<0x4E>(acc_s));
+            uu = _mm256_xor_si256(uu, _mm256_shuffle_epi8(res, inter));
+            if !inverse {
+                vv = _mm256_xor_si256(vv, uu);
+            }
+            _mm256_storeu_si256(up, uu);
+            _mm256_storeu_si256(vp, vv);
+        }
+    }
+    chunks * 16
+}
+
+/// `row <- c * row`, in place, over whole 32-byte units; returns the u16
+/// WORDS processed, the caller running any remainder itself.
+///
+/// The fold kernels all compute `dst ^= c * src` against a SEPARATE
+/// source, so a caller that wants a row scaled by itself has to zero a
+/// temporary, fold into it and copy back - three passes over the row and
+/// a second row's worth of cache, for one pass of arithmetic. The
+/// additive leaf's pointwise step does exactly that 512 times per leaf,
+/// which is why this exists.
+pub fn scale(row: &mut [u16], c: &FoldCoeff) -> usize {
+    let words = (row.len() * 2 / 32) * 16;
+    if c.coeff() == 1 {
+        return words;
+    }
+    if c.coeff() == 0 {
+        row[..words].fill(0);
+        return words;
+    }
+    scale_dispatch(row, c)
+}
+
+/// Which kernel [`scale`] selects on this build and CPU.
+///
+/// ONE copy of the rule, for the reason the gate suite states as "one
+/// rule, one copy": `scale_dispatch` dispatches on it,
+/// [`scale_available`] asks whether it is a vector arm, and a CLI that
+/// has to TELL the user why a fast path declined names it. Three
+/// transcriptions of the same predicate is how a diagnostic ends up
+/// naming the arm the solve did not take.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScaleKernel {
+    /// `scale_neon`: the PMULL kernel, baseline on aarch64.
+    Neon,
+    /// `scale_gfni`: 256-bit GFNI, behind `gfni_rowop_armed`.
+    Gfni256,
+    /// `scale_avx2`: the AVX2 nibble-shuffle kernel.
+    Avx2Nibble,
+    /// `scale_ssse3`: the same nibble kernel at 128 bits, for an x86
+    /// part with `pshufb` and no AVX2.
+    Ssse3Nibble,
+    /// `scale_scalar`: a 512-entry [`MulTable`] per call, and NOT a
+    /// vector arm - [`scale_available`] answers no here.
+    Scalar,
+}
+
+impl ScaleKernel {
+    /// The short name a diagnostic prints.
+    pub fn name(self) -> &'static str {
+        match self {
+            ScaleKernel::Neon => "neon",
+            ScaleKernel::Gfni256 => "gfni256",
+            ScaleKernel::Avx2Nibble => "avx2-nibble",
+            ScaleKernel::Ssse3Nibble => "ssse3-nibble",
+            ScaleKernel::Scalar => "scalar",
+        }
+    }
+
+    /// What would give this CPU a vector [`scale`], in the user's
+    /// terms - `None` once it has one.
+    ///
+    /// Only [`ScaleKernel::Scalar`] has an answer, and on x86 there are
+    /// two quite different ones: a GFNI part HAS the kernel and ships
+    /// with it disarmed, while an SSSE3-only part does not have one at
+    /// all. Saying "unsupported CPU" to the first would be false.
+    pub fn remedy(self) -> Option<&'static str> {
+        if self != ScaleKernel::Scalar {
+            return None;
+        }
+        // THREE different answers, and "unsupported CPU" is right for
+        // only one of them. Collapsing them is the misdiagnosis TODO 340
+        // is about. There were four until `scale` stopped waiting on the
+        // row-op gate: a GFNI part cannot reach this function any more,
+        // because `scale_kernel` never answers `Scalar` there.
+        #[cfg(target_arch = "x86_64")]
+        {
+            // The research knob, not the silicon. `a4237f96bb` wrote
+            // AVX2 and GFNI scale/butterfly kernels and no SSSE3 one,
+            // so forcing ssse3 refuses a kernel this CPU HAS - which is
+            // a very different sentence from not having one.
+            Some("this CPU has no SSSE3, AVX2 or GFNI row kernel")
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Unreachable: `scale_kernel` never answers `Scalar` here.
+            // Kept rather than `unreachable!` because a diagnostic must
+            // not be the thing that panics a repair.
+            None
+        }
+        // armv7 is the shipped case: the 32-bit ARM tarball has no
+        // vector fold AT ALL (`xor_mul_multi_into` returns 0 there), so
+        // this is the BUILD's target and not the chip in the machine,
+        // and telling a Raspberry Pi owner their CPU is unsupported
+        // would be false - the 64-bit build on the same board runs it.
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            Some(
+                "this build's target architecture has no vector row kernel; \
+                 --fast needs an x86-64 or 64-bit ARM build",
+            )
+        }
+    }
+}
+
+/// The kernel [`scale`] would run here. Read by [`scale_dispatch`],
+/// [`scale_available`] and by diagnostics; nothing else re-derives it.
+pub fn scale_kernel() -> ScaleKernel {
+    #[cfg(target_arch = "aarch64")]
+    {
+        ScaleKernel::Neon
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // NOT `gfni_rowop_armed()`, and that asymmetry with `butterfly`
+        // is the whole of TODO 340's second half.
+        //
+        // The gate exists because arming the BUTTERFLY moves work off a
+        // wider fold kernel - 64 bytes at a time on an AVX-512 part -
+        // onto a fused 256-bit one, which is a trade nobody had
+        // measured. `scale` has no such competitor. Unarmed, this
+        // dispatch lands on `scale_scalar`, a 512-entry table built per
+        // row, so `scale_available` answers no and its two callers take
+        // a THIRD path instead: `par2ntt`'s additive leaf folds through
+        // a zeroed temporary, and `par2repair::forney::joint` declines
+        // stage 1 outright. The second of those is `parfast --fast`
+        // silently doing nothing on every GFNI part - Arrow Lake, Zen 4,
+        // anything recent - which is the defect TODO 340 opened.
+        //
+        // Measured 11 Sep 2026 on an EPYC 9354P (Zen 4, the AVX-512
+        // GFNI class, where the butterfly trade is at its WORST): the
+        // joint stage-1 kernel beat the fallback arithmetic on 12 of 12
+        // paired legs, at every depth and every repetition, and the
+        // whole-repair gain tracks the solve's share of the repair -
+        // nothing at m = 8,192, 10% at 16,384, 12 to 18% at 30,000.
+        // `research/FAST-MODE-X86-GFNI-2026-09-11.md` carries the round
+        // and its stated limits. The kernels themselves were proved on
+        // both GFNI classes on 11 Sep
+        // (`research/GFNI-ROWOP-EVIDENCE-2026-09-11.md`); what was
+        // missing was never their correctness.
+        if gfni256_available() {
+            ScaleKernel::Gfni256
+        } else if nibble_kernel_selected()
+            && forced_nibble_kernel() != Some("ssse3")
+            && is_x86_feature_detected!("avx2")
+        {
+            ScaleKernel::Avx2Nibble
+        } else if nibble_kernel_selected() && is_x86_feature_detected!("ssse3") {
+            // THE `!= Some("ssse3")` GUARD ABOVE IS NOW THE ONLY THING
+            // THAT ARM NEEDS, and this one no longer carries it. Until
+            // 11 Sep 2026 that guard appeared on BOTH arms, and on the
+            // second it was not a choice between kernels: `a4237f96bb`
+            // wrote AVX2 and GFNI scale kernels and no SSSE3 one, so
+            // the guard was marking an ABSENCE. `scale_ssse3` fills it,
+            // so the absence is gone and the guard with it - a forced
+            // ssse3 arm now gets the ssse3 kernel, which is what the
+            // knob always claimed to do.
+            ScaleKernel::Ssse3Nibble
+        } else {
+            ScaleKernel::Scalar
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        ScaleKernel::Scalar
+    }
+}
+
+/// Whether [`scale`] has a VECTOR kernel on this build and CPU. False on
+/// any x86 that lands on the SSSE3-less scalar arm, and on nothing else:
+/// a GFNI part answers YES since 11 Sep 2026, whatever
+/// `gfni_rowop_armed` says - see [`scale_kernel`].
+///
+/// **This answers EXISTENCE, not preference.** A caller choosing between
+/// the in-place form and folding through a zeroed temporary wants
+/// [`inplace_scale_preferred`] instead; the two differ on exactly one
+/// part, and conflating them is what made this function's answer
+/// load-bearing for two questions with different evidence behind them.
+pub fn scale_available() -> bool {
+    scale_kernel() != ScaleKernel::Scalar
+}
+
+/// Whether a caller with a CHOICE should scale in place rather than fold
+/// through a zeroed temporary.
+///
+/// Not the same question as [`scale_available`], and the split is the
+/// whole of why this change could land while four publication rounds
+/// were in flight.
+///
+/// `par2repair::forney`'s joint arm has no choice: it scales in place or
+/// it declines stage 1 outright, and it is reached only when a user asks
+/// for it with `parfast --fast`. `par2ntt`'s additive leaf DOES have a
+/// choice - it folded through a temporary before `scale` existed and can
+/// still do that - and it is on EVERY create and repair, gated by no
+/// switch at all. Same kernel, two callers, and the evidence needed to
+/// move them is not the same size.
+///
+/// It held an x86 arm answering NO on a GFNI part, so that the leaf kept
+/// folding through a temporary until its own arm had been measured
+/// there - the opt-in path got the kernel, the ungated path kept what it
+/// had been running, and nothing in flight changed underneath. That
+/// arm's stated precondition was "when a quotable GFNI box has measured
+/// the leaf, delete it".
+///
+/// **A quotable box has, so it is deleted** (11 Sep 2026): on two
+/// matched idle Ryzen 7 9800X3D, the leaf's pointwise step reads
+/// 0.008 ms in place against 0.019 ms through the temporary, about -58%,
+/// median of three runs on each box. The earlier shared-VM reading had
+/// the two arms level, which was a reason to expect no harm rather than
+/// a reason to ship unmeasured; this is the measurement it was waiting
+/// for.
+///
+/// **So this is now a pass-through and the split it existed for is
+/// spent.** It is kept as a name rather than collapsed into
+/// [`scale_available`] because the two questions are genuinely
+/// different - "is there a kernel" and "should a caller with a choice
+/// use it" - and a target that ever wants to answer them differently
+/// again should find the seam here rather than re-cut it. Collapsing it
+/// is available to a later lane; doing it in the same commit as a
+/// default flip is not.
+pub fn inplace_scale_preferred() -> bool {
+    scale_available()
+}
+
+/// [`scale`]'s kernel call, on whichever arm [`scale_kernel`] named.
+/// The selection is NOT repeated here - the same enum [`scale_available`]
+/// reads and a diagnostic prints is what decides.
+fn scale_dispatch(row: &mut [u16], c: &FoldCoeff) -> usize {
+    match scale_kernel() {
+        // SAFETY: NEON, incl. pmull on poly8, is baseline on aarch64, so
+        // there is no feature precondition; the kernel derives its own
+        // bounds from `row`.
+        #[cfg(target_arch = "aarch64")]
+        ScaleKernel::Neon => unsafe { scale_neon(row, c.coeff()) },
+        // SAFETY: gfni+avx2 verified by `gfni256_available`, which
+        // `scale_kernel` checked to reach this arm; the kernel derives
+        // its own bounds from `row`.
+        #[cfg(target_arch = "x86_64")]
+        ScaleKernel::Gfni256 => unsafe { scale_gfni(row, c.coeff()) },
+        // SAFETY: avx2 verified by `scale_kernel`; the nibble tables
+        // this kernel reads are populated exactly when
+        // `nibble_kernel_selected` (see `FoldCoeff::new`).
+        #[cfg(target_arch = "x86_64")]
+        ScaleKernel::Avx2Nibble => unsafe { scale_avx2(row, c) },
+        // SAFETY: ssse3 verified by `scale_kernel`; the nibble tables
+        // this kernel reads are populated exactly when
+        // `nibble_kernel_selected` (see `FoldCoeff::new`).
+        #[cfg(target_arch = "x86_64")]
+        ScaleKernel::Ssse3Nibble => unsafe { scale_ssse3(row, c) },
+        #[cfg(not(target_arch = "aarch64"))]
+        ScaleKernel::Scalar => scale_scalar(row, c.coeff()),
+        // `scale_kernel` never names a kernel off its own architecture,
+        // so the variants left over on each build are unreachable rather
+        // than unhandled - and `scale_scalar` does not exist on aarch64,
+        // which is why this cannot simply be the scalar arm.
+        #[allow(unreachable_patterns)]
+        k => unreachable!("scale_kernel chose {k:?}, which this build has no kernel for"),
+    }
+}
+
+/// The portable scale: one [`MulTable`] over the span. Off the SIMD arms
+/// only, so the table build is not on any shipped path. It read "(512
+/// multiplies)" until 11 Sep 2026, when [`split_tables`] made it a
+/// subset walk; the point of the sentence - that this arm is not worth
+/// tuning - is unchanged.
+#[cfg(not(target_arch = "aarch64"))]
+fn scale_scalar(row: &mut [u16], c: u16) -> usize {
+    let words = (row.len() * 2 / 32) * 16;
+    let t = MulTable::new(c);
+    for w in row[..words].iter_mut() {
+        *w = t.mul(*w);
+    }
+    words
+}
+
+/// [`scale`]'s aarch64 kernel: [`butterfly_neon`]'s multiply with
+/// the product stored over the source. Baseline NEON - the Barrett
+/// reduction is value-only and needs no sha3.
+#[cfg(target_arch = "aarch64")]
+unsafe fn scale_neon(row: &mut [u16], c: u16) -> usize {
+    use std::arch::aarch64::*;
+    let chunks = (row.len() * 2) / 32;
+    if chunks == 0 {
+        return 0;
+    }
+    // SAFETY: NEON incl. pmull on poly8 is baseline on aarch64. Every
+    // access stays within the first `chunks * 32` bytes of `row`, in
+    // bounds by construction of `chunks`.
+    unsafe {
+        let c_lo = vdupq_n_p8(c as u8);
+        let c_hi = vdupq_n_p8((c >> 8) as u8);
+        let c_mid = vreinterpretq_p8_u8(veorq_u8(
+            vreinterpretq_u8_p8(c_lo),
+            vreinterpretq_u8_p8(c_hi),
+        ));
+        let pml = |d: poly8x16_t, c: poly8x16_t| -> poly16x8_t {
+            vmull_p8(vget_low_p8(d), vget_low_p8(c))
+        };
+        let pmh = |d: poly8x16_t, c: poly8x16_t| -> poly16x8_t { vmull_high_p8(d, c) };
+        let rb = row.as_mut_ptr() as *mut u8;
+        for ch in 0..chunks {
+            let off = ch * 32;
+            let mut d = vld2q_u8(rb.add(off));
+            let dlo = vreinterpretq_p8_u8(d.0);
+            let dhi = vreinterpretq_p8_u8(d.1);
+            let dmid = vreinterpretq_p8_u8(veorq_u8(d.0, d.1));
+            let (out_lo, out_hi) = clmul_reduce(
+                pml(dlo, c_lo),
+                pmh(dlo, c_lo),
+                pml(dmid, c_mid),
+                pmh(dmid, c_mid),
+                pml(dhi, c_hi),
+                pmh(dhi, c_hi),
+            );
+            d.0 = out_lo;
+            d.1 = out_hi;
+            vst2q_u8(rb.add(off), d);
+        }
+    }
+    chunks * 16
+}
+
+/// [`scale`]'s AVX2 nibble kernel: [`butterfly_avx2`]'s product stored
+/// over the source.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scale_avx2(row: &mut [u16], c: &FoldCoeff) -> usize {
+    use std::arch::x86_64::*;
+    let units = (row.len() * 2) / 32;
+    if units == 0 {
+        return 0;
+    }
+    let chunks = units / 2;
+    // SAFETY: avx2 is enabled here per #[target_feature] (runtime-
+    // verified at the dispatch site). Every access stays within the first
+    // `units * 32` bytes of `row`.
+    unsafe {
+        let bc = |t: &[u8; 16]| {
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(t.as_ptr() as *const __m128i))
+        };
+        let tl: [__m256i; 4] = std::array::from_fn(|j| bc(&c.nl[j]));
+        let th: [__m256i; 4] = std::array::from_fn(|j| bc(&c.nh[j]));
+        let nib = _mm256_set1_epi8(0x0f);
+        let lo8 = _mm256_set1_epi16(0x00ff);
+        let rb = row.as_mut_ptr() as *mut u8;
+        for ch in 0..chunks {
+            let off = ch * 64;
+            let rp = rb.add(off) as *mut __m256i;
+            let d0 = _mm256_loadu_si256(rp);
+            let d1 = _mm256_loadu_si256(rp.add(1));
+            let slo = _mm256_packus_epi16(_mm256_and_si256(d0, lo8), _mm256_and_si256(d1, lo8));
+            let shi = _mm256_packus_epi16(_mm256_srli_epi16(d0, 8), _mm256_srli_epi16(d1, 8));
+            let n0 = _mm256_and_si256(slo, nib);
+            let n1 = _mm256_and_si256(_mm256_srli_epi16(slo, 4), nib);
+            let n2 = _mm256_and_si256(shi, nib);
+            let n3 = _mm256_and_si256(_mm256_srli_epi16(shi, 4), nib);
+            let plo = _mm256_xor_si256(
+                _mm256_xor_si256(
+                    _mm256_shuffle_epi8(tl[0], n0),
+                    _mm256_shuffle_epi8(tl[1], n1),
+                ),
+                _mm256_xor_si256(
+                    _mm256_shuffle_epi8(tl[2], n2),
+                    _mm256_shuffle_epi8(tl[3], n3),
+                ),
+            );
+            let phi = _mm256_xor_si256(
+                _mm256_xor_si256(
+                    _mm256_shuffle_epi8(th[0], n0),
+                    _mm256_shuffle_epi8(th[1], n1),
+                ),
+                _mm256_xor_si256(
+                    _mm256_shuffle_epi8(th[2], n2),
+                    _mm256_shuffle_epi8(th[3], n3),
+                ),
+            );
+            _mm256_storeu_si256(rp, _mm256_unpacklo_epi8(plo, phi));
+            _mm256_storeu_si256(rp.add(1), _mm256_unpackhi_epi8(plo, phi));
+        }
+        if !units.is_multiple_of(2) {
+            // The odd 32-byte unit at half width - see `butterfly_avx2`.
+            let off = chunks * 64;
+            let nib128 = _mm_set1_epi8(0x0f);
+            let lo8_128 = _mm_set1_epi16(0x00ff);
+            let lane = _mm256_castsi256_si128;
+            let rp = rb.add(off) as *mut __m128i;
+            let d0 = _mm_loadu_si128(rp);
+            let d1 = _mm_loadu_si128(rp.add(1));
+            let slo = _mm_packus_epi16(_mm_and_si128(d0, lo8_128), _mm_and_si128(d1, lo8_128));
+            let shi = _mm_packus_epi16(_mm_srli_epi16(d0, 8), _mm_srli_epi16(d1, 8));
+            let n0 = _mm_and_si128(slo, nib128);
+            let n1 = _mm_and_si128(_mm_srli_epi16(slo, 4), nib128);
+            let n2 = _mm_and_si128(shi, nib128);
+            let n3 = _mm_and_si128(_mm_srli_epi16(shi, 4), nib128);
+            let plo = _mm_xor_si128(
+                _mm_xor_si128(
+                    _mm_shuffle_epi8(lane(tl[0]), n0),
+                    _mm_shuffle_epi8(lane(tl[1]), n1),
+                ),
+                _mm_xor_si128(
+                    _mm_shuffle_epi8(lane(tl[2]), n2),
+                    _mm_shuffle_epi8(lane(tl[3]), n3),
+                ),
+            );
+            let phi = _mm_xor_si128(
+                _mm_xor_si128(
+                    _mm_shuffle_epi8(lane(th[0]), n0),
+                    _mm_shuffle_epi8(lane(th[1]), n1),
+                ),
+                _mm_xor_si128(
+                    _mm_shuffle_epi8(lane(th[2]), n2),
+                    _mm_shuffle_epi8(lane(th[3]), n3),
+                ),
+            );
+            _mm_storeu_si128(rp, _mm_unpacklo_epi8(plo, phi));
+            _mm_storeu_si128(rp.add(1), _mm_unpackhi_epi8(plo, phi));
+        }
+    }
+    units * 16
+}
+
+/// [`scale`] on SSSE3: the 128-bit nibble kernel, for an x86 part with
+/// `pshufb` and no AVX2.
+///
+/// **This is [`scale_avx2`]'s own odd-unit tail, promoted to a kernel.**
+/// That tail already runs the whole algorithm at 128 bits and is
+/// exercised by `scale_matches_the_definition_in_place` at every odd
+/// `units`, so the arithmetic arrives differential-tested rather than
+/// newly written. Only the loop around it is new, which is the point: a
+/// kernel this file has already proved should not be rewritten to reach
+/// one more CPU.
+///
+/// # Why this one function is the whole of SSSE3 support
+///
+/// [`butterfly`] needs no SSSE3 arm - it falls through
+/// [`butterfly_two_pass`], whose multiply is [`xor_mul_multi_into`] and
+/// therefore already [`xor_mul_multi_ssse3`]. `scale` was the only
+/// operation with no SSSE3 path at all, and [`scale_available`] is what
+/// `par2repair::forney::joint` consults. So on an SSSE3-only part -
+/// Intel before Haswell, AMD before Excavator - `parfast --fast` was
+/// accepted and then declined, for want of exactly this loop.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn scale_ssse3(row: &mut [u16], c: &FoldCoeff) -> usize {
+    use std::arch::x86_64::*;
+    let units = (row.len() * 2) / 32;
+    if units == 0 {
+        return 0;
+    }
+    // SAFETY: ssse3 is enabled here per #[target_feature] (runtime-
+    // verified at the dispatch site). Every access stays within the
+    // first `units * 32` bytes of `row`.
+    unsafe {
+        let ld = |t: &[u8; 16]| _mm_loadu_si128(t.as_ptr() as *const __m128i);
+        let tl: [__m128i; 4] = std::array::from_fn(|j| ld(&c.nl[j]));
+        let th: [__m128i; 4] = std::array::from_fn(|j| ld(&c.nh[j]));
+        let nib = _mm_set1_epi8(0x0f);
+        let lo8 = _mm_set1_epi16(0x00ff);
+        let rb = row.as_mut_ptr() as *mut u8;
+        for u in 0..units {
+            let rp = rb.add(u * 32) as *mut __m128i;
+            let d0 = _mm_loadu_si128(rp);
+            let d1 = _mm_loadu_si128(rp.add(1));
+            // Deinterleave the u16 lanes into a low-byte half and a
+            // high-byte half, so one `pshufb` table serves each nibble.
+            let slo = _mm_packus_epi16(_mm_and_si128(d0, lo8), _mm_and_si128(d1, lo8));
+            let shi = _mm_packus_epi16(_mm_srli_epi16(d0, 8), _mm_srli_epi16(d1, 8));
+            let n0 = _mm_and_si128(slo, nib);
+            let n1 = _mm_and_si128(_mm_srli_epi16(slo, 4), nib);
+            let n2 = _mm_and_si128(shi, nib);
+            let n3 = _mm_and_si128(_mm_srli_epi16(shi, 4), nib);
+            let plo = _mm_xor_si128(
+                _mm_xor_si128(_mm_shuffle_epi8(tl[0], n0), _mm_shuffle_epi8(tl[1], n1)),
+                _mm_xor_si128(_mm_shuffle_epi8(tl[2], n2), _mm_shuffle_epi8(tl[3], n3)),
+            );
+            let phi = _mm_xor_si128(
+                _mm_xor_si128(_mm_shuffle_epi8(th[0], n0), _mm_shuffle_epi8(th[1], n1)),
+                _mm_xor_si128(_mm_shuffle_epi8(th[2], n2), _mm_shuffle_epi8(th[3], n3)),
+            );
+            _mm_storeu_si128(rp, _mm_unpacklo_epi8(plo, phi));
+            _mm_storeu_si128(rp.add(1), _mm_unpackhi_epi8(plo, phi));
+        }
+    }
+    units * 16
+}
+
+/// [`scale`]'s GFNI kernel: [`butterfly_gfni`]'s product stored over the
+/// source. UNMEASURED on this fleet, as that one is.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "gfni,avx2")]
+unsafe fn scale_gfni(row: &mut [u16], c: u16) -> usize {
+    use std::arch::x86_64::*;
+    let chunks = (row.len() * 2) / 32;
+    if chunks == 0 {
+        return 0;
+    }
+    // SAFETY: gfni+avx2 are enabled here per #[target_feature] (runtime-
+    // verified at the dispatch site). Every access stays within the first
+    // `chunks * 32` bytes of `row`.
+    unsafe {
+        let m = affine_matrices_fast(c);
+        let mat_n = _mm256_set_epi64x(m[3] as i64, m[0] as i64, m[3] as i64, m[0] as i64);
+        let mat_s = _mm256_set_epi64x(m[1] as i64, m[2] as i64, m[1] as i64, m[2] as i64);
+        let deint = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+            0, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15,
+        ));
+        let inter = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+            0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15,
+        ));
+        let rb = row.as_mut_ptr() as *mut u8;
+        for ch in 0..chunks {
+            let off = ch * 32;
+            let rp = rb.add(off) as *mut __m256i;
+            let data = _mm256_shuffle_epi8(_mm256_loadu_si256(rp), deint);
+            let acc_n = _mm256_gf2p8affine_epi64_epi8::<0>(data, mat_n);
+            let acc_s = _mm256_gf2p8affine_epi64_epi8::<0>(data, mat_s);
+            let res = _mm256_xor_si256(acc_n, _mm256_shuffle_epi32::<0x4E>(acc_s));
+            _mm256_storeu_si256(rp, _mm256_shuffle_epi8(res, inter));
+        }
+    }
+    chunks * 16
+}
+
+// The tests live in `gf16/tests.rs`: this file crossed the size gate's
+// 4,000-line file ceiling when the additive FFT's fused butterfly and
+// in-place scale kernels landed (7 Sep 2026), and the inline `mod tests`
+// was the seam - 768 lines of it, the same split
+// `crates/postfast/src/container.rs` took on 4 Sep. They still read this
+// module's privates through `use super::*`, so nothing was widened to
+// move them.
+#[cfg(test)]
+mod tests;

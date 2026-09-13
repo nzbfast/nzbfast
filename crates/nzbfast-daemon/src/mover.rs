@@ -495,7 +495,15 @@ impl Daemon {
                 }
                 Some((line.saturating_sub(wire_bps + line / 10)).max(5_000_000))
             }
-            n => n.parse::<u64>().ok().map(|mb| mb.max(1) * 1_000_000),
+            // `saturating_mul`: `move_pace` is restored from
+            // `settings.json` with no validation, so this is not only the
+            // API's own range - an out-of-range persisted value
+            // overflowed here (panic when checked, wrap to a TINY budget
+            // in release, which stalls the mover).
+            n => n
+                .parse::<u64>()
+                .ok()
+                .map(|mb| mb.max(1).saturating_mul(1_000_000)),
         }
     }
 

@@ -99,7 +99,7 @@ fn the_session_and_the_job_merge_by_high_water() {
 /// plan is upgraded, and job 2 quietly holds 100 on a gauge that has
 /// never recorded a cap of its own - so `retire_cap_if_exceeded`
 /// returns at its first line and the row went on serving "capped at 38
-/// of 100" from session memory until the daemon restarted (Codex sweep
+/// of 100" from session memory until the daemon restarted (review sweep
 /// 6, N4).
 #[test]
 fn a_fleet_holding_more_than_the_ceiling_retires_the_session_copy() {

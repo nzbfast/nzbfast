@@ -171,7 +171,7 @@ async fn hard_outage_window_parks_the_fleet_then_rejoins() {
     );
 }
 
-/// Codex 7 Aug M1: during a from-the-start outage the prober's paced
+/// Review 7 Aug M1: during a from-the-start outage the prober's paced
 /// bounce ladder decodes nothing and resolves nothing, so none of the
 /// stall watchdog's three signals moved and its 180 s default aborted
 /// jobs squarely inside the ladder's promised ~10 min horizon. Each

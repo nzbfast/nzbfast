@@ -104,7 +104,7 @@ pub(super) const RUNS_TREE_AT: usize = 32;
 /// the same cost class - which is what lets ONE merge algorithm sit over
 /// both. Writing the merge twice, once per container, is the shape this
 /// module exists to avoid: this tree has lost days to hand-copied
-/// siblings that then drifted, and CLAUDE.md's gate list is largely a
+/// siblings that then drifted, and CONTRIBUTING.md's gate list is largely a
 /// monument to it.
 enum Runs<V> {
     Few(Vec<(usize, V)>),
@@ -276,7 +276,7 @@ impl Partial {
         // every run is inside `0..buf.len()`, and overlapping runs MERGE -
         // so a run reaching `buf.len()` from 0 leaves nothing a second run
         // could be. A `self.filled.len() == 1` conjunct would therefore be
-        // a guard no test could ever falsify, which is the shape CLAUDE.md's
+        // a guard no test could ever falsify, which is the shape CONTRIBUTING.md's
         // forty-sixth gate records as making BOTH guards unfalsifiable.
         // `CrcParts::complete` keeps its length check because there the
         // bound is the CALLER's (`oe` is clipped to the block end one file

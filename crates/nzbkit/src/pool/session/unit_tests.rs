@@ -132,8 +132,7 @@ async fn a_spill_head_gives_its_permit_back_while_it_is_parked() {
             0,
             &mut held,
             &mut held_permit,
-            0,
-            &mut None,
+            &mut Ladder::new(),
             &mut finished,
             &sh
         )
@@ -156,8 +155,7 @@ async fn a_spill_head_gives_its_permit_back_while_it_is_parked() {
             0,
             &mut admit,
             &mut permit,
-            0,
-            &mut None,
+            &mut Ladder::new(),
             &mut parked_finished,
             &sh2,
         )
@@ -229,8 +227,7 @@ async fn an_ordinary_parked_worker_keeps_its_permit() {
             0,
             &mut admit,
             &mut permit,
-            0,
-            &mut None,
+            &mut Ladder::new(),
             &mut f2,
             &sh2,
         )
@@ -261,23 +258,13 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
     let cfg = PoolConfig::default();
     // A worker that can only ever fail bows out, and does it BEFORE the
     // backoff: the armed sleep is still there afterwards, unslept.
-    let mut armed = Some(Duration::from_secs(30));
+    let mut lad = Ladder::paced(MAX_SESSION_ATTEMPTS, Some(Duration::from_secs(30)));
     assert!(
-        !pre_dial_gates(
-            &cfg,
-            0,
-            &mut None,
-            &mut None,
-            MAX_SESSION_ATTEMPTS,
-            &mut armed,
-            &mut finished,
-            &sh
-        )
-        .await,
+        !pre_dial_gates(&cfg, 0, &mut None, &mut None, &mut lad, &mut finished, &sh).await,
         "a worker at the session-attempt ceiling is done"
     );
     assert_eq!(
-        armed,
+        lad.pending_backoff,
         Some(Duration::from_secs(30)),
         "the bow-out must not pay the backoff on its way out"
     );
@@ -297,8 +284,7 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
             0,
             &mut held,
             &mut None,
-            0,
-            &mut None,
+            &mut Ladder::new(),
             &mut finished,
             &sh
         )
@@ -315,8 +301,7 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
             0,
             &mut admit,
             &mut None,
-            0,
-            &mut None,
+            &mut Ladder::new(),
             &mut parked_finished,
             &sh2,
         )
@@ -340,7 +325,16 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
     let mut f3 = sh.finished.subscribe();
     let parked = tokio::spawn(async move {
         let mut admit = None;
-        pre_dial_gates(&cfg3, 0, &mut admit, &mut None, 0, &mut None, &mut f3, &sh3).await
+        pre_dial_gates(
+            &cfg3,
+            0,
+            &mut admit,
+            &mut None,
+            &mut Ladder::new(),
+            &mut f3,
+            &sh3,
+        )
+        .await
             && admit.is_some()
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -360,41 +354,22 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
     // is why this is not `backoff_or_finish`.
     let cfg = PoolConfig::default();
     sh.draining.store(true, Ordering::Release);
-    let mut armed = Some(Duration::from_secs(30));
+    let mut lad = Ladder::paced(0, Some(Duration::from_secs(30)));
     let started = tokio::time::Instant::now();
-    assert!(
-        pre_dial_gates(
-            &cfg,
-            0,
-            &mut None,
-            &mut None,
-            0,
-            &mut armed,
-            &mut finished,
-            &sh
-        )
-        .await
-    );
+    assert!(pre_dial_gates(&cfg, 0, &mut None, &mut None, &mut lad, &mut finished, &sh).await);
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "a drain must not wait out the whole backoff"
     );
-    assert!(armed.is_none(), "the backoff is spent either way");
+    assert!(
+        lad.pending_backoff.is_none(),
+        "the backoff is spent either way"
+    );
     sh.draining.store(false, Ordering::Release);
     let _ = sh.finished.send(true);
-    let mut armed = Some(Duration::from_secs(30));
+    let mut lad = Ladder::paced(0, Some(Duration::from_secs(30)));
     assert!(
-        !pre_dial_gates(
-            &cfg,
-            0,
-            &mut None,
-            &mut None,
-            0,
-            &mut armed,
-            &mut finished,
-            &sh
-        )
-        .await,
+        !pre_dial_gates(&cfg, 0, &mut None, &mut None, &mut lad, &mut finished, &sh).await,
         "a finished run ends the worker inside its backoff"
     );
 }
@@ -474,7 +449,7 @@ async fn both_exits_above_the_dial_park_their_unused_session() {
 /// of the NEXT job's pool outright, so a session parked there is a
 /// provider slot held for a job that will never take it. That commit
 /// gave it to the shed and left `stand_down` asking only
-/// `inflight.is_empty()`, and the two are not merely inconsistent on
+/// `sess.inflight.is_empty()`, and the two are not merely inconsistent on
 /// paper: the inner loop reads the abort flag BEFORE it reaches the
 /// shed, so a worker whose pipeline drains in the same pass a sibling's
 /// bytes push the fleet over budget arrives at the abort exit, not the
@@ -587,7 +562,7 @@ async fn an_abort_exit_does_not_park_a_session_on_a_spent_block() {
 /// unread BODY response, so it must close - and it does, but through the
 /// READ-side exit rather than the loop-top one: `abort` sends `finished`
 /// too, and a worker parked in `read_one` breaks out there and quits
-/// with `release_wire`. So the `inflight.is_empty()` guard at the loop
+/// with `release_wire`. So the `sess.inflight.is_empty()` guard at the loop
 /// top is a belt for the same rule and not what this run walks; removing
 /// it leaves this test green. It stays because the rule it enforces is
 /// the pool's own - a socket with responses on it is reusable by nobody
@@ -715,8 +690,8 @@ async fn a_permanent_auth_refusal_settles_the_account_for_every_worker() {
     let ctx = ctx_for(&servers, 0);
     let mut finished = sh.finished.subscribe();
     let (connects, reconnects) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
-        (0u32, 0u32, 0u32, false, None);
+    let mut lad = Ladder::new();
+    lad.am_keeper = false;
     let step = dial_session(
         &sc,
         &cfg,
@@ -725,12 +700,7 @@ async fn a_permanent_auth_refusal_settles_the_account_for_every_worker() {
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        false,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(
@@ -751,6 +721,7 @@ async fn a_permanent_auth_refusal_settles_the_account_for_every_worker() {
     );
     let asked = srv.accepted.load(Ordering::Relaxed);
     // A second worker reads the settled verdict - it must not re-ask.
+    lad.am_keeper = false;
     let step = dial_session(
         &sc,
         &cfg,
@@ -759,12 +730,7 @@ async fn a_permanent_auth_refusal_settles_the_account_for_every_worker() {
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        false,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(matches!(step, DialStep::Quit));
@@ -808,9 +774,9 @@ async fn a_keeper_paces_capacity_bounces_instead_of_walking_to_exhaustion() {
     let ctx = ctx_for(&servers, 0);
     let mut finished = sh.finished.subscribe();
     let (connects, reconnects) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
-        (0u32, 0u32, 0u32, false, None);
+    let mut lad = Ladder::new();
     for expect in 1..=2u32 {
+        lad.am_keeper = true;
         let step = dial_session(
             &sc,
             &cfg,
@@ -819,26 +785,24 @@ async fn a_keeper_paces_capacity_bounces_instead_of_walking_to_exhaustion() {
             &connects,
             &reconnects,
             &mut finished,
-            &mut fails,
-            &mut flap,
-            &mut bounces,
-            &mut ever,
-            true,
-            &mut last_end,
+            &mut lad,
         )
         .await;
         assert!(
             matches!(step, DialStep::Retry),
             "a keeper retries a capacity bounce, paced"
         );
-        assert_eq!(flap, expect, "bounces pace on their own counter");
         assert_eq!(
-            bounces, 0,
+            lad.flap_bounces, expect,
+            "bounces pace on their own counter"
+        );
+        assert_eq!(
+            lad.cap_bounces, 0,
             "and NOT on the capacity-probe ladder's - sharing that counter \
              walked a flapped keeper past the single-prober election"
         );
         assert_eq!(
-            fails, 0,
+            lad.connect_failures, 0,
             "a bounce is not a connect failure - the keeper must never \
              reach connect exhaustion on one"
         );
@@ -881,8 +845,8 @@ async fn a_dead_host_walks_its_ladder_then_becomes_the_prober() {
     let ctx = ctx_for(&servers, 0);
     let mut finished = sh.finished.subscribe();
     let (connects, reconnects) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
-        (0u32, 0u32, 0u32, false, None);
+    let mut lad = Ladder::new();
+    lad.am_keeper = false;
     let step = dial_session(
         &sc,
         &cfg,
@@ -891,17 +855,16 @@ async fn a_dead_host_walks_its_ladder_then_becomes_the_prober() {
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        false,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(matches!(step, DialStep::Retry));
-    assert_eq!(fails, 1, "the first failure is counted and explained once");
+    assert_eq!(
+        lad.connect_failures, 1,
+        "the first failure is counted and explained once"
+    );
     let ticks = sh.deferred.load(Ordering::Relaxed);
+    lad.am_keeper = false;
     let step = dial_session(
         &sc,
         &cfg,
@@ -910,19 +873,14 @@ async fn a_dead_host_walks_its_ladder_then_becomes_the_prober() {
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        false,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(
         matches!(step, DialStep::Retry),
         "exhausting the ladder hands over to the prober, it does not retire the worker"
     );
-    assert_eq!(bounces, 1, "the prober rides its own paced ladder");
+    assert_eq!(lad.cap_bounces, 1, "the prober rides its own paced ladder");
     assert!(
         matches!(*sh.auth[0].episode.borrow(), (CapEpisode::Probing, _)),
         "the lone survivor elects itself prober and publishes the episode"
@@ -1201,8 +1159,8 @@ async fn a_permanent_refusal_releases_the_workers_parked_on_a_capacity_episode()
 
     let mut finished = sh.finished.subscribe();
     let (connects, reconnects) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
-        (0u32, 0u32, 0u32, false, None);
+    let mut lad = Ladder::new();
+    lad.am_keeper = false;
     let step = dial_session(
         &sc,
         &cfg,
@@ -1211,12 +1169,7 @@ async fn a_permanent_refusal_releases_the_workers_parked_on_a_capacity_episode()
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        false,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(
@@ -1261,8 +1214,8 @@ async fn a_permanent_refusal_releases_the_workers_parked_on_a_capacity_episode()
     let parked = park_three(&sh, &cfg, ctx).await;
 
     let mut finished = sh.finished.subscribe();
-    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
-        (0u32, 0u32, 0u32, false, None);
+    let mut lad = Ladder::new();
+    lad.am_keeper = false;
     let step = dial_session(
         &sc,
         &cfg,
@@ -1271,12 +1224,7 @@ async fn a_permanent_refusal_releases_the_workers_parked_on_a_capacity_episode()
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        false,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(
@@ -1336,34 +1284,22 @@ async fn the_top_up_stops_at_the_live_target_and_holds_one_at_the_wire_cap() {
     let ctx = ctx_for(&servers, 0);
     let (tx, _rx) = mpsc::channel(16);
     let (mut conn, _) = Connection::connect(&sc).await.expect("dial the mock");
-    let mut inflight: VecDeque<Work> = VecDeque::new();
+    let mut sess = SessionState::from_inflight(VecDeque::new());
 
     // Over the live target: nothing is admitted at all.
-    let step = top_up_window(&mut conn, &cfg, ctx, &sh, &tx, &mut inflight, 4, true, 0, 0).await;
+    let step = top_up_window(&mut conn, &cfg, ctx, &sh, &tx, &mut sess, 4, true).await;
     assert!(matches!(step, TopUp::Filled));
     assert!(
-        inflight.is_empty(),
+        sess.inflight.is_empty(),
         "a slot over the target admits nothing, so its pipeline drains"
     );
     assert_eq!(sh.queue.lock().await.len(), ids.len());
 
     // Ordinary fill: the window is topped up, each dispatch charged and
     // registered, and the server's tried counter moves.
-    let step = top_up_window(
-        &mut conn,
-        &cfg,
-        ctx,
-        &sh,
-        &tx,
-        &mut inflight,
-        3,
-        false,
-        0,
-        0,
-    )
-    .await;
+    let step = top_up_window(&mut conn, &cfg, ctx, &sh, &tx, &mut sess, 3, false).await;
     assert!(matches!(step, TopUp::Filled));
-    assert_eq!(inflight.len(), 3, "the window fills to `win`");
+    assert_eq!(sess.inflight.len(), 3, "the window fills to `win`");
     assert_eq!(
         live.servers[0].articles_tried.load(Ordering::Relaxed),
         3,
@@ -1376,35 +1312,20 @@ async fn the_top_up_stops_at_the_live_target_and_holds_one_at_the_wire_cap() {
         inflight_cap: 1,
         ..cfg.clone()
     };
-    let step = top_up_window(
-        &mut conn,
-        &capped,
-        ctx,
-        &sh,
-        &tx,
-        &mut inflight,
-        8,
-        false,
-        0,
-        0,
-    )
-    .await;
+    let step = top_up_window(&mut conn, &capped, ctx, &sh, &tx, &mut sess, 8, false).await;
     assert!(matches!(step, TopUp::Filled));
     assert_eq!(
-        inflight.len(),
+        sess.inflight.len(),
         3,
         "over the byte budget nothing new goes on the wire"
     );
     // ...but a worker holding NOTHING still gets its one request, which
     // is what keeps the drain (and so the cap's own release) moving.
-    let mut empty: VecDeque<Work> = VecDeque::new();
-    let step = top_up_window(
-        &mut conn, &capped, ctx, &sh, &tx, &mut empty, 8, false, 0, 0,
-    )
-    .await;
+    let mut empty = SessionState::from_inflight(VecDeque::new());
+    let step = top_up_window(&mut conn, &capped, ctx, &sh, &tx, &mut empty, 8, false).await;
     assert!(matches!(step, TopUp::Filled));
     assert_eq!(
-        empty.len(),
+        empty.inflight.len(),
         1,
         "never below one in flight, or the pool deadlocks against its own cap"
     );
@@ -1412,10 +1333,13 @@ async fn the_top_up_stops_at_the_live_target_and_holds_one_at_the_wire_cap() {
     // A graceful pause admits nothing new either: the in-flight requests
     // below it complete (and journal), and then the worker parks.
     sh.draining.store(true, Ordering::Release);
-    let mut none: VecDeque<Work> = VecDeque::new();
-    let step = top_up_window(&mut conn, &cfg, ctx, &sh, &tx, &mut none, 4, false, 0, 0).await;
+    let mut none = SessionState::from_inflight(VecDeque::new());
+    let step = top_up_window(&mut conn, &cfg, ctx, &sh, &tx, &mut none, 4, false).await;
     assert!(matches!(step, TopUp::Filled));
-    assert!(none.is_empty(), "a drain takes no new work on the wire");
+    assert!(
+        none.inflight.is_empty(),
+        "a drain takes no new work on the wire"
+    );
     conn.quit().await;
 }
 
@@ -1442,19 +1366,17 @@ async fn a_duplicates_refusal_counts_only_when_the_socket_can_be_checked() {
         w.dup = true;
         w
     };
-    let mut inflight: VecDeque<Work> = [dup()].into_iter().collect();
+    let mut sess = SessionState::from_inflight([dup()].into_iter().collect());
     sh.charge_wire();
-    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
     handle_missing(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         false,
         false,
-        &mut bare,
+        &mut sess,
     )
     .await;
     assert!(rx.try_recv().is_err(), "a bare dup refusal decides nothing");
@@ -1467,18 +1389,17 @@ async fn a_duplicates_refusal_counts_only_when_the_socket_can_be_checked() {
 
     // The same refusal with the id echoed back: authoritative, merged,
     // and on a single-server run that union is already unanimous.
-    let mut inflight: VecDeque<Work> = [dup()].into_iter().collect();
+    let mut sess = SessionState::from_inflight([dup()].into_iter().collect());
     sh.charge_wire();
     handle_missing(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         true,
         false,
-        &mut bare,
+        &mut sess,
     )
     .await;
     match rx.try_recv() {
@@ -1530,19 +1451,17 @@ async fn a_duplicate_does_not_spend_a_queued_articles_held_re_ask() {
     let (tx, mut rx) = mpsc::channel(8);
     let mut dup = work("<h@x>");
     dup.dup = true;
-    let mut inflight: VecDeque<Work> = [dup].into_iter().collect();
+    let mut sess = SessionState::from_inflight([dup].into_iter().collect());
     sh.charge_wire();
-    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
     handle_missing(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         true,
         false,
-        &mut bare,
+        &mut sess,
     )
     .await;
     assert!(
@@ -1585,19 +1504,17 @@ async fn an_unproven_dup_refusal_returns_the_hedge_budget() {
         .dups = 1;
     let mut w = work("<u@x>");
     w.dup = true;
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+    let mut sess = SessionState::from_inflight([w].into_iter().collect());
     sh.charge_wire();
-    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
     handle_missing(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         false,
         false,
-        &mut bare,
+        &mut sess,
     )
     .await;
     assert!(rx.try_recv().is_err(), "a bare dup refusal decides nothing");
@@ -1633,7 +1550,6 @@ async fn a_takedown_flavoured_refusal_flavours_the_terminal_missing() {
     sh.alive[0].store(1, Ordering::SeqCst);
     sh.alive[1].store(1, Ordering::SeqCst);
     let (tx, mut rx) = mpsc::channel(8);
-    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
     let pop_id = |q: &mut VecDeque<Work>, id: &str| {
         let at = q.iter().position(|w| &*w.id == id).expect("queued");
         q.remove(at).expect("present")
@@ -1643,18 +1559,17 @@ async fn a_takedown_flavoured_refusal_flavours_the_terminal_missing() {
     // survives to the outcome.
     for (si, takedown) in [(0usize, true), (1usize, false)] {
         let w = pop_id(&mut *sh.queue.lock().await, "<t@x>");
-        let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+        let mut sess = SessionState::from_inflight([w].into_iter().collect());
         sh.charge_wire();
         handle_missing(
             &cfg,
             ctx_for(&servers, si),
             &sh,
             &tx,
-            &mut inflight,
             PooledBuf::unpooled(Vec::new()),
             true,
             takedown,
-            &mut bare,
+            &mut sess,
         )
         .await;
     }
@@ -1672,18 +1587,17 @@ async fn a_takedown_flavoured_refusal_flavours_the_terminal_missing() {
     // <p@x>: plain 430s all the way down stay unflavoured.
     for si in [0usize, 1] {
         let w = pop_id(&mut *sh.queue.lock().await, "<p@x>");
-        let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+        let mut sess = SessionState::from_inflight([w].into_iter().collect());
         sh.charge_wire();
         handle_missing(
             &cfg,
             ctx_for(&servers, si),
             &sh,
             &tx,
-            &mut inflight,
             PooledBuf::unpooled(Vec::new()),
             true,
             false,
-            &mut bare,
+            &mut sess,
         )
         .await;
     }
@@ -1726,19 +1640,17 @@ async fn a_promoted_articles_refusal_goes_back_to_the_promoted_front() {
     }
     let mut w = work("<p@x>");
     w.promoted = true;
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+    let mut sess = SessionState::from_inflight([w].into_iter().collect());
     sh.charge_wire();
-    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
     handle_missing(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         true,
         false,
-        &mut bare,
+        &mut sess,
     )
     .await;
     assert!(rx.try_recv().is_err(), "another backbone can still answer");
@@ -1797,23 +1709,21 @@ async fn a_body_that_waits_on_the_write_side_is_timed_and_marked() {
         }
         rx
     });
-    let mut inflight: VecDeque<Work> = [work("<b0@x>")].into_iter().collect();
+    let mut sess = SessionState::from_inflight([work("<b0@x>")].into_iter().collect());
     sh.charge_wire();
-    let (mut losses, mut bytes) = (0u32, 0u64);
+    let mut lad = Ladder::new();
     let step = handle_body(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(vec![7u8; 4_096]),
-        &mut losses,
-        &mut bytes,
-        Instant::now(),
+        &mut sess,
+        &mut lad,
     )
     .await;
     assert!(matches!(step, BodyStep::Proceed));
-    assert_eq!(bytes, 4_096, "the session's own byte ledger takes it");
+    assert_eq!(sess.bytes, 4_096, "the session's own byte ledger takes it");
     let waited = live.servers[0].blocked_ms.load(Ordering::Relaxed);
     assert!(
         waited >= BLOCKED_NOTE_MS,
@@ -1854,19 +1764,17 @@ async fn a_served_body_feeds_the_rate_the_oracle_and_the_buffer_pool() {
     let (sh, _) = Shared::new(fresh(&id_refs), &servers);
     let ctx = ctx_for(&servers, 0);
     let (tx, mut rx) = mpsc::channel(8);
-    let mut inflight: VecDeque<Work> = [work("<w@x>")].into_iter().collect();
+    let mut sess = SessionState::from_inflight([work("<w@x>")].into_iter().collect());
     sh.charge_wire();
-    let (mut losses, mut bytes) = (0u32, 0u64);
+    let mut lad = Ladder::new();
     handle_body(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(vec![1u8; 2_048]),
-        &mut losses,
-        &mut bytes,
-        Instant::now(),
+        &mut sess,
+        &mut lad,
     )
     .await;
     assert!(matches!(rx.try_recv(), Ok(FetchOutcome::Done { .. })));
@@ -1875,12 +1783,14 @@ async fn a_served_body_feeds_the_rate_the_oracle_and_the_buffer_pool() {
 
     // The same response for an article a duplicate already claimed.
     assert!(sh.claim_done("<l@x>", 1));
-    let mut inflight: VecDeque<Work> = [Work {
-        ord: 1,
-        ..work("<l@x>")
-    }]
-    .into_iter()
-    .collect();
+    let mut sess = SessionState::from_inflight(
+        [Work {
+            ord: 1,
+            ..work("<l@x>")
+        }]
+        .into_iter()
+        .collect(),
+    );
     sh.charge_wire();
     // Taken from the pool, like the session loop's own, so the recycle
     // assertion below is about THIS allocation and not about whatever a
@@ -1888,20 +1798,12 @@ async fn a_served_body_feeds_the_rate_the_oracle_and_the_buffer_pool() {
     let mut losing = pool.take();
     losing.extend_from_slice(&[2u8; 2_048]);
     let losing_alloc = losing.as_ptr();
-    handle_body(
-        &cfg,
-        ctx,
-        &sh,
-        &tx,
-        &mut inflight,
-        losing,
-        &mut losses,
-        &mut bytes,
-        Instant::now(),
-    )
-    .await;
+    handle_body(&cfg, ctx, &sh, &tx, losing, &mut sess, &mut lad).await;
     assert!(rx.try_recv().is_err(), "a lost race emits no outcome");
-    assert_eq!(losses, 1, "the loss is evidence about THIS session's speed");
+    assert_eq!(
+        lad.race_losses, 1,
+        "the loss is evidence about THIS session's speed"
+    );
     // Both responses were real answers from this server: the oracle
     // records the duplicate's too.
     let samples = oracle.drain();
@@ -2237,22 +2139,12 @@ fn a_delivered_body_hands_its_channel_charge_to_the_consumer() {
     let (sh, _) = Shared::new(fresh(&["<w@x>"]), &servers);
     let ctx = ctx_for(&servers, 0);
     let (tx, mut rx) = mpsc::channel(4);
-    let mut inflight: VecDeque<Work> = [work("<w@x>")].into_iter().collect();
+    let mut sess = SessionState::from_inflight([work("<w@x>")].into_iter().collect());
     sh.charge_wire();
-    let (mut losses, mut bytes) = (0u32, 0u64);
+    let mut lad = Ladder::new();
     let body = PooledBuf::unpooled(vec![3u8; 2_048]);
     let charged = body.capacity() as u64;
-    rt.block_on(handle_body(
-        &cfg,
-        ctx,
-        &sh,
-        &tx,
-        &mut inflight,
-        body,
-        &mut losses,
-        &mut bytes,
-        Instant::now(),
-    ));
+    rt.block_on(handle_body(&cfg, ctx, &sh, &tx, body, &mut sess, &mut lad));
     assert!(matches!(rx.try_recv(), Ok(FetchOutcome::Done { .. })));
     assert_eq!(
         cur(Sub::Channel),
@@ -2279,19 +2171,17 @@ fn a_body_that_never_entered_the_channel_releases_its_charge() {
     let ctx = ctx_for(&servers, 0);
     let (tx, rx) = mpsc::channel(4);
     drop(rx); // the consumer is gone: try_send answers Closed
-    let mut inflight: VecDeque<Work> = [work("<w@x>")].into_iter().collect();
+    let mut sess = SessionState::from_inflight([work("<w@x>")].into_iter().collect());
     sh.charge_wire();
-    let (mut losses, mut bytes) = (0u32, 0u64);
+    let mut lad = Ladder::new();
     rt.block_on(handle_body(
         &cfg,
         ctx,
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(vec![3u8; 2_048]),
-        &mut losses,
-        &mut bytes,
-        Instant::now(),
+        &mut sess,
+        &mut lad,
     ));
     assert_eq!(
         cur(Sub::Channel),
@@ -2328,20 +2218,18 @@ async fn a_refusal_that_only_looks_unanimous_because_a_server_left_says_so() {
     // b's last worker has already left; it never saw this article.
     sh.alive[1].store(0, Ordering::SeqCst);
     let (tx, mut rx) = mpsc::channel(8);
-    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
     let w = sh.queue.lock().await.pop_front().expect("queued");
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+    let mut sess = SessionState::from_inflight([w].into_iter().collect());
     sh.charge_wire();
     handle_missing(
         &cfg,
         ctx_for(&servers, 0),
         &sh,
         &tx,
-        &mut inflight,
         PooledBuf::unpooled(Vec::new()),
         true,
         false,
-        &mut bare,
+        &mut sess,
     )
     .await;
     match rx.try_recv() {
@@ -2398,12 +2286,12 @@ async fn a_stated_connection_cap_arms_the_dial_gate() {
     let ctx = ctx_for(&servers, 0);
     let mut finished = sh.finished.subscribe();
     let (connects, reconnects) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
-        (0u32, 0u32, 0u32, false, None);
+    let mut lad = Ladder::new();
     assert!(
         !sh.auth[0].dial.is_armed(),
         "nothing is serialised before the provider has said anything"
     );
+    lad.am_keeper = true;
     let step = dial_session(
         &sc,
         &cfg,
@@ -2412,12 +2300,7 @@ async fn a_stated_connection_cap_arms_the_dial_gate() {
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        true,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(matches!(step, DialStep::Retry));
@@ -2434,6 +2317,7 @@ async fn a_stated_connection_cap_arms_the_dial_gate() {
         .dial
         .canary(true)
         .expect("the gate hands out one permit");
+    lad.am_keeper = true;
     let step = dial_session(
         &sc,
         &cfg,
@@ -2442,12 +2326,7 @@ async fn a_stated_connection_cap_arms_the_dial_gate() {
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        true,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(matches!(step, DialStep::Retry), "it waits and asks again");
@@ -2458,7 +2337,7 @@ async fn a_stated_connection_cap_arms_the_dial_gate() {
          eleven of these landed inside one second on the live daemon"
     );
     assert_eq!(
-        (fails, flap),
+        (lad.connect_failures, lad.flap_bounces),
         (0, 1),
         "standing in the queue is neither a connect failure nor a bounce: \
          counting it would walk a polite worker into the prober election"
@@ -2466,6 +2345,7 @@ async fn a_stated_connection_cap_arms_the_dial_gate() {
 
     // The canary's dial ends, and the next worker probes for real.
     drop(held);
+    lad.am_keeper = true;
     let step = dial_session(
         &sc,
         &cfg,
@@ -2474,12 +2354,7 @@ async fn a_stated_connection_cap_arms_the_dial_gate() {
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        true,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(matches!(step, DialStep::Retry));
@@ -2494,7 +2369,7 @@ async fn a_stated_connection_cap_arms_the_dial_gate() {
 /// A simultaneous-IP refusal must NOT arm it. That limit is about where
 /// the account is used from, not how many sockets it grants, so
 /// serialising dials would answer a question it never asked - the same
-/// distinction `note_cap` already draws (Codex sweep 5, M9).
+/// distinction `note_cap` already draws (review sweep 5, M9).
 #[tokio::test]
 async fn a_source_ip_cap_does_not_arm_the_dial_gate() {
     let srv = MockServer::start(
@@ -2520,8 +2395,8 @@ async fn a_source_ip_cap_does_not_arm_the_dial_gate() {
     let ctx = ctx_for(&servers, 0);
     let mut finished = sh.finished.subscribe();
     let (connects, reconnects) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
-        (0u32, 0u32, 0u32, false, None);
+    let mut lad = Ladder::new();
+    lad.am_keeper = true;
     let step = dial_session(
         &sc,
         &cfg,
@@ -2530,12 +2405,7 @@ async fn a_source_ip_cap_does_not_arm_the_dial_gate() {
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        true,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(matches!(step, DialStep::Retry));
@@ -2562,10 +2432,10 @@ async fn a_granted_session_stands_the_dial_gate_down() {
     let ctx = ctx_for(&servers, 0);
     let mut finished = sh.finished.subscribe();
     let (connects, reconnects) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
-        (0u32, 0u32, 0u32, false, None);
+    let mut lad = Ladder::new();
     // An earlier episode left the fleet serialised.
     sh.auth[0].dial.arm();
+    lad.am_keeper = false;
     let step = dial_session(
         &sc,
         &cfg,
@@ -2574,12 +2444,7 @@ async fn a_granted_session_stands_the_dial_gate_down() {
         &connects,
         &reconnects,
         &mut finished,
-        &mut fails,
-        &mut flap,
-        &mut bounces,
-        &mut ever,
-        false,
-        &mut last_end,
+        &mut lad,
     )
     .await;
     assert!(

@@ -210,6 +210,25 @@ fn adoption_candidates(
         if d == dir {
             continue;
         }
+        // A donor may name a FILE rather than a directory - that is what
+        // par2cmdline's trailing `[files]` arguments are, and parfast
+        // passes them straight through. `walk` would fail its root
+        // `read_dir` on one and the tolerance below would drop it in
+        // silence, so the single file is admitted here under the same
+        // screens the walk applies to a directory's entries.
+        if let Ok(meta) = std::fs::metadata(d)
+            && meta.is_file()
+        {
+            if meta.len() > 0
+                && !is_recovery_by_name_and_content(d)
+                && !identified.contains(&path_identity_key(fold, d))
+                && !exclude.contains(d)
+                && seen.insert(path_identity_key(fold, d))
+            {
+                out.push((d.clone(), meta.len()));
+            }
+            continue;
+        }
         // A donor that cannot be read is skipped, not fatal: the donor
         // is a predecessor's directory this repair does not own, and a
         // concurrent cleanup racing it must degrade to "no donation",
@@ -1641,4 +1660,186 @@ pub(super) fn proven_spent(
         }
     }
     false
+}
+
+/// Which of a set's declared blocks are findable at ANY byte offset
+/// inside the members' own files - par2cmdline's DEFAULT verify pass,
+/// for a caller that has already run the ALIGNED one.
+///
+/// WHY IT IS PUBLIC AND WHO ASKS. par2cmdline verifies by rolling a
+/// block-sized CRC32 window over every source file it opens, so a
+/// member that has been SHIFTED - a prefix prepended, a run of bytes
+/// inserted - still reports every block present at its real offset.
+/// `parfast`'s verify hashed the aligned grid and nothing else, so the
+/// same set read `Found 0 of 30 data blocks` where the reference reads
+/// `Found 30 of 30`, and the repair that followed refused work the
+/// reference completes (`research/CLI-SUBSTITUTION-2026-09-03.md`, G4;
+/// measured 30-of-30 against 0-of-30 on the DEFAULT no-switch verify).
+/// The capability was already here - [`sliding_scan`] is the same
+/// rolling window, and the engine's own repair reaches it through
+/// [`adopt_blocks`] and the caller's escalation - but only ever behind
+/// a repair that had already decided to run. A CLI has to PRINT the
+/// count before it decides anything, which is what this door is for.
+///
+/// It is the SAME scan, not a second one: one spelling of "these
+/// bytes carry this slice", one prefilter, one CRC-then-MD5 bar.
+///
+/// WHAT IT SCANS, and the bound is the whole cost story. Only members
+/// that EXIST, are not already fully proven by `proven`, and whose
+/// on-disk length is not the length the set declares - so a clean set
+/// scans nothing at all, and neither does a set damaged IN PLACE. The
+/// argument for that second screen, and the one shape it gives up, are
+/// at the screen itself. A block is credited to the
+/// member that DECLARES it wherever it is found, which is what lets a
+/// mid-file insertion in one member still account for a neighbour's
+/// slice; extra files that no FileDesc names are NOT walked here,
+/// because the reference prints its `Target:` lines before it opens
+/// them and `parfast`'s repair hands that half to the engine.
+///
+/// `paths` and `proven` are indexed like `files`. `proven[i]` may be
+/// shorter than the member's slice count (an empty bitmap is "nothing
+/// proven"); anything past its end counts as unproven. The answer is
+/// the MERGED bitmap - what the aligned pass proved plus what the scan
+/// found - so a caller counts `true`s and nothing else.
+///
+/// An I/O error on any scanned file drops that file's contribution
+/// rather than failing: this answers a verify, which is read-only and
+/// reports what it could read, and the aligned pass has already had its
+/// own say about a member it could not open.
+pub fn scan_members_for_blocks(
+    files: &[Par2File],
+    paths: &[Option<PathBuf>],
+    proven: &[Vec<bool>],
+    bs: usize,
+) -> Vec<Vec<bool>> {
+    let mut out: Vec<Vec<bool>> = Vec::with_capacity(files.len());
+    for (i, f) in files.iter().enumerate() {
+        let n = if bs == 0 {
+            0
+        } else {
+            f.length.div_ceil(bs as u64) as usize
+        };
+        let mut bits = vec![false; n];
+        if let Some(have) = proven.get(i) {
+            for (b, &ok) in bits.iter_mut().zip(have.iter()) {
+                *b = ok;
+            }
+        }
+        out.push(bits);
+    }
+    if bs == 0 {
+        return out;
+    }
+    // WHAT TO OPEN, decided BEFORE anything is built, and this is the
+    // whole cost story. Two screens, both cheap:
+    //
+    // * a member the aligned pass settled whole is never reopened, so a
+    //   set with no unproven slice anywhere leaves here having touched
+    //   no file and cloned no packet - the ordinary CLEAN verify, which
+    //   this must not tax and measurably does not (A/B 1.005 against an
+    //   A/A floor of 1.005 over 25 interleaved 512 MiB verifies, 9 Sep
+    //   2026);
+    // * a member whose on-disk length is EXACTLY the length the set
+    //   declares is not scanned either.
+    //
+    // THE LENGTH SCREEN IS THE ONE THAT NEEDS ARGUING. Misplacing a
+    // block means moving the bytes after it, and every shape that does
+    // so changes the file's size: a prepended prefix, a mid-file
+    // insertion, a concatenation, a truncation. What keeps the size is
+    // damage IN PLACE - a bad article, a flipped bit, a zero-filled gap
+    // - and in-place damage leaves every surviving block exactly on the
+    // grid the aligned pass already read, so a rolling window over that
+    // file re-finds precisely what is already proven and nothing more.
+    // Without the screen it costs a full extra pass to learn that:
+    // measured on a 512 MiB set with one bad block, a damaged verify
+    // went 2.9x and the repair behind it 2.1x, against an A/A floor of
+    // 0.92 and 0.72 respectively (9 Sep 2026).
+    //
+    // WHAT THE SCREEN GIVES UP, stated rather than implied: a file
+    // holding an insertion AND a deletion that cancel to the declared
+    // length keeps misplaced blocks this will not look for. No shape in
+    // the substitution audit, the parity suite or any corruption a
+    // download produces is that; par2cmdline finds it because it rolls
+    // over every file unconditionally, and it is the one case where we
+    // still would not.
+    let mut cands: Vec<(PathBuf, u64)> = Vec::new();
+    for (i, bits) in out.iter().enumerate() {
+        if !bits.iter().any(|&ok| !ok) {
+            continue;
+        }
+        let Some(p) = paths.get(i).and_then(Option::as_ref) else {
+            continue;
+        };
+        if let Ok(m) = std::fs::metadata(p)
+            && m.len() > 0
+            && m.len() != files[i].length
+        {
+            cands.push((p.clone(), m.len()));
+        }
+    }
+    if cands.is_empty() {
+        return out;
+    }
+    // The global slice space, in `files` order, exactly as the repair's
+    // own target walk lays it out - `sliding_scan` speaks that space and
+    // nothing else.
+    let mut targets: Vec<Target> = Vec::with_capacity(files.len());
+    let mut first = 0usize;
+    let mut missing_set: HashSet<usize> = HashSet::new();
+    for (i, f) in files.iter().enumerate() {
+        let n = out[i].len();
+        for (j, &ok) in out[i].iter().enumerate() {
+            if !ok {
+                missing_set.insert(first + j);
+            }
+        }
+        let on_disk = paths.get(i).and_then(Option::as_ref);
+        targets.push(Target {
+            file: f.clone(),
+            path: on_disk.cloned().unwrap_or_default(),
+            first_slice: first,
+            n_slices: n,
+            present: out[i].clone(),
+            intact: false,
+            exists: on_disk.is_some(),
+            resume: None,
+            md5_unfinished: false,
+        });
+        first += n;
+    }
+    let indices: Vec<usize> = (0..cands.len()).collect();
+    let mut adopted: HashMap<usize, AdoptSrc> = HashMap::new();
+    // Every candidate sits in the tolerant range: see the header - a
+    // verify reports what it could read and never fails on a file the
+    // aligned pass has already ruled on.
+    if sliding_scan(
+        &cands,
+        &indices,
+        0..cands.len(),
+        &targets,
+        &missing_set,
+        bs,
+        &mut adopted,
+    )
+    .is_err()
+    {
+        return out;
+    }
+    // Global index back to (member, slice), by the same walk that laid
+    // it out. Spelled as a dense table rather than a search over the
+    // first-slice offsets, because a set MAY declare a zero-length
+    // member: two members then share one offset and a search cannot say
+    // which of them owns the slice after it.
+    let mut owner: Vec<(usize, usize)> = Vec::with_capacity(first);
+    for (i, bits) in out.iter().enumerate() {
+        for j in 0..bits.len() {
+            owner.push((i, j));
+        }
+    }
+    for g in adopted.into_keys() {
+        if let Some(&(i, j)) = owner.get(g) {
+            out[i][j] = true;
+        }
+    }
+    out
 }

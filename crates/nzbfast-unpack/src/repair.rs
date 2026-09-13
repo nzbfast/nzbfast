@@ -483,11 +483,18 @@ mod extpar2;
 // exactly as it did. `donor_extra_args` is deliberately NOT re-exported:
 // its one caller is `par2cmdline_invocation` beside it, and an unused
 // re-export is a warning.
+//
+// THREE MORE NAMES JOINED IT ON 12 Sep 2026, and for the same reason
+// rather than by policy: `run_external_par2`, `publish_external_coverage`
+// and `par2cmdline_invocation` had exactly one caller each in this file,
+// the par2cmdline hatch inside `fetch_and_repair`, and that hatch moved
+// next to them as `external_repair_pass`. Nothing here names them any
+// longer, so an import of any of them is now the warning the note above
+// describes. Re-add one the day this file calls it again.
 pub(crate) use crate::diag::adopted_clause;
-pub(crate) use extpar2::run_external_par2;
 use extpar2::{
-    NarrowedNeed, NativeVerdict, adoption_narrowed_need, native_shortfall, par2cmdline_invocation,
-    publish_external_coverage,
+    ExternalPass, NarrowedNeed, NativeVerdict, adoption_narrowed_need, external_repair_pass,
+    native_shortfall,
 };
 // `repair_tests` is the only thing outside `extpar2` that names these
 // two, so they are imported under the same cfg it is: an import no
@@ -1430,7 +1437,7 @@ fn chase_repair_on_value(v: Option<&str>) -> bool {
 /// wrong bytes. Patching such a slot in place can restore a RAR
 /// signature into a file the extractor goes on treating as plain:
 /// nothing re-sniffs after repair, so the corrected archive retired as
-/// the payload, packed, on a Completed job (Codex sweep 13 Aug R2).
+/// the payload, packed, on a Completed job (review sweep 13 Aug R2).
 /// False routes the set to the materialize + `repair_dir` +
 /// `reextract_dir` path, which re-extracts what it repairs. The sniff
 /// window is 8 bytes (the longest magic, RAR5); block b covers bytes
@@ -1689,7 +1696,7 @@ pub async fn try_mapped_repair(
     // as validated LOCATORS - by extension AND by packet magic, exactly
     // the file set the old whole-file harvest read (an obfuscated post's
     // volumes land under hash names no extension rule can match, issue
-    // #14; the packet-file ceiling binds both kinds alike, Codex sweep
+    // #14; the packet-file ceiling binds both kinds alike, review sweep
     // 10 Aug M4). The payload bytes stay on disk: `repair_mapped_catalog`
     // preads only the exponents the repair actually selects, re-proving
     // each against its packet MD5, so peak recovery memory is missing x
@@ -2001,8 +2008,9 @@ pub async fn fetch_and_repair(
     // closure so the three call sites below
     // (two direct, one through [`adoption_narrowed_need`]) read exactly as
     // they did when the body lived here.
-    let native_repair =
-        |probe: bool| native_repair_pass(out_dir, set, donor_dirs, probe, &spent, &mismatches);
+    let native_repair = |probe: bool| {
+        native_repair_pass(out_dir, set, donor_dirs, probe, &spent, &mismatches, cancel)
+    };
 
     let mut fetched_files: Vec<usize> = Vec::new();
     if needed > 0 && !wire.source_will_not_serve() {
@@ -2071,6 +2079,13 @@ pub async fn fetch_and_repair(
                 return Ok(false);
             }
             NarrowedNeed::Buy(after) => needed = after,
+            // The probe was cancelled, so nothing below may run: the
+            // very next thing this function does is buy recovery
+            // volumes, and the handle that raised the cancel exists to
+            // stop exactly that. No shortfall, for the reason
+            // [`NativeVerdict::Cancelled`] gives - nothing about this
+            // set is wrong.
+            NarrowedNeed::Cancelled => return Ok(false),
         }
 
         // Min-bytes subset with slice sum ≥ needed - plus ~10% margin:
@@ -2153,92 +2168,35 @@ pub async fn fetch_and_repair(
     if native == NativeVerdict::Done {
         return Ok(true);
     }
+    // A CANCEL ENDS THE FUNCTION, ahead of every fallback below it. The
+    // job has been deleted; par2cmdline would re-run the whole repair
+    // externally for it, and the escalation would buy every remaining
+    // recovery volume on the wire - both of them the work the cancel
+    // was raised to stop. Nothing about the set is wrong, so no
+    // shortfall is recorded either: `Ok(false)` here is "not repaired",
+    // and the tombstone makes the outcome a no-op. See
+    // [`NativeVerdict::Cancelled`].
+    if native == NativeVerdict::Cancelled {
+        return Ok(false);
+    }
 
     // par2cmdline fallback - the escape hatch for anything the native
-    // path declines (see par2repair.rs module docs).
-    //
-    // It is OPTIONAL, and neither of its two absences may return from
-    // here: the escalation below is the NATIVE path's second chance
-    // (every remaining recovery volume on disk, then `repair_dir`
-    // again), and it is reached by falling through this block. Bailing
-    // out because an unrelated external tool is missing failed sets a
-    // native-only install could repair (Codex sweep 10 Aug, M3).
-    let t0 = Instant::now();
-    // `external` is Some only while par2cmdline is still worth trying:
-    // taken for each attempt, put back only when it actually ran.
-    let mut external = main_par2
-        .as_ref()
-        .map(|m| par2cmdline_invocation(m, out_dir, donor_dirs));
-    if external.is_none() {
-        warn!(target: "repair", "no main .par2 on disk - cannot invoke par2cmdline");
-    }
-    // (name, length) of every file the recovery set declares - the
-    // targets par2's exit 0 has just verified, and the only writers
-    // whose coverage that verdict licenses us to publish (sweep 8, M5).
-    let verified: Vec<(String, u64)> = set
-        .files
-        .iter()
-        .map(|f| (f.name.clone(), f.length))
-        .collect();
-    if let Some((bin, arg, extras)) = external.take() {
-        match run_external_par2(&bin, &arg, &extras, out_dir, &verified, extractor)? {
-            Ok(st) if st.success() => {
-                publish_external_coverage(extractor, &verified);
-                info!(target: "repair", "repair complete in {:.2?} ✔", t0.elapsed());
-                return Ok(true);
-            }
-            Ok(st) => {
-                warn!(target: "repair", "par2 repair exited with {st}");
-                external = Some((bin, arg, extras));
-            }
-            Err(e) => {
-                // par2 is no longer embedded - native repair covers real
-                // sets, so reaching this needs both an exotic failure AND
-                // no external par2 on PATH or next to the executable.
-                // Left as None: a binary that could not be spawned will
-                // not spawn on the second pass either.
-                //
-                // §282 item 16: what to SAY about that depends entirely
-                // on why the native pass declined. Advertising
-                // par2cmdline to somebody whose set has no parity on
-                // disk sends them to install a tool that would have
-                // failed on the same arithmetic. On the incident job it
-                // sent the reader off to ask why nzbfast needs an
-                // external par2 at all, which is the wrong question and
-                // one this message caused: see [`NativeVerdict`].
-                //
-                // "on this process's PATH" and not "on this machine",
-                // which is a second wrong claim the old line made and
-                // §282 item 4's notes measured: par2cmdline WAS
-                // installed on the incident box, at a Homebrew prefix,
-                // and `tools::resolve` falls back to the bare name -
-                // i.e. $PATH, which under launchd is
-                // /usr/bin:/bin:/usr/sbin:/sbin. So the hatch is
-                // unreachable on every Homebrew macOS install run as a
-                // service, and the old remedy was one the reader had
-                // already followed. Widening the search to a Homebrew
-                // prefix is a separate judgement (that directory is
-                // user-writable and the result is spawned), so this
-                // says what is true rather than pretending otherwise.
-                match native {
-                    NativeVerdict::NoRecovery { needed, have } => warn!(
-                        target: "repair",
-                        "no external par2 on this process's PATH ({e}), and it could \
-                         not have helped: {needed} block(s) are damaged with only \
-                         {have} recovery block(s) on disk, and no par2 implementation \
-                         can rebuild data it has no parity for. What is missing here \
-                         is recovery data, not a tool"
-                    ),
-                    _ => warn!(
-                        target: "repair",
-                        "no external par2 was runnable ({e}) - install par2cmdline \
-                         (e.g. brew install par2) or place a par2 binary next to nzbfast; \
-                         continuing with native repair alone"
-                    ),
-                }
-            }
-        }
-    }
+    // path declines. Out of line since 12 Sep 2026: the invocation, the
+    // run, the wording of each failure, and why neither of its two
+    // absences may return from here all travelled to
+    // [`extpar2::external_repair_pass`], which the escalation below then
+    // gives a second turn through [`ExternalHatch::second_pass`].
+    let hatch = match external_repair_pass(
+        main_par2.as_deref(),
+        out_dir,
+        donor_dirs,
+        set,
+        extractor,
+        native,
+    )? {
+        ExternalPass::Repaired => return Ok(true),
+        ExternalPass::Declined(hatch) => hatch,
+    };
 
     // Escalation: par2's own damage accounting can exceed the ledger's -
     // fetch every remaining recovery volume and try once more.
@@ -2293,61 +2251,21 @@ pub async fn fetch_and_repair(
         .await?;
     // Shadows the pre-escalation verdict on purpose: this pass ran with
     // every volume on disk, so its needed/have supersede the first
-    // pass's for the [`blocks_shortfall`] verdict at the bottom.
+    // pass's for the [`escalation_shortfall`] verdict at the bottom.
     let native = native_repair(false);
     if native == NativeVerdict::Done {
         return Ok(true);
     }
-    if let Some((bin, arg, extras)) = external
-        && let Ok(st) = run_external_par2(&bin, &arg, &extras, out_dir, &verified, extractor)?
-        && st.success()
-    {
-        publish_external_coverage(extractor, &verified);
-        info!(target: "repair", "repair complete (second pass) ✔");
+    // Same reading as the first pass's arm: a deleted job's repair is
+    // not a failed one, so nothing below here runs and the "repair
+    // failed even with every recovery volume" warn is not printed.
+    if native == NativeVerdict::Cancelled {
+        return Ok(false);
+    }
+    if hatch.second_pass(out_dir, extractor)? {
         return Ok(true);
     }
-    warn!(target: "repair", "repair failed even with every recovery volume");
-    // §282 item 4: the gate above is read at every point that would ask
-    // for MORE, and this is the point where there is nothing more to
-    // ask for - so until 24 Aug 2026 nothing ever read the escalation's
-    // OWN yield, and a job could demonstrate beyond doubt that its
-    // provider will not serve this recovery set and still reach the
-    // user with the plain missing-articles opening that item 17's rung
-    // exists to displace. Measured on a throwaway fixture: 280 recovery
-    // articles asked, 0 arrived, verdict `download incomplete: 1
-    // file(s) with missing segments`. The route in is the floor working
-    // correctly - a FIRST ask under `MIN_RECOVERY_YIELD_SAMPLE`
-    // declines to judge, which is right, and the escalation it then
-    // runs is far over the floor and was judged by nobody.
-    //
-    // REPORTING only. Every guard above is pre-ask and stays exactly as
-    // it was: this cannot make the ladder buy anything it does not buy
-    // today, which is where §282's 229 seconds went.
-    //
-    // Judged on the escalation's own yield, REPLACING the earlier
-    // sample rather than summing with it. Both are asks of one source
-    // against one set, so summing is arithmetically defensible - but it
-    // lets a smaller, older sample outvote a larger, fresher one, and
-    // that has a false positive this verdict must not have. When
-    // `pick_volumes`' cheapest subset happens to be volumes a partially
-    // retained set no longer holds, the first ask comes back empty
-    // while the escalation is served most of the way; summed, that job
-    // is told its provider will not serve the parity and sent hunting a
-    // different source, when the honest answer is that the parity on
-    // offer was not enough. The floor applies either way, so neither
-    // form judges a sample too small to mean anything - and the case
-    // summing would additionally catch is one where the WHOLE remaining
-    // set is under sixteen articles, which is exactly the size the
-    // floor exists to refuse.
-    if wire.source_will_not_serve() {
-        warn!(
-            target: "repair",
-            "recovery unusable: {} across every remaining volume - this provider \
-             will not serve this post's recovery set",
-            wire.describe()
-        );
-        *shortfall = Some(RepairShortfall::Unservable(wire));
-    } else if let Some(s) = blocks_shortfall(native, &wire, set.recovery_set_id) {
+    if let Some(s) = escalation_shortfall(native, &wire, set.recovery_set_id) {
         *shortfall = Some(s);
     }
     Ok(false)
@@ -2378,6 +2296,69 @@ fn blocks_shortfall(
         }
         _ => None,
     }
+}
+
+/// Report the escalation's failure and turn its OWN yield into the job's
+/// fail message - the last judgement a lost job's repair makes, and the
+/// sibling of [`blocks_shortfall`] above for the case that one is
+/// deliberately silent about.
+///
+/// `None` leaves whatever shortfall an earlier rung recorded standing.
+///
+/// Out of line since 12 Sep 2026, when [`fetch_and_repair`] sat at 494
+/// of the size gate's 500-line function ceiling; see
+/// [`extpar2::external_repair_pass`], which moved in the same commit and
+/// states that at length.
+fn escalation_shortfall(
+    native: NativeVerdict,
+    wire: &VolumeYield,
+    set_id: [u8; 16],
+) -> Option<RepairShortfall> {
+    warn!(target: "repair", "repair failed even with every recovery volume");
+    // §282 item 4: the `source_will_not_serve` gate is read at every
+    // point that would ask for MORE, and this is the point where there
+    // is nothing more to ask for - so until 24 Aug 2026 nothing ever
+    // read the escalation's
+    // OWN yield, and a job could demonstrate beyond doubt that its
+    // provider will not serve this recovery set and still reach the
+    // user with the plain missing-articles opening that item 17's rung
+    // exists to displace. Measured on a throwaway fixture: 280 recovery
+    // articles asked, 0 arrived, verdict `download incomplete: 1
+    // file(s) with missing segments`. The route in is the floor working
+    // correctly - a FIRST ask under `MIN_RECOVERY_YIELD_SAMPLE`
+    // declines to judge, which is right, and the escalation it then
+    // runs is far over the floor and was judged by nobody.
+    //
+    // REPORTING only. Every guard in [`fetch_and_repair`] is pre-ask
+    // and stays exactly as
+    // it was: this cannot make the ladder buy anything it does not buy
+    // today, which is where §282's 229 seconds went.
+    //
+    // Judged on the escalation's own yield, REPLACING the earlier
+    // sample rather than summing with it. Both are asks of one source
+    // against one set, so summing is arithmetically defensible - but it
+    // lets a smaller, older sample outvote a larger, fresher one, and
+    // that has a false positive this verdict must not have. When
+    // `pick_volumes`' cheapest subset happens to be volumes a partially
+    // retained set no longer holds, the first ask comes back empty
+    // while the escalation is served most of the way; summed, that job
+    // is told its provider will not serve the parity and sent hunting a
+    // different source, when the honest answer is that the parity on
+    // offer was not enough. The floor applies either way, so neither
+    // form judges a sample too small to mean anything - and the case
+    // summing would additionally catch is one where the WHOLE remaining
+    // set is under sixteen articles, which is exactly the size the
+    // floor exists to refuse.
+    if wire.source_will_not_serve() {
+        warn!(
+            target: "repair",
+            "recovery unusable: {} across every remaining volume - this provider \
+             will not serve this post's recovery set",
+            wire.describe()
+        );
+        return Some(RepairShortfall::Unservable(*wire));
+    }
+    blocks_shortfall(native, wire, set_id)
 }
 
 /// Indexes into `vols` = (file, slices, bytes) minimizing downloaded bytes

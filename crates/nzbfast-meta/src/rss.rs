@@ -71,7 +71,7 @@ impl FeedConfig {
     /// The RSS loop snapshots a feed, awaits a slow fetch, and then applies
     /// the snapshot's rules - so deleting a feed or tightening its rules
     /// while a poll was in flight did not revoke that poll's authority to
-    /// enqueue (Codex sweep 12 Aug F6b). `interval_secs` is excluded: it
+    /// enqueue (review sweep 12 Aug F6b). `interval_secs` is excluded: it
     /// only decides when the NEXT poll runs.
     pub fn fetch_fingerprint(&self) -> String {
         format!(
@@ -725,7 +725,7 @@ pub fn rules_judge_at(rules: &[String], item: &FeedItem, now: i64) -> Judgement 
 /// never matches: its "name" starts with `/`. Matching the local name
 /// is load-bearing - `<atom:entry>` is as good an entry as `<entry>`,
 /// and literal-substring scans made every fully-prefixed Atom feed
-/// parse to healthy-and-empty (Codex sweep 5 Aug M9).
+/// parse to healthy-and-empty (review sweep 5 Aug M9).
 pub(crate) fn find_elem<'a>(xml: &'a str, local: &str) -> Option<(usize, &'a str)> {
     xml.match_indices('<').find_map(|(at, _)| {
         let name = xml[at + 1..]
@@ -886,7 +886,7 @@ impl std::fmt::Display for FeedParseError {
     }
 }
 
-/// [`parse_feed`], but refusing a body that is not a feed (Codex sweep
+/// [`parse_feed`], but refusing a body that is not a feed (review sweep
 /// 2, 3 Aug ML1).
 ///
 /// The tolerant parser answers an empty list for anything it does not
@@ -1254,7 +1254,7 @@ mod tests {
     /// The scope key is what makes the durable seen-guid set per feed
     /// rather than global. Two feeds must never share one, or an item
     /// with `guid = 123` in feed A suppresses a DIFFERENT item with
-    /// `guid = 123` in feed B, across restarts (Codex sweep 12 Aug F12).
+    /// `guid = 123` in feed B, across restarts (review sweep 12 Aug F12).
     ///
     /// And it must not be the url: a feed url essentially always carries
     /// the indexer's apikey, and this value is written to `rss-seen.json`.
@@ -1279,7 +1279,7 @@ mod tests {
     /// The RSS loop snapshots a feed, awaits a fetch that can take most of
     /// a minute, then applies the SNAPSHOT's rules and category. The
     /// fingerprint is how a poll checks it still has authority to do that
-    /// (Codex sweep 12 Aug F6b): everything that changes what a poll MEANS
+    /// (review sweep 12 Aug F6b): everything that changes what a poll MEANS
     /// is in it, and the cadence - which only decides when the next one
     /// runs - is not.
     #[test]
@@ -1474,7 +1474,7 @@ mod tests {
         assert_eq!(items[1].guid, "https://idx/get/def");
     }
 
-    /// Codex sweep 2, 3 Aug ML1: an HTTP 200 that is not a feed used to
+    /// Review sweep 2, 3 Aug ML1: an HTTP 200 that is not a feed used to
     /// parse to an empty list and be recorded as "healthy, no items",
     /// so a revoked apikey's login page looked exactly like a quiet
     /// feed - for as long as the user left it there.
@@ -1571,7 +1571,7 @@ mod tests {
         // A fully PREFIXED Atom document: every descendant carries the
         // prefix too. The root was accepted by local name while the
         // entry scan matched literal `<entry`, so the feed validated
-        // and then parsed to healthy-and-empty for ever (Codex sweep
+        // and then parsed to healthy-and-empty for ever (review sweep
         // 5 Aug M9) - the exact silent failure the checked parser
         // exists to prevent, one layer further in.
         let prefixed = "<?xml version=\"1.0\"?>\

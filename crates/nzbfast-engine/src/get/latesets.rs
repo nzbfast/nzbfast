@@ -233,16 +233,31 @@ fn stopped(cancel: Option<&crate::repair::SideCancel>, edge: &str) -> bool {
 /// without a latch a delete waits out a full CPU-and-disk repair of
 /// every set on disk and then races finalization.
 ///
-/// CHECKED BETWEEN SETS, NEVER INSIDE ONE, and that is the whole design
-/// rather than a detail. `repair_dir_set_with_donors_scoped` writes
-/// files: torn down halfway it leaves a set half-applied, which is
-/// strictly worse than the wait it saves, and no caller could tell the
-/// two apart afterwards. So the latch is read at the top of each ROUND
-/// and at the top of each SET, before any repair is started, and the
-/// bound it buys is stated in that vocabulary: **at most one more set
-/// repair after the latch is raised**. That is a WORK bound and not a
-/// clock, which is what makes it assertable on a loaded box - see
-/// `cancel_tests`.
+/// CHECKED AT THREE EDGES, and the third is new since 12 Sep 2026. This
+/// said "CHECKED BETWEEN SETS, NEVER INSIDE ONE, and that is the whole
+/// design rather than a detail. `repair_dir_set_with_donors_scoped`
+/// writes files: torn down halfway it leaves a set half-applied, which
+/// is strictly worse than the wait it saves, and no caller could tell
+/// the two apart afterwards." That was right for a cut nothing had
+/// specified. `par2repair::control` specifies it: nothing is written at
+/// all before the patch, and during the patch temps are removed, none is
+/// renamed in, and an in-place member gets a subset of the blocks that
+/// were ALREADY MISSING - monotone, so the file is no worse than it was
+/// and a re-run repairs it from the same recovery data. And a caller CAN
+/// tell the two apart, by matching `RepairError::Cancelled`, which the
+/// set loop below does.
+///
+/// So the latch is read at the top of each ROUND, at the top of each
+/// SET, and - through the `RepairControl` the set loop hands the engine -
+/// per member hashed, per block fed and per block written INSIDE a
+/// repair. The two loop edges still earn their place: the catalog build
+/// and the verify pass are paid before the fold reaches its first
+/// cancel poll, and skipping a whole round skips the census as well.
+/// The bound the outer two buy is still a WORK bound and not a clock -
+/// **at most one more set repair STARTED after the latch is raised** -
+/// which is what makes it assertable on a loaded box; see
+/// `cancel_tests`. The inner one turns "started" from "runs to the end"
+/// into "stops where it is".
 ///
 /// WHAT A CANCELLED PASS RETURNS is whatever it had accumulated, which
 /// may be a `good` that a full pass would have turned true. That is the
@@ -432,13 +447,35 @@ pub(super) fn apply_nonactivated_disk_sets(
             }
             let mine = vouched(out_dir, &named, &packets);
             repairs += 1;
-            let done = nzbkit::par2repair::repair_dir_set_with_donors_scoped(
+            // THE CONTROLLED DOOR, since 12 Sep 2026. `stopped` above
+            // is the SET edge - it ends the pass between two sets - and
+            // a late set can itself be a half-hour repair, so the
+            // cancel had to reach inside one too. Same catalog
+            // semantics as the uncontrolled sibling, argument for
+            // argument; the control adds the progress the queue row
+            // draws and the cancel the fold polls. `None` (a CLI run)
+            // builds an inert control, which is the call this was.
+            //
+            // `_run` bounds the reporting window to this one set: the
+            // round walks several, and a row still showing the last
+            // set's phase while the next one's catalog is being built
+            // is the static-word failure with a percentage on it.
+            let control = cancel.map(crate::repair::SideCancel::repair_control);
+            let _run = cancel.map(|c| c.repair_progress().enter());
+            let done = nzbkit::par2repair::repair_dir_set_with_donors_scoped_controlled_as(
                 out_dir,
                 &id,
                 &donors,
                 scope,
                 PATCH_EXISTING,
                 Some(&applicable),
+                // A clean late set returns `NoDamage` and prints
+                // nothing, so this caller is invisible to a log parser
+                // while having paid for a whole retained corpus - the
+                // first of the six failures in
+                // `research/PAR2-RETENTION-CALLER-CENSUS-2026-09-08.md`.
+                nzbkit::par2repair::RetentionCaller::new(nzbkit::par2repair::CallerSite::LateSet),
+                control.unwrap_or_default(),
             );
             match done {
                 Ok(nzbkit::par2repair::RepairStatus::Repaired(r)) => {
@@ -572,6 +609,19 @@ pub(super) fn apply_nonactivated_disk_sets(
                         );
                     }
                 }
+                // THE USER'S CANCEL IS NOT AN UNREADABLE SET. Ahead of
+                // both `Err` arms below, because their wording is the
+                // wrong story twice over: "could not be read (repair
+                // cancelled)" blames the set, and `good = false` would
+                // make a deleted job's tail refuse to report success
+                // over files that verify perfectly well. Nothing is
+                // recorded and the round ENDS - the pass's own X5-13
+                // bound has already stopped it at the next set edge,
+                // and the summary line at the bottom of this function
+                // says what it cost. See `NativeVerdict::Cancelled` for
+                // the same reading on the download repair, and
+                // `RepairError::Cancelled` for what is left on disk.
+                Err(nzbkit::par2repair::RepairError::Cancelled) => break,
                 Err(e) if mine => {
                     if said.insert(id) {
                         warn!(

@@ -776,7 +776,7 @@ fn handle_api(
         // to the handler.
         let form_body = ctype_lc.starts_with("application/x-www-form-urlencoded");
         // The endpoint's OWN limit, decided before the read
-        // (Codex sweep 2, 3 Aug M1). This buffer used to be
+        // (review sweep 2, 3 Aug M1). This buffer used to be
         // capped at a flat 256 MiB and every handler applied
         // its real limit - 8 MiB for a config import, 1 MiB
         // for a server save or a wall fix - only in the
@@ -983,7 +983,19 @@ fn handle_api(
         // body is unchanged: the *arrs and the wrapper probes
         // read the phrases and the hs proof from it, not the
         // status line.
-        let _ = req.respond(with_cors(json_resp(refusal).with_status_code(403), cors));
+        // The refusal honours `output=xml` too, and has to: SAB's
+        // `check_apikey` goes through the same `report()`, so an XML
+        // client that gets XML for every good call and JSON for a bad
+        // key throws in exactly the place its error handling runs. The
+        // extras above (`nzbfast`, `hs_proof`) ride inside `<result>`
+        // beside SAB's two keys; the wrapper probes send no `output`
+        // and keep the JSON body they parse.
+        let refusal = if params.get("output").map(String::as_str) == Some("xml") {
+            xml_resp(sab_xml_body(&mode, &refusal))
+        } else {
+            json_resp(refusal)
+        };
+        let _ = req.respond(with_cors(refusal.with_status_code(403), cors));
         return;
     }
     // For stream-mode adds: absolute player-handoff links need the
@@ -1015,7 +1027,22 @@ fn handle_api(
     };
     let body = api::dispatch(d, &mut req, &params, &mode, &ctx, &mut api_body)
         .unwrap_or_else(|| json!({"status": false, "error": format!("unimplemented mode {mode}")}));
-    let _ = req.respond(with_cors(json_resp(body), cors));
+    // `output=xml`: audit row 7. SAB's `report()` honours it on every
+    // mode and answers `text/xml`; we read the parameter nowhere, so an
+    // XML client got a JSON body with a JSON content type and threw at
+    // parse time. The branch is HERE, at the one `respond` every mode
+    // funnels through, so no arm has to know about it and the JSON path
+    // is byte-identical for every caller that does not ask - the
+    // comparison is `== "xml"`, exactly SAB's, so `output=json` and an
+    // absent `output` both take the old line untouched.
+    let _ = req.respond(with_cors(
+        if params.get("output").map(String::as_str) == Some("xml") {
+            xml_resp(sab_xml_body(&mode, &body))
+        } else {
+            json_resp(body)
+        },
+        cors,
+    ));
 }
 
 pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>, config: PathBuf) {
@@ -1444,7 +1471,7 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                 // before auth - SAB parity, loopback-bound by default, and the
                 // auth-fail limiter still counts the failure afterwards.
                 //
-                // EVERY post, whatever it calls itself (Codex sweep 2, 3 Aug
+                // EVERY post, whatever it calls itself (review sweep 2, 3 Aug
                 // H1). The read used to happen only for three recognized
                 // content types, and a handler whose body was not pre-read
                 // fell back to reading the socket itself - AFTER dispatch,

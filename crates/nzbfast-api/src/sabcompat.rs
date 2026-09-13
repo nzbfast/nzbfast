@@ -83,7 +83,9 @@ pub(super) fn sab_warnings(
         let Some(total) = s.block_bytes.filter(|b| *b > 0) else {
             continue;
         };
-        if d.block_spent(&s.host) < total {
+        // Per ACCOUNT, never per host: two accounts on one hostname
+        // are an ordinary shape and only one of them may have run out.
+        if d.block_spent(&s.account_key()) < total {
             continue;
         }
         out.push(format!(
@@ -454,7 +456,7 @@ fn watch_failed_json(d: &Daemon) -> Vec<Value> {
                 id.clone(),
                 // What Delete addresses. Two watch folders can hold
                 // rejected files of the same NAME, and the basename
-                // then names neither of them (Codex sweep 2,
+                // then names neither of them (review sweep 2,
                 // 3 Aug L1).
                 crate::watchfail::watch_fail_id(p),
             )
@@ -578,6 +580,15 @@ struct SlotCtx {
     /// TODO 205: the disk-unpack ladder's live counters per job, so a
     /// row that says "unpacking" can say how much of it is left.
     unpack_map: std::collections::HashMap<String, Arc<crate::unpackprog::UnpackProgress>>,
+    /// The same question one stage earlier: a row that says "repairing"
+    /// can now say WHICH of the repair's four phases is running and how
+    /// far through it is. The queue row read `Repairing, 100%, timeleft
+    /// 0:00:00` for the whole of a fold before this, which is the
+    /// static-word failure `unpack_map` above exists to fix for the
+    /// unpack ladder - and the reason the daemon capped what it would
+    /// even start (`serve/mod.rs`). See
+    /// `nzbfast_core::repairprog`.
+    repair_map: std::collections::HashMap<String, Arc<crate::streamhub::SideCancel>>,
     active_id: Option<String>,
     stall: Option<(String, Instant)>,
     pool_view: Vec<(String, usize, u64)>,
@@ -625,6 +636,7 @@ fn slot_json(
         sc,
         activity_map,
         unpack_map,
+        repair_map,
         active_id,
         stall,
         pool_view,
@@ -896,6 +908,43 @@ fn slot_json(
             "done": p.done(),
             "total": p.total(),
         })).unwrap_or(Value::Null),
+        // ...and, while a REPAIR is inside the engine, which of its
+        // four phases is running and how far through the whole repair
+        // it is.
+        //
+        // OURS, NOT SAB'S, like `activity`, `origin` and `unpack`
+        // beside it: a real SABnzbd queue slot carries no such key, and
+        // the post-processing options a client reads are `unpackopts`
+        // above. An OBJECT for that reason as much as for the fields -
+        // nothing could mistake it for the boolean flag its name might
+        // suggest.
+        //
+        // Present exactly while an engine repair is running under this
+        // job - which since 12 Sep 2026 includes a stage whose
+        // `activity` is `extracting`, not only `repairing`: the nested
+        // extraction ladder's per-level PAR2 pass carries a control
+        // too, and it runs inside the unpack tail. The page draws the
+        // four phases only under `case 'repairing'`, so on such a row
+        // this object is published and undrawn; the argument for
+        // leaving it that way is on `unpack::nested_par2_repair`.
+        // Absent for the stretches of a `repairing` section that are
+        // NOT an engine repair, chiefly the recovery-volume
+        // side-fetches, where the page keeps the bare word it always
+        // showed. `pct` is the whole repair banded across the four
+        // phases (the band is `nzbfast_core::repairprog`'s decision,
+        // taken to match `parfast`'s so the two products cannot
+        // disagree about what 60% means); `done`/`total` are the
+        // current phase's own, in that phase's own units.
+        "repair": repair_map
+            .get(&j.nzo_id)
+            .map(|c| c.repair_progress())
+            .and_then(|p| p.phase().map(|ph| json!({
+                "phase": ph,
+                "pct": p.permille() as f64 / 10.0,
+                "done": p.done(),
+                "total": p.total(),
+            })))
+            .unwrap_or(Value::Null),
         // SAB's INTERFACE_PRIORITIES vocabulary and NOTHING ELSE:
         // Force, Repair, High, Normal, Low. `sab_priority_name` maps our
         // held-duplicate sentinel out of it; the hold itself is in
@@ -1055,6 +1104,14 @@ fn slot_json(
     })
 }
 
+// `output=xml`, a child module: see sabcompat/xmlout.rs. SAB's
+// `XmlOutputFactory` ported, plus the mode->keyword table that decides
+// each document's outer element. Public because the branch that picks
+// between the two serializations lives at `serve/http.rs`'s single
+// `req.respond`, not in here.
+mod xmlout;
+pub use xmlout::{sab_xml_body, sab_xml_keyword};
+
 // The SAB value formats, a child module: see sabcompat/units.rs.
 mod units;
 use units::sab_priority_name;
@@ -1093,6 +1150,7 @@ pub fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, String>
         prefetch_bps,
         activity_map,
         unpack_map,
+        repair_map,
         active_id,
         stall,
         pool_view,
@@ -1169,6 +1227,7 @@ pub fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, String>
         sc,
         activity_map,
         unpack_map,
+        repair_map,
         active_id,
         stall,
         pool_view,
@@ -2128,7 +2187,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
         let mut ok = false;
         match cmd {
             // Body in api/remote.rs, with the tail-guard, suspend and
-            // idle-announce rationale on it (Codex sweeps 3 + 14 Aug).
+            // idle-announce rationale on it (review sweeps 3 + 14 Aug).
             "GroupPause" | "GroupResume" => {
                 ok = super::api::remote::pause_by_ids(d, &ids, cmd == "GroupPause");
             }
@@ -2187,7 +2246,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                     nzbkit::disk::sanitize_filename(param_str.trim())
                 };
                 // Through the same queued-recategorize transaction as
-                // the SAB change_cat arm (Codex sweep 3 Aug M9):
+                // the SAB change_cat arm (review sweep 3 Aug M9):
                 // category controls filesystem routing, so writing the
                 // label without re-deriving out_dir under add_lock left
                 // the record saying movies while the job downloaded
@@ -2221,7 +2280,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 // Persisted HERE, with every fence still held, not left
                 // to the tail save below: a refused store has to roll
                 // the moved trees back under the fences, and by the
-                // tail they are gone (Codex C10).
+                // tail they are gone (review C10).
                 if !fences.is_empty() && !super::api::queue::persist_relocations(d, fences) {
                     ok = false;
                     *rpc_error = Some(
@@ -2239,7 +2298,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 // is also what "no such job" answers.
                 let prio = nzbget_priority(param_str.trim().parse::<i64>().unwrap_or(0));
                 // Through the shared transition, not a bare write
-                // (Codex sweep 2, 3 Aug M4). This copy cleared the
+                // (review sweep 2, 3 Aug M4). This copy cleared the
                 // watchdog deferral but not the duplicate hold, so
                 // raising a held duplicate to Normal or Force
                 // answered success while `pick_job` - which skips a
@@ -2282,7 +2341,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 // touched the download's own files, on either side.
                 let erase = cmd == "HistoryFinalDelete";
                 let mut h = d.history.lock_ok();
-                // Parity with the SAB/API delete (Codex sweep 3 Aug
+                // Parity with the SAB/API delete (review sweep 3 Aug
                 // M10): a record whose files are mid-move
                 // (recategorize) or mid-unlock (password finalizing)
                 // is being worked on disk right now, and removing it
@@ -2431,7 +2490,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                             early_gone.extend(d.early_take(&mut g));
                             // Record deleted for good - drop its spooled
                             // .nzb. Through `drop_spool` rather than a
-                            // swallowed `remove_file` (Codex sweep F-05):
+                            // swallowed `remove_file` (review sweep F-05):
                             // the row IS gone durably by the time this
                             // runs, so a copy whose unlink is REFUSED is
                             // a file under the adoptable name that no
@@ -2490,7 +2549,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
         // `requeue_category` re-points `out_dir` and can have MOVED the
         // partial download, so each persists inside its own arm with
         // the relocation fences still held and rolls back on a refused
-        // store (Codex C10) - this tail save is their belt. One save,
+        // store (review C10) - this tail save is their belt. One save,
         // not one per arm, so editing N jobs is one rewrite of a
         // queue.json that reaches 14,500 rows. Pinned by
         // `remote_compat.rs`.
@@ -2573,7 +2632,7 @@ pub fn handle_jsonrpc(
     let full_auth;
     if !keys.is_empty() {
         // auth_credentials, not strip_prefix("Basic "): the scheme token
-        // is case-insensitive per RFC 7235 (Codex sweep 12 Aug F18).
+        // is case-insensitive per RFC 7235 (review sweep 12 Aug F18).
         let cred_pw = auth_credentials(&req, "basic")
             .and_then(|b| b64_decode(&b))
             .and_then(|raw| String::from_utf8(raw).ok())
@@ -2620,7 +2679,7 @@ pub fn handle_jsonrpc(
     // effect immediately. The tier is re-derived too, so a key demoted
     // from full to add-only mid-body cannot keep its old reach.
     //
-    // UNCONDITIONAL, including the empty-to-non-empty transition (Codex
+    // UNCONDITIONAL, including the empty-to-non-empty transition (review
     // sweep 3 Aug H4): this used to run only when the request-START key
     // list was non-empty, so an install that was open when the request
     // line arrived kept full_auth=true even if the owner set the very
@@ -2634,7 +2693,7 @@ pub fn handle_jsonrpc(
             .flatten()
             .collect();
         // auth_credentials, not strip_prefix("Basic "): the scheme token
-        // is case-insensitive per RFC 7235 (Codex sweep 12 Aug F18).
+        // is case-insensitive per RFC 7235 (review sweep 12 Aug F18).
         let cred_pw = auth_credentials(&req, "basic")
             .and_then(|b| b64_decode(&b))
             .and_then(|raw| String::from_utf8(raw).ok())
@@ -2741,7 +2800,7 @@ pub fn handle_jsonrpc(
             // The deadline has to reach the store too: `pausedownload`
             // above persisted `paused: true` with no `pause_until_unix`,
             // so a restart before N seconds would restore an INDEFINITE
-            // pause that never auto-resumes (Codex C14).
+            // pause that never auto-resumes (review C14).
             persist_pause(d);
             json!(true)
         }

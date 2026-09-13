@@ -113,6 +113,76 @@ fn in_place_feed_batch_fill_commits_only_complete_slices() {
     assert_eq!(batch.charged_bytes(), 4, "partial bytes were not charged");
 }
 
+/// A folded batch's arena comes back out of the pool with its capacity
+/// and no contents; past the cap it is dropped; and the gauge carries a
+/// pooled arena at capacity, a taken one at nothing.
+#[test]
+fn arena_pool_recycles_up_to_its_cap() {
+    let pool = linalg::ArenaPool::new(1);
+    let mut a = pool.take(64);
+    a.push(1, &[7u8; 40]);
+    let cap_a = a.arena.capacity();
+    assert!(cap_a >= 64);
+    let b = pool.take(64);
+    pool.put(a);
+    assert_eq!(pool.pooled(), 1);
+    pool.put(b);
+    assert_eq!(
+        pool.pooled(),
+        1,
+        "second arena past the cap is freed, not kept"
+    );
+    let c = pool.take(64);
+    assert_eq!(
+        c.arena.capacity(),
+        cap_a,
+        "the pooled arena is the one handed back"
+    );
+    assert!(c.arena.is_empty() && c.slices.is_empty());
+    assert_eq!(c.charged_bytes(), 0);
+    assert_eq!(pool.pooled(), 0);
+    let d = pool.take(cap_a * 4);
+    assert!(
+        d.arena.capacity() >= cap_a * 4,
+        "a too-small pooled arena is not handed out"
+    );
+}
+
+/// Sources packed once at read (`prepack_planar_in_place`) and folded
+/// through `fold_parallel_prepacked` must equal the plain fold over the
+/// interleaved bytes, tile edges and column splits included.
+#[test]
+fn prepacked_fold_matches_plain_fold() {
+    let words = 4096 + 2048 + 32; // tiles plus one packed chunk, not a power of two
+    let rows = 11;
+    if !linalg::prepacked_fold_admissible(words, rows) {
+        return; // planar kernel not selected on this host
+    }
+    let n = 9;
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let raw: Vec<Vec<u8>> = (0..n)
+        .map(|_| (0..words * 2).map(|_| next() as u8).collect())
+        .collect();
+    let mut packed = raw.clone();
+    for p in packed.iter_mut() {
+        assert!(crate::gf16::prepack_planar_in_place(p));
+    }
+    let coeff = |j: usize, i: usize| crate::gf16::pow2((j as u64 + 1) * (i as u64 * 7 + 3));
+    let mut plain: Vec<Vec<u16>> = vec![vec![0x5a5a; words]; rows];
+    let mut viaprepack = plain.clone();
+    let raw_refs: Vec<&[u8]> = raw.iter().map(|v| v.as_slice()).collect();
+    let packed_refs: Vec<&[u8]> = packed.iter().map(|v| v.as_slice()).collect();
+    fold_parallel(&mut plain, &raw_refs, &coeff, None);
+    linalg::fold_parallel_prepacked(&mut viaprepack, &packed_refs, &coeff, None);
+    assert_eq!(plain, viaprepack);
+}
+
 /// The tiled multi-accumulate must match the naive row x source
 /// double loop for every awkward shape: sources shorter than the
 /// rows, odd source lengths, tiles smaller/larger than rows, and a
@@ -179,7 +249,7 @@ fn fold_chunk_tiled_matches_naive() {
         // match, so short/odd/empty sources are the interesting
         // part - a mis-windowed source silently corrupts a repair.
         let mut got = base.clone();
-        fold_parallel(&mut got, &src_refs, &|j, i| coeffs[j][i]);
+        fold_parallel(&mut got, &src_refs, &|j, i| coeffs[j][i], None);
         assert_eq!(
             got, want,
             "fold_parallel rows={rows} nsrc={nsrc} words={words}"
@@ -229,24 +299,146 @@ fn ntt_gates_route_field_shapes_correctly() {
     #[cfg(not(target_pointer_width = "32"))]
     let budget = 4 * gib;
     // Heavy leg: 16384 x 64 KiB, 1500 missing -> NTT.
-    assert!(ntt_gates_pass(65536, 14884, 1500, 1499, budget));
+    assert!(ntt_gates_pass(65536, 14884, 1500, 1499, budget, false));
     // Light/medium damage: fold.
-    assert!(!ntt_gates_pass(65536, 16381, 3, 2, budget));
-    assert!(!ntt_gates_pass(65536, 16283, 101, 100, budget));
-    // Below the measured crossover margin: fold. 300 sits under the
-    // m~288 end-to-end crossover measured on both the 32-core and the
-    // 20-core box; 384 (the gate) sits above it.
-    assert!(!ntt_gates_pass(65536, 16084, 300, 299, budget));
-    assert!(ntt_gates_pass(65536, 16000, 384, 383, budget));
-    // Small source set (640 KiB / 1 MiB blocks at ~1 GiB): fold,
-    // regardless of damage fraction.
-    assert!(!ntt_gates_pass(655360, 870, 768, 767, budget));
-    // Pathological exponent gap (max exponent >= 3m): fold.
-    assert!(!ntt_gates_pass(65536, 14884, 1500, 4500, budget));
-    // Realistic gaps stay eligible (alt = 2m - 2).
-    assert!(ntt_gates_pass(65536, 14884, 1500, 2998, budget));
-    // Corpus over the memory budget: fold (amendment 2).
-    assert!(!ntt_gates_pass(65536, 14884, 1500, 1499, gib / 2));
+    assert!(!ntt_gates_pass(65536, 16381, 3, 2, budget, false));
+    assert!(!ntt_gates_pass(65536, 16283, 101, 100, budget, false));
+    // Just under the row gate: fold; at it: transform. The gate is the
+    // arch's re-measured constant (`ntt_min_missing`: 192 on aarch64
+    // since the paired leaf moved the M3's crossover to ~160, 320 on the
+    // x86 arms until their sweep lands), so pin it relative to that.
+    let gate = ntt_min_missing();
+    assert!(!ntt_gates_pass(
+        65536,
+        16384 - gate + 1,
+        gate - 1,
+        gate - 2,
+        budget,
+        false
+    ));
+    assert!(ntt_gates_pass(
+        65536,
+        16384 - gate,
+        gate,
+        gate - 1,
+        budget,
+        false
+    ));
+    // The small-source shape this test asserted the FOLD for until
+    // 7 Sep 2026 - 640 KiB blocks, 870 present, 768 missing - is a
+    // transform win, and the 8,192 present floor was the only reason it
+    // folded. Measured on the M3 Ultra at 872 present: 29.03 CPU-s
+    // against the fold's 39.00, -26%, 1.34x on feed+fold+solve, eleven
+    // mirrored legs, every one SHA-identical to the pristine corpus
+    // (research/NTT-MIN-PRESENT-CROSSOVER-2026-09-07.md).
+    assert!(ntt_gates_pass(655360, 870, 768, 767, budget, false));
+    // What still folds, stated against the constants rather than a
+    // literal so a re-sweep moves the shape with the gate. Under the
+    // present floor: fold, however deep the damage.
+    let (min_p, min_w, min_m) = (NTT_MIN_PRESENT, NTT_MIN_WORK, ntt_min_missing());
+    assert!(!ntt_gates_pass(
+        655360,
+        min_p - 1,
+        4096,
+        4095,
+        budget,
+        false
+    ));
+    assert!(ntt_gates_pass(655360, min_p, 4096, 4095, budget, false));
+    // Over the present floor but under the WORK floor: fold. This is
+    // the clause a single flat present count cannot express - at the row
+    // gate's own minimum the measured crossover is ~1,630 present on
+    // NEON, 3x the floor, and it falls as 1/m from there.
+    let thin = min_w / min_m;
+    assert!(thin > min_p, "the work floor is what binds at the row gate");
+    assert!(!ntt_gates_pass(
+        65536,
+        thin - 1,
+        min_m,
+        min_m - 1,
+        budget,
+        false
+    ));
+    assert!(ntt_gates_pass(
+        65536,
+        thin + 1,
+        min_m,
+        min_m - 1,
+        budget,
+        false
+    ));
+    // The exponent SPAN gate, at its boundary and stated against the
+    // constant rather than a literal, so a re-sweep moves the shape with
+    // the gate. It fires when recovery VOLUMES are missing and what
+    // survives is a union of ranges, which is why the admitted side
+    // below is the realistic one.
+    let span_gate = (14884 * 1500usize).div_ceil(NTT_MIN_WORK_PER_ROW);
+    assert!(!ntt_gates_pass(
+        65536, 14884, 1500, span_gate, budget, false
+    ));
+    assert!(ntt_gates_pass(
+        65536,
+        14884,
+        1500,
+        span_gate - 1,
+        budget,
+        false
+    ));
+    // The floor arm: a set posted whole spans `m - 1` and is admitted
+    // whatever the work per row says, which is what keeps the ordinary
+    // shape on the transform at the low present counts NTT_MIN_PRESENT
+    // admits. 320 present at m = 2,048 carries 853 of work per row,
+    // well under the gate, so it is admitted consecutive and refused
+    // one row wider - the corner the flat factor of 3 got wrong, where
+    // the M3 measured 0.92-0.95 against the fold (8 Sep 2026).
+    assert!(ntt_gates_pass(65536, 320, 2048, 2047, budget, false));
+    assert!(!ntt_gates_pass(65536, 320, 2048, 2048, budget, false));
+    // The span is what the plan produces: a consecutive set that starts
+    // at 8,192 spans 1,499 rows, and a stride-2 set from 11 relabels to
+    // the same, so both are admitted where the prefix (8,192 or 3,009
+    // rows) was refused above.
+    // (The span honours the two A/B knobs - with the range plan off it
+    // IS the prefix - so the expectations hold for the shipped default.)
+    if std::env::var_os("NZBFAST_REPAIR_NTT_RANGE").is_none()
+        && std::env::var_os("NZBFAST_REPAIR_NTT_PROGRESSION").is_none()
+    {
+        let high: Vec<u32> = (8192..8192 + 1500).collect();
+        assert_eq!(exponent_span(&high), 1499);
+        let stepped: Vec<u32> = (0..1500).map(|i| 11 + 2 * i).collect();
+        assert_eq!(exponent_span(&stepped), 1499);
+        let gappy = [0u32, 1, 4500];
+        assert_eq!(exponent_span(&gappy), 4500);
+    }
+    // Corpus over the memory budget with windows off: fold (amendment 2).
+    assert!(!ntt_gates_pass(65536, 14884, 1500, 1499, gib / 2, false));
+    // ...and with them on it is admitted, because half a gibibyte holds
+    // 8,192 of that set's 64 KiB blocks - well past the window floor.
+    // The corpus clause is a floor on ONE window now, not on the whole
+    // corpus; the budget, and so the peak resident set, is untouched.
+    assert!(ntt_gates_pass(65536, 14884, 1500, 1499, gib / 2, true));
+    // A budget too small to hold a window worth transforming folds
+    // even with windows on: the shape clauses pass, the retention one
+    // does not.
+    let thin = (NTT_MIN_WINDOW_PRESENT - 1) * 65536;
+    assert!(!ntt_gates_pass(65536, 14884, 1500, 1499, thin, true));
+    assert!(ntt_gates_pass(
+        65536,
+        14884,
+        1500,
+        1499,
+        NTT_MIN_WINDOW_PRESENT * 65536,
+        true
+    ));
+    // The shape gates still decide first: a window-sized budget cannot
+    // buy the transform for a 101-block repair.
+    assert!(!ntt_gates_pass(
+        65536,
+        16283,
+        101,
+        100,
+        NTT_MIN_WINDOW_PRESENT * 65536,
+        true
+    ));
 }
 
 /// Stage 2 gate (merged NTT plan): the experimental NTT syndrome
@@ -300,12 +492,12 @@ fn ntt_syndrome_path_matches_fold_path() {
 }
 
 /// The smallest `(block_size, n_inputs, n_missing)` that clears
-/// every clause of [`ntt_gates_pass`]: 8192 present slices,
-/// `NTT_MIN_MISSING` missing, max exponent one under it and so
-/// inside the 3x factor. At a 1 KiB block the stripe geometry is one
-/// stripe wide, so the worker count clamps to 1 on EVERY machine and
-/// the whole footprint is 8 MB of corpus plus a single worker's
-/// arena. The admission tests use this rather than the
+/// every clause of [`ntt_gates_pass`]: `NTT_MIN_MISSING` missing, the
+/// present count both present clauses want at that depth, and a max
+/// exponent one under `m` and so inside the 3x factor. At a 1 KiB block
+/// the stripe geometry is one stripe wide, so the worker count clamps
+/// to 1 on EVERY machine and the whole footprint is ~1 MB of corpus
+/// plus a single worker's arena. The admission tests use this rather than the
 /// 64 KiB/16384/1500 benchmark leg because that leg needs 930 MB of
 /// corpus budget on top of a core-count-dependent arena charge,
 /// which made the expected value a function of the host's RAM, its
@@ -313,14 +505,22 @@ fn ntt_syndrome_path_matches_fold_path() {
 /// in a `--memory=4g` container on a many-core host, and under any
 /// exported `NZBFAST_NTT_BUDGET`.
 ///
-/// Tracks `NTT_MIN_MISSING` deliberately: a shape that stops being
-/// minimal when the gate moves stops testing the gate's boundary.
-const MINIMAL_NTT_SHAPE: (usize, usize, usize) = (1024, 8192 + NTT_MIN_MISSING, NTT_MIN_MISSING);
+/// Derived from the gates rather than written down: a shape that stops
+/// being minimal when a gate moves stops testing the gate's boundary,
+/// and both the present floor and the work floor moved on 7 Sep 2026.
+/// A function and not a `const` because [`ntt_min_missing`] is
+/// per-arch, and the present count the work floor asks for follows it.
+fn minimal_ntt_shape() -> (usize, usize, usize) {
+    let m = NTT_MIN_MISSING.max(ntt_min_missing());
+    let present = NTT_MIN_PRESENT.max(NTT_MIN_WORK.div_ceil(m));
+    (1024, present + m, m)
+}
 
-/// True when any NTT knob is exported. All four move what
+/// True when any NTT knob is exported. All five move what
 /// [`resolve_syndrome_path`] returns - the budget directly, `W` and
-/// `THREADS` through the arena charge - so the admission tests opt
-/// out wholesale rather than fight a bench operator's shell.
+/// `THREADS` through the arena charge, `STREAM` through the retention
+/// clause - so the admission tests opt out wholesale rather than fight
+/// a bench operator's shell.
 /// Mutating the vars from inside the test is not an option: the lib
 /// tests run in parallel with other readers of them.
 fn ntt_env_knob_set() -> bool {
@@ -329,6 +529,10 @@ fn ntt_env_knob_set() -> bool {
         "NZBFAST_NTT_BUDGET",
         "NZBFAST_NTT_W",
         "NZBFAST_NTT_THREADS",
+        // The streaming-admission A/B arm: `=0` restores the flat
+        // "the corpus must fit" clause, which is the one thing the
+        // over-budget admission test asserts against.
+        "NZBFAST_NTT_STREAM",
     ]
     .iter()
     .any(|k| std::env::var_os(k).is_some())
@@ -348,7 +552,7 @@ fn ntt_auto_retention_budget_excludes_the_worker_arenas() {
     let _g = NTT_STATE.lock_ok();
     FAST_PAR_TRIPPED.store(false, std::sync::atomic::Ordering::Relaxed);
     set_fast_par_enabled(true);
-    let (bs, n_inputs, m) = MINIMAL_NTT_SHAPE;
+    let (bs, n_inputs, m) = minimal_ntt_shape();
     let exps: Vec<u32> = (0..m as u32).collect();
     let arenas = ntt_worker_arenas(bs, m);
     assert!(arenas > 0, "the arenas are never free");
@@ -379,7 +583,60 @@ fn ntt_auto_retention_budget_excludes_the_worker_arenas() {
     set_fast_par_enabled(FAST_PAR_DEFAULT);
 }
 
-/// Shrinking the admission tests to [`MINIMAL_NTT_SHAPE`] collapses
+/// The dispatcher's half of the streaming admission: a corpus BIGGER
+/// than the retention budget is selected for the transform, and the
+/// budget it hands back is the WINDOW the fold worker fills, transforms
+/// and releases - not a promise that the corpus fits.
+///
+/// Until 5 Sep 2026 the retention clause demanded the whole corpus fit,
+/// so every repair larger than a quarter of the box's RAM streamed the
+/// fold however big the machine was: a 16 GB box budgets 4 GiB, and the
+/// 10 GiB / 900-row set measured 19.8 s on the fold against 9.2 s in
+/// three windows on an M3 Ultra (SHA-gated, forced arms).
+#[test]
+fn ntt_auto_admits_a_corpus_bigger_than_the_budget() {
+    if ntt_env_knob_set() {
+        return; // the env overrides are exercised manually, not here
+    }
+    let _g = NTT_STATE.lock_ok();
+    FAST_PAR_TRIPPED.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_fast_par_enabled(true);
+    // A 1 KiB block, as in [`minimal_ntt_shape`] and for the same
+    // reason: it keeps the window floor clear of this host's budget
+    // whatever its RAM or cgroup limit, so the shape is decided by the
+    // clause under test and not by the machine.
+    let bs = 1024usize;
+    let m = ntt_min_missing();
+    let exps: Vec<u32> = (0..m as u32).collect();
+    let corpus_budget = ntt_budget_env().saturating_sub(ntt_worker_arenas(bs, m));
+    assert!(
+        corpus_budget / bs >= NTT_MIN_WINDOW_PRESENT,
+        "a 1 KiB block's window clears the floor on any host this builds for"
+    );
+    // Twice what the budget can retain, so the whole-corpus clause
+    // cannot be what admits it.
+    let n_present = (corpus_budget / bs).saturating_mul(2);
+    assert!(n_present.saturating_mul(bs) > corpus_budget);
+    assert_eq!(
+        resolve_syndrome_path(SyndromePath::Auto, bs, n_present + m, m, &exps),
+        Some(corpus_budget),
+        "an over-budget corpus takes the transform one window at a time"
+    );
+    // ...and the retained-only arm (`NZBFAST_NTT_STREAM=0`) refuses
+    // exactly this shape, which is what makes the assertion above about
+    // the new clause rather than about the shape gates.
+    assert!(!ntt_gates_pass(
+        bs,
+        n_present,
+        m,
+        m - 1,
+        corpus_budget,
+        false
+    ));
+    set_fast_par_enabled(FAST_PAR_DEFAULT);
+}
+
+/// Shrinking the admission tests to [`minimal_ntt_shape`] collapses
 /// the geometry to one stripe and therefore one worker, which turns
 /// the `saturating_mul(threads)` factor in [`ntt_worker_arenas`]
 /// into a no-op there. That factor is the whole point of the
@@ -399,6 +656,27 @@ fn ntt_worker_arenas_price_every_worker() {
         crate::par2ntt::FlatPlan::scratch_bytes(1500, w).saturating_mul(threads),
         "the arena charge is per worker, not per repair"
     );
+}
+
+/// The default stripe width keys on the block size only on the x86
+/// nibble arms: everywhere else it is 512 at every block size, and on
+/// those arms it steps to 1,024 exactly at 1 MiB (the measured class,
+/// see `default_stripe_words`).
+#[test]
+fn default_stripe_words_keys_on_block_size_only_on_the_nibble_arms() {
+    let nibble = cfg!(target_arch = "x86_64") && crate::gf16::multi_fold_width() == 4;
+    assert_eq!(super::fastpar::default_stripe_words(65536), 512);
+    assert_eq!(super::fastpar::default_stripe_words((1 << 20) - 2), 512);
+    let big = super::fastpar::default_stripe_words(1 << 20);
+    assert_eq!(big, if nibble { 1024 } else { 512 });
+    assert_eq!(super::fastpar::default_stripe_words(4 << 20), big);
+    if !ntt_env_knob_set() {
+        assert_eq!(
+            ntt_stripe_geometry(4 << 20).0,
+            big,
+            "the geometry takes the rule"
+        );
+    }
 }
 
 /// A set whose present slices are nearly all SHORT tails (many small
@@ -476,6 +754,83 @@ fn ntt_short_tail_pad_counts_against_the_retention_budget() {
     for (c, &j) in missing.iter().enumerate() {
         assert_eq!(out_full[c], full[j], "missing slice {j} wrong via NTT");
     }
+}
+
+/// The streaming admission's own shape, end to end: a corpus SEVERAL
+/// windows deep, every slice full length (no tail pads), through the
+/// real feed worker. The transform is linear in its sources, so the
+/// partial rows of disjoint windows XOR into the same syndromes one
+/// plan over the whole corpus would produce - that identity is what
+/// admits a corpus bigger than the retention budget at all
+/// (`fastpar::ntt_retention_admits`), and this is where it is checked
+/// against the fold rather than argued.
+///
+/// Multi-window was reachable before this test only through
+/// `ntt_short_tail_pad_counts_against_the_retention_budget`, whose
+/// corpus is one batch and therefore ONE window - the pad charge closes
+/// it, and nothing else. Here the feed handle's 1 MiB assembly buffer
+/// is what splits the corpus, so the windows are real ones.
+#[test]
+fn ntt_multi_window_transform_matches_fold_path() {
+    // 2.2 MB of corpus at 512-byte blocks: the Feeder's floor for
+    // `max_batch` is 1 MiB, so three batches arrive and a budget under
+    // one of them closes a window per batch.
+    let (n, bs) = (4400usize, 512usize);
+    let slices = demo_slices(n, bs);
+    let missing: Vec<usize> = {
+        let mut v: Vec<usize> = (0..40).map(|i| (i * 97 + 5) % n).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let m = missing.len();
+    let exps: Vec<u32> = (0..m as u32).collect();
+    let recovery: Vec<(u32, Vec<u8>)> = exps
+        .iter()
+        .map(|&e| (e, generate_recovery(&slices, bs, e)))
+        .collect();
+    let run = |path| {
+        let rec = Reconstructor::new_with_path(bs, n, &missing, &recovery, path).unwrap();
+        {
+            // One feed handle, so the split is the batch boundary and
+            // not an interleaving of producers - the windows are then
+            // deterministic and the count below is a real assertion.
+            let mut feeder = rec.feeder(1 << 20);
+            for (i, s) in slices.iter().enumerate() {
+                if !missing.contains(&i) {
+                    feeder.feed(i, s);
+                }
+            }
+        }
+        rec.finish_reported()
+    };
+    let (fold_out, fold_report) = run(SyndromePath::Fold);
+    assert_eq!(fold_report.windows, 0, "the fold retains nothing");
+    // Half a mebibyte: every 1 MiB batch overflows it on arrival.
+    let (out, report) = run(SyndromePath::NttForce(512 << 10));
+    assert!(report.ntt_used, "the windows must transform, not fold");
+    assert!(
+        report.windows >= 3,
+        "expected the corpus to split into windows, got {}",
+        report.windows
+    );
+    assert_eq!(
+        report.n_present,
+        n - m,
+        "every present slice is fed to exactly one window"
+    );
+    assert_eq!(
+        out, fold_out,
+        "windowed transform must stay bit-identical to the fold"
+    );
+    for (c, &j) in missing.iter().enumerate() {
+        assert_eq!(out[c], slices[j], "missing slice {j} wrong after windowing");
+    }
+    // Control: the same corpus in ONE window is the retained path, and
+    // must agree with both.
+    let (retained_out, retained_report) = run(SyndromePath::NttForce(usize::MAX));
+    assert_eq!(retained_report.windows, 1, "one window retains everything");
+    assert_eq!(retained_out, fold_out, "the retained path is the fold too");
 }
 
 /// Blowing the retention budget mid-feed must fall back to the fold
@@ -758,40 +1113,56 @@ fn payload_bytes(len: usize, seed: u64) -> Vec<u8> {
 /// because the divergence log is process-global: draining it here
 /// cannot race another test's events.
 /// The default retention budget scales to the machine: the flat
-/// 4 GiB ceiling holds on big RAM, small hosts get RAM/4, and a
+/// 64 GiB ceiling holds on very big RAM, everything else gets RAM/4, and a
 /// cgroup limit (the OOM-kill line) caps at a quarter regardless of
 /// host RAM - an OOM kill is the one failure the verify-retry
 /// cannot rescue, so the budget must gate dispatch up front.
 #[test]
 fn ntt_default_budget_scales_to_the_machine() {
     let gib = 1u64 << 30;
-    // The flat ceiling is 4 GiB, which a 32-bit `usize` cannot hold, so
+    // SATURATE, never truncate. `(16 * gib) as usize` is ZERO on a 32-bit
+    // `usize`, and an expectation that wraps agrees with itself exactly the
+    // way the production cast used to - which is the trap the paragraph below
+    // names and this test then walked into three lines later, taking nightly's
+    // armv7-cross red on 6 Sep 2026 (left 1 GiB, right 0). Production
+    // saturates with `usize::try_from(..).unwrap_or(usize::MAX)`; the
+    // expectations must be written the same way, so this closure is the only
+    // route from a `u64` figure to a `usize` one in this test.
+    let bytes = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+    // The flat ceiling is 64 GiB, which a 32-bit `usize` cannot hold, so
     // there it lands on the address-space ceiling instead. Naming the
-    // expectation per width keeps BOTH facts pinned; writing
-    // `(4 * gib) as usize` here is what let the production wrap-to-zero
-    // through in the first place (the cast agreed with itself).
+    // expectation per width keeps BOTH facts pinned.
     #[cfg(target_pointer_width = "32")]
     let ceil = 1usize << 30;
     #[cfg(not(target_pointer_width = "32"))]
-    let ceil = (4 * gib) as usize;
+    let ceil = bytes(64 * gib);
     assert_eq!(ntt_default_budget(None, None), ceil);
-    assert_eq!(ntt_default_budget(Some(64 * gib), None), ceil);
+    assert_eq!(ntt_default_budget(Some(512 * gib), None), ceil);
+    // A 64 GB box gets 16 GiB, which admits a 10 GiB corpus the old
+    // 4 GiB ceiling refused on every box (the big-file round, 5 Sep 2026).
+    assert_eq!(
+        ntt_default_budget(Some(64 * gib), None),
+        bytes(16 * gib).min(ceil)
+    );
     assert_eq!(
         ntt_default_budget(Some(8 * gib), None),
-        ((2 * gib) as usize).min(ceil)
+        bytes(2 * gib).min(ceil)
     );
-    assert_eq!(ntt_default_budget(Some(4 * gib), None), gib as usize);
+    assert_eq!(
+        ntt_default_budget(Some(4 * gib), None),
+        bytes(gib).min(ceil)
+    );
     assert_eq!(
         ntt_default_budget(Some(64 * gib), Some(2 * gib)),
-        (gib / 2) as usize,
+        bytes(gib / 2),
         "cgroup limit caps regardless of host RAM"
     );
     // A budget is never zero and never wraps, whatever the probes say.
-    // The 4 GiB ceiling is exactly 2^32: `b as usize` used to hand a
+    // The ceiling was 4 GiB, exactly 2^32: `b as usize` used to hand a
     // 32-bit host a budget of 0, which fails the gate for every corpus
     // and made the NTT path unreachable on armv7 without one line of
     // code saying so.
-    assert!(ntt_default_budget(None, None) >= gib as usize);
+    assert!(ntt_default_budget(None, None) >= bytes(gib));
     // The heavy benchmark corpus (~0.93 GiB) still clears the gate
     // on a 16 GiB machine (budget 4 GiB, or the 1 GiB address-space
     // ceiling on 32-bit - the corpus fits either) but not on a 2 GiB
@@ -801,14 +1172,28 @@ fn ntt_default_budget_scales_to_the_machine() {
         14884,
         1500,
         1499,
-        ntt_default_budget(Some(16 * gib), None)
+        ntt_default_budget(Some(16 * gib), None),
+        false
     ));
     assert!(!ntt_gates_pass(
         65536,
         14884,
         1500,
         1499,
-        ntt_default_budget(Some(2 * gib), None)
+        ntt_default_budget(Some(2 * gib), None),
+        false
+    ));
+    // With window streaming on, the 2 GiB box takes that corpus a
+    // window at a time instead: its 512 MiB budget holds 8,192 of the
+    // set's 64 KiB blocks, and the budget - the OOM guard this whole
+    // arithmetic exists for - is the same number either way.
+    assert!(ntt_gates_pass(
+        65536,
+        14884,
+        1500,
+        1499,
+        ntt_default_budget(Some(2 * gib), None),
+        true
     ));
 }
 
@@ -877,7 +1262,7 @@ fn fast_par_setting_gates_the_auto_path() {
     }
     let _g = NTT_STATE.lock_ok();
     // A shape that passes every gate on any host.
-    let (bs, n_inputs, m) = MINIMAL_NTT_SHAPE;
+    let (bs, n_inputs, m) = minimal_ntt_shape();
     let exps: Vec<u32> = (0..m as u32).collect();
     let resolve = || resolve_syndrome_path(SyndromePath::Auto, bs, n_inputs, m, &exps);
     set_fast_par_enabled(false);
@@ -1487,7 +1872,7 @@ fn backsub_case(m: usize, words: usize, e0: u32, scatter: usize, seed: u64) {
     let inv = invert_vandermonde(&ks, e0).expect("distinct bases cannot fail");
     let mut want: Vec<Vec<u16>> = vec![vec![0u16; words]; m];
     let bytes: Vec<&[u8]> = syn.iter().map(|s| gf16::words_as_bytes(s)).collect();
-    fold_parallel(&mut want, &bytes, &|j, i| inv[j][i]);
+    fold_parallel(&mut want, &bytes, &|j, i| inv[j][i], None);
     let plan = super::forney::ForneyPlan::prepare(&ks, e0).expect("distinct bases cannot fail");
     let got = plan.solve(&syn, words);
     assert_eq!(
@@ -1615,38 +2000,595 @@ fn parallel_invert_matches_serial_and_reports_singular() {
 ///
 /// Both arms are gate-isolated rather than run for real: each asserts
 /// WHICH refusal comes back, so a later edit that moves the cap behind
-/// another check fails here instead of quietly costing the 23.7 s.
+/// The Gauss-Jordan arm keeps `MAX_REPAIR_DIM` even though
+/// `check_repair_dim` admitted the set.
+///
+/// This is the hole the per-arm cap opened and the reason the guard is
+/// in TWO places. `check_repair_dim` runs before the recovery exponents
+/// are examined, so it cannot know whether the solve will find structure
+/// to exploit; it admits a large `m` on the strength of the Forney arm's
+/// memory bound. A set whose exponents are neither consecutive nor a
+/// relabelable progression - which is what "recovery packets were
+/// themselves lost" looks like - then falls through to Gauss-Jordan on
+/// an explicit `m x m`: `~4*m^2` bytes and `O(m^3)` scalar ops, about a
+/// gigabyte and hours at these sizes. That is precisely the repair-time
+/// DoS the constant exists to refuse, so the arm re-asserts it.
 #[test]
-fn the_repair_matrix_cap_binds_at_exactly_max_repair_dim() {
-    let bs = 2usize;
-    // One over: refused, and refused BEFORE the per-slice length check -
-    // the recovery buffers here are the wrong size on purpose, so a cap
-    // that ever moved below the syndrome-widening loop would report that
-    // instead, having already allocated m of them.
+fn the_unstructured_arm_is_bounded_by_its_own_memory_not_by_a_dimension() {
+    // The arm's bound is checked directly rather than through
+    // `Reconstructor::new`: past the old cap the constructor now goes on
+    // to INVERT the matrix, and an 8,193 x 8,193 Gauss-Jordan is not a
+    // unit test. What is under test is the rule, not the arithmetic.
+    let bs = 64 << 10;
     let over = MAX_REPAIR_DIM + 1;
-    let missing: Vec<usize> = (0..over).collect();
-    let recovery: Vec<(u32, Vec<u8>)> = (0..over as u32).map(|e| (e, vec![0u8; bs + 2])).collect();
-    let Err(err) = Reconstructor::new(bs, MAX_INPUT_SLICES, &missing, &recovery) else {
-        panic!("one block over the cap must be refused");
+
+    // The window ALONE admits it - which is exactly why the dense arm
+    // needs a bound of its own, and why sharing Forney's was the hole.
+    let window = 2 * over * bs;
+    assert!(
+        super::reconstruct::check_repair_dim_within(over, bs, u64::MAX).is_ok(),
+        "an unlimited budget must admit it: the dimension no longer refuses"
+    );
+
+    // Its real footprint is the window plus the matrix and its inverse,
+    // and only the DENSE check knows that: `check_repair_dim_within`
+    // charges whichever arm `backsub_gate` names, which at this m is
+    // Forney, and it runs before the exponents are examined at all. That
+    // is why the dense bound is re-asserted once the arm is known.
+    let need = window + 4 * over * over;
+    assert!(
+        super::reconstruct::check_repair_dim_dense_within(over, bs, need as u64).is_ok(),
+        "a budget covering its whole footprint must admit it"
+    );
+    let Err(err) = super::reconstruct::check_repair_dim_dense_within(over, bs, need as u64 - 1)
+    else {
+        panic!("a budget one byte short of the dense footprint must refuse");
+    };
+    assert!(
+        matches!(&err, RepairError::SolveBudget { .. }),
+        "the refusal must name MEMORY, not a matrix: the recovery set is good and a \
+         bigger budget admits it: {err}"
+    );
+
+    // And the format's own ceiling is still absolute, whatever the RAM.
+    let Err(err) = super::reconstruct::check_repair_dim_within(MAX_INPUT_SLICES + 1, bs, u64::MAX)
+    else {
+        panic!("past the PAR2 input-slice ceiling nothing may be admitted");
+    };
+    assert!(
+        matches!(&err, RepairError::Malformed(m) if m.contains("input-slice ceiling")),
+        "the outer guard must still name the spec ceiling: {err}"
+    );
+}
+
+/// The slab planner: memory sets the PASS COUNT, never a verdict.
+///
+/// Driven as a pure function on a handed-in budget, the same seam
+/// `check_repair_dim_within` uses and for the same reason - a test that
+/// read the host's real budget would assert something different on every
+/// box in the fleet.
+#[test]
+fn plan_slabs_never_refuses_and_takes_the_fewest_passes() {
+    use super::reconstruct::plan_slabs;
+    let gib = |n: u64| n << 30;
+
+    // 1. THE ORDINARY CASE IS ONE SLAB, and one slab must be the
+    //    untouched fast path - every driver below branches on this.
+    let p = plan_slabs(101, 1 << 20, gib(2));
+    assert_eq!(p.slabs, 1, "a repair well inside the budget must not slab");
+    assert_eq!(p.width, 1 << 20, "one slab is the whole block");
+
+    // 2. THE pain65 GEOMETRY, which is why this exists. 65 GiB / 50%
+    //    parity, 16 of 65 members gone: m = 8,064 at a 2,130,944 B
+    //    block is a 32.0076 GiB window, against the 32 GiB budget a
+    //    128 GiB machine derives. It used to be `SolveBudget` and a
+    //    repair of nothing.
+    let (m, bs) = (8_064, 2_130_944);
+    let p = plan_slabs(m, bs, gib(32));
+    assert_eq!(
+        p.slabs, 2,
+        "it misses by 0.024%, so it costs ONE extra pass"
+    );
+    // ...and the two passes are BALANCED. The widest legal slab here is
+    // 504 bytes short of the whole block, so a greedy cut would spend
+    // the second full sweep of a 65 GiB payload carrying 504 bytes.
+    assert_eq!(p.width, 1_065_472);
+    assert!(
+        p.width * 2 >= bs,
+        "two slabs must actually cover the block between them"
+    );
+
+    // 3. The same set on a 256 GiB box (64 GiB budget) is ONE slab, so
+    //    the machine that has the memory pays nothing for this feature.
+    assert_eq!(plan_slabs(m, bs, gib(64)).slabs, 1);
+
+    // 4. Every plan fits the budget it was given, covers the block
+    //    exactly, and has an even width - the solve works in u16 words,
+    //    and an odd slab would split one.
+    for &budget in &[gib(1), gib(2), gib(8), gib(16), gib(32), gib(64)] {
+        for &(m, bs) in &[
+            (8_064usize, 2_130_944usize),
+            (32_768, 2_130_944),
+            (1, 4 << 20),
+            (948, 5_376_000),
+            (10_240, 1 << 20),
+        ] {
+            let p = plan_slabs(m, bs, budget);
+            assert!(p.width.is_multiple_of(2), "slab width must be whole words");
+            assert!(p.slabs >= 1 && p.width >= 2);
+            assert!(
+                p.slabs * p.width >= bs,
+                "the slabs must cover the block: {p:?} for m={m} bs={bs}"
+            );
+            assert!(
+                (p.slabs - 1) * p.width < bs,
+                "no slab may be entirely past the end of the block: {p:?}"
+            );
+            // The window this plan actually asks for, which is what the
+            // whole exercise is about.
+            // Widened BEFORE the product, not after: `2 * m * p.width`
+            // is a `usize` multiply that overflows at 32-bit pointer width
+            // for the GiB-scale geometries below, and `(a * b) as u64`
+            // panics before the cast ever runs.
+            let window = 2 * m as u64 * p.width as u64;
+            assert!(
+                window <= budget || p.width == 2,
+                "a plan must fit its budget: {p:?} asks {window} of {budget} \
+                 for m={m} bs={bs}"
+            );
+        }
+    }
+
+    // 5. THE NEVER-REFUSE PROPERTY, at the format's own ceiling and a
+    //    budget far below anything a real box would derive: 32,768
+    //    inputs is the most PAR2 permits, and even a 16 MiB budget
+    //    plans rather than failing.
+    let p = plan_slabs(MAX_INPUT_SLICES, 4 << 20, 16 << 20);
+    assert!(p.slabs > 1 && p.width >= 2);
+    assert!(p.slabs * p.width >= (4 << 20));
+
+    // 6. Degenerate shapes do not panic and do not divide by zero.
+    assert_eq!(plan_slabs(0, 1 << 20, gib(1)).slabs, 1);
+    assert_eq!(plan_slabs(0, 0, gib(1)).slabs, 1);
+}
+
+/// The UNATTENDED ceiling: a policy about who is watching, not about
+/// what fits.
+///
+/// The engine bounds the unstructured solve by memory, which is right
+/// for a person who typed a command. A daemon sets this instead, because
+/// it can neither show a fold's progress nor interrupt one, so it starts
+/// only what it has always started. Driven as a pure function on
+/// purpose - storing to the process-wide ceiling here would be visible
+/// to every later test in a `cargo test` one-process run.
+#[test]
+fn the_unattended_ceiling_refuses_by_policy_and_says_so() {
+    use super::reconstruct::unattended_refusal;
+
+    // Zero is the default and means no ceiling: nothing is refused, which
+    // is what a command-line tool gets.
+    assert!(unattended_refusal(MAX_INPUT_SLICES, 0).is_ok());
+
+    // At the ceiling, admitted; one past it, refused.
+    assert!(unattended_refusal(MAX_REPAIR_DIM, MAX_REPAIR_DIM).is_ok());
+    let Err(err) = unattended_refusal(MAX_REPAIR_DIM + 1, MAX_REPAIR_DIM) else {
+        panic!("one block past the unattended ceiling must be refused");
+    };
+    // The message has to say it is a POLICY and that the work is
+    // possible, or the next reader files it as an engine limit - which is
+    // exactly how the flat matrix cap came to be believed for a year.
+    let RepairError::Malformed(text) = &err else {
+        panic!("the unattended refusal is a Malformed, not a capacity error: {err}");
+    };
+    assert!(
+        text.contains("unattended ceiling") && text.contains("possible but slow"),
+        "the refusal must name the policy and say the repair is possible: {text}"
+    );
+}
+
+/// THE EXEMPTION, and the reason the ceiling's number never had to be
+/// raised.
+///
+/// `set_unattended_unstructured_ceiling`'s doc named the day in-fold
+/// progress and a cancel arrived as the day to raise the number. Raising
+/// it would have been the wrong reading: the ceiling stands in for
+/// "nobody can see this repair or stop it", and that is a question about
+/// the CALLER and not about the process. So a caller supplying both
+/// halves is admitted at any m, at the same instant an uncontrolled
+/// caller in the same process is refused - which is what lets the daemon
+/// keep setting the ceiling for its uncontrolled repair paths while its
+/// controlled ones run past it.
+///
+/// WHICH PATHS ARE WHICH moved on 12 Sep 2026 and is censused on
+/// `linalg::set_unattended_unstructured_ceiling`. The short form: the
+/// download repair, the late-set pass and the nested extraction
+/// ladder's per-level PAR2 pass are controlled; `get::settle::noset`'s
+/// obfuscated arm and the MAPPED in-stream driver are not, and are the
+/// whole reason `serve/mod.rs` still makes that call. The `inert` arm
+/// below is exactly the control both of them pass.
+///
+/// BOTH HALVES OR NEITHER is the part with the most riding on it: the
+/// two one-sided controls below are the shapes somebody would reach for
+/// when wiring this up in a hurry, and neither is attended.
+#[test]
+fn a_controlled_caller_is_exempt_from_the_unattended_ceiling() {
+    use super::reconstruct::unattended_refusal_for;
+    use crate::par2repair::control::{PauseGate, RepairControl, RepairPhase};
+    use std::sync::Arc;
+
+    let over = MAX_REPAIR_DIM + 1;
+    let sink = Arc::new(|_: RepairPhase, _: u64, _: u64| {});
+
+    // The shape the daemon now passes: a sink AND a gate.
+    let watched = RepairControl::new(Some(sink.clone()), Some(PauseGate::new()));
+    assert!(watched.is_attended());
+    assert!(
+        unattended_refusal_for(over, MAX_REPAIR_DIM, &watched).is_ok(),
+        "a caller that can both see this repair and stop it is attended whatever \
+         process it is in - refusing it is refusing work nobody is waiting blind for"
+    );
+
+    // ...and the same instant, in the same process, for a caller that
+    // passes nothing. This is the pairing that makes the exemption a
+    // narrowing rather than a hole.
+    let inert = RepairControl::default();
+    assert!(!inert.is_attended());
+    assert!(
+        unattended_refusal_for(over, MAX_REPAIR_DIM, &inert).is_err(),
+        "the ceiling still holds for a caller that reports nothing and cannot be \
+         stopped - which is what `get::settle::noset` and the mapped in-stream driver \
+         still pass, and why `serve/mod.rs` still sets it"
+    );
+
+    // HALF A CONTROL IS NOT A WATCHER. Progress with no cancel leaves
+    // somebody who can see a half-hour fold and not end it; a cancel
+    // with no progress leaves somebody who cannot tell when to press it.
+    let report_only = RepairControl::new(Some(sink), None);
+    let cancel_only = RepairControl::new(None, Some(PauseGate::new()));
+    for (what, c) in [("report-only", &report_only), ("cancel-only", &cancel_only)] {
+        assert!(!c.is_attended(), "{what} must not count as attended");
+        assert!(
+            unattended_refusal_for(over, MAX_REPAIR_DIM, c).is_err(),
+            "{what} was admitted past the ceiling"
+        );
+    }
+
+    // The ceiling's DEFAULT is zero, which means no ceiling, so a
+    // command-line tool is unaffected either way - asserted here too,
+    // because the exemption must not be the only thing keeping it open.
+    assert!(unattended_refusal_for(over, 0, &inert).is_ok());
+}
+
+/// The repair's dimension guard, per arm, at every boundary it has.
+///
+/// It used to be one flat cap and this test asserted that. It is now
+/// three rules, because the two solves cost different things:
+///
+/// - Over the PAR2 input-slice ceiling nothing is admitted, whatever
+///   the memory. That is the outer guard the DoS argument rests on.
+/// - The DENSE product keeps `MAX_REPAIR_DIM`, whose doc comment prices
+///   exactly that arm (`~4*m^2` bytes, `O(m^3)` setup). On this build a
+///   fused kernel sends everything past `backsub_min_missing()` to
+///   Forney, so the dense cap is reached only when dispatch says dense.
+/// - FORNEY is bounded by MEMORY instead - `2 * m * block_size`, the
+///   back-substitution's peak window - because its solve is an
+///   evaluation linear in `m`, not a cubic. Capping it at 8,192 refused
+///   the ordinary full-rebuild workflow (every data file deleted,
+///   repair from over-100% parity, so `m` is every input block) on sets
+///   par2cmdline-turbo completes.
+///
+/// Driven through `check_repair_dim_within` so both sides of the memory
+/// boundary are reachable without mutating a process-global env.
+#[test]
+fn the_repair_dimension_guard_is_per_arm_at_every_boundary() {
+    use super::reconstruct::check_repair_dim_within;
+
+    /// `n` GiB as a `usize`, saturating where the address space cannot
+    /// hold it. Written through `u64` because `8 * (1 << 30)` as a
+    /// `usize` literal is a const-eval overflow on a 32-bit target and
+    /// does not COMPILE - which is what took the armv7 nightly red on
+    /// 8 Sep 2026 (claim `red-armv7-cross-d7d319c4`). Saturation is the
+    /// right answer for every budget below except the one gated to
+    /// 64-bit: the 20 GiB window is over EVERY budget a 32-bit `usize`
+    /// can name, so the refusals hold at either width.
+    const fn gib(n: u64) -> u64 {
+        n << 30
+    }
+
+    // 1. Past the slice ceiling: refused however small the blocks are.
+    let over = MAX_INPUT_SLICES + 1;
+    let Err(err) = check_repair_dim_within(over, 2, u64::MAX) else {
+        panic!("a set over the PAR2 slice ceiling must be refused");
     };
     assert!(
         matches!(&err, RepairError::Malformed(m)
-            if m.contains(&format!("{over} missing blocks")) && m.contains("repair-matrix cap")),
-        "the cap must be the reported reason, not a later check: {err}"
+            if m.contains(&format!("{over} missing blocks")) && m.contains("input-slice ceiling")),
+        "the ceiling must be the stated reason: {err}"
     );
-    // Exactly at the cap: NOT refused by the cap. Proven by the next gate
-    // down answering instead - `n_inputs` is deliberately far too small
-    // for these indices, so the only way to reach that message is to have
-    // cleared the dimension check at m == MAX_REPAIR_DIM.
-    let missing: Vec<usize> = (0..MAX_REPAIR_DIM).collect();
-    let recovery: Vec<(u32, Vec<u8>)> = (0..MAX_REPAIR_DIM as u32)
-        .map(|e| (e, vec![0u8; bs]))
-        .collect();
-    let Err(err) = Reconstructor::new(bs, 16, &missing, &recovery) else {
-        panic!("16 inputs cannot hold slice 16");
+
+    // 2. The Forney arm, bounded by memory and not by a matrix. A 10 GiB
+    //    set at 1 MiB blocks fully rebuilt is m = 10,240: 20 GB of peak
+    //    window, so it turns on the budget and nothing else.
+    let m = 10_240;
+    let bs = 1 << 20;
+    // WHICH arm this m takes is NOT asserted here, and that is the fix
+    // rather than an omission. It used to be `assert!(backsub_gate(m))`,
+    // which is a KERNEL property, not a memory one: `backsub_gate`
+    // reaches Forney only where a fused GF16 multi kernel exists, so on
+    // armv7 - which has none - this shape correctly takes the dense
+    // product and that line alone took the nightly red. Restating any
+    // PART of the gate's rule here fails the same way one step removed:
+    // a `multi_fold_width() > 0` guard is wrong under `NZBFAST_BACKSUB=
+    // dense`, the gate's own documented escape hatch, which is how this
+    // was caught locally.
+    //
+    // Nothing is lost by dropping it. The gate's threshold has its own
+    // test (`backsub_gate(gate - 1)` in forney.rs) and its boundary is
+    // the last block of THIS test. And every assertion below holds on
+    // EITHER arm, which is why this is a comment and not a `cfg`: both
+    // arms hold the same two `m x block` buffers, and the dense arm only
+    // adds its `~4*m^2` matrix on top - so a window over budget is over
+    // budget either way, and a budget admitting the wider dense
+    // footprint admits the Forney one too.
+    let Err(err) = check_repair_dim_within(m, bs, gib(8)) else {
+        panic!("20 GB of window must not fit an 8 GB budget");
     };
     assert!(
-        matches!(&err, RepairError::Malformed(m) if m.contains("out of range")),
-        "the cap must admit exactly MAX_REPAIR_DIM, not one under: {err}"
+        matches!(&err, RepairError::SolveBudget { .. }),
+        "over budget must be a capacity refusal, never Malformed - a good recovery set must \
+         not be reported as corrupt just because this machine's memory budget is too small: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("budget") && msg.contains("solve") && msg.contains("retry"),
+        "the message must name the budget and tell the user it is retryable: {msg}"
+    );
+    // The same m, admitted where the memory is there - this is the case
+    // the old flat cap refused outright.
+    //
+    // THIS USED TO BE A `cfg` FORK, and retiring it is the point of the
+    // 10 Sep 2026 widening. The budget is a byte count, and it was a
+    // `usize`: 32 GiB could not be NAMED at 32-bit pointer width, so
+    // this half was gated to 64-bit and the narrow target got a
+    // consolation assertion that the shape is refused whatever budget
+    // is asked for. Both halves were artefacts of the parameter's type.
+    // `check_repair_dim_within` has always done its arithmetic in `u64`
+    // - the window is a saturating `u64` product - so taking the budget
+    // as one too makes this boundary mean the same thing at either
+    // width, and the admitted side is checked on armv7 rather than
+    // excused there.
+    assert!(check_repair_dim_within(m, bs, gib(32)).is_ok());
+    // ...and admitted far past the old cap when the blocks are small,
+    // because then the window is small. 128 KiB of window here, so this
+    // one holds at either width.
+    assert!(check_repair_dim_within(MAX_INPUT_SLICES, 2, gib(8)).is_ok());
+
+    // 3. The dense arm keeps its own cap, whatever the memory. Reached
+    //    here by asking below the fused gate on a build that has one, and
+    //    on a build that has no fused kernel every m lands here anyway.
+    let dense_m = 64;
+    assert!(!super::forney::backsub_gate(dense_m));
+    assert!(check_repair_dim_within(dense_m, 2, u64::MAX).is_ok());
+    // PAST `MAX_REPAIR_DIM`, THE DENSE ARM IS BOUNDED BY MEMORY AND
+    // NOTHING ELSE, which is what `454141ce0f` decided on 8 Sep 2026:
+    // three of the flat cap's four premises did not survive being
+    // measured, and the fourth - memory - is charged here instead. This
+    // used to assert the cap still refused, and went unnoticed because
+    // it only runs where `backsub_gate` says dense at this m, which is
+    // a build with no fused GF16 kernel. armv7 is that build, and armv7
+    // was already failing earlier in this test, so the stale arm was
+    // never reached. Admitted when the footprint fits...
+    let over_dim = MAX_REPAIR_DIM + 1;
+    if !super::forney::backsub_gate(over_dim) {
+        let need = 2 * over_dim as u64 * 2 + 4 * over_dim as u64 * over_dim as u64;
+        assert!(
+            check_repair_dim_within(over_dim, 2, u64::MAX).is_ok(),
+            "past the old flat cap the dense arm must be admitted when the memory is there -              refusing it is what sent an m = 10,000 set to a SLOWER tool"
+        );
+        // ...and refused on MEMORY, naming memory, when it does not.
+        let Err(err) = check_repair_dim_within(over_dim, 2, need - 1) else {
+            panic!("a budget one byte short of the dense footprint must refuse");
+        };
+        assert!(
+            matches!(&err, RepairError::SolveBudget { .. }),
+            "past the flat cap the refusal must be a capacity one, naming memory rather than \
+             a matrix dimension - a bigger budget admits it: {err}"
+        );
+    }
+
+    // 4. ...and the dense arm is charged for MEMORY too, which it was
+    //    not until 8 Sep 2026. EVERY dense assertion above passes
+    //    `block_size = 2`, where the window is 256 bytes and no budget
+    //    can bind - so the arm was covered at every DIMENSION boundary
+    //    and at no MEMORY one, and the missing test was invisible.
+    //    Sizes here are therefore realistic on purpose.
+    //
+    //    The cliff this closes was one block wide: on a box whose gate
+    //    sits at `backsub_min_missing()`, the m just below it took the
+    //    dense arm and allocated the same window the m just above it was
+    //    refused for.
+    let gate = super::forney::backsub_min_missing();
+    if gate > 1 {
+        let below = gate - 1;
+        assert!(
+            !super::forney::backsub_gate(below),
+            "{below} must sit on the dense side of the gate"
+        );
+        // 64 KiB rather than 1 MiB, and the size is load-bearing: when
+        // the generic gate was 2,048 the Forney half below computed
+        // `2 * 2048 * 1 MiB`, exactly 2^32, which does not fit a 32-bit
+        // `usize` - it panics under test on the shipped armv7 build and
+        // wraps to 0 in release. The 10 Sep 2026 recalibration lowered
+        // every gate (1,280 generic and nibble, 704 NEON), so that exact
+        // product no longer overflows - but the margin is what this line
+        // is for and a gate can move back up, so it stays well clear.
+        // The production window is `u64` and saturating; this arithmetic
+        // is not.
+        let bs = 64 << 10;
+        // Both arms hold two m x block_size buffers; the DENSE arm holds
+        // its `~4*m^2` matrix and inverse on top, so its bound is its own
+        // and is strictly larger. Until 8 Sep 2026 the two were charged
+        // the same window and the dense arm's matrix was not priced at
+        // all - it was covered by a flat dimension cap instead, which is
+        // the thing that got removed.
+        let window = 2 * below * bs;
+        let dense_need = window + 4 * below * below;
+        let Err(err) = check_repair_dim_within(below, bs, dense_need as u64 - 1) else {
+            panic!("the dense arm must be refused when its footprint is over budget");
+        };
+        assert!(
+            matches!(&err, RepairError::SolveBudget { .. }),
+            "the dense arm's memory refusal must be a capacity refusal, not Malformed - \
+             the recovery set is good and a bigger budget admits it: {err}"
+        );
+        assert!(
+            check_repair_dim_within(below, bs, dense_need as u64).is_ok(),
+            "exactly its own footprint must still be admitted"
+        );
+        assert!(
+            check_repair_dim_within(below, bs, window as u64).is_err(),
+            "the WINDOW alone must no longer admit the dense arm - the matrix is real \
+             memory and this assertion is what stops it going unpriced again"
+        );
+        // The gate is a KERNEL boundary and not a memory one, so the two
+        // arms must answer the same way one block either side of it.
+        if super::forney::backsub_gate(gate) {
+            let forney_window = 2 * gate * bs;
+            assert!(
+                matches!(
+                    check_repair_dim_within(gate, bs, forney_window as u64 - 1),
+                    Err(RepairError::SolveBudget { .. })
+                ),
+                "one block either side of the arm gate must refuse alike"
+            );
+        }
+    }
+}
+
+/// The back-substitution arm is decided by the EXPONENT SET, and the
+/// third arm is expensive enough that which one a repair reaches is a
+/// performance property worth pinning.
+///
+/// Consecutive exponents make `A` a Vandermonde times a diagonal, whose
+/// explicit inverse is `O(m^2)` and which factors again into the Forney
+/// transform past `forney::backsub_gate`. An arithmetic progression
+/// relabels onto the same shape (`progression_parameters`). ANY OTHER
+/// set - one gap is enough - is a generalized Vandermonde with no
+/// factorization and falls onto Gauss-Jordan: `O(m^3)` setup plus the
+/// dense product, and the one arm `MAX_REPAIR_DIM` still refuses past.
+///
+/// Measured 8 Sep 2026 on the M3 Ultra at m = 2,048 / 64 KiB blocks
+/// (`par2_ntt_bench`, `NZBFAST_NTT_EXP_SPAN`): 4.8 ms setup + 122 ms
+/// solve consecutive, against 940 ms setup + 395 ms dense with one gap -
+/// 5.6x over the whole reconstructor, and identical on the fold and the
+/// NTT syndrome paths because this arm is chosen before any syndrome
+/// exists. That is what `catalog::select_consecutive_run` exists to
+/// avoid paying, and why both repair drivers select through it.
+#[test]
+fn the_backsub_arm_is_decided_by_the_exponent_set() {
+    let bs = 64usize;
+    let slices = demo_slices(6, bs);
+    let missing = [0usize, 2, 4];
+    let arm = |exps: &[u32]| -> &'static str {
+        let recovery: Vec<(u32, Vec<u8>)> = exps
+            .iter()
+            .map(|&e| (e, generate_recovery(&slices, bs, e)))
+            .collect();
+        Reconstructor::new(bs, slices.len(), &missing, &recovery)
+            .expect("well-formed set")
+            .backsub_arm()
+    };
+    // Consecutive: the structured arm. (m = 3 is far under
+    // `backsub_gate`, so it is the explicit inverse rather than Forney;
+    // the gate's own tests cover the Forney side.)
+    assert_eq!(arm(&[0, 1, 2]), "vandermonde");
+    assert_eq!(arm(&[7, 8, 9]), "vandermonde");
+    // An arithmetic progression relabels onto it - but only when the
+    // stride is a UNIT modulo 65535. 2 is; 3 is not (65535 = 3*5*17*257),
+    // so a stride-3 set keeps the unstructured arm.
+    assert_eq!(arm(&[1, 3, 5]), "vandermonde");
+    assert_eq!(arm(&[0, 3, 6]), "gauss-jordan");
+    // One gap and the structure is gone.
+    assert_eq!(arm(&[0, 1, 3]), "gauss-jordan");
+    assert_eq!(arm(&[0, 2, 3]), "gauss-jordan");
+}
+
+/// The MAPPED driver picks the lowest consecutive RUN, not the `m`
+/// smallest exponents - the selection the disk driver has made since
+/// 6 Sep 2026 and this one, the in-place repair the download pipeline
+/// runs, did not until 8 Sep 2026.
+///
+/// With recovery at `[0, 1, 3, 4, 5]` and three blocks missing, taking
+/// the smallest three gives `[0, 1, 3]`, which is neither consecutive
+/// nor a progression and so lands on Gauss-Jordan for no reason at all:
+/// the same set holds the clean run `[3, 4, 5]`. See
+/// `the_backsub_arm_is_decided_by_the_exponent_set` for what that costs.
+#[test]
+fn the_mapped_driver_selects_the_consecutive_run_not_the_smallest() {
+    // The selection expression the driver evaluates, over the exponent
+    // set below. The arm each of the two answers reaches is pinned by
+    // the sibling test above.
+    let offered = [0u32, 1, 3, 4, 5];
+    let chosen = super::catalog::select_consecutive_run(&offered, 3);
+    assert_eq!(chosen, vec![3, 4, 5], "a run was available and not taken");
+    let mut smallest = offered.to_vec();
+    smallest.truncate(3);
+    assert_ne!(
+        chosen, smallest,
+        "the fixture must discriminate the two rules"
+    );
+
+    // ...and the driver still repairs byte-exactly through it. Three
+    // damaged blocks, all in file 0, against the gapped offer.
+    let damage = [(0usize, 0usize), (0, 1), (0, 2)];
+    let (files, bs, _consecutive, pristine) = mapped_fixture(&damage);
+    let mut slices: Vec<Vec<u8>> = Vec::new();
+    for d in &pristine {
+        for c in d.chunks(bs) {
+            let mut v = c.to_vec();
+            v.resize(bs, 0);
+            slices.push(v);
+        }
+    }
+    let recovery: Vec<(u32, Vec<u8>)> = offered
+        .iter()
+        .map(|&e| (e, generate_recovery(&slices, bs, e)))
+        .collect();
+    let mut on_disk = pristine.clone();
+    on_disk[0][..3 * bs].fill(0);
+    let io = MemIo::new(on_disk, None);
+    assert_eq!(
+        repair_mapped(&files, bs, &recovery, &io, false).expect("repairs"),
+        3
+    );
+    assert_eq!(io.snapshot(), pristine, "byte-identical restoration");
+}
+
+/// The fold's cache probe must answer a PLAUSIBLE per-core L2 wherever
+/// the platform supports the query, because both consumers
+/// (`l2_target_words`, `unit_dst_budget`) size the fold's tiles off it.
+///
+/// The value is machine-specific, so this asserts a range rather than a
+/// number - but the range is what a decode bug actually violates. These
+/// OIDs are NOT all the same width (`hw.l2cachesize` answers 8 bytes on
+/// an M3 Ultra, `hw.perflevel0.*` answer 4), so reading one at the wrong
+/// width yields either a huge number (high garbage) or zero, and both
+/// land outside this window. A silently wrong budget is invisible in
+/// every correctness test in this file - the fold still computes the
+/// right answer, just with the wrong residency - which is why the probe
+/// is pinned here instead.
+#[test]
+fn l2_probe_answers_a_plausible_per_core_size() {
+    let Some(bytes) = l2_per_core_bytes() else {
+        // A platform that cannot say (musl, and anything not
+        // Windows/Linux-gnu/macOS) is a supported answer: the callers
+        // take their default budget. Nothing to check.
+        return;
+    };
+    assert!(
+        (64 << 10..=64 << 20).contains(&bytes),
+        "per-core L2 probe answered {bytes} bytes, outside 64 KiB..64 MiB - \
+         a plausible per-core L2 cannot sit outside that, so this is a \
+         decode or OID fault rather than an unusual part"
     );
 }

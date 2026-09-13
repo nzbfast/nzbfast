@@ -348,7 +348,9 @@ pub(super) fn rars_compressed_volumes(name: &str, data: &[u8], per_vol: usize) -
 /// AND a lazy-matching pass, where `Some(1)` gets 8 candidates and no
 /// lazy pass. Nothing a decoder reads differs between them.
 /// `compression_method_for_level` answers 1 for both, the dictionary is
-/// the same 128 KiB default, and `rar50_algorithm_version` is 0 for
+/// the same default for both (128 KiB when this was measured, 2 MiB since
+/// 8 Sep 2026 - what matters here is that it is the SAME, not its size),
+/// and `rar50_algorithm_version` is 0 for
 /// both - verified rather than reasoned, by parsing the volumes back
 /// and comparing the packed `FileHeader::compression_info`, which is
 /// `0x80` either way. Only the match/literal mix inside the bitstream

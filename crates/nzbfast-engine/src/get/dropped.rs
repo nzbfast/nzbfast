@@ -56,7 +56,7 @@ pub(super) async fn refetch_dropped_volumes(
     // volume can only be judged by the fetch-wide total.
     // The third field is the count of this file's declared segments
     // `volume_reqs` did not request because an earlier file already
-    // owned the message id (Codex F-02): never asked for, so never
+    // owned the message id (review finding F-02): never asked for, so never
     // reported missing, so invisible to `failures` below.
     let mut wanted: Vec<(usize, &nzbkit::extract::DroppedVolume, u32)> = Vec::new();
     let mut hole_bytes = 0u64;
@@ -153,7 +153,7 @@ pub(super) async fn refetch_dropped_volumes(
 
 /// What to do with one dropped volume's refetched file.
 ///
-/// Split out of the loop above so the rule the Codex F-05 fix turns on
+/// Split out of the loop above so the rule the review finding F-05 fix turns on
 /// can be stated in a table, without a pool or an extractor. The table
 /// stays because it is the cheap statement of the rule; since 23 Aug
 /// 2026 (TODO 230) every cell of it is ALSO reached by a run of the
@@ -180,7 +180,7 @@ enum Install {
     /// file is a fresh sparse one holding only what arrived, while the
     /// slot's own file holds every byte the demote kept. Renaming would
     /// turn one failed article into a hole over good data, with no
-    /// retry behind it (Codex F-05, 22 Aug 2026). Discard the fetch.
+    /// retry behind it (review finding F-05, 22 Aug 2026). Discard the fetch.
     Discard,
 }
 
@@ -357,7 +357,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Codex F-02 (23 Aug 2026): the same shape as the pair above, but
+    /// Review finding F-02 (23 Aug 2026): the same shape as the pair above, but
     /// the later volume loses an article to a DUPLICATE message id
     /// rather than to the wire. `volume_reqs` gives a repeated id to its
     /// first owner and simply does not request it for the second, so no

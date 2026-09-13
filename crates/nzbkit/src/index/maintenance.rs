@@ -2,6 +2,7 @@
 //! merging, PAR2 sidecar folding, NZB synthesis, compaction/optimize and
 //! the size accounting. Bodies are verbatim moves from the old index.rs.
 
+use super::claims::norm_msgid;
 use super::*;
 
 /// One member row of a split-container set, as `split_merge_group`
@@ -941,7 +942,7 @@ impl Index {
         // that twin can be the maximum). releases.id has no
         // AUTOINCREMENT, so the next insert reuses exactly that id -
         // and a strictly-greater scan would then never visit the
-        // recreated row while every later insert passed it by (Codex
+        // recreated row while every later insert passed it by (review
         // sweep 3 Aug M3). Rewind to the surviving top; the pair logic
         // is idempotent, so re-walking a fringe of ids is only cheap
         // re-reads.
@@ -994,7 +995,7 @@ impl Index {
             // folding deletes bare twin rows, and if one of them was
             // the table maximum, parking the cursor on its id would let
             // SQLite hand the same id to the next insert - a row a
-            // strictly-greater scan then never visits (Codex sweep
+            // strictly-greater scan then never visits (review sweep
             // 3 Aug M3). The head-side rewind above only helps when the
             // recreation happens AFTER the next fold call; this clamp
             // closes the delete-and-recreate-between-folds
@@ -1582,15 +1583,41 @@ impl Index {
             return Ok(0);
         };
         let (keep, keep_grp) = (kept.id, kept.grp.clone());
-        let others: Vec<i64> = class
-            .iter()
-            .map(|m| m.id)
-            .filter(|id| *id != keep)
-            .collect();
         // Union the one-file segment lists, keep's copy winning per
         // part, then ascending id order - deterministic under replay.
         let mut merged: std::collections::BTreeMap<u32, (String, u64)> = Default::default();
         let mut total_parts: i64 = 0;
+        // The members this fold actually absorbed. NOT simply "the
+        // class minus keep": a member that both CONTRADICTS what is
+        // already merged (its part N carries a different message-id)
+        // and CONTRIBUTES a part nothing else has is a second posting
+        // being spliced into the first, and the unioned row would read
+        // complete over a mixture of two article sets - an NZB that
+        // downloads to garbage. The `need_parts` class split above
+        // cannot see it, because a repost of the same file agrees about
+        // its part count; only the ids separate them. This is the rule
+        // ingest already applies in memory (`Index::cluster`, the
+        // generation split): a message-id is globally unique, so part N
+        // of one posting always carries the same id, and a disagreement
+        // is proof rather than a heuristic.
+        //
+        // BOTH HALVES ARE REQUIRED, and the "contributes" half is what
+        // keeps the deliberate behaviour of `3fe5d9156`. A member that
+        // only REPEATS a part already held - the duplicate-part repost
+        // under a seventh poster that
+        // `a_shattered_posting_folds_across_posters_and_groups` pins -
+        // adds nothing to the union either way (`or_insert` keeps the
+        // first copy), so refusing it would strand a one-article
+        // release row forever and buy no safety at all.
+        //
+        // WHAT THIS DOES NOT REACH, said out loud: the dark band's own
+        // shape, where every member row holds a SINGLE article. Such a
+        // member can only contradict or contribute, never both, so two
+        // interleaved shattered postings of one stem still union.
+        // Separating those needs posting identity for a lone article -
+        // the Date range or the pesto counter window, not the id - and
+        // that is a design, not a screen.
+        let mut absorbed: Vec<i64> = Vec::with_capacity(class.len());
         {
             // Every member holds `fname` - that is the fold key - so
             // the union needs no filename reconciliation.
@@ -1599,7 +1626,7 @@ impl Index {
                   WHERE release_id=?1 AND filename=?2",
             )?;
             let mut ids = vec![keep];
-            ids.extend(&others);
+            ids.extend(class.iter().map(|m| m.id).filter(|id| *id != keep));
             for id in ids {
                 let Some((tp, segs)) = stmt
                     .query_row(rusqlite::params![id, fname], |r| {
@@ -1607,17 +1634,37 @@ impl Index {
                     })
                     .optional()?
                 else {
+                    // No file row to union. It carries no articles that
+                    // could contradict anything, and it was always
+                    // absorbed here; leaving it behind would strand an
+                    // empty release row forever.
+                    absorbed.push(id);
                     continue;
                 };
+                let contradicts = segs.iter().any(|(n, mid, _)| {
+                    merged
+                        .get(n)
+                        .is_some_and(|(have, _)| norm_msgid(have) != norm_msgid(mid))
+                });
+                let contributes = segs.iter().any(|(n, _, _)| !merged.contains_key(n));
+                if id != keep && contradicts && contributes {
+                    continue;
+                }
+                absorbed.push(id);
                 total_parts = total_parts.max(tp);
                 for (n, id, b) in segs {
                     merged.entry(n).or_insert((id, b));
                 }
             }
         }
-        if merged.is_empty() {
+        let others: Vec<i64> = absorbed.iter().copied().filter(|id| *id != keep).collect();
+        if merged.is_empty() || others.is_empty() {
             return Ok(0);
         }
+        let class: Vec<Member> = class
+            .into_iter()
+            .filter(|m| absorbed.contains(&m.id))
+            .collect();
         let bytes: u64 = merged.values().map(|v| v.1).sum();
         let seg_blob = segcodec::encode(
             &merged

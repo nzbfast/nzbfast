@@ -155,74 +155,9 @@ impl Index {
             return Ok(None);
         }
 
-        let mut expected: Vec<ExpectedFile> = {
-            let mut stmt = self.db.prepare_cached(
-                "SELECT f.file_ord,f.subject,f.segments,f.required,
-                        k.kind,k.manifest_key
-                   FROM nzb_seed_files f JOIN nzb_seed_file_keys k
-                     ON k.set_id=f.set_id AND k.file_ord=f.file_ord
-                  WHERE f.set_id=?1 ORDER BY f.file_ord",
-            )?;
-            stmt.query_map([set_id], |row| {
-                Ok(ExpectedFile {
-                    ord: row.get(0)?,
-                    subject: row.get(1)?,
-                    segments: row.get::<_, i64>(2)?.max(0) as usize,
-                    required: row.get(3)?,
-                    kind: row.get(4)?,
-                    manifest_key: row.get(5)?,
-                    probes: Vec::new(),
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?
+        let Some((expected, ord_index)) = self.seed_expected_files(set_id, file_count)? else {
+            return Ok(None);
         };
-        if expected.len() != file_count
-            || expected.iter().any(|file| {
-                file.segments == 0
-                    || file.manifest_key.len() != 64
-                    || file.required != (file.kind == seed_file_kind(crate::nzb::FileKind::Data))
-                    || !matches!(file.kind, 0..=2)
-            })
-        {
-            return Ok(None);
-        }
-        let ord_index: HashMap<i64, usize> = expected
-            .iter()
-            .enumerate()
-            .map(|(index, file)| (file.ord, index))
-            .collect();
-        {
-            let mut stmt = self.db.prepare_cached(
-                "SELECT file_ord,part_ord,msgid FROM nzb_seed_msgids
-                  WHERE set_id=?1 ORDER BY file_ord,part_ord,msgid",
-            )?;
-            let probes = stmt.query_map([set_id], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, u32>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?;
-            for probe in probes {
-                let (ord, part, msgid) = probe?;
-                let Some(&index) = ord_index.get(&ord) else {
-                    return Ok(None);
-                };
-                let Some(msgid) = canonical_seed_local_msgid(&msgid) else {
-                    return Ok(None);
-                };
-                if part == 0 {
-                    return Ok(None);
-                }
-                expected[index].probes.push((part, msgid.to_string()));
-            }
-        }
-        if expected
-            .iter()
-            .any(|file| file.required && file.probes.is_empty())
-        {
-            return Ok(None);
-        }
 
         let release_ids: Vec<i64> = {
             let mut stmt = self.db.prepare_cached(
@@ -472,42 +407,11 @@ impl Index {
             return Ok(None);
         }
         let optional_files = selected.len() - data_files;
-        let mut source_releases: BTreeSet<i64> = BTreeSet::new();
-        let mut xml = String::from(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n",
-        );
-        xml.push_str(&format!(
-            "    <meta type=\"title\">{}</meta>\n",
-            xml_escape(&name)
-        ));
-        if !category.is_empty() {
-            xml.push_str(&format!(
-                "    <meta type=\"category\">{}</meta>\n",
-                xml_escape(&category)
-            ));
-        }
-        xml.push_str("  </head>\n");
-        for (ord, local) in &selected {
-            let Some(&index) = ord_index.get(ord) else {
-                return Ok(None);
-            };
-            source_releases.insert(local.release_id);
-            xml.push_str(&format!(
-                "  <file poster=\"{}\" date=\"{}\" subject=\"{}\">\n    <groups><group>{}</group></groups>\n    <segments>\n",
-                xml_escape(&local.poster),
-                local.posted,
-                xml_escape(&expected[index].subject),
-                xml_escape(&local.group),
-            ));
-            for (part, msgid, segment_bytes) in &local.segments {
-                xml.push_str(&format!(
-                    "      <segment bytes=\"{segment_bytes}\" number=\"{part}\">{}</segment>\n",
-                    xml_escape(msgid)
-                ));
-            }
-            xml.push_str("    </segments>\n  </file>\n");
-        }
-        xml.push_str("</nzb>\n");
+        let Some((xml, source_releases)) =
+            seed_collection_xml(&name, &category, &selected, &expected, &ord_index)
+        else {
+            return Ok(None);
+        };
         let parsed = crate::nzb::Nzb::parse(xml.as_bytes())?;
         let parsed_files_match =
             parsed
@@ -586,4 +490,147 @@ impl Index {
             xml,
         }))
     }
+
+    /// The seed's declared file table, with its retained raw probes
+    /// attached, plus the ord -> index map the rest of the build reads it
+    /// through. `None` for every shape that makes the set unexportable
+    /// before any local file is even looked at: a row count that
+    /// disagrees with the stored one, a malformed manifest key, a
+    /// kind/required pair that contradicts itself, a probe naming an ord
+    /// this seed does not have or a part number of zero, or a required
+    /// file with no probe left to check against.
+    ///
+    /// Out of [`Index::make_nzb_seed_collection`] on 7 Sep 2026 (claim
+    /// `debt-split-hot-files-7sep`) at 478 of the size gate's 500-line
+    /// function ceiling. Verbatim: every early return here was a
+    /// `return Ok(None)` there and still ends the export the same way.
+    fn seed_expected_files(
+        &self,
+        set_id: i64,
+        file_count: usize,
+    ) -> Result<Option<(Vec<ExpectedFile>, HashMap<i64, usize>)>, NzbSeedError> {
+        let mut expected: Vec<ExpectedFile> = {
+            let mut stmt = self.db.prepare_cached(
+                "SELECT f.file_ord,f.subject,f.segments,f.required,
+                        k.kind,k.manifest_key
+                   FROM nzb_seed_files f JOIN nzb_seed_file_keys k
+                     ON k.set_id=f.set_id AND k.file_ord=f.file_ord
+                  WHERE f.set_id=?1 ORDER BY f.file_ord",
+            )?;
+            stmt.query_map([set_id], |row| {
+                Ok(ExpectedFile {
+                    ord: row.get(0)?,
+                    subject: row.get(1)?,
+                    segments: row.get::<_, i64>(2)?.max(0) as usize,
+                    required: row.get(3)?,
+                    kind: row.get(4)?,
+                    manifest_key: row.get(5)?,
+                    probes: Vec::new(),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        if expected.len() != file_count
+            || expected.iter().any(|file| {
+                file.segments == 0
+                    || file.manifest_key.len() != 64
+                    || file.required != (file.kind == seed_file_kind(crate::nzb::FileKind::Data))
+                    || !matches!(file.kind, 0..=2)
+            })
+        {
+            return Ok(None);
+        }
+        let ord_index: HashMap<i64, usize> = expected
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.ord, index))
+            .collect();
+        {
+            let mut stmt = self.db.prepare_cached(
+                "SELECT file_ord,part_ord,msgid FROM nzb_seed_msgids
+                  WHERE set_id=?1 ORDER BY file_ord,part_ord,msgid",
+            )?;
+            let probes = stmt.query_map([set_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for probe in probes {
+                let (ord, part, msgid) = probe?;
+                let Some(&index) = ord_index.get(&ord) else {
+                    return Ok(None);
+                };
+                let Some(msgid) = canonical_seed_local_msgid(&msgid) else {
+                    return Ok(None);
+                };
+                if part == 0 {
+                    return Ok(None);
+                }
+                expected[index].probes.push((part, msgid.to_string()));
+            }
+        }
+        if expected
+            .iter()
+            .any(|file| file.required && file.probes.is_empty())
+        {
+            return Ok(None);
+        }
+        Ok(Some((expected, ord_index)))
+    }
+}
+
+/// Render the selected local files as the collection's virtual NZB, and
+/// collect the release ids they came from.
+///
+/// `None` for the one shape that can still fail here - a selected ord
+/// with no entry in `ord_index` - which was a `return Ok(None)` in the
+/// caller and still ends the export the same way.
+///
+/// Out of [`Index::make_nzb_seed_collection`] on 7 Sep 2026 (claim
+/// `debt-split-hot-files-7sep`) at 478 of the size gate's 500-line
+/// function ceiling. Verbatim, one indent level out.
+fn seed_collection_xml(
+    name: &str,
+    category: &str,
+    selected: &BTreeMap<i64, LocalFile>,
+    expected: &[ExpectedFile],
+    ord_index: &HashMap<i64, usize>,
+) -> Option<(String, BTreeSet<i64>)> {
+    let mut source_releases: BTreeSet<i64> = BTreeSet::new();
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n",
+    );
+    xml.push_str(&format!(
+        "    <meta type=\"title\">{}</meta>\n",
+        xml_escape(name)
+    ));
+    if !category.is_empty() {
+        xml.push_str(&format!(
+            "    <meta type=\"category\">{}</meta>\n",
+            xml_escape(category)
+        ));
+    }
+    xml.push_str("  </head>\n");
+    for (ord, local) in selected {
+        let &index = ord_index.get(ord)?;
+        source_releases.insert(local.release_id);
+        xml.push_str(&format!(
+            "  <file poster=\"{}\" date=\"{}\" subject=\"{}\">\n    <groups><group>{}</group></groups>\n    <segments>\n",
+            xml_escape(&local.poster),
+            local.posted,
+            xml_escape(&expected[index].subject),
+            xml_escape(&local.group),
+        ));
+        for (part, msgid, segment_bytes) in &local.segments {
+            xml.push_str(&format!(
+                "      <segment bytes=\"{segment_bytes}\" number=\"{part}\">{}</segment>\n",
+                xml_escape(msgid)
+            ));
+        }
+        xml.push_str("    </segments>\n  </file>\n");
+    }
+    xml.push_str("</nzb>\n");
+    Some((xml, source_releases))
 }

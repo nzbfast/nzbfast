@@ -11,9 +11,11 @@ use crate::*;
 // as they matter - so the type sitting up in the repair ladder had the
 // hub's own field type reaching a layer above it. `repair` re-exports
 // it, so every caller spells it exactly as before.
-/// A sticky cancel handle for one owner's recovery-volume side-fetches.
+/// A sticky cancel handle for one owner's post-network RECOVERY work -
+/// its side-fetches, and since 12 Sep 2026 the repair itself.
 ///
-/// Two halves, because neither alone is a cancel wire:
+/// Two halves on the network side, because neither alone is a cancel
+/// wire:
 ///
 /// - `QueueControl::abort` only reaches the pool the handle is attached
 ///   to RIGHT NOW. A cancel arriving between two volumes, or in the
@@ -28,6 +30,36 @@ use crate::*;
 ///
 /// The speculative prefetch (get/workers.rs) shares its own `stop` flag
 /// through [`SideCancel::over`] rather than carrying a second mechanism.
+///
+/// # And the REPAIR, which is why this type is not only about fetches
+///
+/// The third piece is a `nzbkit::par2repair::PauseGate`, handed to the
+/// engine inside [`repair_control`](Self::repair_control) and polled by
+/// its hashing, feed, solve and patch loops. [`cancel`](Self::cancel)
+/// raises it with the other two, so one press stops the fetch AND the
+/// fold.
+///
+/// IT LIVES HERE RATHER THAN IN A MAP OF ITS OWN, and that is the
+/// whole design. This is the one per-owner handle every daemon repair
+/// site already receives (`repair::fetch_and_repair`'s `cancel`,
+/// `get::latesets`' `cancel`) and the one the daemon already publishes
+/// per nzo_id on `StreamHub::tail_cancel` - so the repair can build a
+/// control with no new plumbing, and there is exactly one cancel bit
+/// for the job. A gate registered separately would be a SECOND source
+/// of truth for one button: the user presses Cancel, one of them is
+/// set, and whether the fold stops depends on which loop happened to
+/// be running. `parfast_session::runner::Control` was rewritten on the
+/// day the engine's gate landed to remove precisely that, and its own
+/// doc carries the argument at length.
+///
+/// [`repair_progress`](Self::repair_progress) rides along for the same
+/// reason, pointed the other way: it is read by the queue payload,
+/// which resolves a job through this very map.
+///
+/// PAUSE IS NOT WIRED. `set_paused` on the gate is never called from
+/// the daemon, so no queue control promises a pause the fold cannot
+/// honour inside the solve - see `par2repair::control::PauseGate` for
+/// why that exception exists.
 pub struct SideCancel {
     flag: Arc<std::sync::atomic::AtomicBool>,
     /// `pub` for ONE caller: `repair::sidefetch` attaches this control
@@ -35,6 +67,17 @@ pub struct SideCancel {
     /// the wire a latch cannot do. (`pub(crate)` until the crate-split
     /// step 2 cut, which put that caller in another crate.)
     pub ctl: Arc<nzbkit::pool::QueueControl>,
+    /// The repair's own stop token - see the type doc. Private: a
+    /// caller gets it through [`SideCancel::repair_control`], which is
+    /// the only shape the engine takes, so nobody can hand the engine
+    /// a gate without the sink beside it (progress with no cancel
+    /// leaves a watcher who cannot act; a cancel with no progress
+    /// leaves one who does not know when to - `RepairControl::
+    /// is_attended`).
+    repair: Arc<nzbkit::par2repair::PauseGate>,
+    /// Where the engine's per-phase progress is published for the
+    /// queue payload to read.
+    progress: Arc<crate::repairprog::RepairProgress>,
 }
 
 /// `new()` is the real constructor and this defers to it, rather than
@@ -58,14 +101,59 @@ impl SideCancel {
         SideCancel {
             flag,
             ctl: Arc::new(nzbkit::pool::QueueControl::default()),
+            repair: nzbkit::par2repair::PauseGate::new(),
+            progress: Arc::new(crate::repairprog::RepairProgress::default()),
         }
     }
 
-    /// Stop this owner's side-fetches: refuse the ones not yet started,
-    /// drop the reads of the one in flight. Idempotent.
+    /// Stop this owner's recovery work: refuse the side-fetches not yet
+    /// started, drop the reads of the one in flight, and call off a
+    /// repair already inside the engine. Idempotent.
+    ///
+    /// THE REPAIR HALF IS NEW SINCE 12 Sep 2026, and it replaces a
+    /// stated limit rather than widening a promise. `cancel_tail_
+    /// fetches`' doc used to read "Only the network is stopped. A
+    /// repair already patching bytes runs to its end and parks -
+    /// cutting it mid-write would leave a half-patched file behind."
+    /// The first clause is no longer true and the second was the right
+    /// caution against a cut that was not specified: it is now.
+    /// `RepairError::Cancelled` states what a cancelled repair leaves,
+    /// and the patch half is MONOTONE - every temp-staged member is
+    /// removed and none renamed in, and an in-place patched member has
+    /// some subset of its MISSING blocks filled, so it is no worse than
+    /// it was and a re-run repairs it from the same recovery data.
     pub fn cancel(&self) {
         self.flag.store(true, std::sync::atomic::Ordering::Release);
         self.ctl.abort();
+        self.repair.cancel();
+    }
+
+    /// The control to hand a `par2repair` entry point: this job's
+    /// progress sink and this job's cancel, as the one value the engine
+    /// takes.
+    ///
+    /// Both halves, always. That is what makes the repair ATTENDED and
+    /// so exempt from the unattended unstructured ceiling
+    /// (`RepairControl::is_attended`), and a door that could hand over
+    /// one half would be a door that quietly did not.
+    pub fn repair_control(&self) -> nzbkit::par2repair::RepairControl {
+        nzbkit::par2repair::RepairControl::new(
+            Some(self.progress.clone()),
+            Some(self.repair.clone()),
+        )
+    }
+
+    /// What the engine has published about the repair running right
+    /// now - read by the queue payload on every poll.
+    pub fn repair_progress(&self) -> &Arc<crate::repairprog::RepairProgress> {
+        &self.progress
+    }
+
+    /// Has a repair under this handle been called off? The gate's own
+    /// relaxed mirror, for a caller mapping `RepairError::Cancelled`
+    /// back to "the user pressed Cancel" rather than to a failure.
+    pub fn repair_cancelled(&self) -> bool {
+        self.repair.is_cancelled()
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -79,7 +167,7 @@ impl SideCancel {
     /// `cancel()` needs to abort may not be attached yet when the call
     /// arrives, so the abort has to be re-tried until the fetch returns.
     /// Same shape, same reason as the prefetch watcher this replaces
-    /// (Codex 5 Aug M3) - 250 ms is well inside a user's patience and
+    /// (review 5 Aug M3) - 250 ms is well inside a user's patience and
     /// costs one timer per volume.
     pub async fn guard<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
         let flag = self.flag.clone();
@@ -903,6 +991,78 @@ impl StreamHub {
         }
     }
 
+    /// GH #71: let go of every post-completion handle whose extractor
+    /// writes into `dir`, because a delete-with-files is about to remove
+    /// it.
+    ///
+    /// Deleting a job's files and streaming them are mutually exclusive
+    /// intents, so severing the stream for THAT job is the request, not
+    /// a casualty. Every other job's post-completion streaming is
+    /// untouched, and the runner's next-job clearing stays the backstop
+    /// for jobs nobody deletes.
+    ///
+    /// **Three slots, because all three pin the same graph.** A finished
+    /// job's extractor is deliberately left installed for
+    /// post-completion streaming and is cleared only when the NEXT job
+    /// starts (`tasks/runner.rs`) - which on an idle daemon is never -
+    /// and it is reachable from three cells, not one:
+    ///
+    ///   * `extractor`, the slot itself;
+    ///   * `seek`, whose `SeekCtl` holds a strong extractor reference of
+    ///     its own (the same reason the runner clears it beside the
+    ///     extractor rather than trusting the slot);
+    ///   * `job_files`, whose `JobFiles` holds a strong `SeekCtl` - so
+    ///     it reaches the extractor through the one above, and pins the
+    ///     run's whole slot array besides.
+    ///
+    /// Clearing only the first two leaves the graph alive through the
+    /// third, which is why this is not the two-line version it looks
+    /// like it should be. `tail_files` is deliberately NOT in the list:
+    /// a retired table holds frozen rows and `FileSlot`s, and no slot
+    /// has ever held a writer or an extractor.
+    ///
+    /// **This is not what closes the file descriptors, and must not be
+    /// mistaken for it.** `release_outputs` in the post-processing tail
+    /// is: it hands every output handle back the moment the download is
+    /// over, on every exit path, long before any delete. What this
+    /// removes is the way a finished job's extractor GRAPH outlives the
+    /// job - memory, and a live route by which something could reopen
+    /// what the tail just closed.
+    ///
+    /// Matched by directory, the one identity all five delete arms and
+    /// the extractor share (the batch arms carry `(name, dir, filed,
+    /// tail)` tuples and no nzo_id). The stated limit of that: a job
+    /// whose files were MOVED after completion has had `Job::out_dir`
+    /// rewritten to the destination (`job.rs`, `mover.rs`) while the
+    /// extractor still names the directory it downloaded into, so this
+    /// finds nothing and the graph waits for the next job as before.
+    /// Nothing is held open in that case either way.
+    pub fn release_handles_for_dir(&self, dir: &std::path::Path) {
+        // The per-file table first, then seek, then the extractor:
+        // outermost holder inward, so no step leaves a cell pointing at
+        // something a later step is about to drop.
+        {
+            let mut g = self.job_files.lock_ok();
+            if g.as_ref()
+                .is_some_and(|(_, t)| t.seek.extractor.out_dir() == dir)
+            {
+                *g = None;
+            }
+        }
+        {
+            let mut g = self.seek.lock_ok();
+            if g.as_ref().is_some_and(|s| s.extractor.out_dir() == dir) {
+                *g = None;
+            }
+        }
+        {
+            let mut g = self.extractor.lock_ok();
+            if g.as_ref().is_some_and(|(_, ex)| ex.out_dir() == dir) {
+                *g = None;
+            }
+        }
+    }
+
     /// TODO 274: the ACTIVE run's per-file table, when it belongs to
     /// `owner` - same ownership rule as [`Self::extractor_for`], and the
     /// same single-lock owner-check-and-clone, so a job transition can
@@ -1485,5 +1645,78 @@ mod resume_route_tests {
         // minted off a plain counter, so `...nzbfast1` is a strict
         // prefix of `...nzbfast10` through `19` and of `...100` up.
         assert_eq!(h.resume_route_for("SABnzbd_nzo_nzbfast10"), None);
+    }
+}
+
+/// GH #71: what a delete-with-files has to let go of before it can
+/// remove a finished job's directory.
+#[cfg(test)]
+mod delete_release_tests {
+    use super::*;
+
+    /// Install the three cells that outlive a finished job, all naming
+    /// one extractor over `dir`, and hand back a `Weak` to it. The Weak
+    /// is the whole point: asserting the CELLS are empty only proves
+    /// three assignments happened, while a failed upgrade proves nothing
+    /// in the hub still reaches the graph.
+    fn install(
+        h: &StreamHub,
+        dir: &std::path::Path,
+    ) -> std::sync::Weak<nzbkit::extract::Extractor> {
+        let ex = Arc::new(nzbkit::extract::Extractor::new(dir, 1, false));
+        let weak = Arc::downgrade(&ex);
+        let seek = Arc::new(SeekCtl {
+            vol_slots: vec![0],
+            observed: vec![std::sync::atomic::AtomicBool::new(false)],
+            slot_articles: vec![(Vec::new(), 0)],
+            ctl: Arc::new(nzbkit::pool::QueueControl::default()),
+            extractor: ex.clone(),
+            slot_by_name: Default::default(),
+            observed_by_name: std::sync::RwLock::new(Default::default()),
+        });
+        *h.job_files.lock_ok() = Some((
+            "SABnzbd_nzo_nzbfast1".into(),
+            Arc::new(JobFiles {
+                rows: Vec::new(),
+                slots: Vec::new(),
+                seek: seek.clone(),
+            }),
+        ));
+        *h.seek.lock_ok() = Some(seek);
+        *h.extractor.lock_ok() = Some(("SABnzbd_nzo_nzbfast1".into(), ex));
+        weak
+    }
+
+    /// Deleting an unrelated job's directory leaves this one's
+    /// post-completion streaming exactly as it was. Deleting THIS one's
+    /// takes every cell that reaches its extractor - including
+    /// `job_files`, which reaches it through the `SeekCtl` it holds and
+    /// is the one a two-cell fix leaves behind.
+    #[test]
+    fn a_delete_releases_the_deleted_directory_and_only_that_one() {
+        let root = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join(format!("nzbfast-gh71-{}", std::process::id())),
+        );
+        let mine = root.join("A");
+        let theirs = root.join("B");
+
+        let h = StreamHub::default();
+        let weak = install(&h, &mine);
+
+        h.release_handles_for_dir(&theirs);
+        assert!(
+            weak.upgrade().is_some() && h.extractor.lock_ok().is_some(),
+            "an unrelated delete must not sever a live stream"
+        );
+
+        h.release_handles_for_dir(&mine);
+        assert!(h.extractor.lock_ok().is_none(), "the extractor cell");
+        assert!(h.seek.lock_ok().is_none(), "the seek cell");
+        assert!(h.job_files.lock_ok().is_none(), "the per-file table");
+        assert!(
+            weak.upgrade().is_none(),
+            "the hub still reaches this job's extractor after the delete - so \
+             the graph, and anything it could reopen, outlives the directory"
+        );
     }
 }

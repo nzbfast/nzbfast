@@ -44,6 +44,14 @@ pub(super) struct PreLock {
     pub(super) activity_map: std::collections::HashMap<String, &'static str>,
     pub(super) unpack_map:
         std::collections::HashMap<String, Arc<crate::unpackprog::UnpackProgress>>,
+    /// The repair's live per-phase counters, keyed by owning nzo_id -
+    /// the `repairing` half of what `unpack_map` is for `extracting`.
+    ///
+    /// Held as the JOB'S `SideCancel`, which is where the repair's
+    /// progress and its cancel both live so that one press means one
+    /// thing (see `nzbfast_core::streamhub::SideCancel`). The payload
+    /// reads `repair_progress()` off it and nothing else.
+    pub(super) repair_map: std::collections::HashMap<String, Arc<crate::streamhub::SideCancel>>,
     pub(super) active_id: Option<String>,
     pub(super) stall: Option<(String, Instant)>,
     pub(super) pool_view: Vec<(String, usize, u64)>,
@@ -158,6 +166,11 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
     // row reads them at render time and this stays one cheap clone of a
     // map that holds at most one entry per unpacking job.
     let unpack_map = d.hub.unpack.lock_ok().clone();
+    // And the repair's, from the map the delete path already aims a
+    // cancel at. Same rule and same shape: handles rather than a
+    // snapshot, cloned before the queue lock, at most one entry per
+    // live job.
+    let repair_map = d.hub.tail_cancel.lock_ok().clone();
     let active_id = d.active_stream.lock_ok().clone();
     let stall = d.stall_since.lock_ok().clone();
     let pool_view: Vec<(String, usize, u64)> = d
@@ -201,6 +214,7 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
         prefetch_bps,
         activity_map,
         unpack_map,
+        repair_map,
         active_id,
         stall,
         pool_view,

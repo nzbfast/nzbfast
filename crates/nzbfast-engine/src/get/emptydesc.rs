@@ -846,6 +846,7 @@ mod unsatisfied_tests {
 
     fn set_with(name: &str, md5: [u8; 16]) -> Vec<Arc<nzbkit::par2::Par2Set>> {
         vec![Arc::new(nzbkit::par2::Par2Set {
+            comment: None,
             recovery_set_id: [7u8; 16],
             block_size: 1000,
             files: vec![nzbkit::par2::Par2File {

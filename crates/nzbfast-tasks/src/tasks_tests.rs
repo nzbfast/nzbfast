@@ -978,7 +978,7 @@ fn trim_meter_sees_madv_free_reusable_release() {
 /// parked the runner forever in exactly that case, with the job stuck
 /// in Downloading and nothing logged. The rendezvous must come back -
 /// true when the gate frees (even after a delay), false at the bound.
-/// Codex sweep I, 13 Aug 2026: the guard ladder bumped `queue_rev` on a
+/// Review sweep I, 13 Aug 2026: the guard ladder bumped `queue_rev` on a
 /// hold's transition edge and stored the hold itself AFTER it. A §129 1b
 /// poll landing between the two sees the announcing revision with the
 /// old hold, adopts that revision, and - since the store carries no
@@ -1024,7 +1024,7 @@ fn every_queue_hold_set_edge_goes_through_one_helper() {
     }
 }
 
-/// Codex sweep H, 13 Aug 2026: the no-servers guard reads the config on
+/// Review sweep H, 13 Aug 2026: the no-servers guard reads the config on
 /// the blocking pool under a bound, and the pick that follows then took
 /// a SECOND, unbounded `Config::load` on the runner itself - with the
 /// job already Downloading and no fetch task yet to cancel. The snapshot
@@ -1085,7 +1085,7 @@ async fn index_gate_rendezvous_bounds_the_runners_wait() {
     release.await.unwrap();
 }
 
-/// Codex sweep 5, M7: the cap gauge is STICKY and the watchdog re-reads
+/// Review sweep 5, M7: the cap gauge is STICKY and the watchdog re-reads
 /// it every tick, so banking on every read stamped a fresh date on an
 /// old refusal. An idle daemon could turn one Monday event into "capped
 /// on 30 of the last 30 days" - which is the sentence a user sends their
@@ -1123,7 +1123,7 @@ fn a_sticky_cap_gauge_banks_one_episode_once() {
     assert_eq!(fold(&d).len(), 1, "a second episode is a second event");
 }
 
-/// Codex sweep 6, N4: the idle Providers row reads `capped_hosts` and
+/// Review sweep 6, N4: the idle Providers row reads `capped_hosts` and
 /// nothing else, so the disproof has to reach the map itself.
 ///
 /// Job 1's refusal at 38 is banked. Job 2 is a fresh pool whose gauge
@@ -1164,7 +1164,7 @@ fn a_later_job_holding_more_retires_the_banked_ceiling() {
     );
 }
 
-/// Codex sweep 6, N8: a job shorter than one watchdog tick could be
+/// Review sweep 6, N8: a job shorter than one watchdog tick could be
 /// refused and leave the lifetime ledger empty.
 ///
 /// Banking lived only on the 1-5 s watchdog tick, and the next job
@@ -1175,7 +1175,7 @@ fn a_later_job_holding_more_retires_the_banked_ceiling() {
 /// it folds there too. Driven through `settle_job_tail`, the production
 /// function, not through the fold helper.
 ///
-/// Codex sweep 7, L2: the REFUSAL LINE rode the same tick and was left
+/// Review sweep 7, L2: the REFUSAL LINE rode the same tick and was left
 /// behind by that fix, which was cap-ledger-only. The retained pool
 /// covers the ordinary case - `pool_live` is not cleared when a job
 /// ends, so the idle Providers card still renders the live record and

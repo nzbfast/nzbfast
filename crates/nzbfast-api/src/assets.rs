@@ -525,7 +525,7 @@ mod tests {
     /// from a ladder probe or a refusal. The TypeError escaped the
     /// row map, so `#srvlist` stayed blank and `loadSettings` never
     /// reached schedules, feeds, indexers, smart folders, categories,
-    /// notifications or automation (Codex sweep 7, H1). The low is
+    /// notifications or automation (review sweep 7, H1). The low is
     /// meaningless with no day to attach it to, so it belongs inside
     /// the guard that proves there is one.
     #[test]
@@ -553,7 +553,7 @@ mod tests {
     /// classes but sat outside `LOOK_KEYS`, so Reset Appearance left
     /// `uiDense` behind and factory defaults came back dense, while an
     /// exported look could not carry the density it was chosen for
-    /// (Codex sweep 7, M8).
+    /// (review sweep 7, M8).
     #[test]
     fn reset_export_and_import_own_every_appearance_key() {
         // Whatever `setDense` and `setUiCompact` write is appearance.
@@ -596,7 +596,7 @@ mod tests {
     /// before the fetch. The restamp named the Queue card by hand and
     /// History was never added, so its tooltip and its accessible label
     /// stayed English on all 27 translated locales while the key it
-    /// needed was already in every catalogue (Codex sweep 7, L4).
+    /// needed was already in every catalogue (review sweep 7, L4).
     #[test]
     fn every_compound_help_label_is_restamped_after_the_catalogue() {
         let hints = fn_body("helpHints");
@@ -627,7 +627,7 @@ mod tests {
     /// drained that list exactly once, in DOM order - so a chain running
     /// backwards through the page (C under B, B under A, DOM reading C,
     /// B, A) auto-placed C while its menu still offered Unstack and the
-    /// announcement had already said where it sat (Codex sweep 7, M9).
+    /// announcement had already said where it sat (review sweep 7, M9).
     #[test]
     fn deferred_card_pins_are_drained_to_a_fixpoint() {
         let b = fn_body("densePack");

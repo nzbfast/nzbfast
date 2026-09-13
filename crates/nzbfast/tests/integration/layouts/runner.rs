@@ -333,7 +333,7 @@ fn write_config(dir: &Path, servers: &[&MockServer]) -> PathBuf {
 /// that matters: this is a real process, not a test build, so
 /// `identity::may_call_out()`'s unit-test answer does not reach it and
 /// nothing else would stop an enrichment worker from hitting TMDB
-/// (CLAUDE.md invariant 5).
+/// (project invariant 5).
 fn run_get(config: &Path, nzb: &Path, out: &Path) -> (String, bool) {
     let mut cmd = get_cmd(
         config,

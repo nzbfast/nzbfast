@@ -113,7 +113,7 @@ pub(super) fn spawn_spec_prefetch(
         let demand = tail_demand.clone();
         let over = ladder_over.clone();
         tokio::spawn(async move {
-            // Codex 5 Aug M3: a rung used to run with no cancellation
+            // Review 5 Aug M3: a rung used to run with no cancellation
             // handle, so a blackholed side provider held drain_network's
             // unconditional await - and with it Cancel/Pause - through
             // the side pool's whole multi-session retry ladder. The
@@ -157,7 +157,7 @@ pub(super) fn spawn_spec_prefetch(
                     let mut idm = std::collections::HashMap::new();
                     // Sweep 9, finding 7: the omitted-duplicate count
                     // is part of this rung's completeness, exactly as
-                    // it is for `fetch_volumes` (Codex F-02). A segment
+                    // it is for `fetch_volumes` (review finding F-02). A segment
                     // whose message-id an earlier segment of this same
                     // volume already claimed is never requested, so no
                     // `Missing`/`Failed` outcome comes back for it and
@@ -333,7 +333,7 @@ pub(super) fn pick_rung(ladder: &[(usize, usize, u64)], deficit: usize) -> usize
         .unwrap_or(ladder.len() - 1)
 }
 
-/// Par-race candidate selection and damage arithmetic (Codex 5 Aug
+/// Par-race candidate selection and damage arithmetic (review 5 Aug
 /// M2), held still where a test can reach it.
 pub(super) struct RaceEstimate {
     /// Cancellable ids: only articles of payload files the recovery
@@ -439,7 +439,7 @@ pub(super) fn par_race_estimate(
 /// Worst-case block cost of the articles already terminally missing.
 /// WHICH articles went missing is unknown, so bound each slot's share
 /// by its own largest declared segment rather than a cross-file
-/// average that a big-article file dilutes (Codex 5 Aug M2).
+/// average that a big-article file dilutes (review 5 Aug M2).
 pub(super) fn par_race_missing_blocks(
     block: usize,
     slots: &[Arc<FileSlot>],
@@ -617,7 +617,7 @@ pub(super) fn spawn_par_race(
                     let rate = b1.saturating_sub(b0) as f64 / span;
                     // Candidates + damage arithmetic live in
                     // par_race_estimate / par_race_missing_blocks_by_set
-                    // (the Codex 5 Aug M2 fixes), where tests can hold
+                    // (the review 5 Aug M2 fixes), where tests can hold
                     // them still - now once per adopted set (TODO 311
                     // follow-on B), so a post carrying one recovery set
                     // per file races each set against its OWN parity

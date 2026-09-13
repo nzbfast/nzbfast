@@ -175,7 +175,11 @@ pub fn write_rev_volumes(
 
         let mut offset = 0u64;
         while offset < shard_len {
-            let take = window.min((shard_len - offset) as usize);
+            // Clamped in u64 BEFORE the narrowing cast: `usize` is 32
+            // bits on armv7 and a remaining span that is an exact
+            // multiple of 4 GiB casts to 0, so `take` was 0, `offset`
+            // never advanced and the writer span here forever.
+            let take = (shard_len - offset).min(window as u64) as usize;
             for row in &mut parity {
                 row[..take].fill(0);
             }
@@ -294,7 +298,10 @@ pub fn data_volume_matches(path: &Path, slot: &crate::rar50::Rev5DataVolume) -> 
     let mut buf = vec![0u8; 256 * 1024];
     let mut offset = 0u64;
     while offset < slot.file_size {
-        let take = buf.len().min((slot.file_size - offset) as usize);
+        // Clamped in u64 before narrowing - see the writer loop above:
+        // a remaining span that is an exact multiple of 4 GiB casts to 0
+        // on a 32-bit target and this verify loop never terminates.
+        let take = (slot.file_size - offset).min(buf.len() as u64) as usize;
         if source.read_at(offset, &mut buf[..take]).is_err() {
             return false;
         }

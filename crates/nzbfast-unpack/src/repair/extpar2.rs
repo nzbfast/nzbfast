@@ -133,7 +133,7 @@ fn par2_policy(out_dir: &Path, extra_args: &[std::path::PathBuf]) -> nzbfast_cor
 /// File names directly in `dir`, or `None` when the directory or ANY
 /// entry could not be read. The purge treats a name absent from this
 /// set as par2's new backup, so a partial snapshot would make every
-/// pre-existing `<target>.N` look new and delete it (22 Aug 2026, Codex
+/// pre-existing `<target>.N` look new and delete it (22 Aug 2026, review
 /// F-06): an incomplete snapshot therefore disables the purge instead.
 pub(super) fn dir_entry_names(
     dir: &std::path::Path,
@@ -281,6 +281,24 @@ pub(super) enum NativeVerdict {
     /// A native bug, the repair-dimension guard, an I/O error, or the
     /// kill switch: the cases the external backstop exists for.
     Backstop,
+    /// THE USER CALLED IT OFF - `RepairError::Cancelled`, raised
+    /// through this job's own `SideCancel` because the job was deleted.
+    ///
+    /// Its own arm and not a `Backstop`, which is the point. Nothing
+    /// about the set is wrong - not the data, not the recovery, not
+    /// this machine - so handing it to par2cmdline would run the whole
+    /// repair a second time, externally, for a job that is already
+    /// tombstoned, and a warn about a "failed" repair would tell a user
+    /// their set is broken when they simply pressed Cancel. Every
+    /// caller returns instead: there is nothing left to try and nothing
+    /// to report.
+    ///
+    /// What is left on disk is stated on `nzbkit::par2repair::
+    /// RepairError::Cancelled` and is monotone - some subset of the
+    /// MISSING blocks filled, no temp renamed in, nothing purged - so a
+    /// re-download or a re-run repairs the same set from the same
+    /// recovery data.
+    Cancelled,
 }
 
 /// Report the native pass's shortfall and turn it into a verdict.
@@ -562,6 +580,12 @@ pub(super) fn adoption_narrowed_need(
             NarrowedNeed::Buy(extra)
         }
         NativeVerdict::Backstop => NarrowedNeed::Buy(needed),
+        // The probe was called off, so nothing is known about the
+        // shortfall and nothing should be bought. `Cancelled` rather
+        // than `Buy(needed)`: a deleted job must not go on to fetch
+        // recovery volumes, which is the very thing its `SideCancel`
+        // was raised to stop.
+        NativeVerdict::Cancelled => NarrowedNeed::Cancelled,
     }
 }
 
@@ -580,6 +604,9 @@ pub(super) enum NarrowedNeed {
     Buy(usize),
     /// Nothing the NZB still has to sell can close it.
     Final { needed: usize },
+    /// The user deleted the job while the adoption probe was running.
+    /// See [`NativeVerdict::Cancelled`].
+    Cancelled,
 }
 
 /// The par2cmdline invocation for this set: (binary, set argument, extra
@@ -638,4 +665,162 @@ pub(super) fn par2cmdline_invocation(
     let mut extra_args: Vec<std::path::PathBuf> = extra_files.iter().map(|f| dot.join(f)).collect();
     extra_args.extend(donor_extra_args(donor_dirs));
     (par2_bin, par2_arg, extra_args)
+}
+
+/// What the par2cmdline hatch still has in hand once its first attempt
+/// has declined: the invocation while it is still worth trying, and the
+/// names an exit 0 would license us to publish.
+pub(super) struct ExternalHatch {
+    // `Some` only while par2cmdline is still worth trying: taken for
+    // each attempt, put back only when it actually ran.
+    invocation: Option<(PathBuf, PathBuf, Vec<PathBuf>)>,
+    // (name, length) of every file the recovery set declares - the
+    // targets par2's exit 0 has just verified, and the only writers
+    // whose coverage that verdict licenses us to publish (sweep 8, M5).
+    verified: Vec<(String, u64)>,
+}
+
+/// What [`external_repair_pass`] found.
+pub(super) enum ExternalPass {
+    /// par2cmdline ran and exited 0. Coverage is published and the set
+    /// is whole, so the caller is repaired.
+    Repaired,
+    /// Nothing was repaired here, and the caller falls THROUGH to the
+    /// escalation carrying the hatch - see the note on
+    /// [`external_repair_pass`] for why none of the three ways to reach
+    /// this arm is a return.
+    Declined(ExternalHatch),
+}
+
+/// par2cmdline fallback - the escape hatch for anything the native path
+/// declines (see par2repair.rs module docs).
+///
+/// It is OPTIONAL, and neither of its two absences may return from the
+/// caller: the escalation below it is the NATIVE path's second chance
+/// (every remaining recovery volume on disk, then `repair_dir` again),
+/// and it is reached by falling through this block. Bailing out because
+/// an unrelated external tool is missing failed sets a native-only
+/// install could repair (review sweep 10 Aug, M3). A non-zero exit is
+/// the same story with the binary present. That is what
+/// [`ExternalPass::Declined`] is for: all three ways out of here hand
+/// the hatch on rather than ending the repair.
+///
+/// Out of line since 12 Sep 2026, when [`super::fetch_and_repair`] sat
+/// at 494 of the size gate's 500-line FUNCTION ceiling - six lines
+/// free, the narrowest function margin in the tree - the two earlier
+/// cuts out of it ([`native_shortfall`] on 28 Aug 2026,
+/// [`super::nativepass::native_repair_pass`] on 31 Aug) having been
+/// spent by twelve days of ordinary work. PAST TENSE on purpose, for
+/// this file's own header's reason: this move is what fixed the margin,
+/// so a present-tense "is at the ceiling" would be false the moment it
+/// was written.
+pub(super) fn external_repair_pass(
+    main_par2: Option<&Path>,
+    out_dir: &Path,
+    donor_dirs: &[PathBuf],
+    set: &nzbkit::par2::Par2Set,
+    // Parked around the invocation - see [`run_external_par2`].
+    extractor: &nzbkit::extract::Extractor,
+    // The native pass's verdict, read on ONE arm only: which wording an
+    // unspawnable par2 gets. See the §282 item 16 note there.
+    native: NativeVerdict,
+) -> Result<ExternalPass> {
+    let t0 = Instant::now();
+    let mut external = main_par2.map(|m| par2cmdline_invocation(m, out_dir, donor_dirs));
+    if external.is_none() {
+        warn!(target: "repair", "no main .par2 on disk - cannot invoke par2cmdline");
+    }
+    let verified: Vec<(String, u64)> = set
+        .files
+        .iter()
+        .map(|f| (f.name.clone(), f.length))
+        .collect();
+    if let Some((bin, arg, extras)) = external.take() {
+        match run_external_par2(&bin, &arg, &extras, out_dir, &verified, extractor)? {
+            Ok(st) if st.success() => {
+                publish_external_coverage(extractor, &verified);
+                info!(target: "repair", "repair complete in {:.2?} ✔", t0.elapsed());
+                return Ok(ExternalPass::Repaired);
+            }
+            Ok(st) => {
+                warn!(target: "repair", "par2 repair exited with {st}");
+                external = Some((bin, arg, extras));
+            }
+            Err(e) => {
+                // par2 is no longer embedded - native repair covers real
+                // sets, so reaching this needs both an exotic failure AND
+                // no external par2 on PATH or next to the executable.
+                // Left as None: a binary that could not be spawned will
+                // not spawn on the second pass either.
+                //
+                // §282 item 16: what to SAY about that depends entirely
+                // on why the native pass declined. Advertising
+                // par2cmdline to somebody whose set has no parity on
+                // disk sends them to install a tool that would have
+                // failed on the same arithmetic. On the incident job it
+                // sent the reader off to ask why nzbfast needs an
+                // external par2 at all, which is the wrong question and
+                // one this message caused: see [`NativeVerdict`].
+                //
+                // "on this process's PATH" and not "on this machine",
+                // which is a second wrong claim the old line made and
+                // §282 item 4's notes measured: par2cmdline WAS
+                // installed on the incident box, at a Homebrew prefix,
+                // and `tools::resolve` falls back to the bare name -
+                // i.e. $PATH, which under launchd is
+                // /usr/bin:/bin:/usr/sbin:/sbin. So the hatch is
+                // unreachable on every Homebrew macOS install run as a
+                // service, and the old remedy was one the reader had
+                // already followed. Widening the search to a Homebrew
+                // prefix is a separate judgement (that directory is
+                // user-writable and the result is spawned), so this
+                // says what is true rather than pretending otherwise.
+                match native {
+                    NativeVerdict::NoRecovery { needed, have } => warn!(
+                        target: "repair",
+                        "no external par2 on this process's PATH ({e}), and it could \
+                         not have helped: {needed} block(s) are damaged with only \
+                         {have} recovery block(s) on disk, and no par2 implementation \
+                         can rebuild data it has no parity for. What is missing here \
+                         is recovery data, not a tool"
+                    ),
+                    _ => warn!(
+                        target: "repair",
+                        "no external par2 was runnable ({e}) - install par2cmdline \
+                         (e.g. brew install par2) or place a par2 binary next to nzbfast; \
+                         continuing with native repair alone"
+                    ),
+                }
+            }
+        }
+    }
+    Ok(ExternalPass::Declined(ExternalHatch {
+        invocation: external,
+        verified,
+    }))
+}
+
+impl ExternalHatch {
+    /// The escalation's second par2cmdline attempt, run once every
+    /// remaining recovery volume is on disk.
+    ///
+    /// Same invocation as the first, deliberately: what changed is the
+    /// directory it reads, not the arguments. `false` is the ordinary
+    /// answer - no binary worth trying, or it ran and did not repair -
+    /// and the caller reports the failure itself.
+    pub(super) fn second_pass(
+        &self,
+        out_dir: &Path,
+        extractor: &nzbkit::extract::Extractor,
+    ) -> Result<bool> {
+        if let Some((bin, arg, extras)) = &self.invocation
+            && let Ok(st) = run_external_par2(bin, arg, extras, out_dir, &self.verified, extractor)?
+            && st.success()
+        {
+            publish_external_coverage(extractor, &self.verified);
+            info!(target: "repair", "repair complete (second pass) ✔");
+            return Ok(true);
+        }
+        Ok(false)
+    }
 }

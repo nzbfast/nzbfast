@@ -515,7 +515,10 @@ fn holds_backpressure_parks_near_the_cap_and_reopens_as_the_engine_catches_up() 
     const CAP: usize = 8 << 20; // set_holds_cap(1) floors here
     let engage = park_engage_mark(CAP);
     let packed: usize = vols.iter().map(|v| v.len()).sum();
-    let junk = 7 << 19; // 3.5 MiB against the ~3.9 MB packed set
+    // 3.75 MiB against the packed set (~3.9 MB until 6 Sep 2026, when the
+    // encoder's per-256 KiB tables shrank it and the closing allowance
+    // stopped short of the body floor at 3.5 MiB of junk).
+    let junk = 15 << 18;
     assert!(
         junk + packed < CAP && junk + packed - vols[vols.len() - 1].len() > engage,
         "the fixture must cross the engage mark without breaching: \

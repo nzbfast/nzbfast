@@ -12,7 +12,7 @@
 //! child in `Drop`, which covers a normal end and a panicking unwind.
 //! It cannot cover the case that actually happened: the TEST PROCESS
 //! itself dying without unwinding. A `cargo nextest` run killed at the
-//! terminal, a runner killed by pattern (CLAUDE.md invariant 2a is
+//! terminal, a runner killed by pattern (project invariant 2a is
 //! about exactly that mistake), an OOM kill - in each of them the test
 //! binary takes SIGKILL, no destructor anywhere runs, and every daemon
 //! it spawned is reparented to launchd and serves forever.
@@ -216,7 +216,7 @@ mod tests {
     fn arm_is_inert_with_no_environment_set() {
         // The variable is never set for a unit-test build, and this test
         // deliberately does not set it: `set_var` would race every other
-        // test in the shared process (CLAUDE.md's `--bin nzbfast`
+        // test in the shared process (CONTRIBUTING.md's `--bin nzbfast`
         // one-process note). If some future caller does set it, skip
         // rather than assert a world we did not build.
         if std::env::var_os(ENV).is_none() {

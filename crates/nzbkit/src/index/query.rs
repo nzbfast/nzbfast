@@ -622,7 +622,7 @@ impl Index {
     /// `m:<norm>` (the parser writes whichever the stem supports, by
     /// design) enriches to one IMDb id on two rows, and the old `LIMIT 1`
     /// then returned one arbitrary half of that film's releases while
-    /// `total` agreed with it, so nothing looked wrong (Codex sweep 7,
+    /// `total` agreed with it, so nothing looked wrong (review sweep 7,
     /// M4).
     ///
     /// `imdb <> ''` looks redundant next to two equality terms and is
@@ -695,14 +695,14 @@ impl Index {
     /// which has no TMDB id to give and writes the bare IMDb NUMBER into
     /// this column instead. So `id_src` names the namespace and this
     /// resolver takes only its own ('' being the legacy, unlabelled
-    /// value - Codex sweep 7, H2).
+    /// value - review sweep 7, H2).
     ///
     /// Returns EVERY movie key filed under the id, not one of them.
     /// Nothing constrains the column to be unique and two shapes make it
     /// genuinely repeat - a remade-title split, and the `m:<norm>:<year>`
     /// / `m:<norm>` pair the parser keys by design - so the old `LIMIT 1`
     /// silently answered with one arbitrary half of a film's releases
-    /// (Codex sweep 7, M4). Empty means we hold nothing for that id,
+    /// (review sweep 7, M4). Empty means we hold nothing for that id,
     /// which the caller turns into an empty feed - never a fall-through
     /// to the other namespace.
     ///
@@ -736,7 +736,7 @@ impl Index {
     /// default, AniList whenever TVmaze missed the title (no key needed
     /// - anime posted under a romaji title is the routine case), and
     /// TMDB when a key is configured. `id_src` is what tells them apart,
-    /// so a `tvmazeid=` takes only TVmaze-sourced rows (Codex sweep 7,
+    /// so a `tvmazeid=` takes only TVmaze-sourced rows (review sweep 7,
     /// H2). Unlabelled legacy rows (`id_src=''`) are NOT admitted: the
     /// AniList fallback was writing its media ids into `tmdb_id` for
     /// three weeks before the `id_src` column existed, so '' names no
@@ -749,7 +749,7 @@ impl Index {
     /// parses into two title keys that enrich to the SAME show id, which
     /// is precisely what the duplicate check's alias oracle relies on,
     /// so answering with one of them arbitrarily hid half a series from
-    /// Sonarr (Codex sweep 7, M4). Empty = we hold no TV title for that
+    /// Sonarr (review sweep 7, M4). Empty = we hold no TV title for that
     /// id, which the facade turns into an empty feed - never a
     /// fall-through to the whole index (TODO 187).
     ///
@@ -844,7 +844,7 @@ impl Index {
     /// because two rows are called one show on the strength of one equal
     /// number: an AniList media id that happens to equal another show's
     /// TVmaze id would otherwise make the duplicate check hold a
-    /// download as an alias of something unrelated (Codex sweep 7, H2).
+    /// download as an alias of something unrelated (review sweep 7, H2).
     /// Comparing the pair - rather than admitting only TVmaze rows -
     /// also keeps the oracle working for anime, which under the keyless
     /// default is AniList-sourced whenever TVmaze lacked the romaji
@@ -1057,7 +1057,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Codex sweep 7, H2: `titles.tmdb_id` is FOUR namespaces in one
+    /// Review sweep 7, H2: `titles.tmdb_id` is FOUR namespaces in one
     /// column, and `kind` names only two of them. On a TV row it holds a
     /// TVmaze show id under the keyless default, an AniList media id
     /// whenever TVmaze missed the title (anime under a romaji title
@@ -1120,7 +1120,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Codex sweep 7, M4: nothing makes an external id unique across
+    /// Review sweep 7, M4: nothing makes an external id unique across
     /// title keys, and two production shapes routinely repeat one - a
     /// film keyed with and without its year, and a show posted under two
     /// spellings. `LIMIT 1` answered with one arbitrary half of the
@@ -1198,7 +1198,7 @@ mod tests {
         assert_eq!(ix.tv_show_id("t:absent").unwrap(), None);
         assert_eq!(ix.tv_show_id("m:a film").unwrap(), None);
         assert_eq!(ix.tv_show_id("").unwrap(), None);
-        // Codex sweep 7, H2: the alias oracle calls two rows one show on
+        // Review sweep 7, H2: the alias oracle calls two rows one show on
         // the strength of one equal number, so the number alone is not
         // enough - an AniList media id equal to another show's TVmaze id
         // would hold an unrelated download as a duplicate.

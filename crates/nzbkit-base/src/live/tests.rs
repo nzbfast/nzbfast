@@ -1257,7 +1257,7 @@ fn control_disjoint_sets_share_no_damage() {
     );
 }
 
-/// Codex sweep 13 Aug R1: slots differing only by case must never
+/// Review sweep 13 Aug R1: slots differing only by case must never
 /// cross-claim each other's descriptors. With FileDesc order
 /// [a.txt, A.txt] the first slot to match used to take the OTHER
 /// file's descriptor case-insensitively (one first-hit loop over
@@ -1997,7 +1997,7 @@ fn assert_matchers_agree(files: &[(&str, &[u8])], steps: &[Step]) {
     );
 }
 
-/// The Codex-R1 case-cross shape plus duplicates: exact must beat
+/// The review-R1 case-cross shape plus duplicates: exact must beat
 /// approximate in both impls whichever arrival order, and two
 /// descriptors sharing one exact name must be split by the HEAD rather
 /// than by FileDesc order (W4-02B).
@@ -3378,6 +3378,57 @@ fn a_forced_readback_does_not_confirm_a_head_nomination_vacuously() {
     );
 }
 
+/// A forced read-back retracts the §94 B PER-RANGE BITMAP too, not only
+/// the block verdicts and the prefix.
+///
+/// `force_readback` erases every in-stream verdict because an
+/// overlapping write means an Ok proves the bytes that WERE hashed, not
+/// the bytes on disk now. It reset `blocks`, `ok_prefix` and the prefix
+/// digest and left `VouchBits` set, so `vouched_end` - which is
+/// consulted for exactly the offsets ABOVE the watermark that the prefix
+/// reset just vacated - went on answering "vouched" for blocks whose Ok
+/// verdict had just been thrown away, and the random-access reader
+/// served them. `arm_vouch`'s own rationale names that direction: "an
+/// under-report parks a reader, an over-report serves bytes the set has
+/// not vouched for."
+#[test]
+fn a_forced_readback_retracts_the_per_range_vouch_bits() {
+    let data = data_of(4096, 17);
+    let (v, _set) = active_verifier(&[("a.bin", &data)], 1024);
+    let g = VerifyGate::new(1);
+    v.set_gate(g.clone());
+    // Block 3 first, so the contiguous prefix stays at 0 and every
+    // answer below has to come from the bitmap rather than the
+    // watermark - the whole point of the per-range map.
+    v.on_data(0, "a.bin", 4096, 3072, &data[3072..]);
+    assert_eq!(g.watermark(0), 0, "no contiguous prefix yet");
+    assert_eq!(
+        g.vouched_end(0, 3072),
+        u64::MAX,
+        "the tail block is vouched in-stream"
+    );
+
+    v.force_readback(0);
+
+    // `vouched_end` answers the OFFSET ITSELF for an unvouched block -
+    // "park here" - where it answered `u64::MAX` above, which is
+    // "everything from here on is vouched, serve it".
+    assert_eq!(
+        g.vouched_end(0, 3072),
+        3072,
+        "a retracted verdict must not leave its vouch bit standing"
+    );
+
+    // The control the fix must not cost: the read-back re-earns the bit
+    // from disk, so the gate is not permanently sealed shut.
+    let _ = v.finish_slot_from(0, ReadAt::Reader(&|off, buf| read_span(&data, off, buf)));
+    assert_eq!(
+        g.vouched_end(0, 3072),
+        u64::MAX,
+        "disk truth re-vouches for the block the reset erased"
+    );
+}
+
 /// The half F10's fix must not cost, and the reason it reads back the
 /// DELIVERED blocks rather than all of them: a truthfully nominated
 /// member that is merely DAMAGED keeps its descriptor even when a
@@ -3760,4 +3811,128 @@ fn ever_activated_is_a_lock_free_monotonic_mirror_of_the_plan() {
     v.activate(&[second.as_slice()]).expect("fixture parses");
     assert!(v.ever_activated());
     assert_eq!(v.sets().len(), 2);
+}
+
+/// THE ZERO-HEAD FLAKE, 10 Sep 2026 - the SEAM, pinned deterministically.
+///
+/// Two catalog rows - `cc-n15-zero-head-twins-r100` and
+/// `cc-n26-three-zero-head-members-one-damaged` - flaked about one run
+/// in seven on a loaded box and passed the retry in CI, which posed one
+/// question: is the `(length, md5-16k)` tie-break DERIVED, or does it
+/// fall out of worker order? It falls out of worker order, and this is
+/// the window it falls through.
+///
+/// `finish_slot_from`'s last-chance ladder takes the claim mutex TWICE.
+/// `try_match`'s md5-16k tier declines when two or more unclaimed
+/// descriptors share this slot's head; `try_match_whole` settles two or
+/// more by whole-file MD5. Between the two acquisitions a rival slot's
+/// claim can land, and then the slot sees TWO at the first rung and ONE
+/// at the second - a count NEITHER rung answers, because
+/// `try_match_whole` reads a lone candidate as one the rung above it
+/// already took. The member finishes unclaimed with the descriptor its
+/// own bytes name still free, is priced WHOLLY MISSING, and its payload
+/// is left in the output tree under the token name the wire gave it.
+///
+/// Driven at the seam because nothing above it can hold the window
+/// open: the claim has to land between two calls inside one function,
+/// and every `ReadAt` the test could hook is reached AFTER
+/// `try_match_whole` has already snapshotted its candidates. The
+/// concurrent sibling below drives the real `finish_slot_from` and
+/// reproduces the same strand by racing it.
+#[test]
+fn a_rival_claim_between_the_two_finish_tiers_leaves_a_twin_unnamed() {
+    let mut a = vec![0u8; 20_000];
+    let mut b = vec![0u8; 20_000];
+    a[16_384..].copy_from_slice(&data_of(3_616, 71));
+    b[16_384..].copy_from_slice(&data_of(3_616, 72));
+    let (v, _set) = active_verifier(&[("twin.a.vob", &a), ("twin.b.vob", &b)], 1024);
+    // Slot 0 carries a's bytes under an OPAQUE wire name, which is the
+    // rows' `[naming] wire = "opaque"` - no name tier can help.
+    v.on_data(0, "Xk1jibber", 20_000, 0, &a);
+    let plan = v.plan.read_ok();
+    let Plan::Active(active) = &*plan else {
+        panic!("the fixture activated")
+    };
+    let fi_of = |name: &str| {
+        active
+            .files()
+            .find(|(_, f)| f.name == name)
+            .map(|(fi, _)| fi)
+            .expect("in the set")
+    };
+    let src = ReadAt::Reader(&|off, buf| read_span(&a, off, buf));
+    let mut s = v.slots[0].lock_ok();
+
+    let seen = s.unclaimed_head_candidates(active);
+    assert_eq!(seen, 2, "both twins share this slot's head and are free");
+    assert!(
+        !s.try_match(0, active, false),
+        "two unclaimed candidates: the md5-16k tier must decline on ambiguity"
+    );
+    // The rival slot's claim lands HERE, between the two rungs.
+    active.claimed.lock_ok()[fi_of("twin.b.vob")] = Some(1);
+    assert!(
+        !s.try_match_whole(0, active, &src),
+        "the whole-file tier reads a lone candidate as already taken"
+    );
+    // Which is the strand: nothing has named the slot, and the
+    // descriptor its bytes DO name is still free.
+    assert!(s.file.is_none(), "the slot is unnamed at this point");
+
+    // The retry `finish_slot_from` makes is what closes it, and it is
+    // armed by the population having moved rather than by a guess.
+    let now = s.unclaimed_head_candidates(active);
+    assert_eq!(now, 1, "the rival's claim took one candidate off the table");
+    assert!(now < seen, "the retry must be armed by the shrink");
+    assert!(
+        s.try_match(0, active, false),
+        "one unclaimed candidate: the md5-16k tier claims on uniqueness"
+    );
+    assert_eq!(
+        s.file,
+        Some(fi_of("twin.a.vob")),
+        "and it must be the descriptor this slot's own bytes carry"
+    );
+}
+
+/// The same defect through the REAL `finish_slot_from`, raced rather
+/// than hand-driven - the arm that would catch a regression the seam
+/// test above could be edited past.
+///
+/// Two identical-head twins finishing on two threads, released
+/// together, over enough rounds that the window between the ladder's
+/// two claim-mutex acquisitions is hit. Measured on this box before the
+/// retry landed: a strand inside the first few hundred rounds, every
+/// run. It cannot fail spuriously WITH the retry, because the retry
+/// makes every interleaving of the two rungs reach the same pair of
+/// names - which is the property being asserted, not a rate.
+#[test]
+fn identical_head_twins_are_named_in_every_finish_interleaving() {
+    let mut a = vec![0u8; 20_000];
+    let mut b = vec![0u8; 20_000];
+    a[16_384..].copy_from_slice(&data_of(3_616, 71));
+    b[16_384..].copy_from_slice(&data_of(3_616, 72));
+    for round in 0..400 {
+        let (v, _set) = active_verifier(&[("twin.a.vob", &a), ("twin.b.vob", &b)], 1024);
+        // Slot 0 carries b's bytes, so a pairing taken by POSITION is
+        // crossed rather than merely lucky.
+        v.on_data(0, "Xk1jibber", 20_000, 0, &b);
+        v.on_data(1, "Qz2jibber", 20_000, 0, &a);
+        let start = std::sync::Barrier::new(2);
+        let (r0, r1) = std::thread::scope(|sc| {
+            let h = sc.spawn(|| {
+                start.wait();
+                finish_from(&v, 1, &a)
+            });
+            start.wait();
+            let mine = finish_from(&v, 0, &b);
+            (mine, h.join().expect("slot 1 finished"))
+        });
+        let r0 = r0.unwrap_or_else(|| panic!("round {round}: slot 0 was left unnamed"));
+        let r1 = r1.unwrap_or_else(|| panic!("round {round}: slot 1 was left unnamed"));
+        assert_eq!(r0.par2_name.as_deref(), Some("twin.b.vob"), "round {round}");
+        assert_eq!(r1.par2_name.as_deref(), Some("twin.a.vob"), "round {round}");
+        assert!(r0.all_ok(), "round {round}: {r0:?}");
+        assert!(r1.all_ok(), "round {round}: {r1:?}");
+    }
 }

@@ -71,8 +71,42 @@ use std::io::Cursor;
 
 use sevenz_rust2::{
     ArchiveEntry, ArchiveReader, ArchiveWriter, EncoderConfiguration, EncoderMethod, Entropy,
-    EntropyScope, Password, encoder_options::AesEncoderOptions,
+    EntropyScope, Password,
+    encoder_options::{AesEncoderOptions, Lzma2Options},
 };
+
+/// The LZMA2 preset a compressed level is written at: 6 is the writer's
+/// own default and 7-Zip's, so the archive is what `7z a` would make.
+const LZMA2_PRESET: u32 = 6;
+
+/// Bytes of input per independent LZMA2 chunk when the member is encoded
+/// on several threads. Every chunk starts with a dictionary reset, so the
+/// output depends on this size and the preset, never on the thread count
+/// or their timing - the archive is deterministic. 7-Zip's own multi-
+/// threaded LZMA2 uses this shape (a 0xE0 reset-everything chunk header
+/// at each boundary), so the reader sees an ordinary LZMA2 stream. Eight
+/// MiB is the preset-6 dictionary, the smallest chunk the writer allows
+/// at that preset; a smaller member is one chunk and encodes exactly as
+/// it did single-threaded.
+const LZMA2_CHUNK_BYTES: u64 = 8 << 20;
+
+/// The LZMA2 configuration: preset 6 across as many threads as the box
+/// has, one 8 MiB chunk per work unit.
+///
+/// Measured 5 Sep 2026 on a 32-core Apple desktop: a 32 MiB mixed member
+/// 10.7 s single-threaded -> 2.5 s (four chunks, so the chunk count is
+/// the ceiling), packed +4.5%. The thread count is a speed knob only;
+/// [`LZMA2_CHUNK_BYTES`] is what fixes the bytes.
+fn lzma2_configuration() -> EncoderConfiguration {
+    // The pool's width comes from the one place the fleet reads it, so
+    // `NZBFAST_CPU_WORKERS` caps this writer like every other pool.
+    let threads = u32::try_from(nzbkit::mem::cpu_workers().max(1)).unwrap_or(u32::MAX);
+    EncoderConfiguration::from(Lzma2Options::from_level_mt(
+        LZMA2_PRESET,
+        threads,
+        LZMA2_CHUNK_BYTES,
+    ))
+}
 
 /// Whether an archive is encrypted, and how far the encryption reaches.
 ///
@@ -142,17 +176,12 @@ impl<'a> Encrypt<'a> {
 /// here rather than worked around: a catalog archive has no secrecy to
 /// lose (the password travels in the profile), and a client reading one
 /// cannot tell the difference.
-pub fn write_archive(
-    members: &[(String, Vec<u8>)],
+pub fn write_archive<B: AsRef<[u8]>>(
+    members: &[(String, B)],
     compressed: bool,
     encrypt: Encrypt<'_>,
     seed: [u8; 32],
 ) -> Result<Vec<u8>, String> {
-    let method = if compressed {
-        EncoderMethod::LZMA2
-    } else {
-        EncoderMethod::COPY
-    };
     let _entropy = EntropyScope::install(Entropy::Seeded(seed));
     let mut w = ArchiveWriter::new(Cursor::new(Vec::new()))
         .map_err(|e| format!("the 7z writer would not start: {e}"))?;
@@ -172,7 +201,11 @@ pub fn write_archive(
             Password::from(pw),
         )));
     }
-    methods.push(EncoderConfiguration::new(method));
+    methods.push(if compressed {
+        lzma2_configuration()
+    } else {
+        EncoderConfiguration::new(EncoderMethod::COPY)
+    });
     w.set_content_methods(methods);
     // Explicitly, in both directions: the writer's own default is TRUE,
     // so a data-encrypted profile that said nothing here would emit a
@@ -186,8 +219,11 @@ pub fn write_archive(
         // its own recovery set), where non-solid is both what 7-Zip
         // writes for a small set and the shape a client can open a
         // member of without decoding the ones in front of it.
-        w.push_archive_entry(ArchiveEntry::new_file(name), Some(Cursor::new(bytes)))
-            .map_err(|e| format!("the 7z writer refused {name:?}: {e}"))?;
+        w.push_archive_entry(
+            ArchiveEntry::new_file(name),
+            Some(Cursor::new(bytes.as_ref())),
+        )
+        .map_err(|e| format!("the 7z writer refused {name:?}: {e}"))?;
     }
     let out = w
         .finish()
@@ -225,11 +261,17 @@ pub fn split_parts(bytes: &[u8], part_bytes: usize) -> Vec<Vec<u8>> {
 /// exactly that join from the disk pass, measured at 2.000x of payload
 /// in device I/O); here the payloads are kilobytes and the check runs
 /// at generation, so the simple reading is the right one.
-pub fn extract_set(
-    set: &[Vec<u8>],
+pub fn extract_set<S: AsRef<[u8]>>(
+    set: &[S],
     password: Option<&str>,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let joined: Vec<u8> = set.concat();
+    // Generic over the element for the reason `crate::zip::extract_set`
+    // gives: the round trip hands this a borrowed view of the posted
+    // set, and every other caller passes `&[Vec<u8>]` unchanged.
+    let mut joined: Vec<u8> = Vec::with_capacity(set.iter().map(|s| s.as_ref().len()).sum());
+    for part in set {
+        joined.extend_from_slice(part.as_ref());
+    }
     let mut r = ArchiveReader::new(Cursor::new(&joined), read_password(password))
         .map_err(|e| format!("the 7z set does not parse: {e}"))?;
     let mut out = Vec::new();
@@ -358,6 +400,75 @@ mod tests {
                 .expect("the archive parses")
                 .as_deref(),
             Some(COPY_ID)
+        );
+    }
+
+    /// A member under one chunk must encode to the bytes the single-threaded
+    /// writer produces, and a member spanning several chunks must encode to
+    /// the same bytes on every run, because the archive a profile describes
+    /// cannot depend on how many cores built it.
+    #[test]
+    fn multi_threaded_lzma2_is_deterministic_and_matches_single_threaded_below_a_chunk() {
+        let mut seed = 0x9e37_79b9u32;
+        let mut noise = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as u8
+        };
+        let small: Vec<u8> = (0..300_000)
+            .map(|i| {
+                if i % 64 < 40 {
+                    b'a' + (i % 26) as u8
+                } else {
+                    noise()
+                }
+            })
+            .collect();
+        let single = {
+            let mut w = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+            w.set_content_methods(vec![EncoderConfiguration::from(Lzma2Options::from_level(
+                LZMA2_PRESET,
+            ))]);
+            w.set_encrypt_header(false);
+            w.push_archive_entry(
+                ArchiveEntry::new_file("m.bin"),
+                Some(Cursor::new(small.clone())),
+            )
+            .unwrap();
+            w.finish().unwrap().into_inner()
+        };
+        let members = vec![("m.bin".to_string(), small)];
+        let threaded = write_archive(&members, true, Encrypt::None, [0u8; 32]).unwrap();
+        assert_eq!(
+            threaded, single,
+            "one chunk must encode as the single-threaded writer does"
+        );
+
+        let big: Vec<u8> = (0..(2 * LZMA2_CHUNK_BYTES as usize + 12345))
+            .map(|i| {
+                if i % 128 < 96 {
+                    b'a' + (i % 26) as u8
+                } else {
+                    noise()
+                }
+            })
+            .collect();
+        let members = vec![("big.bin".to_string(), big)];
+        let first = write_archive(&members, true, Encrypt::None, [0u8; 32]).unwrap();
+        let second = write_archive(&members, true, Encrypt::None, [0u8; 32]).unwrap();
+        assert_eq!(
+            first, second,
+            "a multi-chunk member must not depend on thread timing"
+        );
+        assert_eq!(
+            extract_set(std::slice::from_ref(&first), None).unwrap(),
+            members,
+            "the multi-chunk archive must read back"
+        );
+        assert_eq!(
+            declared_method(&first, None).unwrap().as_deref(),
+            Some(EncoderMethod::ID_LZMA2)
         );
     }
 

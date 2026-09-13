@@ -4,6 +4,18 @@ use super::*;
 mod settings_apply;
 use settings_apply::apply_setting_tail;
 
+// Two more links in the same chain, each named for the block it holds:
+// `apply_setting` -> naming -> index -> `apply_setting_tail`. Split out
+// on 7 Sep 2026 with `apply_setting` at 474 of the size gate's 500-line
+// function ceiling.
+#[path = "settings_apply_naming.rs"]
+mod settings_apply_naming;
+use settings_apply_naming::apply_setting_naming;
+
+#[path = "settings_apply_index.rs"]
+mod settings_apply_index;
+use settings_apply_index::apply_setting_index;
+
 #[path = "settings_setters.rs"]
 mod settings_setters;
 
@@ -1510,55 +1522,6 @@ pub fn apply_setting(
         "update_url" => set_update_url(d, name, v)?,
         "ui_locale" => set_ui_locale(d, name, v)?,
         "cors_origin" => set_cors_origin(d, name, v)?,
-        "index_deepen" => {
-            // Articles of history added per scan pass; 0 = off.
-            let n = uint()?;
-            d.index_deepen.store(n, Ordering::Relaxed);
-            (true, json!(n))
-        }
-        "index_coverage" => {
-            // A8: scan the other backbones' tips too (their own marks).
-            d.index_coverage.store(flag(), Ordering::Relaxed);
-            (true, json!(d.index_coverage.load(Ordering::Relaxed)))
-        }
-        "index_gapfill" => set_index_gapfill(d, name, v)?,
-        "index_fold_secs" => set_index_fold_secs(d, name, v)?,
-        "index_probe7z" => {
-            // TODO 131 B3: the byte-probe naming lane's kill switch.
-            d.index_probe7z.store(flag(), Ordering::Relaxed);
-            (true, json!(d.index_probe7z.load(Ordering::Relaxed)))
-        }
-        "index_probe7z_budget" => set_index_probe7z_budget(d, name, v)?,
-        "index_pesto" => {
-            // TODO 131 red-team 5a: the pesto rung's kill switch.
-            d.index_pesto.store(flag(), Ordering::Relaxed);
-            (true, json!(d.index_pesto.load(Ordering::Relaxed)))
-        }
-        "index_pesto_budget" => set_index_pesto_budget(d, name, v)?,
-        "index_nzbimport" => {
-            // §131 #6: the posted-NZB ingestion rung's kill switch.
-            d.index_nzbimport.store(flag(), Ordering::Relaxed);
-            (true, json!(d.index_nzbimport.load(Ordering::Relaxed)))
-        }
-        "index_nzbimport_budget" => set_index_nzbimport_budget(d, name, v)?,
-        "index_search_log" => {
-            // §131 D3 search-miss logging. Turning it OFF also clears
-            // the table: a privacy switch that leaves the history
-            // behind is not one, and this is the user's own search
-            // history on the user's own box.
-            let on = flag();
-            d.index_search_log.store(on, Ordering::Relaxed);
-            // TODO 166: _deferred, because this caller has no way to
-            // report a busy index - the switch itself has already
-            // landed - and an "off" that leaves the history behind is
-            // not off. A busy index latches and the searchlog tick
-            // retries it on the writer.
-            #[cfg(feature = "indexer")]
-            if !on {
-                d.clear_search_log_deferred();
-            }
-            (true, json!(d.index_search_log.load(Ordering::Relaxed)))
-        }
         "bench_interval" => set_bench_interval(d, name, v)?,
         "auto_prefetch" => set_auto_prefetch(d, name, v)?,
         "race_stragglers" => set_race_stragglers(d, name, v)?,
@@ -1574,66 +1537,6 @@ pub fn apply_setting(
             // job launch).
             d.oracle_route.store(flag(), Ordering::Relaxed);
             (true, json!(d.oracle_route.load(Ordering::Relaxed)))
-        }
-        "auto_rename" => {
-            let on = flag();
-            d.auto_rename.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "identity_lookup" => {
-            let on = flag();
-            d.identity_lookup.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_resolution" => {
-            let on = flag();
-            d.rename.resolution.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_vcodec" => {
-            let on = flag();
-            d.rename.vcodec.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_acodec" => {
-            let on = flag();
-            d.rename.acodec.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_source" => {
-            let on = flag();
-            d.rename.source.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_group" => {
-            let on = flag();
-            d.rename.group.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_year_parens" => {
-            let on = flag();
-            d.rename.year_parens.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_quality_brackets" => {
-            let on = flag();
-            d.rename.quality_brackets.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_extra_words" => {
-            let on = flag();
-            d.rename.extra_words.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_identify" => {
-            let on = flag();
-            d.rename.identify.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_episode_titles" => {
-            let on = flag();
-            d.rename.episode_titles.store(on, Ordering::Relaxed);
-            (true, json!(on))
         }
         "fast_final_check" => {
             // Live: the next settle pass and the next `verify` both read
@@ -1722,26 +1625,6 @@ pub fn apply_setting(
             d.metrics_open.store(on, Ordering::Relaxed);
             (true, json!(on))
         }
-        "rename_junk" => {
-            let on = flag();
-            d.rename.junk.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_media_only" => {
-            let on = flag();
-            d.rename.media_only.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "skip_samples" => {
-            let on = flag();
-            d.skip_samples.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
-        "rename_from_nzb" => {
-            let on = flag();
-            d.rename.from_nzb.store(on, Ordering::Relaxed);
-            (true, json!(on))
-        }
         "connections" => set_connections(d, name, v)?,
         "window" => {
             let n = uint()?.clamp(1, 64) as usize;
@@ -1802,9 +1685,12 @@ pub fn apply_setting(
             d.library_recheck_secs.store(n, Ordering::Relaxed);
             (true, json!(n))
         }
-        // The rest of the table is in settings_apply.rs - this match was
-        // 507 lines, past the size gate's function ceiling.
-        _ => apply_setting_tail(d, name, v)?,
+        // The rest of the table is in three sibling modules - this match
+        // was 507 lines, past the size gate's function ceiling, and was
+        // back at 474 of it on 7 Sep 2026. The naming block delegates on
+        // to the indexer block and that to settings_apply.rs's tail,
+        // whose `_` arm is the original refusal.
+        _ => apply_setting_naming(d, name, v)?,
     })
 }
 

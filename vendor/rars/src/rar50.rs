@@ -28,11 +28,18 @@ pub use write::rev::{
     data_volume_matches, default_recovery_volume_count, max_recovery_volume_count,
     percent_recovery_volume_count, write_rev_volumes, RevSet,
 };
+pub use write::stream::{
+    crc32_of_reader, write_compressed_archive_streamed, write_compressed_volumes_streamed,
+    write_encrypted_stored_archive_streamed, write_encrypted_stored_volumes_streamed,
+    write_stored_archive_streamed, write_stored_archive_streamed_with_recovery,
+    write_stored_volumes_streamed, write_stored_volumes_streamed_with_recovery,
+    StreamedStoredEntry,
+};
 pub use write::{
     ArchiveMetadataEntry, CompressedEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry,
     EncryptedStoredEntry, EncryptedStoredEntryWithServices, EncryptedStoredServiceEntry,
     FilterKind, FilterPolicy, Rar50VolumeWriter, Rar50Writer, StoredEntry, StoredEntryWithServices,
-    StoredServiceEntry, WriterOptions,
+    HashRecord, StoredServiceEntry, WriterOptions,
 };
 
 const HEAD_MAIN: u64 = 1;

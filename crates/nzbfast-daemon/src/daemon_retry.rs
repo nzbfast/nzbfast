@@ -254,7 +254,7 @@ impl Daemon {
         // this is not a race the user has to lose deliberately.
         //
         // UNDER the history lock, which is the half that makes it work
-        // (Codex H7). `history_change_cat` raises its `moving` marker and
+        // (review H7). `history_change_cat` raises its `moving` marker and
         // THEN re-verifies the record is still in history; a check taken
         // outside this lock could pass just before the marker went up
         // while the move still proceeded. Both REST and JSON-RPC history
@@ -276,7 +276,7 @@ impl Daemon {
         // extracting/renaming/moving under `out_dir` and will write the
         // committed state back when it settles. Removing and re-queueing
         // the record here would reassign that directory under the
-        // running task (Codex sweep 3 Aug H1). Checked under the history
+        // running task (review sweep 3 Aug H1). Checked under the history
         // lock: set_password raises the flag and then re-verifies the
         // record is still present under this same lock, so whichever
         // committed second sees the other.
@@ -410,7 +410,7 @@ impl Daemon {
             j.state = JobState::Queued;
             // A retry is an instruction to RUN the job, so it cannot
             // arrive back in the queue holding a pause `pick_job` will
-            // skip it for (Codex sweep 2, 3 Aug M4). The flag reaches
+            // skip it for (review sweep 2, 3 Aug M4). The flag reaches
             // here from a pause taken while the job was in its
             // post-network tail, which the tail correctly ignored and
             // then left set; the shared transition now refuses to set
@@ -448,7 +448,7 @@ impl Daemon {
             // row while the tail is still on its way to park - so the
             // record can reach here with the flag still set, and the
             // first park after a successful re-run would delete the
-            // payload it just produced (Codex sweep 14 Aug H1). park
+            // payload it just produced (review sweep 14 Aug H1). park
             // now spends the flag as it reads it; this is the belt to
             // that brace and the only cover for the row filed by hand.
             had_del_on_drop = std::mem::replace(&mut j.del_on_drop, false);

@@ -988,6 +988,35 @@ ENGLISH_ONLY = {
               'localized download pages and from the update panel: 30 bare '
               'English hrefs across 15 localized pages, against 15 for the '
               'Synology guide (measured 23 Aug 2026).',
+    'parfast-benchmarks': 'The parfast round book, added 12 Sep 2026 by '
+                'decision: PAR2 create, verify and repair measured as a '
+                'standalone tool on six machines, generated from '
+                'research/build_page.py by website/tools/build_parfast_page.py '
+                'rather than hand-written. English only for the reason '
+                'benchmark-nested-archives is, and more so: it is fifteen '
+                'charts and 246 table rows of figures, tool names and unit '
+                'labels around a few hundred words of caption, and every one '
+                'of those numbers is REGENERATED whenever a round lands, so '
+                'fifteen twins would be fifteen copies to re-derive and hold '
+                'to figure parity on every re-run. The prose a reader needs '
+                'to read the figures is in the benchmarks page section that '
+                'links here, and that page IS a translated family - the '
+                'pointer sentence into this page is translated in all 16. '
+                'Revisit if the page grows prose rather than charts.',
+    'parfast-benchmarks-data': 'Data-only twin of the parfast round book, '
+                'added 12 Sep 2026 by decision, and the artefact whose URL '
+                'gets handed to a forum: the same figures with the argument '
+                'taken off, no site chrome, no nav, no picker and - audited, '
+                'not overlooked - no <a href> at all, which is what the house '
+                'rule (28 Aug 2026) asks of the page a reader meets cold. '
+                'English only for the reason parfast-benchmarks is, and it '
+                'inherits that reason rather than taking one of its own: it '
+                'is generated from the SAME round book by '
+                'website/tools/build_parfast_data_page.py, so fifteen twins '
+                'would be fifteen copies to re-derive on every re-run of a '
+                'round. Linked from nowhere on the site, exactly as '
+                'benchmarks-data is, and for the same reason: the URL is '
+                'handed out by hand.',
     'benchmarks-data': 'Raw-data twin of the benchmarks page, added 24 Aug '
                        '2026 by decision: the client download rounds '
                        'as plain unhighlighted tables, deliberately carrying '
@@ -1006,7 +1035,7 @@ ENGLISH_ONLY = {
 # green. The per-entry loop in the selftest cannot see it either, because a
 # deleted entry deletes its own case. Raise this when a page family is added;
 # lowering it is a claim that a family has been withdrawn from the site.
-ROSTER_EXPECTED = 15
+ROSTER_EXPECTED = 17
 
 
 def page_bases(names):

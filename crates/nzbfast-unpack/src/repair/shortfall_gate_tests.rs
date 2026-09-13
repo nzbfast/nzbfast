@@ -50,6 +50,7 @@ fn pfile(name: &str, blocks: Vec<BlockCheck>) -> Par2File {
 
 fn pset(files: Vec<Par2File>) -> Par2Set {
     Par2Set {
+        comment: None,
         recovery_set_id: [0u8; 16],
         block_size: 2000,
         files,

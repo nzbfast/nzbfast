@@ -129,7 +129,7 @@ pub fn header_apikey(req: &tiny_http::Request) -> Option<String> {
 /// `strip_prefix("Basic ")`, so a client sending `basic` or `BASIC` - both
 /// compliant, and what some proxies and HTTP libraries emit - got a 401
 /// with correct credentials. The Bearer parser above already got this
-/// right (Codex sweep 12 Aug F18).
+/// right (review sweep 12 Aug F18).
 pub fn auth_credentials(req: &tiny_http::Request, scheme: &str) -> Option<String> {
     let v = req
         .headers()
@@ -357,7 +357,7 @@ pub fn jsonrpc_path_password(path: &str) -> Option<String> {
 /// pre-authentication on a body of up to 256 MiB, and
 /// `String::from_utf8_lossy` expands each invalid byte to a 3-byte
 /// replacement character - so one part whose "header" is the whole body
-/// used to allocate ~3x the body on top of it (Codex H8). 8 KiB is far
+/// used to allocate ~3x the body on top of it (review H8). 8 KiB is far
 /// past any legitimate filename.
 pub(super) const MAX_PART_HEADER: usize = 8 << 10;
 
@@ -507,7 +507,7 @@ pub fn valid_boundary(b: &str) -> bool {
 /// NAME is case-insensitive like the media type around it, but the
 /// VALUE is a literal delimiter that has to keep its case - so the
 /// position is found in a lowercased copy and the text is cut from the
-/// original. The gateway learned that in Codex sweep 2's H1 while the
+/// original. The gateway learned that in review sweep 2's H1 while the
 /// two handler-side copies stayed case-sensitive, which left `Boundary=`
 /// parsing at the gateway (fields merged, auth decided) and failing in
 /// the handler (no file part at all).
@@ -553,6 +553,18 @@ pub fn json_resp(v: Value) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     )
 }
 
+/// The `output=xml` twin of `json_resp`, for the SAB facade.
+///
+/// `text/xml` and not `application/xml`, because that is the literal
+/// string SAB's `report()` writes into the header and a compat surface
+/// is judged against SAB rather than against the registry. No charset
+/// parameter either, for the same reason - the declaration is in the
+/// document's own prolog, which is where an XML parser looks first.
+pub fn xml_resp(body: String) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    tiny_http::Response::from_data(body.into_bytes())
+        .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/xml"[..]).unwrap())
+}
+
 /// May a scan pass that began at `pass_era` hand its freshly-opened
 /// connection to the daemon, given the current `era` and switch state?
 ///
@@ -576,7 +588,7 @@ pub fn may_publish_index(era: u64, pass_era: u64, enabled: bool) -> bool {
 /// Percent-encode one query VALUE for a URL the daemon generates.
 /// Generated hex keys pass through unchanged; a user-chosen key holding
 /// `&`, `+`, `%` or `#` sent raw changes the parsed query and breaks
-/// every link that carries it (Codex sweep 10 Aug L1). Everything
+/// every link that carries it (review sweep 10 Aug L1). Everything
 /// outside the RFC 3986 unreserved set is encoded.
 pub fn query_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -631,7 +643,7 @@ mod auth_scheme_tests {
     /// `strip_prefix("Basic ")` - so a client sending `basic` or `BASIC`,
     /// both compliant and both emitted in the wild by proxies and HTTP
     /// libraries that normalize headers, got a 401 with correct
-    /// credentials (Codex sweep 12 Aug F18).
+    /// credentials (review sweep 12 Aug F18).
     #[test]
     fn the_scheme_token_is_case_insensitive() {
         for spelling in ["Basic", "basic", "BASIC", "bAsIc"] {

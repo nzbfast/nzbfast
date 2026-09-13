@@ -48,7 +48,7 @@
 //! --test integration`, which now puts every module in one process -
 //! and that is a gain, not a risk: it is the only way the "test A leaves
 //! process-global state that test B reads" class is visible at all, the
-//! class CLAUDE.md's `unit-one-process` note exists for. Verified green
+//! class CONTRIBUTING.md's `unit-one-process` note exists for. Verified green
 //! in that single-process shape before this landed.
 //!
 //! ADDING A TEST: put the file beside this one and add a `mod` line
@@ -84,7 +84,7 @@
 //! These pass under nextest either way, because nextest gives every
 //! test its own process - which is exactly why the coupling was
 //! invisible and why `cargo test --test integration` is the shape that
-//! shows it (CLAUDE.md's `unit-one-process` note is about this class).
+//! shows it (CONTRIBUTING.md's `unit-one-process` note is about this class).
 //! Do NOT "fix" one of these by merging it and running only nextest.
 //! A test whose subject is a process-global needs its own executable.
 //!
@@ -124,7 +124,7 @@
 //! mean nzbfast's alone. Every existing filter is already safe - the two
 //! overrides in `.config/nextest.toml` that name it are written
 //! `package(nzbfast) and binary(integration) and test(...)`, and no `-E`
-//! expression in CLAUDE.md, ci-private.yml or nightly.yml mentions it at
+//! expression in CONTRIBUTING.md, ci-private.yml or nightly.yml mentions it at
 //! all (they name only the seven build-gated heavy binaries). Keep the
 //! `package(...)` half on anything new. The name is shared deliberately
 //! rather than made unique: this file and nzbfast's are the same idea and
@@ -148,7 +148,7 @@ mod scratch;
 // `[[test]]` target does - the gate has to sit on the `mod` line. This
 // is the ONE place the cfg belongs: widening the production `cfg` so the
 // slim binary carries the index to satisfy a test is the mistake the
-// mobile-targets note in CLAUDE.md warns about. The two examples that
+// mobile-targets note in CONTRIBUTING.md warns about. The two examples that
 // reach the index (`indexscan_bench`, `sidecar_fold_walk`) carry the
 // same rule as `required-features = ["indexer"]` in Cargo.toml, because
 // an example IS a target. ci-private's `slim-check` job runs the nzbkit
@@ -169,6 +169,8 @@ mod loss_doubt;
 mod lzma_dict_admission;
 mod mediaprobe;
 mod par2_parse;
+mod par2gen_cancel;
+mod par2gen_create_ntt;
 mod par2gen_interop;
 mod par2repair_dir;
 mod par2repair_namepath;

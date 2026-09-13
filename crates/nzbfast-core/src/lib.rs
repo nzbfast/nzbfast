@@ -64,6 +64,10 @@ pub mod identity;
 pub mod import_sab;
 pub mod interests;
 pub mod lanegate;
+// The machine's LOCAL civil time. One copy, because the weekly
+// scheduler and the quota ledger each had their own and the two had
+// drifted - see the module header.
+pub mod localtime;
 // Which interface carries our traffic and how fast it is. Hoisted out of
 // serve/ by TODO 276 item 3 so the CLI sysbench can ask without the daemon.
 pub mod locallink;
@@ -84,6 +88,10 @@ pub mod ratelimit;
 // Release-name grammar - the password convention and the dedupe
 // reduction, hoisted out of `smart` by the crate-split prep.
 pub mod relname;
+// What a DAEMON repair is doing while it does it - the other end of
+// `nzbkit::par2repair::control`, and the repair's answer to the
+// question `unpackprog` answers for the unpack ladder.
+pub mod repairprog;
 // Which configured server a lane should talk to - three pure selectors
 // over `nzbkit::config::Config`, hoisted out of the bin's `nettools` by
 // the crate-split step 3 cut because `scan` (nzbfast-meta) calls all

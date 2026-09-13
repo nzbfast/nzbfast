@@ -84,7 +84,7 @@ pub struct TargetFails {
     /// only a completed download (which clears the entry) re-arms it.
     #[serde(default)]
     pub actioned: bool,
-    /// Which incarnation of this target the entry is (Codex sweep 2,
+    /// Which incarnation of this target the entry is (review sweep 2,
     /// 3 Aug M3). The *arr give-up runs on a spawned thread holding
     /// cloned keys, and a slow Sonarr leaves a wide window in which the
     /// user can press "Try again" and re-monitor the target - after
@@ -484,7 +484,7 @@ fn err_str(e: ureq::Error) -> String {
 /// already blocklisted the release itself.
 ///
 /// `still_wanted` is re-asked immediately before each destructive step,
-/// never merely on the way in (Codex sweep 2, 3 Aug M3). Everything
+/// never merely on the way in (review sweep 2, 3 Aug M3). Everything
 /// before step 2 is remote GETs against an *arr that may be slow, and
 /// the user can press "Try again" and re-monitor the target throughout
 /// that window - a check taken at the top would be exactly as stale as
@@ -790,7 +790,7 @@ impl Daemon {
         // spawned worker below carries it and re-checks it before every
         // destructive *arr call, so a "Try again" pressed while Sonarr
         // is slow cannot be undone by work that was already in flight
-        // (Codex sweep 2, 3 Aug M3).
+        // (review sweep 2, 3 Aug M3).
         let (fire, dirty, token) = {
             let mut st = self.giveup.lock_ok();
             match state {
@@ -1023,7 +1023,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Codex sweep 2, 3 Aug M3. The *arr give-up runs on a spawned
+    /// Review sweep 2, 3 Aug M3. The *arr give-up runs on a spawned
     /// thread; "Try again" runs on the request thread. With a slow
     /// Sonarr the second finishes first, and the worker then
     /// unmonitored a target the user had just re-monitored.
@@ -1366,7 +1366,7 @@ mod tests {
         );
     }
 
-    /// Codex sweep 2, 3 Aug M3, the wire half: a target reset while the
+    /// Review sweep 2, 3 Aug M3, the wire half: a target reset while the
     /// *arr round-trips are in flight must leave the *arr untouched.
     /// The check has to sit immediately before the unmonitor, not at
     /// the top of the call - everything before it is GETs against an

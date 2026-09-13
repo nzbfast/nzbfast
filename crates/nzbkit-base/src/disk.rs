@@ -14,417 +14,41 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// Raise the open-file soft limit toward the hard limit, returning the
-/// effective value.
-///
-/// The engine holds one writer per output file for the life of a job. That
-/// is a handful when direct extraction keeps volumes in RAM, but a low
-/// memory budget spills them to disk instead - one writer per RAR volume,
-/// 431 of them on the 190 GB set. macOS ships a 256 soft limit against a
-/// 245k kernel cap, so exactly the low-memory devices that force the spill
-/// path also ran out of descriptors and failed every write with EMFILE.
-///
-/// macOS rejects RLIM_INFINITY here, so step down through candidate targets
-/// rather than asking for the hard limit directly.
-///
-/// Returns the soft limit now in force, or 0 where there is no such limit to
-/// raise - which is every non-unix target. On Windows a `File` is a Win32
-/// HANDLE bounded by kernel memory rather than by a per-process soft cap, so
-/// 0 means "unlimited as far as this matters", NOT "no descriptors": callers
-/// must not size the spill path off this number.
-// The two `as u64` at the returns are no-ops where rlim_t IS u64 (Linux,
-// macOS - the only two platforms clippy ever runs on here) and are the
-// conversion that makes this compile at all where it is i64 (the BSDs).
-// Without this the lint is a build error on the platforms we gate on and
-// removing the cast is a build error on the platform we ship to.
-// Not #[expect]: the casts live inside cfg(unix), so on Windows there
-// is nothing to fire on and the expectation goes unfulfilled.
-#[allow(clippy::unnecessary_cast)]
-pub fn raise_fd_limit() -> u64 {
-    #[cfg(unix)]
-    // SAFETY: libc::rlimit is a plain all-integer C struct, so the zeroed
-    // value is valid; getrlimit and setrlimit only read/write through the
-    // pointers to the live stack locals (`lim`, `next`) passed here.
-    unsafe {
-        let mut lim: libc::rlimit = std::mem::zeroed();
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
-            return 0;
-        }
-        // Everything below is in `libc::rlim_t`, never a hardcoded u64:
-        // rlim_t is u64 on Linux and macOS but i64 on the BSDs, so the
-        // literals have to be converted to the target's own type and the
-        // result converted back at the return. Writing `u64` here builds
-        // on the two platforms we test on and fails to compile on FreeBSD.
-        let start = lim.rlim_cur;
-        let hard = lim.rlim_max;
-        let cap = |v: libc::rlim_t| {
-            if hard == libc::RLIM_INFINITY {
-                v
-            } else {
-                v.min(hard)
-            }
-        };
-        for target in [65536, 16384, 4096, 1024] {
-            let want = cap(target as libc::rlim_t);
-            if want <= lim.rlim_cur {
-                continue;
-            }
-            let mut next = lim;
-            next.rlim_cur = want;
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &next) == 0 {
-                return want as u64;
-            }
-        }
-        start as u64
-    }
-    #[cfg(not(unix))]
-    0
-}
+/// The positioned-IO primitives and their counters, out of this file for
+/// the size gate's 4,000-line ceiling.
+mod io_prim;
+pub use io_prim::{
+    bytes_written, chunk_len, raise_fd_limit, read_exact_at, storage_exhausted, write_all_at,
+    writes_issued,
+};
 
-/// How much of a `remaining`-byte span to take into a `cap`-byte buffer:
-/// the span, CLAMPED IN u64, and only then narrowed.
-///
-/// THE ORDER IS THE WHOLE POINT, and getting it backwards is a class of
-/// bug this tree carried at nineteen sites. `(remaining as usize).min(cap)`
-/// narrows FIRST, and `usize` is 32 bits on the shipped
-/// `armv7-unknown-linux-musleabihf` target - so a remaining span of
-/// exactly 4 GiB narrows to ZERO and the caller takes nothing. In a
-/// decrementing loop that is no progress at all, forever; in a reader it
-/// is `Ok(0)`, which every consumer in this tree - and the vendored rars
-/// engine, whose `BlockingRangeSource` contract says `Ok(0)` means the
-/// source ends here - reads as a clean end of file.
-///
-/// AND IT IS NOT AN ALIGNMENT COINCIDENCE. The near-miss case funnels
-/// into the zero case: with a cap of B the last short read takes
-/// `remaining % 2^32` bytes, which lands `remaining` exactly on a
-/// multiple of 2^32, and the next call returns zero. So the trigger is
-/// "any span of 4 GiB or more", deterministically - an ordinary large
-/// video, a zip64 member, a PAR2 target file.
-///
-/// On a 64-bit host this is bit-identical to the narrow-first spelling
-/// (`u64::MAX as usize == usize::MAX`), which is why the class was
-/// invisible to every suite this fleet runs.
-///
-/// Returns 0 ONLY for an empty span or an empty buffer - the debug
-/// assertion pins that, and it is the assertion that would have caught
-/// all nineteen, since every one of those call sites had already proved
-/// its span non-empty before it narrowed.
-#[inline]
-pub fn chunk_len(remaining: u64, cap: usize) -> usize {
-    let n = remaining.min(cap as u64) as usize;
-    debug_assert!(
-        n > 0 || remaining == 0 || cap == 0,
-        "chunk_len({remaining}, {cap}) took nothing from a non-empty span"
-    );
-    n
-}
-
-/// Positioned read: unix pread never touches the file cursor; Windows
-/// `seek_read` does move it, so every access to engine-written files must
-/// go through these helpers (nothing reads via the cursor today).
-pub fn read_exact_at(f: &File, buf: &mut [u8], off: u64) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-        f.read_exact_at(buf, off)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::FileExt;
-        let (mut buf, mut off) = (buf, off);
-        while !buf.is_empty() {
-            match f.seek_read(buf, off) {
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "failed to fill whole buffer",
-                    ));
-                }
-                Ok(n) => {
-                    let rest = buf;
-                    buf = &mut rest[n..];
-                    off += n as u64;
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Process-wide bytes written through the positioned-write path - the
-/// dashboard's disk-write rate. Counted here rather than from OS
-/// counters: buffered writeback is charged to the kernel, not to us
-/// (macOS ri_diskio_byteswritten stays near zero during a download).
-static BYTES_WRITTEN: AtomicU64 = AtomicU64::new(0);
-
-pub fn bytes_written() -> u64 {
-    BYTES_WRITTEN.load(Ordering::Relaxed)
-}
-
-/// Process-wide POSITIONED-WRITE CALLS, the quantity round 23 named as
-/// the small-article cost: a `pwrite` costs about the same for 50 KB as
-/// for 700 KB, so the bytes counter above says nothing about what the
-/// kernel is charged and this one says everything. It is what makes the
-/// coalescing window ([`stage`]) measurable from inside the binary
-/// rather than only under a profiler - an A/B arm reads it at the end of
-/// a leg and the ratio IS the change.
-static WRITES_ISSUED: AtomicU64 = AtomicU64::new(0);
-
-pub fn writes_issued() -> u64 {
-    WRITES_ISSUED.load(Ordering::Relaxed)
-}
-
-/// Positioned write, same cross-platform contract as [`read_exact_at`].
-///
-/// The telemetry counter is charged on SUCCESS, not on entry: charging
-/// the requested length up front showed phantom disk throughput during
-/// exactly the ENOSPC/EIO episodes where writes were failing and the
-/// retry ladder was re-attempting them. On unix a partial write that
-/// precedes an error goes uncounted - the conservative direction for a
-/// rate readout.
-pub fn write_all_at(f: &File, buf: &[u8], off: u64) -> io::Result<()> {
-    WRITES_ISSUED.fetch_add(1, Ordering::Relaxed);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-        f.write_all_at(buf, off).inspect(|()| {
-            BYTES_WRITTEN.fetch_add(buf.len() as u64, Ordering::Relaxed);
-        })
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::FileExt;
-        let (mut buf, mut off) = (buf, off);
-        while !buf.is_empty() {
-            match f.seek_write(buf, off) {
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
-                }
-                Ok(n) => {
-                    BYTES_WRITTEN.fetch_add(n as u64, Ordering::Relaxed);
-                    buf = &buf[n..];
-                    off += n as u64;
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Is this write-path error the storage itself running out from under
-/// us - a condition no amount of refetching fixes? True for a full
-/// volume (`StorageFull`), an exhausted quota (`QuotaExceeded`), a
-/// filesystem that went read-only mid-run (`ReadOnlyFilesystem` - USB
-/// disks and network shares do this when they hit trouble), and the
-/// `WriteZero` a positioned write reports when the kernel accepts zero
-/// bytes forever (the Windows path above manufactures exactly that on a
-/// full disk).
-///
-/// The raw-code fallback is gated to the platform whose number it is:
-/// 112 is ERROR_DISK_FULL on Windows but EHOSTDOWN on Unix, and an
-/// unguarded match would call a dead host a full disk (the same trap
-/// `disk_full_failure` documents on the message side). Raw codes matter
-/// at all because errors built via `Error::from_raw_os_error` carry the
-/// code without the kind mapping std's syscall wrappers apply.
-pub fn storage_exhausted(e: &io::Error) -> bool {
-    match e.kind() {
-        io::ErrorKind::StorageFull
-        | io::ErrorKind::QuotaExceeded
-        | io::ErrorKind::ReadOnlyFilesystem
-        | io::ErrorKind::WriteZero => true,
-        _ => match e.raw_os_error() {
-            // ENOSPC, EROFS / ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL,
-            // ERROR_WRITE_PROTECT.
-            Some(code) if cfg!(windows) => matches!(code, 112 | 39 | 19),
-            Some(code) => matches!(code, 28 | 30),
-            None => false,
-        },
-    }
-}
-
-/// Process default for [`FileWriter`] cache dropping (see
-/// `maybe_drop_cache`). Set BEFORE the first write of the run - the
-/// per-process decision is latched on first use.
-static DROP_CACHE_DEFAULT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-pub fn set_drop_cache_default(on: bool) {
-    DROP_CACHE_DEFAULT.store(on, Ordering::Relaxed);
-}
-
-/// C1: whether drop-behind should default ON for a reader-less run (the
-/// CLI `get` path) given this machine's memory - the RAM-aware policy
-/// replacing the old always-on CLI default. The mechanics are
-/// `maybe_drop_cache` below; `NZBFAST_DROP_CACHE=1/0` still force-
-/// overrides whatever this decides (see `drop_cache_enabled`).
-///
-/// Why memory-aware: the 1 GB-cgroup evidence said always-on (M32,
-/// ~17% of a core saved in memcg reclaim) and a 31 GB 8-core host
-/// said always-off (~30% wall cost, Aug 2026) - both measured right,
-/// both wrong as a global default. A 20 Aug 2026 six-tier cgroup-v2
-/// SSD ladder (512M-16G limits, 24 GB job each) located the
-/// crossover: at <= 1 GiB drop-behind zeroes reclaim scanning (5-6M
-/// pages per job -> ~0) at no wall cost and holds the job's physical
-/// footprint to ~0.25-0.6 GB, at 2 GiB it is a wash, and at 4 GiB+ it
-/// costs 25-40% wall (40-70% unconstrained) paying sync_file_range +
-/// DONTNEED per stride for evictions the kernel handles for free when
-/// it has room. The threshold encloses the wash cell on the protective
-/// side. HDD leg unmeasured (no reachable box) - if spinning rust
-/// later shows a different crossover, this constant is the one dial.
-pub fn drop_cache_auto() -> bool {
-    drop_cache_auto_for(crate::mem::physical_ram(), crate::mem::cgroup_mem_limit())
-}
-
-/// Enable at 2 GiB effective memory and below; the tighter of host RAM
-/// and the cgroup limit decides, same sources as `MemBudget::auto`.
-/// Unknown memory reads as "not small" (a failed probe is not a small
-/// box - the `concurrency_caps_for` convention), so probes failing on
-/// an exotic platform keep today's big-box behaviour, not the slow arm.
-fn drop_cache_auto_for(ram: Option<u64>, cgroup_limit: Option<u64>) -> bool {
-    const THRESHOLD: u64 = 2 << 30;
-    let eff = match (ram, cgroup_limit) {
-        (Some(r), Some(l)) => r.min(l),
-        (Some(r), None) => r,
-        (None, Some(l)) => l,
-        (None, None) => return false,
-    };
-    eff <= THRESHOLD
-}
-
-/// Default stride for write pacing (macOS, and the Linux daemon
-/// path) - see [`FileWriter`]'s
-/// `maybe_pace_writeback`. 32 MB: small enough that the per-flush pause
-/// hides inside the fetch->decode channel, large enough that a 10 Gbps
-/// decoded stream (~1.2 GB/s) syncs ~40 times a second, not thousands.
-/// The m1 stride sweep read the same within noise from 16 to 64 MB
-/// (2/68, 3/68, 4/68 samples below 80% of peak), so the choice is not
-/// delicate.
-// Not #[expect]: live on macOS, which takes the arm below. Linux uses
-// the 0 arm and Windows has no arm at all, so it is dead on both.
-#[allow(dead_code)]
-const WRITE_PACE_STRIDE_DEFAULT: u64 = 32 << 20;
-
-/// The pacing stride in force, in bytes; 0 = pacing off. Latched on
-/// first use; `NZBFAST_WRITE_PACE_MB` overrides in either direction
-/// (0 = off).
-///
-/// macOS: ON by default - the 6 Aug A/B on m1 (87 GB, 10 Gbps) took
-/// the job from 25/87 seconds below 80% of peak to 3/68 and sustained
-/// 7.2 -> 9.0 Gbps, with the per-server write-side blocking erased.
-///
-/// Linux: OFF by default. The 7 Aug daemon A/B on the Linux rig
-/// (8-core/31 GB ext4 box, 60 GB loopback mock, 8 legs) found no arm
-/// that beat
-/// no-pacing: fsync per stride read the same or worse (ext4 journal
-/// commit + device flush), sync_file_range arms read within noise, and
-/// drop-behind was clearly worse. Linux's balance_dirty_pages already
-/// bounds the dirty set gradually - the macOS save-up-then-dump
-/// pathology was never observed. The machinery stays compiled and
-/// env-selectable so a real-NAS leg (Synology, TODO 126.1) can test
-/// the shipped binary with NZBFAST_WRITE_PACE_MB=32 alone.
+/// Write-back pacing and the page-cache policy. Same ceiling.
+mod pacing;
+use pacing::apply_cache_policy;
+// The pacer itself is unix-only, and so is this import: `maybe_pace_writeback`
+// has an empty body on every other target, so naming these unconditionally
+// would be a reference to items that are ABSENT on Windows, iOS and Android
+// (tools/cfg-symbol-gate.py). Same cfg as the definitions in `pacing`.
+pub use pacing::{drop_cache_auto, set_drop_cache_default};
+#[cfg(test)]
+use pacing::{drop_cache_auto_for, parse_pace_mb};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn write_pace_stride() -> u64 {
-    #[cfg(target_os = "macos")]
-    const DEFAULT: u64 = WRITE_PACE_STRIDE_DEFAULT;
-    #[cfg(target_os = "linux")]
-    const DEFAULT: u64 = 0;
-    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        parse_pace_mb(std::env::var("NZBFAST_WRITE_PACE_MB").ok().as_deref()).unwrap_or(DEFAULT)
-    })
-}
-
-/// The `NZBFAST_WRITE_PACE_MB` mapping, split out so it is testable
-/// without mutating process env (same seam as [`storage_override`]).
-/// None = unset/unparsable, defer to the process default.
-// Not #[expect]: live on macOS and Linux via write_pace_stride, which
-// is cfg'd out on Windows - dead there, so the waiver is Windows's.
-#[allow(dead_code)]
-fn parse_pace_mb(raw: Option<&str>) -> Option<u64> {
-    raw?.trim()
-        .parse::<u64>()
-        .ok()
-        .map(|mb| mb.saturating_mul(1 << 20))
-}
-
-/// `NZBFAST_NOCACHE=1`: set F_NOCACHE on every [`FileWriter`] handle
-/// (macOS), so the large sequential output streams to the device at a
-/// steady rate instead of accumulating dirty pages for the kernel to
-/// dump in one burst - fix direction 2 of the line-rate campaign.
-/// Reads through the same handle (mapped repair, settle read-back)
-/// bypass the cache too, which is why this is bench-gated rather than
-/// a default: measure before paying that on real jobs.
-#[cfg(target_os = "macos")]
-fn nocache_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("NZBFAST_NOCACHE").is_ok_and(|v| v == "1"))
-}
-
-/// Which flush primitive the Linux pacer uses per stride (see
-/// `FileWriter::maybe_pace_writeback`). Default `Sfr` (async
-/// writeback start, the lightest); `NZBFAST_PACE_MODE=fsync|sfrwait`
-/// select the heavier arms for benching, same policy as
-/// `NZBFAST_NOCACHE`. On the 7 Aug VPS rig all three read within
-/// noise or worse than no pacing - kept for the real-NAS leg.
+use pacing::{pace_bg_enabled, pace_flush, pace_flush_bg, pace_step, write_pace_stride};
+// Same rule one target narrower: the page-cache DROP is linux-only, so
+// naming it on any other target is a reference to an item that is not
+// there. Missed on the first pass because this box is macOS - the build
+// that sees it is the linux `slim-check` / `check` job.
 #[cfg(target_os = "linux")]
-#[derive(Clone, Copy)]
-enum PaceMode {
-    Sfr,
-    SfrWait,
-    Fsync,
-}
+use pacing::drop_cache_enabled;
 
-#[cfg(target_os = "linux")]
-fn pace_mode() -> PaceMode {
-    static V: std::sync::OnceLock<PaceMode> = std::sync::OnceLock::new();
-    *V.get_or_init(|| match std::env::var("NZBFAST_PACE_MODE").as_deref() {
-        Ok("fsync") => PaceMode::Fsync,
-        Ok("sfrwait") => PaceMode::SfrWait,
-        _ => PaceMode::Sfr,
-    })
-}
+/// What a path is sitting on, and what that costs. Same ceiling.
+mod probe;
+#[cfg(test)]
+use probe::storage_override;
+pub use probe::{Storage, StorageProbe, decoders_for_storage, detect_storage, probe_storage};
 
-/// The per-process drop-behind decision, latched on first use (see
-/// `FileWriter::maybe_drop_cache`): `NZBFAST_DROP_CACHE=1/0` overrides,
-/// else the process default (CLI `get` turns it on, the daemon never
-/// does). Shared with `maybe_pace_writeback`, which stands down while
-/// drop-behind is active - the two hooks would otherwise race one
-/// `drop_next` watermark and double-flush every stride.
-#[cfg(target_os = "linux")]
-fn drop_cache_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("NZBFAST_DROP_CACHE").as_deref() {
-        Ok("1") => true,
-        Ok("0") => false,
-        _ => DROP_CACHE_DEFAULT.load(Ordering::Relaxed),
-    })
-}
-
-/// Apply the bench-gated F_NOCACHE policy to a fresh writer handle.
-/// Best-effort: a filesystem that refuses the fcntl just keeps the
-/// default caching behaviour.
-fn apply_cache_policy(file: &File) {
-    #[cfg(target_os = "macos")]
-    if nocache_enabled() {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: fcntl takes only the raw fd plus integer arguments;
-        // the borrow of `file` keeps the fd open across the call.
-        unsafe {
-            libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = file;
-    }
-}
+/// `FileWriter`'s coverage ledger - a second `impl` block, same ceiling.
+mod coverage;
 
 /// Windows write-path fixes (6 Aug line-rate campaign), both latched on
 /// first use like the macOS pacing stride.
@@ -606,249 +230,6 @@ pub(crate) fn reopen_read_handle(primary: &File) -> io::Result<File> {
     // SAFETY: failure handles were rejected above and no other owner closes
     // this fresh handle.
     Ok(unsafe { File::from_raw_handle(h as _) })
-}
-
-/// What a path is sitting on.
-///
-/// `Unknown` is a first-class answer and must never be treated as
-/// `Rotational`: device mapper, RAID, overlayfs in a container and
-/// every non-Linux local disk land here, and guessing "spinning" for
-/// them would clamp hardware that has no seek problem.
-///
-/// `Network` was added 3 Sep 2026 by the read-side cache policy
-/// (`readpolicy`), which needs to know what a RE-READ costs and not
-/// only what a seek costs - a payload dropped from the page cache on
-/// an SMB share is fetched again over the wire. It is a separate
-/// variant rather than a second enum because there is one storage
-/// question in this tree and it gets one answer; `decoders_for_storage`
-/// treats it exactly as it treated the `Unknown` these mounts used to
-/// report, so the download path's behaviour is unchanged by the split.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Storage {
-    Rotational,
-    Solid,
-    /// SMB/CIFS, NFS, AFP, WebDAV, 9P or a FUSE client. Local seek cost
-    /// unknown; a re-read crosses a wire.
-    Network,
-    Unknown,
-}
-
-/// A storage class and HOW it was reached.
-///
-/// Two fields because two different questions are asked of this probe
-/// and only one of them is answered by the class alone. The read-side
-/// cache policy wants to know what a RE-READ costs, which is a property
-/// of the device; the decode-worker clamp and the spill governor's
-/// stand-down want to know whether OUR WRITE ORDER is the order the
-/// platter sees, which is a property of the filesystem on top of it.
-/// [`StorageProbe::direct_dev`] is what separates them.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct StorageProbe {
-    /// What the storage is.
-    pub class: Storage,
-    /// `true` when `class` was read off the block device that the
-    /// filesystem's OWN `st_dev` names, or asserted by the operator
-    /// through `NZBFAST_STORAGE`.
-    ///
-    /// `false` means `st_dev` was ANONYMOUS and the device had to be
-    /// found through the mount table (`disk::mounttab`). That is not
-    /// merely a weaker probe. The filesystems with an anonymous device
-    /// are exactly the ones that put a layer between a `pwrite` offset
-    /// and a platter address - btrfs and ZFS copy on write, overlayfs
-    /// writes into a different filesystem entirely - so a rule that
-    /// exists because "N decode workers become N seek lanes" does not
-    /// follow there even when the class is right.
-    ///
-    /// `Unknown` and `Network` carry `true` because there is no indirect
-    /// answer for the flag to qualify - including the case where the
-    /// fallback ran and stood down, which is what overlayfs inside a
-    /// container does (measured: its mountinfo source is the word
-    /// `overlay`, and its `upperdir=` names a path in the HOST).
-    pub direct_dev: bool,
-}
-
-/// What is under `path`, with `NZBFAST_STORAGE=rotational|ssd|auto` as the
-/// operator override (`auto`, or anything unset, probes).
-///
-/// The probe matters because decoded articles `pwrite` at their final
-/// offsets: with several decode workers the network's article lanes become
-/// the output file's seek lanes, which a spinning disk pays for and an SSD
-/// does not.
-///
-/// The thin reading of [`probe_storage`], for the callers that only want
-/// the class. `decoders_for_storage` is the one that wants the rest.
-pub fn detect_storage(path: &Path) -> Storage {
-    probe_storage(path).class
-}
-
-/// [`detect_storage`], plus how the answer was reached.
-///
-/// ONE probe, one answer, richer answer - the storage question is not
-/// duplicated anywhere else in this tree and must not be. The two arms
-/// are tried in order: the filesystem's own device id first, and the
-/// mount table only when that names nothing.
-pub fn probe_storage(path: &Path) -> StorageProbe {
-    let direct = |class| StorageProbe {
-        class,
-        direct_dev: true,
-    };
-    if let Some(forced) = storage_override(std::env::var("NZBFAST_STORAGE").ok().as_deref()) {
-        // The operator asserting a class asserts it for every reader:
-        // `NZBFAST_STORAGE=rotational` has clamped decoders since the
-        // clamp existed and must keep doing so.
-        return direct(forced);
-    }
-    // Asked BEFORE the rotational flag because a network mount has no
-    // block device to read one from: on Linux it would fall through to
-    // `Unknown`, and on macOS `rotational` answers `None` for
-    // everything. The operator override still wins over both.
-    if readpolicy::is_network_fs(path) {
-        return direct(Storage::Network);
-    }
-    if let Some(spinning) = rotational(path) {
-        return direct(class_of(spinning));
-    }
-    match rotational_via_mount_table(path) {
-        Some(spinning) => StorageProbe {
-            class: class_of(spinning),
-            direct_dev: false,
-        },
-        None => direct(Storage::Unknown),
-    }
-}
-
-/// The rotational flag as a class. One place, so the two arms of
-/// [`probe_storage`] cannot come to disagree about which way round it is.
-fn class_of(spinning: bool) -> Storage {
-    if spinning {
-        Storage::Rotational
-    } else {
-        Storage::Solid
-    }
-}
-
-/// The `NZBFAST_STORAGE` override, parsed. Split out so the mapping is
-/// testable without mutating the environment: tests share one process, so
-/// a `set_var` here would race every other test that probes storage.
-fn storage_override(raw: Option<&str>) -> Option<Storage> {
-    match raw {
-        Some("rotational") | Some("hdd") => Some(Storage::Rotational),
-        Some("ssd") | Some("solid") => Some(Storage::Solid),
-        _ => None,
-    }
-}
-
-/// Read the backing block device's `queue/rotational` flag, using the
-/// filesystem's OWN device id and nothing else.
-///
-/// The device id of the file's filesystem indexes `/sys/dev/block`, which
-/// for a partition resolves to the partition's directory - `queue/` lives
-/// on the parent disk, hence the walk up one level.
-///
-/// **A whole family of filesystems has no device id to index with, and
-/// this answers `None` for every one of them.** btrfs, ZFS and overlayfs
-/// allocate an ANONYMOUS block device (`major 0`), so `st_dev` names
-/// nothing under `/sys/dev/block` and the canonicalize below fails.
-/// Measured on the fleet's rotational NAS on 3 Sep 2026 with the
-/// `readpolicy_probe` example, on the box: its btrfs data volume (twelve
-/// spinning disks, every one of them reporting `queue/rotational 1`)
-/// answered `class=Unknown`, while `/` on ext4 over the same disks
-/// answered `class=Rotational`.
-///
-/// **That hole is no longer the end of the probe** (TODO 325, 4 Sep
-/// 2026): [`probe_storage`] falls through to `mounttab`, which finds the
-/// device the mount was made from instead, and the NAS volume above now
-/// answers `Rotational`. This function is deliberately left as the
-/// narrow question it always was - it is the arm whose answer carries
-/// `direct_dev`, i.e. the one a caller may read as a statement about
-/// write ORDER and not only about the device. The round that found the
-/// hole is in `research/PAR2-TWO-LANES-COMPARED-2026-09-03.md`; the one
-/// that closed it, including the three shapes that broke the obvious
-/// designs, is `research/STORAGE-PROBE-ANON-DEV-2026-09-04.md`.
-#[cfg(target_os = "linux")]
-fn rotational(path: &Path) -> Option<bool> {
-    use std::os::unix::fs::MetadataExt;
-    // Probe the directory itself, not a file inside it: the caller may not
-    // have created anything yet.
-    let dev = std::fs::metadata(path).ok()?.dev();
-    // libc::major/minor are safe fns on Linux (they only bit-shift the
-    // integer dev value) - an `unsafe` block here trips `-D unused-unsafe`
-    // on the CI runner, the one platform that compiles this cfg.
-    let (major, minor) = (libc::major(dev), libc::minor(dev));
-    sysfs_rotational(format!("/sys/dev/block/{major}:{minor}"))
-}
-
-/// `queue/rotational` under a sysfs block-device directory, with the
-/// parent walk a partition needs.
-///
-/// Shared with `mounttab`, which reaches the same file by a different
-/// route: one reader for one file, so the two arms of the probe cannot
-/// come to disagree about what `1` means or where `queue/` lives.
-#[cfg(target_os = "linux")]
-fn sysfs_rotational(dir: impl AsRef<Path>) -> Option<bool> {
-    let sys = std::fs::canonicalize(dir).ok()?;
-    let read = |dir: &Path| -> Option<bool> {
-        let raw = std::fs::read_to_string(dir.join("queue/rotational")).ok()?;
-        match raw.trim() {
-            "1" => Some(true),
-            "0" => Some(false),
-            _ => None,
-        }
-    };
-    read(&sys).or_else(|| read(sys.parent()?))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn rotational(_path: &Path) -> Option<bool> {
-    None
-}
-
-/// Core count at or below which a box is treated as NAS-class for the
-/// rotational clamp.
-const NAS_CORES: usize = 4;
-
-/// How many decode workers to run, given what the output sits on.
-///
-/// Decoded articles `pwrite` at their final offsets, so N decode workers
-/// scatter N interleaved write streams across the output file: the
-/// network's article lanes become the platter's seek lanes. One worker
-/// keeps them in order.
-///
-/// Gated on THREE signals, because the clamp is only free on one side of
-/// each. On a NAS-class box it costs nothing - measured flat from 1 to 4
-/// decoders on Gracemont E-cores (the N100-class proxy), since this path
-/// does not scale with decode workers there. On a big box it is NOT free
-/// (1075 -> 3226 MB/s going 1 to 4 decoders on an M3 Ultra), and a
-/// rotational device there is usually a wide array that can absorb the
-/// parallel writes. `Unknown` never clamps, and neither does `Network`:
-/// those mounts reported `Unknown` here until the variant was split out
-/// on 3 Sep 2026 and this rule must not change under them.
-///
-/// **The third signal is [`StorageProbe::direct_dev`], and it is what
-/// keeps this rule where its evidence is** (TODO 325, 4 Sep 2026).
-/// Closing the anonymous-device hole in the probe made `Rotational`
-/// newly VISIBLE on btrfs and ZFS, which would have handed this clamp
-/// to every small btrfs NAS in one commit - a throughput change on a
-/// population nobody has measured, and the fleet has no box with both a
-/// rotational volume and few enough cores to measure it on (the one
-/// spinning Linux box has twelve). The stand-down is not merely "not
-/// measured", though: the sentence this clamp rests on is about WRITE
-/// ORDER reaching the platter, and on the filesystems the fallback
-/// reaches it does not - btrfs and ZFS copy on write, so the allocator
-/// and not our `pwrite` offset decides where a block lands. So the
-/// clamp asks for a class read off the filesystem's own device. An
-/// operator who wants it anyway still has `NZBFAST_STORAGE=rotational`,
-/// which asserts `direct_dev`.
-pub fn decoders_for_storage(storage: StorageProbe, cores: usize, decoders: usize) -> usize {
-    if decoders > 1
-        && cores <= NAS_CORES
-        && storage.class == Storage::Rotational
-        && storage.direct_dev
-    {
-        1
-    } else {
-        decoders
-    }
 }
 
 /// The verdict BOTH bomb guards raise - [`WriteBudget::charge`] on the
@@ -1383,7 +764,7 @@ pub struct FileWriter {
     /// [`writes_issued`] is the process-wide figure and is the one a
     /// benchmark reads; this one exists because a test cannot. Every
     /// `cargo test --lib` target runs its whole crate in ONE process
-    /// (CLAUDE.md's one-process oracle), so a test asserting on a
+    /// (CONTRIBUTING.md's one-process oracle), so a test asserting on a
     /// process-global counter is measuring every other test's writes
     /// too - which is exactly how these two failed there while passing
     /// under nextest, where each test owns a process.
@@ -2483,211 +1864,6 @@ impl FileWriter {
     fn maybe_pace_writeback(&self) {}
 }
 
-/// The pacer's watermark step ([`FileWriter::maybe_pace_writeback`]),
-/// pure so the completion rule below is testable: given the file's
-/// `written` counter, the current `drop_next` watermark, the declared
-/// size and the stride, decide whether to flush now and what to store
-/// as the next watermark.
-///
-/// The stride alone has a blind spot the 6 Aug measurements never
-/// exercised: the watermark is PER FILE, so a file smaller than the
-/// initial 16 MB watermark never flushes at all, and one just over it
-/// keeps its tail dirty forever. A corpus of many small files (CD-era
-/// 15 MB rar parts, image sets) therefore accumulates dirty pages at
-/// line rate with the pacer nominally ON - the exact unbounded backlog
-/// the stride exists to prevent, rebuilt out of tails. The fix is a
-/// once-only flush when the file completes (`written` reaches the
-/// declared size): small files get their single flush there, large
-/// files get their sub-stride tail cleaned, and the dirty set is
-/// bounded by the files actually in flight instead of the whole job.
-///
-/// `u64::MAX` is the parked sentinel: the completion flush stores it so
-/// neither rule can fire again. `written` counts duplicate/repair spans
-/// too (see `note_written`), so completion can trip a little early on a
-/// duplicate-heavy file - harmless, it is still one flush of whatever
-/// is dirty. `size` 0 means unknown: no completion rule, stride only.
-/// The pacer's one flush primitive, shared by the inline stride path
-/// and the completion flusher. macOS: plain `libc::fsync` (NOT
-/// sync_data - std promotes that to a device-barrier fcntl on Apple
-/// platforms, a durability tax this path does not need). Linux: NOT
-/// fsync by default - measured 7 Aug on ext4 and btrfs daemon rigs, a
-/// per-stride fsync forces a journal/tree commit plus a device cache
-/// flush and read the same or WORSE than no pacing (btrfs worst case
-/// 1230-1317 s blocked). sync_file_range starts writeback with no
-/// metadata commit, no device flush and no eviction;
-/// NZBFAST_PACE_MODE=fsync|sfrwait are the bench arms.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn pace_flush(fd: std::os::unix::io::RawFd) {
-    // SAFETY: both calls take only the raw fd plus integer arguments;
-    // every caller keeps the backing File open across the call.
-    #[cfg(target_os = "macos")]
-    unsafe {
-        libc::fsync(fd);
-    }
-    // SAFETY: as above. Spelled out a second time rather than left to the
-    // block comment above: the two arms are cfg-exclusive, so on Linux the
-    // macos block and its comment are BOTH gone and this block is the first
-    // thing `undocumented_unsafe_blocks` sees. That is a Linux-only clippy
-    // error no run on a mac can reach, and it held `check` red on main.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        match pace_mode() {
-            PaceMode::Sfr => {
-                libc::sync_file_range(fd, 0, 0, libc::SYNC_FILE_RANGE_WRITE);
-            }
-            PaceMode::SfrWait => {
-                libc::sync_file_range(
-                    fd,
-                    0,
-                    0,
-                    libc::SYNC_FILE_RANGE_WAIT_BEFORE
-                        | libc::SYNC_FILE_RANGE_WRITE
-                        | libc::SYNC_FILE_RANGE_WAIT_AFTER,
-                );
-            }
-            PaceMode::Fsync => {
-                libc::fsync(fd);
-            }
-        }
-    }
-}
-
-/// Whether stride flushes ride the background flusher thread
-/// ([`pace_flush_bg`]) rather than running inline on the decode worker
-/// that crossed the watermark. `NZBFAST_PACE_BG=0` forces inline (the
-/// bench control arm); anything else, including unset, is the default
-/// below. Latched on first use like the stride itself.
-///
-/// Measured 2 Sep 2026 on the dev Mac (32-core M3 Ultra, 512 GB, APFS
-/// SSD; loopback `nzbfast mockserve`, 24 x 2 GB stored set, 16 conns,
-/// `get --no-extract`, arms alternated, sync + 10 s settle between
-/// legs). Inline (`NZBFAST_PACE_BG=0`), 8 legs: wall 16.0-18.4 s,
-/// median 16.6; sustained samples 2.9-3.1 GB/s; ~200 s summed
-/// write-side blocking. Background, 11 legs: wall 12.3-13.5 s, median
-/// 12.5 (-25%); sustained 3.7-4.2 GB/s; ~100 s blocking; user CPU the
-/// same (15.6 vs 15.8 s), sys 6% lower, peak RSS identical (287 MB).
-/// The pacing effect is kept, by the control: pacing OFF
-/// (`NZBFAST_WRITE_PACE_MB=0`) finished the WIRE in the same 12.5-13.3 s
-/// but the process took 16.5-22.9 s, the difference being finish()'s
-/// sync pass paying the saved-up dirty set - the 6 Aug dump, moved to
-/// the tail - with 4-5 of 6 rate samples below 80% of peak and +15-25%
-/// CPU; the background arm shows none of that (0 samples below 80%,
-/// no tail: raw-in and wall agree to 0.1 s). Queue depth is not the
-/// lever here: `NZBFAST_PACE_BG_QUEUE=8` read the same as 64 (12.4,
-/// 12.5 s). One background leg of twelve ran disk-bound at ~230 MB/s
-/// from its FIRST second for 60 s and then at full rate (75 s wall) -
-/// not a mid-run dump, and it preceded the settle change; it did not
-/// recur in the eleven legs after. Linux is unaffected in practice
-/// (its pacer defaults OFF); a `NZBFAST_WRITE_PACE_MB` leg there gets
-/// the same routing, unmeasured.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn pace_bg_enabled() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| !matches!(std::env::var("NZBFAST_PACE_BG").as_deref(), Ok("0")))
-}
-
-/// Hand a flush to the background flusher thread - every completion
-/// flush, and every stride flush while [`pace_bg_enabled`] (see the
-/// notes in [`FileWriter::maybe_pace_writeback`]).
-///
-/// The channel is bounded and the send never blocks: a full queue means
-/// the flusher is at device pace already - exactly the backpressure
-/// regime where one more inline fsync on a decode worker is the honest
-/// price, so the caller pays it there and then. That fallback is what
-/// keeps the stride's pacing effect: the dirty set the flusher has not
-/// reached is bounded by the queue, and past it the decoders block as
-/// they did inline. The thread is detached on purpose: it owns nothing
-/// but cloned handles, and losing queued flushes at process exit loses
-/// nothing `finish()`'s own sync pass would not redo.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn pace_flush_bg(file: File) {
-    use std::sync::OnceLock;
-    use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
-    // Option: the thread is an OPTIMISATION, and spawn can genuinely
-    // fail (RLIMIT_NPROC/pids.max exhausted after the decoders start).
-    // Panicking here would kill a decode worker - and with one decoder,
-    // wedge the bounded outcome channel behind a reader that no longer
-    // exists. No thread = every flush runs inline instead.
-    static TX: OnceLock<Option<SyncSender<File>>> = OnceLock::new();
-    let tx = TX.get_or_init(|| {
-        let (tx, rx) = sync_channel::<File>(pace_flush_queue());
-        std::thread::Builder::new()
-            .name("pace-flush".into())
-            .spawn(move || {
-                use std::os::unix::io::AsRawFd;
-                for f in rx {
-                    pace_flush(f.as_raw_fd());
-                }
-            })
-            .ok()
-            .map(|_| tx)
-    });
-    let file = match tx {
-        Some(tx) => match tx.try_send(file) {
-            Ok(()) => return,
-            // Full = the flusher is at device pace (backpressure) and
-            // Disconnected = the thread died; either way the flush
-            // still happens, here - for a completion it is this file's
-            // only one, for a stride it is the pacing pause itself.
-            Err(TrySendError::Full(f) | TrySendError::Disconnected(f)) => f,
-        },
-        None => file,
-    };
-    use std::os::unix::io::AsRawFd;
-    pace_flush(file.as_raw_fd());
-}
-
-/// Depth of the flusher's queue: how many flushes (each a cloned
-/// handle, each fsyncing EVERYTHING dirty on its file when it runs) may
-/// wait before a decoder pays its stride inline. `NZBFAST_PACE_BG_QUEUE`
-/// overrides for benching; the default is the completion flusher's
-/// original 64.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-const PACE_FLUSH_QUEUE_DEFAULT: usize = 64;
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn pace_flush_queue() -> usize {
-    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("NZBFAST_PACE_BG_QUEUE")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(PACE_FLUSH_QUEUE_DEFAULT)
-    })
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn pace_step(written: u64, covered: u64, due: u64, size: u64, stride: u64) -> Option<u64> {
-    const PARKED: u64 = u64::MAX;
-    if due == PARKED {
-        return None;
-    }
-    // Completion keys off UNIQUE coverage, never `written`: duplicate
-    // spans and repair rewrites push `written` past `size` while real
-    // gaps remain, and parking on aggregate traffic would leave the
-    // genuine tail unpaced.
-    let complete = size > 0 && covered >= size;
-    if written >= due {
-        // A stride crossing that is also the completion parks the
-        // watermark, so the completion rule cannot double-flush.
-        // Saturating: parse_pace_mb deliberately saturates an absurd
-        // NZBFAST_WRITE_PACE_MB to u64::MAX, and a plain add would
-        // panic (debug) or wrap to a tiny watermark that fsyncs every
-        // write (release). Saturating to PARKED just stops pacing the
-        // file - the right meaning for a stride that large.
-        return Some(if complete {
-            PARKED
-        } else {
-            written.saturating_add(stride)
-        });
-    }
-    if complete {
-        return Some(PARKED);
-    }
-    None
-}
-
 /// The error [`FileWriter::read_covered_at`] answers with. Same kind as
 /// the extractor's `nofile()`, which is what its callers already branch
 /// on.
@@ -2799,6 +1975,54 @@ impl FileWriter {
         Ok(())
     }
 
+    /// END OF JOB: give the OS this file's handle back, whatever the
+    /// sync says.
+    ///
+    /// [`park`] is the wrong contract for the end of a download, and the
+    /// difference is the whole point of this method. Park exists so an
+    /// external tool can take the bytes over, so a failed flush or sync
+    /// there MUST keep the handle - we would otherwise hand par2cmdline
+    /// a file whose last writes are still in our buffers and let it
+    /// "repair" bytes we were about to write. At the end of a job there
+    /// is no such tool and no later write: the handle is being given up
+    /// for good, so keeping it because the sync failed leaks it for the
+    /// life of the writer and buys nothing.
+    ///
+    /// **Which is a real leak and not a theoretical one, on exactly one
+    /// class of filesystem.** `sync_data` essentially never fails on a
+    /// local disk, so the early return above it is invisible here; on a
+    /// network mount it is an ordinary event (a wedged or re-exported
+    /// NFS server answers EIO or ESTALE), and NFS is also the one place
+    /// where a still-open handle is USER-VISIBLE: unlinking an open file
+    /// there silly-renames it to `.nfs*` instead of removing it, so a
+    /// delete-with-files leaves the directory behind with our own
+    /// descriptors named inside it. That is GH #71, reported against
+    /// 1.3.1 on an NFS download folder, where an *arr's post-import
+    /// delete left ~100 GB of fully imported releases on disk and only a
+    /// daemon restart cleared them - a restart being exactly the cure
+    /// for a leaked descriptor, and no cure at all for the theory that
+    /// the extractor is simply still installed.
+    ///
+    /// The sync is still attempted, and its error still returned, so the
+    /// caller can say what went wrong - it just no longer decides
+    /// whether the descriptor closes.
+    pub fn release(&self) -> io::Result<()> {
+        // Attempt both, in park's order, and keep the FIRST failure to
+        // report: a flush error is the more specific of the two, and a
+        // sync that fails after it is usually the same fault twice.
+        let flushed = self.flush_stage();
+        let mut g = self.file.write_ok();
+        #[cfg(windows)]
+        self.aux.write_ok().clear();
+        let synced = match g.as_ref() {
+            Some(f) => f.sync_data(),
+            None => Ok(()),
+        };
+        // Unconditional, and the reason this method exists.
+        *g = None;
+        flushed.and(synced)
+    }
+
     /// [`park`] plus exclusive custody for the external tool that is
     /// about to own the file (sweep 8, M4). Paired with [`unpark`],
     /// which hands the file back.
@@ -2894,155 +2118,6 @@ impl FileWriter {
         }
         *g = Some(file);
         Ok(())
-    }
-
-    /// Record `[offset, offset+len)` as on-disk without writing - crash
-    /// resume seeds the coverage map with spans a previous run persisted.
-    ///
-    /// `intervals` is kept sorted by start and disjoint (touching runs
-    /// merged), so this is a binary-search insert-and-merge: no per-write
-    /// allocation and no full re-sort. The old rebuild-and-sort was
-    /// O(n log n) + a heap alloc on EVERY span; under heavy out-of-order
-    /// arrival (one disjoint region per in-flight connection) every
-    /// decoder thread paid that while serialized on this mutex.
-    /// Record [offset, offset+len) as written, returning the number of
-    /// bytes that were NOT already covered. A rewrite (repair span, or a
-    /// duplicate article) returns 0, which is what makes the extraction
-    /// budget in `write_at` immune to double-charging a healing file.
-    pub fn note_written(&self, offset: u64, len: u64) -> u64 {
-        if len == 0 {
-            return 0;
-        }
-        self.written.fetch_add(len, Ordering::Relaxed);
-        let fresh = self.merge_span(offset, len);
-        self.covered.fetch_add(fresh, Ordering::Relaxed);
-        fresh
-    }
-
-    /// Merge `[offset, offset+len)` into the coverage map, returning the
-    /// bytes that were not already in it. Split out of `note_written` so
-    /// [`note_repaired`](FileWriter::note_repaired) can publish spans an
-    /// external tool wrote without charging them to `written`.
-    fn merge_span(&self, offset: u64, len: u64) -> u64 {
-        if len == 0 {
-            return 0;
-        }
-        let (s, e) = (offset, offset + len);
-        let mut iv = self.intervals.lock_ok();
-        // First interval that could touch/overlap on the left (its end
-        // reaches `s`), and first that starts beyond `e` (can't touch).
-        let lo = iv.partition_point(|&(_, fe)| fe < s);
-        let hi = iv.partition_point(|&(fs, _)| fs <= e);
-        if lo < hi {
-            // Merge the overlapping/adjacent run [lo, hi) into one span.
-            // The run's spans are disjoint, so the newly-covered count is
-            // the merged length minus what the run already held.
-            let held: u64 = iv[lo..hi].iter().map(|&(fs, fe)| fe - fs).sum();
-            let ns = s.min(iv[lo].0);
-            let ne = e.max(iv[hi - 1].1);
-            iv[lo] = (ns, ne);
-            iv.drain(lo + 1..hi);
-            (ne - ns) - held
-        } else {
-            iv.insert(lo, (s, e));
-            len
-        }
-    }
-
-    /// True when every byte of [off, off+len) has been written.
-    pub fn covered(&self, off: u64, len: u64) -> bool {
-        // Coverage is published after the `pwrite`, so a staged span
-        // reads as a hole. That is the SAFE direction for every consumer
-        // (nobody is told a byte is there when it is not), but a caller
-        // waiting for its own bytes would wait for a write nothing has
-        // asked for yet - so an overlapping run goes out here.
-        //
-        // The cost is bounded and it is the same write either way: the
-        // relaxed load above answers no for every writer that is not
-        // staging, which on the direct-map one-pass path is every volume
-        // writer `materialized_span_on_disk` asks about.
-        if self.stage_overlaps(off, off + len) {
-            let _ = self.flush_stage();
-        }
-        let iv = self.intervals.lock_ok();
-        iv.iter().any(|&(s, e)| s <= off && off + len <= e)
-    }
-
-    /// True when some byte range was written MORE THAN ONCE - the total
-    /// bytes written exceed the distinct bytes covered. In a well-formed
-    /// download every article owns a disjoint byte range, so this stays
-    /// false; it turns true only when two writes land on the same range:
-    /// a same-article hedge/tail duplicate (identical bytes, harmless) or
-    /// - the reason this exists - a MALFORMED post carrying two different
-    /// articles for one file range. The second is silent corruption: the
-    /// later write overwrites the first on disk, but a block the in-stream
-    /// verifier already marked Ok from the first copy is never re-hashed,
-    /// so garbage ships as a "clean download". Settle consults this to
-    /// force a read-back of such a slot (see `LiveVerifier::force_readback`).
-    pub fn had_rewrite(&self) -> bool {
-        // Both counters advance when a coalescing run is WRITTEN, so a
-        // duplicate still sitting in the open run would read as no
-        // rewrite at all - and settle would skip exactly the read-back
-        // this answer exists to force. Cold path (settle), so the run
-        // goes out first and the comparison is over the whole file.
-        let _ = self.flush_stage();
-        self.written.load(Ordering::Relaxed) > self.covered.load(Ordering::Relaxed)
-    }
-
-    /// The written sub-ranges of [off, off+len), clipped, in file offsets.
-    /// Anything not returned is a sparse hole that would pread as zeros -
-    /// the extractor's fallback read-back must never copy those.
-    pub fn covered_intervals(&self, off: u64, len: u64) -> Vec<(u64, u64)> {
-        if self.stage_overlaps(off, off + len) {
-            let _ = self.flush_stage();
-        }
-        self.covered_intervals_raw(off, len)
-    }
-
-    /// [`FileWriter::covered_intervals`] with no staging flush - the
-    /// door [`FileWriter::gate_enter`] takes, because it is already
-    /// inside the gate and the overlap it would flush is the one the
-    /// gate has just excluded.
-    fn covered_intervals_raw(&self, off: u64, len: u64) -> Vec<(u64, u64)> {
-        let end = off + len;
-        let iv = self.intervals.lock_ok();
-        iv.iter()
-            .filter_map(|&(s, e)| {
-                let cs = s.max(off);
-                let ce = e.min(end);
-                (cs < ce).then_some((cs, ce))
-            })
-            .collect()
-    }
-
-    /// End of the contiguous prefix starting at 0 (the streaming frontier).
-    pub fn contiguous_from_start(&self) -> u64 {
-        // The streaming frontier, polled by live readers: a run held
-        // behind it would stall a player on bytes we already have.
-        let _ = self.flush_stage();
-        let iv = self.intervals.lock_ok();
-        match iv.first() {
-            Some(&(0, e)) => e,
-            _ => 0,
-        }
-    }
-
-    /// Bytes written so far (not necessarily contiguous).
-    pub fn written(&self) -> u64 {
-        self.written.load(Ordering::Relaxed)
-    }
-
-    /// Count `n` bytes a PRIOR run left in this file as written, without
-    /// claiming coverage of any range. A crash-resume opens an output
-    /// that already holds bytes, and the extractor's in-stream decrypt
-    /// gate reads this counter as "this output holds ciphertext" (rule 2
-    /// of `instream_decrypt_allowed`): a resumed writer that started at
-    /// zero let the gate latch plaintext-once over them (TODO 158 item
-    /// 2). Coverage stays empty on purpose - the resume replays or
-    /// refetches every one of those bytes, and `covered` must keep
-    /// answering for THIS run's writes alone.
-    pub fn seed_written(&self, n: u64) {
-        self.written.fetch_add(n, Ordering::Relaxed);
     }
 
     /// Open this file for READING at its current path, taking a custody
@@ -3209,7 +2284,7 @@ impl FileWriter {
             // Opened UNDER the gate, so the descriptor is ordered before
             // any later `repairing = true`. Unix repair does not drain
             // readers, so an open after the unlock could land on the
-            // inode a child was mid-rewrite of (Codex F-21, 22 Aug 2026).
+            // inode a child was mid-rewrite of (review finding F-21, 22 Aug 2026).
             // A failed open leaves `readers` untouched - no lease exists
             // to undo it.
             #[cfg(test)]
@@ -3542,7 +2617,7 @@ pub use cowcopy::copy_file_cow;
 
 // The SECOND route from a path to its block device, for the filesystems
 // that have no `st_dev` to index `/sys/dev/block` with - see
-// `rotational` above, and the module's own header for the three
+// `probe::rotational`, and the module's own header for the three
 // measured facts that shape it.
 #[cfg(unix)]
 mod mounttab;

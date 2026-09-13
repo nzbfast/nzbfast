@@ -1,0 +1,9 @@
+# Row 3b, the same failure at full width: one volume arrives with only its
+# first 20 articles and nothing else.
+#
+# The spec sized this shape as "900 MiB of one volume", which was written
+# against the older rig's 1 GiB members. This fixture's volumes are 500 MiB,
+# so 900 MiB does not fit in one and the shape is stated as what it is: most
+# of one volume gone. Row 4 covers the whole-member case.
+ARTICLE 768000
+feature.part09.rar 20-681

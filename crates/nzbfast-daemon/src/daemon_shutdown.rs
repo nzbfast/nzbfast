@@ -137,7 +137,7 @@ pub fn wind_down(d: &Arc<Daemon>, rt: &tokio::runtime::Handle, reason: &str) {
     // warm-pool sweep after it - found None and lost the route to the
     // very hub this signal was aimed at: the gauge then stopped
     // counting sessions that were still saying goodbye, and the sweep
-    // had nothing to clear (Codex sweep 3, M13). `stop_sidecar` takes
+    // had nothing to clear (review sweep 3, M13). `stop_sidecar` takes
     // the hub out of the slot for exactly this reason.
     let sidecar_hub = d.sidecar.lock_ok().as_ref().map(|s| s.hub.clone());
     d.poke_sidecar(|_| true);
@@ -516,6 +516,18 @@ pub fn timed_pause(d: &Arc<Daemon>, mins: u64, graceful: bool) {
     // Marker on the transition only; a re-sent pause of a paused queue
     // is not a new moment.
     if !was_paused {
+        // Written down, not only ringed: the marker ring is in-memory
+        // and the settings file carries only the flag, so until 10 Sep
+        // 2026 a pause nobody remembered pressing left no line in
+        // daemon.log at all (13 h of a held queue, found by the file's
+        // mtime). `graceful` and `mins` are the two things a reader
+        // wants to know first.
+        info!(
+            target: "pause",
+            "downloads paused ({}{})",
+            if graceful { "graceful" } else { "now" },
+            if mins == 0 { String::new() } else { format!(", {mins} min") }
+        );
         d.note_event(
             "pause",
             if mins == 0 {
@@ -979,7 +991,7 @@ mod shutdown_sidecar_tests {
     /// normally gone by the time either looked. The wind-down then saw
     /// zero connections and left while the prefetch's sessions were
     /// still saying goodbye, which is the same provider-occupancy
-    /// symptom the sidecar leg above exists to prevent (Codex sweep 3,
+    /// symptom the sidecar leg above exists to prevent (review sweep 3,
     /// M13). Retaining the hub before signalling is what `stop_sidecar`
     /// already does.
     #[test]
@@ -1124,7 +1136,7 @@ mod pause_timer_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Codex sweep 24 Aug 2026, F-07: every arm used to spawn a raw `std::thread`
+    /// Review sweep 24 Aug 2026, F-07: every arm used to spawn a raw `std::thread`
     /// that slept the WHOLE duration holding an `Arc<Daemon>`, with a
     /// generation counter that invalidated the old sleeper without ever
     /// waking it. So N authenticated `set_pause`/`scheduleresume` calls

@@ -880,7 +880,7 @@ impl Extractor {
     /// begin/end - never against that total. A post declaring 16 MiB
     /// and shipping one CRC-valid byte therefore leaves a file that is
     /// one byte plus a hole, with every article counter at zero
-    /// (Codex sweep 3 Aug M7). The interval map already knows exactly
+    /// (review sweep 3 Aug M7). The interval map already knows exactly
     /// which bytes arrived; this is the question nobody was asking it
     /// at completion.
     ///
@@ -1011,7 +1011,7 @@ impl Extractor {
     /// but a fresh extractor starts with an empty `names_taken`, so an
     /// inner member sanitizing to the same name claimed it freely and
     /// the inner output writer opened the very inode the replay loop
-    /// was still reading (Codex sweep 3 Aug H3). That both corrupts
+    /// was still reading (review sweep 3 Aug H3). That both corrupts
     /// unread packed bytes and, when a small shape finishes, lets the
     /// all-good cleanup delete the extracted payload as if it were the
     /// spent source. Claiming the name here pushes the inner output to a
@@ -1032,7 +1032,7 @@ impl Extractor {
         // file under EVERY volume that reads it, in volume order, and
         // the grant must sit on the first volume - the one whose parse
         // founds the group - not on the last, which has not parsed when
-        // the member routes (Codex F-03).
+        // the member routes (review finding F-03).
         inner.preclaimed.entry(key).or_insert(slot);
     }
 
@@ -1294,6 +1294,23 @@ impl Extractor {
         )
     }
 
+    /// Did `slot`'s volume head declare an embedded recovery record
+    /// (RAR5 archive flag 0x0008, RAR4 MHD_PROTECT)? False for a slot
+    /// never mapped, a non-RAR slot, and a header-encrypted set whose
+    /// flag is ciphertext. The set-less settle arm asks this before
+    /// materializing a chased set for the recovery-record rung: the
+    /// record lives at the volume's tail and reaches disk only when the
+    /// chase demotes, so a chase must not be forfeited - and a player's
+    /// stream on its output ended - for a record that is not there.
+    pub fn slot_declares_recovery_record(&self, slot: usize) -> bool {
+        self.inner
+            .lock_ok()
+            .slots
+            .get(slot)
+            .and_then(|s| s.mapper.as_ref())
+            .is_some_and(|m| m.recovery_record)
+    }
+
     /// The RAR flavor of [`Self::is_chased`] alone. The distinction
     /// matters to exactly one caller: a `.7z` materialized for repair is
     /// the 7z post-pass's own input, but a RAR chase demoted the same
@@ -1367,7 +1384,7 @@ impl Extractor {
             // in-memory `renamed_to` above reaches no journal line - so
             // after a crash, replay went looking for the OLD file, found
             // nothing, and refetched a complete verified volume sitting
-            // right there under its new name (Codex sweep 13 Aug R3).
+            // right there under its new name (review sweep 13 Aug R3).
             // Re-firing the materialized hook appends `S new-name` + `M`
             // in one write: last-S-wins retargets the destination and
             // the positional M rewrites the already-identity fragments

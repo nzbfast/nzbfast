@@ -39,7 +39,7 @@ pub fn media_claim_name(j: &Job) -> String {
 /// directory, or a file whose bytes are not a container we understand.
 /// `Err` is a failure to look, and only ever an I/O one - the volume,
 /// the permission, the network mount. Every caller needs that
-/// distinction (Codex sweep 7, M6): the re-derivation pass must not
+/// distinction (review sweep 7, M6): the re-derivation pass must not
 /// record "no payload" for a disk it never managed to read, and the
 /// prober says a different thing in the log for each - a lossy wrapper
 /// that erased both into `None` is what made a chipless row and an

@@ -41,6 +41,173 @@ pub(super) enum DialStep {
     Quit,
 }
 
+/// The per-WORKER ladder state: everything in [`session_loop`] that
+/// survives a redial.
+///
+/// These nine counters used to be nine locals crossing into
+/// [`dial_session`], [`acquire_conn`], [`pre_dial_gates`],
+/// [`claim_flap_keeper`] and [`handle_body`] as nine separate `&mut`s -
+/// six of them into `acquire_conn` alone. They are one borrow now. The
+/// grouping is by LIFETIME, not by topic: what makes a field belong here
+/// is that a `continue 'session` must not reset it, which is exactly the
+/// property the old comments spent their lines asserting one local at a
+/// time.
+///
+/// Nothing here is per-session; that is [`SessionState`]. Getting a field
+/// on the wrong side is a real defect, not a tidiness question - moving
+/// `race_losses` into `SessionState`, for instance, would silently reset
+/// the recycle experiment's evidence at every dial.
+pub(super) struct Ladder {
+    /// Consecutive failed CONNECTS. Cleared by a connect that lands.
+    pub(super) connect_failures: u32,
+    /// TODO 115: capacity bounces while holding a keeper slot pace their
+    /// retries on this counter, never on `connect_failures` - a keeper
+    /// must not walk toward connect exhaustion on bounces (see the
+    /// keeper arm).
+    pub(super) flap_bounces: u32,
+    /// The capacity-PROBE ladder's own step count, which is also how
+    /// `park_or_probe` tells the elected prober re-entering from its own
+    /// ladder (bounces > 0) from a worker arriving fresh. The keeper's
+    /// flap counter above must stay out of it: sharing one counter let a
+    /// keeper that had flapped and then exhausted its dial attempts walk
+    /// straight past the single-prober election.
+    pub(super) cap_bounces: u32,
+    /// Consecutive sessions that connected and then died without doing
+    /// any useful work. Cleared by a well-formed response, never by a
+    /// connect - see the useful-work reset in `session_loop`.
+    pub(super) session_failures: u32,
+    /// The delay `session_failures` has armed for the next connect.
+    pub(super) pending_backoff: Option<Duration>,
+    /// Recycle experiment: consecutive articles of OURS a duplicate
+    /// dispatch finished first. Reset by any completion we win.
+    pub(super) race_losses: u32,
+    /// Flap breaker: true once THIS worker claimed its server's keeper
+    /// slot - the keeper never bows out to its own clamp.
+    pub(super) am_keeper: bool,
+    /// Whether this worker has ever had a session accepted.
+    pub(super) ever_connected: bool,
+    /// Why this worker's last session ended ([`SessionEnds`] slot
+    /// order), refreshed at every end site, so the redial note can tell
+    /// a rotation we chose from a session genuinely lost.
+    pub(super) last_end: Option<usize>,
+}
+
+impl Ladder {
+    pub(super) fn new() -> Self {
+        Self {
+            connect_failures: 0,
+            flap_bounces: 0,
+            cap_bounces: 0,
+            session_failures: 0,
+            pending_backoff: None,
+            race_losses: 0,
+            am_keeper: false,
+            ever_connected: false,
+            last_end: None,
+        }
+    }
+
+    /// A session was LOST at `code`: note the end and arm the standard
+    /// redial backoff. The five `continue 'session` arms that follow a
+    /// death (flush, top-up, idle-dead, protocol death, stall) all did
+    /// these three statements verbatim; a rotation WE chose
+    /// (`rotated`) must not, because it has not failed at anything.
+    pub(super) fn lost(&mut self, cfg: &PoolConfig, code: usize) {
+        self.last_end = Some(code);
+        self.session_failures += 1;
+        self.pending_backoff = Some(session_backoff_delay(cfg, self.session_failures));
+    }
+
+    /// A ladder already `session_failures` deep with `pending_backoff`
+    /// armed - the two fields [`pre_dial_gates`] reads, set directly so
+    /// a test can put a worker at the attempt ceiling without dialling
+    /// its way there.
+    #[cfg(test)]
+    pub(super) fn paced(session_failures: u32, pending_backoff: Option<Duration>) -> Self {
+        Self {
+            session_failures,
+            pending_backoff,
+            ..Self::new()
+        }
+    }
+
+    /// A session ended because WE ended it (shed, recycle). No failure,
+    /// so no backoff and no `session_failures` step.
+    pub(super) fn rotated(&mut self, code: usize) {
+        self.last_end = Some(code);
+    }
+}
+
+/// The per-SESSION state: everything a `continue 'session` throws away.
+///
+/// Constructed once per dial and passed to the response-side helpers as
+/// one `&mut` instead of the four they each used to take. The connection
+/// itself is deliberately NOT in here: `conn` is moved out at six exits
+/// (`quit`, `stand_down`, `release_shed_conn`, `session_died_mid_read`),
+/// and a partial move out of a struct field is the one shape that would
+/// have made this refactor a fight with the borrow checker rather than a
+/// rename.
+pub(super) struct SessionState {
+    /// This session's birth, for the slope-recycle comparison in
+    /// [`handle_body`]. Stamped BEFORE the dial, as it always was - a
+    /// session's age includes the connect it paid for.
+    pub(super) start: Instant,
+    /// Bytes this session has delivered.
+    pub(super) bytes: u64,
+    /// Completed useful responses this session (a well-formed 222 OR an
+    /// authoritative 430/423). Session-death attribution keys on THIS,
+    /// not on bytes: a connection that validly answered "no such
+    /// article" and then died was a working session, and charging its
+    /// death to the innocent front article would let a
+    /// one-response-per-connection server walk a perfectly valid article
+    /// to Failed without ever serving it.
+    pub(super) responses: u32,
+    /// §129 3g: the bare refusals this session has handed out, most
+    /// recent last. A response read off by one is invisible while the
+    /// refusals are bare, but the session PROVES the misalignment when
+    /// it finally reads an id it can check - and at that moment every
+    /// refusal in here is evidence collected from a misaligned socket.
+    pub(super) bare_refused: VecDeque<Arc<str>>,
+    /// §129 3g: whether this session has already read a fence answer.
+    /// Only the first one can tell DATE-silence apart from a real
+    /// desync, because before it the socket is aligned by construction.
+    pub(super) fence_read_seen: bool,
+    /// In-flight commands, oldest first (responses arrive in order).
+    pub(super) inflight: VecDeque<Work>,
+    /// Last moment this session's socket was known alive: dial time,
+    /// then every pass that reaches the wire, then each successful idle
+    /// probe (see `idle_turn`). Per-session on purpose - a redial starts
+    /// a fresh clock, which is why `session_loop` re-stamps this the
+    /// moment `acquire_conn` returns rather than trusting the value this
+    /// constructor left.
+    pub(super) quiet_since: Instant,
+}
+
+impl SessionState {
+    /// A session whose pipeline is already `inflight`, for the helper
+    /// tests that drive one response arm with a hand-built queue.
+    #[cfg(test)]
+    pub(super) fn from_inflight(inflight: VecDeque<Work>) -> Self {
+        Self {
+            inflight,
+            ..Self::new(0)
+        }
+    }
+
+    pub(super) fn new(window: usize) -> Self {
+        let now = Instant::now();
+        Self {
+            start: now,
+            bytes: 0,
+            responses: 0,
+            bare_refused: VecDeque::new(),
+            fence_read_seen: false,
+            inflight: VecDeque::with_capacity(window),
+            quiet_since: now,
+        }
+    }
+}
+
 #[expect(clippy::too_many_arguments)]
 pub(super) async fn dial_session(
     server: &ServerConfig,
@@ -50,16 +217,22 @@ pub(super) async fn dial_session(
     connects: &Arc<AtomicU64>,
     reconnects: &Arc<AtomicU64>,
     finished: &mut tokio::sync::watch::Receiver<bool>,
-    connect_failures: &mut u32,
-    flap_bounces: &mut u32,
-    cap_bounces: &mut u32,
-    ever_connected: &mut bool,
-    am_keeper: bool,
-    // Why this worker's PREVIOUS session ended ([`SessionEnds`] slot
-    // order), so the redial can be painted as what it is: a rotation
-    // we chose, or a session genuinely lost.
-    last_end: &mut Option<usize>,
+    // This worker's ladder state: the six fields below plus the
+    // session counters the caller keeps. See [`Ladder`].
+    ladder: &mut Ladder,
 ) -> DialStep {
+    // One `&mut Ladder` in, the same six bindings out: destructuring a
+    // `&mut` gives `&mut` per field, so every statement below reads
+    // exactly as it did when these were six parameters.
+    let am_keeper = ladder.am_keeper;
+    let Ladder {
+        connect_failures,
+        flap_bounces,
+        cap_bounces,
+        ever_connected,
+        last_end,
+        ..
+    } = ladder;
     // Settled already: this server has told us the account is
     // no good. Workers that reach here later must not re-ask -
     // that is the storm this exists to stop, and it is also
@@ -226,7 +399,7 @@ pub(super) async fn dial_session(
                 // branch could demote a job off a false outage. The
                 // refusal above is unguarded on purpose: the Providers
                 // card SHOULD show what the server said, whether or not
-                // the account is also serving (Codex sweep 12 Aug F11).
+                // the account is also serving (review sweep 12 Aug F11).
                 if held == 0 {
                     sl.note_down(
                         if kind == crate::nntp::AuthRefusal::Permanent {
@@ -308,7 +481,7 @@ pub(super) async fn dial_session(
                     // cap, and it is what widens the flap clamp past
                     // one keeper.
                     // `held` is the ONE sample taken above, deliberately
-                    // not re-read (Codex sweep 5, L7).
+                    // not re-read (review sweep 5, L7).
                     shared.note_cap_bounce(ctx.idx, held);
                     // ...and price it for the person, not just for the
                     // clamp: the sessions we hold at a refusal ARE the
@@ -321,7 +494,7 @@ pub(super) async fn dial_session(
                     // are incidental, and recording them as the ceiling
                     // told the user to ask their provider about
                     // connection tiers when the answer lay elsewhere
-                    // (Codex sweep 5, M9). The clamp above still widens
+                    // (review sweep 5, M9). The clamp above still widens
                     // either way - backing off is right for both.
                     if crate::nntp::capacity_limit(&line) == crate::nntp::CapacityLimit::Connections
                     {
@@ -430,7 +603,7 @@ pub(super) async fn dial_session(
             if let Some(live) = &cfg.live
                 && let Some(sl) = live.servers.get(ctx.idx)
                 // Guarded by `held` exactly as the capacity arm above is,
-                // and for the same reason (Codex sweep 12 Aug F11): we
+                // and for the same reason (review sweep 12 Aug F11): we
                 // deliberately ask for more connections than the plan
                 // grants, so surplus workers failing to dial is the
                 // NORMAL case. Unguarded, one surplus dial failure
@@ -537,11 +710,14 @@ pub(super) async fn read_one(
     cfg: &PoolConfig,
     ctx: ServerCtx,
     shared: &Arc<Shared>,
-    inflight: &VecDeque<Work>,
+    // This session's state: `inflight` (read) and `fence_read_seen`
+    // (written). See [`SessionState`].
+    sess: &mut SessionState,
     finished: &mut tokio::sync::watch::Receiver<bool>,
     promote_gen: &mut tokio::sync::watch::Receiver<u64>,
-    fence_read_seen: &mut bool,
 ) -> ReadStep {
+    let fence_read_seen = &mut sess.fence_read_seen;
+    let inflight = &sess.inflight;
     // A worker mid-read must notice global completion: once a tail
     // duplicate wins somewhere, waiting out a slow original here
     // would stall the whole pool's return. It must also notice a
@@ -894,18 +1070,22 @@ pub(super) enum BodyStep {
     Recycle,
 }
 
-#[expect(clippy::too_many_arguments)]
 pub(super) async fn handle_body(
     cfg: &PoolConfig,
     ctx: ServerCtx,
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
-    inflight: &mut VecDeque<Work>,
     buf: PooledBuf<'_>,
-    race_losses: &mut u32,
-    session_bytes: &mut u64,
-    session_start: Instant,
+    sess: &mut SessionState,
+    ladder: &mut Ladder,
 ) -> BodyStep {
+    let session_start = sess.start;
+    let race_losses = &mut ladder.race_losses;
+    let SessionState {
+        inflight,
+        bytes: session_bytes,
+        ..
+    } = sess;
     let w = inflight.pop_front().expect("response without command");
     shared.release_wire(1);
     // TODO 315: if this article was holding a late re-ask, that re-ask
@@ -1214,12 +1394,16 @@ pub(super) async fn handle_missing(
     ctx: ServerCtx,
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
-    inflight: &mut VecDeque<Work>,
     buf: PooledBuf<'_>,
     echoed: bool,
     takedown: bool,
-    bare_refused: &mut VecDeque<Arc<str>>,
+    sess: &mut SessionState,
 ) {
+    let SessionState {
+        inflight,
+        bare_refused,
+        ..
+    } = sess;
     let mut w = inflight.pop_front().expect("response without command");
     shared.release_wire(1);
     drop(buf); // returned to the pool here, not at scope end
@@ -1706,7 +1890,6 @@ pub(super) async fn done_before_dial(
 /// behaviour, and the ORDER, are unchanged and load-bearing.
 ///
 /// Returns false when this worker is done and the caller must return.
-#[expect(clippy::too_many_arguments)]
 pub(super) async fn pre_dial_gates(
     cfg: &PoolConfig,
     idx: usize,
@@ -1716,11 +1899,13 @@ pub(super) async fn pre_dial_gates(
     // during a spill episode. `None` for a pool with no lease, which is
     // the CLI and every test that does not opt in.
     permit: &mut Option<crate::pool::handoff::Permit>,
-    session_failures: u32,
-    pending_backoff: &mut Option<Duration>,
+    // The two ladder fields this gate reads. See [`Ladder`].
+    ladder: &mut Ladder,
     finished: &mut tokio::sync::watch::Receiver<bool>,
     shared: &Arc<Shared>,
 ) -> bool {
+    let session_failures = ladder.session_failures;
+    let pending_backoff = &mut ladder.pending_backoff;
     // A session that can only ever fail bows out for good, exactly as
     // connect exhaustion does (see `MAX_SESSION_ATTEMPTS`) - this
     // worker's `alive` count comes down with it, so a multi-server job
@@ -1865,13 +2050,18 @@ async fn session_died_mid_read(
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
     conn: Connection,
-    inflight: &mut VecDeque<Work>,
     buf: PooledBuf<'_>,
     e: &crate::nntp::NntpError,
-    bare_refused: &VecDeque<Arc<str>>,
-    session_bytes: u64,
-    session_responses: u32,
+    sess: &mut SessionState,
 ) -> usize {
+    let session_bytes = sess.bytes;
+    let session_responses = sess.responses;
+    let SessionState {
+        inflight,
+        bare_refused,
+        ..
+    } = sess;
+    let bare_refused = &*bare_refused;
     drop(buf); // returned to the pool here, not at scope end
     // WHO hung up (TODO 121 diagnostics): an I/O-flavoured
     // error OR a clean EOF (`Closed` - read_status maps
@@ -1942,12 +2132,17 @@ async fn session_stalled_mid_read(
     ctx: ServerCtx,
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
-    inflight: &mut VecDeque<Work>,
     buf: PooledBuf<'_>,
     prebyte_expired: bool,
-    bare_refused: &VecDeque<Arc<str>>,
-    session_bytes: u64,
+    sess: &mut SessionState,
 ) -> usize {
+    let session_bytes = sess.bytes;
+    let SessionState {
+        inflight,
+        bare_refused,
+        ..
+    } = sess;
+    let bare_refused = &*bare_refused;
     // Stalled mid-response; connection state unusable.
     // Body bytes of the CURRENT response count as flap
     // progress: `session_bytes` holds only COMPLETED
@@ -2206,12 +2401,13 @@ async fn top_up_window(
     ctx: ServerCtx,
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
-    inflight: &mut VecDeque<Work>,
+    sess: &mut SessionState,
     win: usize,
     over_target: bool,
-    session_bytes: u64,
-    session_responses: u32,
 ) -> TopUp {
+    let session_bytes = sess.bytes;
+    let session_responses = sess.responses;
+    let inflight = &mut sess.inflight;
     while inflight.len() < win {
         if shared.draining.load(Ordering::Acquire) {
             break;
@@ -2445,12 +2641,9 @@ async fn acquire_conn(
     connects: &Arc<AtomicU64>,
     reconnects: &Arc<AtomicU64>,
     finished: &mut tokio::sync::watch::Receiver<bool>,
-    connect_failures: &mut u32,
-    flap_bounces: &mut u32,
-    cap_bounces: &mut u32,
-    ever_connected: &mut bool,
-    am_keeper: bool,
-    last_end: &mut Option<usize>,
+    // Four of the six ladder fields this used to take were pure
+    // pass-through to `dial_session`; only the two below are read here.
+    ladder: &mut Ladder,
 ) -> DialStep {
     let warm = match spare.or_else(|| preclaimed.take()) {
         Some(c) => Some(c),
@@ -2481,26 +2674,14 @@ async fn acquire_conn(
                 sl.note_up();
             }
             shared.auth[ctx.idx].mark_up();
-            *connect_failures = 0;
-            *ever_connected = true;
+            ladder.connect_failures = 0;
+            ladder.ever_connected = true;
             shared.connected[ctx.idx].store(true, Ordering::Relaxed);
             DialStep::Conn(c)
         }
         None => {
             return dial_session(
-                server,
-                cfg,
-                ctx,
-                shared,
-                connects,
-                reconnects,
-                finished,
-                connect_failures,
-                flap_bounces,
-                cap_bounces,
-                ever_connected,
-                am_keeper,
-                last_end,
+                server, cfg, ctx, shared, connects, reconnects, finished, ladder,
             )
             .await;
         }
@@ -2534,33 +2715,9 @@ pub(super) async fn session_loop(
     // before the ramp; used for the first session instead of dialling.
     mut preclaimed: Option<Connection>,
 ) {
-    let mut connect_failures: u32 = 0;
-    // TODO 115: capacity bounces while holding a keeper slot pace their
-    // retries on this counter, never on connect_failures - a keeper must
-    // not walk toward connect exhaustion on bounces (see the keeper arm).
-    let mut flap_bounces: u32 = 0;
-    // The capacity-PROBE ladder's own step count, which is also how
-    // `park_or_probe` tells the elected prober re-entering from its own
-    // ladder (bounces > 0) from a worker arriving fresh. The keeper's
-    // flap counter above must stay out of it: sharing one counter let a
-    // keeper that had flapped and then exhausted its dial attempts walk
-    // straight past the single-prober election.
-    let mut cap_bounces: u32 = 0;
-    // Consecutive sessions that connected and then died without doing any
-    // useful work, and the delay they have armed for the next connect.
-    let mut session_failures: u32 = 0;
-    let mut pending_backoff: Option<Duration> = None;
-    // Recycle experiment: consecutive articles of OURS a duplicate
-    // dispatch finished first. Reset by any completion we win.
-    let mut race_losses: u32 = 0;
-    // Flap breaker: true once THIS worker claimed its server's keeper
-    // slot - the keeper never bows out to its own clamp.
-    let mut am_keeper = false;
-    let mut ever_connected = false;
-    // Why this worker's last session ended (SessionEnds slot order),
-    // refreshed at every end site below, so the redial note can tell a
-    // rotation we chose from a session genuinely lost.
-    let mut last_end: Option<usize> = None;
+    // Everything that survives a redial. Nine locals and their comments
+    // until 10 Sep 2026; the comments are on the fields now.
+    let mut ladder = Ladder::new();
     let mut finished = shared.finished.subscribe();
     let mut promote_gen = shared.promote_gen.subscribe();
 
@@ -2586,8 +2743,7 @@ pub(super) async fn session_loop(
             ctx.idx,
             &mut admit,
             permit,
-            session_failures,
-            &mut pending_backoff,
+            &mut ladder,
             &mut finished,
             &shared,
         )
@@ -2599,7 +2755,7 @@ pub(super) async fn session_loop(
             return;
         }
 
-        if !claim_flap_keeper(cfg, ctx, &shared, &mut am_keeper, &mut preclaimed).await {
+        if !claim_flap_keeper(cfg, ctx, &shared, &mut ladder.am_keeper, &mut preclaimed).await {
             return;
         }
 
@@ -2616,29 +2772,11 @@ pub(super) async fn session_loop(
         } else {
             None
         };
-        // Slope-recycle experiment: this session's own byte total and
-        // birth, so its personal rate can be compared to the fleet's.
-        let session_start = Instant::now();
-        let mut session_bytes: u64 = 0;
-        // Completed useful responses this session (a well-formed 222 OR
-        // an authoritative 430/423). Session-death attribution keys on
-        // THIS, not on bytes: a connection that validly answered "no
-        // such article" and then died was a working session, and
-        // charging its death to the innocent front article would let a
-        // one-response-per-connection server walk a perfectly valid
-        // article to Failed without ever serving it.
-        let mut session_responses: u32 = 0;
-        // §129 3g: the bare refusals this session has handed out, most
-        // recent last. A response read off by one is invisible while the
-        // refusals are bare, but the session PROVES the misalignment when
-        // it finally reads an id it can check - and at that moment every
-        // refusal in here is evidence collected from a misaligned socket.
-        let mut bare_refused: VecDeque<Arc<str>> = VecDeque::new();
-        // §129 3g: whether this session has already read a fence answer.
-        // Only the first one can tell DATE-silence apart from a real
-        // desync, because before it the socket is aligned by
-        // construction.
-        let mut fence_read_seen = false;
+        // Everything a `continue 'session` throws away: this session's
+        // birth, byte and response totals, the bare-refusal window and
+        // the in-flight pipeline. Stamped HERE, before the dial, so a
+        // session's age still includes the connect it paid for.
+        let mut sess = SessionState::new(cfg.window);
         let mut conn = match acquire_conn(
             spare,
             &mut preclaimed,
@@ -2649,12 +2787,7 @@ pub(super) async fn session_loop(
             &connects,
             &reconnects,
             &mut finished,
-            &mut connect_failures,
-            &mut flap_bounces,
-            &mut cap_bounces,
-            &mut ever_connected,
-            am_keeper,
-            &mut last_end,
+            &mut ladder,
         )
         .await
         {
@@ -2681,19 +2814,22 @@ pub(super) async fn session_loop(
         // Cap-estimation tally, same lifetime (TODO 115).
         let _sess = SessionTally::up(&shared, ctx.idx);
 
-        // In-flight commands, oldest first (responses arrive in order).
-        let mut inflight: VecDeque<Work> = VecDeque::with_capacity(cfg.window);
-
-        // Last moment this session's socket was known alive: dial time,
-        // then every pass that reaches the wire, then each successful
-        // idle probe (see `idle_turn`). Per-session on purpose - a
-        // redial starts a fresh clock.
-        let mut quiet_since = Instant::now();
+        // The socket is alive as of NOW, not as of the `SessionState`
+        // above: the dial in between can take seconds.
+        sess.quiet_since = Instant::now();
 
         loop {
             if shared.aborted.load(Ordering::Acquire) {
-                shared.release_wire(inflight.len());
-                stand_down(cfg, server, &shared, ctx.idx, conn, inflight.is_empty()).await;
+                shared.release_wire(sess.inflight.len());
+                stand_down(
+                    cfg,
+                    server,
+                    &shared,
+                    ctx.idx,
+                    conn,
+                    sess.inflight.is_empty(),
+                )
+                .await;
                 return; // user abort
             }
             // M11 stream mode: while a player is attached, run shallow
@@ -2721,12 +2857,12 @@ pub(super) async fn session_loop(
             // and the measurement behind the split is on that function.
             let over_target = surplus_here(cfg, ctx.idx, &shared, &admit);
             if over_target
-                && inflight.is_empty()
+                && sess.inflight.is_empty()
                 && !shared.draining.load(Ordering::Acquire)
                 && shed_surplus(cfg, ctx.idx, &shared, &mut admit)
             {
                 shared.note_session_end(ctx.idx, 4);
-                last_end = Some(4);
+                ladder.rotated(4);
                 release_shed_conn(cfg, server, &shared, ctx.idx, conn).await;
                 continue 'session;
             }
@@ -2751,10 +2887,10 @@ pub(super) async fn session_loop(
             // in-flight bytes) and it is what hands a promoted run to
             // a FRESH session, which is exactly the recovery a sick
             // connection needs.
-            if inflight.len() > base_win && !shared.draining.load(Ordering::Acquire) {
+            if sess.inflight.len() > base_win && !shared.draining.load(Ordering::Acquire) {
                 shared.note_session_end(ctx.idx, 4);
-                last_end = Some(4);
-                shed_pipeline(&shared, &mut inflight).await;
+                ladder.rotated(4);
+                shed_pipeline(&shared, &mut sess.inflight).await;
                 conn.quit().await;
                 continue 'session;
             }
@@ -2766,20 +2902,16 @@ pub(super) async fn session_loop(
                 ctx,
                 &shared,
                 &out,
-                &mut inflight,
+                &mut sess,
                 win,
                 over_target,
-                session_bytes,
-                session_responses,
             )
             .await
             {
-                last_end = Some(cause);
-                session_failures += 1;
-                pending_backoff = Some(session_backoff_delay(cfg, session_failures));
+                ladder.lost(cfg, cause);
                 continue 'session;
             }
-            if inflight.is_empty() {
+            if sess.inflight.is_empty() {
                 // THE reuse point. `inflight.is_empty()` is the whole
                 // safety argument: no BODY is outstanding, so there are
                 // no unread responses queued on this socket and the next
@@ -2792,7 +2924,7 @@ pub(super) async fn session_loop(
                 // Held across the whole idle turn, guard-shaped because
                 // `IdleTurn::Retire` leaves this function outright.
                 let _idle = crate::pool::surge::IdleConn::hold(&shared);
-                match idle_turn(cfg, server, ctx, &shared, conn, &mut quiet_since).await {
+                match idle_turn(cfg, server, ctx, &shared, conn, &mut sess.quiet_since).await {
                     IdleTurn::Keep(c) => conn = c,
                     IdleTurn::Retire => return,
                     IdleTurn::Dead => {
@@ -2800,20 +2932,17 @@ pub(super) async fn session_loop(
                         // end is already tallied; redial with the standard
                         // backoff so an idle-reaping provider is not dial
                         // stormed.
-                        last_end = Some(0);
-                        session_failures += 1;
-                        pending_backoff = Some(session_backoff_delay(cfg, session_failures));
+                        ladder.lost(cfg, 0);
                         continue 'session;
                     }
                 }
                 continue;
             }
-            quiet_since = Instant::now();
+            sess.quiet_since = Instant::now();
             if conn.flush().await.is_err() {
                 // Write-side peer death, same as the failed send above.
                 shared.note_session_end(ctx.idx, 0);
-                last_end = Some(0);
-                if session_bytes > 0 {
+                if sess.bytes > 0 {
                     // Flap breaker: an ESTABLISHED session (it served bytes)
                     // died - count it where it happens, not at some later
                     // redial this worker may never win (a capped provider
@@ -2825,14 +2954,13 @@ pub(super) async fn session_loop(
                     &out,
                     cfg,
                     ctx,
-                    &mut inflight,
+                    &mut sess.inflight,
                     FailCode::Transport,
                     "flush failed",
-                    session_responses == 0,
+                    sess.responses == 0,
                 )
                 .await;
-                session_failures += 1;
-                pending_backoff = Some(session_backoff_delay(cfg, session_failures));
+                ladder.lost(cfg, 0);
                 continue 'session;
             }
 
@@ -2840,29 +2968,28 @@ pub(super) async fn session_loop(
             // TODO 96.4: which command the answer below belongs to. A
             // 223 and a 222 are both `Ok(Ok(true))`, and only this says
             // which one arrived.
-            let probe_front = inflight.front().is_some_and(|w| w.probe);
+            let probe_front = sess.inflight.front().is_some_and(|w| w.probe);
             let step = read_one(
                 &mut conn,
                 &mut buf,
                 cfg,
                 ctx,
                 &shared,
-                &inflight,
+                &mut sess,
                 &mut finished,
                 &mut promote_gen,
-                &mut fence_read_seen,
             )
             .await;
             let Some(read) = step.read else {
                 drop(buf); // back to the pool here, before the awaits below
                 if step.shed_for_promote {
                     shared.note_session_end(ctx.idx, 4);
-                    last_end = Some(4);
-                    shed_pipeline(&shared, &mut inflight).await;
+                    ladder.rotated(4);
+                    shed_pipeline(&shared, &mut sess.inflight).await;
                     conn.quit().await; // internally bounded
                     continue 'session;
                 }
-                shared.release_wire(inflight.len());
+                shared.release_wire(sess.inflight.len());
                 if !step.mute_suspect {
                     conn.quit().await; // internally bounded
                 }
@@ -2876,8 +3003,8 @@ pub(super) async fn session_loop(
             // broken account, and a session that can only ever fail must
             // not clear its counter just by connecting again.
             if matches!(&read, Ok(Ok(_))) {
-                session_failures = 0;
-                session_responses += 1;
+                ladder.session_failures = 0;
+                sess.responses += 1;
                 // §129 3g: this response carried a message-id we could
                 // check against the article we asked for, so the socket
                 // was aligned HERE - and a response desync is monotone
@@ -2887,33 +3014,21 @@ pub(super) async fn session_loop(
                 // suspect any more. What accumulates after this point
                 // is exactly the window a later proof of desync voids.
                 if step.id_echoed {
-                    bare_refused.clear();
+                    sess.bare_refused.clear();
                 }
             }
             match read {
                 Ok(Ok(true)) if probe_front => {
-                    handle_probe_hit(ctx, &shared, &mut inflight, buf);
+                    handle_probe_hit(ctx, &shared, &mut sess.inflight, buf);
                 }
                 Ok(Ok(true)) => {
-                    match handle_body(
-                        cfg,
-                        ctx,
-                        &shared,
-                        &out,
-                        &mut inflight,
-                        buf,
-                        &mut race_losses,
-                        &mut session_bytes,
-                        session_start,
-                    )
-                    .await
-                    {
+                    match handle_body(cfg, ctx, &shared, &out, buf, &mut sess, &mut ladder).await {
                         BodyStep::Proceed => {}
                         BodyStep::Recycle => {
                             // Deliberate hangup (slow-session recycle):
                             // ours, and the census must say so.
                             shared.note_session_end(ctx.idx, 4);
-                            last_end = Some(4);
+                            ladder.rotated(4);
                             conn.quit().await; // internally bounded
                             continue 'session;
                         }
@@ -2925,50 +3040,31 @@ pub(super) async fn session_loop(
                         ctx,
                         &shared,
                         &out,
-                        &mut inflight,
                         buf,
                         step.id_echoed,
                         step.takedown,
-                        &mut bare_refused,
+                        &mut sess,
                     )
                     .await;
                 }
                 Ok(Err(e)) => {
-                    last_end = Some(
-                        session_died_mid_read(
-                            cfg,
-                            ctx,
-                            &shared,
-                            &out,
-                            conn,
-                            &mut inflight,
-                            buf,
-                            &e,
-                            &bare_refused,
-                            session_bytes,
-                            session_responses,
-                        )
-                        .await,
-                    );
-                    session_failures += 1;
-                    pending_backoff = Some(session_backoff_delay(cfg, session_failures));
+                    let code =
+                        session_died_mid_read(cfg, ctx, &shared, &out, conn, buf, &e, &mut sess)
+                            .await;
+                    ladder.lost(cfg, code);
                     continue 'session;
                 }
                 Err(_) => {
-                    last_end = Some(
-                        session_stalled_mid_read(
-                            cfg,
-                            ctx,
-                            &shared,
-                            &out,
-                            &mut inflight,
-                            buf,
-                            step.prebyte_expired,
-                            &bare_refused,
-                            session_bytes,
-                        )
-                        .await,
-                    );
+                    let code = session_stalled_mid_read(
+                        cfg,
+                        ctx,
+                        &shared,
+                        &out,
+                        buf,
+                        step.prebyte_expired,
+                        &mut sess,
+                    )
+                    .await;
                     // A8: the stall arm arms the same backoff as the
                     // protocol-death arm above. The expiry itself paces
                     // one attempt (the budget had to run out first),
@@ -2982,8 +3078,7 @@ pub(super) async fn session_loop(
                     // a serving session at zero extra delay, and a
                     // can-only-stall server now also bows out at
                     // MAX_SESSION_ATTEMPTS like any other broken one.
-                    session_failures += 1;
-                    pending_backoff = Some(session_backoff_delay(cfg, session_failures));
+                    ladder.lost(cfg, code);
                     continue 'session;
                 }
             }

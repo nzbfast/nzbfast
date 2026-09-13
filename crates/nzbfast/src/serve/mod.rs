@@ -78,7 +78,7 @@ pub(crate) use nzbfast_daemon::histstore;
 // rostered on the Windows jobs alone, and nothing did that for `check`.
 // Closed the same day: `tools/ci-verdict.py` rosters the Linux jobs too.
 // The flag is what pulls nzbfast's LIB target into the lint at all; the
-// host clippy line in CLAUDE.md lacked it and gained it in 470efe74d.
+// host clippy line in CONTRIBUTING.md lacked it and gained it in 470efe74d.
 #[cfg(feature = "indexer")]
 pub(crate) use nzbfast_daemon::predb_seed;
 
@@ -171,6 +171,81 @@ pub async fn serve(config: PathBuf, mut opts: ServeOpts) -> Result<()> {
     // Saved settings may have overridden the CLI budget; republish so the
     // repair paths use the same figure the rest of the daemon does.
     nzbkit::mem::set_process_budget(opts.mem_budget);
+    // The BACKSTOP for this process's repair paths that report nothing,
+    // set before anything can repair.
+    //
+    // The engine bounds an unstructured (Gauss-Jordan) solve by memory,
+    // which is the right answer for a person who typed a command and can
+    // watch it: at the top of that range a repair fits in a few GB and
+    // takes about half an hour, and par2cmdline-turbo takes about as long,
+    // so refusing it outright only sends the user to a slower tool.
+    //
+    // A daemon WAS the other case, and this comment said so until
+    // 12 Sep 2026: "it emits no progress inside a fold and polls nothing
+    // that could stop one, so a long repair and a wedged one look
+    // identical from the dashboard - the queue row has read `Repairing,
+    // 100%, timeleft 0:00:00` through exactly that kind of stall before -
+    // and a cancel would not be honoured until the fold finished
+    // anyway", and it ended "raise this when those two land".
+    //
+    // BOTH LANDED, AND RAISING THE NUMBER WAS THE WRONG ANSWER. The
+    // ceiling never measured what a daemon can afford; it stood in for
+    // "nobody can see this repair or stop it", which is a question about
+    // the CALLER. So the two repair paths a user watches now pass a
+    // `par2repair::RepairControl` built from the job's own `SideCancel`
+    // (`repair::nativepass` for the download repair, `get::latesets` for
+    // the late-set pass): the queue row moves through the engine's four
+    // phases, a Cancel reaches the fold, and `check_repair_dim_dense`
+    // skips this ceiling for them by itself - uncapped at any m the
+    // memory bound admits, which is more than raising the number would
+    // have bought them.
+    //
+    // WHAT THIS LINE IS STILL FOR, and why deleting it would be a
+    // regression: the daemon's repair paths that pass NO control, plus
+    // whatever is written next without looking. Those are still
+    // unwatched, and for them the original argument holds word for word.
+    // Raising the number would have uncapped them too, for nothing.
+    //
+    // IT USED TO NAME THE NESTED EXTRACTION LADDER HERE, and that path
+    // took its own door on 12 Sep 2026 (claim
+    // `nested-repair-infold-control`): `unpack::nested_par2_repair` now
+    // carries the job's `SideCancel` down `extract_nested_why` and
+    // repairs through `par2repair::repair_present_sets_controlled_as`,
+    // so a nested layer's repair moves the queue row and a Cancel ends
+    // it. So the question "can this call go now?" was asked properly,
+    // by CENSUS rather than by reasoning, over every daemon-reachable
+    // `par2repair` entry that starts a solve - the disk driver's
+    // entries and the mapped driver's, five production call sites. The
+    // answer is NO, and these two are why:
+    //
+    //   - `get::settle::noset`, the arm for a post whose NZB named no
+    //     PAR2 set. It calls
+    //     `PacketCatalog::repair_present_or_renamed_sets` - a whole
+    //     directory of sets repaired from disk with nothing published
+    //     and nothing polled.
+    //   - the MAPPED in-stream driver: `repair::try_mapped_repair`,
+    //     which calls `repair_mapped_catalog_resumed` and so reaches
+    //     the same `Reconstructor` through `new_with_path` with a
+    //     default control. It HAS a `SideCancel` in scope for its
+    //     recovery fetches and hands the engine nothing.
+    //
+    // (`unpack::extract_local` also passes nothing and does not count:
+    // it is `nzbfast extract`, a person at a terminal, never the
+    // daemon.) The full census lives on
+    // `par2repair::set_unattended_unstructured_ceiling`; either of the
+    // two above growing a control is the event that makes this line
+    // deletable, and that lane owes the census again rather than
+    // trusting this comment.
+    //
+    // Pinned both ways: `par2repair::inline_tests::
+    // a_controlled_caller_is_exempt_from_the_unattended_ceiling` drives
+    // the exemption and the refusal at the same m, and
+    // `nzbfast_core::repairprog::tests::
+    // the_handle_the_daemon_registers_builds_an_attended_control` plus
+    // `nzbfast_unpack::unpack::nested_repair_cancel_tests::
+    // the_ladders_handle_builds_an_attended_control` pin that the
+    // handles the daemon actually registers are the attended shape.
+    nzbkit::par2repair::set_unattended_unstructured_ceiling(nzbkit::par2repair::MAX_REPAIR_DIM);
     // One holds ledger per daemon process, so the two pipelines a queue
     // hand-over keeps alive share one holds cap (TODO 219 follow-up).
     // `NZBFAST_HOLDS_LEDGER=0` leaves it uninstalled: each pipeline then

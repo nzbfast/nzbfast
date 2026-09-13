@@ -475,7 +475,7 @@ impl RemuxSession {
             // checks against the source length, so one 512 MiB sample used
             // to allocate a payload-sized input buffer plus another
             // payload-sized copy in the fMP4 writer - times sixteen
-            // concurrent remux workers (Codex sweep 12 Aug F3).
+            // concurrent remux workers (review sweep 12 Aug F3).
             if s.size as usize > FRAG_MAX_BYTES {
                 return Err(RemuxError::Malformed(
                     "sample table",

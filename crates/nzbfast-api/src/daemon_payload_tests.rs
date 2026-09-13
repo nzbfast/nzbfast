@@ -22,6 +22,13 @@ mod notice_tests;
 #[path = "daemon_payload_tests/unpack_progress_tests.rs"]
 mod unpack_progress_tests;
 
+// The repair's four phases and its fraction on the queue row - the
+// sibling of the unpack counters above, one stage earlier in the tail
+// (12 Sep 2026, claim `daemon-infold-progress-cancel`). Same #[path]
+// requirement and the same size-gate reason.
+#[path = "daemon_payload_tests/repair_progress_tests.rs"]
+mod repair_progress_tests;
+
 // The idle-server early start's banked bytes on the queue row and its
 // rate in the header, out for the ceiling and carrying the same #[path]
 // requirement.

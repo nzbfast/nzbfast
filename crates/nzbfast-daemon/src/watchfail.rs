@@ -40,7 +40,7 @@ pub const UNSAVED: &str = "queued, but the queue record could not be saved";
 pub const KEPT: &str = "queued, but the file could not be removed";
 
 /// Opaque, stable identity for one tracked watch-folder rejection
-/// (Codex sweep 2, 3 Aug L1).
+/// (review sweep 2, 3 Aug L1).
 ///
 /// The queue payload names these rows by basename, which is not an
 /// identity: change the watch directory and a rejected `same.nzb` can

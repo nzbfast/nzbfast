@@ -1,6 +1,6 @@
 //! The mount table as a SECOND route from a path to its block device.
 //!
-//! [`super::rotational`] indexes `/sys/dev/block` with the filesystem's
+//! [`super::probe::rotational`] indexes `/sys/dev/block` with the filesystem's
 //! own `st_dev`, and a whole family of filesystems has no `st_dev` to
 //! index with: btrfs, ZFS and overlayfs allocate an ANONYMOUS block
 //! device (`major 0`), so the sysfs path does not exist and the probe
@@ -31,7 +31,7 @@
 //!   the `stat` route resolves it. Both routes are needed, neither is
 //!   sufficient.
 //!
-//! Everything here fails CLOSED, per the rule at [`super::rotational`]:
+//! Everything here fails CLOSED, per the rule at [`super::probe::rotational`]:
 //! any step that cannot answer returns `None`, which is
 //! `Storage::Unknown`, which selects no aggressive arm anywhere.
 
@@ -171,7 +171,7 @@ fn rotational_of_source(source: &Path) -> Option<bool> {
     let members = btrfs_members(&name).unwrap_or_else(|| vec![name]);
     let mut seen = None;
     for m in members {
-        match super::sysfs_rotational(Path::new("/sys/class/block").join(m)) {
+        match super::probe::sysfs_rotational(Path::new("/sys/class/block").join(m)) {
             Some(true) => return Some(true),
             Some(false) => seen = Some(false),
             None => {}
@@ -206,7 +206,7 @@ fn block_name_for_source(source: &Path) -> Option<String> {
     {
         let rdev = m.rdev();
         // libc::major/minor are safe fns on Linux - see the same note at
-        // `disk::rotational`, which an `unsafe` block here would trip.
+        // `disk::probe::rotational`, which an `unsafe` block here would trip.
         let (major, minor) = (libc::major(rdev), libc::minor(rdev));
         if let Ok(p) = std::fs::canonicalize(format!("/sys/dev/block/{major}:{minor}"))
             && let Some(name) = p.file_name().and_then(|n| n.to_str())

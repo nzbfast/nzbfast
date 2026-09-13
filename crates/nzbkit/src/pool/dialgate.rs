@@ -200,7 +200,7 @@ impl DialGate {
     /// the account is used from, not how many sockets it grants, so
     /// serialising dials would answer a question it never asked - the
     /// same distinction `AuthState::note_cap` already draws, for the
-    /// reason recorded there (Codex sweep 5, M9).
+    /// reason recorded there (review sweep 5, M9).
     pub(super) fn arm(&self) {
         self.capped.store(true, Ordering::Release);
     }

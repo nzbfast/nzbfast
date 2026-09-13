@@ -25,7 +25,7 @@ use tracing::{info, warn};
 /// extracted payload for an archive set, or verified/repaired data files
 /// when the set is bare files under PAR2 with nothing to unpack.
 pub fn extract_local(dir: &std::path::Path, password: Option<&str>) -> Result<bool> {
-    use nzbkit::par2repair::{RepairStatus, repair_dir};
+    use nzbkit::par2repair::{CallerSite, RepairStatus, RetentionCaller, repair_dir_as};
 
     // --- Phase 1: PAR2 repair (only if a set is present) ---------------
     // Detect the set by `.par2` name OR the `PAR2\0PKT` packet magic:
@@ -37,7 +37,7 @@ pub fn extract_local(dir: &std::path::Path, password: Option<&str>) -> Result<bo
     let has_par2 = dir_has_par2(dir)?;
     let mut par2_ok = true;
     if has_par2 {
-        match repair_dir(dir) {
+        match repair_dir_as(dir, RetentionCaller::new(CallerSite::OfflineExtraction)) {
             Ok(RepairStatus::NoDamage) => info!(target: "par2", "no damage, set verifies ✔"),
             Ok(RepairStatus::Repaired(r)) => {
                 info!(
@@ -215,7 +215,11 @@ pub(crate) fn extract_nested(
     password: Option<&str>,
     depth: usize,
 ) -> Result<NestOutcome> {
-    extract_nested_why(dir, password, depth, &mut None)
+    // NO CANCEL HANDLE, and there is none to pass: the two callers of
+    // this shape are `extract_local` - the `nzbfast extract` CLI
+    // command, where nobody is holding a queue row - and the tests. The
+    // daemon enters at [`extract_nested_why`], which takes one.
+    extract_nested_why(dir, password, depth, &mut None, None)
 }
 
 /// [`extract_nested`] carrying the pass's own reason back out, on the
@@ -241,6 +245,21 @@ pub fn extract_nested_why(
     password: Option<&str>,
     depth: usize,
     why: &mut Option<String>,
+    // The owner's recovery-work handle, or `None` on a CLI run. It
+    // reaches ONE thing down this ladder - each level's PAR2 pass, which
+    // is the only stretch of a nested extraction that can run for half
+    // an hour with nothing to show - and it is threaded rather than
+    // armed on a thread-local because the descent is explicit and
+    // greppable either way, while a thread-local would be silently wrong
+    // the day any arm of this ladder moves to a pool. See
+    // [`nested_par2_repair`].
+    //
+    // NAMED THROUGH `streamhub` AND NOT THROUGH `repair`, which
+    // re-exports the same type: `repair` already depends on `unpack`,
+    // so the convenient spelling would put a CYCLE in the top-level
+    // module graph and `tools/modgraph.py` refuses one (it caught this
+    // exact edge). `streamhub` is the core layer, which is below both.
+    cancel: Option<&crate::streamhub::SideCancel>,
 ) -> Result<NestOutcome> {
     extract_nested_capped(
         dir,
@@ -248,6 +267,7 @@ pub fn extract_nested_why(
         depth,
         nzbkit::extract::nested_depth_cap(),
         why,
+        cancel,
     )
 }
 
@@ -268,6 +288,7 @@ fn extract_nested_capped(
     depth: usize,
     cap: usize,
     why: &mut Option<String>,
+    cancel: Option<&crate::streamhub::SideCancel>,
 ) -> Result<NestOutcome> {
     use nzbkit::extract::release_stem;
     // Nested-level PAR2 repair - the per-level twin of extract_local's
@@ -282,8 +303,19 @@ fn extract_nested_capped(
     // that set was settled by the stream/top-level pass. Runs before
     // the `before` snapshot so recreated/adopted files count as this
     // level's input, never as freshly-produced nested archives.
-    if depth > 0 && dir_has_nested_extractable(dir)? {
-        nested_par2_repair(dir);
+    if depth > 0
+        && dir_has_nested_extractable(dir)?
+        && nested_par2_repair(dir, depth as u32, cancel) == NestedRepair::Cancelled
+    {
+        // A CANCELLED REPAIR MUST NOT BE FOLLOWED BY THIS LEVEL'S
+        // EXTRACTION. The whole reason the pass runs first is that the
+        // cure is packed beside the disease; running the attempt over a
+        // layer whose repair was cut halfway would extract from bytes
+        // nobody proved, and report the level's failure as the
+        // archive's. The job is being deleted, so `Failed` is the
+        // honest outcome and the reason travels with it.
+        why.get_or_insert_with(|| "the job was cancelled".to_string());
+        return Ok(NestOutcome::Failed);
     }
     let before = snapshot_recursive(dir)?;
     // The cap this level's CHILDREN get. Only COMPRESSING layers count
@@ -313,7 +345,7 @@ fn extract_nested_capped(
     // final payload (.cbr, .cb7) is RAR magic without RAR grammar too,
     // but it is the download, not an outer volume - counting it here
     // made an unrelated comic beside the set suppress recursion into a
-    // genuinely nested extensionless RAR (Codex sweep 13 Aug U3). Same
+    // genuinely nested extensionless RAR (review sweep 13 Aug U3). Same
     // exclusion its sibling censuses already apply.
     let pre_obfuscated = before.iter().any(|p| {
         !looks_like_named_rar(p) && nzbkit::extract::archive_sniff_eligible(p) && rar_magic(p)
@@ -659,6 +691,7 @@ fn extract_nested_capped(
                 depth + 1,
                 child_cap,
                 why,
+                cancel,
             )?);
             if lift_nest_outputs(&sub, dir) {
                 let _ = std::fs::remove_dir_all(&sub);
@@ -682,6 +715,7 @@ fn extract_nested_capped(
                 depth + 1,
                 child_cap,
                 why,
+                cancel,
             )?);
         }
     }
@@ -810,7 +844,18 @@ pub(crate) fn lift_scratch_into(
             continue;
         };
         let target = dir.join(&name);
-        if e.file_type().is_ok_and(|t| t.is_dir()) && target.is_dir() {
+        // `symlink_metadata`, not `target.is_dir()`, for the same reason
+        // the file branch below gives: `is_dir()` FOLLOWS symlinks, so a
+        // symlinked directory sitting at the destination name made this
+        // branch recurse THROUGH the link and publish extracted payload
+        // outside the job folder, while the file branch two lines down
+        // was already refusing exactly that. An archive member can be a
+        // symlink, so the name at `target` is not always ours. A link
+        // here is an occupied name and takes the rename-aside ladder.
+        let target_is_real_dir = target
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_dir());
+        if e.file_type().is_ok_and(|t| t.is_dir()) && target_is_real_dir {
             clean &= lift_scratch_into(&p, &target, prefix, what);
             // Only an emptied source dir goes; a stranded entry keeps it.
             clean &= std::fs::remove_dir(&p).is_ok();
@@ -1080,7 +1125,7 @@ pub(crate) fn extract_one_level_at(
     // the caller's: replacing it starved every later container of the
     // password the user actually supplied, so a level with one
     // harvest-unlockable archive left the OTHER one packed with its
-    // correct password in hand (Codex sweep 13 Aug U2). The arms with
+    // correct password in hand (review sweep 13 Aug U2). The arms with
     // per-container candidate sweeps (named RAR groups, zip, 7z) take
     // the ORIGINAL password and re-resolve per container - their sweeps
     // lead with it and re-harvest this same directory. Only the arms
@@ -1136,7 +1181,7 @@ pub(crate) fn extract_one_level_at(
     // The verdicts of the arms that can NOT own a split container's
     // head (SFX, 7z, zip, tar, plain split). Step 8's rescue replaces
     // the RAR arms' verdict on the container it joined, not the level's:
-    // a broken `subs.7z` beside a rescued split RAR stayed broken (Codex
+    // a broken `subs.7z` beside a rescued split RAR stayed broken (review
     // F-01, 22 Aug 2026), so these fold back in after the rescue.
     let mut others: Option<NestOutcome> = None;
     let claim = |o: NestOutcome, out: &mut Option<NestOutcome>| {
@@ -1646,6 +1691,22 @@ pub(crate) fn dir_has_nested_extractable(dir: &std::path::Path) -> Result<bool> 
     }))
 }
 
+/// What a nested level's PAR2 pass ended as, from the ONE angle its
+/// caller has to act on.
+///
+/// Not a verdict about the sets - those are logged per set below, and
+/// the level's real verdict is the extraction attempt that follows.
+/// This says only whether the level may still HAVE that attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NestedRepair {
+    /// The pass ran to its end (repaired, clean, unrepairable or
+    /// errored - all four leave the level to the extractor).
+    Ran,
+    /// The user called the job off inside a repair. NOT a failed set:
+    /// see the arm that builds it.
+    Cancelled,
+}
+
 /// Run PAR2 repair over the recovery sets a nested layer carries, before
 /// its extraction attempt. Only sets whose data files are actually in
 /// `dir` run (repair_present_sets): the downloaded set's own index -
@@ -1654,15 +1715,74 @@ pub(crate) fn dir_has_nested_extractable(dir: &std::path::Path) -> Result<bool> 
 /// re-verifies or resurrects the outer set. The extraction attempt that
 /// follows is the level's verdict; an unrepairable set still gets its
 /// .rev and recovery-record chances in extract_one_level.
-pub(crate) fn nested_par2_repair(dir: &std::path::Path) {
-    use nzbkit::par2repair::{RepairStatus, repair_present_sets};
-    let results = match repair_present_sets(dir) {
+///
+/// # It reports and it stops, since 12 Sep 2026
+///
+/// `cancel` is the owner's [`crate::streamhub::SideCancel`] - the same
+/// handle `repair::nativepass` and `get::latesets` build their controls
+/// from, and the one the delete arms already raise through
+/// `postproc::cancel_tail_fetches`. `None` is a CLI run
+/// (`extract_local`) and builds an INERT control, which is the call
+/// this function made before that date, branch for branch.
+///
+/// This was the LAST daemon repair path reporting nothing, and it is
+/// why `serve/mod.rs`'s unattended ceiling named this function by name.
+/// It no longer does - that call survives for two other paths, and the
+/// census naming them is at the call itself and on
+/// `par2repair::set_unattended_unstructured_ceiling`.
+///
+/// THE CONTROL IS SUPPLIED PER SET, not once: this pass repairs every
+/// present set in the directory and the loop is the engine's, so the
+/// per-set reporting window `get::latesets` opens with
+/// `RepairProgress::enter()` is opened here by the supplier the engine
+/// calls at each set's start. See
+/// [`nzbkit::par2repair::repair_present_sets_controlled_as`].
+///
+/// WHAT THE DASHBOARD DOES NOT DRAW, stated because it is the one thing
+/// this is not. The progress lands on `SideCancel::repair_progress()`
+/// and `mode=queue`'s `repair` object publishes it, the same as for the
+/// other two controlled paths - but those run under the `repairing`
+/// activity word and this one runs inside the UNPACK tail, where the
+/// word is `extracting` and `web/dashboard.html`'s `case 'repairing'`
+/// is what draws the four phases. So an API client sees a nested
+/// layer's repair and the page currently does not. Making the word
+/// follow the pass means toggling `activity` inside a recursion that
+/// interleaves repair and extraction at every level: a change about the
+/// activity vocabulary rather than about the control, and deliberately
+/// not made here.
+pub(crate) fn nested_par2_repair(
+    dir: &std::path::Path,
+    depth: u32,
+    cancel: Option<&crate::streamhub::SideCancel>,
+) -> NestedRepair {
+    use nzbkit::par2repair::{
+        CallerSite, RepairStatus, RetentionCaller, repair_present_sets_controlled_as,
+    };
+    // The DEPTH travels with the label: an outer archive can be clean
+    // while the set inside it is not, so a nested attempt is its own
+    // population for the retention admission census and must never be
+    // pooled with the outer one.
+    let caller = RetentionCaller::new(CallerSite::NestedExtraction).at_depth(depth);
+    // The DIRECTORY's reporting window. Its Drop is what says "no repair
+    // is inside the engine" once the ladder moves on to the extraction
+    // attempt, on the failure paths too.
+    let _run = cancel.map(|c| c.repair_progress().enter());
+    // ...and the per-SET one, opened by the engine at each set's start.
+    let per_set = || match cancel {
+        Some(c) => {
+            c.repair_progress().restart();
+            c.repair_control()
+        }
+        None => nzbkit::par2repair::RepairControl::default(),
+    };
+    let results = match repair_present_sets_controlled_as(dir, caller, &per_set) {
         Ok(r) => r,
         Err(e) => {
             warn!(target: "par2", "nested set: scan error - {e}");
-            return;
+            return NestedRepair::Ran;
         }
     };
+    let mut cancelled = false;
     for r in results {
         match r.status {
             Ok(RepairStatus::NoDamage) => {
@@ -1688,8 +1808,28 @@ pub(crate) fn nested_par2_repair(dir: &std::path::Path) {
                     nzbkit::par2repair::published_clause(&partial)
                 )
             }
+            // THE USER'S CANCEL IS NOT AN UNREADABLE SET, and this arm
+            // sits ahead of the one below for the same reason
+            // `NativeVerdict::Cancelled` and `latesets`' `break` do:
+            // that arm would report a set that is perfectly fine as a
+            // repair error, over a job that is being deleted. The
+            // engine stops the walk on it, so this is the last outcome
+            // in the vec.
+            Err(nzbkit::par2repair::RepairError::Cancelled) => {
+                cancelled = true;
+                info!(
+                    target: "par2",
+                    "nested set: repair stopped - the job was cancelled (nothing was \
+                     renamed in, and any block already patched is one that was missing)"
+                );
+            }
             Err(e) => warn!(target: "par2", "nested set: repair error - {e}"),
         }
+    }
+    if cancelled {
+        NestedRepair::Cancelled
+    } else {
+        NestedRepair::Ran
     }
 }
 
@@ -2474,6 +2614,10 @@ mod split_set_sweep_tests;
 #[cfg(test)]
 #[path = "unpack/nested_depth_tests.rs"]
 mod nested_depth_tests;
+
+#[cfg(test)]
+#[path = "unpack/nested_repair_cancel_tests.rs"]
+mod nested_repair_cancel_tests;
 
 /// The `<prefix>-<n>-<name>` collision ladders, on a member name already
 /// AT the component cap.

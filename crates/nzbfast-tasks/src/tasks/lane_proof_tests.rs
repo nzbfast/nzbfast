@@ -1489,7 +1489,7 @@ fn the_confirm_grab_refuses_a_link_pointing_at_the_service_next_door() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex M6: the dashboard nests the confirm lane under the
+/// Review M6: the dashboard nests the confirm lane under the
 /// correlation switch, so correlation OFF greys every confirm control
 /// out - but the worker used to gate on its own flag alone and kept
 /// spending up to the daily confirm budget in indexer lookups on a lane the

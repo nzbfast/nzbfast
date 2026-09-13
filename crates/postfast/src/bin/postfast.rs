@@ -103,6 +103,8 @@ options, all optional:
   --nfo, --sfv       post a companion metadata file beside the payload
   --verify           re-download the post and compare hashes
   --connections <n>  connections the verify pool opens (default 4)
+  --optimal-parse    pack the RAR 5 archives with the cost-based parse:
+                     smaller volumes, several times the creation CPU
 ";
 
 fn run_gen(profile_path: &Path, out: &Path) -> u8 {

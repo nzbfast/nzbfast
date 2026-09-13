@@ -317,3 +317,45 @@ Note either below.
   corpus would buy a few dozen edges and carry ~360 derived blobs to do
   it. What length buys on this target is the feature space, and no
   corpus shortens that.
+
+- `rar_map/` (1 file / 25 bytes, 11 Sep 2026) - a repro, and the only
+  one here that is not the bytes libFuzzer wrote. It is named for the
+  artifact it stands in for and suffixed `-reduced`, because that
+  artifact could not usefully shrink.
+
+  - `crash-f23952f19b3ae77b1b576164f2d99592f840188a-reduced` (25 bytes) -
+    the scheduled fuzz-smoke red of 11 Sep 2026 (run 34564492152, sha
+    `a6ed0da5`, `fuzz` job; `fuzz-arm` was green in the same run, so
+    never a platform artefact). The original artifact is 41,608 bytes
+    and `cargo fuzz tmin` took 41 bytes off it in 20,000 runs, which is
+    not tmin failing: this target derives `declared` from the input's
+    OWN length, so deleting bytes shrinks the volume the header is
+    checked against and the input stops reproducing. A header with a
+    small `head_size` reproduces in 25 bytes, and deletion alone cannot
+    walk from one to the other. So this file is CONSTRUCTED to the shape
+    the artifact had, and was checked to fire the same assertion on the
+    same line before the fix and to pass after it. Keeping the 41 KB
+    original instead would also have set this target's `max_len` to
+    41,608 - the measured trap the `nzb_parse` entry above records.
+
+    Byte 0 is the feed selector `0x00` (whole-file spans, no password,
+    volume size = the body's length), then an 8-byte RAR4 `-hp` salt and
+    one AES-128-CBC block that decrypts under the target's throwaway key
+    to a `0x7a` block with `LONG_BLOCK` set, `head_size` 11 and a
+    declared data area of 16 MiB. Its header FITS the 24-byte volume;
+    its data area ends 16 MiB past the end of it.
+
+    The finding was in the TARGET, not the mapper - half 2 asserted a
+    volume bound that belongs to `VolumeMapper::advance_to` and is not
+    on the path the half exercises. The reasoning is written out at the
+    site in `fuzz_targets/rar_map.rs`; the library's own two halves of
+    that split are pinned by
+    `rar::tests::the_encrypted_v4_parse_bounds_the_header_but_leaves_the_data_area_to_the_mapper`.
+    The ordinary-test twin over these exact bytes is
+    `fuzz_seed_corpus::the_rar_map_seed_still_carries_an_out_of_volume_cursor`.
+
+    Re-run after the correction, seeded exactly as fuzz-smoke seeds this
+    target and with this file in the corpus: 2,840,635 executions in
+    901 s at ~3,150 exec/s, cov 1,319 / ft 4,992, peak RSS 781 MB, zero
+    crashes, OOMs or timeouts. Fifteen times the 60 s the burst that
+    found it had.

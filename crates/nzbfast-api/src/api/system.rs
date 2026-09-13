@@ -558,7 +558,7 @@ fn m_notify_test(
             json!({"status": false, "error": "POST required"})
         } else {
             // From the BODY, with `&value=` kept only for callers
-            // that already had it (Codex sweep 2, 3 Aug MH1). The
+            // that already had it (review sweep 2, 3 Aug MH1). The
             // target carries a webhook token and a custom body
             // template, and a POST is not private when its
             // parameters ride the query string - reverse proxies log
@@ -1037,7 +1037,7 @@ fn m_sysbench(
     _api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
     Some({
-        // Single-flight (Codex sweep 10 Aug M14): a second tab, or a
+        // Single-flight (review sweep 10 Aug M14): a second tab, or a
         // manual run coinciding with the schedule, ran the workload
         // concurrently - the runs distorted each other's numbers and
         // doubled the compute/disk/provider traffic.

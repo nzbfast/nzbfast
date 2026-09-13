@@ -3,6 +3,42 @@ use super::{huffman, Error, Result};
 use std::io::Read;
 use std::ops::Range;
 
+/// Opt-in compression experiments; not used by production writers.
+#[cfg(feature = "ratio-lab")]
+pub mod ratio;
+// nzbfast-local change, 7 Sep 2026 - binary-tree match finder; see VENDORING.md.
+mod tree;
+use tree::{empty_slots, TreeMatchFinder, TREE_CANDIDATE_SLOTS, TREE_NO_MATCH};
+
+/// Entropy-block boundary choice by exact encoded cost - the default emit
+/// (nzbfast-local change, 7 Sep 2026; see VENDORING.md).
+mod boundaries;
+
+/// Ring-probe stage counters (nzbfast-local change, 8 Sep 2026; see
+/// VENDORING.md). `ratio-lab` only - `probe_stat!` compiles to nothing in
+/// a production build, so no timing arm ever pays for it.
+#[cfg(feature = "ratio-lab")]
+pub mod probe_stats;
+
+#[cfg(feature = "ratio-lab")]
+macro_rules! probe_stat {
+    ($stat:ident) => {
+        probe_stats::bump(probe_stats::Stat::$stat, 1)
+    };
+    ($stat:ident, $by:expr) => {
+        probe_stats::bump(probe_stats::Stat::$stat, $by as u64)
+    };
+}
+
+#[cfg(not(feature = "ratio-lab"))]
+macro_rules! probe_stat {
+    ($stat:ident) => {};
+    ($stat:ident, $by:expr) => {
+        let _ = $by;
+    };
+}
+
+
 pub const LEVEL_TABLE_SIZE: usize = 20;
 pub const MAIN_TABLE_SIZE: usize = 306;
 pub const DISTANCE_TABLE_SIZE_50: usize = 64;
@@ -26,9 +62,45 @@ const STREAM_FILTER_HOLD_LIMIT: usize = 8 * 1024 * 1024;
 const STREAM_MAX_PENDING_FILTERS: usize = 8192;
 const MAX_ENCODER_MATCH_OFFSET: usize = DEFAULT_DICTIONARY_SIZE;
 const MAX_ENCODER_MATCH_LENGTH: usize = 4096;
-const MAX_COMPRESSED_BLOCK_OUTPUT: usize = 4 * 1024 * 1024;
-const MAX_FILTER_BLOCK_LENGTH: usize = 0x3ffff;
-const MATCH_HASH_BUCKETS: usize = 4096;
+pub(crate) const MAX_COMPRESSED_BLOCK_OUTPUT: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_FILTER_BLOCK_LENGTH: usize = 0x3ffff;
+// nzbfast-local change, 5 Sep 2026 - flat ring match index; see VENDORING.md.
+// Bucket count is sized to the indexed span (about one bucket per `depth`
+// positions) inside these bounds; the ring depth follows the candidate
+// budget inside its own, so `EncodeOptions::new(n)` reaches exactly its n
+// newest same-hash positions for n up to MATCH_INDEX_MAX_DEPTH.
+const MATCH_INDEX_MIN_BUCKETS: usize = 1 << 10;
+const MATCH_INDEX_MAX_BUCKETS: usize = 1 << 16;
+const MATCH_INDEX_MIN_DEPTH: usize = 4;
+/// At most this many tag bits per ring slot (see `MatchIndex::tag_bits`).
+const MATCH_TAG_BITS_MAX: u32 = 8;
+/// The long-match table (see `MatchIndex::long`): one position per entry,
+/// keyed by a hash of the 32 bytes at an ANCHOR position, an anchor being
+/// a position whose four-byte hash has these low bits clear (one in 32).
+const LONG_INDEX_MIN_ENTRIES: usize = 1 << 10;
+const LONG_INDEX_MAX_ENTRIES: usize = 1 << 20;
+const LONG_ANCHOR_MASK: u32 = 31;
+const LONG_ANCHOR_SPACING: usize = 32;
+/// A long-table candidate must match at least this far to be considered;
+/// shorter matches are the ring's business.
+const LONG_MATCH_MIN_LENGTH: usize = 32;
+const LONG_HASH_BYTES: usize = 32;
+const MATCH_INDEX_MAX_DEPTH: usize = 64;
+// A match at least this long ends the candidate walk: the remaining
+// candidates can only trade a few bits of distance against the cost of
+// visiting them (7-Zip's `nice_len`, zstd's `targetLength`).
+const MATCH_NICE_LENGTH: usize = 64;
+// nzbfast-local change, 5 Sep 2026 - literal-run acceleration; see VENDORING.md.
+// Once a run of literals has gone LITERAL_SKIP_STRENGTH-scaled bytes without a
+// match, the tokenizer probes every 2nd, then 3rd, ... position instead of
+// every one (the LZ4 / zstd fast-level rule), capped at LITERAL_SKIP_MAX.
+// Every position is still INSERTED into the index, so a later match can still
+// point back into a skipped run; only the probe at the skipped position is
+// saved. Compressible data almost never runs 32 literals without a match, so
+// this does not fire there; incompressible data fires it at once and stops
+// paying the candidate walk on every byte.
+const LITERAL_SKIP_STRENGTH: u32 = 5;
+const LITERAL_SKIP_MAX: usize = 16;
 const MAX_MATCH_CANDIDATES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,7 +398,7 @@ pub fn encode_table_lengths_with_bit_count(
 
     let level_tokens = encode_table_level_tokens(&flattened);
     let level_lengths = level_code_lengths_for_tokens(&level_tokens);
-    let level_table = HuffmanTable::from_lengths(&level_lengths)?;
+    let level_table = EncoderTable::from_lengths(&level_lengths)?;
     let mut writer = BitWriter::new();
     write_level_lengths(&mut writer, &level_lengths);
     for token in level_tokens {
@@ -450,17 +522,11 @@ pub fn encode_literal_only(data: &[u8], algorithm_version: u8) -> Result<Vec<u8>
         }
     }
 
-    let table = HuffmanTable::from_lengths(&lengths.main)?;
+    let table = EncoderTable::from_lengths(&lengths.main)?;
     let (table_data, table_bits) =
         encode_table_lengths_with_bit_count(&lengths, algorithm_version)?;
-    let mut writer = BitWriter {
-        bytes: table_data,
-        bit_pos: table_bits,
-    };
-    for &byte in data {
-        let (code, len) = table.code_for_symbol(byte as usize)?;
-        writer.write_bits(usize::from(code), usize::from(len));
-    }
+    let mut writer = BitWriter::continuing(table_data, table_bits);
+    write_literal_codes(&mut writer, &table, data)?;
     let payload_bits = writer.bit_pos;
     encode_compressed_block(&writer.finish(), payload_bits, true, true)
 }
@@ -476,6 +542,44 @@ pub struct EncodeOptions {
     pub lazy_matching: bool,
     pub lazy_lookahead: usize,
     pub max_match_distance: usize,
+    /// Parse by least total estimated bits over a window of positions
+    /// rather than greedily with a one-position lazy re-probe: see
+    /// [`walk_tokens_optimal`]. The level ABOVE `lazy_matching`, which
+    /// stays exactly what it was and is what this leaves unset.
+    /// (nzbfast-local change, 7 Sep 2026; see VENDORING.md.)
+    pub optimal_parse: bool,
+    /// Cut the entropy blocks where the exact encoded cost says to cut
+    /// (`codec::rar50::boundaries`) instead of every [`ENTROPY_BLOCK_BYTES`]
+    /// of input. Independent of the parse above, which fixes the tokens
+    /// this then prices. ON by default since 7 Sep 2026: measured -0.76%
+    /// on the mixed corpus and -1.1 to -1.3% on member sets for a few
+    /// percent of encode CPU. Off restores the fixed cut byte for byte,
+    /// which is what a fixture pinning archive bytes wants.
+    /// (nzbfast-local change, 7 Sep 2026; see VENDORING.md.)
+    pub adaptive_entropy_blocks: bool,
+    /// Price each 4 MiB region of a member BOTH ways - as one tokenizer
+    /// block, and as [`TOKENIZER_SHORT_HORIZON`]-byte tokenizer blocks -
+    /// and keep whichever encoded smaller. OFF by default: it encodes
+    /// every region twice. See [`encode_member_region`].
+    /// (nzbfast-local change, 7 Sep 2026; see VENDORING.md.)
+    pub tokenizer_horizon_choice: bool,
+    /// Total encoder working-memory allowance in bytes, or `None` for the
+    /// host-sized defaults below ([`ENCODE_WAVE_MEMORY_BUDGET_PER_THREAD`]
+    /// per pool thread with a [`ENCODE_WAVE_MEMORY_BUDGET_MIN`] floor, and
+    /// a flat [`TREE_HINT_BUDGET_BYTES`] of match hints).
+    ///
+    /// Those defaults are sized for a desktop and are the reason a caller
+    /// on a small target cannot bound this encoder: the floor ALONE is a
+    /// gibibyte, which is the whole address space a 32-bit process can
+    /// budget for ([`crate::Rar50WritePolicy`]). Set, the allowance is
+    /// split between the two - half to the block wave, a quarter to the
+    /// hints - and each is still floored at one block, so a budget smaller
+    /// than one block in flight encodes serially rather than failing.
+    ///
+    /// It is a MEMORY decision and never a ratio one: both budgets choose
+    /// how many blocks are in flight, and the same bytes come out at any
+    /// width. (nzbfast-local change, 8 Sep 2026; see VENDORING.md.)
+    pub working_memory: Option<usize>,
 }
 
 impl EncodeOptions {
@@ -485,7 +589,19 @@ impl EncodeOptions {
             lazy_matching: false,
             lazy_lookahead: 1,
             max_match_distance: MAX_ENCODER_MATCH_OFFSET,
+            optimal_parse: false,
+            adaptive_entropy_blocks: true,
+            tokenizer_horizon_choice: false,
+            working_memory: None,
         }
+    }
+
+    /// Bounds the encoder's working memory; see
+    /// [`EncodeOptions::working_memory`]. `None` restores the host-sized
+    /// defaults. (nzbfast-local change, 8 Sep 2026; see VENDORING.md.)
+    pub const fn with_working_memory(mut self, bytes: Option<usize>) -> Self {
+        self.working_memory = bytes;
+        self
     }
 
     pub const fn with_lazy_matching(mut self, enabled: bool) -> Self {
@@ -500,6 +616,26 @@ impl EncodeOptions {
 
     pub const fn with_max_match_distance(mut self, distance: usize) -> Self {
         self.max_match_distance = distance;
+        self
+    }
+
+    /// Turns on the cost-based parse; see [`EncodeOptions::optimal_parse`].
+    pub const fn with_optimal_parse(mut self, enabled: bool) -> Self {
+        self.optimal_parse = enabled;
+        self
+    }
+
+    /// Chooses how the entropy blocks are cut; see
+    /// [`EncodeOptions::adaptive_entropy_blocks`].
+    pub const fn with_adaptive_entropy_blocks(mut self, enabled: bool) -> Self {
+        self.adaptive_entropy_blocks = enabled;
+        self
+    }
+
+    /// Turns on the per-region tokenizer horizon choice; see
+    /// [`EncodeOptions::tokenizer_horizon_choice`].
+    pub const fn with_tokenizer_horizon_choice(mut self, enabled: bool) -> Self {
+        self.tokenizer_horizon_choice = enabled;
         self
     }
 }
@@ -578,6 +714,43 @@ impl Rar50FilterSpec {
     }
 }
 
+/// The member transformed by its filters exactly as [`filtered_lz_blocks`]
+/// transforms it - per 262,143-byte chunk, one record per chunk and filter,
+/// executable filters keyed by absolute offset, delta state reset at every
+/// chunk - but returned whole, records at their absolute offsets, for the
+/// pooled encoder to cut into its own blocks. (nzbfast-local change, 7 Sep
+/// 2026; see VENDORING.md.)
+fn filtered_lz_member_records(
+    data: &[u8],
+    filters: &[Rar50FilterSpec],
+) -> Result<(Vec<u8>, Vec<EncodeFilter>)> {
+    let filters = normalized_filter_specs(data.len(), filters)?;
+    let mut transformed = data.to_vec();
+    let mut records = Vec::new();
+    let mut chunk_start = 0usize;
+    while chunk_start < data.len() {
+        let chunk_end = (chunk_start + MAX_FILTER_BLOCK_LENGTH).min(data.len());
+        for filter in &filters {
+            let start = filter.range.start.max(chunk_start);
+            let end = filter.range.end.min(chunk_end);
+            if start >= end {
+                continue;
+            }
+            let (filter_type, channels) =
+                encode_filter_data(filter.kind, &mut transformed[start..end], start)?;
+            records.push(EncodeFilter {
+                offset: start,
+                length: end - start,
+                filter_type,
+                channels,
+            });
+        }
+        chunk_start = chunk_end;
+    }
+    Ok((transformed, records))
+}
+
+#[cfg(any(test, feature = "ratio-lab"))]
 fn filtered_lz_member(
     data: &[u8],
     filters: &[Rar50FilterSpec],
@@ -642,6 +815,7 @@ fn encode_filter_data(
 /// block. That window holds the FILTERED chunks, which is what the decoder
 /// keeps, so the caller can assign it straight onto the encoder history.
 /// Its trim rule must stay identical to `Unpack50Encoder::remember`.
+#[cfg(any(test, feature = "ratio-lab"))]
 fn filtered_lz_blocks(
     data: &[u8],
     filters: &[Rar50FilterSpec],
@@ -732,51 +906,1223 @@ fn encode_lz_member_inner(
     algorithm_version: u8,
     initial_filters: &[EncodeFilter],
     options: EncodeOptions,
-    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> Result<Vec<u8>> {
-    if data.len() > MAX_COMPRESSED_BLOCK_OUTPUT && initial_filters.is_empty() {
-        let mut out = Vec::new();
-        let mut block_history =
-            history[history.len().saturating_sub(options.max_match_distance)..].to_vec();
-        let mut chunks = data.chunks(MAX_COMPRESSED_BLOCK_OUTPUT).peekable();
-        let mut completed = 0usize;
-        while let Some(chunk) = chunks.next() {
-            let is_last = chunks.peek().is_none();
-            let mut chunk_progress = |position: usize| {
-                progress
-                    .as_deref_mut()
-                    .is_none_or(|report| report(completed.saturating_add(position)))
-            };
-            out.extend(encode_lz_block(
-                chunk,
-                &block_history,
-                algorithm_version,
-                &[],
-                options,
-                is_last,
-                Some(&mut chunk_progress),
-            )?);
-            completed = completed.saturating_add(chunk.len());
-            block_history.extend_from_slice(chunk);
-            let keep_from = block_history
-                .len()
-                .saturating_sub(options.max_match_distance);
-            if keep_from != 0 {
-                block_history.drain(..keep_from);
-            }
-        }
-        return Ok(out);
-    }
-
-    encode_lz_block(
+    encode_lz_member_inner_pooled(
         data,
         history,
         algorithm_version,
         initial_filters,
         options,
-        true,
         progress,
+        &EncoderScratchPool::new(),
     )
+}
+
+/// [`encode_lz_member_with_history_and_options`] with the encoder scratch
+/// taken from `scratch` and returned to it: a writer resolving many
+/// members hands one pool to all of them, so a set of small members does
+/// not fault a fresh 40 MiB of index and token buffers in per member
+/// (200 members of 2.7 MB: 8 s of system time on an 8-vCPU guest, most
+/// of the wall). (nzbfast-local change, 6 Sep 2026; see VENDORING.md.)
+pub(crate) fn encode_lz_member_pooled(
+    data: &[u8],
+    history: &[u8],
+    algorithm_version: u8,
+    options: EncodeOptions,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+    scratch: &EncoderScratchPool,
+) -> Result<Vec<u8>> {
+    encode_lz_member_inner_pooled(
+        data,
+        history,
+        algorithm_version,
+        &[],
+        options,
+        progress,
+        scratch,
+    )
+}
+
+fn encode_lz_member_inner_pooled(
+    data: &[u8],
+    history: &[u8],
+    algorithm_version: u8,
+    initial_filters: &[EncodeFilter],
+    options: EncodeOptions,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+    scratch: &EncoderScratchPool,
+) -> Result<Vec<u8>> {
+    // `initial_filters` are the member's filter records at their ABSOLUTE
+    // offsets in `data`; every block below takes the ones in its range and
+    // the emitter writes each at the token that reaches it, so a filtered
+    // member walks the same pooled, tree-fed path an unfiltered one does.
+    // It used to drop to a serial walk of one-filter-chunk blocks
+    // (nzbfast-local change, 7 Sep 2026; see VENDORING.md).
+    if data.len() > MAX_COMPRESSED_BLOCK_OUTPUT {
+        let wave_width = encode_block_wave_width_for_budget(
+            options.max_match_distance,
+            !history.is_empty(),
+            options.working_memory,
+        );
+        return encode_lz_member_blocks_in_waves_filtered(
+            data,
+            history,
+            initial_filters,
+            algorithm_version,
+            options,
+            progress,
+            wave_width,
+            MemberWindow::whole(),
+            scratch,
+        );
+    }
+
+    let mut owned = scratch.take();
+    // A member of one region takes the same per-region choice a longer
+    // member's regions take: the choice's WIDE arm is this single-block
+    // encode, block for block, so the switch cannot cost a byte here
+    // either.
+    let packed = if options.tokenizer_horizon_choice && data.len() > TOKENIZER_SHORT_HORIZON {
+        encode_member_region(
+            data,
+            history,
+            0..data.len(),
+            initial_filters,
+            algorithm_version,
+            options,
+            true,
+            progress,
+            &mut owned,
+            None,
+            &[],
+        )
+    } else {
+        encode_lz_block_with_scratch(
+            data,
+            history,
+            algorithm_version,
+            initial_filters,
+            options,
+            true,
+            progress,
+            &mut owned,
+        )
+    };
+    scratch.put(owned);
+    packed
+}
+
+// nzbfast-local change, 5 Sep 2026 - the blocks of one member are encoded in
+// parallel; see VENDORING.md.
+//
+// A member longer than one compressed block is cut into 4 MiB blocks whose
+// tokenizers depend on RAW INPUT only: block k sees the `max_match_distance`
+// bytes before it as history, and those bytes are the member's own input (or
+// the incoming solid history) - never a previous block's OUTPUT. So the blocks
+// are independent, and with the `parallel` feature a bounded pool tokenizes
+// and entropy-codes them concurrently, then concatenates them in order. The output is
+// byte-identical to the serial walk because each block is handed exactly the
+// history the serial walk carried into it (`member_block_history`).
+//
+// The pool is bounded by memory as well as by cores: every block in flight
+// holds its own bounded match index and token vector. Large-dictionary blocks
+// borrow ordinary member history/input; only an incoming solid-history seam
+// needs a buffer. Smaller dictionaries keep the original copy path.
+// The original estimate is retained whenever it is lower. For wide
+// dictionaries, account for the bounded index instead of charging four
+// index bytes for every byte of history. The shared 1 GiB worker budget stays
+// unchanged. Wide dictionaries can use four workers without incoming history;
+// an owned solid-history seam still narrows the pool for very wide dictionaries.
+#[cfg(feature = "parallel")]
+// The budget scales with the box: 128 MiB per pool thread, never under
+// 1 GiB. A flat 1 GiB held a 32 MiB-dictionary encode to FOUR workers on a
+// 32-core desktop (measured 5 Sep 2026: 26.5 s wall for 102 CPU-seconds on
+// the mixed 1 GiB corpus, against rar's 14.5 s for 276), because the
+// per-block estimate below is what the workers actually hold and 1 GiB
+// buys few of them.
+const ENCODE_WAVE_MEMORY_BUDGET_PER_THREAD: usize = 128 << 20;
+const ENCODE_WAVE_MEMORY_BUDGET_MIN: usize = 1 << 30;
+
+#[cfg(test)]
+fn encode_block_wave_width(dictionary: usize) -> usize {
+    encode_block_wave_width_for_history(dictionary, true)
+}
+
+fn encode_block_wave_width_for_history(dictionary: usize, incoming_history: bool) -> usize {
+    encode_block_wave_width_for_budget(dictionary, incoming_history, None)
+}
+
+/// [`encode_block_wave_width_for_history`] against an explicit working-memory
+/// allowance: `None` keeps the host-sized default below.
+/// (nzbfast-local change, 8 Sep 2026; see VENDORING.md.)
+pub(crate) fn encode_block_wave_width_for_budget(
+    dictionary: usize,
+    incoming_history: bool,
+    working_memory: Option<usize>,
+) -> usize {
+    #[cfg(feature = "parallel")]
+    {
+        // What one block in flight holds, measured rather than feared: the
+        // ring index (16 MiB at the default depth), the literal price prefix
+        // (16 MiB), the token vector (up to 32 MiB), the block's output and
+        // its input copy (4 MiB each) - 72 MiB - plus a copy of the history
+        // when the block does not borrow it: below 32 MiB dictionaries the
+        // tokenizer copies history and input into one span, and at any size
+        // an incoming solid history is copied at the seam.
+        let copied_history = if dictionary < (32 << 20) || incoming_history {
+            dictionary
+        } else {
+            0
+        };
+        let per_block = (72usize << 20).saturating_add(copied_history);
+        let threads = rayon::current_num_threads();
+        // A caller-set allowance replaces the host-sized default outright
+        // rather than capping it: the default's floor is a gibibyte, which
+        // is larger than the whole budget of the targets that set this.
+        // Half of the allowance goes here and a quarter to the tree hints.
+        let budget = match working_memory {
+            Some(bytes) => bytes / 2,
+            None => (ENCODE_WAVE_MEMORY_BUDGET_PER_THREAD.saturating_mul(threads))
+                .max(ENCODE_WAVE_MEMORY_BUDGET_MIN),
+        };
+        let by_memory = (budget / per_block).max(1);
+        threads.clamp(1, by_memory)
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = (dictionary, incoming_history, working_memory);
+        1
+    }
+}
+
+/// The history the block starting at `start` sees: the last `dictionary`
+/// bytes before it, drawn from the member's incoming history and then from
+/// `data` itself - exactly what the serial block walk carried into it.
+fn member_block_history<'a>(
+    data: &'a [u8],
+    history_tail: &'a [u8],
+    start: usize,
+    dictionary: usize,
+) -> std::borrow::Cow<'a, [u8]> {
+    if start >= dictionary {
+        std::borrow::Cow::Borrowed(&data[start - dictionary..start])
+    } else if start == 0 {
+        std::borrow::Cow::Borrowed(history_tail)
+    } else {
+        let from_history = &history_tail[history_tail.len().saturating_sub(dictionary - start)..];
+        let mut combined = Vec::with_capacity(from_history.len() + start);
+        combined.extend_from_slice(from_history);
+        combined.extend_from_slice(&data[..start]);
+        std::borrow::Cow::Owned(combined)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_member_block(
+    data: &[u8],
+    history_tail: &[u8],
+    range: Range<usize>,
+    filters: &[EncodeFilter],
+    algorithm_version: u8,
+    options: EncodeOptions,
+    is_last: bool,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+    scratch: &mut EncoderScratch,
+    anchors: Option<&MemberAnchors<'_>>,
+    tree: &[std::sync::atomic::AtomicU32],
+) -> Result<Vec<u8>> {
+    let block_filters = filters_in_block(filters, &range);
+    // Small dictionaries keep their established path; borrowing and wider
+    // pools are reserved for the large-history jobs that benefit in timings.
+    if options.max_match_distance < 32 << 20 {
+        let history =
+            member_block_history(data, history_tail, range.start, options.max_match_distance);
+        let long_seed = anchors.map(|anchors| LongSeed {
+            anchors,
+            range_start: range.start,
+        });
+        return encode_lz_block_in_span(
+            &data[range],
+            &history,
+            algorithm_version,
+            &block_filters,
+            options,
+            is_last,
+            progress,
+            scratch,
+            None,
+            long_seed,
+            tree,
+        );
+    }
+    encode_member_block_borrowed(
+        data,
+        history_tail,
+        range,
+        &block_filters,
+        algorithm_version,
+        options,
+        is_last,
+        progress,
+        scratch,
+        anchors,
+        tree,
+    )
+}
+
+/// The member's filter records that start inside `range`, as records of
+/// the block: offsets from `range.start`. The last block also takes any
+/// record starting at or past the member's end, which the emitter writes
+/// after its final token (a record like that is invalid input and only
+/// reaches here from a test of the pricing model).
+fn filters_in_block(filters: &[EncodeFilter], range: &Range<usize>) -> Vec<EncodeFilter> {
+    filters
+        .iter()
+        .filter(|filter| filter.offset >= range.start && filter.offset < range.end)
+        .map(|filter| EncodeFilter {
+            offset: filter.offset - range.start,
+            ..*filter
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_member_block_borrowed(
+    data: &[u8],
+    history_tail: &[u8],
+    range: Range<usize>,
+    filters: &[EncodeFilter],
+    algorithm_version: u8,
+    options: EncodeOptions,
+    is_last: bool,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+    scratch: &mut EncoderScratch,
+    anchors: Option<&MemberAnchors<'_>>,
+    tree: &[std::sync::atomic::AtomicU32],
+) -> Result<Vec<u8>> {
+    let dictionary = options.max_match_distance;
+    // Own only the seam between incoming solid history and this member.
+    // Otherwise history and input are one contiguous borrowed member slice.
+    let span = if range.start >= dictionary || history_tail.is_empty() {
+        std::borrow::Cow::Borrowed(&data[range.start.saturating_sub(dictionary)..range.end])
+    } else {
+        let tail = &history_tail[history_tail.len().saturating_sub(dictionary - range.start)..];
+        let mut span = Vec::with_capacity(tail.len() + range.end);
+        span.extend_from_slice(tail);
+        span.extend_from_slice(&data[..range.end]);
+        std::borrow::Cow::Owned(span)
+    };
+    let history_len = span.len() - range.len();
+    let (history, block) = span.split_at(history_len);
+    let long_seed = anchors.map(|anchors| LongSeed {
+        anchors,
+        range_start: range.start,
+    });
+    encode_lz_block_in_span(
+        block,
+        history,
+        algorithm_version,
+        filters,
+        options,
+        is_last,
+        progress,
+        scratch,
+        Some(&span),
+        long_seed,
+        tree,
+    )
+}
+
+/// The tokenizer horizon the SHORT arm of the per-region choice encodes
+/// at: a quarter of the 4 MiB region, which is the arm the review's lab
+/// measured as `opt-horizon-balanced` (`research/rar5-ratio-lab/balanced`).
+/// Narrower arms (256 KiB, and the seven-way power-of-two screen down to
+/// 64 KiB) buy a further 0.03 to 0.07% for two to five times this arm's
+/// CPU, which is the wrong end of the trade for a mode anyone runs.
+/// (nzbfast-local change, 7 Sep 2026; see VENDORING.md.)
+const TOKENIZER_SHORT_HORIZON: usize = 1 << 20;
+
+/// One 4 MiB REGION of a member, encoded the way `options` asks.
+///
+/// By default a region is one tokenizer block and this is exactly
+/// [`encode_member_block`]. With
+/// [`EncodeOptions::tokenizer_horizon_choice`] the region is encoded a
+/// SECOND time as [`TOKENIZER_SHORT_HORIZON`]-byte tokenizer blocks and
+/// the smaller of the two encodings is kept, so the switch can never
+/// cost a byte on any shape - only CPU, since it encodes every region
+/// twice.
+///
+/// Why the two arms are comparable, and why the choices compose into one
+/// member rather than into a concatenation of archives:
+///
+/// - **The raw dictionary history is identical either way.** A block's
+///   tokenizer sees the `max_match_distance` bytes of MEMBER INPUT before
+///   it ([`member_block_history`]), never a previous block's output, so
+///   which arm won for the region before this one changes nothing about
+///   what this region's tokenizer is handed.
+/// - **No repeat state crosses the choice.** Every tokenizer block starts
+///   its parse and its emission from `EncoderMatchState::default()`
+///   already (see [`emit_entropy_blocks`]), which is what makes the arms
+///   independent; a carried rep model would price each arm against a
+///   state the other arm did not leave.
+/// - **Only the member's real last block carries the final flag**, so the
+///   run of blocks this returns for the last region ends the member once.
+///
+/// The lab arm this reproduces is `opt-horizon-balanced`
+/// (`research/rar5-ratio-lab/balanced/README.md`), which writes
+/// 111,639,171 bytes on the first 256 MiB of the mixed corpus at a 32 MiB
+/// dictionary. This writer wrote 111,639,169 for it - the two bytes are
+/// archive framing - and 111,617,844 once the tree finder's per-position
+/// candidate list landed beside it, against 112,865,011 with the switch
+/// off.
+///
+/// NOT reached by the switch: a solid member of 4 MiB or less, which
+/// [`LiveSpanEncoder`] encodes as one tokenizer block on an index and a
+/// tree finder CARRIED ACROSS the group's members. Both arms would have
+/// to run over that live state and only one of them may leave its marks
+/// on it, and rolling a 32 MiB-dictionary finder back per member costs
+/// more than the choice can return. Solid members past 4 MiB fall to the
+/// block walk and take the choice like any other member.
+/// (nzbfast-local change, 7 Sep 2026; see VENDORING.md.)
+#[allow(clippy::too_many_arguments)]
+fn encode_member_region(
+    data: &[u8],
+    history_tail: &[u8],
+    range: Range<usize>,
+    filters: &[EncodeFilter],
+    algorithm_version: u8,
+    options: EncodeOptions,
+    is_last: bool,
+    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    scratch: &mut EncoderScratch,
+    anchors: Option<&MemberAnchors<'_>>,
+    tree: &[std::sync::atomic::AtomicU32],
+) -> Result<Vec<u8>> {
+    // A region no longer than the short horizon is ONE block either way -
+    // same history, same bytes, same final flag, so the same output - and
+    // with the switch off there is only ever the one arm.
+    if !options.tokenizer_horizon_choice || range.len() <= TOKENIZER_SHORT_HORIZON {
+        return encode_member_block(
+            data,
+            history_tail,
+            range,
+            filters,
+            algorithm_version,
+            options,
+            is_last,
+            progress,
+            scratch,
+            anchors,
+            tree,
+        );
+    }
+    // Both arms walk the same input bytes, so the second one reports no
+    // forward progress: the callback sees the high-water mark, which the
+    // first arm has already carried to the region's end. It is still
+    // POLLED by the second arm, so a refusal stops that arm as promptly
+    // as it stops the first.
+    let mut reached = 0usize;
+    let mut region_progress = |position: usize| {
+        reached = reached.max(position);
+        progress.as_deref_mut().is_none_or(|report| report(reached))
+    };
+    let wide = encode_member_block(
+        data,
+        history_tail,
+        range.clone(),
+        filters,
+        algorithm_version,
+        options,
+        is_last,
+        Some(&mut region_progress),
+        scratch,
+        anchors,
+        tree,
+    )?;
+    // The finder writes `stride` slots per POSITION and the stride is
+    // carried in the slice's own shape (see `encode_tokens_in_span`), so a
+    // sub-region's hints are its own positions' slots and nothing else:
+    // the finder's answers are a function of the position alone, which is
+    // what lets a region's hint span be cut at all.
+    let stride = if tree.is_empty() {
+        0
+    } else {
+        tree.len() / range.len()
+    };
+    let mut short = Vec::with_capacity(wide.len());
+    let mut start = range.start;
+    while start < range.end {
+        let end = (start + TOKENIZER_SHORT_HORIZON).min(range.end);
+        let hints = &tree[(start - range.start) * stride..(end - range.start) * stride];
+        let block = encode_member_block(
+            data,
+            history_tail,
+            start..end,
+            filters,
+            algorithm_version,
+            options,
+            is_last && end == range.end,
+            Some(&mut region_progress),
+            scratch,
+            anchors,
+            hints,
+        )?;
+        short.extend_from_slice(&block);
+        // Every remaining block only adds to this, so the wide arm has
+        // already won and the rest of the short arm is wasted work.
+        if short.len() >= wide.len() {
+            return Ok(wide);
+        }
+        start = end;
+    }
+    Ok(short)
+}
+
+/// The long-table ANCHORS of a member's blocks (see `MatchIndex::long`),
+/// computed once per block by the first worker that needs them and shared
+/// read-only after. Every block's tokenizer used to rescan its whole history
+/// for anchors - up to 32 MiB per 4 MiB block, eight times over the member,
+/// about 9% of a large-dictionary encode - where the anchors of a block are a
+/// property of its bytes alone. Each list holds offsets within the block
+/// (ascending), and the pool's drain loop releases lists no block in flight
+/// can still need. (nzbfast-local change, 6 Sep 2026; see VENDORING.md.)
+struct MemberAnchors<'a> {
+    data: &'a [u8],
+    lists: Vec<std::sync::Mutex<Option<std::sync::Arc<Vec<u32>>>>>,
+}
+
+/// Where a block's history sits in the member, for `MatchIndex::seed_history`
+/// to take its long-table seed from [`MemberAnchors`] instead of a scan.
+#[derive(Clone, Copy)]
+struct LongSeed<'a> {
+    anchors: &'a MemberAnchors<'a>,
+    /// The block's first position in the member.
+    range_start: usize,
+}
+
+impl<'a> MemberAnchors<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        let blocks = data.len().div_ceil(MAX_COMPRESSED_BLOCK_OUTPUT);
+        Self {
+            data,
+            lists: (0..blocks).map(|_| std::sync::Mutex::new(None)).collect(),
+        }
+    }
+
+    /// The anchor offsets of `block`, computed on first use.
+    fn block(&self, block: usize) -> std::sync::Arc<Vec<u32>> {
+        let mut slot = self.lists[block]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(list) = &*slot {
+            return list.clone();
+        }
+        let list = std::sync::Arc::new(Self::compute(
+            self.data,
+            member_block_range(self.data.len(), block),
+        ));
+        *slot = Some(list.clone());
+        list
+    }
+
+    /// Anchors in `range` with the 32 hashed bytes inside the member, as
+    /// offsets from `range.start`, ascending - the same positions a scan
+    /// of the member would anchor.
+    fn compute(data: &[u8], range: Range<usize>) -> Vec<u32> {
+        let mut out = Vec::new();
+        let end = range
+            .end
+            .min(data.len().saturating_sub(LONG_HASH_BYTES - 1));
+        let mut pos = range.start;
+        while pos + 8 <= data.len() && pos + 4 <= end {
+            let words = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            for (i, word) in [
+                words as u32,
+                (words >> 8) as u32,
+                (words >> 16) as u32,
+                (words >> 24) as u32,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if long_anchor(word) {
+                    out.push((pos + i - range.start) as u32);
+                }
+            }
+            pos += 4;
+        }
+        while pos < end {
+            let word = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            if long_anchor(word) {
+                out.push((pos - range.start) as u32);
+            }
+            pos += 1;
+        }
+        out
+    }
+
+    /// Drop the lists of every block below `block`: none in flight reads them.
+    fn release_below(&self, block: usize) {
+        for list in &self.lists[..block.min(self.lists.len())] {
+            *list.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+}
+
+fn member_block_range(data_len: usize, block: usize) -> Range<usize> {
+    block * MAX_COMPRESSED_BLOCK_OUTPUT..((block + 1) * MAX_COMPRESSED_BLOCK_OUTPUT).min(data_len)
+}
+
+/// Which blocks of a member's span an encode covers: all of them, or the
+/// blocks from `first_block` on, with the earlier ones standing in for the
+/// member bytes before them (nzbfast-local change, 6 Sep 2026; see
+/// VENDORING.md and [`encode_lz_member_window`]).
+#[derive(Clone, Copy)]
+struct MemberWindow {
+    /// The first block to encode; the blocks before it are history.
+    first_block: usize,
+    /// Whether the span ends where the member does, so the span's last
+    /// block carries the member's `is_last`.
+    final_segment: bool,
+}
+
+impl MemberWindow {
+    fn whole() -> Self {
+        Self {
+            first_block: 0,
+            final_segment: true,
+        }
+    }
+}
+
+/// The compressed blocks of a member from a WINDOW onto it - `span`, whose
+/// first `first_block` blocks are member bytes already encoded and whose
+/// remaining blocks are the ones to encode now - byte-identical to the
+/// blocks the whole-member walk produces for the same member.
+///
+/// A block's tokenizer depends on its own bytes and the `max_match_distance`
+/// bytes before them, never on an earlier block's OUTPUT (see the block
+/// pool above), so a caller that holds the member a segment at a time can
+/// encode each segment with the previous segment's tail in front of it and
+/// concatenate the results: the streamed compressed writer does exactly
+/// that, over a window of `first_block` whole blocks (at least the
+/// dictionary) plus the segment. The history part must be whole blocks so
+/// the block boundaries in the span are the member's own, and every
+/// history a block sees is then the same bytes the whole-member walk hands
+/// it (`member_block_history` clips it to the dictionary). The long-table
+/// anchors of the history blocks are computed from the span on first use,
+/// as the whole-member walk computes them. `final_segment` marks the span
+/// that ends where the member does; only its last block carries `is_last`.
+/// A member of one block or less has no window: encode it whole through
+/// [`encode_lz_member_with_options`], which takes the single-block path the
+/// whole-member walk takes for it. (nzbfast-local change, 6 Sep 2026; see
+/// VENDORING.md.)
+pub(crate) fn encode_lz_member_window(
+    span: &[u8],
+    first_block: usize,
+    algorithm_version: u8,
+    options: EncodeOptions,
+    final_segment: bool,
+    scratch: &EncoderScratchPool,
+) -> Result<Vec<u8>> {
+    if first_block * MAX_COMPRESSED_BLOCK_OUTPUT >= span.len() {
+        return Err(Error::InvalidData(
+            "RAR 5 member window holds no block to encode",
+        ));
+    }
+    let wave_width = encode_block_wave_width_for_budget(
+        options.max_match_distance,
+        false,
+        options.working_memory,
+    );
+    encode_lz_member_blocks_in_waves(
+        span,
+        &[],
+        algorithm_version,
+        options,
+        None,
+        wave_width,
+        MemberWindow {
+            first_block,
+            final_segment,
+        },
+        scratch,
+    )
+}
+
+/// How many blocks a streamed member's window should carry so the block
+/// pool stays fed: the pool's width, and never under eight (32 MiB).
+pub(crate) fn member_window_blocks(options: EncodeOptions) -> usize {
+    encode_block_wave_width_for_budget(options.max_match_distance, false, options.working_memory)
+        .max(8)
+}
+
+fn encode_lz_member_blocks_in_waves(
+    data: &[u8],
+    history: &[u8],
+    algorithm_version: u8,
+    options: EncodeOptions,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+    wave_width: usize,
+    window: MemberWindow,
+    scratch_pool: &EncoderScratchPool,
+) -> Result<Vec<u8>> {
+    encode_lz_member_blocks_in_waves_filtered(
+        data,
+        history,
+        &[],
+        algorithm_version,
+        options,
+        progress,
+        wave_width,
+        window,
+        scratch_pool,
+    )
+}
+
+/// [`encode_lz_member_blocks_in_waves`] for a member carrying filter
+/// records (absolute offsets in `data`); each block takes the records in
+/// its range (nzbfast-local change, 7 Sep 2026; see VENDORING.md).
+#[allow(clippy::too_many_arguments)]
+fn encode_lz_member_blocks_in_waves_filtered(
+    data: &[u8],
+    history: &[u8],
+    filters: &[EncodeFilter],
+    algorithm_version: u8,
+    options: EncodeOptions,
+    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    wave_width: usize,
+    window: MemberWindow,
+    scratch_pool: &EncoderScratchPool,
+) -> Result<Vec<u8>> {
+    let dictionary = options.max_match_distance;
+    let history_tail = &history[history.len().saturating_sub(dictionary)..];
+    let block_count = data.len().div_ceil(MAX_COMPRESSED_BLOCK_OUTPUT);
+    let first_block = window.first_block.min(block_count);
+    // `wave_width` is the number of blocks in flight at once (the name is
+    // from the first cut, which ran the blocks in barrier-separated waves).
+    let width = wave_width.max(1).min(block_count - first_block);
+    // Without the pool there is nothing to run blocks on: the walk is serial
+    // whatever width was asked for (the tests ask for several).
+    #[cfg(not(feature = "parallel"))]
+    let width = {
+        let _ = width;
+        1
+    };
+    if tree_match_finder_applies(options, data, history_tail) {
+        return encode_blocks_with_tree(
+            data,
+            filters,
+            algorithm_version,
+            options,
+            block_count,
+            width,
+            progress,
+            window,
+            scratch_pool,
+        );
+    }
+    if width > 1 {
+        #[cfg(feature = "parallel")]
+        return encode_blocks_pooled(
+            data,
+            history_tail,
+            filters,
+            algorithm_version,
+            options,
+            block_count,
+            width,
+            progress,
+            window,
+            scratch_pool,
+        );
+    }
+    let anchors = MemberAnchors::new(data);
+    let blocks_in_dictionary = dictionary.div_ceil(MAX_COMPRESSED_BLOCK_OUTPUT);
+    let mut out = Vec::new();
+    let mut completed = 0usize;
+    let mut scratch = scratch_pool.take();
+    for block in first_block..block_count {
+        let range = member_block_range(data.len(), block);
+        anchors.release_below(block.saturating_sub(blocks_in_dictionary));
+        let mut block_progress = |position: usize| {
+            progress
+                .as_deref_mut()
+                .is_none_or(|report| report(completed.saturating_add(position)))
+        };
+        out.extend(encode_member_region(
+            data,
+            history_tail,
+            range.clone(),
+            filters,
+            algorithm_version,
+            options,
+            window.final_segment && block + 1 == block_count,
+            Some(&mut block_progress),
+            &mut scratch,
+            Some(&anchors),
+            &[],
+        )?);
+        completed = completed.saturating_add(range.len());
+    }
+    scratch_pool.put(scratch);
+    Ok(out)
+}
+
+/// A member's dictionary must be at least this wide for the tree match
+/// finder to run: below it the ring index's newest-`depth` reach already
+/// covers most of the window, and the tree's eight bytes per window byte
+/// buy little. (nzbfast-local change, 7 Sep 2026; see VENDORING.md.)
+const TREE_MIN_DICTIONARY: usize = MAX_COMPRESSED_BLOCK_OUTPUT;
+
+/// Whether this member's blocks run behind the tree match finder.
+///
+/// Incoming SOLID history is excluded: the finder indexes one contiguous
+/// span in the member's own coordinates, and a member behind a solid seam
+/// has its history in another buffer. Solid groups reach the finder
+/// through [`LiveSpanEncoder`], which owns the whole group's span.
+fn tree_match_finder_applies(options: EncodeOptions, data: &[u8], history_tail: &[u8]) -> bool {
+    options.max_match_candidates != 0
+        && options.max_match_distance >= TREE_MIN_DICTIONARY
+        && history_tail.is_empty()
+        && TreeMatchFinder::fits(data.len())
+}
+
+/// How many walkers split the finder's ranges (nzbfast-local change,
+/// 7 Sep 2026; see VENDORING.md).
+///
+/// The blocks behind the finder are idle while it runs, so the pool's
+/// whole width is available - and taking it is the wrong trade. A tree
+/// descent is a chain of dependent loads over a structure far larger than
+/// the last-level cache, so walkers past a handful spend their time
+/// stalled on memory rather than working, and the stall is charged as
+/// user CPU. Measured on the 256 MiB slice at `-md32m`, on an idle
+/// twenty-core Apple silicon desktop, same bytes at every width:
+///
+/// | walkers | wall s | user s |
+/// |---|---:|---:|
+/// | 1 | 73.2 | 102.8 |
+/// | 4 | 29.9 | 112.3 |
+/// | 8 | 25.2 | 155.0 |
+/// | 12 | 20.4 | 174.2 |
+/// | 20 | 17.5 | 211.2 |
+///
+/// Four is where the wall is most of the way down and the CPU has barely
+/// moved.
+const TREE_WALKER_CAP: usize = 4;
+
+/// How many candidate slots the finder records per position for this
+/// member (nzbfast-local change, 7 Sep 2026; see VENDORING.md).
+///
+/// The lazy parser reads one distance and takes the longest, which is what
+/// it did before lists existed, so it pays nothing here. The cost-based
+/// parse consumes the whole frontier and drops the ring walk for it, which
+/// is where both the bytes and the CPU are: the buffer is four bytes per
+/// slot per position of the wave in flight, so the wider stride is asked
+/// for only by the parse that uses it.
+fn tree_candidate_slots(options: EncodeOptions) -> usize {
+    // A direct eight-byte hash reports one long hint; the optimal parser
+    // retains the ring for its short candidates in this research control.
+    #[cfg(feature = "ratio-lab")]
+    if std::env::var_os("RARS_TREE_HASH8").is_some() {
+        return 1;
+    }
+    if options.optimal_parse {
+        TREE_CANDIDATE_SLOTS
+    } else {
+        1
+    }
+}
+
+/// The most the finder's answers may hold for the blocks in flight at
+/// once (nzbfast-local change, 7 Sep 2026; see VENDORING.md).
+///
+/// A wave's hints are four bytes per slot per position and the whole wave
+/// is walked before any of its blocks encodes, so at a stride of
+/// [`TREE_CANDIDATE_SLOTS`] the buffer is 64 MiB per block in flight -
+/// and the pool's own width is chosen by core count, so on a wide box the
+/// buffer would grow with the box rather than with the work. Measured on
+/// the 256 MiB slice at `-md32m` on a twenty-core M1 Ultra, peak RSS by
+/// stride: 2.26 GB at one slot, 2.61 at two, 2.99 at three, 3.49 at four,
+/// 4.28 at six, 5.15 at eight. This holds the hints to half a gigabyte,
+/// which is eight blocks at the shipped stride.
+///
+/// The wave width is a memory decision and nothing else - the same bytes
+/// come out at any width (`the_hint_budget_narrows_a_wave_without_moving_
+/// its_bytes` holds that), so narrowing here costs wall time on a wide
+/// box and no ratio.
+const TREE_HINT_BUDGET_BYTES: usize = 512 << 20;
+
+/// `width` narrowed so a wave's hints fit [`TREE_HINT_BUDGET_BYTES`].
+fn tree_wave_width(width: usize, stride: usize, working_memory: Option<usize>) -> usize {
+    let slot = std::mem::size_of::<std::sync::atomic::AtomicU32>();
+    let per_block = MAX_COMPRESSED_BLOCK_OUTPUT * stride.max(1) * slot;
+    // A quarter of a caller-set allowance; see the const's own note for why
+    // the default is a flat half-gigabyte.
+    let budget = working_memory.map_or(TREE_HINT_BUDGET_BYTES, |bytes| bytes / 4);
+    (budget / per_block.max(1)).clamp(1, width.max(1))
+}
+
+fn tree_walkers() -> usize {
+    #[cfg(feature = "parallel")]
+    {
+        rayon::current_num_threads().clamp(1, TREE_WALKER_CAP)
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        1
+    }
+}
+
+/// The end of the 4 MiB block grid cell `position` falls in: the finder's
+/// walks are cut on this grid so a window of a member builds the tree the
+/// whole member builds (see [`tree::TreeMatchFinder::advance_range`]).
+fn block_grid_end(data_len: usize, position: usize) -> usize {
+    ((position / MAX_COMPRESSED_BLOCK_OUTPUT) + 1)
+        .saturating_mul(MAX_COMPRESSED_BLOCK_OUTPUT)
+        .min(data_len)
+}
+
+/// The blocks of one member with the binary-tree match finder in front of
+/// them (nzbfast-local change, 7 Sep 2026; see VENDORING.md).
+///
+/// The finder walks the member's positions in order - it cannot be
+/// re-seeded per block, which is what rules out giving every block its own
+/// tree - and hands each block the best distance it found at each of the
+/// block's positions. The blocks then tokenize and entropy-code exactly as
+/// they do without it, on the pool, each with its own ring index for the
+/// near matches the finder does not rank: the finder's answers are a
+/// function of the position alone, so a block's output does not depend on
+/// how many of them ran at once.
+///
+/// The walk is cut into WAVES of `width` blocks because the answers have
+/// to be held somewhere: four bytes per position, 16 MiB per block in
+/// flight. The wave width is a memory decision and nothing else - the same
+/// bytes come out at any width.
+#[allow(clippy::too_many_arguments)]
+fn encode_blocks_with_tree(
+    data: &[u8],
+    filters: &[EncodeFilter],
+    algorithm_version: u8,
+    options: EncodeOptions,
+    block_count: usize,
+    width: usize,
+    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    window: MemberWindow,
+    scratch_pool: &EncoderScratchPool,
+) -> Result<Vec<u8>> {
+    let mut finder = TreeMatchFinder::new(options.max_match_distance);
+    let walkers = tree_walkers();
+    let stride = tree_candidate_slots(options);
+    let anchors = MemberAnchors::new(data);
+    let blocks_in_dictionary = options
+        .max_match_distance
+        .div_ceil(MAX_COMPRESSED_BLOCK_OUTPUT);
+    // A window onto a member starts the finder a full window before its
+    // first encoded block, on the block grid: the live tree there is then
+    // the one the whole-member walk holds, node for node.
+    let first_position = (window.first_block * MAX_COMPRESSED_BLOCK_OUTPUT).min(data.len());
+    let mut position = first_position.saturating_sub(finder.window());
+    finder.skip_to(position);
+    while position < first_position {
+        let end = block_grid_end(data.len(), position).min(first_position);
+        finder.advance_range(data, position..end, None, stride, walkers);
+        position = end;
+    }
+    let mut out = Vec::new();
+    let mut distances = empty_slots(0);
+    let mut block = window.first_block;
+    let mut tokenized = 0usize;
+    let width = tree_wave_width(width, stride, options.working_memory);
+    while block < block_count {
+        let wave_end = (block + width).min(block_count);
+        let wave = member_block_range(data.len(), block).start
+            ..member_block_range(data.len(), wave_end - 1).end;
+        if distances.len() < wave.len() * stride {
+            distances = empty_slots(wave.len() * stride);
+        }
+        for slot in &distances[..wave.len() * stride] {
+            slot.store(TREE_NO_MATCH, std::sync::atomic::Ordering::Relaxed);
+        }
+        for index in block..wave_end {
+            let range = member_block_range(data.len(), index);
+            let at = (range.start - wave.start) * stride;
+            finder.advance_range(
+                data,
+                range.clone(),
+                Some(&distances[at..at + range.len() * stride]),
+                stride,
+                walkers,
+            );
+        }
+        let block_output = |index: usize, scratch: &mut EncoderScratch| {
+            let range = member_block_range(data.len(), index);
+            let at = (range.start - wave.start) * stride;
+            encode_member_region(
+                data,
+                &[],
+                range.clone(),
+                filters,
+                algorithm_version,
+                options,
+                window.final_segment && index + 1 == block_count,
+                None,
+                scratch,
+                Some(&anchors),
+                &distances[at..at + range.len() * stride],
+            )
+        };
+        #[cfg(feature = "parallel")]
+        let encoded: Vec<Result<Vec<u8>>> = if wave_end - block > 1 {
+            use rayon::prelude::*;
+            (block..wave_end)
+                .into_par_iter()
+                .map(|index| {
+                    let mut scratch = scratch_pool.take();
+                    let result = block_output(index, &mut scratch);
+                    scratch_pool.put(scratch);
+                    result
+                })
+                .collect()
+        } else {
+            let mut scratch = scratch_pool.take();
+            let encoded = vec![block_output(block, &mut scratch)];
+            scratch_pool.put(scratch);
+            encoded
+        };
+        #[cfg(not(feature = "parallel"))]
+        let encoded: Vec<Result<Vec<u8>>> = {
+            let mut scratch = scratch_pool.take();
+            let encoded = (block..wave_end)
+                .map(|index| block_output(index, &mut scratch))
+                .collect();
+            scratch_pool.put(scratch);
+            encoded
+        };
+        for packed in encoded {
+            out.extend(packed?);
+        }
+        tokenized = tokenized.saturating_add(wave.len());
+        block = wave_end;
+        anchors.release_below(block.saturating_sub(blocks_in_dictionary + 1));
+        if progress
+            .as_deref_mut()
+            .is_some_and(|report| !report(tokenized))
+        {
+            return Err(Error::Cancelled);
+        }
+    }
+    if progress.is_some_and(|report| !report(data.len())) {
+        return Err(Error::Cancelled);
+    }
+    Ok(out)
+}
+
+/// The blocks of one member on the rayon pool, `width` at a time, with no
+/// barrier between them: `width` worker tasks each take the next block
+/// index off a shared counter until the member is exhausted, so a slow
+/// block never idles the others (nzbfast-local change, 5 Sep 2026; the
+/// first cut ran barrier-separated waves and lost the tail of every wave -
+/// see VENDORING.md). The calling thread owns the (single-threaded)
+/// progress callback: it drains finished blocks into the output IN ORDER as
+/// they complete, so the output held in flight stays near `width` blocks
+/// rather than the whole member, and it reports the tokenized bytes on
+/// every completion or every few milliseconds, whichever comes first. When
+/// the callback refuses, a flag every block's tokenizer polls at its own
+/// checkpoints stops the workers within a checkpoint, as on the serial walk.
+/// An error in one block stops the workers taking new ones; the first error
+/// in block order is the one returned, as the serial walk would have.
+#[cfg(feature = "parallel")]
+fn encode_blocks_pooled(
+    data: &[u8],
+    history_tail: &[u8],
+    filters: &[EncodeFilter],
+    algorithm_version: u8,
+    options: EncodeOptions,
+    block_count: usize,
+    width: usize,
+    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    window: MemberWindow,
+    scratch_pool: &EncoderScratchPool,
+) -> Result<Vec<u8>> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
+    let first_block = window.first_block;
+    let next_block = AtomicUsize::new(first_block);
+    let cancelled = AtomicBool::new(false);
+    let failed = AtomicBool::new(false);
+    let tokenized = AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<Result<Vec<u8>>>>> =
+        (0..block_count).map(|_| Mutex::new(None)).collect();
+    // Finished-block count, and the condvar the drain loop parks on.
+    let finished = (Mutex::new(0usize), Condvar::new());
+    let anchors = MemberAnchors::new(data);
+    let blocks_in_dictionary = options
+        .max_match_distance
+        .div_ceil(MAX_COMPRESSED_BLOCK_OUTPUT);
+    let mut out = Vec::new();
+    let mut drained = first_block;
+    let mut first_error = None;
+    // One block, wherever it runs: a spawned worker or - see the drain loop
+    // below - the calling thread itself. Shared by both so the two cannot
+    // drift; it takes its scratch by reference because a worker keeps one
+    // for its whole run.
+    let encode_one = |block: usize, scratch: &mut EncoderScratch| {
+        let range = member_block_range(data.len(), block);
+        let mut last = 0usize;
+        let mut block_progress = |position: usize| {
+            tokenized.fetch_add(position.saturating_sub(last), Ordering::Relaxed);
+            last = last.max(position);
+            !cancelled.load(Ordering::Relaxed)
+        };
+        let result = encode_member_region(
+            data,
+            history_tail,
+            range,
+            filters,
+            algorithm_version,
+            options,
+            window.final_segment && block + 1 == block_count,
+            Some(&mut block_progress),
+            scratch,
+            Some(&anchors),
+            &[],
+        );
+        if result.is_err() {
+            failed.store(true, Ordering::Relaxed);
+        }
+        *slots[block]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+        let (count, wake) = &finished;
+        *count
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+        wake.notify_all();
+    };
+    let mut owner_scratch: Option<EncoderScratch> = None;
+    rayon::in_place_scope(|scope| {
+        for _ in 0..width {
+            let (next_block, cancelled, failed, encode_one) =
+                (&next_block, &cancelled, &failed, &encode_one);
+            scope.spawn(move |_| {
+                let mut scratch = scratch_pool.take();
+                loop {
+                    if cancelled.load(Ordering::Relaxed) || failed.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let block = next_block.fetch_add(1, Ordering::Relaxed);
+                    if block >= block_count {
+                        break;
+                    }
+                    encode_one(block, &mut scratch);
+                }
+                scratch_pool.put(scratch);
+            });
+        }
+        // The calling thread: drain in order, report, and watch for refusal.
+        let (count, wake) = &finished;
+        let mut seen = 0usize;
+        loop {
+            while drained < block_count && first_error.is_none() {
+                let mut slot = slots[drained]
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match slot.take() {
+                    Some(Ok(bytes)) => {
+                        drop(slot);
+                        out.extend(bytes);
+                        drained += 1;
+                        // Blocks in flight are at or past `drained`; their
+                        // history begins within `blocks_in_dictionary` of it.
+                        anchors.release_below(drained.saturating_sub(blocks_in_dictionary + 1));
+                    }
+                    Some(Err(error)) => {
+                        first_error = Some(error);
+                    }
+                    None => break,
+                }
+            }
+            if drained == block_count || first_error.is_some() || cancelled.load(Ordering::Relaxed)
+            {
+                break;
+            }
+            if progress
+                .as_deref_mut()
+                .is_some_and(|report| !report(tokenized.load(Ordering::Relaxed).min(data.len())))
+            {
+                cancelled.store(true, Ordering::Relaxed);
+                break;
+            }
+            // NOTHING TO DRAIN, AND THIS THREAD MUST NOT PARK WHILE A BLOCK
+            // IS STILL UNCLAIMED. `in_place_scope` runs the calling thread's
+            // body on the calling thread, which under `rayon::join` (the
+            // volume writer) or `map_slice_collect` (the multi-group walk) is
+            // a POOL thread. Parking it here holds a pool thread that the
+            // `width` jobs just spawned need in order to run at all, so with
+            // as many concurrent member encodes as the pool has threads every
+            // one of them parked waiting for jobs none of them could run -
+            // a permanent starvation deadlock at near-zero CPU, not a slow
+            // encode. It cap-killed `unit-one-process` on a two-thread runner
+            // for an unknown number of pushes (11 Sep 2026), where the two
+            // chase fixtures in nzbkit compress concurrently; the 5 ms
+            // timeout below made it look like a hang rather than a wedge.
+            // Taking a block HERE is what makes progress unconditional: in
+            // the worst case, with no worker ever scheduled, the calling
+            // thread encodes the whole member itself (nzbfast-local change,
+            // 11 Sep 2026).
+            let block = next_block.fetch_add(1, Ordering::Relaxed);
+            if block < block_count {
+                encode_one(
+                    block,
+                    owner_scratch.get_or_insert_with(|| scratch_pool.take()),
+                );
+                continue;
+            }
+            // Every remaining block is claimed, and a block is only ever
+            // claimed by a thread that is already RUNNING the closure that
+            // finishes it - so this park is always woken.
+            let guard = count
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (guard, _) = wake
+                .wait_timeout_while(guard, std::time::Duration::from_millis(5), |done| {
+                    *done == seen
+                })
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            seen = *guard;
+        }
+    });
+    if let Some(scratch) = owner_scratch.take() {
+        scratch_pool.put(scratch);
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    // Blocks still in their slots finished after the drain loop stopped;
+    // the first error in block order wins, as on the serial walk.
+    for slot in slots.into_iter().skip(drained) {
+        match slot
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            Some(Ok(bytes)) => out.extend(bytes),
+            Some(Err(error)) => return Err(error),
+            None => {
+                return Err(Error::InvalidData(
+                    "RAR 5 block encoder left a block unencoded",
+                ))
+            }
+        }
+    }
+    if progress.is_some_and(|report| !report(data.len())) {
+        return Err(Error::Cancelled);
+    }
+    Ok(out)
 }
 
 fn encode_lz_block(
@@ -788,6 +2134,58 @@ fn encode_lz_block(
     is_last: bool,
     progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> Result<Vec<u8>> {
+    encode_lz_block_with_scratch(
+        data,
+        history,
+        algorithm_version,
+        initial_filters,
+        options,
+        is_last,
+        progress,
+        &mut EncoderScratch::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_lz_block_with_scratch(
+    data: &[u8],
+    history: &[u8],
+    algorithm_version: u8,
+    initial_filters: &[EncodeFilter],
+    options: EncodeOptions,
+    is_last: bool,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+    scratch: &mut EncoderScratch,
+) -> Result<Vec<u8>> {
+    encode_lz_block_in_span(
+        data,
+        history,
+        algorithm_version,
+        initial_filters,
+        options,
+        is_last,
+        progress,
+        scratch,
+        None,
+        None,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_lz_block_in_span(
+    data: &[u8],
+    history: &[u8],
+    algorithm_version: u8,
+    initial_filters: &[EncodeFilter],
+    options: EncodeOptions,
+    is_last: bool,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+    scratch: &mut EncoderScratch,
+    indexed_span: Option<&[u8]>,
+    long_seed: Option<LongSeed<'_>>,
+    tree: &[std::sync::atomic::AtomicU32],
+) -> Result<Vec<u8>> {
     let distance_size = match algorithm_version {
         0 => DISTANCE_TABLE_SIZE_50,
         1 => DISTANCE_TABLE_SIZE_70,
@@ -797,15 +2195,208 @@ fn encode_lz_block(
             ))
         }
     };
-    let mut tokens = Vec::new();
-    tokens.extend(initial_filters.iter().copied().map(EncodeToken::Filter));
-    tokens.extend(encode_tokens_with_progress(
+    let tokens = encode_tokens_in_span(
         data,
         history,
         options,
         distance_size,
         progress,
-    )?);
+        scratch,
+        indexed_span,
+        long_seed,
+        tree,
+    )?;
+    let out = encode_token_blocks(
+        data,
+        &tokens,
+        initial_filters,
+        algorithm_version,
+        distance_size,
+        is_last,
+        ENTROPY_BLOCK_BYTES,
+        options,
+        &mut scratch.boundaries,
+    )?;
+    // The token vector goes back to the scratch for the next block.
+    scratch.tokens = tokens;
+    scratch.tokens.clear();
+    Ok(out)
+}
+
+/// How much INPUT one set of Huffman tables covers. The tokenizer's work
+/// item stays the 4 MiB block (one history seed, one pool task); its token
+/// stream is then cut into entropy blocks of about this many input bytes,
+/// each written as its own RAR 5 compressed block with fresh tables, so a
+/// stretch of text and the already-compressed bytes after it are not priced
+/// with one shared code. One table set per 4 MiB was the larger half of the
+/// size gap to `rar` at equal dictionary: on the 1 GiB mixed corpus at a
+/// 1 MiB dictionary 663.6 MB -> 587.1 MB at 256 KiB (rar 7.23: 590.1 MB),
+/// 580.2 MB at 64 KiB; at 32 MiB 585.6 -> 527.4 MB (rar 468.9, the rest
+/// being long-range matches the index does not reach). A table set costs a
+/// few hundred bytes and the reader a table decode per block: extracting
+/// the 32 MiB-dictionary archive took 0.39 s with one table per 4 MiB,
+/// 0.38-0.40 s at 256 KiB and 0.48-0.50 s at 64 KiB, which is why the cut
+/// is not finer. The rep-distance state carries across entropy
+/// blocks exactly as the reader's does across every block of a file.
+/// (nzbfast-local change, 6 Sep 2026; see VENDORING.md.)
+const ENTROPY_BLOCK_BYTES: usize = 256 << 10;
+/// ...and at least this many tokens per table: a stretch of 4 KiB matches
+/// has 64 tokens per 256 KiB, and a table set for 64 symbols costs more
+/// than it can save (the repeated-payload corpus grew 1.3% on tables
+/// alone before this floor).
+const ENTROPY_BLOCK_MIN_TOKENS: usize = 1024;
+
+/// Token ranges covering about `target_bytes` of input each and at least
+/// [`ENTROPY_BLOCK_MIN_TOKENS`] tokens, cut at token boundaries (a match is
+/// never split), always at least one range.
+fn entropy_block_token_ranges(tokens: &[EncodeToken], target_bytes: usize) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut bytes = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        bytes += token.length;
+        if bytes >= target_bytes && index + 1 - start >= ENTROPY_BLOCK_MIN_TOKENS {
+            ranges.push(start..index + 1);
+            start = index + 1;
+            bytes = 0;
+        }
+    }
+    if start < tokens.len() || ranges.is_empty() {
+        ranges.push(start..tokens.len());
+    }
+    ranges
+}
+
+/// The token stream of one tokenizer block as a run of RAR 5 compressed
+/// blocks, each with its own tables (see [`ENTROPY_BLOCK_BYTES`]). The
+/// initial filters ride the first block; the last carries `is_last`.
+///
+/// WHERE the cuts fall is `options.adaptive_entropy_blocks`: by default
+/// `boundaries` picks them by exact encoded cost, and with the switch off
+/// they are the fixed [`entropy_block_token_ranges`] cut this function
+/// always made. (nzbfast-local change, 7 Sep 2026; see VENDORING.md.)
+#[allow(clippy::too_many_arguments)]
+fn encode_token_blocks(
+    data: &[u8],
+    tokens: &[EncodeToken],
+    initial_filters: &[EncodeFilter],
+    algorithm_version: u8,
+    distance_size: usize,
+    is_last: bool,
+    target_bytes: usize,
+    options: EncodeOptions,
+    scratch: &mut boundaries::BoundaryScratch,
+) -> Result<Vec<u8>> {
+    if options.adaptive_entropy_blocks {
+        return boundaries::encode_token_blocks_adaptive(
+            data,
+            tokens,
+            initial_filters,
+            algorithm_version,
+            distance_size,
+            is_last,
+            target_bytes,
+            scratch,
+        );
+    }
+    emit_entropy_blocks(
+        data,
+        tokens,
+        &entropy_block_token_ranges(tokens, target_bytes),
+        initial_filters,
+        algorithm_version,
+        distance_size,
+        is_last,
+    )
+}
+
+/// The token ranges of one tokenizer block written out as compressed
+/// blocks, in order, with one rep-distance state carried through them.
+/// The single emitter both boundary choices go through.
+fn emit_entropy_blocks(
+    data: &[u8],
+    tokens: &[EncodeToken],
+    ranges: &[Range<usize>],
+    initial_filters: &[EncodeFilter],
+    algorithm_version: u8,
+    distance_size: usize,
+    is_last: bool,
+) -> Result<Vec<u8>> {
+    let last = ranges.len() - 1;
+    let mut out = Vec::new();
+    let mut state = EncoderMatchState::default();
+    let mut output_pos = 0usize;
+    let at_token = filter_token_indices(tokens, initial_filters);
+    for (index, range) in ranges.iter().enumerate() {
+        // The records whose token falls in this range; the last range also
+        // takes those past the final token.
+        let filters: Vec<EncodeFilter> = initial_filters
+            .iter()
+            .zip(&at_token)
+            .filter(|(_, &(token, _))| {
+                range.contains(&token) || (index == last && token >= range.end)
+            })
+            .map(|(&filter, _)| filter)
+            .collect();
+        let (block, next_pos) = encode_token_block(
+            data,
+            &tokens[range.clone()],
+            output_pos,
+            &filters,
+            algorithm_version,
+            distance_size,
+            &mut state,
+            is_last && index == last,
+        )?;
+        out.extend_from_slice(&block);
+        output_pos = next_pos;
+    }
+    Ok(out)
+}
+
+/// For each filter record (offsets in the coordinates `tokens` cover from
+/// position 0), the index of the token whose span holds its start, or
+/// `tokens.len()` for a record at or past the end, with the position of
+/// that token (the record is written as an offset from it). The emitter writes a
+/// record just before that token, as an offset from the position there,
+/// so a record anywhere in a tokenizer block is legal input and the
+/// pricing in `boundaries` charges it to the entropy block that carries
+/// it. (nzbfast-local change, 7 Sep 2026; see VENDORING.md.)
+pub(super) fn filter_token_indices(
+    tokens: &[EncodeToken],
+    filters: &[EncodeFilter],
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::with_capacity(filters.len());
+    let mut token = 0usize;
+    let mut pos = 0usize;
+    for filter in filters {
+        while token < tokens.len() && pos + tokens[token].length <= filter.offset {
+            pos += tokens[token].length;
+            token += 1;
+        }
+        out.push((token, pos));
+    }
+    out
+}
+
+/// One RAR 5 compressed block with tables built from exactly these tokens.
+/// `state` is the rep-distance state at the block's start and is advanced
+/// through it; the frequency pass runs on a copy so both passes see the
+/// same states. Returns the framed block and the input position after it.
+/// `initial_filters` are written where their offsets fall: each just before
+/// the first token whose span reaches it (records must be in offset order),
+/// any past the last token after it.
+#[allow(clippy::too_many_arguments)]
+fn encode_token_block(
+    data: &[u8],
+    tokens: &[EncodeToken],
+    start_pos: usize,
+    initial_filters: &[EncodeFilter],
+    algorithm_version: u8,
+    distance_size: usize,
+    state: &mut EncoderMatchState,
+    is_last: bool,
+) -> Result<(Vec<u8>, usize)> {
     let mut lengths = TableLengths {
         main: vec![0; MAIN_TABLE_SIZE],
         distance: vec![0; distance_size],
@@ -814,40 +2405,45 @@ fn encode_lz_block(
     };
 
     let mut main_frequencies = vec![0usize; MAIN_TABLE_SIZE];
+    main_frequencies[256] = initial_filters.len();
     let mut distance_frequencies = vec![0usize; distance_size];
     let mut align_frequencies = vec![0usize; ALIGN_TABLE_SIZE];
     let mut length_frequencies = vec![0usize; LENGTH_TABLE_SIZE];
-    let mut state = EncoderMatchState::default();
-    for token in &tokens {
-        match *token {
-            EncodeToken::Filter(_) => main_frequencies[256] += 1,
-            EncodeToken::Literal(byte) => main_frequencies[byte as usize] += 1,
-            EncodeToken::Match { length, distance } => {
-                match state.encode_match(length, distance, distance_size)? {
-                    EncodedMatch::LastLengthRepeat => main_frequencies[257] += 1,
-                    EncodedMatch::RepeatDistance {
-                        index, length_slot, ..
-                    } => {
-                        main_frequencies[258 + index] += 1;
-                        length_frequencies[length_slot] += 1;
-                    }
-                    EncodedMatch::New {
-                        length_slot,
-                        distance_slot,
-                        distance_extra,
-                        distance_bit_count,
-                        ..
-                    } => {
-                        main_frequencies[262 + length_slot] += 1;
-                        distance_frequencies[distance_slot] += 1;
-                        if distance_bit_count >= 4 {
-                            align_frequencies[distance_extra & 0x0f] += 1;
-                        }
+    let mut freq_state = *state;
+    let mut output_pos = start_pos;
+    for token in tokens {
+        let length = token.length;
+        let distance = token.distance;
+        if distance == 0 {
+            for &byte in &data[output_pos..output_pos + length] {
+                main_frequencies[usize::from(byte)] += 1;
+            }
+        } else {
+            match freq_state.encode_match(length, distance, distance_size)? {
+                EncodedMatch::LastLengthRepeat => main_frequencies[257] += 1,
+                EncodedMatch::RepeatDistance {
+                    index, length_slot, ..
+                } => {
+                    main_frequencies[258 + index] += 1;
+                    length_frequencies[length_slot] += 1;
+                }
+                EncodedMatch::New {
+                    length_slot,
+                    distance_slot,
+                    distance_extra,
+                    distance_bit_count,
+                    ..
+                } => {
+                    main_frequencies[262 + length_slot] += 1;
+                    distance_frequencies[distance_slot] += 1;
+                    if distance_bit_count >= 4 {
+                        align_frequencies[distance_extra & 0x0f] += 1;
                     }
                 }
-                state.remember(length, distance);
             }
+            freq_state.remember(length, distance);
         }
+        output_pos += length;
     }
 
     lengths.main = huffman::complete_lengths_for_frequencies(&main_frequencies, 15);
@@ -855,81 +2451,99 @@ fn encode_lz_block(
     lengths.length = huffman::complete_lengths_for_frequencies(&length_frequencies, 15);
     lengths.align = huffman::complete_lengths_for_frequencies(&align_frequencies, 15);
 
-    let main_table = HuffmanTable::from_lengths(&lengths.main)?;
-    let distance_table = HuffmanTable::from_lengths(&lengths.distance)?;
-    let align_table = HuffmanTable::from_lengths(&lengths.align)?;
-    let length_table = HuffmanTable::from_lengths(&lengths.length)?;
+    let main_table = EncoderTable::from_lengths(&lengths.main)?;
+    let distance_table = EncoderTable::from_lengths(&lengths.distance)?;
+    let align_table = EncoderTable::from_lengths(&lengths.align)?;
+    let length_table = EncoderTable::from_lengths(&lengths.length)?;
     let (table_data, table_bits) =
         encode_table_lengths_with_bit_count(&lengths, algorithm_version)?;
-    let mut writer = BitWriter {
-        bytes: table_data,
-        bit_pos: table_bits,
+    let mut writer = BitWriter::continuing(table_data, table_bits);
+    let mut pending = initial_filters.iter().peekable();
+    // A record's offset is relative to the position it is read at, which is
+    // the token's own position; `output_pos` and the offsets share the
+    // tokenizer block's coordinates.
+    let mut emit_filters_before = |writer: &mut BitWriter, reach: usize, at: usize| -> Result<()> {
+        while let Some(filter) = pending.next_if(|filter| filter.offset < reach) {
+            let (code, len) = main_table.code_for_symbol(256)?;
+            writer.write_bits(usize::from(code), usize::from(len));
+            write_filter(
+                writer,
+                EncodeFilter {
+                    offset: filter.offset.saturating_sub(at),
+                    ..*filter
+                },
+            )?;
+        }
+        Ok(())
     };
-    let mut state = EncoderMatchState::default();
+    let mut output_pos = start_pos;
     for token in tokens {
-        match token {
-            EncodeToken::Filter(filter) => {
-                let (code, len) = main_table.code_for_symbol(256)?;
-                writer.write_bits(usize::from(code), usize::from(len));
-                write_filter(&mut writer, filter)?;
-            }
-            EncodeToken::Literal(byte) => {
-                let (code, len) = main_table.code_for_symbol(byte as usize)?;
-                writer.write_bits(usize::from(code), usize::from(len));
-            }
-            EncodeToken::Match { length, distance } => {
-                match state.encode_match(length, distance, distance_size)? {
-                    EncodedMatch::LastLengthRepeat => {
-                        let (code, len) = main_table.code_for_symbol(257)?;
-                        writer.write_bits(usize::from(code), usize::from(len));
-                    }
-                    EncodedMatch::RepeatDistance {
-                        index,
-                        length_slot,
-                        length_extra,
-                    } => {
-                        let (code, len) = main_table.code_for_symbol(258 + index)?;
-                        writer.write_bits(usize::from(code), usize::from(len));
-                        let (code, len) = length_table.code_for_symbol(length_slot)?;
-                        writer.write_bits(usize::from(code), usize::from(len));
-                        let length_extra_bits = length_slot_extra_bits(length_slot)?;
-                        if length_extra_bits != 0 {
-                            writer.write_bits(length_extra, usize::from(length_extra_bits));
-                        }
-                    }
-                    EncodedMatch::New {
-                        length_slot,
-                        length_extra,
-                        distance_slot,
-                        distance_extra,
-                        distance_bit_count,
-                    } => {
-                        let (code, len) = main_table.code_for_symbol(262 + length_slot)?;
-                        writer.write_bits(usize::from(code), usize::from(len));
-                        let length_extra_bits = length_slot_extra_bits(length_slot)?;
-                        if length_extra_bits != 0 {
-                            writer.write_bits(length_extra, usize::from(length_extra_bits));
-                        }
-                        let (code, len) = distance_table.code_for_symbol(distance_slot)?;
-                        writer.write_bits(usize::from(code), usize::from(len));
-                        if distance_bit_count >= 4 {
-                            if distance_bit_count > 4 {
-                                writer.write_bits(distance_extra >> 4, distance_bit_count - 4);
-                            }
-                            let (code, len) = align_table.code_for_symbol(distance_extra & 0x0f)?;
-                            writer.write_bits(usize::from(code), usize::from(len));
-                        } else if distance_bit_count != 0 {
-                            writer.write_bits(distance_extra, distance_bit_count);
-                        }
+        let length = token.length;
+        let distance = token.distance;
+        emit_filters_before(&mut writer, output_pos + length, output_pos)?;
+        if distance == 0 {
+            write_literal_codes(
+                &mut writer,
+                &main_table,
+                &data[output_pos..output_pos + length],
+            )?;
+        } else {
+            match state.encode_match(length, distance, distance_size)? {
+                EncodedMatch::LastLengthRepeat => {
+                    let (code, len) = main_table.code_for_symbol(257)?;
+                    writer.write_bits(usize::from(code), usize::from(len));
+                }
+                EncodedMatch::RepeatDistance {
+                    index,
+                    length_slot,
+                    length_extra,
+                } => {
+                    let (code, len) = main_table.code_for_symbol(258 + index)?;
+                    writer.write_bits(usize::from(code), usize::from(len));
+                    let (code, len) = length_table.code_for_symbol(length_slot)?;
+                    writer.write_bits(usize::from(code), usize::from(len));
+                    let length_extra_bits = length_slot_extra_bits(length_slot)?;
+                    if length_extra_bits != 0 {
+                        writer.write_bits(length_extra, usize::from(length_extra_bits));
                     }
                 }
-                state.remember(length, distance);
+                EncodedMatch::New {
+                    length_slot,
+                    length_extra,
+                    distance_slot,
+                    distance_extra,
+                    distance_bit_count,
+                } => {
+                    let (code, len) = main_table.code_for_symbol(262 + length_slot)?;
+                    writer.write_bits(usize::from(code), usize::from(len));
+                    let length_extra_bits = length_slot_extra_bits(length_slot)?;
+                    if length_extra_bits != 0 {
+                        writer.write_bits(length_extra, usize::from(length_extra_bits));
+                    }
+                    let (code, len) = distance_table.code_for_symbol(distance_slot)?;
+                    writer.write_bits(usize::from(code), usize::from(len));
+                    if distance_bit_count >= 4 {
+                        if distance_bit_count > 4 {
+                            writer.write_bits(distance_extra >> 4, distance_bit_count - 4);
+                        }
+                        let (code, len) = align_table.code_for_symbol(distance_extra & 0x0f)?;
+                        writer.write_bits(usize::from(code), usize::from(len));
+                    } else if distance_bit_count != 0 {
+                        writer.write_bits(distance_extra, distance_bit_count);
+                    }
+                }
             }
+            state.remember(length, distance);
         }
+        output_pos += length;
     }
+    emit_filters_before(&mut writer, usize::MAX, output_pos)?;
 
     let payload_bits = writer.bit_pos;
-    encode_compressed_block(&writer.finish(), payload_bits, true, is_last)
+    Ok((
+        encode_compressed_block(&writer.finish(), payload_bits, true, is_last)?,
+        output_pos,
+    ))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -961,6 +2575,7 @@ impl Unpack50Encoder {
         Ok(packed)
     }
 
+    #[cfg(test)]
     pub(crate) fn encode_member_with_progress(
         &mut self,
         input: &[u8],
@@ -994,6 +2609,57 @@ impl Unpack50Encoder {
         algorithm_version: u8,
         filters: &[Rar50FilterSpec],
     ) -> Result<Vec<u8>> {
+        self.encode_member_with_filters_pooled(
+            input,
+            algorithm_version,
+            filters,
+            None,
+            &EncoderScratchPool::new(),
+        )
+    }
+
+    /// The filtered member through the same pooled, tree-fed encoder an
+    /// unfiltered member takes: the whole member is transformed first, in
+    /// the codec's 262,143-byte filter chunks with one record per chunk and
+    /// filter, and the records ride the blocks at their absolute offsets.
+    /// It used to walk one-chunk blocks serially, without the tree or the
+    /// pool (nzbfast-local change, 7 Sep 2026; see VENDORING.md).
+    pub(crate) fn encode_member_with_filters_pooled(
+        &mut self,
+        input: &[u8],
+        algorithm_version: u8,
+        filters: &[Rar50FilterSpec],
+        progress: Option<&mut dyn FnMut(usize) -> bool>,
+        scratch: &EncoderScratchPool,
+    ) -> Result<Vec<u8>> {
+        let (filtered, records) = filtered_lz_member_records(input, filters)?;
+        let packed = encode_lz_member_inner_pooled(
+            &filtered,
+            &self.history,
+            algorithm_version,
+            &records,
+            self.options,
+            progress,
+            scratch,
+        )?;
+        // The window a solid successor is compressed against is what the
+        // decoder keeps, and the decoder keeps the LZ output: the filtered
+        // bytes, not `input`.
+        self.remember(&filtered);
+        Ok(packed)
+    }
+
+    /// The path [`Self::encode_member_with_filters`] took before 7 Sep
+    /// 2026: one-filter-chunk blocks, walked serially, with no tree hints.
+    /// Kept as the exact control the ratio lab's joint filter/tree
+    /// encoder is tested against.
+    #[cfg(any(test, feature = "ratio-lab"))]
+    pub(crate) fn encode_member_with_filters_chunked(
+        &mut self,
+        input: &[u8],
+        algorithm_version: u8,
+        filters: &[Rar50FilterSpec],
+    ) -> Result<Vec<u8>> {
         if input.len() > MAX_FILTER_BLOCK_LENGTH {
             let (packed, history) = filtered_lz_blocks(
                 input,
@@ -1015,9 +2681,6 @@ impl Unpack50Encoder {
             self.options,
             None,
         )?;
-        // The window a solid successor is compressed against is what the
-        // decoder keeps, and the decoder keeps the LZ output: the filtered
-        // bytes, not `input`.
         self.remember(&filtered);
         Ok(packed)
     }
@@ -1029,30 +2692,13 @@ impl Unpack50Encoder {
         filters: &[Rar50FilterSpec],
         progress: &mut dyn FnMut(usize) -> bool,
     ) -> Result<Vec<u8>> {
-        if input.len() > MAX_FILTER_BLOCK_LENGTH {
-            let (packed, history) = filtered_lz_blocks(
-                input,
-                filters,
-                &self.history,
-                algorithm_version,
-                self.options,
-                Some(progress),
-            )?;
-            self.history = history;
-            return Ok(packed);
-        }
-        let (filtered, records) = filtered_lz_member(input, filters)?;
-        let packed = encode_lz_member_inner(
-            &filtered,
-            &self.history,
+        self.encode_member_with_filters_pooled(
+            input,
             algorithm_version,
-            &records,
-            self.options,
+            filters,
             Some(progress),
-        )?;
-        // See `encode_member_with_filters`: remember the filtered bytes.
-        self.remember(&filtered);
-        Ok(packed)
+            &EncoderScratchPool::new(),
+        )
     }
 
     fn remember(&mut self, input: &[u8]) {
@@ -1067,11 +2713,33 @@ impl Unpack50Encoder {
     }
 }
 
+// nzbfast-local change, 5 Sep 2026 — literal-run tokens; see VENDORING.md.
+// A zero distance denotes a literal run in the current block input.
+// Match lengths and literal-run lengths share the same field.
 #[derive(Debug, Clone, Copy)]
-enum EncodeToken {
-    Filter(EncodeFilter),
-    Literal(u8),
-    Match { length: usize, distance: usize },
+struct EncodeToken {
+    length: usize,
+    distance: usize,
+}
+impl EncodeToken {
+    fn push_literal(tokens: &mut Vec<Self>) {
+        Self::push_literals(tokens, 1);
+    }
+    fn push_literals(tokens: &mut Vec<Self>, count: usize) {
+        if let Some(last) = tokens.last_mut() {
+            if last.distance == 0 {
+                last.length += count;
+                return;
+            }
+        }
+        tokens.push(Self {
+            length: count,
+            distance: 0,
+        });
+    }
+    fn matched(length: usize, distance: usize) -> Self {
+        Self { length, distance }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1172,66 +2840,363 @@ fn encode_tokens(
         .expect("encoding without cancellation cannot be cancelled")
 }
 
+// Match positions are offsets into the combined history/input buffer. Keep
+// full-width storage available for spans that do not fit in u32.
+// (nzbfast-local change, 5 Sep 2026; see VENDORING.md.)
+trait MatchPosition: Copy {
+    /// Bits a slot holds - what is left above a position is the tag.
+    const BITS: u32;
+    fn from_position(pos: usize) -> Self;
+    fn position(self) -> usize;
+}
+
+impl MatchPosition for usize {
+    const BITS: u32 = usize::BITS;
+    fn from_position(pos: usize) -> Self {
+        pos
+    }
+    fn position(self) -> usize {
+        self
+    }
+}
+
+impl MatchPosition for u32 {
+    const BITS: u32 = u32::BITS;
+    fn from_position(pos: usize) -> Self {
+        // Dispatch checked the whole indexed span before choosing u32.
+        // Insertions only use positions within that span (a tagged slot
+        // value keeps its tag inside the 32 bits, by `tag_bits`).
+        debug_assert!(u32::try_from(pos).is_ok());
+        pos as u32
+    }
+    fn position(self) -> usize {
+        self as usize
+    }
+}
+
+fn compact_match_index_fits(input_len: usize, history_len: usize, max_distance: usize) -> bool {
+    input_len
+        .checked_add(history_len.min(max_distance))
+        .is_some_and(|len| u32::try_from(len).is_ok())
+}
+
+#[cfg(test)]
 fn encode_tokens_with_progress(
     input: &[u8],
     history: &[u8],
     options: EncodeOptions,
     distance_size: usize,
-    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> Result<Vec<EncodeToken>> {
-    let mut tokens = Vec::new();
-    let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
-    let history = &history[history.len().saturating_sub(options.max_match_distance)..];
-    let mut combined = Vec::with_capacity(history.len() + input.len());
-    combined.extend_from_slice(history);
-    combined.extend_from_slice(input);
-    for history_pos in 0..history.len().saturating_sub(2) {
-        insert_match_position(&combined, history_pos, &mut buckets);
-    }
+    encode_tokens_with_scratch(
+        input,
+        history,
+        options,
+        distance_size,
+        progress,
+        &mut EncoderScratch::default(),
+    )
+}
 
-    let mut pos = history.len();
-    let end = combined.len();
+#[cfg(test)]
+fn encode_tokens_with_scratch(
+    input: &[u8],
+    history: &[u8],
+    options: EncodeOptions,
+    distance_size: usize,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+    scratch: &mut EncoderScratch,
+) -> Result<Vec<EncodeToken>> {
+    encode_tokens_in_span(
+        input,
+        history,
+        options,
+        distance_size,
+        progress,
+        scratch,
+        None,
+        None,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_tokens_in_span(
+    input: &[u8],
+    history: &[u8],
+    options: EncodeOptions,
+    distance_size: usize,
+    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    scratch: &mut EncoderScratch,
+    indexed_span: Option<&[u8]>,
+    long_seed: Option<LongSeed<'_>>,
+    tree: &[std::sync::atomic::AtomicU32],
+) -> Result<Vec<EncodeToken>> {
+    let mut tokens = std::mem::take(&mut scratch.tokens);
+    tokens.clear();
+    if options.max_match_candidates == 0 || options.max_match_distance == 0 {
+        // The entire input is one literal run. Preserve the original progress
+        // checkpoints without allocating a hash index or copying history.
+        let mut consumed = 1usize;
+        while consumed <= input.len() {
+            if progress
+                .as_deref_mut()
+                .is_some_and(|report| !report(consumed))
+            {
+                return Err(Error::Cancelled);
+            }
+            consumed = consumed.saturating_add(1024 * 1024);
+        }
+        if progress.is_some_and(|report| !report(input.len())) {
+            return Err(Error::Cancelled);
+        }
+        if !input.is_empty() {
+            tokens.push(EncodeToken {
+                length: input.len(),
+                distance: 0,
+            });
+        }
+        return Ok(tokens);
+    }
+    if compact_match_index_fits(input.len(), history.len(), options.max_match_distance) {
+        let indexed_len = input.len() + history.len().min(options.max_match_distance);
+        let index = scratch.index(indexed_len, options.max_match_candidates);
+        let (tokens, index) = encode_tokens_indexed_in_span::<u32>(
+            input,
+            history,
+            options,
+            distance_size,
+            progress,
+            index,
+            tokens,
+            indexed_span,
+            long_seed,
+            tree,
+        )?;
+        scratch.index = Some(index);
+        Ok(tokens)
+    } else {
+        let indexed_len = input.len() + history.len().min(options.max_match_distance);
+        let index = MatchIndex::<usize>::new(indexed_len, options.max_match_candidates);
+        encode_tokens_indexed_in_span::<usize>(
+            input,
+            history,
+            options,
+            distance_size,
+            progress,
+            index,
+            tokens,
+            indexed_span,
+            long_seed,
+            tree,
+        )
+        .map(|(tokens, _)| tokens)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+fn encode_tokens_indexed<P: MatchPosition>(
+    input: &[u8],
+    history: &[u8],
+    options: EncodeOptions,
+    distance_size: usize,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+    buckets: MatchIndex<P>,
+    tokens: Vec<EncodeToken>,
+) -> Result<(Vec<EncodeToken>, MatchIndex<P>)> {
+    encode_tokens_indexed_in_span::<P>(
+        input,
+        history,
+        options,
+        distance_size,
+        progress,
+        buckets,
+        tokens,
+        None,
+        None,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_tokens_indexed_in_span<P: MatchPosition>(
+    input: &[u8],
+    history: &[u8],
+    options: EncodeOptions,
+    distance_size: usize,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
+    mut buckets: MatchIndex<P>,
+    tokens: Vec<EncodeToken>,
+    indexed_span: Option<&[u8]>,
+    long_seed: Option<LongSeed<'_>>,
+    tree: &[std::sync::atomic::AtomicU32],
+) -> Result<(Vec<EncodeToken>, MatchIndex<P>)> {
+    let history = &history[history.len().saturating_sub(options.max_match_distance)..];
+    let combined = if let Some(span) = indexed_span {
+        debug_assert_eq!(span.len(), history.len() + input.len());
+        std::borrow::Cow::Borrowed(span)
+    } else if history.is_empty() {
+        std::borrow::Cow::Borrowed(input)
+    } else {
+        let mut combined = Vec::with_capacity(history.len() + input.len());
+        combined.extend_from_slice(history);
+        combined.extend_from_slice(input);
+        std::borrow::Cow::Owned(combined)
+    };
+    // The stride is carried in the slice's own shape rather than in a
+    // parameter through five call layers: the finder writes `stride` slots
+    // per position of `input` and nothing else shares the buffer.
+    debug_assert!(tree.is_empty() || tree.len() % input.len().max(1) == 0);
+    let stride = if tree.is_empty() || input.is_empty() {
+        0
+    } else {
+        tree.len() / input.len()
+    };
+    let tree = TreeMatches {
+        base: history.len(),
+        distances: tree,
+        stride,
+    };
+    buckets.seed_history(&combined, history.len(), long_seed);
+    walk_tokens(
+        &combined,
+        history.len(),
+        combined.len(),
+        options,
+        distance_size,
+        progress,
+        buckets,
+        tokens,
+        tree,
+    )
+}
+
+/// The tokenizer's walk over `combined[start..end]` with `combined[..start]`
+/// as its history, on an index that already holds every position the walk
+/// may reach back to: [`encode_tokens_indexed_in_span`] seeds the index
+/// and calls this; [`LiveSpanEncoder`] calls it member after member on
+/// one index that the walks themselves keep current, so a solid group's
+/// members never re-seed the dictionary (nzbfast-local change, 6 Sep
+/// 2026; see VENDORING.md). Matches never reach past `end`.
+#[allow(clippy::too_many_arguments)]
+fn walk_tokens<P: MatchPosition>(
+    combined: &[u8],
+    start: usize,
+    end: usize,
+    options: EncodeOptions,
+    distance_size: usize,
+    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    mut buckets: MatchIndex<P>,
+    mut tokens: Vec<EncodeToken>,
+    tree: TreeMatches<'_>,
+) -> Result<(Vec<EncodeToken>, MatchIndex<P>)> {
+    if options.optimal_parse {
+        return walk_tokens_optimal(
+            combined,
+            start,
+            end,
+            options,
+            distance_size,
+            progress,
+            buckets,
+            tokens,
+            tree,
+        );
+    }
+    let input = &combined[start..end];
+
+    let mut pos = start;
     let mut state = EncoderMatchState::default();
     let mut next_report = 0usize;
+    let mut literal_run = 0usize;
+    // The lazy parser's probe at `pos + 1` is the search the next iteration
+    // would run from scratch when it defers, so it is kept: `probed` is
+    // `Some(best_match(pos))` when the previous iteration already computed
+    // it. The position deferred over is inserted BEFORE the probe, so the
+    // probe sees exactly what the fresh search would have (the old order
+    // inserted it after, and the fresh search saw one candidate more).
+    // (nzbfast-local change, 5 Sep 2026; see VENDORING.md.)
+    let prices = LiteralPrices::new(input, start);
+    let mut probed: Option<(Option<MatchCandidate>, bool)> = None;
     while pos < end {
-        if let Some(candidate) = best_match(
-            &combined,
-            pos,
-            end,
-            &buckets,
-            options,
-            &state,
-            distance_size,
-        ) {
-            if should_lazy_emit_literal(
-                &combined,
+        let (candidate, saw_prefix_match) = match probed.take() {
+            Some(probe) => probe,
+            None => best_match_probe(
+                combined,
                 pos,
+                end,
                 &buckets,
                 options,
                 &state,
                 distance_size,
-                candidate,
-            ) {
-                tokens.push(EncodeToken::Literal(combined[pos]));
-                insert_match_position(&combined, pos, &mut buckets);
-                pos += 1;
-                continue;
-            }
-            let MatchCandidate {
-                length, distance, ..
-            } = candidate;
-            tokens.push(EncodeToken::Match { length, distance });
-            state.remember(length, distance);
-            for history_pos in pos..pos + length {
-                insert_match_position(&combined, history_pos, &mut buckets);
-            }
-            pos += length;
-        } else {
-            tokens.push(EncodeToken::Literal(combined[pos]));
-            insert_match_position(&combined, pos, &mut buckets);
-            pos += 1;
+                &prices,
+                tree,
+            ),
+        };
+        if saw_prefix_match {
+            literal_run = 0;
         }
-        let consumed = pos.saturating_sub(history.len());
+        if let Some(candidate) = candidate {
+            if options.lazy_matching && pos + 1 < end {
+                insert_match_position(combined, pos, &mut buckets);
+                let next = best_match_probe(
+                    combined,
+                    pos + 1,
+                    end,
+                    &buckets,
+                    options,
+                    &state,
+                    distance_size,
+                    &prices,
+                    tree,
+                );
+                let deferred = next.0.is_some_and(|next| {
+                    next.score > candidate.score + prices.bits(pos, 1) as isize
+                }) || should_lazy_emit_literal_beyond_one(
+                    combined,
+                    pos,
+                    &buckets,
+                    options,
+                    &state,
+                    distance_size,
+                    candidate,
+                    &prices,
+                    tree,
+                );
+                if deferred {
+                    EncodeToken::push_literal(&mut tokens);
+                    pos += 1;
+                    probed = Some(next);
+                    continue;
+                }
+                let MatchCandidate {
+                    length, distance, ..
+                } = candidate;
+                tokens.push(EncodeToken::matched(length, distance));
+                state.remember(length, distance);
+                insert_match_range(combined, pos + 1..pos + length, &mut buckets);
+                pos += length;
+                literal_run = 0;
+            } else {
+                let MatchCandidate {
+                    length, distance, ..
+                } = candidate;
+                tokens.push(EncodeToken::matched(length, distance));
+                state.remember(length, distance);
+                insert_match_range(combined, pos..pos + length, &mut buckets);
+                pos += length;
+            }
+        } else {
+            let step = (1 + (literal_run >> LITERAL_SKIP_STRENGTH))
+                .min(LITERAL_SKIP_MAX)
+                .min(end - pos);
+            EncodeToken::push_literals(&mut tokens, step);
+            insert_match_range(combined, pos..pos + step, &mut buckets);
+            literal_run += step;
+            pos += step;
+        }
+        let consumed = pos.saturating_sub(start);
         if consumed >= next_report {
             if progress
                 .as_deref_mut()
@@ -1245,17 +3210,61 @@ fn encode_tokens_with_progress(
     if progress.is_some_and(|report| !report(input.len())) {
         return Err(Error::Cancelled);
     }
-    Ok(tokens)
+    Ok((tokens, buckets))
 }
 
-fn should_lazy_emit_literal(
+/// The lazy parser's probes at offsets two and beyond; offset one is the
+/// tokenizer's own, cached probe.
+#[allow(clippy::too_many_arguments)]
+fn should_lazy_emit_literal_beyond_one<P: MatchPosition>(
     input: &[u8],
     pos: usize,
-    buckets: &[Vec<usize>],
+    buckets: &MatchIndex<P>,
     options: EncodeOptions,
     state: &EncoderMatchState,
     distance_size: usize,
     current: MatchCandidate,
+    prices: &LiteralPrices,
+    tree: TreeMatches<'_>,
+) -> bool {
+    let end = input.len();
+    let lookahead = options.lazy_lookahead.max(1);
+    if lookahead < 2 {
+        return false;
+    }
+    (2..=lookahead)
+        .take_while(|offset| pos + offset < end)
+        .any(|offset| {
+            best_match_probe(
+                input,
+                pos + offset,
+                end,
+                buckets,
+                options,
+                state,
+                distance_size,
+                prices,
+                tree,
+            )
+            .0
+            .is_some_and(|next| {
+                let skipped_literal_score = prices.bits(pos, offset) as isize;
+                next.score > current.score + skipped_literal_score
+            })
+        })
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn should_lazy_emit_literal<P: MatchPosition>(
+    input: &[u8],
+    pos: usize,
+    buckets: &MatchIndex<P>,
+    options: EncodeOptions,
+    state: &EncoderMatchState,
+    distance_size: usize,
+    current: MatchCandidate,
+    prices: &LiteralPrices,
 ) -> bool {
     let end = input.len();
     if !options.lazy_matching || pos + 1 >= end {
@@ -1273,12 +3282,155 @@ fn should_lazy_emit_literal(
                 options,
                 state,
                 distance_size,
+                prices,
             )
             .is_some_and(|next| {
-                let skipped_literal_score = offset as isize * 8;
+                let skipped_literal_score = prices.bits(pos, offset) as isize;
                 next.score > current.score + skipped_literal_score
             })
         })
+}
+
+/// What the block's literals cost, byte by byte: the order-0 Huffman code
+/// length of each byte value over the block's own input, prefix-summed so
+/// the literal cost of any range is two loads. A match is worth taking only
+/// when its estimated bits are fewer than the literals it replaces, and its
+/// score is the bits it saves; the old rule (`16 * length - cost`) accepted
+/// every match of four bytes or more, so on text, where a literal costs five
+/// bits, a four-byte match at a new distance costing ~30 bits was taken over
+/// ~20 bits of literals. The final table differs from this estimate (it
+/// counts emitted literals only), but the estimate is the same one the
+/// block's frequencies would give before any match is chosen.
+/// (nzbfast-local change, 5 Sep 2026; see VENDORING.md.)
+struct LiteralPrices {
+    /// Offset of the block's input inside the combined history/input span.
+    base: usize,
+    prefix: Vec<u32>,
+    /// The per-byte code lengths the prefix was summed from, which the
+    /// cost-based parse starts its price model from (see
+    /// [`TokenPrices::constant`]).
+    byte_price: [u8; 256],
+}
+
+impl LiteralPrices {
+    /// One price table per tokenizer block. Pricing each 256 KiB entropy
+    /// block by its own lengths was tried (6 Sep 2026): -0.4% of size on
+    /// the mixed corpus for +13% of CPU, the sharper prices sending the
+    /// parser after more matches; not kept.
+    fn new(input: &[u8], base: usize) -> Self {
+        // Four interleaved histograms break the store-to-load chain a single
+        // table has on repeated bytes, and every fourth byte is enough of a
+        // sample for a code-length estimate over megabytes (a block under
+        // 64 KiB is counted whole). Measured: the single-table full count
+        // cost about a millisecond per MiB, a quarter of the model's cost.
+        let stride = if input.len() >= 64 << 10 { 4 } else { 1 };
+        let mut counts = [[0u32; 256]; 4];
+        let mut chunks = input.chunks_exact(4 * stride);
+        for chunk in &mut chunks {
+            counts[0][usize::from(chunk[0])] += 1;
+            counts[1][usize::from(chunk[stride])] += 1;
+            counts[2][usize::from(chunk[2 * stride])] += 1;
+            counts[3][usize::from(chunk[3 * stride])] += 1;
+        }
+        for &byte in chunks.remainder() {
+            counts[0][usize::from(byte)] += 1;
+        }
+        let mut frequencies = [0usize; 256];
+        for table in &counts {
+            for (byte, &count) in table.iter().enumerate() {
+                frequencies[byte] += count as usize;
+            }
+        }
+        // A byte the sample never saw still occurs; price it as a rare
+        // symbol rather than an absent one.
+        let lengths = huffman::lengths_for_frequencies(&frequencies, 15);
+        let mut price = [15u8; 256];
+        for (byte, &length) in lengths.iter().enumerate() {
+            if length != 0 {
+                price[byte] = length;
+            }
+        }
+        let mut prefix = Vec::with_capacity(input.len() + 1);
+        let mut total = 0u32;
+        prefix.push(0);
+        for &byte in input {
+            total += u32::from(price[usize::from(byte)]);
+            prefix.push(total);
+        }
+        Self {
+            base,
+            prefix,
+            byte_price: price,
+        }
+    }
+
+    /// The literal cost, in bits, of `length` bytes at `pos` (combined
+    /// coordinates; `pos` is at or past the block's start).
+    #[inline]
+    fn bits(&self, pos: usize, length: usize) -> usize {
+        let start = pos - self.base;
+        (self.prefix[start + length] - self.prefix[start]) as usize
+    }
+}
+
+/// The tree finder's answers for the positions of one block: `stride`
+/// distances per position, nearest first and each reaching strictly
+/// farther than the one before it, with [`TREE_NO_MATCH`] where the list
+/// ends. `base` is the combined-span position of the first position's
+/// slots, so a probe looks its own position up directly. An empty set is
+/// the whole of what a caller without a finder passes, and every probe
+/// below is written to cost nothing when it is empty.
+///
+/// The lazy parser asks for a stride of one and reads
+/// [`TreeMatches::best_distance`]; the cost-based parse asks for
+/// [`TREE_CANDIDATE_SLOTS`] and consumes the whole list as its candidate
+/// source, which is what lets it skip the ring walk. (nzbfast-local
+/// change, 7 Sep 2026; see VENDORING.md.)
+#[derive(Debug, Clone, Copy, Default)]
+struct TreeMatches<'a> {
+    base: usize,
+    distances: &'a [std::sync::atomic::AtomicU32],
+    stride: usize,
+}
+
+impl TreeMatches<'_> {
+    /// No finder: every probe returns nothing.
+    fn none() -> Self {
+        Self::default()
+    }
+
+    /// One position's candidate slots, nearest first; empty without a
+    /// finder or past the block the finder answered for.
+    #[inline]
+    fn candidates(&self, pos: usize) -> &[std::sync::atomic::AtomicU32] {
+        if self.stride == 0 {
+            return &[];
+        }
+        let at = match pos.checked_sub(self.base) {
+            Some(index) => index * self.stride,
+            None => return &[],
+        };
+        match self.distances.get(at..at + self.stride) {
+            Some(slots) => slots,
+            None => &[],
+        }
+    }
+
+    /// The distance of the LONGEST match the finder found at `pos`, if
+    /// any: the last filled slot, and with a stride of one the only one.
+    #[inline]
+    fn best_distance(&self, pos: usize) -> Option<usize> {
+        // The walkers filled these in parallel and finished before the
+        // tokenizer started; the load is plain (see the `tree` module).
+        let mut best = None;
+        for slot in self.candidates(pos) {
+            match slot.load(std::sync::atomic::Ordering::Relaxed) {
+                TREE_NO_MATCH => break,
+                distance => best = Some(distance as usize),
+            }
+        }
+        best
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1289,59 +3441,281 @@ struct MatchCandidate {
     cost: usize,
 }
 
-fn best_match(
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+fn best_match<P: MatchPosition>(
     input: &[u8],
     pos: usize,
     end: usize,
-    buckets: &[Vec<usize>],
+    buckets: &MatchIndex<P>,
     options: EncodeOptions,
     state: &EncoderMatchState,
     distance_size: usize,
+    prices: &LiteralPrices,
 ) -> Option<MatchCandidate> {
+    best_match_probe(
+        input,
+        pos,
+        end,
+        buckets,
+        options,
+        state,
+        distance_size,
+        prices,
+        TreeMatches::none(),
+    )
+    .0
+}
+
+/// The best match at `pos`, and whether ANY candidate shared its four-byte
+/// prefix. The second answer drives literal-run acceleration: a position
+/// whose candidates all cost more than their literals is compressible data
+/// the parser declined, not the incompressible run the acceleration is for.
+#[allow(clippy::too_many_arguments)]
+fn best_match_probe<P: MatchPosition>(
+    input: &[u8],
+    pos: usize,
+    end: usize,
+    buckets: &MatchIndex<P>,
+    options: EncodeOptions,
+    state: &EncoderMatchState,
+    distance_size: usize,
+    prices: &LiteralPrices,
+    tree: TreeMatches<'_>,
+) -> (Option<MatchCandidate>, bool) {
     let max_distance = pos.min(options.max_match_distance);
     let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
     if options.max_match_candidates == 0
         || max_distance == 0
         || max_length < 4
-        || pos + 2 >= input.len()
+        || pos + 3 >= input.len()
     {
-        return None;
+        return (None, false);
     }
-    let bucket = &buckets[match_hash(input, pos)];
+    probe_stat!(Probes);
+    // Shorter matches cannot win; reject hash collisions before scanning or scoring.
+    let prefix = &input[pos..pos + 4];
     let mut best = None;
+    let mut saw_prefix_match = false;
     let mut checked = 0usize;
+    // Which break ended the ring walk (`ratio-lab` only).
+    #[cfg(feature = "ratio-lab")]
+    let mut exit_code = probe_stats::Stat::ExitExhausted;
     for distance in state.reps {
         if distance == 0 || distance > max_distance {
             continue;
         }
-        let length = match_length(input, pos, distance, max_length);
-        consider_match_candidate(&mut best, state, distance_size, length, distance);
+        probe_stat!(RepChecked);
+        if &input[pos - distance..pos - distance + 4] != prefix {
+            continue;
+        }
+        probe_stat!(RepPrefixHit);
+        let length = 4 + match_length(input, pos + 4, distance, max_length - 4);
+        saw_prefix_match = true;
+        consider_match_candidate(
+            &mut best,
+            state,
+            distance_size,
+            length,
+            distance,
+            prices.bits(pos, length),
+        );
     }
-    for &candidate in bucket.iter().rev() {
+    for (candidate, tag_matches) in buckets.candidates_tagged(input, pos) {
         if candidate >= pos {
             continue;
         }
         let distance = pos - candidate;
         if distance > max_distance {
+            #[cfg(feature = "ratio-lab")]
+            {
+                exit_code = probe_stats::Stat::ExitDistance;
+            }
             break;
         }
+        // A rejected prefix still consumes the candidate budget.
         checked += 1;
-        let length = match_length(input, pos, distance, max_length);
-        consider_match_candidate(&mut best, state, distance_size, length, distance);
-        if let Some(best) = best {
-            if best.length == max_length {
+        probe_stat!(RingChecked);
+        // A tag mismatch is a prefix mismatch without the history load;
+        // it takes the same exits the byte filter and prefix compare would.
+        if !tag_matches {
+            probe_stat!(RingTagReject);
+            if checked >= options.max_match_candidates {
+                #[cfg(feature = "ratio-lab")]
+                {
+                    exit_code = probe_stats::Stat::ExitCap;
+                }
                 break;
             }
+            continue;
+        }
+        // Candidates come newest first, so every later one is FARTHER and
+        // costs at least as many distance bits: it can only beat `best` by
+        // being strictly longer (a byte of length is worth its literal price,
+        // at least one bit, and the most a farther distance can save on the
+        // length ladder is two bits - so a shorter farther candidate wins
+        // only on a one-bit literal, which this filter forgoes). One byte
+        // compare at `best.length - 1` settles it before the prefix compare,
+        // the length loop and the cost estimate run.
+        // The walk's stop rule (a nice-length best ends it) is applied only
+        // after a candidate is actually considered, so behind a 64+ byte
+        // repeat-distance match the skipped shorter candidates cost a byte
+        // each and the first one that could tie or beat it decides; the old
+        // walk stopped on the first bucket candidate whatever it was and
+        // missed longer matches behind it (measured: a 160-byte match at
+        // distance 5,008 behind a 75-byte repeat, on Rust source). Output
+        // differs from the old walk only there. (nzbfast-local change,
+        // 5 Sep 2026; see VENDORING.md.)
+        if let Some(best) = best {
+            if input[candidate + best.length - 1] != input[pos + best.length - 1] {
+                probe_stat!(RingByteReject);
+                if checked >= options.max_match_candidates {
+                    #[cfg(feature = "ratio-lab")]
+                    {
+                        exit_code = probe_stats::Stat::ExitCap;
+                    }
+                    break;
+                }
+                continue;
+            }
+        }
+        if &input[candidate..candidate + 4] == prefix {
+            probe_stat!(RingPrefixHit);
+            let length = 4 + match_length(input, pos + 4, distance, max_length - 4);
+            saw_prefix_match = true;
+            consider_match_candidate(
+                &mut best,
+                state,
+                distance_size,
+                length,
+                distance,
+                prices.bits(pos, length),
+            );
+        } else {
+            probe_stat!(RingPrefixReject);
+        }
+        // Repeat distances may already have supplied a maximal match. Keep
+        // the original stopping point even when this bucket entry is rejected.
+        if best.is_some_and(|best| best.length == max_length || best.length >= MATCH_NICE_LENGTH) {
+            #[cfg(feature = "ratio-lab")]
+            {
+                exit_code = probe_stats::Stat::ExitNice;
+            }
+            break;
         }
         if checked >= options.max_match_candidates {
+            #[cfg(feature = "ratio-lab")]
+            {
+                exit_code = probe_stats::Stat::ExitCap;
+            }
             break;
         }
     }
-    best
+    #[cfg(feature = "ratio-lab")]
+    {
+        probe_stats::bump(exit_code, 1);
+        probe_stats::bump(probe_stats::walk_bucket(checked), 1);
+    }
+    // The tree finder: the longest occurrence in this position's bucket,
+    // wherever in the dictionary it is, priced against everything above.
+    // Its length was capped at the finder's comparison limit, so the real
+    // length is recomputed here - a 4,096-byte repeat reported as a
+    // 64-byte one is emitted whole. (nzbfast-local change, 7 Sep 2026;
+    // see VENDORING.md.)
+    if let Some(distance) = tree.best_distance(pos) {
+        probe_stat!(TreeProbe);
+        if distance <= max_distance && &input[pos - distance..pos - distance + 4] == prefix {
+            probe_stat!(TreePrefixHit);
+            let length = 4 + match_length(input, pos + 4, distance, max_length - 4);
+            saw_prefix_match = true;
+            consider_match_candidate(
+                &mut best,
+                state,
+                distance_size,
+                length,
+                distance,
+                prices.bits(pos, length),
+            );
+        }
+    }
+    // The long table: a repeat farther back than the ring keeps.
+    if best.is_none_or(|best| best.length < LONG_MATCH_MIN_LENGTH) {
+        if let Some(candidate) = buckets.long_candidate(input, pos) {
+            probe_stat!(LongProbe);
+            if candidate < pos
+                && pos - candidate <= max_distance
+                && &input[candidate..candidate + 4] == prefix
+            {
+                probe_stat!(LongPrefixHit);
+                let distance = pos - candidate;
+                let length = 4 + match_length(input, pos + 4, distance, max_length - 4);
+                if length >= LONG_MATCH_MIN_LENGTH.min(max_length) {
+                    saw_prefix_match = true;
+                    consider_match_candidate(
+                        &mut best,
+                        state,
+                        distance_size,
+                        length,
+                        distance,
+                        prices.bits(pos, length),
+                    );
+                }
+            }
+        }
+    }
+    (best, saw_prefix_match)
 }
 
 fn match_length(input: &[u8], pos: usize, distance: usize, max_length: usize) -> usize {
-    super::fast::match_length(input, pos, distance, max_length)
+    let length = super::fast::match_length(input, pos, distance, max_length);
+    probe_stat!(MatchLengthCalls);
+    probe_stat!(MatchLengthBytes, length);
+    length
+}
+
+/// What a match farther back than a megabyte is charged on top of
+/// [`estimated_match_cost`], in bits (nzbfast-local change, 7 Sep 2026;
+/// see VENDORING.md).
+///
+/// The cost estimate spends one flat ten-bit constant on the two Huffman
+/// symbols a match writes - the main symbol and the distance slot - and
+/// counts the slot's extra bits exactly. That is close enough while every
+/// match comes from a ring that reaches a few megabytes, and it stops
+/// being close enough once the tree finder offers a match from anywhere
+/// in a 32 MiB dictionary at nearly every position: the parser then takes
+/// the LONGEST match on offer, which is usually the farthest, and pays
+/// for it in distance bits. Measured on the first 256 MiB of the mixed
+/// corpus at `-md32m` (7 Sep 2026): without the surcharge the encoder
+/// emits 4.44 M matches eight or more MiB back and 27.30 bits a match,
+/// where rar 7.23 emits 2.21 M and 25.1 bits - and it is 117,291,644
+/// bytes against rar's 116,751,028. With it: 116,493,016, under rar's
+/// own. The surcharge was swept: 4 bits 116,576,488, 6 bits
+/// 116,493,016, 8 bits 116,517,992, 10 bits 116,564,428, 16 bits
+/// 116,692,584.
+///
+/// It is a stand-in for prices read off the real tables. **It is the LAZY
+/// walk's stand-in, and the cost-based parse is not what retires it** -
+/// measured 7 Sep 2026 by the lane that gave the parse its own candidate
+/// list, with this constant set to zero: the `-mo` archive is 112,865,011
+/// bytes either way, bit for bit, because the parse prices `MatchRun`s
+/// that carry no score and never reaches `consider_match_candidate`,
+/// while the LAZY level goes 115,617,428 to 116,416,233, +0.69%. What
+/// retires it is real prices inside `estimated_match_cost`, whose flat
+/// ten-bit constant for a match's two Huffman symbols is what it corrects
+/// for. It is zero below a megabyte, so the writer's own default was
+/// untouched by it while that default was 128 KiB; the 2 MiB default of
+/// 8 Sep 2026 is above the threshold and does reach it. (nzbfast-local
+/// change, 7 Sep 2026.)
+const FAR_DISTANCE_SURCHARGE_BITS: usize = 6;
+const FAR_DISTANCE_SURCHARGE_FROM: usize = 1 << 20;
+
+#[inline]
+fn far_distance_surcharge(distance: usize) -> usize {
+    if distance > FAR_DISTANCE_SURCHARGE_FROM {
+        FAR_DISTANCE_SURCHARGE_BITS
+    } else {
+        0
+    }
 }
 
 fn consider_match_candidate(
@@ -1350,6 +3724,7 @@ fn consider_match_candidate(
     distance_size: usize,
     length: usize,
     distance: usize,
+    literal_bits: usize,
 ) {
     if length < 4 {
         return;
@@ -1357,10 +3732,14 @@ fn consider_match_candidate(
     let Ok(cost) = estimated_match_cost(state, length, distance, distance_size) else {
         return;
     };
+    // A match that saves no bits against its literals is not a match.
+    if cost >= literal_bits {
+        return;
+    }
     let candidate = MatchCandidate {
         length,
         distance,
-        score: (length as isize * 16) - cost as isize,
+        score: literal_bits as isize - cost as isize - far_distance_surcharge(distance) as isize,
         cost,
     };
     if best.is_none_or(|best| {
@@ -1404,36 +3783,1883 @@ fn estimated_match_cost(
         + distance_slot_bit_count(distance_slot)?)
 }
 
-fn insert_match_position(input: &[u8], pos: usize, buckets: &mut [Vec<usize>]) {
-    if pos + 2 < input.len() {
-        buckets[match_hash(input, pos)].push(pos);
+// nzbfast-local change, 7 Sep 2026 - cost-based optimal parse; see
+// VENDORING.md.
+//
+// `walk_tokens` is greedy with a one-position lazy re-probe: it takes the
+// best-scoring token at each position and never reconsiders. A cost-based
+// parse instead prices EVERY reachable token over a window of positions
+// and keeps the cheapest total path, which is where LZMA's `GetOptimum`,
+// 7-Zip's and zstd's `btultra` levels get their last few percent. RAR 5's
+// token set is what makes the difference worth a dynamic program rather
+// than a deeper greedy search: four repeat distances that ROTATE on use,
+// a two-bit length-repeat token, and a length bonus that depends on the
+// distance, so a match three bits dearer now can be eight bits cheaper two
+// tokens later by leaving a repeat slot in place. Only a parse that
+// carries the repeat state through the search sees that, so every node of
+// the program carries its own [`EncoderMatchState`].
+//
+// Measured on 256 MiB of mixed text, fixed-width records and a replayed
+// 32 MiB pool, at a 32 MiB dictionary: 118,507,983 bytes greedy against
+// 115,238,274 here, which is 2.76% smaller and under what `rar 7.23`
+// writes at either `-m3` (116,751,028) or `-m5` (116,003,986). It costs
+// 3.7x the greedy walk's CPU on an idle 20-core box, because it probes
+// every position where the greedy walk probes about one in ten, so it
+// is the top of the level ladder and not a default.
+
+/// How many input positions one dynamic-programming window decides at a
+/// time. The window is solved exactly and then committed, so a longer one
+/// is a better parse and a shorter one is less memory and less work thrown
+/// away at a forced jump; 16 Ki positions is about 1.2 MB of nodes and puts
+/// a window boundary every 16 KiB of input, where the boundary costs
+/// nothing at all (the window is allowed to end on any node up to a full
+/// match past its limit, so no match is ever cut by the boundary itself).
+const OPTIMAL_WINDOW_POSITIONS: usize = 1 << 14;
+/// A match at least this long is taken without pricing what else the
+/// window could do with those bytes: the parse commits its path up to that
+/// position, emits the match, and starts a fresh window after it (LZMA's
+/// `numFastBytes` rule, which exists for exactly this reason). Without it
+/// a repeated-payload shape prices 4,096 positions inside every 4,096-byte
+/// match, and the parse costs many times what the shape can pay back.
+/// Measured on the 256 MiB mixed slice at a 32 MiB dictionary (7 Sep
+/// 2026, on the tree before the length-limited Huffman codes landed):
+/// 64 gives 115,914,564 bytes for 98 user s, 512 gives 115,917,624 for
+/// 105 - the shorter threshold is both smaller and cheaper, so a match
+/// this long is not worth deliberating over. It is the same length the
+/// candidate walk already stops at ([`MATCH_NICE_LENGTH`]).
+const OPTIMAL_SUFFICIENT_LENGTH: usize = 64;
+/// Per position, at most this many SHORTER lengths are priced beyond each
+/// candidate's own full length. Cutting a match short to land on a cheaper
+/// token pays near the bottom of the length ladder, so the budget is spent
+/// from the shortest candidate upward and the full length of every
+/// candidate is always priced.
+const OPTIMAL_SHORT_LENGTH_BUDGET: usize = 64;
+/// ...and per repeat distance, at most this many rungs from length two up.
+/// A repeat is priced from every node, four of them, so its ladder is the
+/// parse's most repeated inner loop; the rungs that pay are at the bottom,
+/// where a two-byte repeat undercuts two literals.
+const OPTIMAL_REPEAT_LENGTH_BUDGET: usize = 16;
+/// Prices are in sixteenths of a bit. Huffman code lengths are whole bits,
+/// but a token's price is a sum of several of them plus raw bits, and the
+/// entropy price of a symbol is not an integer: sixteenths keep the
+/// program's comparisons from collapsing into ties.
+const PRICE_SHIFT: u32 = 4;
+/// A symbol no table entry would reach costs the deepest code a RAR 5
+/// table can hold. Nothing is priced free.
+const PRICE_MAX: u16 = 15 << PRICE_SHIFT;
+/// ...and nothing is priced below one bit, which is a Huffman code's floor.
+const PRICE_MIN: u16 = 1 << PRICE_SHIFT;
+/// How much input the FIRST price region waits for, against
+/// [`ENTROPY_BLOCK_BYTES`] for every region after it. A region is priced
+/// by the region before it, so the first one has nothing of its own and
+/// runs on the constant model; a short first region gets real code
+/// lengths in front of the parse sooner, and on a MEMBER SET that is the
+/// difference between a member being parsed on real prices and never
+/// leaving the constant model at all.
+///
+/// Measured 7 Sep 2026 (400 files of about 2.7 MB, and the first 256 MiB
+/// of the mixed corpus), user CPU flat to noise across the column:
+///
+/// | first region | 400 files, 32 MiB | slice, 32 MiB | slice, 128 KiB |
+/// |---|---|---|---|
+/// | 256 KiB (none) | 492,385,336 | 114,684,633 | 152,021,538 |
+/// | 128 KiB | 489,415,177 | 114,597,054 | |
+/// | 64 KiB | 488,452,656 | 114,461,903 | 151,615,812 |
+/// | **32 KiB** | **488,399,398** | **114,407,187** | **151,473,395** |
+/// | 16 KiB | | 114,452,648 | |
+///
+/// 32 KiB is an optimum and not the end of a trend: 16 KiB is worse
+/// again, and below it the region is too small a sample to price from.
+///
+/// **This dial was 64 KiB for a few hours and had to be RE-TUNED when the
+/// adaptive entropy-block splitter landed on by default**, because the
+/// splitter cuts the very blocks this model prices for; on the tree
+/// before it, 64 KiB was the optimum and 32 KiB measurably worse. Re-run
+/// the sweep whenever the block cutter changes: it is four archives, and
+/// it has moved the answer once already.
+const OPTIMAL_FIRST_REGION_BYTES: usize = 32 << 10;
+// A first region at or past a full one would settle nothing early, which
+// is the whole point of it; a build error is the right place to say so.
+const _: () = assert!(OPTIMAL_FIRST_REGION_BYTES < ENTROPY_BLOCK_BYTES);
+
+/// Sixteenths of a bit of `log2(value)`, by integer log plus four rounds of
+/// mantissa squaring. Integer arithmetic throughout, so an archive's bytes
+/// do not depend on a platform's `log2`.
+fn log2_sixteenths(value: u64) -> u32 {
+    debug_assert!(value != 0);
+    let integer = 63 - value.leading_zeros();
+    // The mantissa in Q30, so [2^30, 2^31) and a square still fits a u64.
+    let mut mantissa = if integer >= 30 {
+        value >> (integer - 30)
+    } else {
+        value << (30 - integer)
+    };
+    let mut fraction = 0u32;
+    for bit in (0..PRICE_SHIFT).rev() {
+        mantissa = (mantissa * mantissa) >> 30;
+        if mantissa >= 1 << 31 {
+            fraction |= 1 << bit;
+            mantissa >>= 1;
+        }
+    }
+    (integer << PRICE_SHIFT) | fraction
+}
+
+/// What each token symbol costs, in sixteenths of a bit, under one set of
+/// Huffman tables. The four tables are the four the writer emits, so a
+/// token's price here is the bits `encode_token_block` would actually
+/// write for it, align symbol included.
+#[derive(Clone)]
+struct TokenPrices {
+    main: Vec<u16>,
+    length: Vec<u16>,
+    distance: Vec<u16>,
+    align: Vec<u16>,
+}
+
+impl TokenPrices {
+    /// The constant-cost model [`estimated_match_cost`] uses, with the
+    /// block's own order-0 literal prices: what the parse prices with
+    /// before it has produced any tokens to build a table from. Priced
+    /// token for token it is that function exactly, scaled.
+    fn constant(literal_bits: &[u8; 256], distance_size: usize) -> Self {
+        let mut main = vec![10 << PRICE_SHIFT; MAIN_TABLE_SIZE];
+        for (symbol, &bits) in literal_bits.iter().enumerate() {
+            main[symbol] = u16::from(bits) << PRICE_SHIFT;
+        }
+        // 256 is the filter symbol, which the parse never emits.
+        main[256] = PRICE_MAX;
+        main[257] = 2 << PRICE_SHIFT;
+        for symbol in main.iter_mut().take(262).skip(258) {
+            *symbol = 5 << PRICE_SHIFT;
+        }
+        Self {
+            main,
+            length: vec![0; LENGTH_TABLE_SIZE],
+            distance: vec![0; distance_size],
+            // The constant model charges a far distance its whole bit
+            // count; the exact model writes all but four of those bits
+            // raw and the last four as an align symbol, so a flat four
+            // bits per align symbol reproduces it.
+            align: vec![4 << PRICE_SHIFT; ALIGN_TABLE_SIZE],
+        }
     }
 }
 
-fn match_hash(input: &[u8], pos: usize) -> usize {
-    let value =
-        ((input[pos] as usize) << 8) ^ ((input[pos + 1] as usize) << 4) ^ input[pos + 2] as usize;
-    value & (MATCH_HASH_BUCKETS - 1)
+/// Sixteenths of a bit for each symbol, from the frequencies a completed
+/// region of the token stream actually had. A symbol the region never used
+/// is priced at the table's deepest code rather than free; a table the
+/// region never used at all keeps the constant model's price, so a region
+/// with no far matches does not make the next one's far matches
+/// unaffordable.
+fn price_from_frequencies(prices: &mut [u16], frequencies: &[usize], absent: u16) {
+    let total: usize = frequencies.iter().sum();
+    if total == 0 {
+        prices.fill(absent);
+        return;
+    }
+    let log_total = log2_sixteenths(total as u64);
+    for (price, &frequency) in prices.iter_mut().zip(frequencies) {
+        *price = if frequency == 0 {
+            PRICE_MAX
+        } else {
+            let bits = log_total - log2_sixteenths(frequency as u64);
+            (bits as u16).clamp(PRICE_MIN, PRICE_MAX)
+        };
+    }
+}
+
+/// The parse's price model: the prices in force, and the token frequencies
+/// of the region being parsed. Every [`ENTROPY_BLOCK_BYTES`] of committed
+/// input the frequencies become the prices and reset, so each region is
+/// priced by the one before it - the reader's tables are per region too,
+/// so those are the codes the writer is about to build. (zstd's
+/// `btultra2` re-parses the same block with the first pass's statistics;
+/// pricing from the previous region instead costs one pass rather than
+/// two and follows the input where a whole-block statistic cannot.)
+struct PriceModel {
+    prices: TokenPrices,
+    main: Vec<usize>,
+    length: Vec<usize>,
+    distance: Vec<usize>,
+    align: Vec<usize>,
+    bytes: usize,
+    /// How much committed input the next rebuild waits for: the short
+    /// first region ([`OPTIMAL_FIRST_REGION_BYTES`]), then a full one.
+    threshold: usize,
+    distance_size: usize,
+}
+
+impl PriceModel {
+    fn new(literals: &LiteralPrices, distance_size: usize) -> Self {
+        Self {
+            prices: TokenPrices::constant(&literals.byte_price, distance_size),
+            main: vec![0; MAIN_TABLE_SIZE],
+            length: vec![0; LENGTH_TABLE_SIZE],
+            distance: vec![0; distance_size],
+            align: vec![0; ALIGN_TABLE_SIZE],
+            bytes: 0,
+            threshold: OPTIMAL_FIRST_REGION_BYTES,
+            distance_size,
+        }
+    }
+
+    fn observe_literals(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.main[usize::from(byte)] += 1;
+        }
+        self.bytes += bytes.len();
+    }
+
+    fn observe_match(
+        &mut self,
+        state: &EncoderMatchState,
+        length: usize,
+        distance: usize,
+    ) -> Result<()> {
+        match state.encode_match(length, distance, self.distance_size)? {
+            EncodedMatch::LastLengthRepeat => self.main[257] += 1,
+            EncodedMatch::RepeatDistance {
+                index, length_slot, ..
+            } => {
+                self.main[258 + index] += 1;
+                self.length[length_slot] += 1;
+            }
+            EncodedMatch::New {
+                length_slot,
+                distance_slot,
+                distance_extra,
+                distance_bit_count,
+                ..
+            } => {
+                self.main[262 + length_slot] += 1;
+                self.distance[distance_slot] += 1;
+                if distance_bit_count >= 4 {
+                    self.align[distance_extra & 0x0f] += 1;
+                }
+            }
+        }
+        self.bytes += length;
+        Ok(())
+    }
+
+    /// Rebuild the prices when a region's worth of input has been
+    /// committed. Called only between windows, so a window's prices, and
+    /// the literal price prefix built from them, never move under it.
+    fn settle(&mut self) {
+        if self.bytes < self.threshold {
+            return;
+        }
+        self.threshold = ENTROPY_BLOCK_BYTES;
+        price_from_frequencies(&mut self.prices.main, &self.main, PRICE_MAX);
+        price_from_frequencies(&mut self.prices.length, &self.length, 0);
+        price_from_frequencies(&mut self.prices.distance, &self.distance, 0);
+        price_from_frequencies(&mut self.prices.align, &self.align, 4 << PRICE_SHIFT);
+        self.main.fill(0);
+        self.length.fill(0);
+        self.distance.fill(0);
+        self.align.fill(0);
+        self.bytes = 0;
+    }
+}
+
+/// What [`encode_token_block`] would spend on this token, in sixteenths of
+/// a bit, under `prices` and with `state` as the repeat state in front of
+/// it. Exact for the given tables: the same three arms, the same extra
+/// bits, the same align symbol - and the reference [`DistanceArm`], which
+/// is what the parse actually runs, is held to it symbol for symbol
+/// (`distance_arm_prices_agree_with_the_direct_token_cost`).
+#[cfg(test)]
+fn priced_match_cost(
+    prices: &TokenPrices,
+    state: &EncoderMatchState,
+    length: usize,
+    distance: usize,
+    distance_size: usize,
+) -> Result<u32> {
+    Ok(match state.encode_match(length, distance, distance_size)? {
+        EncodedMatch::LastLengthRepeat => u32::from(prices.main[257]),
+        EncodedMatch::RepeatDistance {
+            index, length_slot, ..
+        } => {
+            u32::from(prices.main[258 + index])
+                + u32::from(prices.length[length_slot])
+                + (u32::from(length_slot_extra_bits(length_slot)?) << PRICE_SHIFT)
+        }
+        EncodedMatch::New {
+            length_slot,
+            distance_slot,
+            distance_extra,
+            distance_bit_count,
+            ..
+        } => {
+            let mut cost = u32::from(prices.main[262 + length_slot])
+                + (u32::from(length_slot_extra_bits(length_slot)?) << PRICE_SHIFT)
+                + u32::from(prices.distance[distance_slot]);
+            if distance_bit_count >= 4 {
+                cost += ((distance_bit_count as u32 - 4) << PRICE_SHIFT)
+                    + u32::from(prices.align[distance_extra & 0x0f]);
+            } else {
+                cost += (distance_bit_count as u32) << PRICE_SHIFT;
+            }
+            cost
+        }
+    })
+}
+
+/// Every match length's length slot and that slot's extra-bit count, so
+/// pricing a length down a ladder is two array reads. `slot` is 0xff where
+/// the length has no slot. Built once per parse; 4 KiB of tables.
+struct LengthSlots {
+    slot: Vec<u8>,
+    extra: Vec<u8>,
+}
+
+impl LengthSlots {
+    fn new() -> Self {
+        let mut slot = vec![0xffu8; MAX_ENCODER_MATCH_LENGTH + 1];
+        let mut extra = vec![0u8; MAX_ENCODER_MATCH_LENGTH + 1];
+        for length in 2..=MAX_ENCODER_MATCH_LENGTH {
+            if let Ok((index, _)) = length_slot_for_match(length) {
+                if let Ok(bits) = length_slot_extra_bits(index) {
+                    slot[length] = index as u8;
+                    extra[length] = bits;
+                }
+            }
+        }
+        Self { slot, extra }
+    }
+}
+
+/// What a fixed distance costs a fixed node, with only the length left to
+/// vary. The arm a distance takes (a repeat slot or a new distance) and
+/// everything the distance itself pays (its slot code, its raw bits and
+/// its align symbol) depend on the node's repeat state and not on the
+/// length, so they are decided ONCE per (node, distance) and the ladder of
+/// lengths below costs two array reads and an add each. Pricing every
+/// length through [`EncoderMatchState::encode_match`] instead re-derived
+/// the distance slot, the align symbol and the length bonus for every rung
+/// (measured 7 Sep 2026: 126 user s over the 256 MiB slice, against 28 for
+/// the lazy parser).
+#[derive(Debug, Clone, Copy)]
+enum DistanceArm {
+    /// One of the four repeat distances, at `main` bits for its symbol;
+    /// `repeat_at` is the one length that takes the two-bit length-repeat
+    /// token instead (zero when this slot cannot reach it).
+    Repeat {
+        main: u32,
+        repeat_at: usize,
+        repeat_price: u32,
+    },
+    /// A distance the state does not hold: `paid` is everything the
+    /// distance costs, `bonus` the length the format gives back for it.
+    New { paid: u32, bonus: usize },
+}
+
+impl DistanceArm {
+    fn new(
+        prices: &TokenPrices,
+        state: &EncoderMatchState,
+        distance: usize,
+        distance_size: usize,
+    ) -> Option<Self> {
+        if let Some(index) = state
+            .reps
+            .iter()
+            .position(|&repeat| repeat == distance && repeat != 0)
+        {
+            return Some(Self::Repeat {
+                main: u32::from(prices.main[258 + index]),
+                repeat_at: if index == 0 { state.last_length } else { 0 },
+                repeat_price: u32::from(prices.main[257]),
+            });
+        }
+        let (slot, extra) = distance_slot_for_match(distance, distance_size).ok()?;
+        let bit_count = distance_slot_bit_count(slot).ok()?;
+        let mut paid = u32::from(prices.distance[slot]);
+        if bit_count >= 4 {
+            paid += ((bit_count as u32 - 4) << PRICE_SHIFT) + u32::from(prices.align[extra & 0x0f]);
+        } else {
+            paid += (bit_count as u32) << PRICE_SHIFT;
+        }
+        Some(Self::New {
+            paid,
+            bonus: length_bonus(distance),
+        })
+    }
+
+    /// The bits this arm spends on `length`, or `None` where the format
+    /// cannot express it.
+    #[inline]
+    fn price(&self, prices: &TokenPrices, slots: &LengthSlots, length: usize) -> Option<u32> {
+        match *self {
+            Self::Repeat {
+                main,
+                repeat_at,
+                repeat_price,
+            } => {
+                if length == repeat_at {
+                    return Some(repeat_price);
+                }
+                let slot = slots.slot[length];
+                if slot == 0xff {
+                    return None;
+                }
+                Some(
+                    main + u32::from(prices.length[usize::from(slot)])
+                        + (u32::from(slots.extra[length]) << PRICE_SHIFT),
+                )
+            }
+            Self::New { paid, bonus } => {
+                let encoded = length.checked_sub(bonus)?;
+                if encoded < 2 {
+                    return None;
+                }
+                let slot = slots.slot[encoded];
+                if slot == 0xff {
+                    return None;
+                }
+                Some(
+                    paid + u32::from(prices.main[262 + usize::from(slot)])
+                        + (u32::from(slots.extra[encoded]) << PRICE_SHIFT),
+                )
+            }
+        }
+    }
+}
+
+/// One entry of a position's candidate list: `length` bytes match at
+/// `distance`, and no NEARER distance reaches that far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatchRun {
+    length: usize,
+    distance: usize,
+}
+
+/// The candidate list a cost-based parse needs at `pos`: for each length
+/// worth reaching, the NEAREST distance that reaches it, with lengths (and
+/// so distances) strictly increasing.
+///
+/// THIS IS THE PARSE'S ONLY CANDIDATE SOURCE, and it has two of them.
+///
+/// **The tree finder, where one is running** (a dictionary at or past
+/// [`TREE_MIN_DICTIONARY`], and the parse asks it for a stride of
+/// [`TREE_CANDIDATE_SLOTS`]). Its descent already visits exactly this
+/// frontier - increasing length, nearest distance for each - so its slots
+/// ARE the list, and the walk is a descent per position rather than up to
+/// `max_match_candidates` scattered slots of a ring far larger than any
+/// cache. The lengths are recomputed here at this tokenizer's own
+/// boundary, because the finder capped its comparisons at
+/// `TREE_NICE_LENGTH` and a 4,096-byte repeat it recorded as a 64-byte one
+/// is emitted whole. (nzbfast-local change, 7 Sep 2026; the ring walk was
+/// 81% of the parse's CPU before it - see the handoff.)
+///
+/// **The ring index otherwise** - below the tree's dictionary threshold,
+/// and in the tests. It yields the list directly and needs no sort: its
+/// walk is newest first, so it visits distances in increasing order, and
+/// the first candidate to reach a length is by construction the nearest
+/// one that does - which is why the walk keeps only strictly longer
+/// candidates. The long-table arm rides both paths: it reaches an anchor
+/// farther back than either structure keeps.
+fn match_candidates_at<P: MatchPosition>(
+    input: &[u8],
+    pos: usize,
+    end: usize,
+    buckets: &MatchIndex<P>,
+    options: EncodeOptions,
+    tree: TreeMatches<'_>,
+    out: &mut Vec<MatchRun>,
+) {
+    out.clear();
+    let max_distance = pos.min(options.max_match_distance);
+    let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
+    if options.max_match_candidates == 0
+        || max_distance == 0
+        || max_length < 4
+        || pos + 3 >= input.len()
+    {
+        return;
+    }
+    let prefix = &input[pos..pos + 4];
+    let mut best_length = 0usize;
+    probe_stat!(OptProbes);
+    if tree.stride > 1 {
+        probe_stat!(OptTreeProbe);
+        // The finder's frontier, nearest first. Its distances increase, so
+        // the first one past the parse's own limit ends the list.
+        for slot in tree.candidates(pos) {
+            let distance = match slot.load(std::sync::atomic::Ordering::Relaxed) {
+                TREE_NO_MATCH => break,
+                distance => distance as usize,
+            };
+            if distance > max_distance {
+                break;
+            }
+            if &input[pos - distance..pos - distance + 4] != prefix {
+                continue;
+            }
+            let length = 4 + match_length(input, pos + 4, distance, max_length - 4);
+            if length > best_length {
+                best_length = length;
+                out.push(MatchRun { length, distance });
+            }
+            if best_length >= max_length {
+                break;
+            }
+        }
+    } else {
+        let mut checked = 0usize;
+        // Which break ended this walk (`ratio-lab` only).
+        #[cfg(feature = "ratio-lab")]
+        let mut exit_code = probe_stats::Stat::OptExitExhausted;
+        for (candidate, tag_matches) in buckets.candidates_tagged(input, pos) {
+            if candidate >= pos {
+                continue;
+            }
+            let distance = pos - candidate;
+            if distance > max_distance {
+                #[cfg(feature = "ratio-lab")]
+                {
+                    exit_code = probe_stats::Stat::OptExitDistance;
+                }
+                break;
+            }
+            // A rejected candidate still spends the budget, as it does in
+            // `best_match_probe`: the walk's reach is what the budget names.
+            checked += 1;
+            probe_stat!(OptRingChecked);
+            if !tag_matches {
+                probe_stat!(OptRingTagReject);
+                if checked >= options.max_match_candidates {
+                    #[cfg(feature = "ratio-lab")]
+                    {
+                        exit_code = probe_stats::Stat::OptExitCap;
+                    }
+                    break;
+                }
+                continue;
+            }
+            // Only a STRICTLY longer match can enter the list, so the byte
+            // one past the current best settles the candidate before the
+            // prefix compare, the length loop or a push.
+            if best_length >= 4 && input[candidate + best_length] != input[pos + best_length] {
+                probe_stat!(OptRingByteReject);
+                if checked >= options.max_match_candidates {
+                    #[cfg(feature = "ratio-lab")]
+                    {
+                        exit_code = probe_stats::Stat::OptExitCap;
+                    }
+                    break;
+                }
+                continue;
+            }
+            if &input[candidate..candidate + 4] == prefix {
+                probe_stat!(OptRingPrefixHit);
+                let length = 4 + match_length(input, pos + 4, distance, max_length - 4);
+                if length > best_length {
+                    best_length = length;
+                    out.push(MatchRun { length, distance });
+                }
+            }
+            if best_length >= max_length || best_length >= MATCH_NICE_LENGTH {
+                #[cfg(feature = "ratio-lab")]
+                {
+                    exit_code = probe_stats::Stat::OptExitNice;
+                }
+                break;
+            }
+            if checked >= options.max_match_candidates {
+                #[cfg(feature = "ratio-lab")]
+                {
+                    exit_code = probe_stats::Stat::OptExitCap;
+                }
+                break;
+            }
+        }
+        #[cfg(feature = "ratio-lab")]
+        probe_stats::bump(exit_code, 1);
+    }
+    // The long table: a repeat farther back than either structure keeps.
+    // It is appended independently of the frontier's distance order, so
+    // when it fires the frontier is rebuilt below.
+    // Set when the list may no longer be ordered by distance, so the
+    // frontier below is rebuilt. The ring path's flag is raised exactly
+    // where it was before the tree returned lists, so that path is
+    // byte-for-byte the control this change is measured against.
+    let mut rebuild = false;
+    if best_length < LONG_MATCH_MIN_LENGTH {
+        if let Some(candidate) = buckets.long_candidate(input, pos) {
+            if candidate < pos
+                && pos - candidate <= max_distance
+                && &input[candidate..candidate + 4] == prefix
+            {
+                let distance = pos - candidate;
+                let length = 4 + match_length(input, pos + 4, distance, max_length - 4);
+                if length > best_length && length >= LONG_MATCH_MIN_LENGTH.min(max_length) {
+                    out.push(MatchRun { length, distance });
+                    // The tree's own frontier was ordered until this push.
+                    rebuild |= tree.stride > 1;
+                }
+            }
+        }
+    }
+    // A single hint from a finder the parse did not ask a list of: merge it
+    // into the nearest-distance frontier, the ring's candidates still
+    // competing. Unchanged from before the list existed, so this path is
+    // the control the list is measured against.
+    if tree.stride == 1 {
+        if let Some(distance) = tree.best_distance(pos) {
+            if distance <= max_distance && &input[pos - distance..pos - distance + 4] == prefix {
+                let length = 4 + match_length(input, pos + 4, distance, max_length - 4);
+                if out.iter().any(|run| run.distance <= distance && run.length >= length) {
+                    return;
+                }
+                out.push(MatchRun { length, distance });
+                rebuild = true;
+            }
+        }
+    }
+    // The long-table arm is appended independently of the frontier's own
+    // distance order, and the parse reads the LAST entry as the longest, so
+    // rebuild rather than assume ordering. Neither arm fires at most
+    // positions, and neither can drop a candidate that is not dominated by
+    // a nearer one reaching as far.
+    if rebuild && out.len() > 1 {
+        out.sort_unstable_by_key(|run| (run.distance, std::cmp::Reverse(run.length)));
+        let mut reached = 0;
+        out.retain(|run| {
+            if run.length <= reached {
+                false
+            } else {
+                reached = run.length;
+                true
+            }
+        });
+    }
+}
+
+/// One position of the dynamic program: the cheapest path found to it so
+/// far, the position it came from, the token that got it there (a zero
+/// distance is a literal), and the repeat state that path leaves behind.
+/// The state is per node and not per position: two paths reaching the same
+/// byte leave different repeat slots in place, and which one is cheaper
+/// from here depends on that.
+#[derive(Debug, Clone, Copy)]
+struct OptimalNode {
+    price: u32,
+    from: u32,
+    distance: usize,
+    state: EncoderMatchState,
+}
+
+impl OptimalNode {
+    const UNREACHED: Self = Self {
+        price: u32::MAX,
+        from: 0,
+        distance: 0,
+        state: EncoderMatchState {
+            reps: [0; 4],
+            last_length: 0,
+        },
+    };
+}
+
+#[inline]
+fn relax_optimal(
+    nodes: &mut [OptimalNode],
+    from: usize,
+    length: usize,
+    price: u32,
+    distance: usize,
+    mut state: EncoderMatchState,
+) {
+    let to = from + length;
+    if price < nodes[to].price {
+        if distance != 0 {
+            state.remember(length, distance);
+        }
+        nodes[to] = OptimalNode {
+            price,
+            from: from as u32,
+            distance,
+            state,
+        };
+    }
+}
+
+/// The cost-based parse: [`walk_tokens`]'s alternative when
+/// [`EncodeOptions::optimal_parse`] is set, one level above the lazy
+/// parser and emitting the same `EncodeToken` stream.
+///
+/// The input is decided one window at a time. Inside a window every
+/// position is probed and priced, and the cheapest path across it is kept;
+/// the window is then committed and the next one starts where that path
+/// ended, so a match is never cut by a window boundary (a window may end
+/// up to one full match past its own limit, and the terminal it commits to
+/// is the cheapest of those, each charged the literals that would carry it
+/// to the same byte). Positions are inserted into the index in their own
+/// order, exactly once each, whether the path went over them or through
+/// them.
+#[allow(clippy::too_many_arguments)]
+fn walk_tokens_optimal<P: MatchPosition>(
+    combined: &[u8],
+    start: usize,
+    end: usize,
+    options: EncodeOptions,
+    distance_size: usize,
+    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    mut buckets: MatchIndex<P>,
+    mut tokens: Vec<EncodeToken>,
+    tree: TreeMatches<'_>,
+) -> Result<(Vec<EncodeToken>, MatchIndex<P>)> {
+    let input = &combined[start..end];
+    let literals = LiteralPrices::new(input, start);
+    let mut model = PriceModel::new(&literals, distance_size);
+    let slots = LengthSlots::new();
+    let mut state = EncoderMatchState::default();
+    let mut nodes: Vec<OptimalNode> = Vec::new();
+    let mut runs: Vec<MatchRun> = Vec::new();
+    let mut literal_prefix: Vec<u32> = Vec::new();
+    let mut path: Vec<(usize, usize)> = Vec::new();
+    let mut pos = start;
+    let mut next_report = 0usize;
+
+    while pos < end {
+        let limit = OPTIMAL_WINDOW_POSITIONS.min(end - pos);
+        // How far past the window's limit a path may end: one full match.
+        let horizon = (limit + MAX_ENCODER_MATCH_LENGTH).min(end - pos);
+        literal_prefix.clear();
+        literal_prefix.push(0);
+        let mut running = 0u32;
+        for &byte in &combined[pos..pos + horizon] {
+            running += u32::from(model.prices.main[usize::from(byte)]);
+            literal_prefix.push(running);
+        }
+        nodes.clear();
+        nodes.resize(horizon + 1, OptimalNode::UNREACHED);
+        nodes[0] = OptimalNode {
+            price: 0,
+            from: 0,
+            distance: 0,
+            state,
+        };
+
+        let mut forced: Option<MatchRun> = None;
+        let mut settled = limit;
+        for index in 0..limit {
+            let at = pos + index;
+            let node = nodes[index];
+            let max_length = (end - at).min(MAX_ENCODER_MATCH_LENGTH);
+            let max_distance = at.min(options.max_match_distance);
+            // A literal always keeps the window connected, so every node
+            // below the limit is reachable and no arm below needs a guard.
+            relax_optimal(
+                &mut nodes,
+                index,
+                1,
+                node.price + u32::from(model.prices.main[usize::from(combined[at])]),
+                0,
+                node.state,
+            );
+            // The repeat distances, read from THIS node's state. RAR 5
+            // encodes a repeat match from length two with no distance
+            // bonus, so the ladder starts below what a four-byte hash can
+            // find, and the length the last match had is the two-bit
+            // length-repeat token.
+            if max_length >= 2 && max_distance != 0 {
+                for slot in 0..4 {
+                    let distance = node.state.reps[slot];
+                    if distance == 0 || distance > max_distance {
+                        continue;
+                    }
+                    if combined[at - distance] != combined[at]
+                        || combined[at - distance + 1] != combined[at + 1]
+                    {
+                        continue;
+                    }
+                    let Some(arm) =
+                        DistanceArm::new(&model.prices, &node.state, distance, distance_size)
+                    else {
+                        continue;
+                    };
+                    let length = 2 + match_length(combined, at + 2, distance, max_length - 2);
+                    let short = length.min(2 + OPTIMAL_REPEAT_LENGTH_BUDGET);
+                    for reach in 2..=short {
+                        relax_priced(
+                            &mut nodes,
+                            &model.prices,
+                            &slots,
+                            &arm,
+                            &node,
+                            index,
+                            reach,
+                            distance,
+                        );
+                    }
+                    // ...and the full length, plus the one length the
+                    // two-bit length-repeat token can reach, when the
+                    // ladder above stopped short of them.
+                    if length > short {
+                        relax_priced(
+                            &mut nodes,
+                            &model.prices,
+                            &slots,
+                            &arm,
+                            &node,
+                            index,
+                            length,
+                            distance,
+                        );
+                    }
+                    let repeat = node.state.last_length;
+                    if slot == 0 && repeat > short && repeat < length {
+                        relax_priced(
+                            &mut nodes,
+                            &model.prices,
+                            &slots,
+                            &arm,
+                            &node,
+                            index,
+                            repeat,
+                            distance,
+                        );
+                    }
+                }
+            }
+            match_candidates_at(combined, at, end, &buckets, options, tree, &mut runs);
+            insert_match_position(combined, at, &mut buckets);
+            if let Some(&longest) = runs.last() {
+                if longest.length >= OPTIMAL_SUFFICIENT_LENGTH {
+                    forced = Some(longest);
+                    settled = index;
+                    break;
+                }
+            }
+            let mut budget = OPTIMAL_SHORT_LENGTH_BUDGET;
+            let mut shortest = 2usize;
+            for run in &runs {
+                let Some(arm) =
+                    DistanceArm::new(&model.prices, &node.state, run.distance, distance_size)
+                else {
+                    continue;
+                };
+                relax_priced(
+                    &mut nodes,
+                    &model.prices,
+                    &slots,
+                    &arm,
+                    &node,
+                    index,
+                    run.length,
+                    run.distance,
+                );
+                while shortest < run.length && budget != 0 {
+                    relax_priced(
+                        &mut nodes,
+                        &model.prices,
+                        &slots,
+                        &arm,
+                        &node,
+                        index,
+                        shortest,
+                        run.distance,
+                    );
+                    shortest += 1;
+                    budget -= 1;
+                }
+                shortest = run.length + 1;
+            }
+        }
+
+        let terminal = if forced.is_some() {
+            settled
+        } else {
+            let mut best = limit;
+            let mut best_price = u32::MAX;
+            for candidate in limit..=horizon {
+                if nodes[candidate].price == u32::MAX {
+                    continue;
+                }
+                // Charge each ending the literals that would carry it to
+                // the same byte, so paths covering different amounts of
+                // input are compared over the same input.
+                let adjusted =
+                    nodes[candidate].price + literal_prefix[horizon] - literal_prefix[candidate];
+                if adjusted < best_price {
+                    best_price = adjusted;
+                    best = candidate;
+                }
+            }
+            best
+        };
+
+        path.clear();
+        let mut cursor = terminal;
+        while cursor != 0 {
+            let node = nodes[cursor];
+            path.push((cursor - node.from as usize, node.distance));
+            cursor = node.from as usize;
+        }
+        let mut at = pos;
+        for &(length, distance) in path.iter().rev() {
+            if distance == 0 {
+                EncodeToken::push_literals(&mut tokens, length);
+                model.observe_literals(&combined[at..at + length]);
+            } else {
+                tokens.push(EncodeToken::matched(length, distance));
+                model.observe_match(&state, length, distance)?;
+                state.remember(length, distance);
+            }
+            at += length;
+        }
+        debug_assert_eq!(at, pos + terminal);
+
+        if let Some(run) = forced {
+            tokens.push(EncodeToken::matched(run.length, run.distance));
+            model.observe_match(&state, run.length, run.distance)?;
+            state.remember(run.length, run.distance);
+            // The forced position was inserted before the break; the rest
+            // of the match is inserted here, in its own order.
+            insert_match_range(combined, at + 1..at + run.length, &mut buckets);
+            pos = at + run.length;
+        } else {
+            // The window probed and inserted every position below its
+            // limit; a path that ended past it covered the rest.
+            if terminal > limit {
+                insert_match_range(combined, pos + limit..pos + terminal, &mut buckets);
+            }
+            pos += terminal;
+        }
+        model.settle();
+
+        let consumed = pos - start;
+        if consumed >= next_report {
+            if progress
+                .as_deref_mut()
+                .is_some_and(|report| !report(consumed))
+            {
+                return Err(Error::Cancelled);
+            }
+            next_report = consumed.saturating_add(1024 * 1024);
+        }
+    }
+    if progress.is_some_and(|report| !report(input.len())) {
+        return Err(Error::Cancelled);
+    }
+    Ok((tokens, buckets))
+}
+
+/// Price one length on an already-decided arm and relax the node it
+/// reaches. A length the format cannot express at that distance (the
+/// distance bonus takes it below two) simply has no edge.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn relax_priced(
+    nodes: &mut [OptimalNode],
+    prices: &TokenPrices,
+    slots: &LengthSlots,
+    arm: &DistanceArm,
+    node: &OptimalNode,
+    index: usize,
+    length: usize,
+    distance: usize,
+) {
+    let Some(cost) = arm.price(prices, slots, length) else {
+        return;
+    };
+    relax_optimal(
+        nodes,
+        index,
+        length,
+        node.price + cost,
+        distance,
+        node.state,
+    );
+}
+
+// nzbfast-local change, 5 Sep 2026 — share an eight-byte load across four
+// adjacent hashes. Insert every position in its original order, including
+// repeated-prefix collisions, and use the scalar path at the input tail.
+// See research/rar5-large-2026-09-05 and VENDORING.md.
+fn insert_match_range<P: MatchPosition>(
+    input: &[u8],
+    range: Range<usize>,
+    index: &mut MatchIndex<P>,
+) {
+    let mut pos = range.start;
+    let end = range.end.min(input.len().saturating_sub(3));
+    while end.saturating_sub(pos) >= 4 && input.len().saturating_sub(pos) >= 8 {
+        let words = u64::from_le_bytes(input[pos..pos + 8].try_into().unwrap());
+        index.insert_word(words as u32, pos);
+        index.insert_word((words >> 8) as u32, pos + 1);
+        index.insert_word((words >> 16) as u32, pos + 2);
+        index.insert_word((words >> 24) as u32, pos + 3);
+        index.long_insert(input, words as u32, pos, true);
+        index.long_insert(input, (words >> 8) as u32, pos + 1, true);
+        index.long_insert(input, (words >> 16) as u32, pos + 2, true);
+        index.long_insert(input, (words >> 24) as u32, pos + 3, true);
+        pos += 4;
+    }
+    for at in pos..end {
+        index.insert(input, at);
+    }
+}
+
+fn insert_match_position<P: MatchPosition>(input: &[u8], pos: usize, index: &mut MatchIndex<P>) {
+    index.insert(input, pos);
+}
+
+// nzbfast-local change, 5 Sep 2026 - flat ring match index; see VENDORING.md.
+//
+// Every bucket is a fixed ring of `depth` position slots in one flat
+// vector, addressed by a multiplicative hash of the FOUR bytes at a
+// position (a match must be four bytes long to be emitted, so a shorter
+// hash only manufactures collisions). Insertion overwrites the oldest slot;
+// a probe reads the newest `depth` back. No per-bucket allocation, no
+// growth, a bounded and cache-local walk. The previous index was 4,096
+// growable vectors under a three-byte hash, where most of a probe's
+// candidates were other trigrams' positions rejected by the prefix
+// compare, and the walk was bounded only by the candidate budget.
+struct MatchIndex<P> {
+    slots: Vec<P>,
+    counts: Vec<u32>,
+    hash_shift: u32,
+    depth_bits: u32,
+    /// Positions in the span need `pos_bits`; the bits above them in a
+    /// slot hold a TAG, `tag_bits` of the position's four-byte hash (bits
+    /// the bucket does not use), so a candidate whose tag differs is
+    /// rejected without loading its history - at a 32 MiB dictionary the
+    /// buckets are full and every one of a probe's 64 candidates used to
+    /// cost a scattered load for the one-byte filter alone. A tag can only
+    /// reject a candidate the prefix compare would have rejected, and a
+    /// rejection still spends the candidate, so the walk stops where it
+    /// did and the output is byte-identical. Zero `tag_bits` (a span past
+    /// 2^32 in a u32 index cannot happen; usize spans get 8) means no tags.
+    /// (nzbfast-local change, 6 Sep 2026; see VENDORING.md.)
+    pos_bits: u32,
+    tag_bits: u32,
+    /// The long-match table: at every anchor position (one in 32, chosen by
+    /// the four-byte hash so the same bytes anchor the same way wherever
+    /// they recur) the position, plus one, under a hash of its next 32
+    /// bytes; zero is empty. The ring above keeps the newest `depth`
+    /// positions per bucket, which on a 32 MiB dictionary is the newest
+    /// four megabytes or so of any common prefix - a repeat farther back
+    /// than that was invisible. This table reaches the whole dictionary
+    /// at one slot per 32 bytes: a repeated span is found at its first
+    /// anchor, and the rep-distance probe carries the match on from there.
+    /// Measured on the 1 GiB mixed corpus at a 32 MiB dictionary, where a
+    /// third of the bytes are a 32 MiB pool replayed: see the research
+    /// record for the round. (nzbfast-local change, 6 Sep 2026; see
+    /// VENDORING.md.)
+    long: Vec<P>,
+    long_shift: u32,
+}
+
+#[inline]
+fn long_anchor(word: u32) -> bool {
+    (word.wrapping_mul(0x9E37_79B1) >> 8) & LONG_ANCHOR_MASK == 0
+}
+
+/// Hash of the 32 bytes at `pos`; the caller checks they exist.
+#[inline]
+fn long_hash(input: &[u8], pos: usize) -> u64 {
+    let mut hash = 0u64;
+    for chunk in input[pos..pos + LONG_HASH_BYTES].chunks_exact(8) {
+        let word = u64::from_le_bytes(chunk.try_into().unwrap());
+        hash = (hash ^ word).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        hash ^= hash >> 29;
+    }
+    hash
+}
+
+/// Per-thread encoder buffers a block encoder keeps between blocks: the
+/// match index (16 MiB of slots at the default depth, whose fresh pages
+/// were faulted in again for every 4 MiB block) and the token vector. A
+/// pool worker owns one for the blocks it takes; every other caller gets a
+/// fresh, empty one. Reset is the bucket counts only - slots past a
+/// bucket's count are never read. (nzbfast-local change, 5 Sep 2026; see
+/// VENDORING.md.)
+/// A match index carried LIVE across the members of a solid group.
+///
+/// A solid member's continued arm tokenizes the member against the
+/// dictionary of history before it, and the tokenizer seeded a fresh
+/// index from that history for every member: up to 32 MiB of ring and
+/// long-table inserts per member, ~80 ms, which on 10,240 members of
+/// 10 KiB was 1,667 CPU-seconds for 100 MiB of input (rar 7.23: 62). The
+/// group's members are consecutive in one span, so the index one member's
+/// walk leaves holds exactly what the next member's seed would build (the
+/// newest `depth` positions of every bucket, the newest anchor of every
+/// long slot), and the walk continues on it: seeded once per group, then
+/// the members' own bytes keep it current. The tag geometry is fixed from
+/// the group span's length at the start so no slot is read under a split
+/// it was not written under. A member longer than one block takes the
+/// block path and leaves the index behind; the next member re-seeds. The
+/// tokens are the per-member walk's, byte for byte (the solid identity
+/// test holds it over tiny members and resets). (nzbfast-local change,
+/// 6 Sep 2026; see VENDORING.md.)
+pub(crate) struct LiveSpanEncoder {
+    index: Option<MatchIndex<u32>>,
+    /// The binary-tree match finder, carried across the group's members
+    /// exactly as the ring is: it is the reach a solid set of small
+    /// members needs, and it cannot be re-seeded per member any more than
+    /// the ring can. Present only for dictionaries at or past
+    /// [`TREE_MIN_DICTIONARY`]. (nzbfast-local change, 7 Sep 2026; see
+    /// VENDORING.md.)
+    tree: Option<TreeMatchFinder>,
+    /// The finder's answers for the member being encoded.
+    tree_distances: Vec<std::sync::atomic::AtomicU32>,
+    /// Span positions `[0, covered)` are in the index.
+    covered: usize,
+    /// ...except `[indexed_to, covered)`: the last three positions of a
+    /// member have no four bytes after them until the span grows past it,
+    /// so they are inserted at the next call, in their place in the order.
+    indexed_to: usize,
+    /// The span length the index's position packing was fixed for: a
+    /// caller whose span GROWS between calls (the reset walk appends a
+    /// member at a time) names the bound up front.
+    capacity: usize,
+    tokens: Vec<EncodeToken>,
+    scratch: EncoderScratchPool,
+    /// This encoder emits on the calling thread, so one set of boundary
+    /// buffers serves every member (nzbfast-local change, 7 Sep 2026).
+    boundaries: boundaries::BoundaryScratch,
+}
+
+impl LiveSpanEncoder {
+    /// An encoder for spans that are complete before the first call.
+    pub(crate) fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    /// An encoder whose span may grow up to `capacity` bytes between
+    /// calls, the index continuing across the growth.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            index: None,
+            tree: None,
+            tree_distances: empty_slots(0),
+            covered: 0,
+            indexed_to: 0,
+            capacity,
+            tokens: Vec::new(),
+            scratch: EncoderScratchPool::new(),
+            boundaries: boundaries::BoundaryScratch::default(),
+        }
+    }
+
+    /// `span[start..end]` encoded as one member with `span[..start]` as its
+    /// history, the index continued from the previous call when that call
+    /// ended at `start` on the same span.
+    pub(crate) fn encode_member(
+        &mut self,
+        span: &[u8],
+        start: usize,
+        end: usize,
+        algorithm_version: u8,
+        options: EncodeOptions,
+    ) -> Result<Vec<u8>> {
+        let data = &span[start..end];
+        if data.len() > MAX_COMPRESSED_BLOCK_OUTPUT
+            || options.max_match_candidates == 0
+            || options.max_match_distance == 0
+            || !compact_match_index_fits(
+                data.len(),
+                start.min(options.max_match_distance),
+                options.max_match_distance,
+            )
+            || u32::try_from(self.capacity.max(span.len())).is_err()
+        {
+            // Off the live path: the block walk (or the literal-only walk),
+            // and the index no longer describes the span.
+            self.index = None;
+            self.tree = None;
+            return encode_lz_member_pooled(
+                data,
+                &span[..start],
+                algorithm_version,
+                options,
+                None,
+                &self.scratch,
+            );
+        }
+        let distance_size = match algorithm_version {
+            0 => DISTANCE_TABLE_SIZE_50,
+            1 => DISTANCE_TABLE_SIZE_70,
+            _ => {
+                return Err(Error::InvalidData(
+                    "RAR 5 unknown compression algorithm version",
+                ))
+            }
+        };
+        // The shape the per-member walk would give this member's index -
+        // its history (clipped to the dictionary) plus itself; the live
+        // index continues only while that shape holds, which it does once
+        // the history reaches the dictionary.
+        let shape_len = data.len() + start.min(options.max_match_distance);
+        let (buckets, depth) = MatchIndex::<u32>::shape(shape_len, options.max_match_candidates);
+        let long_entries = MatchIndex::<u32>::long_entries(shape_len);
+        let capacity = self.capacity.max(span.len());
+        let continued = self.covered == start
+            && capacity == self.capacity
+            && self.index.as_ref().is_some_and(|index| {
+                index.counts.len() == buckets
+                    && index.depth() == depth
+                    && index.long.len() == long_entries
+            });
+        // The finder walks this member's positions after the history
+        // before it, in one range per member: its comparisons stop where
+        // the tokenizer's matches must stop, at the member's end.
+        let tree = if options.max_match_distance >= TREE_MIN_DICTIONARY
+            && TreeMatchFinder::fits(capacity)
+        {
+            let stride = tree_candidate_slots(options);
+            let mut finder = match self.tree.take() {
+                Some(finder) if continued => finder,
+                _ => {
+                    let mut finder = TreeMatchFinder::new(options.max_match_distance);
+                    let from = start.saturating_sub(finder.window());
+                    finder.skip_to(from);
+                    finder.advance_range(span, from..start, None, stride, tree_walkers());
+                    finder
+                }
+            };
+            let slots = (end - start) * stride;
+            if self.tree_distances.len() < slots {
+                self.tree_distances = empty_slots(slots);
+            }
+            for slot in &self.tree_distances[..slots] {
+                slot.store(TREE_NO_MATCH, std::sync::atomic::Ordering::Relaxed);
+            }
+            finder.advance_range(
+                span,
+                start..end,
+                Some(&self.tree_distances[..slots]),
+                stride,
+                1,
+            );
+            self.tree = Some(finder);
+            &self.tree_distances[..slots]
+        } else {
+            self.tree = None;
+            &[][..]
+        };
+        let index = match self.index.take() {
+            Some(mut index) if continued => {
+                for pos in self.indexed_to..start {
+                    index.insert(span, pos);
+                }
+                index
+            }
+            _ => {
+                // Seed once for this span: every position before `start`,
+                // newest first; positions farther back than the dictionary
+                // are only reached when a bucket has fewer nearer ones and
+                // are filtered by distance at lookup, so the walk sees what
+                // the per-member seed would have given it.
+                let mut index = MatchIndex::<u32>::new_shaped(
+                    shape_len,
+                    capacity,
+                    options.max_match_candidates,
+                );
+                index.seed_history_at(span, start);
+                index
+            }
+        };
+        self.capacity = capacity;
+        let tokens = std::mem::take(&mut self.tokens);
+        let (tokens, index) = walk_tokens::<u32>(
+            span,
+            start,
+            end,
+            options,
+            distance_size,
+            None,
+            index,
+            tokens,
+            TreeMatches {
+                base: start,
+                distances: tree,
+                stride: if tree.is_empty() || end == start {
+                    0
+                } else {
+                    tree.len() / (end - start)
+                },
+            },
+        )?;
+        // Only the shape the index was built for matters for reuse; a
+        // different span length next time means a different group.
+        index_keep(&mut self.index, index);
+        self.covered = end;
+        self.indexed_to = end.min(span.len().saturating_sub(3));
+        let out = encode_token_blocks(
+            data,
+            &tokens,
+            &[],
+            algorithm_version,
+            distance_size,
+            true,
+            ENTROPY_BLOCK_BYTES,
+            options,
+            &mut self.boundaries,
+        )?;
+        self.tokens = tokens;
+        self.tokens.clear();
+        Ok(out)
+    }
+}
+
+fn index_keep(slot: &mut Option<MatchIndex<u32>>, index: MatchIndex<u32>) {
+    *slot = Some(index);
+}
+
+/// Encoder scratch handed from one block encode to the next: a member
+/// encoded from windows ([`encode_lz_member_window`]) would otherwise
+/// give every window's workers fresh buffers - 72 MiB a worker, hundreds
+/// of megabytes of fresh pages per window, which on a KVM guest is where
+/// the streamed writer's time went (measured 6 Sep 2026: system time
+/// 8 -> 18 s over a 1 GiB member). Workers take a scratch when they start
+/// and put it back when they finish, so at most as many are held as
+/// workers run at once, whichever windows they belong to. (nzbfast-local
+/// change, 6 Sep 2026; see VENDORING.md.)
+#[derive(Default)]
+pub(crate) struct EncoderScratchPool(std::sync::Mutex<Vec<EncoderScratch>>);
+
+impl EncoderScratchPool {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn take(&self) -> EncoderScratch {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+            .unwrap_or_default()
+    }
+
+    fn put(&self, scratch: EncoderScratch) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(scratch);
+    }
+}
+
+#[derive(Default)]
+struct EncoderScratch {
+    index: Option<MatchIndex<u32>>,
+    tokens: Vec<EncodeToken>,
+    /// The boundary search's prefix snapshots, ~3.5 MB a block, held here
+    /// for the reason the index is (nzbfast-local change, 7 Sep 2026).
+    boundaries: boundaries::BoundaryScratch,
+}
+
+impl EncoderScratch {
+    /// An index of the given shape, reused when the shape matches.
+    fn index(&mut self, indexed_len: usize, max_match_candidates: usize) -> MatchIndex<u32> {
+        let (buckets, depth) = MatchIndex::<u32>::shape(indexed_len, max_match_candidates);
+        match self.index.take() {
+            Some(mut index)
+                if index.counts.len() == buckets
+                    && index.depth() == depth
+                    && index.long.len() == MatchIndex::<u32>::long_entries(indexed_len) =>
+            {
+                index.counts.fill(0);
+                index.long.fill(P_ZERO_U32);
+                // The span may be longer or shorter than the one this index
+                // was shaped for (block 0 has no history, block 8 has 32
+                // MiB of it): the position/tag split follows the span, and
+                // no slot written under the old split is ever read - reads
+                // stop at the bucket count, which is zero again.
+                index.set_span(indexed_len);
+                index
+            }
+            _ => MatchIndex::new(indexed_len, max_match_candidates),
+        }
+    }
+}
+
+const P_ZERO_U32: u32 = 0;
+
+/// The shipped rule for `(buckets, depth)`: the ring holds the candidate
+/// budget's positions (inside its own bounds) and the span gets about one
+/// bucket per `depth` positions.
+#[inline]
+fn index_geometry_default(indexed_len: usize, max_match_candidates: usize) -> (usize, usize) {
+    let depth = max_match_candidates
+        .max(1)
+        .next_power_of_two()
+        .clamp(MATCH_INDEX_MIN_DEPTH, MATCH_INDEX_MAX_DEPTH);
+    let buckets = (indexed_len / depth)
+        .max(1)
+        .next_power_of_two()
+        .clamp(MATCH_INDEX_MIN_BUCKETS, MATCH_INDEX_MAX_BUCKETS);
+    (buckets, depth)
+}
+
+/// Production: the shipped rule, and nothing else. This is the whole of
+/// `shape`'s body in a build without `ratio-lab`, so no production binary
+/// carries a branch, a lookup or a symbol for the research override below.
+#[cfg(not(feature = "ratio-lab"))]
+#[inline]
+fn index_geometry(indexed_len: usize, max_match_candidates: usize) -> (usize, usize) {
+    index_geometry_default(indexed_len, max_match_candidates)
+}
+
+/// `ratio-lab` only (nzbfast-local change, 8 Sep 2026; see VENDORING.md and
+/// `research/rar5-index-geometry-2026-09-08`): force either axis of the
+/// index geometry from the environment, so bucket count and ring depth can
+/// be swept INDEPENDENTLY. The 8 Sep ring-probe census found 69.6% of a
+/// bucket's candidates are foreign four-byte words, which is a property of
+/// this shape rather than of the walk, and the one screen that followed it
+/// moved both axes at once.
+///
+/// `RARS_INDEX_DEPTH` and `RARS_INDEX_BUCKETS` each force their axis
+/// exactly; an axis left unset follows the shipped rule GIVEN the other,
+/// so a depth-only arm keeps "about one bucket per `depth` positions".
+/// With neither set this is `index_geometry_default` by construction, which
+/// is what makes the research control reproduce ordinary bytes.
+#[cfg(feature = "ratio-lab")]
+fn index_geometry(indexed_len: usize, max_match_candidates: usize) -> (usize, usize) {
+    let (forced_buckets, forced_depth) = index_geometry_override();
+    if forced_buckets.is_none() && forced_depth.is_none() {
+        // The research CONTROL is the shipped function itself, not a
+        // re-derivation of it that could drift away from it silently.
+        return index_geometry_default(indexed_len, max_match_candidates);
+    }
+    let depth = forced_depth.unwrap_or_else(|| {
+        max_match_candidates
+            .max(1)
+            .next_power_of_two()
+            .clamp(MATCH_INDEX_MIN_DEPTH, MATCH_INDEX_MAX_DEPTH)
+    });
+    let buckets = forced_buckets.unwrap_or_else(|| {
+        (indexed_len / depth)
+            .max(1)
+            .next_power_of_two()
+            .clamp(MATCH_INDEX_MIN_BUCKETS, MATCH_INDEX_MAX_BUCKETS)
+    });
+    (buckets, depth)
+}
+
+/// The parsed overrides, read once. A malformed value ABORTS the process
+/// rather than falling back to the default: an arm that silently measured
+/// the baseline under an arm's label is the one failure this harness cannot
+/// detect from its own output, and every reading in this campaign is a
+/// paired delta. It aborts rather than panicking because `shape` is reached
+/// from an encoder WORKER - a panic there unwinds one rayon thread and
+/// leaves the process alive with no output and no exit, which reads as a
+/// slow arm rather than as a refusal (observed, 8 Sep 2026).
+#[cfg(feature = "ratio-lab")]
+fn index_geometry_override() -> (Option<usize>, Option<usize>) {
+    static OVERRIDE: std::sync::OnceLock<(Option<usize>, Option<usize>)> =
+        std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        fn refuse(message: String) -> ! {
+            eprintln!("rars ratio-lab: {message}");
+            std::process::abort();
+        }
+        fn read(name: &str, max: usize) -> Option<usize> {
+            let raw = std::env::var(name).ok()?;
+            let Ok(value) = raw.trim().parse::<usize>() else {
+                refuse(format!("{name}: not a number: {raw:?}"));
+            };
+            if !value.is_power_of_two() || value > max {
+                refuse(format!("{name}: want a power of two in 1..={max}, got {value}"));
+            }
+            Some(value)
+        }
+        let depth = read("RARS_INDEX_DEPTH", 1 << 12);
+        let buckets = read("RARS_INDEX_BUCKETS", 1 << 24);
+        // One index is allocated per encoder worker, so a careless pair is
+        // gigabytes rather than a slow run.
+        let slots =
+            buckets.unwrap_or(MATCH_INDEX_MAX_BUCKETS) * depth.unwrap_or(MATCH_INDEX_MAX_DEPTH);
+        if slots > 1 << 26 {
+            refuse(format!(
+                "RARS_INDEX_BUCKETS * RARS_INDEX_DEPTH = {slots} slots is over the lab's 2^26 ceiling"
+            ));
+        }
+        (buckets, depth)
+    })
+}
+
+impl<P: MatchPosition> MatchIndex<P> {
+    /// Entries in the long-match table for a span: one per anchor spacing.
+    fn long_entries(indexed_len: usize) -> usize {
+        (indexed_len / LONG_ANCHOR_SPACING)
+            .max(1)
+            .next_power_of_two()
+            .clamp(LONG_INDEX_MIN_ENTRIES, LONG_INDEX_MAX_ENTRIES)
+    }
+
+    /// `(buckets, depth)` for a span and a candidate budget.
+    fn shape(indexed_len: usize, max_match_candidates: usize) -> (usize, usize) {
+        index_geometry(indexed_len, max_match_candidates)
+    }
+
+    fn new(indexed_len: usize, max_match_candidates: usize) -> Self {
+        Self::new_shaped(indexed_len, indexed_len, max_match_candidates)
+    }
+
+    /// An index shaped for a span `shape_len` long whose positions are
+    /// offsets below `span_len`: the live solid encoder shapes its index
+    /// as the per-member walk would (history plus member) while its
+    /// positions are offsets in the whole group span.
+    fn new_shaped(shape_len: usize, span_len: usize, max_match_candidates: usize) -> Self {
+        let (buckets, depth) = Self::shape(shape_len, max_match_candidates);
+        let long_entries = Self::long_entries(shape_len);
+        let mut index = Self {
+            slots: vec![P::from_position(0); buckets * depth],
+            counts: vec![0; buckets],
+            hash_shift: 32 - buckets.trailing_zeros(),
+            depth_bits: depth.trailing_zeros(),
+            long: vec![P::from_position(0); long_entries],
+            long_shift: 64 - long_entries.trailing_zeros(),
+            pos_bits: 0,
+            tag_bits: 0,
+        };
+        index.set_span(span_len);
+        index
+    }
+
+    /// The position/tag split for a span whose positions are below
+    /// `indexed_len`: only valid on an index with every bucket count zero.
+    fn set_span(&mut self, indexed_len: usize) {
+        debug_assert!(self.counts.iter().all(|&count| count == 0));
+        self.pos_bits = (usize::BITS - indexed_len.max(1).leading_zeros()).max(1);
+        self.tag_bits = P::BITS
+            .saturating_sub(self.pos_bits)
+            .min(MATCH_TAG_BITS_MAX);
+    }
+
+    /// The tag of a four-byte word: hash bits below the bucket's.
+    #[inline]
+    fn tag(&self, word: u32) -> usize {
+        ((word.wrapping_mul(0x9E37_79B1) >> 8) as usize) & ((1usize << self.tag_bits) - 1)
+    }
+
+    /// A slot value: the position with the word's tag above it.
+    #[inline]
+    fn slot_value(&self, word: u32, pos: usize) -> P {
+        P::from_position(pos | (self.tag(word) << self.pos_bits))
+    }
+
+    /// A slot's position, without its tag.
+    #[inline]
+    fn slot_position(&self, slot: P) -> usize {
+        slot.position() & ((1usize << self.pos_bits) - 1)
+    }
+
+    #[inline]
+    fn long_slot(&self, input: &[u8], pos: usize) -> usize {
+        (long_hash(input, pos) >> self.long_shift) as usize
+    }
+
+    /// Record `pos` in the long table if it is an anchor with 32 bytes after
+    /// it. Forward insertion overwrites (the newest position wins); reverse
+    /// seeding keeps the first write, which is the newest there too.
+    #[inline]
+    fn long_insert(&mut self, input: &[u8], word: u32, pos: usize, overwrite: bool) {
+        if long_anchor(word) && pos + LONG_HASH_BYTES <= input.len() {
+            let slot = self.long_slot(input, pos);
+            if overwrite || self.long[slot].position() == 0 {
+                self.long[slot] = P::from_position(pos + 1);
+            }
+        }
+    }
+
+    /// The long table's position for `pos`, if `pos` is an anchor and the
+    /// table has one: the caller verifies the bytes.
+    #[inline]
+    fn long_candidate(&self, input: &[u8], pos: usize) -> Option<usize> {
+        if pos + LONG_HASH_BYTES > input.len() {
+            return None;
+        }
+        let word = u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap());
+        if !long_anchor(word) {
+            return None;
+        }
+        let entry = self.long[self.long_slot(input, pos)].position();
+        (entry != 0).then(|| entry - 1)
+    }
+
+    /// Anchors of the whole history into the long table, newest first, so
+    /// the nearest occurrence of a span is the one kept. Runs over ALL of
+    /// the history where the ring's seeding stops once every bucket is
+    /// full - reach is the point of this table.
+    fn seed_long_history(&mut self, input: &[u8], history_len: usize) {
+        let mut end = history_len.min(input.len().saturating_sub(LONG_HASH_BYTES - 1));
+        while end >= 4 {
+            end -= 4;
+            let words = u64::from_le_bytes(input[end..end + 8].try_into().unwrap());
+            self.long_insert(input, (words >> 24) as u32, end + 3, false);
+            self.long_insert(input, (words >> 16) as u32, end + 2, false);
+            self.long_insert(input, (words >> 8) as u32, end + 1, false);
+            self.long_insert(input, words as u32, end, false);
+        }
+        while end != 0 {
+            end -= 1;
+            let word = u32::from_le_bytes(input[end..end + 4].try_into().unwrap());
+            self.long_insert(input, word, end, false);
+        }
+    }
+
+    #[inline]
+    fn depth(&self) -> usize {
+        1 << self.depth_bits
+    }
+
+    #[inline]
+    fn bucket(&self, input: &[u8], pos: usize) -> usize {
+        let word = u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap());
+        (word.wrapping_mul(0x9E37_79B1) >> self.hash_shift) as usize
+    }
+
+    /// Positions with fewer than four bytes after them can never start a
+    /// match and are not indexed.
+    #[inline]
+    fn insert(&mut self, input: &[u8], pos: usize) {
+        if pos + 3 < input.len() {
+            let word = u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap());
+            self.insert_word(word, pos);
+            self.long_insert(input, word, pos, true);
+        }
+    }
+
+    #[inline]
+    fn insert_word(&mut self, word: u32, pos: usize) {
+        let bucket = (word.wrapping_mul(0x9E37_79B1) >> self.hash_shift) as usize;
+        let count = self.counts[bucket];
+        let slot = (bucket << self.depth_bits) | (count as usize & (self.depth() - 1));
+        self.slots[slot] = self.slot_value(word, pos);
+        self.counts[bucket] = count.wrapping_add(1);
+    }
+
+    /// Seed the history of a member at `to` in `span` into a fresh index
+    /// whose positions are span offsets: every position below `to`, newest
+    /// first until the buckets fill, exactly as [`Self::seed_history`]
+    /// seeds a span that begins at zero. Positions farther back than the
+    /// dictionary are filtered by distance at lookup, so the span's start
+    /// is only a cost, paid once per group.
+    fn seed_history_at(&mut self, span: &[u8], to: usize) {
+        self.seed_history(span, to, None);
+    }
+
+    fn seed_history(&mut self, input: &[u8], history_len: usize, long_seed: Option<LongSeed<'_>>) {
+        // Normalizing a ring preserves its candidate order, but not its
+        // absolute insertion count. Keep the original path when a count
+        // could wrap anywhere in this combined history/input span.
+        if history_len <= self.slots.len() * 2 || u32::try_from(input.len()).is_err() {
+            insert_match_range(input, 0..history_len, self);
+            return;
+        }
+        self.seed_history_reverse(input, history_len);
+        match long_seed {
+            Some(seed) => self.seed_long_from_anchors(input, history_len, seed),
+            None => self.seed_long_history(input, history_len),
+        }
+    }
+
+    /// The long-table seed from the member's shared anchor lists: the same
+    /// positions `seed_long_history` would anchor, in the same newest-first
+    /// order, so the table and the output are identical. The history of a
+    /// block is member bytes before `range_start`, at `history_len -
+    /// range_start` from their member positions in this span; any solid
+    /// history from an earlier member sits before them and is scanned.
+    fn seed_long_from_anchors(&mut self, input: &[u8], history_len: usize, seed: LongSeed<'_>) {
+        let window_start = seed.range_start.saturating_sub(history_len);
+        let shift = history_len as isize - seed.range_start as isize;
+        let first_block = window_start / MAX_COMPRESSED_BLOCK_OUTPUT;
+        let end_block = seed.range_start.div_ceil(MAX_COMPRESSED_BLOCK_OUTPUT);
+        for block in (first_block..end_block).rev() {
+            let list = seed.anchors.block(block);
+            let block_base = block * MAX_COMPRESSED_BLOCK_OUTPUT;
+            for &offset in list.iter().rev() {
+                let data_pos = block_base + offset as usize;
+                if data_pos < window_start {
+                    break;
+                }
+                if data_pos >= seed.range_start {
+                    continue;
+                }
+                let pos = (data_pos as isize + shift) as usize;
+                if pos + LONG_HASH_BYTES > input.len() {
+                    continue;
+                }
+                let slot = self.long_slot(input, pos);
+                if self.long[slot].position() == 0 {
+                    self.long[slot] = P::from_position(pos + 1);
+                }
+            }
+        }
+        // Solid history from an earlier member (or a streamed member's
+        // earlier segment) sits BEFORE the member's own bytes in this span,
+        // so it is the OLDEST part of the window and is scanned LAST: the
+        // scan this replaced ran newest-first over the whole window, and
+        // keep-first semantics make the order the result. (The first cut
+        // scanned it first, which handed an older occurrence the slot a
+        // newer one should have had whenever both anchored the same way -
+        // invisible on a member with no incoming history, which is every
+        // shape the identity checks used.)
+        let tail_len = history_len.saturating_sub(seed.range_start);
+        if tail_len != 0 {
+            self.seed_long_history(input, tail_len);
+        }
+    }
+
+    fn seed_history_reverse(&mut self, input: &[u8], history_len: usize) {
+        // Batch scanning helps low-diversity history; the scalar scan is
+        // faster when its bucket accesses are dense and irregular. A small
+        // projected-bucket sample selects the scan, never the candidates.
+        let end = history_len.min(input.len().saturating_sub(3));
+        let mut seen = [0u64; 16];
+        let mut distinct = 0;
+        for pos in (end.saturating_sub(512)..end).rev() {
+            let bucket = self.bucket(input, pos) & 1023;
+            let bit = 1u64 << (bucket & 63);
+            if seen[bucket >> 6] & bit == 0 {
+                seen[bucket >> 6] |= bit;
+                distinct += 1;
+                if distinct > 128 {
+                    self.seed_history_reverse_scalar(input, history_len);
+                    return;
+                }
+            }
+        }
+        self.seed_history_reverse_batched(input, history_len);
+    }
+
+    fn seed_history_reverse_scalar(&mut self, input: &[u8], history_len: usize) {
+        debug_assert!(self.counts.iter().all(|&count| count == 0));
+        let depth = self.depth();
+        let mut unfilled = self.counts.len();
+        let end = history_len.min(input.len().saturating_sub(3));
+        for pos in (0..end).rev() {
+            let word = u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap());
+            let bucket = (word.wrapping_mul(0x9E37_79B1) >> self.hash_shift) as usize;
+            let count = self.counts[bucket] as usize;
+            if count == depth {
+                continue;
+            }
+            // Store from the back: after normalization, the newest entry
+            // sits immediately before the next insertion slot.
+            let slot = (bucket << self.depth_bits) + depth - 1 - count;
+            self.slots[slot] = self.slot_value(word, pos);
+            self.counts[bucket] += 1;
+            if count + 1 == depth {
+                unfilled -= 1;
+                if unfilled == 0 {
+                    break;
+                }
+            }
+        }
+        for (bucket, &count) in self.counts.iter().enumerate() {
+            let count = count as usize;
+            if count != 0 && count < depth {
+                let base = bucket << self.depth_bits;
+                self.slots
+                    .copy_within(base + depth - count..base + depth, base);
+            }
+        }
+    }
+
+    fn seed_history_reverse_batched(&mut self, input: &[u8], history_len: usize) {
+        debug_assert!(self.counts.iter().all(|&count| count == 0));
+        let depth = self.depth();
+        let mut unfilled = self.counts.len();
+        let mut end = history_len.min(input.len().saturating_sub(3));
+        // An eight-byte load covers four overlapping prefixes. One scalar
+        // prefix handles a history ending at the last valid input prefix.
+        if end != 0 && input.len() - end < 4 {
+            end -= 1;
+            let word = u32::from_le_bytes(input[end..end + 4].try_into().unwrap());
+            self.seed_history_word(word, end, depth, &mut unfilled);
+        }
+        while end >= 4 && unfilled != 0 {
+            end -= 4;
+            let words = u64::from_le_bytes(input[end..end + 8].try_into().unwrap());
+            self.seed_history_word((words >> 24) as u32, end + 3, depth, &mut unfilled);
+            self.seed_history_word((words >> 16) as u32, end + 2, depth, &mut unfilled);
+            self.seed_history_word((words >> 8) as u32, end + 1, depth, &mut unfilled);
+            self.seed_history_word(words as u32, end, depth, &mut unfilled);
+        }
+        while end != 0 && unfilled != 0 {
+            end -= 1;
+            let word = u32::from_le_bytes(input[end..end + 4].try_into().unwrap());
+            self.seed_history_word(word, end, depth, &mut unfilled);
+        }
+        for (bucket, &count) in self.counts.iter().enumerate() {
+            let count = count as usize;
+            if count != 0 && count < depth {
+                let base = bucket << self.depth_bits;
+                self.slots
+                    .copy_within(base + depth - count..base + depth, base);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn seed_history_word(&mut self, word: u32, pos: usize, depth: usize, unfilled: &mut usize) {
+        let bucket = (word.wrapping_mul(0x9E37_79B1) >> self.hash_shift) as usize;
+        let count = self.counts[bucket] as usize;
+        if count < depth {
+            let slot = (bucket << self.depth_bits) + depth - 1 - count;
+            self.slots[slot] = self.slot_value(word, pos);
+            self.counts[bucket] += 1;
+            if count + 1 == depth {
+                *unfilled -= 1;
+            }
+        }
+    }
+
+    /// The bucket's inserted positions, newest first, at most `depth` of them.
+    #[inline]
+    fn candidates(&self, input: &[u8], pos: usize) -> impl Iterator<Item = usize> + '_ {
+        self.candidates_tagged(input, pos)
+            .map(|(candidate, _)| candidate)
+    }
+
+    /// The bucket's inserted positions, newest first, each with whether its
+    /// tag matches the word at `pos` - `false` means the prefix cannot.
+    #[inline]
+    fn candidates_tagged(
+        &self,
+        input: &[u8],
+        pos: usize,
+    ) -> impl Iterator<Item = (usize, bool)> + '_ {
+        let word = u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap());
+        let bucket = (word.wrapping_mul(0x9E37_79B1) >> self.hash_shift) as usize;
+        let tag = self.tag(word);
+        let count = self.counts[bucket];
+        let available = (count as usize).min(self.depth());
+        let base = bucket << self.depth_bits;
+        let mask = self.depth() - 1;
+        let pos_mask = (1usize << self.pos_bits) - 1;
+        (1..=available).map(move |back| {
+            let value =
+                self.slots[base | (count.wrapping_sub(back as u32) as usize & mask)].position();
+            (value & pos_mask, (value >> self.pos_bits) == tag)
+        })
+    }
 }
 
 fn length_slot_for_match(length: usize) -> Result<(usize, usize)> {
     if length < 2 {
         return Err(Error::InvalidData("RAR 5 match length is too short"));
     }
-    for slot in 0..LENGTH_TABLE_SIZE {
-        let bit_count = usize::from(length_slot_extra_bits(slot)?);
-        let base = slot_to_length(slot, 0)?;
-        let max = base
-            + if bit_count == 0 {
-                0
-            } else {
-                (1usize << bit_count) - 1
-            };
-        if length >= base && length <= max {
-            return Ok((slot, length - base));
-        }
+    let value = length - 2;
+    if value < 8 {
+        return Ok((value, 0));
     }
-    Err(Error::InvalidData("RAR 5 match length is too long"))
+    // Four consecutive slots share each extra-bit width.
+    let bits = (usize::BITS - 1 - value.leading_zeros()) as usize - 2;
+    let slot = 4 * (bits + 1) + ((value >> bits) & 3);
+    if slot >= LENGTH_TABLE_SIZE {
+        return Err(Error::InvalidData("RAR 5 match length is too long"));
+    }
+    let base = ((4 | (slot & 3)) << bits) + 2;
+    Ok((slot, length - base))
 }
 
 /// The inverse of `slot_to_distance`: the slot whose window contains
@@ -1452,25 +5678,27 @@ fn distance_slot_for_match(distance: usize, distance_size: usize) -> Result<(usi
     if distance == 0 {
         return Err(Error::InvalidData("RAR 5 match distance is zero"));
     }
-    let needle = distance as u64;
-    for slot in 0..distance_size {
-        let bit_count = distance_slot_bit_count(slot)?;
-        let base = if slot < 4 {
-            slot as u64 + 1
-        } else {
-            distance_wide(slot, bit_count as u8, 0)
-        };
-        let max = base
-            + if bit_count == 0 {
-                0
-            } else {
-                (1u64 << bit_count) - 1
-            };
-        if needle >= base && needle <= max {
-            return Ok((slot, (needle - base) as usize));
-        }
+    let value = distance - 1;
+    // Two consecutive distance slots share each extra-bit width.
+    let (slot, bits) = if value < 4 {
+        (value, 0)
+    } else {
+        let bits = (usize::BITS - 1 - value.leading_zeros()) as usize - 1;
+        (2 * (bits + 1) + ((value >> bits) & 1), bits)
+    };
+    // Preserve the linear search's error when it would reach invalid slot 66.
+    if bits > 31 && distance_size > 66 {
+        return Err(Error::InvalidData("RAR 5 distance slot is too large"));
     }
-    Err(Error::InvalidData("RAR 5 match distance is too large"))
+    if slot >= distance_size || bits > 31 {
+        return Err(Error::InvalidData("RAR 5 match distance is too large"));
+    }
+    let base = if slot < 4 {
+        slot + 1
+    } else {
+        ((2 | (slot & 1)) << bits) + 1
+    };
+    Ok((slot, distance - base))
 }
 
 fn literal_presence(data: &[u8]) -> [bool; 256] {
@@ -1572,7 +5800,6 @@ impl Unpack50Decoder {
     fn history_window_len(&self) -> usize {
         self.history.len() - self.history_start
     }
-
 
     /// Trim the window to `limit` bytes - O(1), no bytes move.
     #[inline]
@@ -1779,8 +6006,7 @@ impl Unpack50Decoder {
                     output.push((entry >> 8) as u8);
                 }
                 if output.len() >= output_size
-                    || (burst_control.is_none()
-                        && bits.position() >= block_header.payload_bits)
+                    || (burst_control.is_none() && bits.position() >= block_header.payload_bits)
                 {
                     break;
                 }
@@ -1844,6 +6070,10 @@ impl Unpack50Decoder {
                         } else {
                             bits.read_bits(distance_bit_count as u8)?
                         };
+                        #[cfg(feature = "parallel")]
+                        let distance =
+                            slot_distance_value(distance_slot, distance_bit_count, distance_extra);
+                        #[cfg(not(feature = "parallel"))]
                         let distance = slot_to_distance(distance_slot, distance_extra)?;
                         length += length_bonus(distance);
                         self.reps.rotate_right(1);
@@ -1877,11 +6107,12 @@ impl Unpack50Decoder {
         }
 
         if output.len() == output_size {
-            let history_output = if self.retain_history && mode.applies_filters() && !filters.is_empty() {
-                Some(output.clone())
-            } else {
-                None
-            };
+            let history_output =
+                if self.retain_history && mode.applies_filters() && !filters.is_empty() {
+                    Some(output.clone())
+                } else {
+                    None
+                };
             if mode.applies_filters() {
                 apply_filters(&mut output, &filters)?;
             }
@@ -1938,7 +6169,12 @@ impl Unpack50Decoder {
         // Gated to non-solid members <= flat_limit; everything else (solid,
         // over-limit, non-parallel builds) keeps the streaming-MT/serial path.
         #[cfg(feature = "parallel")]
-        if self.use_flat_mode(flat_plan_bytes(0, output_size, history_limit), output_size, solid, flat_limit) {
+        if self.use_flat_mode(
+            flat_plan_bytes(0, output_size, history_limit),
+            output_size,
+            solid,
+            flat_limit,
+        ) {
             debug_assert!(
                 self.history_window_len() == 0,
                 "flat mode is gated to non-solid members, which carry no history"
@@ -1970,7 +6206,13 @@ impl Unpack50Decoder {
 
         #[cfg(feature = "parallel")]
         let mt_done = if self.capped_workers(output_size) >= 2 {
-            self.run_blocks_parallel(input, algorithm_version, output_size, &mut output, &mut sink)?;
+            self.run_blocks_parallel(
+                input,
+                algorithm_version,
+                output_size,
+                &mut output,
+                &mut sink,
+            )?;
             true
         } else {
             false
@@ -2068,7 +6310,9 @@ impl Unpack50Decoder {
         for size in member_sizes {
             total_output_size = total_output_size
                 .checked_add(*size)
-                .ok_or(Error::InvalidData("RAR 5 solid chain output size overflows"))?;
+                .ok_or(Error::InvalidData(
+                    "RAR 5 solid chain output size overflows",
+                ))?;
             member_ends.push(total_output_size);
         }
         if reset_first {
@@ -2478,7 +6722,8 @@ impl StreamingOutput {
                 return Err(StreamDecodeError::FilteredMember);
             }
         }
-        self.pending_filters.push_back(StreamFilter { filter, ring_start });
+        self.pending_filters
+            .push_back(StreamFilter { filter, ring_start });
         Ok(())
     }
 
@@ -2688,10 +6933,7 @@ impl StreamingOutput {
                 continue;
             }
             let offset = self.head & self.mask;
-            let take = bytes
-                .len()
-                .min(flush_room)
-                .min(self.ring.len() - offset);
+            let take = bytes.len().min(flush_room).min(self.ring.len() - offset);
             self.ring[offset..offset + take].copy_from_slice(&bytes[..take]);
             self.head += take;
             self.written += take;
@@ -3015,8 +7257,7 @@ impl StreamingOutput {
                 }
             }
             if !self.filter_scratch.is_empty() {
-                sink(DecodedChunk::Bytes(&self.filter_scratch))
-                    .map_err(StreamDecodeError::Sink)?;
+                sink(DecodedChunk::Bytes(&self.filter_scratch)).map_err(StreamDecodeError::Sink)?;
             }
             self.flushed = end;
         }
@@ -3109,7 +7350,7 @@ fn decode_block_serial<E>(
                 let distance = reps[rep_index];
                 if distance == 0 {
                     return Err(
-                        Error::InvalidData("RAR 5 repeat distance is not initialized").into()
+                        Error::InvalidData("RAR 5 repeat distance is not initialized").into(),
                     );
                 }
                 let length_slot = tables.length.decode(bits)?;
@@ -3138,6 +7379,10 @@ fn decode_block_serial<E>(
                 } else {
                     bits.read_bits(distance_bit_count as u8)?
                 };
+                #[cfg(feature = "parallel")]
+                let distance =
+                    slot_distance_value(distance_slot, distance_bit_count, distance_extra);
+                #[cfg(not(feature = "parallel"))]
                 let distance = slot_to_distance(distance_slot, distance_extra)?;
                 length += length_bonus(distance);
                 reps.rotate_right(1);
@@ -3362,7 +7607,9 @@ impl LazyDecodeTables {
     /// chain, or a test fixture) so the pipeline sees one type.
     fn prebuilt(tables: std::sync::Arc<DecodeTables>) -> Self {
         let built = std::sync::OnceLock::new();
-        built.set(Ok(tables)).expect("fresh OnceLock accepts a value");
+        built
+            .set(Ok(tables))
+            .expect("fresh OnceLock accepts a value");
         Self {
             lengths: None,
             built,
@@ -3631,8 +7878,7 @@ fn decode_tape_op(
         _ => {
             let length_slot = symbol - 262;
             let length = read_slot_length(length_slot, bits)?;
-            let (distance_slot, distance_bit_count) =
-                tables.distance.decode_distance_hot(bits)?;
+            let (distance_slot, distance_bit_count) = tables.distance.decode_distance_hot(bits)?;
             let distance_extra = if distance_bit_count >= 4 && tables.align_mode {
                 let high = bits.read_bits(distance_bit_count - 4)?;
                 let low = tables.align.decode(bits)? as u32;
@@ -3676,13 +7922,15 @@ const fn build_length_slot_extra_bits() -> [u8; LENGTH_TABLE_SIZE] {
 #[cfg(feature = "parallel")]
 #[inline]
 fn read_slot_length(slot: usize, bits: &mut BitReader<'_>) -> Result<u32> {
+    // These symbols encode the entire length: no table load or bit read is
+    // needed. Keep that common tape-worker case ahead of the operand path.
+    if slot < 8 {
+        return Ok(slot as u32 + 2);
+    }
     let Some(&extra_bits) = LENGTH_SLOT_EXTRA_BITS.get(slot) else {
         return Err(Error::InvalidData("RAR 5 length slot is too large"));
     };
     let extra = bits.read_bits(extra_bits)?;
-    if slot < 8 {
-        return Ok(slot as u32 + 2);
-    }
     Ok((((4 | (slot as u32 & 3)) << extra_bits) | extra) + 2)
 }
 
@@ -3715,8 +7963,9 @@ fn slot_distance_bits(slot: usize) -> Result<u8> {
 }
 
 /// `slot_to_distance` with the slot's bit count already in hand and the
-/// range check already made by `slot_distance_bits`. `extra` came out of a
-/// `read_bits` of exactly `bit_count` bits, so it cannot exceed the slot -
+/// range check already made by `slot_distance_bits` or `decode_distance_hot`.
+/// `extra` came out of a `read_bits` of exactly `bit_count` bits, or a high-bit
+/// read plus the four-bit alignment alphabet, so it cannot exceed the slot -
 /// the check the public function repeats is unreachable from here.
 #[cfg(feature = "parallel")]
 #[inline]
@@ -3787,10 +8036,9 @@ impl Unpack50Decoder {
                     let index = op.distance as usize;
                     let distance = self.reps[index];
                     if distance == 0 {
-                        return Err(Error::InvalidData(
-                            "RAR 5 repeat distance is not initialized",
-                        )
-                        .into());
+                        return Err(
+                            Error::InvalidData("RAR 5 repeat distance is not initialized").into(),
+                        );
                     }
                     self.reps[..=index].rotate_right(1);
                     self.reps[0] = distance;
@@ -3928,7 +8176,8 @@ impl Unpack50Decoder {
                 let mut rr = 0usize;
                 'scan: while !scan_done {
                     let mut buffers = recycle_rx.try_recv().unwrap_or_default();
-                    let header = match read_compressed_block_into(&mut input, &mut buffers.payload) {
+                    let header = match read_compressed_block_into(&mut input, &mut buffers.payload)
+                    {
                         Ok(header) => header,
                         Err(error) => {
                             scan_error = Some(error);
@@ -4081,7 +8330,13 @@ impl Unpack50Decoder {
     /// pipeline, and small enough to hold whole in a member-sized buffer.
     /// Solid members, members over `flat_limit`, and non-parallel builds (this
     /// method only exists under the feature) keep the streaming-ring path.
-    fn use_flat_mode(&self, plan_bytes: usize, output_size: usize, solid: bool, flat_limit: u64) -> bool {
+    fn use_flat_mode(
+        &self,
+        plan_bytes: usize,
+        output_size: usize,
+        solid: bool,
+        flat_limit: u64,
+    ) -> bool {
         if solid {
             return false;
         }
@@ -4161,8 +8416,14 @@ impl Unpack50Decoder {
             macro_rules! fast_copy {
                 ($distance:expr, $length:expr) => {{
                     let length = $length;
-                    if flat_stride_copy(&mut buf, pos, $distance, length, fast_end, fast_distance_max)
-                    {
+                    if flat_stride_copy(
+                        &mut buf,
+                        pos,
+                        $distance,
+                        length,
+                        fast_end,
+                        fast_distance_max,
+                    ) {
                         pos += length;
                         true
                     } else {
@@ -4489,7 +8750,8 @@ impl Unpack50Decoder {
                 let mut rr = 0usize;
                 'scan: while !scan_done {
                     let mut buffers = recycle_rx.try_recv().unwrap_or_default();
-                    let header = match read_compressed_block_into(&mut input, &mut buffers.payload) {
+                    let header = match read_compressed_block_into(&mut input, &mut buffers.payload)
+                    {
                         Ok(header) => header,
                         Err(error) => {
                             scan_error = Some(error);
@@ -4927,7 +9189,9 @@ impl FlatOutput {
         sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
     ) -> std::result::Result<(), StreamDecodeError<E>> {
         self.emit_ready(sink)?;
-        let shift = self.emitted.min(self.pos.saturating_sub(self.history_limit));
+        let shift = self
+            .emitted
+            .min(self.pos.saturating_sub(self.history_limit));
         if shift == 0 || self.pos - shift + needed > self.buf.len() {
             return Err(StreamDecodeError::FilteredMember);
         }
@@ -5733,6 +9997,52 @@ pub fn slot_to_distance(slot: usize, extra_bits: u32) -> Result<usize> {
     Ok(distance_from_parts(slot, bit_count as u8, extra_bits))
 }
 
+// nzbfast-local change, 5 Sep 2026 — RAR5 encoder hot paths; see VENDORING.md.
+// Encoding has a different lookup direction from decoding. Keep these
+// symbol-indexed codes separate so decoder tables and caches do not grow.
+struct EncoderTable {
+    codes: Vec<(u16, u8)>,
+}
+
+impl EncoderTable {
+    fn from_lengths(lengths: &[u8]) -> Result<Self> {
+        let mut counts = [0u16; 16];
+        for &length in lengths {
+            if length > 15 {
+                return Err(Error::InvalidData("RAR 5 Huffman length is too large"));
+            }
+            if length != 0 {
+                counts[length as usize] += 1;
+            }
+        }
+        validate_huffman_counts(&counts)?;
+        let mut next_code = [0u16; 16];
+        let mut code = 0;
+        for len in 1..=15 {
+            code = (code + counts[len - 1]) << 1;
+            next_code[len] = code;
+        }
+        let mut codes = vec![(0, 0); lengths.len()];
+        for (symbol, &length) in lengths.iter().enumerate() {
+            if length != 0 {
+                u16::try_from(symbol)
+                    .map_err(|_| Error::InvalidData("RAR 5 Huffman symbol is too large"))?;
+                codes[symbol] = (next_code[length as usize], length);
+                next_code[length as usize] += 1;
+            }
+        }
+        Ok(Self { codes })
+    }
+
+    fn code_for_symbol(&self, symbol: usize) -> Result<(u16, u8)> {
+        self.codes
+            .get(symbol)
+            .copied()
+            .filter(|&(_, len)| len != 0)
+            .ok_or(Error::InvalidData("RAR 5 missing Huffman symbol"))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HuffmanTable {
     // nzbfast-local change, 2 Sep 2026 - re-apply the compact canonical
@@ -5862,7 +10172,11 @@ impl HuffmanTable {
             if len <= HUFF_LUT_BITS {
                 let shift = HUFF_LUT_BITS - len;
                 let start = usize::from(code) << shift;
-                let class = if symbol < 256 { HUFF_LUT_LITERAL_BIT } else { 0 };
+                let class = if symbol < 256 {
+                    HUFF_LUT_LITERAL_BIT
+                } else {
+                    0
+                };
                 #[cfg(feature = "parallel")]
                 let metadata = if DISTANCE_LUT {
                     distance_lut_metadata(symbol)
@@ -5871,8 +10185,7 @@ impl HuffmanTable {
                 };
                 #[cfg(not(feature = "parallel"))]
                 let metadata = 0;
-                let entry =
-                    (u32::from(symbol) << 8) | class | metadata | u32::from(length);
+                let entry = (u32::from(symbol) << 8) | class | metadata | u32::from(length);
                 lut[start..start + (1 << shift)].fill(entry);
             }
         }
@@ -5988,6 +10301,7 @@ impl HuffmanTable {
         Err(Error::InvalidData("RAR 5 invalid Huffman code"))
     }
 
+    #[cfg(test)]
     fn code_for_symbol(&self, symbol: usize) -> Result<(u16, u8)> {
         let Some(index) = self
             .symbols
@@ -6058,8 +10372,11 @@ impl<'a> BitReader<'a> {
     #[inline]
     fn refill(&mut self) {
         if self.byte_pos + 8 <= self.input.len() {
-            let word =
-                u64::from_be_bytes(self.input[self.byte_pos..self.byte_pos + 8].try_into().unwrap());
+            let word = u64::from_be_bytes(
+                self.input[self.byte_pos..self.byte_pos + 8]
+                    .try_into()
+                    .unwrap(),
+            );
             self.cache |= word >> self.cache_bits;
             let whole = (64 - self.cache_bits) & !7;
             self.byte_pos += (whole / 8) as usize;
@@ -6131,9 +10448,66 @@ impl<'a> BitReader<'a> {
     }
 }
 
+// nzbfast-local change, 5 Sep 2026 - batch literal Huffman codes (the review's
+// `rar5-emit` pass); see VENDORING.md. Each canonical code is at most 15 bits:
+// pairs fit 30 bits and groups of four fit 60, which the bit writer below
+// takes as two spills. No staging buffer; every starting bit offset and the
+// final partial byte are the writer's business.
+#[inline]
+fn write_literal_codes(writer: &mut BitWriter, table: &EncoderTable, data: &[u8]) -> Result<()> {
+    let literals = data;
+    // Most literal runs between matches are one to three bytes (round 28 of
+    // research/RAR-PERF-AUDIT-2026-09-02.md counted 97% at three or fewer on
+    // the census shapes); they skip the four-code setup entirely.
+    #[cfg(target_pointer_width = "64")]
+    let literals = if literals.len() < 4 {
+        literals
+    } else {
+        let mut chunks = literals.chunks_exact(4);
+        for chunk in &mut chunks {
+            let (a, a_len) = table.code_for_symbol(usize::from(chunk[0]))?;
+            let (b, b_len) = table.code_for_symbol(usize::from(chunk[1]))?;
+            let (c, c_len) = table.code_for_symbol(usize::from(chunk[2]))?;
+            let (d, d_len) = table.code_for_symbol(usize::from(chunk[3]))?;
+            let value = (((usize::from(a) << b_len) | usize::from(b)) << c_len) | usize::from(c);
+            let value = (value << d_len) | usize::from(d);
+            writer.write_bits(
+                value,
+                usize::from(a_len) + usize::from(b_len) + usize::from(c_len) + usize::from(d_len),
+            );
+        }
+        chunks.remainder()
+    };
+    let mut pairs = literals.chunks_exact(2);
+    for pair in &mut pairs {
+        let (first, first_len) = table.code_for_symbol(usize::from(pair[0]))?;
+        let (second, second_len) = table.code_for_symbol(usize::from(pair[1]))?;
+        writer.write_bits(
+            (usize::from(first) << second_len) | usize::from(second),
+            usize::from(first_len) + usize::from(second_len),
+        );
+    }
+    for &byte in pairs.remainder() {
+        let (code, len) = table.code_for_symbol(usize::from(byte))?;
+        writer.write_bits(usize::from(code), usize::from(len));
+    }
+    Ok(())
+}
+
+// nzbfast-local change, 5 Sep 2026 - the bit writer accumulates in a u64 and
+// spills 32 bits at a time; see VENDORING.md. Codes and operands are at most
+// 32 bits, and a wider write is split: fewer than 32 bits are live between
+// calls and each chunk adds at most 32. Dead high bits need not be cleared;
+// word/byte spills truncate them. The live suffix always fits in u64.
+// nzbfast-local change, 5 Sep 2026 — inline non-recursive chunks and retain
+// dead high bits; shift wide usize values through u64 for 32-bit portability.
+// Measurements and the cross-build fix are in rar5-current-2026-09-05.
 struct BitWriter {
     bytes: Vec<u8>,
+    /// Total bits written, spilled or not.
     bit_pos: usize,
+    acc: u64,
+    acc_bits: u32,
 }
 
 impl BitWriter {
@@ -6141,23 +10515,72 @@ impl BitWriter {
         Self {
             bytes: Vec::new(),
             bit_pos: 0,
+            acc: 0,
+            acc_bits: 0,
         }
     }
 
+    /// Continue a stream whose first `bit_pos` bits are already in `bytes`
+    /// (the table data a block starts with); a partial last byte is taken
+    /// back into the accumulator so the next write lands after its bits.
+    fn continuing(mut bytes: Vec<u8>, bit_pos: usize) -> Self {
+        debug_assert_eq!(bytes.len(), bit_pos.div_ceil(8));
+        let used = (bit_pos & 7) as u32;
+        let (acc, acc_bits) = if used == 0 {
+            (0, 0)
+        } else {
+            let last = bytes.pop().unwrap_or(0);
+            (u64::from(last >> (8 - used)), used)
+        };
+        Self {
+            bytes,
+            bit_pos,
+            acc,
+            acc_bits,
+        }
+    }
+
+    #[inline]
     fn write_bits(&mut self, value: usize, count: usize) {
-        for bit in (0..count).rev() {
-            if self.bit_pos.is_multiple_of(8) {
-                self.bytes.push(0);
-            }
-            if (value >> bit) & 1 != 0 {
-                let byte = self.bytes.last_mut().unwrap();
-                *byte |= 1 << (7 - (self.bit_pos % 8));
-            }
-            self.bit_pos += 1;
+        if count == 0 {
+            return;
+        }
+        if count > 32 {
+            // Through u64: `usize >> 32` is a compile-time overflow on a
+            // 32-bit target (the armv7 build), and there the high half is
+            // zero anyway.
+            self.write_chunk(((value as u64) >> 32) as usize, count - 32);
+            self.write_chunk(value & 0xffff_ffff, 32);
+        } else {
+            self.write_chunk(value, count);
         }
     }
 
-    fn finish(self) -> Vec<u8> {
+    #[inline(always)]
+    fn write_chunk(&mut self, value: usize, count: usize) {
+        debug_assert!((1..=32).contains(&count));
+        let value = (value as u64) & ((1u64 << count) - 1);
+        self.acc = (self.acc << count) | value;
+        self.acc_bits += count as u32;
+        self.bit_pos += count;
+        if self.acc_bits >= 32 {
+            let spill = self.acc_bits - 32;
+            let word = (self.acc >> spill) as u32;
+            self.bytes.extend_from_slice(&word.to_be_bytes());
+            self.acc_bits = spill;
+            // Only the low acc_bits bits are live; later spills truncate stale high bits.
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        while self.acc_bits >= 8 {
+            self.acc_bits -= 8;
+            self.bytes.push((self.acc >> self.acc_bits) as u8);
+        }
+        if self.acc_bits != 0 {
+            self.bytes
+                .push(((self.acc & ((1u64 << self.acc_bits) - 1)) << (8 - self.acc_bits)) as u8);
+        }
         self.bytes
     }
 }
@@ -6336,8 +10759,1153 @@ fn write_level_lengths(writer: &mut BitWriter, lengths: &[u8; LEVEL_TABLE_SIZE])
 }
 
 #[cfg(test)]
+/// Material whose regions do not all want the same tokenizer horizon:
+/// phases of small-vocabulary text, fixed-width records and noise,
+/// with long-range replays over them - the shape of the corpus the
+/// choice was measured on, in miniature.
+pub(crate) fn horizon_material(len: usize) -> Vec<u8> {
+    const WORDS: [&[u8]; 8] = [
+        b"alpha ",
+        b"beta ",
+        b"gamma delta ",
+        b"epsilon ",
+        b"zeta eta ",
+        b"theta ",
+        b"iota kappa ",
+        b"lambda mu nu ",
+    ];
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut out: Vec<u8> = Vec::with_capacity(len + 256 * 1024);
+    while out.len() < len {
+        match (out.len() / (300 * 1024)) % 3 {
+            0 => {
+                for _ in 0..8192 {
+                    out.extend_from_slice(WORDS[(next() % 8) as usize]);
+                }
+            }
+            1 => {
+                for i in 0..4096u64 {
+                    out.extend_from_slice(
+                        format!("{:08x},{:012},record\n", i ^ (next() >> 40), i).as_bytes(),
+                    );
+                }
+            }
+            _ => {
+                for _ in 0..4096 {
+                    out.extend_from_slice(&next().to_le_bytes());
+                }
+            }
+        }
+        if out.len() > 300 * 1024 {
+            let at = (next() as usize) % (out.len() - 200 * 1024);
+            let replay = out[at..at + 60_000].to_vec();
+            out.extend_from_slice(&replay);
+        }
+    }
+    out.truncate(len);
+    out
+}
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn borrowed_member_spans_match_owned_history_at_solid_seams() {
+        let mut random = 73921u32;
+        let data: Vec<u8> = (0..16384)
+            .map(|i| {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                if i % 31 < 17 {
+                    random as u8
+                } else {
+                    (i % 7) as u8
+                }
+            })
+            .collect();
+        let incoming = &data[100..4197];
+        for history in [&[][..], incoming] {
+            for dictionary in [0, 1, 4096, 16384, 32 << 20] {
+                let tail = &history[history.len().saturating_sub(dictionary)..];
+                for start in [0, 1, 4096, 8192] {
+                    for candidates in [0, 16] {
+                        for version in [0, 1] {
+                            let options = EncodeOptions::new(candidates)
+                                .with_max_match_distance(dictionary)
+                                .with_lazy_matching(true);
+                            let range = start..start + 4096;
+                            let old_history = member_block_history(&data, tail, start, dictionary);
+                            let mut old_events = Vec::new();
+                            let old = encode_lz_block(
+                                &data[range.clone()],
+                                &old_history,
+                                version,
+                                &[],
+                                options,
+                                true,
+                                Some(&mut |pos| {
+                                    old_events.push(pos);
+                                    true
+                                }),
+                            )
+                            .unwrap();
+                            let mut new_events = Vec::new();
+                            let new = encode_member_block_borrowed(
+                                &data,
+                                tail,
+                                range,
+                                &[],
+                                version,
+                                options,
+                                true,
+                                Some(&mut |pos| {
+                                    new_events.push(pos);
+                                    true
+                                }),
+                                &mut EncoderScratch::default(),
+                                None,
+                                &[],
+                            )
+                            .unwrap();
+                            assert_eq!(old, new);
+                            assert_eq!(old_events, new_events);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_history_seed_preserves_candidate_order_and_future_insertions() {
+        fn compare<P: MatchPosition>(a: &MatchIndex<P>, b: &MatchIndex<P>) {
+            assert_eq!(a.depth(), b.depth());
+            assert_eq!(a.counts.len(), b.counts.len());
+            let depth = a.depth();
+            for bucket in 0..a.counts.len() {
+                let ac = a.counts[bucket];
+                let bc = b.counts[bucket];
+                let count = (ac as usize).min(depth);
+                assert_eq!(count, (bc as usize).min(depth));
+                let base = bucket << a.depth_bits;
+                for back in 1..=count {
+                    let ai = base | (ac.wrapping_sub(back as u32) as usize & (depth - 1));
+                    let bi = base | (bc.wrapping_sub(back as u32) as usize & (depth - 1));
+                    assert_eq!(a.slots[ai].position(), b.slots[bi].position());
+                }
+            }
+        }
+        fn check<P: MatchPosition>() {
+            for budget in [1, 5, 16, 64] {
+                for history_len in [0, 1, 2, 3, 4, 7, 15, 31, 64, 4097, 131073] {
+                    for pattern in 0..3 {
+                        let mut random = 719283u32;
+                        let input: Vec<u8> = (0..history_len + 17)
+                            .map(|i| {
+                                random ^= random << 13;
+                                random ^= random >> 17;
+                                random ^= random << 5;
+                                match pattern {
+                                    0 => random as u8,
+                                    1 => (i % 7) as u8,
+                                    _ if i > history_len / 2 => 0,
+                                    _ => random as u8,
+                                }
+                            })
+                            .collect();
+                        // A small table exercises both full and partial buckets,
+                        // including early saturation, without large test allocations.
+                        let mut forward = MatchIndex::<P>::new(1, budget);
+                        let mut reverse = MatchIndex::<P>::new(1, budget);
+                        insert_match_range(&input, 0..history_len, &mut forward);
+                        reverse.seed_history_reverse(&input, history_len);
+                        compare(&forward, &reverse);
+                        let mut scalar = MatchIndex::<P>::new(1, budget);
+                        let mut batched = MatchIndex::<P>::new(1, budget);
+                        scalar.seed_history_reverse_scalar(&input, history_len);
+                        batched.seed_history_reverse_batched(&input, history_len);
+                        compare(&forward, &scalar);
+                        compare(&forward, &batched);
+                        for range in [history_len..history_len + 7, history_len + 7..input.len()] {
+                            insert_match_range(&input, range.clone(), &mut forward);
+                            insert_match_range(&input, range.clone(), &mut reverse);
+                            insert_match_range(&input, range.clone(), &mut scalar);
+                            insert_match_range(&input, range, &mut batched);
+                            compare(&forward, &reverse);
+                            compare(&forward, &scalar);
+                            compare(&forward, &batched);
+                        }
+                        let mut forward = MatchIndex::<P>::new(1, budget);
+                        let mut selected = MatchIndex::<P>::new(1, budget);
+                        insert_match_range(&input, 0..history_len, &mut forward);
+                        selected.seed_history(&input, history_len, None);
+                        compare(&forward, &selected);
+                    }
+                }
+            }
+            // Include histories ending at the final possible prefix, where
+            // the batched loader must peel a scalar tail before its u64 read.
+            for history_len in (0..=16).chain([131073]) {
+                for tail in 0..=7 {
+                    let input: Vec<u8> = (0..history_len + tail).map(|i| (i * 17) as u8).collect();
+                    let mut forward = MatchIndex::<P>::new(1, 16);
+                    let mut reverse = MatchIndex::<P>::new(1, 16);
+                    insert_match_range(&input, 0..history_len, &mut forward);
+                    reverse.seed_history_reverse(&input, history_len);
+                    compare(&forward, &reverse);
+                }
+            }
+        }
+        check::<u32>();
+        check::<usize>();
+    }
+
+
+    /// [`encode_blocks_pooled`] must never park the thread that owns its
+    /// scope while a block is still unclaimed, because that thread is a
+    /// POOL thread at both of the writer's call sites (`rayon::join` in
+    /// `rar50::write::volume`, `map_slice_collect` in the multi-group
+    /// walk). Parking it holds a thread the `width` jobs it just spawned
+    /// need in order to run at all, so N concurrent member encodes on an
+    /// N-thread pool all park waiting for jobs none of them can run.
+    ///
+    /// FOUND IN CI, 11 Sep 2026, as a cap kill of `unit-one-process` with
+    /// no failure reported: that job runs each unit binary bare, so
+    /// libtest takes its thread count from the runner, and on a two-CPU
+    /// runner exactly two tests run at once. nzbkit's two over-the-cap
+    /// chase fixtures sit next to each other in registration order and
+    /// both compress tens of megabytes, so when they aligned, both pool
+    /// threads parked and the whole process wedged four tests in - 1,642
+    /// of 1,646 tests never ran, for 31 minutes, at near-zero CPU, until
+    /// the job's own timeout killed it. The 5 ms poll on the park is why
+    /// it reads as a hang rather than a wedge.
+    ///
+    /// Two threads is the smallest pool that shows it and the one CI had.
+    /// `recv_timeout` rather than `join` IS the assertion: a join would
+    /// simply hang this suite and read as a wedge of its own. The payload
+    /// must COMPRESS - `should_store_compressed_payload` has a sampled
+    /// fast path that returns before the encoder on incompressible input,
+    /// and the first cut of this test took it and passed over nothing -
+    /// and must exceed `MAX_COMPRESSED_BLOCK_OUTPUT` so `width > 1` puts
+    /// the walk on the pooled arm at all.
+    ///
+    /// Negative control: drop the owner's `encode_one` arm from the drain
+    /// loop and this fails on the first run, at the full timeout.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn concurrent_member_encodes_never_starve_a_pool_of_their_own_size() {
+        use std::sync::{Arc, Barrier, mpsc};
+        let mut seed = 0x2545F491u64 | 1;
+        let data: Arc<Vec<u8>> = Arc::new(
+            (0..(12usize << 20))
+                .map(|i| {
+                    if i % 2 == 0 {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        (seed >> 24) as u8
+                    } else {
+                        0
+                    }
+                })
+                .collect(),
+        );
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .unwrap(),
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..2 {
+            let (pool, barrier, tx, data) =
+                (pool.clone(), barrier.clone(), tx.clone(), data.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                let out = pool.install(|| {
+                    crate::rar50::Rar50Writer::new(
+                        crate::rar50::WriterOptions::default().with_compression_level(1),
+                    )
+                    .compressed_entries(&[crate::rar50::CompressedEntry {
+                        name: b"F.bin",
+                        data: &data,
+                        mtime: None,
+                        attributes: 0,
+                        host_os: 0,
+                    }])
+                    .finish()
+                });
+                let _ = tx.send(out.map(|v| v.len()));
+            });
+        }
+        drop(tx);
+        for i in 0..2 {
+            let got = rx.recv_timeout(std::time::Duration::from_secs(90)).unwrap_or_else(|_| {
+                panic!("encode {i} never finished: the two-thread pool starved")
+            });
+            let packed = got.unwrap();
+            assert!(
+                packed < data.len(),
+                "the payload must compress or the writer stores it and this \
+                 test never reaches the pooled block walk: {packed} from {}",
+                data.len()
+            );
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn owned_history_cost_bounds_large_dictionary_worker_count() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(16)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            // 16 threads: a 2 GiB budget over 72 MiB per borrowed-history
+            // block, or 72 MiB plus the dictionary when history is copied.
+            assert_eq!(encode_block_wave_width(128 << 10), 16);
+            for dictionary in [64 << 20, 128 << 20, 256 << 20, 1 << 30] {
+                assert_eq!(encode_block_wave_width_for_history(dictionary, false), 16);
+            }
+            assert_eq!(encode_block_wave_width(4 << 20), 16);
+            assert_eq!(encode_block_wave_width(8 << 20), 16);
+            assert_eq!(encode_block_wave_width(32 << 20), 16);
+            assert_eq!(encode_block_wave_width(64 << 20), 15);
+            assert_eq!(encode_block_wave_width(128 << 20), 10);
+            assert_eq!(encode_block_wave_width(256 << 20), 6);
+            assert_eq!(encode_block_wave_width(1 << 30), 1);
+        });
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        pool.install(|| assert_eq!(encode_block_wave_width(128 << 20), 1));
+    }
+
+    #[test]
+    fn batched_match_insertions_preserve_slots_counts_and_candidates() {
+        fn check<P: MatchPosition>() {
+            let mut seed = 71329u32;
+            for len in (0..=33).chain([63, 64, 65, 127, 128, 129]) {
+                let input: Vec<u8> = (0..len)
+                    .map(|i| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        if len % 2 == 0 {
+                            (i % 3) as u8
+                        } else {
+                            seed as u8
+                        }
+                    })
+                    .collect();
+                for budget in [1, 5, 16, 64, 256] {
+                    let mut expected = MatchIndex::<P>::new(len, budget);
+                    let mut observed = MatchIndex::<P>::new(len, budget);
+                    for step in [1, 3, 4, 7, 16, 129] {
+                        for start in (0..len).step_by(step) {
+                            let end = (start + step).min(len);
+                            for pos in start..end {
+                                expected.insert(&input, pos);
+                            }
+                            insert_match_range(&input, start..end, &mut observed);
+                            assert_eq!(expected.counts, observed.counts);
+                        }
+                        assert!(expected
+                            .slots
+                            .iter()
+                            .zip(&observed.slots)
+                            .all(|(a, b)| a.position() == b.position()));
+                    }
+                    for pos in 0..len.saturating_sub(3) {
+                        assert_eq!(
+                            expected.candidates(&input, pos).collect::<Vec<_>>(),
+                            observed.candidates(&input, pos).collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
+        }
+        check::<u32>();
+        check::<usize>();
+    }
+
     use super::*;
+
+    #[test]
+    fn bit_writer_preserves_low_live_bits_across_many_spills() {
+        let mut seed = 0x517c_a931u32;
+        for offset in 0..8 {
+            let mut writer = BitWriter::new();
+            let mut reference = Vec::new();
+            let mut pos = 0usize;
+            let mut emit = |writer: &mut BitWriter, value: usize, count: usize| {
+                writer.write_bits(value, count);
+                for shift in (0..count).rev() {
+                    if pos % 8 == 0 {
+                        reference.push(0);
+                    }
+                    *reference.last_mut().unwrap() |=
+                        (((value >> shift) & 1) as u8) << (7 - pos % 8);
+                    pos += 1;
+                }
+                assert_eq!(writer.bit_pos, pos);
+            };
+            emit(&mut writer, usize::MAX, offset);
+            for index in 0..4096 {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let value = (seed as usize).wrapping_mul(0x9e37_79b1usize);
+                let width = if index % 3 == 0 {
+                    usize::BITS as usize
+                } else {
+                    seed as usize % (usize::BITS as usize + 1)
+                };
+                emit(&mut writer, value, width);
+            }
+            assert_eq!(writer.finish(), reference);
+        }
+    }
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn block_wave_without_progress_matches_reporting_path() {
+        let data: Vec<u8> = (0..MAX_COMPRESSED_BLOCK_OUTPUT + 513)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let history = vec![0x71; 97];
+        let options = EncodeOptions::new(0).with_max_match_distance(128);
+        for algorithm in [0, 1, 255] {
+            let direct = encode_lz_member_blocks_in_waves(
+                &data,
+                &history,
+                algorithm,
+                options,
+                None,
+                2,
+                MemberWindow::whole(),
+                &EncoderScratchPool::new(),
+            );
+            let reporting = encode_lz_member_blocks_in_waves(
+                &data,
+                &history,
+                algorithm,
+                options,
+                Some(&mut |_| true),
+                2,
+                MemberWindow::whole(),
+                &EncoderScratchPool::new(),
+            );
+            match (direct, reporting) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b),
+                (Err(a), Err(b)) => assert_eq!(format!("{a:?}"), format!("{b:?}")),
+                _ => panic!("progress changed the wave result"),
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn flat_literal_match_pairs_preserve_ring_bytes_and_state_at_boundaries() {
+        let tables = std::sync::Arc::new(LazyDecodeTables::new(TableLengths {
+            main: vec![1, 1],
+            distance: vec![1, 1],
+            align: vec![4; ALIGN_TABLE_SIZE],
+            length: vec![1, 1],
+        }));
+        let seed: Vec<u8> = (0..32).collect();
+        for literal_len in [0, 1, 3, 16, 17] {
+            for length in [2, 16, 64, 65] {
+                for distance in [0, 1, 15, 16, 32, 33, 127, 129] {
+                    for limit in [
+                        0,
+                        literal_len,
+                        literal_len + length - 1,
+                        literal_len + length,
+                        256,
+                    ] {
+                        let make_tape = || BlockTape {
+                            seq: 0,
+                            tables: tables.clone(),
+                            payload: Vec::new(),
+                            payload_bits: 0,
+                            lits: vec![0xa5; literal_len + 64],
+                            ops: vec![
+                                TapeOp::lits(literal_len as u32),
+                                TapeOp::match_at(distance as u32, length as u32),
+                                TapeOp::lits(64),
+                            ],
+                            filters: Vec::new(),
+                            resume_bit: None,
+                            tail_error: Some(Error::NeedMoreInput),
+                        };
+                        let mut ring = StreamingOutput::new(seed.clone(), 0, limit, 128, 128);
+                        let mut flat = FlatOutput::new_seeded(&seed, limit, 128, 128);
+                        let mut ring_decoder = Unpack50Decoder::new();
+                        let mut flat_decoder = Unpack50Decoder::new();
+                        let mut sink = |_: DecodedChunk<'_>| Ok::<_, std::convert::Infallible>(());
+                        let ring_result =
+                            ring_decoder.apply_tape(&mut make_tape(), &mut ring, limit, &mut sink);
+                        let flat_result = flat_decoder.apply_tape_flat(
+                            &mut make_tape(),
+                            &mut flat,
+                            limit,
+                            &mut sink,
+                        );
+                        let classify = |result: std::result::Result<
+                            TapeApplied,
+                            StreamDecodeError<std::convert::Infallible>,
+                        >| {
+                            match result {
+                                Ok(outcome) => Ok(matches!(outcome, TapeApplied::OutputDone)),
+                                Err(StreamDecodeError::Decode(error)) => Err(Some(error)),
+                                Err(StreamDecodeError::FilteredMember) => Err(None),
+                                Err(StreamDecodeError::Sink(never)) => match never {},
+                            }
+                        };
+                        assert_eq!(classify(flat_result), classify(ring_result));
+                        assert_eq!(flat.written(), ring.written());
+                        assert_eq!(&flat.buf[..flat.pos], &ring.ring[..ring.head]);
+                        assert_eq!(flat_decoder.reps, ring_decoder.reps);
+                        assert_eq!(flat_decoder.last_length, ring_decoder.last_length);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Three blocks of one member (the third a few KiB), with incoming solid
+    /// history: the serial walk (wave width one) and a wave holding every
+    /// block must produce the same bytes, and the stream must decode.
+    fn member_block_fixture() -> (Vec<u8>, Vec<u8>) {
+        let mut seed = 0x2545_f491u32;
+        let mut noise = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let history: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let data: Vec<u8> = (0..2 * MAX_COMPRESSED_BLOCK_OUTPUT + 4096)
+            .map(|i| {
+                let region = (i / 20_000) % 4;
+                match region {
+                    0 => (i * 7 % 251) as u8,
+                    1 => noise() as u8,
+                    2 => b"the quick brown fox jumps over the lazy dog "[i % 44],
+                    _ => (i / 3 % 256) as u8,
+                }
+            })
+            .collect();
+        (history, data)
+    }
+
+    #[test]
+    fn member_blocks_encode_identically_serially_and_in_a_wave() {
+        let (history, data) = member_block_fixture();
+        let options = EncodeOptions::new(16).with_max_match_distance(200_000);
+        let serial = encode_lz_member_blocks_in_waves(
+            &data,
+            &history,
+            0,
+            options,
+            None,
+            1,
+            MemberWindow::whole(),
+            &EncoderScratchPool::new(),
+        )
+        .unwrap();
+        for wave in [2, 3, 8] {
+            let waved = encode_lz_member_blocks_in_waves(
+                &data,
+                &history,
+                0,
+                options,
+                None,
+                wave,
+                MemberWindow::whole(),
+                &EncoderScratchPool::new(),
+            )
+            .unwrap();
+            assert_eq!(waved, serial, "wave width {wave}");
+        }
+        let without_history = encode_lz_member_blocks_in_waves(
+            &data,
+            &[],
+            0,
+            options,
+            None,
+            3,
+            MemberWindow::whole(),
+            &EncoderScratchPool::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            Unpack50Decoder::new()
+                .decode_member(&without_history, 0, data.len(), false, DecodeMode::Lz)
+                .unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn member_block_waves_report_monotone_progress_and_honour_cancellation() {
+        let (history, data) = member_block_fixture();
+        // The pooled workers continuously take new blocks; there is no barrier
+        // between waves. They may finish before the coordinator is scheduled,
+        // so a single final report is valid there. The serial walk necessarily
+        // reports intermediate checkpoints between blocks.
+        let options = EncodeOptions::new(16).with_max_match_distance(200_000);
+        for wave in [1, 3] {
+            let mut events = Vec::new();
+            encode_lz_member_blocks_in_waves(
+                &data,
+                &history,
+                0,
+                options,
+                Some(&mut |position| {
+                    events.push(position);
+                    true
+                }),
+                wave,
+                MemberWindow::whole(),
+                &EncoderScratchPool::new(),
+            )
+            .unwrap();
+            assert!(
+                events.windows(2).all(|pair| pair[0] <= pair[1]),
+                "wave {wave}: progress went backwards: {events:?}"
+            );
+            assert_eq!(events.last(), Some(&data.len()), "wave {wave}");
+            assert!(
+                events.iter().all(|&position| position <= data.len()),
+                "wave {wave}: progress exceeded the member length: {events:?}"
+            );
+            if wave == 1 {
+                assert!(
+                    events
+                        .iter()
+                        .any(|&position| position > 0 && position < data.len()),
+                    "serial walk: no intermediate progress was reported"
+                );
+            }
+            // Refusing at the first report that shows real progress cancels the
+            // encode; no report may follow the refusal.
+            let mut calls = 0usize;
+            let mut refused_at = None;
+            let result = encode_lz_member_blocks_in_waves(
+                &data,
+                &history,
+                0,
+                options,
+                Some(&mut |position| {
+                    calls += 1;
+                    assert!(refused_at.is_none(), "reported after refusing");
+                    if position > 0 {
+                        refused_at = Some(calls);
+                        return false;
+                    }
+                    true
+                }),
+                wave,
+                MemberWindow::whole(),
+                &EncoderScratchPool::new(),
+            );
+            assert!(
+                matches!(result, Err(Error::Cancelled)),
+                "wave {wave}: {result:?}"
+            );
+            assert!(refused_at.is_some(), "wave {wave}");
+        }
+    }
+
+    #[test]
+    fn batched_literal_codes_match_scalar_writes_at_all_widths_and_offsets() {
+        let mut cases = Vec::new();
+        for width in 1..=15 {
+            cases.push(vec![width; (1usize << width).min(256)]);
+        }
+        // A complete, deep tree supplies codes with high bits set, including
+        // 15-bit codes; uniform long-code tables alone have small code values.
+        let mut deep: Vec<u8> = (1..=14).collect();
+        deep.extend_from_slice(&[15, 15]);
+        cases.push(deep);
+        for lengths in cases {
+            let table = EncoderTable::from_lengths(&lengths).unwrap();
+            for offset in 0..8 {
+                for count in 0..=33 {
+                    let input: Vec<u8> = (0..count)
+                        .map(|i| ((i * 7 + count) % lengths.len()) as u8)
+                        .collect();
+                    let mut batched = BitWriter::new();
+                    let mut scalar = BitWriter::new();
+                    batched.write_bits(0x55, offset);
+                    scalar.write_bits(0x55, offset);
+                    write_literal_codes(&mut batched, &table, &input).unwrap();
+                    for byte in input {
+                        let (code, len) = table.code_for_symbol(usize::from(byte)).unwrap();
+                        scalar.write_bits(usize::from(code), usize::from(len));
+                    }
+                    assert_eq!(batched.bit_pos, scalar.bit_pos);
+                    assert_eq!(batched.finish(), scalar.finish());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bit_writer_continues_a_partial_byte() {
+        let mut first = BitWriter::new();
+        first.write_bits(0b101, 3);
+        let bits = first.bit_pos;
+        let mut writer = BitWriter::continuing(first.finish(), bits);
+        writer.write_bits(0x1abc, 13);
+        writer.write_bits(0xffff_ffff, 32);
+        writer.write_bits(1, 1);
+        assert_eq!(writer.bit_pos, 49);
+        let mut reference = BitWriter::new();
+        reference.write_bits(0b101, 3);
+        reference.write_bits(0x1abc, 13);
+        reference.write_bits(0xffff_ffff, 32);
+        reference.write_bits(1, 1);
+        let expected = reference.finish();
+        assert_eq!(writer.finish(), expected);
+        assert_eq!(expected, vec![0xba, 0xbc, 0xff, 0xff, 0xff, 0xff, 0x80]);
+    }
+
+    #[test]
+    fn literal_runs_keep_token_storage_compact() {
+        assert_eq!(
+            std::mem::size_of::<EncodeToken>(),
+            2 * std::mem::size_of::<usize>()
+        );
+        let input = vec![b'x'; 65536];
+        let tokens = encode_tokens(&input, &[], EncodeOptions::new(0), DISTANCE_TABLE_SIZE_50);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].distance, 0);
+        assert_eq!(tokens[0].length, input.len());
+    }
+
+    #[test]
+    fn disabled_match_search_preserves_progress_and_cancellation() {
+        for size in [0, 1, 1024 * 1024 + 1, 2 * 1024 * 1024 + 3] {
+            let input = vec![b'x'; size];
+            let expected: Vec<_> = (1..=size).step_by(1024 * 1024).chain([size]).collect();
+            for options in [
+                EncodeOptions::new(0),
+                EncodeOptions::new(16).with_max_match_distance(0),
+            ] {
+                let mut events = Vec::new();
+                let tokens = encode_tokens_with_progress(
+                    &input,
+                    b"history",
+                    options,
+                    64,
+                    Some(&mut |n| {
+                        events.push(n);
+                        true
+                    }),
+                )
+                .unwrap();
+                assert_eq!(events, expected);
+                assert_eq!(tokens.len(), usize::from(size != 0));
+                for stop in 1..=expected.len() {
+                    let mut events = Vec::new();
+                    let result = encode_tokens_with_progress(
+                        &input,
+                        b"history",
+                        options,
+                        64,
+                        Some(&mut |n| {
+                            events.push(n);
+                            events.len() != stop
+                        }),
+                    );
+                    assert!(matches!(result, Err(Error::Cancelled)));
+                    assert_eq!(events, expected[..stop]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_output_matches_pre_optimization_mixed_stream() {
+        let mut seed = 12345u32;
+        let data: Vec<u8> = (0..65536)
+            .map(|i| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                if i % 4096 < 2048 {
+                    seed as u8
+                } else if i % 8192 < 4096 {
+                    (i % 251) as u8
+                } else {
+                    65
+                }
+            })
+            .collect();
+        let sixteen = encode_lz_member_with_options(&data, 0, EncodeOptions::new(16)).unwrap();
+        let none = encode_lz_member_with_options(&data, 0, EncodeOptions::new(0)).unwrap();
+        let filtered = Unpack50Encoder::with_options(EncodeOptions::new(16))
+            .encode_member_with_filters(
+                &data,
+                0,
+                &[
+                    Rar50FilterSpec::range(Rar50FilterKind::E8, 0..data.len() / 2),
+                    Rar50FilterSpec::range(
+                        Rar50FilterKind::Delta { channels: 4 },
+                        data.len() / 2..data.len(),
+                    ),
+                ],
+            )
+            .unwrap();
+        let observed = [&sixteen, &none, &filtered].map(|p| (p.len(), crc32fast::hash(p)));
+        // Captured with the encoder before the September 5 creation changes:
+        // (33143, 0x2269afd4), (56053, 0x213b0e1e), (33603, 0x6d15eed4). Re-pinned
+        // the same day twice: for literal-run acceleration (see
+        // LITERAL_SKIP_STRENGTH; the fixture's 2 KiB random regions run past 32
+        // literals, so their probes thin out: 33156 and 33396), then for the
+        // flat ring match index (`MatchIndex`; a 4-byte hash reaches different
+        // candidates on this fixture: +9 and +68 bytes here, -2.4% to -13% on
+        // the 8 MiB corpora). The zero-candidate stream is one literal run
+        // either way. Re-pinned 7 Sep 2026 for the filtered stream only
+        // (33464 -> 33463): its two records are now written just before the
+        // token that reaches each, as an offset from there, rather than
+        // both at the head of the block.
+        assert_eq!(
+            observed,
+            [
+                (33165, 0x8a06cda4),
+                (56053, 0x213b0e1e),
+                (33463, 0x8e690b21)
+            ],
+            "packed (length, crc32) of the 16-candidate, zero-candidate and filtered streams"
+        );
+    }
+
+    #[test]
+    fn encoder_table_matches_canonical_decoder_codes() {
+        let mut seed = 0x12345678u32;
+        let mut tables = vec![
+            vec![],
+            vec![0; 306],
+            vec![1],
+            vec![1, 1],
+            vec![8; 256],
+            vec![15; 306],
+            vec![1, 1, 1],
+            vec![16],
+        ];
+        for size in [20, 44, 64, 80, 256, 306] {
+            for _ in 0..12 {
+                let frequencies: Vec<_> = (0..size)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        (seed % 1000) as usize
+                    })
+                    .collect();
+                tables.push(huffman::complete_lengths_for_frequencies(&frequencies, 15));
+            }
+        }
+        let mut oversized = vec![0; 65537];
+        oversized[65536] = 1;
+        tables.push(oversized);
+        for lengths in tables {
+            match (
+                EncoderTable::from_lengths(&lengths),
+                HuffmanTable::from_lengths(&lengths),
+            ) {
+                (Ok(encode), Ok(decode)) => {
+                    for symbol in 0..lengths.len() + 2 {
+                        assert_eq!(
+                            encode.code_for_symbol(symbol),
+                            decode.code_for_symbol(symbol)
+                        );
+                    }
+                }
+                (Err(a), Err(b)) => assert_eq!(a, b),
+                _ => panic!("encoder and decoder disagree on table validity"),
+            }
+        }
+    }
+
+    #[test]
+    fn byte_bit_writer_matches_bitwise_reference_at_all_widths_and_offsets() {
+        fn reference(bytes: &mut Vec<u8>, pos: &mut usize, value: usize, count: usize) {
+            for shift in (0..count).rev() {
+                if *pos % 8 == 0 {
+                    bytes.push(0);
+                }
+                let last = bytes.len() - 1;
+                bytes[last] |= (((value >> shift) & 1) as u8) << (7 - *pos % 8);
+                *pos += 1;
+            }
+        }
+        for offset in 0..8 {
+            for width in 0..=usize::BITS as usize {
+                for value in [0, 1, usize::MAX, usize::MAX / 3, 0x13579bdf] {
+                    let mut writer = BitWriter::new();
+                    let mut bytes = Vec::new();
+                    let mut pos = 0;
+                    for (v, n) in [
+                        (0x55, offset),
+                        (value, width),
+                        (0xab, 8),
+                        (value.reverse_bits(), width),
+                        (3, 2),
+                    ] {
+                        writer.write_bits(v, n);
+                        reference(&mut bytes, &mut pos, v, n);
+                        assert_eq!(writer.bit_pos, pos);
+                    }
+                    assert_eq!(writer.finish(), bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_encoder_slots_match_linear_reference() {
+        for length in (0..=8192).chain([usize::MAX]) {
+            assert_eq!(
+                length_slot_for_match(length),
+                reference_length_slot(length),
+                "length {length}"
+            );
+        }
+        let mut distances: Vec<usize> = (0..=1024).collect();
+        for slot in 0..if usize::BITS == 64 { 66 } else { 60 } {
+            if let Ok(base) = slot_to_distance(slot, 0) {
+                distances.extend([base - 1, base, base + 1]);
+                let bits = distance_slot_bit_count(slot).unwrap();
+                if let Some(end) = base.checked_add((1usize << bits) - 1) {
+                    distances.extend([end - 1, end]);
+                    if let Some(next) = end.checked_add(1) {
+                        distances.push(next);
+                    }
+                }
+            }
+        }
+        #[cfg(target_pointer_width = "64")]
+        distances.extend([1usize << 33, 1usize << 40, usize::MAX]);
+        for size in [0, 1, 4, 5, 16, 32, 64, 66, 80] {
+            for &distance in &distances {
+                assert_eq!(
+                    distance_slot_for_match(distance, size),
+                    reference_distance_slot(distance, size),
+                    "distance {distance}, table {size}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn match_index_yields_a_buckets_newest_insertions_first_and_no_more_than_its_depth() {
+        let input: Vec<u8> = b"abcd".iter().copied().cycle().take(1000).collect();
+        for budget in [1, 5, 8, 64, 256] {
+            let mut index = MatchIndex::<u32>::new(input.len(), budget);
+            let depth = budget.max(1).next_power_of_two().clamp(4, 64);
+            assert_eq!(index.depth(), depth, "budget {budget}");
+            for pos in 0..40 {
+                index.insert(&input, pos);
+            }
+            // Positions 0, 4, 8, ... share the prefix "abcd"; ten were inserted.
+            let seen: Vec<usize> = index.candidates(&input, 40).collect();
+            let expected: Vec<usize> = (0..10).rev().map(|i| i * 4).take(depth).collect();
+            assert_eq!(seen, expected, "budget {budget}");
+            // Positions with fewer than four bytes after them are not indexed.
+            let mut tail = MatchIndex::<usize>::new(input.len(), 8);
+            tail.insert(&input, input.len() - 4);
+            tail.insert(&input, input.len() - 3);
+            assert_eq!(
+                tail.candidates(&input, 0).collect::<Vec<_>>(),
+                vec![input.len() - 4]
+            );
+        }
+        // A tiny input still gets the minimum table; a large one is capped.
+        assert_eq!(
+            MatchIndex::<u32>::new(10, 16).counts.len(),
+            MATCH_INDEX_MIN_BUCKETS
+        );
+        assert_eq!(
+            MatchIndex::<u32>::new(1 << 30, 16).counts.len(),
+            MATCH_INDEX_MAX_BUCKETS
+        );
+    }
+
+    #[test]
+    fn prefix_match_filter_preserves_candidate_limits_and_repeat_choices() {
+        let mut seed = 12345u32;
+        for alphabet in [2, 17, 256] {
+            let mut input: Vec<u8> = (0..1536)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    (seed % alphabet) as u8
+                })
+                .collect();
+            input.extend_from_within(..512);
+            let mut buckets = MatchIndex::<usize>::new(input.len(), 16);
+            let prices = LiteralPrices::new(&input, 0);
+            for pos in 0..input.len() {
+                for cap in [0, 1, 4, 16] {
+                    let options = EncodeOptions::new(cap).with_max_match_distance(1024);
+                    let state = EncoderMatchState {
+                        reps: [1, 2, 17, 1536],
+                        ..Default::default()
+                    };
+                    assert_eq!(
+                        best_match(
+                            &input,
+                            pos,
+                            input.len(),
+                            &buckets,
+                            options,
+                            &state,
+                            64,
+                            &prices
+                        ),
+                        reference_best_match(
+                            &input,
+                            pos,
+                            input.len(),
+                            &buckets,
+                            options,
+                            &state,
+                            64,
+                            &prices,
+                        ),
+                        "alphabet {alphabet}, pos {pos}, cap {cap}"
+                    );
+                }
+                buckets.insert(&input, pos);
+            }
+        }
+    }
+
+    fn reference_length_slot(length: usize) -> Result<(usize, usize)> {
+        if length < 2 {
+            return Err(Error::InvalidData("RAR 5 match length is too short"));
+        }
+        for slot in 0..LENGTH_TABLE_SIZE {
+            let bit_count = usize::from(length_slot_extra_bits(slot)?);
+            let base = slot_to_length(slot, 0)?;
+            let max = base
+                + if bit_count == 0 {
+                    0
+                } else {
+                    (1usize << bit_count) - 1
+                };
+            if length >= base && length <= max {
+                return Ok((slot, length - base));
+            }
+        }
+        Err(Error::InvalidData("RAR 5 match length is too long"))
+    }
+
+    fn reference_distance_slot(distance: usize, distance_size: usize) -> Result<(usize, usize)> {
+        if distance == 0 {
+            return Err(Error::InvalidData("RAR 5 match distance is zero"));
+        }
+        for slot in 0..distance_size {
+            let bit_count = distance_slot_bit_count(slot)?;
+            let base = slot_to_distance(slot, 0)?;
+            let max = base
+                + if bit_count == 0 {
+                    0
+                } else {
+                    (1usize << bit_count) - 1
+                };
+            if distance >= base && distance <= max {
+                return Ok((slot, distance - base));
+            }
+        }
+        Err(Error::InvalidData("RAR 5 match distance is too large"))
+    }
+
+    fn reference_best_match(
+        input: &[u8],
+        pos: usize,
+        end: usize,
+        buckets: &MatchIndex<usize>,
+        options: EncodeOptions,
+        state: &EncoderMatchState,
+        distance_size: usize,
+        prices: &LiteralPrices,
+    ) -> Option<MatchCandidate> {
+        let max_distance = pos.min(options.max_match_distance);
+        let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
+        if options.max_match_candidates == 0
+            || max_distance == 0
+            || max_length < 4
+            || pos + 3 >= input.len()
+        {
+            return None;
+        }
+        let mut best = None;
+        let mut checked = 0usize;
+        for distance in state.reps {
+            if distance == 0 || distance > max_distance {
+                continue;
+            }
+            let length = match_length(input, pos, distance, max_length);
+            consider_match_candidate(
+                &mut best,
+                state,
+                distance_size,
+                length,
+                distance,
+                prices.bits(pos, length),
+            );
+        }
+        for candidate in buckets.candidates(input, pos) {
+            if candidate >= pos {
+                continue;
+            }
+            let distance = pos - candidate;
+            if distance > max_distance {
+                break;
+            }
+            checked += 1;
+            if let Some(best) = best {
+                if input[candidate + best.length - 1] != input[pos + best.length - 1] {
+                    if checked >= options.max_match_candidates {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            let length = match_length(input, pos, distance, max_length);
+            consider_match_candidate(
+                &mut best,
+                state,
+                distance_size,
+                length,
+                distance,
+                prices.bits(pos, length),
+            );
+            if let Some(best) = best {
+                if best.length == max_length || best.length >= MATCH_NICE_LENGTH {
+                    break;
+                }
+            }
+            if checked >= options.max_match_candidates {
+                break;
+            }
+        }
+        best
+    }
 
     /// The tape op's SHAPE is the optimisation, so it is worth an
     /// assertion rather than a comment. Before 3 Sep 2026 `TapeOp` was an
@@ -6522,6 +12090,41 @@ mod tests {
                 Err(_) => assert!(slot_distance_bits(slot).is_err(), "slot {slot}"),
             }
         }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn fused_length_reads_match_reference_at_every_slot_and_bit_offset() {
+        for slot in 0..LENGTH_TABLE_SIZE {
+            let width = length_slot_extra_bits(slot).unwrap();
+            for extra in 0..(1u32 << width) {
+                for offset in 0..8 {
+                    let mut writer = BitWriter::new();
+                    writer.write_bits(0, offset);
+                    writer.write_bits(extra as usize, usize::from(width));
+                    let encoded = writer.finish();
+                    let mut bits = BitReader::new_at(&encoded, offset);
+                    assert_eq!(
+                        read_slot_length(slot, &mut bits).unwrap() as usize,
+                        slot_to_length(slot, extra).unwrap(),
+                        "slot {slot}, extra {extra}, offset {offset}"
+                    );
+                    assert_eq!(bits.position(), offset + usize::from(width));
+                }
+            }
+            if width != 0 {
+                assert_eq!(
+                    read_slot_length(slot, &mut BitReader::new(&[])),
+                    Err(Error::NeedMoreInput)
+                );
+            }
+        }
+        let mut bits = BitReader::new(&[0xff; 8]);
+        assert_eq!(
+            read_slot_length(LENGTH_TABLE_SIZE, &mut bits),
+            Err(Error::InvalidData("RAR 5 length slot is too large"))
+        );
+        assert_eq!(bits.position(), 0);
     }
 
     fn checksum(flags: u8, size_bytes: &[u8]) -> u8 {
@@ -6787,7 +12390,11 @@ mod tests {
         assert_eq!(control, Some(262));
         assert_eq!(output.written(), 1);
         assert_eq!(output.ring[0], b'A');
-        assert_eq!(bits.position(), 2, "the control code is consumed at handoff");
+        assert_eq!(
+            bits.position(),
+            2,
+            "the control code is consumed at handoff"
+        );
 
         let long_len = (HUFF_LUT_BITS + 1) as u8;
         let long = HuffmanTable::from_lengths(&[long_len, long_len]).unwrap();
@@ -6853,10 +12460,7 @@ mod tests {
         .unwrap();
         let mut max_bits = BitReader::new(&[0, 0]);
         assert_eq!(
-            short
-                .distance
-                .decode_distance_hot(&mut max_bits)
-                .unwrap(),
+            short.distance.decode_distance_hot(&mut max_bits).unwrap(),
             (65, 31)
         );
         let mut short_bits = BitReader::new(&[0b1000_0000, 0]);
@@ -6969,10 +12573,7 @@ mod tests {
         // u16 storage and prove both canonical endpoints decode.
         assert_eq!(table.symbols, [0, (MAIN_TABLE_SIZE - 1) as u16]);
         assert_eq!(table.code_for_symbol(0).unwrap(), (0, 1));
-        assert_eq!(
-            table.code_for_symbol(MAIN_TABLE_SIZE - 1).unwrap(),
-            (1, 1)
-        );
+        assert_eq!(table.code_for_symbol(MAIN_TABLE_SIZE - 1).unwrap(), (1, 1));
         let mut reader = BitReader::new(&[0b0100_0000]);
         assert_eq!(table.decode(&mut reader).unwrap(), 0);
         assert_eq!(table.decode(&mut reader).unwrap(), MAIN_TABLE_SIZE - 1);
@@ -6991,11 +12592,37 @@ mod tests {
     }
 
     #[test]
+    fn primary_huffman_lookup_matches_bitwise_decode_across_all_prefixes() {
+        let mut cases = vec![vec![8; 256]];
+        for length in [1, 4, 8, 9, 10, 12, 14, 15] {
+            let mut lengths = vec![0; MAIN_TABLE_SIZE];
+            lengths[0] = length;
+            lengths[MAIN_TABLE_SIZE - 1] = length;
+            cases.push(lengths);
+        }
+        for lengths in cases {
+            let table = HuffmanTable::from_lengths(&lengths).unwrap();
+            for prefix in 0..32768u16 {
+                let encoded = (prefix << 1).to_be_bytes();
+                let mut fast = BitReader::new(&encoded);
+                let mut bitwise = BitReader::new(&encoded);
+                match (table.decode(&mut fast), table.decode_slow(&mut bitwise)) {
+                    (Ok(a), Ok(b)) => {
+                        assert_eq!(a, b, "prefix {prefix}");
+                        assert_eq!(fast.position(), bitwise.position());
+                    }
+                    (Err(_), Err(_)) => {}
+                    pair => panic!("lookup and bitwise decode disagree: {pair:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn codes_beyond_the_primary_huffman_lut_use_the_canonical_fallback() {
         let table = HuffmanTable::from_lengths(&[10, 10]).unwrap();
         assert_eq!(
-            table.lut[0],
-            HUFF_LUT_MISS,
+            table.lut[0], HUFF_LUT_MISS,
             "10-bit codes must not populate the LUT"
         );
 
@@ -7076,7 +12703,7 @@ mod tests {
         assert!(
             encode_tokens(data, &[], EncodeOptions::default(), DISTANCE_TABLE_SIZE_50)
                 .iter()
-                .any(|token| matches!(token, EncodeToken::Match { .. }))
+                .any(|token| token.distance != 0)
         );
     }
 
@@ -7150,7 +12777,13 @@ mod tests {
 
     #[test]
     fn lazy_lz_parser_defers_short_match_for_longer_next_match() {
-        let input = b"abcdXbcdYYYYYYYYYYYYabcdYYYYYYYYYYYY";
+        // A byte-diverse prefix prices the literals like real data (about
+        // eight bits each); over the bare pattern's five-symbol alphabet a
+        // four-byte match costs more than the four literals it replaces and
+        // the parser rightly declines it (see `LiteralPrices`).
+        let mut input: Vec<u8> = (0u8..=199).collect();
+        input.extend_from_slice(b"abcdXbcdYYYYYYYYYYYYabcdYYYYYYYYYYYY");
+        let input = &input[..];
         let greedy = encode_tokens(
             input,
             &[],
@@ -7172,10 +12805,10 @@ mod tests {
 
         assert!(greedy
             .iter()
-            .any(|token| matches!(token, EncodeToken::Match { length: 4, .. })));
+            .any(|token| token.distance != 0 && token.length == 4));
         assert!(lazy
             .iter()
-            .any(|token| matches!(token, EncodeToken::Match { length, .. } if *length > 8)));
+            .any(|token| token.distance != 0 && token.length > 8));
         assert_eq!(decode_lz(&packed, 0, input.len()).unwrap(), input);
     }
 
@@ -7189,7 +12822,9 @@ mod tests {
         input[pos..pos + 8].copy_from_slice(pattern);
         input[pos + 8] = b'X';
 
-        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        let mut buckets = MatchIndex::<usize>::new(input.len(), 256);
+
+        let prices = LiteralPrices::new(&input, 0);
         for candidate in 0..pos {
             insert_match_position(&input, candidate, &mut buckets);
         }
@@ -7206,6 +12841,7 @@ mod tests {
             EncodeOptions::default(),
             &state,
             DISTANCE_TABLE_SIZE_50,
+            &prices,
         )
         .unwrap();
 
@@ -7224,7 +12860,9 @@ mod tests {
         input[pos - 30] = b'x';
         input[pos..pos + 9].copy_from_slice(b"ABCDEFGHI");
 
-        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        let mut buckets = MatchIndex::<usize>::new(input.len(), 256);
+
+        let prices = LiteralPrices::new(&input, 0);
         for candidate in 0..pos {
             insert_match_position(&input, candidate, &mut buckets);
         }
@@ -7240,6 +12878,7 @@ mod tests {
             EncodeOptions::default(),
             &state,
             DISTANCE_TABLE_SIZE_50,
+            &prices,
         )
         .unwrap();
 
@@ -7252,6 +12891,7 @@ mod tests {
             &state,
             DISTANCE_TABLE_SIZE_50,
             current,
+            &prices,
         ));
     }
 
@@ -7261,11 +12901,16 @@ mod tests {
         let mut input: Vec<u8> = (0..240u16)
             .map(|value| value.wrapping_mul(91) as u8)
             .collect();
+        // Under the literal price model deferring two literals must buy a
+        // match that saves more than they cost: the ten-byte next match the
+        // fixture used to carry no longer does, a fourteen-byte one does.
         input[pos - 30..pos - 22].copy_from_slice(b"ABCDEFGH");
-        input[pos - 80..pos - 70].copy_from_slice(b"CDEFGHIJKL");
-        input[pos..pos + 12].copy_from_slice(b"ABCDEFGHIJKL");
+        input[pos - 80..pos - 66].copy_from_slice(b"CDEFGHIJKLMNOP");
+        input[pos..pos + 16].copy_from_slice(b"ABCDEFGHIJKLMNOP");
 
-        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        let mut buckets = MatchIndex::<usize>::new(input.len(), 256);
+
+        let prices = LiteralPrices::new(&input, 0);
         for candidate in 0..pos {
             insert_match_position(&input, candidate, &mut buckets);
         }
@@ -7278,6 +12923,7 @@ mod tests {
             EncodeOptions::default(),
             &state,
             DISTANCE_TABLE_SIZE_50,
+            &prices,
         )
         .unwrap();
 
@@ -7292,6 +12938,7 @@ mod tests {
             &state,
             DISTANCE_TABLE_SIZE_50,
             current,
+            &prices,
         ));
         assert!(should_lazy_emit_literal(
             &input,
@@ -7303,6 +12950,7 @@ mod tests {
             &state,
             DISTANCE_TABLE_SIZE_50,
             current,
+            &prices,
         ));
     }
 
@@ -7316,7 +12964,9 @@ mod tests {
         input[pos - 80..pos - 71].copy_from_slice(b"CDEFGHIJK");
         input[pos..pos + 12].copy_from_slice(b"ABCDEFGHIJKL");
 
-        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        let mut buckets = MatchIndex::<usize>::new(input.len(), 256);
+
+        let prices = LiteralPrices::new(&input, 0);
         for candidate in 0..pos {
             insert_match_position(&input, candidate, &mut buckets);
         }
@@ -7329,6 +12979,7 @@ mod tests {
             EncodeOptions::default(),
             &state,
             DISTANCE_TABLE_SIZE_50,
+            &prices,
         )
         .unwrap();
 
@@ -7340,6 +12991,7 @@ mod tests {
             EncodeOptions::default(),
             &state,
             DISTANCE_TABLE_SIZE_50,
+            &prices,
         )
         .unwrap();
 
@@ -7355,6 +13007,7 @@ mod tests {
             &state,
             DISTANCE_TABLE_SIZE_50,
             current,
+            &prices,
         ));
     }
 
@@ -7640,7 +13293,10 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            matches!(err, StreamDecodeError::Decode(Error::WindowLimitExceeded { .. })),
+            matches!(
+                err,
+                StreamDecodeError::Decode(Error::WindowLimitExceeded { .. })
+            ),
             "expected WindowLimitExceeded, got {err:?}"
         );
 
@@ -7694,8 +13350,8 @@ mod tests {
         // window now starts at the ceiling and must never grow.
         let dict = 2 * STREAM_INITIAL_WINDOW_CAP;
         let output = StreamingOutput::new(Vec::new(), 0, 4 * dict, dict, dict);
-        let ceiling = (dict + 2 * STREAM_FLUSH_THRESHOLD + STREAM_FILTER_HOLD_LIMIT)
-            .next_power_of_two();
+        let ceiling =
+            (dict + 2 * STREAM_FLUSH_THRESHOLD + STREAM_FILTER_HOLD_LIMIT).next_power_of_two();
         assert_eq!(output.ring.len(), ceiling);
 
         // A small member declaring the same dictionary keeps the lazy start.
@@ -7729,9 +13385,7 @@ mod tests {
         let mut sink = |chunk: DecodedChunk<'_>| {
             match chunk {
                 DecodedChunk::Bytes(bytes) => decoded.extend_from_slice(bytes),
-                DecodedChunk::Repeated { byte, len } => {
-                    decoded.resize(decoded.len() + len, byte)
-                }
+                DecodedChunk::Repeated { byte, len } => decoded.resize(decoded.len() + len, byte),
             }
             Ok::<_, std::convert::Infallible>(())
         };
@@ -7826,9 +13480,7 @@ mod tests {
         let mut sink = |chunk: DecodedChunk<'_>| {
             match chunk {
                 DecodedChunk::Bytes(bytes) => decoded.extend_from_slice(bytes),
-                DecodedChunk::Repeated { byte, len } => {
-                    decoded.resize(decoded.len() + len, byte)
-                }
+                DecodedChunk::Repeated { byte, len } => decoded.resize(decoded.len() + len, byte),
             }
             Ok::<_, std::convert::Infallible>(())
         };
@@ -8191,19 +13843,31 @@ mod tests {
             )
             .unwrap();
         let block = parse_compressed_block(&input).unwrap();
-        let (lengths, table_bits) = read_table_lengths(&input[block.payload.clone()], 0).unwrap();
-        let tables = DecodeTables::from_lengths(&lengths).unwrap();
-        let mut bits = BitReader::new_at(&input[block.payload], table_bits);
-        assert_eq!(tables.main.decode(&mut bits).unwrap(), 256);
-        let first = read_filter(&mut bits, 0).unwrap();
-        assert_eq!(tables.main.decode(&mut bits).unwrap(), 256);
-        let second = read_filter(&mut bits, 0).unwrap();
+        let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
+        assert_ne!(lengths.main[256], 0, "the filter symbol is in the table");
+
+        // Each record is written just before the token that reaches it
+        // (they used to lead the block), so the proof of their starts and
+        // lengths is the stream with the filters left unapplied: it is the
+        // transformed input exactly, and the transform is address-keyed.
+        let (transformed, records) = filtered_lz_member(
+            &data,
+            &[
+                Rar50FilterSpec::range(Rar50FilterKind::E8, first_start..first_end),
+                Rar50FilterSpec::range(Rar50FilterKind::E8, second_start..second_end),
+            ],
+        )
+        .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_ne!(transformed, data);
+        let unapplied = Unpack50Decoder::new()
+            .decode_member(&input, 0, data.len(), false, DecodeMode::LzNoFilters)
+            .unwrap();
+        assert_eq!(unapplied, transformed);
 
         let output = decode_lz(&input, 0, data.len()).unwrap();
 
         assert_eq!(output, data);
-        assert_eq!(first.start, first_start);
-        assert_eq!(second.start, second_start);
     }
 
     #[test]
@@ -8260,18 +13924,577 @@ mod tests {
         assert!(solid.len() < standalone.len());
     }
 
+    /// The uniform member the windowed-walk cells below encode: two whole
+    /// blocks and a short third, repetitive enough for a parse to have
+    /// matches to find and noisy enough that it is not one long run.
+    fn member_window_material() -> Vec<u8> {
+        let block = MAX_COMPRESSED_BLOCK_OUTPUT;
+        (0..2 * block + 12_345)
+            .map(|i| {
+                let word = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 59;
+                if i % 97 < 90 {
+                    b'a' + (i % 7) as u8 + word as u8 / 8
+                } else {
+                    word as u8
+                }
+            })
+            .collect()
+    }
+
+    /// `data` encoded a block at a time, each window carrying the blocks
+    /// the dictionary reaches back over plus the block to encode.
+    fn member_windowed_walk(data: &[u8], dictionary: usize, options: EncodeOptions) -> Vec<u8> {
+        let block = MAX_COMPRESSED_BLOCK_OUTPUT;
+        let history_blocks = dictionary.div_ceil(block);
+        let pool = EncoderScratchPool::new();
+        let mut windowed = Vec::new();
+        let mut start = 0usize;
+        while start < data.len() {
+            let end = (start + block).min(data.len());
+            let history_start = start.saturating_sub(history_blocks * block);
+            windowed.extend(
+                encode_lz_member_window(
+                    &data[history_start..end],
+                    (start - history_start) / block,
+                    0,
+                    options,
+                    end == data.len(),
+                    &pool,
+                )
+                .unwrap(),
+            );
+            start = end;
+        }
+        windowed
+    }
+
+    /// One cell of the windowed-walk table: a member encoded from windows -
+    /// each window the blocks before it (at least the dictionary) and the
+    /// blocks to encode - is the member encoded whole, block for block,
+    /// which is what the streamed compressed writer relies on.
+    ///
+    /// Every cell runs under BOTH parsers. The cost-based one asks the tree
+    /// for a per-position CANDIDATE LIST rather than one distance, so a
+    /// window's slice of the hint buffer is `stride` slots per position and
+    /// an index that forgot the stride would show up here and nowhere else.
+    /// (nzbfast-local change, 7 Sep 2026.)
+    ///
+    /// ONE TEST PER CELL rather than a loop over the table, and that is a
+    /// wall-clock decision with no coverage in it: nightly's `armv7-cross`
+    /// kills a test at 900 s under qemu and the loop was 605.6 s of that
+    /// budget in ONE test (run 34583096699), a margin of 1.5x with nothing
+    /// watching it. nextest gives each cell its own process and runs them
+    /// concurrently, so the split moves work sideways: the worst cell is an
+    /// estimated 149 s and the seven together cost what the one did, to
+    /// within the measurement. Measured per cell on the emulated target,
+    /// because the cost is NOT spread evenly over the table - the cells
+    /// span 23x, from 1.27 s (sub-block dictionary, lazy) to 29.70 s
+    /// (sub-block dictionary, cost-based), so neither end is anywhere near
+    /// the 1/6 an even table would suggest. The cost-based parse is also
+    /// CHEAPER at a one-block dictionary than at a sub-block one, because
+    /// `TREE_MIN_DICTIONARY` arms the tree finder at 4 MiB and the tree is
+    /// the cheaper finder for a parse that wants a candidate list. Numbers,
+    /// rig and what is scaled rather than measured: the host repo's
+    /// `research/ARMV7-CROSS-TEST-CEILING-2026-09-11.md`.
+    /// (nzbfast-local change, 11 Sep 2026.)
+    fn member_windows_match_the_whole_walk(dictionary: usize, optimal_parse: bool) {
+        let uniform = member_window_material();
+        let options = EncodeOptions::new(16)
+            .with_max_match_distance(dictionary)
+            .with_optimal_parse(optimal_parse);
+        let whole = encode_lz_member_with_options(&uniform, 0, options).unwrap();
+        assert_eq!(
+            member_windowed_walk(&uniform, dictionary, options),
+            whole,
+            "dictionary {dictionary}, optimal {optimal_parse}"
+        );
+    }
+
+    #[test]
+    fn member_windows_match_the_whole_walk_at_a_sub_block_dictionary_lazily() {
+        member_windows_match_the_whole_walk(128 << 10, false);
+    }
+
+    #[test]
+    fn member_windows_match_the_whole_walk_at_a_sub_block_dictionary_optimally() {
+        member_windows_match_the_whole_walk(128 << 10, true);
+    }
+
+    #[test]
+    fn member_windows_match_the_whole_walk_at_a_one_block_dictionary_lazily() {
+        member_windows_match_the_whole_walk(MAX_COMPRESSED_BLOCK_OUTPUT, false);
+    }
+
+    #[test]
+    fn member_windows_match_the_whole_walk_at_a_one_block_dictionary_optimally() {
+        member_windows_match_the_whole_walk(MAX_COMPRESSED_BLOCK_OUTPUT, true);
+    }
+
+    #[test]
+    fn member_windows_match_the_whole_walk_at_a_two_block_dictionary_lazily() {
+        member_windows_match_the_whole_walk(2 * MAX_COMPRESSED_BLOCK_OUTPUT, false);
+    }
+
+    #[test]
+    fn member_windows_match_the_whole_walk_at_a_two_block_dictionary_optimally() {
+        member_windows_match_the_whole_walk(2 * MAX_COMPRESSED_BLOCK_OUTPUT, true);
+    }
+
+    /// The windowed walk also makes the same per-region horizon CHOICES as
+    /// the whole-member walk, over material whose regions do not all want
+    /// the same horizon. The choice is made per region from that region's
+    /// own bytes and the raw member history before them, both of which a
+    /// window holds exactly, so the windowed walk makes the same choices -
+    /// but a selector that read anything else (an output length carried
+    /// across regions, a rep model, the block index within the encode)
+    /// would diverge here and nowhere else. The size assertion holds the
+    /// switch-on arm to being a REAL arm: on material where the wide
+    /// horizon always won, the two arms would agree however broken the
+    /// plumbing was, and it is why THIS pair stays one test while the
+    /// parser table above became one test per cell - the assertion is
+    /// across the two arms, not inside either.
+    #[test]
+    fn member_windows_make_the_same_horizon_choices_as_the_whole_walk() {
+        let block = MAX_COMPRESSED_BLOCK_OUTPUT;
+        let mixed = horizon_material(block + 500_000);
+        let mut sizes = Vec::new();
+        for horizon in [false, true] {
+            let options = EncodeOptions::new(16)
+                .with_max_match_distance(block)
+                .with_tokenizer_horizon_choice(horizon);
+            let whole = encode_lz_member_with_options(&mixed, 0, options).unwrap();
+            assert_eq!(
+                member_windowed_walk(&mixed, block, options),
+                whole,
+                "horizon choice {horizon}"
+            );
+            sizes.push(whole.len());
+        }
+        assert!(
+            sizes[1] < sizes[0],
+            "the horizon arm of this test has to be an arm: {} bytes with the \
+             choice on against {} with it off",
+            sizes[1],
+            sizes[0],
+        );
+    }
+
+    /// [`encode_member_region`] returns whichever of its two arms encoded
+    /// smaller, and with the switch off it is the wide arm byte for byte.
+    ///
+    /// The `assert_ne!` is the positive control: "the choice returned the
+    /// wide arm" is also what a dead short arm looks like, so the test
+    /// first proves the two arms differ on this region.
+    #[test]
+    fn the_region_horizon_choice_keeps_the_smaller_of_its_two_arms() {
+        let region = 2 * TOKENIZER_SHORT_HORIZON + 300_000;
+        let data = horizon_material(region);
+        let options = EncodeOptions::new(16).with_max_match_distance(128 << 10);
+        let mut scratch = EncoderScratch::default();
+        let arm = |scratch: &mut EncoderScratch, range: Range<usize>, last: bool| {
+            encode_member_block(
+                &data,
+                &[],
+                range,
+                &[],
+                0,
+                options,
+                last,
+                None,
+                scratch,
+                None,
+                &[],
+            )
+            .unwrap()
+        };
+        let wide = arm(&mut scratch, 0..region, true);
+        let mut short = Vec::new();
+        let mut start = 0usize;
+        while start < region {
+            let end = (start + TOKENIZER_SHORT_HORIZON).min(region);
+            short.extend(arm(&mut scratch, start..end, end == region));
+            start = end;
+        }
+        assert_ne!(
+            wide, short,
+            "the two horizons encode this region the same way, so nothing below is a test"
+        );
+
+        let off = encode_member_region(
+            &data,
+            &[],
+            0..region,
+            &[],
+            0,
+            options,
+            true,
+            None,
+            &mut scratch,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(off, wide, "with the switch off the region is the wide arm");
+
+        let on = encode_member_region(
+            &data,
+            &[],
+            0..region,
+            &[],
+            0,
+            options.with_tokenizer_horizon_choice(true),
+            true,
+            None,
+            &mut scratch,
+            None,
+            &[],
+        )
+        .unwrap();
+        let smaller = if short.len() < wide.len() { &short } else { &wide };
+        assert_eq!(on, *smaller, "the choice kept the larger arm");
+    }
+
+    /// The switch never grows a member on any shape, and every member it
+    /// writes still decodes to its input. The arm it is measured against
+    /// is always one of its own candidates, so this is a property of the
+    /// selector rather than of the corpus - which is why the shapes here
+    /// include the ones a shorter horizon is known to LOSE on (one buffer
+    /// replayed, and a member below the short horizon, where the choice
+    /// is inert by construction).
+    #[test]
+    fn the_region_horizon_choice_never_grows_a_member() {
+        let block = MAX_COMPRESSED_BLOCK_OUTPUT;
+        let shapes: [(&str, Vec<u8>); 4] = [
+            ("mixed phases, two regions", horizon_material(block + 500_000)),
+            ("mixed phases, under a region", horizon_material(1_500_000)),
+            ("under the short horizon", horizon_material(400_000)),
+            (
+                "one buffer replayed",
+                b"the same paragraph, over and over, with nothing new in it at all.\n"
+                    .repeat(40_000),
+            ),
+        ];
+        for (name, data) in shapes {
+            for dictionary in [128usize << 10, block] {
+                let options = EncodeOptions::new(16).with_max_match_distance(dictionary);
+                let off = encode_lz_member_with_options(&data, 0, options).unwrap();
+                let on = encode_lz_member_with_options(
+                    &data,
+                    0,
+                    options.with_tokenizer_horizon_choice(true),
+                )
+                .unwrap();
+                assert!(
+                    on.len() <= off.len(),
+                    "{name} at dictionary {dictionary}: {} bytes with the choice on \
+                     against {} with it off",
+                    on.len(),
+                    off.len(),
+                );
+                assert_eq!(
+                    Unpack50Decoder::new()
+                        .decode_member(&on, 0, data.len(), false, DecodeMode::Lz)
+                        .unwrap(),
+                    data,
+                    "{name} at dictionary {dictionary}"
+                );
+            }
+        }
+    }
+
+    /// DIAGNOSTIC, not a test of anything: `RARS_STATS_ARCHIVE=<archive>`
+    /// prints where the bits of every compressed member went - blocks,
+    /// tables, literals, matches by length and distance, repeats - so two
+    /// writers' archives over the same input can be compared class by
+    /// class (used 6 Sep 2026 to find the 1.7% against rar at 32 MiB).
+    #[test]
+    #[ignore = "diagnostic: set RARS_STATS_ARCHIVE to a RAR 5 archive and run with --nocapture"]
+    fn token_statistics_of_an_archive() {
+        let Ok(path) = std::env::var("RARS_STATS_ARCHIVE") else {
+            return;
+        };
+        let data = std::fs::read(&path).unwrap();
+        let archive = crate::rar50::Archive::parse(&data).unwrap();
+        let member_count = archive.files().filter(|f| !f.is_stored()).count();
+        let mut totals = std::collections::BTreeMap::<&'static str, f64>::new();
+        let mut packed_total = 0usize;
+        let mut unpacked_total = 0u64;
+        // Tables and repeat state carry across the members of a solid
+        // stream, as the decoder carries them.
+        let mut tables: Option<DecodeTables> = None;
+        let mut reps = [0usize; 4];
+        let mut last_length = 0usize;
+        for file in archive.files() {
+            if file.is_stored() {
+                continue;
+            }
+            let packed = file.packed_data(&archive).unwrap();
+            let info = file.decoded_compression_info().unwrap();
+            let version = info.algorithm_version;
+            if !info.solid {
+                tables = None;
+                reps = [0; 4];
+                last_length = 0;
+            }
+            let mut input = std::io::Cursor::new(packed.as_slice());
+            let mut payload_buf = Vec::new();
+            // Counters: [count, bits, bytes-produced]
+            let mut blocks = 0u64;
+            let mut table_sets = 0u64;
+            let mut repeated_table_sets = 0u64;
+            let mut previous_lengths: Option<TableLengths> = None;
+            let mut header_bits = 0u64;
+            let mut table_bits = 0u64;
+            let mut payload_bits_total = 0u64;
+            let mut lit = [0u64; 3];
+            let mut filt = [0u64; 3];
+            let mut rep_last = [0u64; 3];
+            let mut rep = [[0u64; 3]; 4];
+            let mut mat = [0u64; 3];
+            let mut len_hist = [0u64; 8]; // 4-7,8-15,16-31,32-63,64-127,128-255,256-1023,1024+
+            let mut len_bits = [0u64; 8];
+            let mut dist_hist = [0u64; 26]; // log2 distance
+            let mut dist_bits = [0u64; 26];
+            // Far matches (8 MiB and beyond) by length bucket: count, bytes.
+            let mut far_len = [[0u64; 2]; 8];
+            let mut near_len = [[0u64; 2]; 8];
+            let len_bucket = |length: usize| -> usize {
+                match length {
+                    0..=7 => 0,
+                    8..=15 => 1,
+                    16..=31 => 2,
+                    32..=63 => 3,
+                    64..=127 => 4,
+                    128..=255 => 5,
+                    256..=1023 => 6,
+                    _ => 7,
+                }
+            };
+            loop {
+                let header = match read_compressed_block_into(&mut input, &mut payload_buf) {
+                    Ok(header) => header,
+                    Err(_) => break,
+                };
+                blocks += 1;
+                header_bits += 8 * (2 + 1 + header.payload_size.div_ceil(256).min(3)) as u64;
+                let payload = payload_buf.as_slice();
+                let mut bit_pos = 0usize;
+                if header.has_tables {
+                    let (lengths, bits_used) = read_table_lengths(payload, version).unwrap();
+                    if previous_lengths.as_ref() == Some(&lengths) {
+                        repeated_table_sets += 1;
+                    }
+                    previous_lengths = Some(lengths.clone());
+                    tables = Some(DecodeTables::from_lengths(&lengths).unwrap());
+                    table_sets += 1;
+                    table_bits += bits_used as u64;
+                    bit_pos = bits_used;
+                }
+                let tables = tables.as_ref().expect("tables");
+                let mut bits = BitReader::new_at(payload, bit_pos);
+                payload_bits_total += header.payload_bits as u64;
+                while bits.position() < header.payload_bits {
+                    let start = bits.position();
+                    let symbol = match tables.main.decode(&mut bits) {
+                        Ok(symbol) => symbol,
+                        Err(_) => break,
+                    };
+                    match symbol {
+                        0..=255 => {
+                            lit[0] += 1;
+                            lit[1] += (bits.position() - start) as u64;
+                            lit[2] += 1;
+                        }
+                        256 => {
+                            let _ = read_filter(&mut bits, 0);
+                            filt[0] += 1;
+                            filt[1] += (bits.position() - start) as u64;
+                        }
+                        257 => {
+                            rep_last[0] += 1;
+                            rep_last[1] += (bits.position() - start) as u64;
+                            rep_last[2] += last_length as u64;
+                        }
+                        258..=261 => {
+                            let index = symbol - 258;
+                            let slot = tables.length.decode(&mut bits).unwrap();
+                            let extra = bits
+                                .read_bits(length_slot_extra_bits(slot).unwrap())
+                                .unwrap();
+                            let length = slot_to_length(slot, extra).unwrap();
+                            let distance = reps[index];
+                            reps[..=index].rotate_right(1);
+                            reps[0] = distance;
+                            last_length = length;
+                            rep[index][0] += 1;
+                            rep[index][1] += (bits.position() - start) as u64;
+                            rep[index][2] += length as u64;
+                        }
+                        _ => {
+                            let slot = symbol - 262;
+                            let extra = bits
+                                .read_bits(length_slot_extra_bits(slot).unwrap())
+                                .unwrap();
+                            let mut length = slot_to_length(slot, extra).unwrap();
+                            let after_length = bits.position();
+                            let distance_slot = tables.distance.decode(&mut bits).unwrap();
+                            let count = distance_slot_bit_count(distance_slot).unwrap();
+                            let distance_extra = if count >= 4 && tables.align_mode {
+                                let high = bits.read_bits((count - 4) as u8).unwrap();
+                                let low = tables.align.decode(&mut bits).unwrap() as u32;
+                                (high << 4) | low
+                            } else {
+                                bits.read_bits(count as u8).unwrap()
+                            };
+                            let distance = slot_to_distance(distance_slot, distance_extra).unwrap();
+                            length += length_bonus(distance);
+                            reps.rotate_right(1);
+                            reps[0] = distance;
+                            last_length = length;
+                            let total = (bits.position() - start) as u64;
+                            mat[0] += 1;
+                            mat[1] += total;
+                            mat[2] += length as u64;
+                            let lb = len_bucket(length);
+                            len_hist[lb] += 1;
+                            len_bits[lb] += (after_length - start) as u64;
+                            let db = (usize::BITS - distance.max(1).leading_zeros()) as usize;
+                            let db = db.min(25);
+                            dist_hist[db] += 1;
+                            dist_bits[db] += (bits.position() - after_length) as u64;
+                            let bucket = if distance >= 8 << 20 {
+                                &mut far_len[lb]
+                            } else {
+                                &mut near_len[lb]
+                            };
+                            bucket[0] += 1;
+                            bucket[1] += length as u64;
+                        }
+                    }
+                }
+                if header.is_last {
+                    break;
+                }
+            }
+            let mb = |bits: u64| bits as f64 / 8.0 / 1e6;
+            if member_count > 1 {
+                packed_total += packed.len();
+                unpacked_total += file.unpacked_size;
+                for (key, value) in [
+                    ("blocks", blocks as f64),
+                    ("table sets", table_sets as f64),
+                    ("table MB", mb(table_bits)),
+                    ("header MB", mb(header_bits)),
+                    ("literal tokens", lit[0] as f64),
+                    ("literal MB", mb(lit[1])),
+                    ("match tokens", mat[0] as f64),
+                    ("match MB", mb(mat[1])),
+                    ("match copied MB", mat[2] as f64 / 1e6),
+                    ("rep0 tokens", rep[0][0] as f64),
+                    ("rep0 copied MB", rep[0][2] as f64 / 1e6),
+                    ("rep-last copied MB", rep_last[2] as f64 / 1e6),
+                    (
+                        "far matches",
+                        far_len.iter().map(|b| b[0]).sum::<u64>() as f64,
+                    ),
+                    (
+                        "far copied MB",
+                        far_len.iter().map(|b| b[1]).sum::<u64>() as f64 / 1e6,
+                    ),
+                ] {
+                    *totals.entry(key).or_insert(0.0) += value;
+                }
+                continue;
+            }
+            println!(
+                "== {} packed {} MB, unpacked {} MB",
+                String::from_utf8_lossy(&file.name),
+                packed.len() as f64 / 1e6,
+                file.unpacked_size as f64 / 1e6
+            );
+            println!("blocks {blocks}, table sets {table_sets} ({repeated_table_sets} identical to the previous), block headers {:.2} MB, tables {:.2} MB, payload {:.2} MB",
+                mb(header_bits), mb(table_bits), mb(payload_bits_total));
+            println!(
+                "literals   {:>12} tokens {:>8.2} MB {:>6.3} bits/lit",
+                lit[0],
+                mb(lit[1]),
+                lit[1] as f64 / lit[0].max(1) as f64
+            );
+            println!("filters    {:>12} tokens {:>8.2} MB", filt[0], mb(filt[1]));
+            println!(
+                "rep-last   {:>12} tokens {:>8.2} MB {:>10.1} MB copied",
+                rep_last[0],
+                mb(rep_last[1]),
+                rep_last[2] as f64 / 1e6
+            );
+            for (index, r) in rep.iter().enumerate() {
+                println!(
+                    "rep{index}       {:>12} tokens {:>8.2} MB {:>10.1} MB copied, avg len {:.1}",
+                    r[0],
+                    mb(r[1]),
+                    r[2] as f64 / 1e6,
+                    r[2] as f64 / r[0].max(1) as f64
+                );
+            }
+            println!("matches    {:>12} tokens {:>8.2} MB {:>10.1} MB copied, avg len {:.1}, {:.2} bits/match", mat[0], mb(mat[1]), mat[2] as f64 / 1e6, mat[2] as f64 / mat[0].max(1) as f64, mat[1] as f64 / mat[0].max(1) as f64);
+            let names = [
+                "4-7", "8-15", "16-31", "32-63", "64-127", "128-255", "256-1023", "1024+",
+            ];
+            for (i, name) in names.iter().enumerate() {
+                println!(
+                    "  len {:>9}: {:>10} matches, {:>6.2} MB of length+symbol bits",
+                    name,
+                    len_hist[i],
+                    mb(len_bits[i])
+                );
+            }
+            for (i, name) in names.iter().enumerate() {
+                println!("  far>=8MiB len {:>9}: {:>10} matches {:>7.1} MB copied | nearer: {:>10} matches {:>7.1} MB", name, far_len[i][0], far_len[i][1] as f64 / 1e6, near_len[i][0], near_len[i][1] as f64 / 1e6);
+            }
+            for (i, count) in dist_hist.iter().enumerate() {
+                if *count > 0 {
+                    println!(
+                        "  dist 2^{:>2}: {:>10} matches, {:>6.2} MB of distance bits",
+                        i.saturating_sub(1),
+                        count,
+                        mb(dist_bits[i])
+                    );
+                }
+            }
+        }
+        if member_count > 1 {
+            println!(
+                "== {member_count} compressed members, packed {:.2} MB, unpacked {:.2} MB",
+                packed_total as f64 / 1e6,
+                unpacked_total as f64 / 1e6
+            );
+            for (key, value) in &totals {
+                println!("  {key:>20}: {value:.2}");
+            }
+        }
+    }
+
     #[test]
     fn large_lz_members_are_split_into_multiple_compressed_blocks() {
         let data = vec![0u8; MAX_COMPRESSED_BLOCK_OUTPUT + 1];
         let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(16)).unwrap();
         let mut cursor = std::io::Cursor::new(encoded.as_slice());
         let mut payload = Vec::new();
-        let first = read_compressed_block_into(&mut cursor, &mut payload).unwrap();
-        let second = read_compressed_block_into(&mut cursor, &mut payload).unwrap();
+        // Two tokenizer blocks, each cut into entropy blocks with their own
+        // tables: every block but the last says it is not the last.
+        let mut blocks = 0usize;
+        loop {
+            let block = read_compressed_block_into(&mut cursor, &mut payload).unwrap();
+            blocks += 1;
+            assert!(block.has_tables, "block {blocks} carries its own tables");
+            if block.is_last {
+                break;
+            }
+        }
+        assert!(blocks >= 2, "{blocks} blocks");
+        assert_eq!(cursor.position() as usize, encoded.len());
         let mut decoder = Unpack50Decoder::new();
 
-        assert!(!first.is_last);
-        assert!(second.is_last);
         assert_eq!(
             decoder
                 .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
@@ -8313,7 +14536,10 @@ mod tests {
 
         assert!(!first.is_last);
         assert!(last_is_last);
-        assert!(blocks > 2);
+        // One 4 MiB tokenizer block and the tail: the records are split per
+        // 262,143-byte chunk inside them, and the entropy cut is the
+        // boundary search's (it used to be one compressed block per chunk).
+        assert!(blocks >= 2);
         assert_eq!(
             decoder
                 .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
@@ -8386,12 +14612,15 @@ mod tests {
         .unwrap();
         let mut cursor = std::io::Cursor::new(encoded.as_slice());
         let mut payload = Vec::new();
-        let first = read_compressed_block_into(&mut cursor, &mut payload).unwrap();
-        let second = read_compressed_block_into(&mut cursor, &mut payload).unwrap();
+        let mut last = read_compressed_block_into(&mut cursor, &mut payload).unwrap();
+        while cursor.position() < encoded.len() as u64 {
+            last = read_compressed_block_into(&mut cursor, &mut payload).unwrap();
+        }
         let mut decoder = Unpack50Decoder::new();
 
-        assert!(!first.is_last);
-        assert!(second.is_last);
+        // Two records of 262,143 and 1 byte, whatever the compressed-block
+        // layout (one block since the pooled path took filtered members).
+        assert!(last.is_last);
         assert_eq!(
             decoder
                 .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
@@ -8418,7 +14647,19 @@ mod tests {
 
     #[test]
     fn encodes_lz_member_with_last_length_repeat_symbols() {
-        let data = b"abcdXabcdYabcdZabcd";
+        // Eight distinct filler bytes between the repeats price the literals
+        // like real data (a four-byte match must save bits against them -
+        // see `LiteralPrices`) without a literal run long enough to start
+        // the probe acceleration, which the old one-byte fillers with a
+        // 200-byte diverse prefix did, skipping two of the repeats.
+        let mut data = Vec::new();
+        for (index, filler) in (0u8..3).zip([200u8, 208, 216]) {
+            let _ = index;
+            data.extend_from_slice(b"abcd");
+            data.extend(filler..filler + 8);
+        }
+        data.extend_from_slice(b"abcd");
+        let data = &data[..];
         let input = encode_lz_member(data, 0).unwrap();
         let block = parse_compressed_block(&input).unwrap();
         let (lengths, _) = read_table_lengths(&input[block.payload], 0).unwrap();
@@ -8810,7 +15051,7 @@ mod tests {
         lengths.main[b'A' as usize] = 1;
         lengths.main[b'B' as usize] = 1;
         let (bytes, bit_pos) = encode_table_lengths_with_bit_count(&lengths, 0).unwrap();
-        let mut writer = BitWriter { bytes, bit_pos };
+        let mut writer = BitWriter::continuing(bytes, bit_pos);
         for &byte in data {
             match byte {
                 b'A' => writer.write_bits(0, 1),
@@ -8833,7 +15074,7 @@ mod tests {
         lengths.main[262] = 2;
         lengths.distance[1] = 1;
         let (bytes, bit_pos) = encode_table_lengths_with_bit_count(&lengths, 0).unwrap();
-        let mut writer = BitWriter { bytes, bit_pos };
+        let mut writer = BitWriter::continuing(bytes, bit_pos);
 
         writer.write_bits(0b00, 2); // 'A'
         writer.write_bits(0b01, 2); // 'B'
@@ -8883,7 +15124,9 @@ mod tests {
         let mut lcg = 0x2545F491_4F6CDD1Du64;
         let mut random = Vec::with_capacity(big);
         while random.len() < big {
-            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lcg = lcg
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             random.extend_from_slice(&lcg.to_le_bytes());
         }
         random.truncate(big);
@@ -8940,7 +15183,10 @@ mod tests {
                 .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
                 .unwrap();
             assert_eq!(ref_out, data, "{name}: reference output mismatch");
-            assert_eq!(mt_decoder.reps, reference.reps, "{name}: rep state diverged");
+            assert_eq!(
+                mt_decoder.reps, reference.reps,
+                "{name}: rep state diverged"
+            );
             assert_eq!(
                 mt_decoder.last_length, reference.last_length,
                 "{name}: last_length diverged"
@@ -9055,10 +15301,9 @@ mod tests {
                         assert_eq!(mt_out, ref_out, "{name}/{prefix}: prefix output mismatch");
                     }
                     Err(ref_error) => match mt_result {
-                        Err(StreamDecodeError::Decode(mt_error)) => assert_eq!(
-                            mt_error, ref_error,
-                            "{name}/{prefix}: error mismatch"
-                        ),
+                        Err(StreamDecodeError::Decode(mt_error)) => {
+                            assert_eq!(mt_error, ref_error, "{name}/{prefix}: error mismatch")
+                        }
                         Ok(_) => {
                             panic!("{name}/{prefix}: parallel succeeded where reference errored")
                         }
@@ -9133,7 +15378,11 @@ mod tests {
                     .unwrap(),
             );
         }
-        assert_eq!(serial_out, members.concat(), "oracle disagrees with encoder");
+        assert_eq!(
+            serial_out,
+            members.concat(),
+            "oracle disagrees with encoder"
+        );
 
         // Chain in two groups of two; the second call sees a carried window.
         for flat_limit in [u64::MAX, 0] {
@@ -9142,8 +15391,7 @@ mod tests {
             for group in [[0usize, 1], [2, 3]] {
                 let sizes: Vec<usize> = group.iter().map(|&i| members[i].len()).collect();
                 let mut next = 0usize;
-                let readers: Vec<&[u8]> =
-                    group.iter().map(|&i| encoded[i].as_slice()).collect();
+                let readers: Vec<&[u8]> = group.iter().map(|&i| encoded[i].as_slice()).collect();
                 let mut next_input = || -> Option<Box<dyn std::io::Read + Send>> {
                     let reader = readers.get(next)?;
                     next += 1;
@@ -9320,7 +15568,7 @@ mod tests {
         lengths.distance[1] = 1;
         lengths.length[0] = 1;
         let (bytes, bit_pos) = encode_table_lengths_with_bit_count(&lengths, 0).unwrap();
-        let mut writer = BitWriter { bytes, bit_pos };
+        let mut writer = BitWriter::continuing(bytes, bit_pos);
         writer.write_bits(0b00, 2); // 'A'
         writer.write_bits(0b01, 2); // 'B'
         writer.write_bits(0b11, 2); // symbol 262: new match, length 2
@@ -9344,8 +15592,7 @@ mod tests {
             DecodeTables::from_lengths(&bad_lengths).is_err(),
             "fixture tables must fail to build"
         );
-        let (bad_bytes, bad_bits) =
-            encode_table_lengths_with_bit_count(&bad_lengths, 0).unwrap();
+        let (bad_bytes, bad_bits) = encode_table_lengths_with_bit_count(&bad_lengths, 0).unwrap();
         let block2 = encode_compressed_block(&bad_bytes, bad_bits, true, true).unwrap();
 
         let mut stream = block1;
@@ -9431,7 +15678,7 @@ mod tests {
         lengths.distance[1] = 1;
         lengths.length[0] = 1;
         let (bytes, bit_pos) = encode_table_lengths_with_bit_count(&lengths, 0).unwrap();
-        let mut writer = BitWriter { bytes, bit_pos };
+        let mut writer = BitWriter::continuing(bytes, bit_pos);
         writer.write_bits(0b00, 2); // 'A'
         writer.write_bits(0b01, 2); // 'B'
         writer.write_bits(0b11, 2); // symbol 262: new match, length 2
@@ -9499,9 +15746,7 @@ mod tests {
         for distance in [16, 17, 31, 64, 127] {
             for length in 0..=64 {
                 let mut output = FlatOutput::new(prefix.len() + 80, 256, 256);
-                let mut sink = |_chunk: DecodedChunk<'_>| {
-                    Ok::<_, std::convert::Infallible>(())
-                };
+                let mut sink = |_chunk: DecodedChunk<'_>| Ok::<_, std::convert::Infallible>(());
                 output.push_bytes(&prefix, &mut sink).unwrap();
                 output.copy_match(distance, length, &mut sink).unwrap();
 
@@ -9525,8 +15770,7 @@ mod tests {
         for prefix in [0usize, 1, 7] {
             for count in 0..=20usize {
                 let mut output = FlatOutput::new(prefix + count + 80, 256, 256);
-                let mut sink =
-                    |_chunk: DecodedChunk<'_>| Ok::<_, std::convert::Infallible>(());
+                let mut sink = |_chunk: DecodedChunk<'_>| Ok::<_, std::convert::Infallible>(());
                 let head: Vec<u8> = (0..prefix as u8).map(|b| b.wrapping_add(200)).collect();
                 let bytes: Vec<u8> = (0..count as u8)
                     .map(|b| b.wrapping_mul(31).wrapping_add(7))
@@ -9567,7 +15811,10 @@ mod tests {
                 .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
                 .unwrap();
             assert_eq!(ref_out, data, "{name}: reference output mismatch");
-            assert_eq!(flat_decoder.reps, reference.reps, "{name}: rep state diverged");
+            assert_eq!(
+                flat_decoder.reps, reference.reps,
+                "{name}: rep state diverged"
+            );
             assert_eq!(
                 flat_decoder.last_length, reference.last_length,
                 "{name}: last_length diverged"
@@ -9642,7 +15889,7 @@ mod tests {
         lengths.distance[1] = 1;
         lengths.length[0] = 1;
         let (bytes, bit_pos) = encode_table_lengths_with_bit_count(&lengths, 0).unwrap();
-        let mut writer = BitWriter { bytes, bit_pos };
+        let mut writer = BitWriter::continuing(bytes, bit_pos);
         writer.write_bits(0b00, 2); // 'A'
         writer.write_bits(0b01, 2); // 'B'
         writer.write_bits(0b11, 2); // symbol 262: new match, length 2
@@ -9714,7 +15961,9 @@ mod tests {
         let mut lcg = 0x9E3779B97F4A7C15u64;
         let mut block = Vec::with_capacity(32 << 10);
         while block.len() < 32 << 10 {
-            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lcg = lcg
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             block.extend_from_slice(&lcg.to_le_bytes());
         }
         let mut data = Vec::with_capacity(3 << 20);
@@ -9733,12 +15982,20 @@ mod tests {
         let mut reference = Unpack50Decoder::new();
         reference.set_window_limit(dictionary);
         let expected = reference
-            .decode_member_with_dictionary(&encoded, 0, data.len(), dictionary, false, DecodeMode::Lz)
+            .decode_member_with_dictionary(
+                &encoded,
+                0,
+                data.len(),
+                dictionary,
+                false,
+                DecodeMode::Lz,
+            )
             .unwrap();
         assert_eq!(expected, data, "reference disagrees with the encoder");
         let mut flat_decoder = Unpack50Decoder::new();
-        let flat_out = flat_sink_decode_with_dictionary(&encoded, data.len(), dictionary, &mut flat_decoder)
-            .expect("sliding flat decode");
+        let flat_out =
+            flat_sink_decode_with_dictionary(&encoded, data.len(), dictionary, &mut flat_decoder)
+                .expect("sliding flat decode");
         assert_eq!(flat_out, expected);
         assert_eq!(flat_decoder.reps, reference.reps);
     }
@@ -9762,9 +16019,17 @@ mod tests {
         let mut flat_decoder = Unpack50Decoder::new();
         let mut reference = Unpack50Decoder::new();
         let expected = reference
-            .decode_member_with_dictionary(&encoded, 0, data.len(), dictionary, false, DecodeMode::Lz)
+            .decode_member_with_dictionary(
+                &encoded,
+                0,
+                data.len(),
+                dictionary,
+                false,
+                DecodeMode::Lz,
+            )
             .unwrap();
-        match flat_sink_decode_with_dictionary(&encoded, data.len(), dictionary, &mut flat_decoder) {
+        match flat_sink_decode_with_dictionary(&encoded, data.len(), dictionary, &mut flat_decoder)
+        {
             Err(StreamDecodeError::FilteredMember) => {}
             Ok(out) => assert_eq!(out, expected, "filtered output diverged across slides"),
             Err(other) => panic!("unexpected error: {other:?}"),
@@ -9802,7 +16067,9 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(b"PLAIN-PREFIX-not-filtered-0000000000");
         let start = data.len();
-        let region: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(3).wrapping_add(7)).collect();
+        let region: Vec<u8> = (0..64u8)
+            .map(|i| i.wrapping_mul(3).wrapping_add(7))
+            .collect();
         data.extend_from_slice(&region);
         let end = data.len();
         data.extend_from_slice(b"SUFFIX-not-filtered-111111111111111");
@@ -9894,7 +16161,7 @@ mod tests {
         lengths.distance[1] = 1;
         lengths.length[0] = 1;
         let (bytes, bit_pos) = encode_table_lengths_with_bit_count(&lengths, 0).unwrap();
-        let mut writer = BitWriter { bytes, bit_pos };
+        let mut writer = BitWriter::continuing(bytes, bit_pos);
 
         writer.write_bits(0b00, 2); // 'A'
         writer.write_bits(0b01, 2); // 'B'
@@ -9905,5 +16172,764 @@ mod tests {
             writer.write_bits(0, 1); // length slot 0
         }
         writer.finish()
+    }
+    #[test]
+    fn narrow_match_positions_preserve_full_width_token_choices() {
+        let mut seed = 0x12345678u32;
+        let input: Vec<u8> = (0..32769)
+            .map(|i| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                if i % 512 < 256 {
+                    seed as u8
+                } else {
+                    (i % 251) as u8
+                }
+            })
+            .collect();
+        for history_len in [0, 1, 2, 31, 4096] {
+            let history = &input[..history_len];
+            for limit in [1, 64, 65536] {
+                for candidates in [1, 16, 256] {
+                    for lazy in [false, true] {
+                        let options = EncodeOptions::new(candidates)
+                            .with_max_match_distance(limit)
+                            .with_lazy_matching(lazy)
+                            .with_lazy_lookahead(3);
+                        let mut narrow_progress = Vec::new();
+                        let mut wide_progress = Vec::new();
+                        let indexed_len = input.len() + history.len().min(limit);
+                        let (narrow, _) = encode_tokens_indexed::<u32>(
+                            &input,
+                            history,
+                            options,
+                            DISTANCE_TABLE_SIZE_50,
+                            Some(&mut |n| {
+                                narrow_progress.push(n);
+                                true
+                            }),
+                            MatchIndex::new(indexed_len, candidates),
+                            Vec::new(),
+                        )
+                        .unwrap();
+                        let (wide, _) = encode_tokens_indexed::<usize>(
+                            &input,
+                            history,
+                            options,
+                            DISTANCE_TABLE_SIZE_50,
+                            Some(&mut |n| {
+                                wide_progress.push(n);
+                                true
+                            }),
+                            MatchIndex::new(indexed_len, candidates),
+                            Vec::new(),
+                        )
+                        .unwrap();
+                        let pairs = |tokens: Vec<EncodeToken>| {
+                            tokens
+                                .into_iter()
+                                .map(|t| (t.length, t.distance))
+                                .collect::<Vec<_>>()
+                        };
+                        assert_eq!(pairs(narrow), pairs(wide));
+                        assert_eq!(narrow_progress, wide_progress);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_match_index_selection_checks_span_and_overflow() {
+        assert!(compact_match_index_fits(100, usize::MAX, 20));
+        assert!(!compact_match_index_fits(usize::MAX, 1, 1));
+        let limit = u32::MAX as usize;
+        assert!(compact_match_index_fits(limit, 0, usize::MAX));
+        assert!(compact_match_index_fits(limit - 10, usize::MAX, 10));
+        assert!(!compact_match_index_fits(limit - 10, 11, 11));
+        assert_eq!(
+            <u32 as MatchPosition>::from_position(limit).position(),
+            limit
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert!(!compact_match_index_fits(limit + 1, 0, usize::MAX));
+            let wide = limit + 1;
+            assert_eq!(
+                <usize as MatchPosition>::from_position(wide).position(),
+                wide
+            );
+        }
+    }
+
+    /// Text-like bytes with real repeats, the shape the parse is for.
+    fn optimal_parse_fixture(len: usize) -> Vec<u8> {
+        const WORDS: [&[u8]; 8] = [
+            b"the ", b"quick ", b"brown ", b"fox ", b"jumps ", b"over ", b"lazy ", b"dog ",
+        ];
+        let mut random = 0x1234_5678u32;
+        let mut data = Vec::with_capacity(len + 64);
+        while data.len() < len {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            let pick = (random >> 3) as usize % WORDS.len();
+            data.extend_from_slice(WORDS[pick]);
+            if random.is_multiple_of(23) {
+                data.extend_from_slice(&random.to_le_bytes());
+            }
+            if random.is_multiple_of(101) && data.len() > 2048 {
+                // A far repeat, which is where the repeat slots earn.
+                let from = (random as usize) % (data.len() - 1024);
+                let span = data[from..from + 300].to_vec();
+                data.extend_from_slice(&span);
+            }
+        }
+        data.truncate(len);
+        data
+    }
+
+    /// The parse prices from tables it builds itself, so a length's price
+    /// must be the bits the writer will actually spend on it.
+    /// [`DistanceArm`] is the hot-loop form, deciding the distance's arm
+    /// once and walking the length ladder; [`priced_match_cost`] is the
+    /// direct one, straight off [`EncoderMatchState::encode_match`]. They
+    /// are held equal here over every arm the format has, including the
+    /// lengths and distances that have no encoding at all.
+    #[test]
+    fn distance_arm_prices_agree_with_the_direct_token_cost() {
+        let slots = LengthSlots::new();
+        let literal_bits = [8u8; 256];
+        for distance_size in [DISTANCE_TABLE_SIZE_50, DISTANCE_TABLE_SIZE_70] {
+            let mut prices = TokenPrices::constant(&literal_bits, distance_size);
+            // Prices no two arms can accidentally agree under.
+            for (symbol, price) in prices.main.iter_mut().enumerate() {
+                *price = ((symbol % 14) as u16 + 1) << PRICE_SHIFT;
+            }
+            for (symbol, price) in prices.length.iter_mut().enumerate() {
+                *price = ((symbol % 12) as u16 + 1) << PRICE_SHIFT;
+            }
+            for (symbol, price) in prices.distance.iter_mut().enumerate() {
+                *price = ((symbol % 13) as u16 + 1) << PRICE_SHIFT;
+            }
+            for (symbol, price) in prices.align.iter_mut().enumerate() {
+                *price = ((symbol % 9) as u16 + 1) << PRICE_SHIFT;
+            }
+            let states = [
+                EncoderMatchState::default(),
+                EncoderMatchState {
+                    reps: [7, 300, 70_000, 1 << 20],
+                    last_length: 11,
+                },
+                EncoderMatchState {
+                    reps: [1, 2, 3, 4],
+                    last_length: 2,
+                },
+                EncoderMatchState {
+                    reps: [4096, 8192, 1, 0],
+                    last_length: 4096,
+                },
+            ];
+            for state in states {
+                for distance in [
+                    1usize,
+                    2,
+                    4,
+                    5,
+                    7,
+                    255,
+                    256,
+                    300,
+                    8192,
+                    70_000,
+                    1 << 20,
+                    3 << 21,
+                    1 << 30,
+                ] {
+                    let arm = DistanceArm::new(&prices, &state, distance, distance_size);
+                    for length in [2usize, 3, 4, 5, 11, 63, 64, 255, 4095, 4096] {
+                        let direct =
+                            priced_match_cost(&prices, &state, length, distance, distance_size)
+                                .ok();
+                        let armed = arm.and_then(|arm| arm.price(&prices, &slots, length));
+                        assert_eq!(
+                            direct, armed,
+                            "distance {distance} length {length} state {state:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The parse's first entropy region has no tokens of its own to price
+    /// from, so it prices with what the greedy walk always used. That
+    /// fallback has to BE that model and not merely resemble it, or the
+    /// parse's first quarter-megabyte optimises something else.
+    #[test]
+    fn constant_prices_reproduce_the_estimated_match_cost_model() {
+        let mut literal_bits = [0u8; 256];
+        for (byte, bits) in literal_bits.iter_mut().enumerate() {
+            *bits = 1 + (byte % 15) as u8;
+        }
+        for distance_size in [DISTANCE_TABLE_SIZE_50, DISTANCE_TABLE_SIZE_70] {
+            let prices = TokenPrices::constant(&literal_bits, distance_size);
+            for (price, &bits) in prices.main.iter().zip(&literal_bits) {
+                assert_eq!(*price, u16::from(bits) << PRICE_SHIFT);
+            }
+            let states = [
+                EncoderMatchState::default(),
+                EncoderMatchState {
+                    reps: [9, 4096, 1 << 19, 1 << 24],
+                    last_length: 17,
+                },
+            ];
+            for state in states {
+                for distance in [1usize, 3, 256, 8193, 1 << 18, 1 << 24, 1 << 30] {
+                    for length in [2usize, 4, 17, 100, 4096] {
+                        let old = estimated_match_cost(&state, length, distance, distance_size)
+                            .ok()
+                            .map(|bits| (bits as u32) << PRICE_SHIFT);
+                        let new =
+                            priced_match_cost(&prices, &state, length, distance, distance_size)
+                                .ok();
+                        assert_eq!(old, new, "distance {distance} length {length}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Prices are integer arithmetic on purpose: an archive's bytes must
+    /// not depend on a platform's `log2`. This holds the integer form to
+    /// the real logarithm it stands in for, and to the monotonicity a
+    /// price table needs of it (a rarer symbol never prices cheaper).
+    #[test]
+    fn log2_sixteenths_tracks_the_logarithm_it_prices_with() {
+        for value in [
+            1u64,
+            2,
+            3,
+            5,
+            7,
+            16,
+            17,
+            255,
+            1000,
+            65_535,
+            1 << 20,
+            (1 << 40) + 7,
+        ] {
+            let exact = (value as f64).log2() * 16.0;
+            let got = f64::from(log2_sixteenths(value));
+            assert!(
+                got <= exact + 1e-9 && got > exact - 1.0,
+                "{value}: {got} against {exact}"
+            );
+        }
+        let mut previous = 0;
+        for value in 1u64..8192 {
+            let now = log2_sixteenths(value);
+            assert!(now >= previous, "{value} priced below {}", value - 1);
+            previous = now;
+        }
+    }
+
+    /// A region's frequencies become the next region's prices, so a symbol
+    /// the region leaned on has to come out cheap, one it never used
+    /// expensive, and a table it never used at all has to keep a workable
+    /// price rather than becoming unaffordable.
+    #[test]
+    fn settled_prices_follow_the_region_they_were_counted_over() {
+        let literals = LiteralPrices::new(&[b'a'; 4096], 0);
+        let mut model = PriceModel::new(&literals, DISTANCE_TABLE_SIZE_50);
+        model.observe_literals(&[b'a'; ENTROPY_BLOCK_BYTES]);
+        model.observe_literals(&[b'z'; 16]);
+        model.settle();
+        assert!(model.prices.main[usize::from(b'a')] < model.prices.main[usize::from(b'z')]);
+        assert_eq!(model.prices.main[usize::from(b'q')], PRICE_MAX);
+        assert!(model.prices.main[usize::from(b'a')] >= PRICE_MIN);
+        // No match token was seen at all, so the match tables keep the
+        // constant model's prices instead of pricing every match at the
+        // deepest code a table can hold.
+        assert_eq!(model.prices.distance[3], 0);
+        assert_eq!(model.prices.align[3], 4 << PRICE_SHIFT);
+        // ...and the counters reset, so a region is priced by the region
+        // before it and not by the whole member.
+        assert_eq!(model.bytes, 0);
+        assert!(model.main.iter().all(|&count| count == 0));
+    }
+
+    /// The FIRST region is short on purpose, so a member gets real code
+    /// lengths four times sooner and a member shorter than one entropy
+    /// region leaves the constant model at all; every region after it is
+    /// a full one. A regression here is silent - it costs bytes on member
+    /// sets and nothing else notices.
+    #[test]
+    fn the_first_price_region_is_short_and_the_rest_are_not() {
+        let literals = LiteralPrices::new(&[b'a'; 4096], 0);
+        let mut model = PriceModel::new(&literals, DISTANCE_TABLE_SIZE_50);
+        assert_eq!(model.threshold, OPTIMAL_FIRST_REGION_BYTES);
+
+        // One byte short of the first region settles nothing: the counters
+        // still hold what was observed and the prices are still the
+        // constant model's.
+        model.observe_literals(&vec![b'a'; OPTIMAL_FIRST_REGION_BYTES - 1]);
+        model.settle();
+        assert_eq!(model.bytes, OPTIMAL_FIRST_REGION_BYTES - 1);
+        assert_eq!(model.threshold, OPTIMAL_FIRST_REGION_BYTES);
+        assert_eq!(
+            model.main[usize::from(b'a')],
+            OPTIMAL_FIRST_REGION_BYTES - 1
+        );
+
+        // Reaching it settles, and moves the bar to a full region.
+        model.observe_literals(b"a");
+        model.settle();
+        assert_eq!(model.bytes, 0);
+        assert_eq!(model.threshold, ENTROPY_BLOCK_BYTES);
+
+        // ...which the next region has to reach before it settles again.
+        model.observe_literals(&vec![b'z'; OPTIMAL_FIRST_REGION_BYTES]);
+        model.settle();
+        assert_eq!(model.bytes, OPTIMAL_FIRST_REGION_BYTES);
+        assert_eq!(model.threshold, ENTROPY_BLOCK_BYTES);
+    }
+
+    /// The candidate list is the parse's only view of the dictionary, and
+    /// its filters (the tag, and the byte one past the current best) exist
+    /// to reject candidates without loading them. This re-derives the same
+    /// list from the same bucket walk WITHOUT those filters, so a filter
+    /// that drops a candidate it should have kept fails here.
+    #[test]
+    fn match_candidates_are_the_nearest_distance_for_each_length() {
+        let data = optimal_parse_fixture(48 << 10);
+        let options = EncodeOptions::new(64).with_max_match_distance(1 << 20);
+        let mut buckets = MatchIndex::<u32>::new(data.len(), options.max_match_candidates);
+        let mut runs = Vec::new();
+        let mut reached = 0usize;
+        for pos in 0..data.len() {
+            match_candidates_at(&data, pos, data.len(), &buckets, options, TreeMatches::none(), &mut runs);
+            let expected = unfiltered_candidate_list(&data, pos, data.len(), &buckets, options);
+            assert_eq!(runs, expected, "position {pos}");
+            let mut previous: Option<MatchRun> = None;
+            for &run in &runs {
+                assert!(run.length >= 4 && run.distance >= 1);
+                if let Some(previous) = previous {
+                    assert!(run.length > previous.length);
+                    assert!(run.distance > previous.distance);
+                }
+                assert_eq!(
+                    &data[pos..pos + run.length],
+                    &data[pos - run.distance..pos - run.distance + run.length]
+                );
+                previous = Some(run);
+            }
+            reached += usize::from(!runs.is_empty());
+            buckets.insert(&data, pos);
+        }
+        // A list that is empty everywhere would pass every assertion above.
+        assert!(reached > data.len() / 4, "only {reached} positions matched");
+    }
+
+    #[test]
+    fn optimal_tokenizer_consumes_an_independent_tree_hint() {
+        let mut seed = 0x1937_4628_u64;
+        let history: Vec<u8> = (0..4096).map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        }).collect();
+        let data = history.clone();
+        let combined = [history.as_slice(), data.as_slice()].concat();
+        let options = EncodeOptions::new(64)
+            .with_max_match_distance(131072)
+            .with_optimal_parse(true);
+        // Both shapes the parse can be handed: one distance merged into the
+        // ring's frontier, and a list the parse takes INSTEAD of the ring.
+        for stride in [1usize, TREE_CANDIDATE_SLOTS] {
+        let hints = empty_slots(data.len() * stride);
+        hints[0].store(history.len() as u32, std::sync::atomic::Ordering::Relaxed);
+        let parse = |tree| {
+            // Deliberately do not seed history into the ring: this match must
+            // arrive through the tree parameter passed by walk_tokens.
+            walk_tokens(
+                &combined, history.len(), combined.len(), options,
+                DISTANCE_TABLE_SIZE_50, None,
+                MatchIndex::<usize>::new(combined.len(), options.max_match_candidates),
+                Vec::new(), tree,
+            ).unwrap().0
+        };
+        let without = parse(TreeMatches::none());
+        let with = parse(TreeMatches { base: history.len(), distances: &hints, stride });
+        assert_eq!(without[0].distance, 0);
+        assert_eq!(with[0].distance, history.len(), "stride {stride}");
+        assert!(with[0].length >= OPTIMAL_SUFFICIENT_LENGTH);
+        let (packed, _) = encode_token_block(
+            &data, &with, 0, &[], 0, DISTANCE_TABLE_SIZE_50,
+            &mut EncoderMatchState::default(), true,
+        ).unwrap();
+        let mut decoder = Unpack50Decoder::new();
+        decoder.decode_member_with_dictionary(
+            &encode_literal_only(&history, 0).unwrap(), 0, history.len(),
+            131072, false, DecodeMode::Lz,
+        ).unwrap();
+        assert_eq!(decoder.decode_member_with_dictionary(
+            &packed, 0, data.len(), 131072, true, DecodeMode::Lz,
+        ).unwrap(), data);
+        }
+    }
+
+    /// The hint budget narrows a wave and moves not one byte of the
+    /// archive: the wave width decides how much of the finder's answer is
+    /// held at once and nothing else, which is the property the budget
+    /// rests on. (nzbfast-local change, 7 Sep 2026.)
+    #[test]
+    fn the_hint_budget_narrows_a_wave_without_moving_its_bytes() {
+        // Eight blocks at the shipped stride, and never below one.
+        assert_eq!(tree_wave_width(16, TREE_CANDIDATE_SLOTS, None), 8);
+        assert_eq!(tree_wave_width(4, TREE_CANDIDATE_SLOTS, None), 4);
+        assert_eq!(tree_wave_width(64, tree::TREE_MAX_CANDIDATE_SLOTS, None), 4);
+        assert_eq!(tree_wave_width(1, tree::TREE_MAX_CANDIDATE_SLOTS, None), 1);
+        // A stride of one is the lazy parser's, and the budget does not
+        // reach it at any width the pool can ask for.
+        assert_eq!(tree_wave_width(20, 1, None), 20);
+        let block = MAX_COMPRESSED_BLOCK_OUTPUT;
+        let data = optimal_parse_fixture(3 * block + 4_096);
+        let options = EncodeOptions::new(16)
+            .with_max_match_distance(2 * block)
+            .with_optimal_parse(true);
+        let pool = EncoderScratchPool::new();
+        let narrow = encode_lz_member_blocks_in_waves(
+            &data, &[], 0, options, None, 1, MemberWindow::whole(), &pool,
+        )
+        .unwrap();
+        let wide = encode_lz_member_blocks_in_waves(
+            &data, &[], 0, options, None, 8, MemberWindow::whole(), &pool,
+        )
+        .unwrap();
+        assert_eq!(narrow, wide);
+    }
+
+    /// At a wide stride the finder's list REPLACES the ring walk, so what
+    /// the parse prices has to be a valid frontier on its own and has to
+    /// carry what the ring was carrying: every candidate a real match at
+    /// its distance, lengths and distances strictly increasing, and the
+    /// list reaching at least as far as the ring's at nearly every
+    /// position and strictly farther at many. (nzbfast-local change,
+    /// 7 Sep 2026.)
+    #[test]
+    fn a_wide_stride_frontier_replaces_the_ring_without_losing_reach() {
+        let data = optimal_parse_fixture(96 << 10);
+        let options = EncodeOptions::new(16).with_max_match_distance(4 << 20);
+        let stride = TREE_CANDIDATE_SLOTS;
+        let hints = empty_slots(data.len() * stride);
+        let mut finder = TreeMatchFinder::new(options.max_match_distance);
+        finder.advance_range(&data, 0..data.len(), Some(&hints), stride, 1);
+        let tree = TreeMatches { base: 0, distances: &hints, stride };
+        let mut index = MatchIndex::<u32>::new(data.len(), options.max_match_candidates);
+        let mut ring = Vec::new();
+        let mut listed = Vec::new();
+        let mut farther = 0usize;
+        let mut shorter = 0usize;
+        let mut several = 0usize;
+        for pos in 0..data.len() {
+            match_candidates_at(&data, pos, data.len(), &index, options,
+                TreeMatches::none(), &mut ring);
+            match_candidates_at(&data, pos, data.len(), &index, options,
+                tree, &mut listed);
+            for pair in listed.windows(2) {
+                assert!(pair[0].length < pair[1].length, "pos {pos}");
+                assert!(pair[0].distance < pair[1].distance, "pos {pos}");
+            }
+            for run in &listed {
+                assert!(run.distance <= pos.min(options.max_match_distance));
+                assert_eq!(&data[pos..pos + run.length],
+                    &data[pos - run.distance..pos - run.distance + run.length],
+                    "pos {pos} is not a real match");
+            }
+            several += usize::from(listed.len() > 1);
+            let reach = |runs: &Vec<MatchRun>| runs.last().map_or(0, |run| run.length);
+            match reach(&listed).cmp(&reach(&ring)) {
+                std::cmp::Ordering::Greater => farther += 1,
+                std::cmp::Ordering::Less => shorter += 1,
+                std::cmp::Ordering::Equal => {}
+            }
+            index.insert(&data, pos);
+        }
+        assert!(several > data.len() / 50, "only {several} positions listed several");
+        assert!(farther > shorter, "tree reached farther at {farther}, shorter at {shorter}");
+        // The ring is bounded to its newest slots, so the tree giving up
+        // reach anywhere is a finding, not a rounding error.
+        assert!(shorter * 100 < data.len(), "tree lost reach at {shorter} positions");
+    }
+
+    #[test]
+    fn tree_candidate_frontiers_remain_nearest_and_valid() {
+        let data = optimal_parse_fixture(96 << 10);
+        let options = EncodeOptions::new(16).with_max_match_distance(4 << 20);
+        let hints = empty_slots(data.len());
+        let mut finder = TreeMatchFinder::new(options.max_match_distance);
+        finder.advance_range(&data, 0..data.len(), Some(&hints), 1, 1);
+        let tree = TreeMatches { base: 0, distances: &hints, stride: 1 };
+        let mut index = MatchIndex::<u32>::new(data.len(), options.max_match_candidates);
+        let mut ring = Vec::new();
+        let mut combined = Vec::new();
+        let mut additions = 0;
+        for pos in 0..data.len() {
+            match_candidates_at(&data, pos, data.len(), &index, options,
+                TreeMatches::none(), &mut ring);
+            match_candidates_at(&data, pos, data.len(), &index, options,
+                tree, &mut combined);
+            additions += usize::from(ring != combined);
+            for old in &ring {
+                assert!(combined.iter().any(|new|
+                    new.length >= old.length && new.distance <= old.distance));
+            }
+            for pair in combined.windows(2) {
+                assert!(pair[0].length < pair[1].length);
+                assert!(pair[0].distance < pair[1].distance);
+            }
+            for run in &combined {
+                assert!(run.distance <= pos.min(options.max_match_distance));
+                assert_eq!(&data[pos..pos + run.length],
+                    &data[pos - run.distance..pos - run.distance + run.length]);
+            }
+            index.insert(&data, pos);
+        }
+        assert!(additions > 0, "fixture must exercise independent tree matches");
+    }
+
+    /// [`match_candidates_at`] with its filters removed: the same walk, the
+    /// same stopping points, every candidate's length measured.
+    fn unfiltered_candidate_list(
+        input: &[u8],
+        pos: usize,
+        end: usize,
+        buckets: &MatchIndex<u32>,
+        options: EncodeOptions,
+    ) -> Vec<MatchRun> {
+        let mut out = Vec::new();
+        let max_distance = pos.min(options.max_match_distance);
+        let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
+        if options.max_match_candidates == 0
+            || max_distance == 0
+            || max_length < 4
+            || pos + 3 >= input.len()
+        {
+            return out;
+        }
+        let prefix = &input[pos..pos + 4];
+        let mut best_length = 0usize;
+        let mut checked = 0usize;
+        for candidate in buckets.candidates(input, pos) {
+            if candidate >= pos {
+                continue;
+            }
+            let distance = pos - candidate;
+            if distance > max_distance {
+                break;
+            }
+            checked += 1;
+            if &input[candidate..candidate + 4] == prefix {
+                let length = 4 + match_length(input, pos + 4, distance, max_length - 4);
+                if length > best_length {
+                    best_length = length;
+                    out.push(MatchRun { length, distance });
+                }
+            }
+            if best_length >= max_length || best_length >= MATCH_NICE_LENGTH {
+                break;
+            }
+            if checked >= options.max_match_candidates {
+                break;
+            }
+        }
+        if best_length < LONG_MATCH_MIN_LENGTH {
+            if let Some(candidate) = buckets.long_candidate(input, pos) {
+                if candidate < pos
+                    && pos - candidate <= max_distance
+                    && &input[candidate..candidate + 4] == prefix
+                {
+                    let distance = pos - candidate;
+                    let length = 4 + match_length(input, pos + 4, distance, max_length - 4);
+                    if length > best_length && length >= LONG_MATCH_MIN_LENGTH.min(max_length) {
+                        out.push(MatchRun { length, distance });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The parse is a new token stream, so what it emits has to decode to
+    /// the input it was given - through history, through both algorithm
+    /// versions, and over inputs long enough to cross several of its own
+    /// windows - and it has to be SMALLER than the parser it sits above,
+    /// which is the only reason to pay for it.
+    #[test]
+    fn optimal_parse_round_trips_and_undercuts_the_lazy_parser() {
+        let compressible = optimal_parse_fixture(96 << 10);
+        let mut random = 0x9e37_79b9u32;
+        let noise: Vec<u8> = (0..4096)
+            .map(|_| {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                random as u8
+            })
+            .collect();
+        let fixtures: [&[u8]; 6] = [
+            &[],
+            b"ab",
+            b"abcabcabcabcabcabc",
+            &noise,
+            &compressible[..1024],
+            &compressible,
+        ];
+        let lazy_options = EncodeOptions::new(64)
+            .with_lazy_matching(true)
+            .with_max_match_distance(1 << 20);
+        let optimal_options = lazy_options.with_optimal_parse(true);
+        for data in fixtures {
+            for version in [0u8, 1] {
+                let optimal =
+                    encode_lz_member_with_options(data, version, optimal_options).unwrap();
+                assert_eq!(decode_lz(&optimal, version, data.len()).unwrap(), data);
+                // ...and as a solid member, whose matches reach into the
+                // history the walk was seeded with.
+                let history_member =
+                    encode_lz_member_with_options(&compressible, version, optimal_options).unwrap();
+                let with_history = encode_lz_member_with_history_and_options(
+                    data,
+                    &compressible,
+                    version,
+                    optimal_options,
+                )
+                .unwrap();
+                let dictionary = 1 << 20;
+                let mut decoder = Unpack50Decoder::new();
+                assert_eq!(
+                    decoder
+                        .decode_member_with_dictionary(
+                            &history_member,
+                            version,
+                            compressible.len(),
+                            dictionary,
+                            false,
+                            DecodeMode::Lz,
+                        )
+                        .unwrap(),
+                    compressible
+                );
+                decoder.commit_member();
+                assert_eq!(
+                    decoder
+                        .decode_member_with_dictionary(
+                            &with_history,
+                            version,
+                            data.len(),
+                            dictionary,
+                            true,
+                            DecodeMode::Lz,
+                        )
+                        .unwrap(),
+                    data
+                );
+            }
+        }
+        let lazy = encode_lz_member_with_options(&compressible, 0, lazy_options).unwrap();
+        let optimal = encode_lz_member_with_options(&compressible, 0, optimal_options).unwrap();
+        assert!(
+            optimal.len() < lazy.len(),
+            "optimal {} against lazy {}",
+            optimal.len(),
+            lazy.len()
+        );
+    }
+
+    /// What the dynamic program is FOR, and the one claim a size test on
+    /// one corpus cannot make: over a member priced by the model both
+    /// parsers score with, the program's token sequence costs FEWER
+    /// estimated bits than the greedy walk's. The repeat state is inside
+    /// that claim - the four distances rotate on use and the length-repeat
+    /// token costs about two bits, so a sequence that leaves the right
+    /// slots in place is cheaper than one that does not, and both tokens
+    /// have to actually appear or the state carried per node is decoration.
+    #[test]
+    fn optimal_parse_costs_fewer_estimated_bits_than_the_lazy_walk() {
+        // Two spans replayed alternately, so keeping both distances in
+        // repeat slots (and repeating the length) is the cheap answer.
+        let mut data = Vec::new();
+        let first: Vec<u8> = (0..96u8).map(|byte| byte.wrapping_mul(37)).collect();
+        let second: Vec<u8> = (0..96u8)
+            .map(|byte| byte.wrapping_mul(91).wrapping_add(7))
+            .collect();
+        let mut random = 0x51ed_2701u32;
+        for _ in 0..400 {
+            data.extend_from_slice(&first);
+            data.extend_from_slice(&second);
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            data.extend_from_slice(&random.to_le_bytes()[..1 + (random as usize & 3)]);
+        }
+        data.extend_from_slice(&optimal_parse_fixture(48 << 10));
+        // Short of one entropy region, so the parse never leaves the
+        // constant model and this IS the model it minimised under.
+        assert!(data.len() < ENTROPY_BLOCK_BYTES);
+        let literals = LiteralPrices::new(&data, 0);
+        let prices = TokenPrices::constant(&literals.byte_price, DISTANCE_TABLE_SIZE_50);
+        let priced = |options| {
+            let tokens = encode_tokens(&data, &[], options, DISTANCE_TABLE_SIZE_50);
+            let mut state = EncoderMatchState::default();
+            let mut bits = 0u64;
+            let mut at = 0usize;
+            let mut repeats = 0usize;
+            let mut length_repeats = 0usize;
+            for token in &tokens {
+                if token.distance == 0 {
+                    for &byte in &data[at..at + token.length] {
+                        bits += u64::from(prices.main[usize::from(byte)]);
+                    }
+                } else {
+                    match state
+                        .encode_match(token.length, token.distance, DISTANCE_TABLE_SIZE_50)
+                        .unwrap()
+                    {
+                        EncodedMatch::LastLengthRepeat => length_repeats += 1,
+                        EncodedMatch::RepeatDistance { .. } => repeats += 1,
+                        EncodedMatch::New { .. } => {}
+                    }
+                    bits += u64::from(
+                        priced_match_cost(
+                            &prices,
+                            &state,
+                            token.length,
+                            token.distance,
+                            DISTANCE_TABLE_SIZE_50,
+                        )
+                        .unwrap(),
+                    );
+                    state.remember(token.length, token.distance);
+                }
+                at += token.length;
+            }
+            assert_eq!(at, data.len(), "the tokens do not cover the input");
+            (bits, repeats, length_repeats)
+        };
+        let lazy = EncodeOptions::new(64)
+            .with_max_match_distance(1 << 20)
+            .with_lazy_matching(true);
+        let (lazy_bits, ..) = priced(lazy);
+        let (bits, repeats, length_repeats) = priced(lazy.with_optimal_parse(true));
+        assert!(
+            bits < lazy_bits,
+            "{bits} sixteenths of a bit against the lazy walk's {lazy_bits}"
+        );
+        assert!(repeats > 0, "no repeat-distance token");
+        assert!(length_repeats > 0, "no length-repeat token");
     }
 }

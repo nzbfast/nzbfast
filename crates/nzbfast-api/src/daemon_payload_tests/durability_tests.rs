@@ -201,7 +201,7 @@ fn a_delete_inside_the_park_window_buries_the_row_park_already_wrote() {
 /// the flag used to ride along. Nothing anywhere cleared it, so the next
 /// park of that same Arc (the one at the end of a SUCCESSFUL re-run)
 /// removed the payload it had just produced, moments before filing the
-/// Completed row (Codex sweep 14 Aug H1).
+/// Completed row (review sweep 14 Aug H1).
 #[test]
 fn a_lane_tail_never_parks_a_record_that_was_retried_out_from_under_it() {
     with_daemon("park-generation", |d| {
@@ -247,7 +247,7 @@ fn a_lane_tail_never_parks_a_record_that_was_retried_out_from_under_it() {
         // NOW the old lane tail finishes and parks. It must decline.
         d.park_gen(job.clone(), Some(gen0));
 
-        // Codex sweep 5, M5: the stale branch dropped both maps
+        // Review sweep 5, M5: the stale branch dropped both maps
         // unconditionally, so a delayed old tail stripped the LIVE
         // retry's entries - see release_custody_if_unclaimed.
         assert!(
@@ -530,7 +530,7 @@ fn latched_note_queue_idle_never_takes_the_queue_lock() {
 }
 
 /// The arming edge's empty scan and its latch CAS share one hold of the
-/// queue lock, and an enqueue cannot publish between them (Codex sweep
+/// queue lock, and an enqueue cannot publish between them (review sweep
 /// 14 Aug M3). The pre-fix shape dropped the queue guard after the scan:
 /// removal of a last job A leaves the queue empty, an add of B re-arms
 /// the latch and publishes job.added, and A's notifier - holding a scan

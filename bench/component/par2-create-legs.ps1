@@ -14,6 +14,10 @@ param(
   # The PRODUCT arm, added 4 Sep 2026: `ours` is the par2_create_bench
   # harness and measures the ENGINE, `parfast` is the binary a user runs.
   [string]$Parfast = "$env:USERPROFILE\paraudit\bin\parfast.exe",
+  # Rival-survey arms, 5 Sep 2026 - as par2-round.ps1's param block.
+  [string]$Par2j    = "$env:USERPROFILE\paraudit\rivals\mp\par2j64.exe",
+  [string]$Phpar2   = "$env:USERPROFILE\paraudit\rivals\phpar2\x64\phpar2.exe",
+  [string]$Turbo120 = "$env:USERPROFILE\paraudit\rivals\turbo120utf8\par2.exe",
   # Arm ORDER is a protocol knob, not a cosmetic one. This script used a
   # fixed order, and memory nzbfast-par2-perf-audit-2026-09-02 records a
   # fixed order on a laptop manufacturing a 4/4 sweep for whichever arm
@@ -28,6 +32,7 @@ $src = "$Root\rig\pristine"; $out = "$Root\out"
 Get-ChildItem "$src\*" -File | ? { $_.Name -notlike "*.par2" } | % { $null = [System.IO.File]::ReadAllBytes($_.FullName) }
 "BIN ours $((Get-FileHash $Ours).Hash) turbo $(& $Turbo --version 2>&1 | select -First 1)"
 $files = Get-ChildItem "$src\*" -File | ? { $_.Name -notlike "*.par2" } | % FullName
+$names = Get-ChildItem "$src\*" -File | ? { $_.Name -notlike "*.par2" } | % Name
 if ($Tools) { $arms = $Tools.Split(",") } else { $arms = @("ours","turbo16"); if ($Parpar) { $arms += "parpar" } }
 foreach ($r in 1..$Reps) { foreach ($bs in $Sizes) { foreach ($tool in $arms) {
   if (Test-Path $out) { Remove-Item -Recurse -Force $out }; New-Item -ItemType Directory $out | Out-Null
@@ -38,6 +43,14 @@ foreach ($r in 1..$Reps) { foreach ($bs in $Sizes) { foreach ($tool in $arms) {
     "turbo"   { & $Turbo c -q "-s$bs" "-r$Pct" "-B$src" "$out\bench.par2" @files *> $null }
     "turbo16" { & $Turbo c -q "-s$bs" "-r$Pct" -T16 "-B$src" "$out\bench.par2" @files *> $null }
     "parpar"  { Push-Location $src; & $Parpar -q -s "${bs}b" -r "$Pct%" -o "$out\bench.par2" @files *> $null; Pop-Location }
+    # --- rival-survey arms. par2j takes its base directory as /d and bare
+    # names; phpar2 (par2cmdline 0.4) has no base-path option at all, so it
+    # writes beside the payload and the set is moved out inside the timer.
+    "par2j"     { & $Par2j c "/ss$bs" "/rr$Pct" "/d$src" "$out\bench.par2" @names *> $null }
+    "par2j_gpu" { & $Par2j c "/lc256" "/ss$bs" "/rr$Pct" "/d$src" "$out\bench.par2" @names *> $null }
+    "phpar2"    { Push-Location $src; & $Phpar2 c -q "-s$bs" "-r$Pct" "bench.par2" @names *> $null; Move-Item "$src\bench*.par2" $out -Force; Pop-Location }
+    "turbo120"  { & $Turbo120 c -q "-s$bs" "-r$Pct" "-B$src" "$out\bench.par2" @files *> $null }
+    "turbo120_16" { & $Turbo120 c -q "-s$bs" "-r$Pct" -T16 "-B$src" "$out\bench.par2" @files *> $null }
   }
   $sw.Stop()
   "CREATE-$Tag r=$r bs=$bs tool=$tool wall=$([math]::Round($sw.Elapsed.TotalSeconds,3)) files=$((Get-ChildItem $out | measure).Count)"

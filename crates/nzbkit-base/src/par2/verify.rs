@@ -237,7 +237,15 @@ pub fn verify_file_blocks(file: &Par2File, block_size: u64, data: &[u8]) -> Vec<
             if !check.is_proven() {
                 return false;
             }
-            let start = i * bs;
+            // `checked_mul`: both operands come off the PAR2 grid, so a
+            // declared block count times a declared block size can pass
+            // 4 GiB on the shipped 32-bit armv7 target. A wrapped
+            // `start` is SMALL, so it survives the bound test below and
+            // this cell would then be settled against another block's
+            // bytes - a wrong verdict, not a panic.
+            let Some(start) = i.checked_mul(bs) else {
+                return false;
+            };
             if start >= data.len() {
                 return false;
             }

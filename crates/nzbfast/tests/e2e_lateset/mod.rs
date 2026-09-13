@@ -279,7 +279,7 @@ async fn run_x5_24(
 /// lengths; two payloads arrive and claim their sets; the third arrives
 /// with ZERO bytes but its set carries 100% parity.
 ///
-/// **MEASURED 30 Aug 2026 and the row's prediction is WRONG.** Codex
+/// **MEASURED 30 Aug 2026 and the row's prediction is WRONG.** review
 /// predicted the stray-set guard in `get/settle.rs` would classify the
 /// residual set as foreign and never invoke its parity. It does not get
 /// the chance: a set that never activated in-stream is applied wholesale

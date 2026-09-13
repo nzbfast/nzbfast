@@ -11,6 +11,12 @@
 #   crates/nzbfast-tasks/Cargo.toml (serve's background lanes, split out 2 Sep 2026)
 #   crates/nzbfast-api/Cargo.toml (serve's request layer, split out 2 Sep 2026)
 #   crates/nzbtray/Cargo.toml   (installer stamps both exes)
+#   crates/parfast/Cargo.toml   (tracks the nzbfast version, but PRE-RELEASE:
+#                                it takes <new>-beta.1, a fresh beta series per
+#                                version. Added 10 Sep 2026 when parfast was moved
+#                                off its own 0.90.x line to match nzbfast. It is
+#                                here so the next bump cannot leave it behind - a
+#                                version that tracks another one by hand drifts.)
 #   website/download*.html      (16 locales, version-pinned button URLs)
 #   (NOT the homebrew formula - see bump-tap.sh, it needs published shas)
 #   Cargo.lock                  (via cargo, if available)
@@ -56,6 +62,25 @@ bump_toml "$ROOT/crates/nzbfast-tasks/Cargo.toml"
 bump_toml "$ROOT/crates/nzbfast-api/Cargo.toml"
 bump_toml "$ROOT/crates/nzbtray/Cargo.toml"
 
+# parfast is PRE-RELEASE and carries a beta suffix, so it cannot go through
+# bump_toml (and $NEW is validated as dotted numerals, deliberately - the
+# suffix is this script's to add, not the operator's to pass in). A version
+# bump starts a FRESH beta series: 1.5.0-beta.1, then 1.6.0-beta.1. A
+# hand-set -beta.N within one version is not preserved across a bump,
+# because a beta count carried onto a new version means nothing.
+# When parfast ships stable, move it to bump_toml above and delete this.
+bump_toml_beta() {
+    awk -v new="$NEW-beta.1" '!done && /^version = "/ { sub(/"[^"]*"/, "\"" new "\""); done=1 } { print }' \
+        "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+bump_toml_beta "$ROOT/crates/parfast/Cargo.toml"
+# Assert the POSITIVE, as the download-page arm below does: a parfast whose
+# [package] version line was restructured would rewrite to nothing and pass.
+if ! grep -q "^version = \"$NEW-beta.1\"" "$ROOT/crates/parfast/Cargo.toml"; then
+    echo "REFUSING: crates/parfast/Cargo.toml did not move to $NEW-beta.1" >&2
+    exit 1
+fi
+
 # The Homebrew formula is NOT bumped here. It needs the sha256 of each
 # published archive, which does not exist until the release is uploaded, and a
 # formula carrying a new version with last release's hashes fails every user's
@@ -63,7 +88,7 @@ bump_toml "$ROOT/crates/nzbtray/Cargo.toml"
 # release is published, and pushes it to the tap.
 
 if command -v cargo >/dev/null 2>&1; then
-    (cd "$ROOT" && cargo update -q -p nzbfast -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbtray 2>/dev/null) || true
+    (cd "$ROOT" && cargo update -q -p nzbfast -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbtray -p parfast 2>/dev/null) || true
 fi
 
 # Website download buttons are version-pinned (asset filenames inside
@@ -71,7 +96,7 @@ fi
 # release publish or the live site 404s - all locales, one pass. There is
 # no partial failure mode: the whole page breaks at once, in all sixteen
 # locales, the instant the new release becomes `latest`.
-TOUCHED="crates/nzbfast/Cargo.toml crates/nzbfast-core/Cargo.toml crates/nzbfast-unpack/Cargo.toml crates/nzbfast-meta/Cargo.toml crates/nzbfast-engine/Cargo.toml crates/nzbfast-daemon/Cargo.toml crates/nzbfast-tasks/Cargo.toml crates/nzbfast-api/Cargo.toml crates/nzbtray/Cargo.toml"
+TOUCHED="crates/nzbfast/Cargo.toml crates/nzbfast-core/Cargo.toml crates/nzbfast-unpack/Cargo.toml crates/nzbfast-meta/Cargo.toml crates/nzbfast-engine/Cargo.toml crates/nzbfast-daemon/Cargo.toml crates/nzbfast-tasks/Cargo.toml crates/nzbfast-api/Cargo.toml crates/nzbtray/Cargo.toml crates/parfast/Cargo.toml"
 [ -f "$ROOT/Cargo.lock" ] && TOUCHED="$TOUCHED Cargo.lock"
 pages=0
 bad=0

@@ -35,7 +35,7 @@ const TS_PACKET: usize = 188;
 /// whatever the file happened to be long enough for accepted a single
 /// 0x47 at offset 0 from anything 188 to 375 bytes long - which is one
 /// byte of evidence, the very rule this constant exists to replace
-/// (Codex sweep 7, M7).
+/// (review sweep 7, M7).
 const TS_SYNCS: usize = 4;
 
 /// Fill as much of `buf` as the file has, returning how many bytes
@@ -64,7 +64,7 @@ pub(super) fn read_head(f: &mut std::fs::File, buf: &mut [u8]) -> Option<usize> 
 /// two and skips the rename, and `tv_sort` computes one canonical
 /// target for both - so an obfuscated release kept its hash because of
 /// a thumbnail. A lone one was offered to the user as `Title.ts`
-/// (Codex sweep 6, N6).
+/// (review sweep 6, N6).
 ///
 /// The sync repeating on the 188-byte stride is what actually
 /// identifies the format. `container_ext` has already declined the
@@ -168,7 +168,7 @@ pub(super) fn video_ext(path: &Path) -> Option<String> {
         // program stream or transport stream from cleanup and
         // VIDEO_EXTS names mpg/mpeg/ts/m2ts as videos. So a hash-named
         // TS payload was rescued from deletion and then skipped by
-        // every rename path - kept, and still unnamed (Codex sweep 5,
+        // every rename path - kept, and still unnamed (review sweep 5,
         // L4). Answered here rather than by widening `container_ext`,
         // whose callers ask "can the remuxer walk this", which for these
         // two is still no.
@@ -203,7 +203,7 @@ pub(super) fn video_ext(path: &Path) -> Option<String> {
         // refuse a valid extensionless feature the magic alone used to
         // accept. That is a regression rather than an uncovered format,
         // so an incomplete probe falls through to the sniff below
-        // (Codex sweep 5, M10).
+        // (review sweep 5, M10).
         Ok(info) if info.complete && !info.has_video() => None,
         // Anything else - including a probe that failed on a container
         // it could not walk - leaves the sniff standing, so #43's
@@ -254,7 +254,7 @@ mod tests {
     }
 
     /// The MPEG family is a video to every other part of this file, so
-    /// it has to be one here too (Codex sweep 5, L4). `VIDEO_EXTS` names
+    /// it has to be one here too (review sweep 5, L4). `VIDEO_EXTS` names
     /// mpg/mpeg/ts/m2ts and `looks_like_video_bytes` rescues these two
     /// from cleanup; before this they were rescued and then never named.
     #[test]
@@ -293,7 +293,7 @@ mod tests {
     /// thumbnail beside a hash-named feature was a SECOND video:
     /// `rename_movie` sees two candidates and leaves both alone, so an
     /// obfuscated release kept its hash because of a GIF, and a lone
-    /// one was renamed to `Title.ts` and offered as playable (Codex
+    /// one was renamed to `Title.ts` and offered as playable (review
     /// sweep 6, N6).
     #[test]
     fn a_gif_is_not_a_transport_stream() {
@@ -320,7 +320,7 @@ mod tests {
         // And the arm the 1030-byte fixture above never reached: a file
         // long enough for ONE packet and no more used to have its sync
         // count scaled down to one, which is `head[0] == 0x47` again
-        // under a longer name (Codex sweep 7, M7). 188 to 375 bytes is
+        // under a longer name (review sweep 7, M7). 188 to 375 bytes is
         // the window; 256 sits in the middle of it.
         let mut short_gif = b"GIF89a".to_vec();
         short_gif.extend_from_slice(&[0u8; 250]);
@@ -347,7 +347,7 @@ mod tests {
 
     /// An INCOMPLETE probe is not proof of "no video".
     ///
-    /// Codex sweep 5, M10, against the fix above: `probe` returns
+    /// Review sweep 5, M10, against the fix above: `probe` returns
     /// partial information as `Ok` - a valid MP4 whose `moov` sits past
     /// the parser's element budget comes back Ok with no tracks seen -
     /// and reading that as "audio" refuses a valid extensionless feature

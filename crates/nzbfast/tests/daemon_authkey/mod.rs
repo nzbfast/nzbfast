@@ -149,7 +149,7 @@ async fn apikey_reveal_and_rotate_need_the_api_key() {
     .unwrap();
 }
 
-/// Codex sweep 2, 3 Aug H1 and M1: the /api body contract.
+/// Review sweep 2, 3 Aug H1 and M1: the /api body contract.
 ///
 /// H1 - the previous sweep moved the credential snapshot to AFTER the
 /// body read so a caller could not be authorized on key A, stall the

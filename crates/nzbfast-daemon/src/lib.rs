@@ -74,8 +74,8 @@ pub use nzbkit::par2repair::FAST_PAR_DEFAULT;
 // IS `crate::watchlist`, so the layer crate is named outright at every
 // reference instead (`nzbfast_meta::watchlist::WatchItem`).
 pub(crate) use nzbfast_core::{
-    conntune, diag, diskfree, eatvol, failkind, health, identify, identity, manifest, netfetch,
-    notify, persist, pwfile, sandbox, setup, sizes, srrdb, streamhub, tools,
+    conntune, diag, diskfree, eatvol, failkind, health, identify, identity, localtime, manifest,
+    netfetch, notify, persist, pwfile, sandbox, setup, sizes, srrdb, streamhub, tools,
 };
 pub(crate) use nzbfast_engine::get;
 pub(crate) use nzbfast_meta::{newznab, nzbindex, plex, rss, wall};
@@ -154,7 +154,7 @@ pub mod requeue;
 // helpers, so no glob is needed.
 pub mod altcand;
 
-// altspend.rs: §290 (Codex F-09/F-11) - the one reserve-then-admit
+// altspend.rs: §290 (review finding F-09/F-11) - the one reserve-then-admit
 // primitive the hunt, the clicked switch and the automatic promotion all
 // pass through. Inherent methods on `Daemon`, so no glob is needed.
 pub mod altspend;
@@ -220,7 +220,7 @@ use outage::*;
 // rostered on the Windows jobs alone, and nothing did that for `check`.
 // Closed the same day: `tools/ci-verdict.py` rosters the Linux jobs too.
 // The flag is what pulls nzbfast's LIB target into the lint at all; the
-// host clippy line in CLAUDE.md lacked it and gained it in 470efe74d.
+// host clippy line in CONTRIBUTING.md lacked it and gained it in 470efe74d.
 
 #[cfg(feature = "indexer")]
 pub mod predb_seed;

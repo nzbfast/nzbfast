@@ -705,7 +705,7 @@ impl Extractor {
     /// other way to put an extractor into this state from up there is
     /// to replay a whole chase, forfeit and demote, which is a rig
     /// rather than a test and was the reason that driver went untested
-    /// through two rounds of the Codex F-05 fix.
+    /// through two rounds of the review finding F-05 fix.
     #[doc(hidden)]
     pub fn seed_dropped_volume(&self, slot: usize, posted: &str, ranges: Vec<(u64, u64)>) {
         let mut inner = self.inner.lock_ok();

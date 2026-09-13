@@ -12,7 +12,7 @@ fn payload(n: usize, seed: u8) -> Vec<u8> {
         .collect()
 }
 
-/// Codex sweep 10 Aug M5: a RAR4 header carries a CRC16 and nothing on
+/// Review sweep 10 Aug M5: a RAR4 header carries a CRC16 and nothing on
 /// the PLAINTEXT path ever checked it, so damaged or crafted
 /// name/flag/geometry bytes were taken as authoritative - and the
 /// extractor turns that geometry straight into pwrite destinations.

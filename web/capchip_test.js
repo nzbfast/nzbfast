@@ -48,7 +48,7 @@ const TODAY = 20100;
 const UNKNOWN = Number.MAX_SAFE_INTEGER;   // conntune::DAY_LO_UNKNOWN
 
 // The commonest shape on earth: a server nobody has ever refused. It has
-// no tuner entry at all, so there is no ledger to read (Codex sweep 7,
+// no tuner entry at all, so there is no ledger to read (review sweep 7,
 // H1). Anything but a quiet empty string here took the whole Settings
 // panel down with it.
 {
@@ -89,7 +89,7 @@ const UNKNOWN = Number.MAX_SAFE_INTEGER;   // conntune::DAY_LO_UNKNOWN
 
 // A ledger written before the per-day column existed. There is no figure
 // for those days and the lifetime one is not it, so the sentence keeps
-// the count and drops the number (Codex sweep 7, H1b).
+// the count and drops the number (review sweep 7, H1b).
 {
   const legacy = { days: [TODAY - 4, TODAY - 1], granted_lo: 10 };      // no day_lo at all
   const chip = capChip(legacy, 40, TODAY);

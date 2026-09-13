@@ -397,7 +397,7 @@ pub(super) fn take_census(
     let mut total_segments: u64 = 0;
     // Which slots the coverage census below may NOT speak for, because
     // this run's interval map is not the whole story about their bytes
-    // (Codex sweep 2, 3 Aug M2 - see the census itself for why each
+    // (review sweep 2, 3 Aug M2 - see the census itself for why each
     // one is here).
     // The UNION over every adopted recovery set (TODO 311): a post may
     // ship one set per file, and a name any of them covers is covered.
@@ -489,7 +489,7 @@ pub(super) fn take_census(
         // exactly that untrusted total. So a self-consistent post can
         // declare 16 MiB, ship one CRC-valid byte, retire every counter
         // to zero, and leave a file that is one byte plus a hole - which
-        // used to complete green (Codex sweep 3 Aug M7). The interval
+        // used to complete green (review sweep 3 Aug M7). The interval
         // map is the ground truth and costs one lock to ask.
         //
         // The interval map records what THIS run's decoder wrote, which
@@ -498,7 +498,7 @@ pub(super) fn take_census(
         // question, and asking it globally - `verifier.set().is_none()
         // && deferred_arts == 0` - exempted every slot in the job the
         // moment any set existed or anything anywhere was deferred
-        // (Codex sweep 2, 3 Aug M2). A sparse out-of-set `.nfo` beside
+        // (review sweep 2, 3 Aug M2). A sparse out-of-set `.nfo` beside
         // a healthy covered RAR therefore completed green with a
         // one-byte-plus-hole file, and one unactivatable sniffed
         // recovery volume exempted the entire payload of the post.

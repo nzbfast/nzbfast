@@ -726,7 +726,7 @@ pub(crate) fn rescue_split_of_container(
         // Except that `inner` is ONE verdict for the whole scratch dir and
         // carries no ownership: with two sets joined here, a sibling's
         // success makes it `Produced` even for an input no arm ever
-        // touched (Codex F-01, 23 Aug 2026). A final-payload name is
+        // touched (review finding F-01, 23 Aug 2026). A final-payload name is
         // exactly that input by construction - `collect_sevenz_archives`
         // and the stray-archive door both refuse a payload NAME (`.cb7`,
         // `.cbr`, and since 31 Aug 2026 `.mkv`/`.iso`/`.srt` and the
@@ -764,7 +764,7 @@ pub(crate) fn rescue_split_of_container(
 ///
 /// The parts are already spent, so a joined file is the only copy of
 /// itself: one that fails to move stays in `dir` unopened, and an empty
-/// scratch must not then read as "the join IS the payload" (Codex F-12,
+/// scratch must not then read as "the join IS the payload" (review finding F-12,
 /// 22 Aug 2026). Split out of [`rescue_split_of_container`] so that arm
 /// is reachable without a rename seam - a scratch directory this process
 /// may not write to is a real `EACCES`, where reaching the same line

@@ -194,7 +194,7 @@ impl ListSource {
     /// source in that window, and nothing rechecked - so a deleted account
     /// reinserted its items, persisted them and resumed auto-grabbing, and
     /// survived a restart doing it. Comparing this fingerprint after the
-    /// await is what revokes that authority (Codex sweep 12 Aug F6).
+    /// await is what revokes that authority (review sweep 12 Aug F6).
     ///
     /// Deliberately NOT the whole struct: `name` is cosmetic and
     /// `interval_secs` only decides WHEN the next poll is, so neither

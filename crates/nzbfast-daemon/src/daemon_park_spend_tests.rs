@@ -1,4 +1,4 @@
-//! §290 (Codex F-11): the automatic promotion asks the ceilings.
+//! §290 (review finding F-11): the automatic promotion asks the ceilings.
 //!
 //! This is the only door of the three that ships ON (`alt_auto_switch`,
 //! §282 item 19), and it consulted nothing at all - not the copy cap,

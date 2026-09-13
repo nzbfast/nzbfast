@@ -1,4 +1,4 @@
-//! Side-fetch cancellation tests (Codex 5 Aug M3). A child module of
+//! Side-fetch cancellation tests (review 5 Aug M3). A child module of
 //! `repair` so repair.rs keeps its size-gate baseline - same pattern
 //! as pool/unit_tests.rs.
 
@@ -80,7 +80,7 @@ async fn a_steer_config_side_fetch_still_completes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex 5 Aug M3: a side-fetch against a blackholed provider used to
+/// Review 5 Aug M3: a side-fetch against a blackholed provider used to
 /// run its whole multi-session retry ladder with no way to stop it,
 /// holding drain_network's await - and with it Cancel/Pause - for
 /// minutes. A `SideCancel` must bring `fetch_volume_articles` home

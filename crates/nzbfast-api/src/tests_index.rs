@@ -442,7 +442,7 @@ fn the_wall_poll_refuses_to_latch_a_failed_tip() {
 /// the unchanged-page signature left out both the count and the scan
 /// state, so choosing the first newsgroup in another tab left "Choose
 /// newsgroups" up on an empty page forever, because the page itself
-/// never changed (Codex sweep 7, L1). Source-scanned for the same
+/// never changed (review sweep 7, L1). Source-scanned for the same
 /// reason as the tip guard above: the HTML ships inside the binary.
 #[cfg(feature = "indexer")]
 #[test]
@@ -481,7 +481,7 @@ fn the_empty_wall_reads_the_stand_down_answer_and_repaints_on_it() {
 /// `navPillName` runs before the catalogue arrives, so the loader calls
 /// it again afterwards - but it used to strip the element's only
 /// `data-i18n` selector on the first call, so the retry found nothing
-/// and every non-English locale kept the English word (Codex sweep 7,
+/// and every non-English locale kept the English word (review sweep 7,
 /// L4).
 #[cfg(feature = "indexer")]
 #[test]
@@ -890,7 +890,7 @@ fn weekly_quota_period_pins_to_the_local_monday() {
     );
 }
 
-/// Codex 7 Aug M2: the UTC-to-local token migration must not discard a
+/// Review 7 Aug M2: the UTC-to-local token migration must not discard a
 /// non-UTC user's persisted spend. A LEGACY ledger (no "local" marker)
 /// whose token matches what the old UTC scheme computes right now is
 /// the current window's spend and carries; new-format ledgers demand
@@ -1448,7 +1448,7 @@ fn an_empty_boundary_parses_nothing() {
 
 /// One boundary parse for the gateway and both file-part handlers.
 ///
-/// There were three copies and they disagreed after Codex sweep 2's
+/// There were three copies and they disagreed after review sweep 2's
 /// H1 taught the gateway that a media type's parameter names are
 /// case-insensitive: `Boundary=` then parsed as multipart at the
 /// gateway - fields merged, the key found, auth decided - and as
@@ -1500,7 +1500,7 @@ fn multipart_fields_are_capped() {
     assert_eq!(super::multipart_fields(&body, b).len(), 256);
 }
 
-/// Codex H8: a part whose "header block" is attacker-sized invalid
+/// Review H8: a part whose "header block" is attacker-sized invalid
 /// UTF-8 must never reach the lossy decode - `from_utf8_lossy`
 /// expands each invalid byte to a 3-byte replacement character, and
 /// this parser runs pre-authentication on a body of up to 256 MiB.

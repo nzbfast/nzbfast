@@ -269,7 +269,7 @@ fn m_wall_fix(
                                 // endpoint already hands that name to
                                 // the UI - it was simply dropped on the
                                 // way back, leaving an unlabelled id in
-                                // a column four namespaces share (Codex
+                                // a column four namespaces share (review
                                 // sweep 7, H2). Anything we do not
                                 // recognise is stored as unlabelled
                                 // rather than trusted.
@@ -1393,7 +1393,7 @@ mod tests {
         }
     }
 
-    /// Site 1, the fixer's candidate arm. The crash window Codex F-07
+    /// Site 1, the fixer's candidate arm. The crash window review finding F-07
     /// closed for the UPLOAD path was still open here: this arm ran
     /// after the index write committed and wrote the fetched bytes
     /// straight over the path the committed row names.

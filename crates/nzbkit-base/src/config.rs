@@ -558,6 +558,42 @@ pub const MIN_IDLE_RELEASE_SECS: u64 = 60;
 /// DEFAULT: both idle-release settings override it per server.
 const TIGHT_SOURCE_IPS: u32 = 3;
 
+/// FNV-1a over 32 bits, for [`ServerConfig::account_key`]'s digest.
+///
+/// Written out rather than pulled from a crate because the value is
+/// stamped into `usage.json`, which outlives releases: a hash whose
+/// implementation could move under a dependency bump would re-key every
+/// block meter on the install that bumped it.
+fn fnv1a32(s: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// The HOST an account key bills to - the other half of
+/// [`ServerConfig::account_key`], kept beside it so the two cannot part
+/// company.
+///
+/// The account key carries its host verbatim after a fixed `acct:` tag
+/// and eight hex digits, so the ledger can bill one string into both its
+/// per-account bucket and its per-HOST buckets (the day totals, the
+/// SABnzbd `mode=server_stats` surface) without a second parameter at
+/// fifteen call sites.
+///
+/// A string that is NOT an account key comes back unchanged, and that
+/// is load-bearing rather than defensive: every key in a pre-migration
+/// `usage.json` is a bare hostname, and every hand-built test rig bills
+/// one. Those installs and those rigs keep billing exactly what they
+/// billed before.
+pub fn account_host(key: &str) -> &str {
+    key.strip_prefix("acct:")
+        .filter(|r| r.len() > 9 && r.as_bytes()[8] == b':')
+        .map_or(key, |r| &r[9..])
+}
+
 impl ServerConfig {
     /// The name this server's TLS handshake uses: BOTH the name the
     /// certificate is checked against and the name sent as SNI.
@@ -585,6 +621,62 @@ impl ServerConfig {
             Some(n) if !n.trim().is_empty() => n.trim(),
             _ => self.host.as_str(),
         }
+    }
+
+    /// This row's PERSISTED SPEND identity: the account the bytes are
+    /// billed to, as `acct:<8 hex>:<host>`.
+    ///
+    /// A HOSTNAME IS NOT AN ACCOUNT. Two rows on one provider are an
+    /// ordinary shape - a second account is how people buy more
+    /// connections, and a prepaid block bought from a provider you
+    /// already use lands on the same host more often than not - and the
+    /// §96.5 block meter is `lifetime - block_base` read off a
+    /// host-keyed ledger, so an unlimited account's bytes used to burn
+    /// its block sibling's block and stand it down early.
+    ///
+    /// THE USERNAME IS THE ACCOUNT, and that is the whole choice here.
+    /// A provider cannot issue two accounts under one username, so two
+    /// rows agreeing on host and username are the same account at the
+    /// provider and SHARE one bill - which is why this is allowed to
+    /// alias them where [`crate::pool::row_keys`] must not. That
+    /// header rejected `host:port:username` as the FLEET identity
+    /// because two verbatim-duplicate rows collapse to one key; they
+    /// are two socket pools whatever their credentials say, so
+    /// aliasing them is wrong there. They are one bill, so aliasing
+    /// them is right here. The argument does not transfer, in either
+    /// direction.
+    ///
+    /// NOT ORDER-DEPENDENT, which is the requirement a persisted ledger
+    /// adds and `row_keys`' per-host ordinal cannot meet: `lifetime` is
+    /// never pruned and a block base outlives releases, so a key that
+    /// moves when the user reorders Settings or deletes the first of two
+    /// rows would silently reattach a block base to the wrong account
+    /// and tell somebody mid-block they have a full one.
+    ///
+    /// NOT THE PORT either. Two rows on one account differing only in
+    /// port (563 beside 119) are still one account and one bill, and a
+    /// user retyping the port must not reset their block meter.
+    ///
+    /// THE USERNAME IS DIGESTED, never spelled out: `mode=usage`
+    /// publishes the whole ledger map verbatim, keys included, so a
+    /// plaintext key would put a credential fragment in an API body.
+    /// The host stays in the clear because that payload already carries
+    /// it, and a greppable `usage.json` is worth more than the last
+    /// eight bits of obscurity. FNV-1a is written out here rather than
+    /// taken from a crate for the reason every persisted digest wants:
+    /// this value is stamped into a file that outlives releases, so it
+    /// must not be able to move under a dependency bump.
+    ///
+    /// The `acct:` prefix and the fixed-width digest make the encoding
+    /// injective and make [`account_host`] exact - a hostname can
+    /// contain neither `:` nor a leading `acct:`, so a bare host read
+    /// out of a pre-migration ledger is unambiguously its own key.
+    pub fn account_key(&self) -> String {
+        format!(
+            "acct:{:08x}:{}",
+            fnv1a32(self.username.as_deref().unwrap_or("")),
+            self.host
+        )
     }
 
     /// May nzbfast spend this server's bytes on its OWN curiosity -
@@ -755,7 +847,7 @@ pub fn obfuscate(secret: &str) -> String {
 /// and [`obfuscate`] wrote it to disk verbatim, after which
 /// `deobfuscate` decoded the "hex" and handed the connect path four
 /// different bytes. AUTHINFO PASS then failed forever, with the config
-/// looking correct (Codex sweep 12 Aug F16). Encoding unconditionally
+/// looking correct (review sweep 12 Aug F16). Encoding unconditionally
 /// round-trips it: the stored form is `obf1:<hex of the whole literal>`,
 /// which `deobfuscate` reverses exactly.
 pub fn obfuscate_input(secret: &str) -> String {
@@ -1693,6 +1785,70 @@ mod warm_pool_default_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The persisted spend identity, in the four cases that decide what
+    /// it is FOR: it splits two accounts on one hostname, merges rows
+    /// that name one account, ignores the port, and never spells the
+    /// username out (the ledger it keys is published by `mode=usage`).
+    #[test]
+    fn an_account_key_is_the_username_on_the_host_and_never_the_port() {
+        let row = |json: &str| -> super::ServerConfig {
+            serde_json::from_str(json).expect("server config")
+        };
+        let a = row(r#"{"host":"news.example","username":"alice"}"#);
+        let b = row(r#"{"host":"news.example","username":"bob"}"#);
+        assert_ne!(a.account_key(), b.account_key(), "two accounts, two bills");
+
+        // Same account, a different port and a different everything-else:
+        // one bill, because a provider issues one account per username.
+        let a119 = row(r#"{"host":"news.example","username":"alice","port":119,
+                "block_bytes":500,"level":2,"enabled":false}"#);
+        assert_eq!(a.account_key(), a119.account_key());
+
+        // A row with no username is its own (anonymous) account, and two
+        // of them are still one.
+        let anon = row(r#"{"host":"news.example"}"#);
+        assert_eq!(
+            anon.account_key(),
+            row(r#"{"host":"news.example"}"#).account_key()
+        );
+        assert_ne!(anon.account_key(), a.account_key());
+
+        // A cleared editor box sends an empty string, which must not be
+        // a third account.
+        assert_eq!(
+            anon.account_key(),
+            row(r#"{"host":"news.example","username":""}"#).account_key()
+        );
+
+        for k in [a.account_key(), anon.account_key()] {
+            assert!(!k.contains("alice"), "the username is digested: {k}");
+            assert_eq!(super::account_host(&k), "news.example");
+        }
+    }
+
+    /// ...and a string that is not an account key is its own host,
+    /// which is what every pre-migration `usage.json` entry and every
+    /// hand-built test rig bills under.
+    #[test]
+    fn account_host_passes_a_bare_hostname_through() {
+        for h in [
+            "news.example",
+            "acct",
+            "acct:",
+            "acct:short:h",
+            "acct:toolongdigest:h",
+        ] {
+            assert_eq!(super::account_host(h), h, "{h} is not an account key");
+        }
+        assert_eq!(
+            super::account_host("acct:0011aabb:news.example"),
+            "news.example"
+        );
+        // The host is taken VERBATIM after the fixed-width digest, so a
+        // hostname is never re-split however it is spelled.
+        assert_eq!(super::account_host("acct:0011aabb:a:b"), "a:b");
+    }
+
     #[test]
     fn nzbget_conf_parses_servers_levels_groups() {
         let conf = "\n# comment\nMainDir=/data\nServer1.Active=yes\nServer1.Host=news.prim.com\nServer1.Port=563\nServer1.Username=u1\nServer1.Password=p1\nServer1.Encryption=yes\nServer1.Connections=30\nServer1.Level=0\nServer1.Group=1\nServer2.Active=yes\nServer2.Host=fill.block.com\nServer2.Encryption=no\nServer2.Level=1\nServer2.Retention=4000\nServer3.Active=no\nServer3.Host=off.example.com\n";
@@ -2047,7 +2203,7 @@ mod obf_tests {
     /// encoded and stores it verbatim; `deobfuscate` then decodes the
     /// "hex" and hands the connect path different bytes, so AUTHINFO PASS
     /// fails forever against a config that looks right. The raw-input
-    /// encoder makes no such guess (Codex sweep 12 Aug F16).
+    /// encoder makes no such guess (review sweep 12 Aug F16).
     #[test]
     fn a_literal_obf_prefixed_password_round_trips() {
         for pw in [
@@ -2232,7 +2388,7 @@ pub fn parse_sabnzbd_categories(text: &str) -> ImportedCategories {
     // `complete_dir=~/Downloads/complete`, and joining a relative
     // category dir onto the verbatim value produced `~/…/movies`,
     // which the absolute-path check below then rejected - dropping a
-    // perfectly valid destination (Codex sweep 5 Aug L2).
+    // perfectly valid destination (review sweep 5 Aug L2).
     let complete_dir = resolve_sab_dir(&complete_dir, "");
 
     let mut out = ImportedCategories::default();
@@ -2670,7 +2826,7 @@ host = news.example.com
     /// category dir must land under `$HOME/...` - joining the verbatim
     /// `~/...` produced a path the absolute check rejected, and a
     /// valid destination was dropped with a misleading "no
-    /// complete_dir" note (Codex sweep 5 Aug L2).
+    /// complete_dir" note (review sweep 5 Aug L2).
     #[test]
     fn a_tilde_complete_dir_still_resolves_relative_category_dirs() {
         // HOME on unix, USERPROFILE on Windows - resolved the same way
@@ -2697,7 +2853,7 @@ host = news.example.com
         );
     }
 
-    /// Codex sweep 7 Aug (the 3df076bf residual): the OTHER two home
+    /// Review sweep 7 Aug (the 3df076bf residual): the OTHER two home
     /// spellings a sabnzbd.ini carries - `~\...` from a Windows-authored
     /// config and a bare `~` - must expand too, or category downloads
     /// land in a directory literally named `~` under complete_dir.

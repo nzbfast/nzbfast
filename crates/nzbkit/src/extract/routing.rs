@@ -471,7 +471,7 @@ impl Extractor {
             let child = self.ensure_child(inner);
             let cs = child.alloc_slot();
             // A §94 A map-mode replay preclaimed its SOURCE files under a
-            // volume slot of this group (Codex F-03); the child's claims
+            // volume slot of this group (review finding F-03); the child's claims
             // are its own, so the grant moves to the routed slot.
             let ck = name_collision_key(inner.fold_names, &sanitize_out_name(&key));
             if let Some(&pre) = inner.preclaimed.get(&ck)

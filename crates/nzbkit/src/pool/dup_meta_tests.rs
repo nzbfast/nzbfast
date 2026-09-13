@@ -451,14 +451,14 @@ fn an_unscoped_request_can_neither_earn_nor_inherit_a_stand_down() {
     // guard alone hides a mutation of the other: with the WRITE
     // refused the sentinel can never be in the set, so the read guard
     // is unfalsifiable through `note_decoded` - and a guard no test can
-    // kill is a guard no test is checking (the trap CLAUDE.md's
+    // kill is a guard no test is checking (the trap CONTRIBUTING.md's
     // cfg-safety gate entry records in its own words).
     //
     // The WRITE door, while `off` is still empty, so `any_off` - the
     // ledger's "gate stood down" line, read by `pool::saturation` -
     // carries the assertion too.
     assert!(
-        !sh.part_latch.stand_down(u32::MAX),
+        !sh.part_latch.stand_down(u32::MAX).0,
         "the sentinel cannot be recorded, and stand_down says so"
     );
     assert!(
@@ -466,7 +466,7 @@ fn an_unscoped_request_can_neither_earn_nor_inherit_a_stand_down() {
         "so the ledger does not report a stand-down that never happened"
     );
     // A REAL file index in the same run is unaffected.
-    assert!(sh.part_latch.stand_down(0), "a real file still latches");
+    assert!(sh.part_latch.stand_down(0).0, "a real file still latches");
     assert!(sh.part_latch.is_off(0));
     // The READ door on its own. `off` is reachable from any sibling
     // module of `pool` - the call site in `note_decoded` wrote it

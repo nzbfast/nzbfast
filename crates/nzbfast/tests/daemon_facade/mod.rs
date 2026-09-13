@@ -958,7 +958,7 @@ async fn nzbget_jsonrpc_facade_cycle() {
     .unwrap();
 }
 
-/// The NZBGet JSON-RPC facade announces the idle edge (Codex sweep
+/// The NZBGet JSON-RPC facade announces the idle edge (review sweep
 /// 14 Aug M4). GroupPause on the sole runnable job and a non-active
 /// GroupDelete each idle the queue with no park, and the REST arms have
 /// said `queue.idle` for both since the 10 Aug sweep - this facade
@@ -1889,6 +1889,190 @@ async fn clear_failed_sweeps_failures_and_spares_locked_rows() {
                 "{id} must survive value=failed: {hist2}"
             );
         }
+    })
+    .await
+    .unwrap();
+}
+
+/// `output=xml` on a LIVE daemon: row 7 of
+/// `research/SAB-MODE-SHAPE-AUDIT-2026-08-31.md`, the one finding there
+/// that is a whole serializer rather than a field.
+///
+/// The unit tests beside `sabcompat/xmlout.rs` hold the documents to
+/// SAB's own `XmlOutputFactory` algorithm. What they cannot see is the
+/// part that lives in `serve/http.rs`: whether the parameter is read at
+/// all, whether the CONTENT TYPE moves with the body (a client that
+/// gets `application/json` on an XML document is no better off than
+/// before), and - the regression that matters most here - whether a
+/// caller that does not ask for XML still gets exactly the bytes it got
+/// yesterday.
+///
+/// So the JSON half is pinned by EQUALITY against itself across three
+/// spellings: no `output` at all, `output=json`, and an `output` value
+/// that is neither. SAB's own test is `params.get("output") == "xml"`
+/// and nothing looser, so all three must be byte-identical to each
+/// other; only the literal `xml` may move.
+#[tokio::test(flavor = "multi_thread")]
+async fn sab_output_xml_is_opt_in_and_shaped_like_sabs() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-sabxml-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    // One configured server so `mode=status` has a row to render and
+    // `mode=warnings` does NOT say "no server configured". Never
+    // dialled: nothing here downloads.
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        r#"{"servers":[{"host":"news.invalid","port":563,"tls":true,"connections":4,"level":0}]}"#,
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        let body = |q: &str| -> String { http(port, &format!("/api?{q}"), None) };
+        // Headers kept, so the content type can be read off the wire
+        // rather than assumed.
+        let full = |q: &str| -> String {
+            let req = format!("GET /api?{q} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            String::from_utf8_lossy(&raw(port, req.as_bytes())).to_string()
+        };
+
+        // ---- the JSON path is untouched, which is the regression -----
+        for mode in [
+            "version",
+            "queue",
+            "history",
+            "status",
+            "fullstatus",
+            "warnings",
+            "get_cats",
+            "get_scripts",
+            "get_config",
+            "server_stats",
+        ] {
+            let bare = body(&format!("mode={mode}&apikey=sekrit"));
+            let asked = body(&format!("mode={mode}&apikey=sekrit&output=json"));
+            let odd = body(&format!("mode={mode}&apikey=sekrit&output=text"));
+            // `queue` and `history` carry a live clock in some fields,
+            // so compare the PARSED value rather than the bytes for
+            // them; every other body here is stable within a run.
+            let j = |s: &str| -> serde_json::Value {
+                serde_json::from_str(s).unwrap_or_else(|e| panic!("{mode} not JSON ({e}): {s}"))
+            };
+            assert_eq!(j(&bare), j(&asked), "{mode}: output=json moved the body");
+            assert_eq!(
+                j(&bare),
+                j(&odd),
+                "{mode}: a non-xml output value moved the body"
+            );
+            // ...and it really is JSON, with a JSON content type.
+            let hdrs = full(&format!("mode={mode}&apikey=sekrit"));
+            assert!(
+                hdrs.to_lowercase()
+                    .contains("content-type: application/json"),
+                "{mode}: JSON path lost its content type: {hdrs}"
+            );
+        }
+
+        // ---- and `output=xml` answers XML, with SAB's element names --
+        let x = |mode: &str| -> String { body(&format!("mode={mode}&apikey=sekrit&output=xml")) };
+
+        // The prolog is SAB's, byte for byte, on every mode.
+        for mode in ["version", "queue", "history", "status", "warnings"] {
+            assert!(
+                x(mode).starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n"),
+                "{mode}: {}",
+                x(mode)
+            );
+        }
+        // `text/xml`, which is the literal string SAB's `report()`
+        // writes - not `application/xml`.
+        let hdrs = full("mode=version&apikey=sekrit&output=xml");
+        assert!(
+            hdrs.to_lowercase().contains("content-type: text/xml"),
+            "xml path kept a JSON content type: {hdrs}"
+        );
+
+        // The outer element per mode, from SAB's own `report(keyword=)`.
+        assert!(x("version").contains("<version>"), "{}", x("version"));
+        assert!(x("queue").contains("<queue>"), "{}", x("queue"));
+        assert!(x("history").contains("<history>"), "{}", x("history"));
+        assert!(x("get_config").contains("<config>"), "{}", x("get_config"));
+        // `server_stats` is one of SAB's `keyword=""` modes.
+        assert!(
+            x("server_stats").contains("<result>"),
+            "{}",
+            x("server_stats")
+        );
+        // `status` and `fullstatus` are ONE function in SAB and one
+        // document here - audit finding 5, carried onto the XML path.
+        assert!(x("status").contains("<status>"), "{}", x("status"));
+        assert!(x("fullstatus").contains("<status>"), "{}", x("fullstatus"));
+        // The plural table, live: `categories` -> `<category>`,
+        // `scripts` -> `<script>`, and a Python bool spelled `True`.
+        assert!(x("get_cats").contains("<category>"), "{}", x("get_cats"));
+        assert!(
+            x("get_scripts").contains("<script>None</script>"),
+            "{}",
+            x("get_scripts")
+        );
+        assert!(
+            x("status").contains("<paused>False</paused>"),
+            "{}",
+            x("status")
+        );
+        // A configured server reaches the XML path too, under the
+        // table's singular rather than the `slot` fallback.
+        assert!(
+            x("status").contains("<servername>news.invalid</servername>"),
+            "{}",
+            x("status")
+        );
+        // Nothing in an XML answer is JSON, which is the crash this
+        // whole item is about.
+        for mode in ["version", "queue", "status", "get_cats"] {
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&x(mode)).is_err(),
+                "{mode} still answered JSON under output=xml: {}",
+                x(mode)
+            );
+        }
+
+        // ---- a REFUSAL honours it as well ---------------------------
+        // SAB's `check_apikey` goes through the same `report()`, so a
+        // client that gets XML for every good call and JSON for a bad
+        // key throws exactly where its error handling runs.
+        let bad = body("mode=version&apikey=wrong&output=xml");
+        assert!(
+            bad.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<result>"),
+            "refusal was not an XML result report: {bad}"
+        );
+        assert!(bad.contains("<status>False</status>"), "{bad}");
+        // The exact SAB phrase the *arrs substring-match survives the
+        // move to XML.
+        assert!(bad.contains("<error>API Key Incorrect</error>"), "{bad}");
+        // ...and the JSON refusal is unchanged for everyone else.
+        let bad_json = body("mode=version&apikey=wrong");
+        let v: serde_json::Value = serde_json::from_str(&bad_json)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {bad_json}"));
+        assert_eq!(v["error"], "API Key Incorrect");
+        assert_eq!(v["status"], false);
     })
     .await
     .unwrap();

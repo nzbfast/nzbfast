@@ -150,7 +150,7 @@ jobs:
       # internet; NZBFAST_REQUIRE_PAR2 turns a broken par2 install into
       # a red run instead of silently skipped repair coverage
       # (rationale in pr-check.yml). --test-threads=1 is a hard
-      # requirement for the daemon suite (CLAUDE.md invariant 4); the
+      # requirement for the daemon suite (project invariant 4); the
       # e2e suite tolerates parallelism but carries timing-sensitive
       # stall/watchdog tests (8-10s abort windows), so it ran
       # single-threaded here too - nightly has the time budget.
@@ -474,9 +474,29 @@ jobs:
       #     equals the keeper target - the clamp still ENGAGES, only its
       #     note is never emitted, so the rig-sanity line reads "the
       #     clamp never engaged" when it did.
-      # The other 21 are real regression coverage that has simply never
-      # run; they pass clean today (verified individually and as a
-      # group, 31 Aug 2026). `--run-ignored ignored-only` so this step
+      # A SIXTH joined them 9 Sep 2026 (claim `red-long-suites-c765a60a`,
+      # full numbers: research/HEDGE-PAYOUT-RIG-CANNOT-ISOLATE-THE-HEDGE-2026-09-09.md):
+      #   - payout_hedge_rescues_stalls_in_under_a_second_not_eight trips
+      #     its own sanity precondition ("off leg finished too fast for
+      #     the stalls to have bitten"), and the cause is that the rig
+      #     does not isolate what it names. Its doc comment builds a
+      #     fixture for ONE stalled article so the 2x slow-owner rule
+      #     stays dark, then stalls SIX on a server holding 3 of the 4
+      #     connections. The slow-owner comparison is PER WORKER and a
+      #     stalled worker still counts in the divisor, so two
+      #     concurrent stalls drop the owner to 13.3 KB/s against 40 and
+      #     the rule fires - rescuing at ~3 s where the baseline assumes
+      #     the flat 8 s. Both legs sample that race: measured on an
+      #     idle box, the hedge-ON leg twice finished fast with ZERO
+      #     hedges issued, so the payout assertion passes for the wrong
+      #     reason as often as the precondition fails. The engine is not
+      #     regressed - every leg completed all 80 articles and won all
+      #     6 dups, sooner than the rig expects. Re-pricing the fixture
+      #     is the fix; widening `off > 9 s` until it stopped failing
+      #     would only hide which rule paid.
+      # The other 20 are real regression coverage that has simply never
+      # run; they passed clean when wired (verified individually and as
+      # a group, 31 Aug 2026 - 21 then, less the sixth named out above). `--run-ignored ignored-only` so this step
       # runs ONLY the named ignored tests, never the ordinary pool::
       # unit tests the main sweep already covers on every push.
       # `.config/nextest.toml`'s `pool-rigs-serial` test-group forces
@@ -494,7 +514,7 @@ jobs:
         run: >
           cargo nextest run --profile ci -p nzbkit --locked --lib
           --features heavy-tests --run-ignored ignored-only
-          -E 'package(nzbkit) and binary(nzbkit) and test(/^pool::(fault_rigs::fight_slope_plus_adaptive_must_not_double_punish|queue_tests::queue_control_cancel_cost_at_field_scale|rig_tests::(payout_brownout_recovery_across_config_tiers|payout_channel_depth_smooths_a_stalling_write_side|payout_flap_breaker_collapses_ip_cap_churn|payout_flap_cap_keepers_hold_the_caps_worth|payout_hedge_rescues_stalls_in_under_a_second_not_eight|payout_hot_spare_hides_reconnect_latency|payout_hot_spare_skips_the_slow_start_trickle|payout_multiwan_fanout_rescues_the_frozen_wan|payout_rain_fade_drains_to_the_healthy_wan|payout_recycle_slope_probes_an_asymmetric_multiwan|payout_slope_recycle_frees_a_degraded_session|payout_ttfb_hedge_beats_the_budget_on_dead_air|payout_ttfb_hedge_still_pays_when_dials_cost|safety_adaptive_timeout_kills_nothing_on_a_jittery_link|safety_shipped_defaults_survive_starlink_handovers|safety_ttfb_hedge_kills_nothing_on_a_jittery_link)|tail_rigs::(the_queue_dry_tail_is_the_dial_not_the_job|the_taper_costs_nothing_when_the_client_is_the_bottleneck|the_taper_shortens_the_drain_without_paying_wall_for_it))$/)'
+          -E 'package(nzbkit) and binary(nzbkit) and test(/^pool::(fault_rigs::fight_slope_plus_adaptive_must_not_double_punish|queue_tests::queue_control_cancel_cost_at_field_scale|rig_tests::(payout_brownout_recovery_across_config_tiers|payout_channel_depth_smooths_a_stalling_write_side|payout_flap_breaker_collapses_ip_cap_churn|payout_flap_cap_keepers_hold_the_caps_worth|payout_hot_spare_hides_reconnect_latency|payout_hot_spare_skips_the_slow_start_trickle|payout_multiwan_fanout_rescues_the_frozen_wan|payout_rain_fade_drains_to_the_healthy_wan|payout_recycle_slope_probes_an_asymmetric_multiwan|payout_slope_recycle_frees_a_degraded_session|payout_ttfb_hedge_beats_the_budget_on_dead_air|payout_ttfb_hedge_still_pays_when_dials_cost|safety_adaptive_timeout_kills_nothing_on_a_jittery_link|safety_shipped_defaults_survive_starlink_handovers|safety_ttfb_hedge_kills_nothing_on_a_jittery_link)|tail_rigs::(the_queue_dry_tail_is_the_dial_not_the_job|the_taper_costs_nothing_when_the_client_is_the_bottleneck|the_taper_shortens_the_drain_without_paying_wall_for_it))$/)'
       # Same as the first one above: this job's suites share one junit
       # path, so each needs its own check before the next overwrites it.
       - name: wedge check - pool rigs
@@ -1037,14 +1057,70 @@ jobs:
             min_tests: 1000
           # The nzbkit split's lane 2 cut (3 Sep 2026). The leg above
           # kept the larger half: nzbkit's 2,753 lib tests are 1,553 in
-          # the facade (extract, pool, index) and 1,200 here, and
-          # serially on the dev box this binary is 119.4 s. So the
-          # budget is a THIRD of nzbkit's rather than a match for it -
-          # the campaign is a rate per binary, and a binary that runs in
-          # two minutes buys the same order of iterations from 3000 s
-          # that the facade needs 9000 for. If it stops completing three
-          # iterations, cut the leg with a `one-process-uncovered:` line
-          # rather than leaving it red.
+          # the facade (extract, pool, index) and 1,200 here.
+          #
+          # THE BUDGET WAS 3000 - A THIRD OF nzbkit's - ON A PREMISE THAT
+          # IS NOW FALSE, and the way it failed is worth more than the
+          # number. That premise was "serially on the dev box this binary
+          # is 119.4 s ... a binary that runs in two minutes buys the same
+          # order of iterations from 3000 s that the facade needs 9000
+          # for". It stopped being true on 11 Sep 2026 and the leg refused
+          # itself on 12 Sep (run 34685204202, sha 62365d02): only 2
+          # iterations completed against `--min-runs 3`, which is exit 2
+          # with zero tests failed. The six-night series off this same
+          # leg's own logs, every number of which is printed on a PASS too:
+          #
+          #   date    sha       tests  s/iter  iters  dilation  pace
+          #   09-08   d7d319c4   1360    288     10    9.79     0.92
+          #   09-09   c765a60a   1390    139     21   11.09     0.87
+          #   09-10   9338c31b   1406    256     11   12.09     0.92
+          #   09-10b  81bcc950   1411    256     11   11.02     0.91
+          #   09-11   6140be0f   1435    889      3   10.73     0.83
+          #   09-12   62365d02   1446   1230      2   11.18     0.92  RED
+          #
+          # THE RUNNER DID NOT GET SLOWER - dilation held in a 9.8-12.1x
+          # band the red night sits in the middle of, the quiet CPU probe
+          # held at 0.441-0.662 s and pace at 0.83-0.94 - so re-deriving
+          # the multipliers would have been chasing a healthy box. AND THE
+          # BINARY DID NOT GROW: 1411 -> 1446 tests is 2.5% while the
+          # iteration wall went 256 s -> 1230 s, 4.8x. What happened is
+          # the third thing, and it is the one the refusal did not name
+          # until this commit: the PAR2 joint-Forney campaign split
+          # `par2repair/forney/` out (the module does not exist at
+          # 81bcc950) and landed 19 compute-heavy tests in `forney::joint`.
+          # Measured on the dev box 12 Sep: those 19 are 1.3% of this
+          # binary's 1,460 tests and 135.6 s of its 275.2 s, 49% of the
+          # wall. Five of them are 42.9, 30.1, 15.6, 14.0 and 13.3 s EACH
+          # on a 32-core M3 Ultra.
+          #
+          # So the budget is re-derived from what the binary now costs,
+          # not raised until it passes. The loop never starts an iteration
+          # it has no room to finish, so N iterations need N x the
+          # iteration wall: 6000 s buys 4 at today's 1234 s and still buys
+          # 3 if an iteration reaches 2000 s (62% of growth headroom).
+          # It costs no more wall than 5000 would at today's cost - the
+          # campaign stops when it cannot start another iteration, at
+          # ~4936 s either way - so the extra 1000 s is bought headroom
+          # rather than bought minutes. Expect ~87 min against the 46 min
+          # this leg took on 12 Sep.
+          #
+          # AND IT CARRIES AN `iteration_timeout`, WHICH IS THE SECOND
+          # DEFECT AND THE WORSE ONE. The driver's default is 1800 s and
+          # an iteration that crosses it is counted as a RED named
+          # `<the process wedged and hit the per-iteration timeout>`. At
+          # 1234 s this leg was already 69% of the way there, so the next
+          # growth step would not have refused the run - it would have
+          # FABRICATED a finding, and one red in three runs is 33%, over
+          # the 25% threshold, i.e. exit 1 with a named wedge that never
+          # happened. 3600 s is ~2.9x the honest wall: still tight enough
+          # to catch a real wedge, wide enough that growth reports itself
+          # as the refusal above rather than as a lie. The job timeout is
+          # the budget plus one iteration at that ceiling plus the build.
+          #
+          # If it stops completing three iterations, re-read the series
+          # the same way before reaching for the budget again, and if the
+          # honest answer is that it cannot, cut the leg with a
+          # `one-process-uncovered:` line rather than leaving it red.
           #
           # THE FEATURES ARE ON THE `select` FOR THE REASON THE CORE LEG
           # BELOW STATES. `test-support` is a dev-dependency switch in
@@ -1058,8 +1134,12 @@ jobs:
           - id: nzbkit-base:lib
             package: nzbkit-base
             select: --lib --features indexer,test-support
-            budget: 3000
-            timeout: 90
+            budget: 6000
+            timeout: 180
+            # The only leg that overrides the driver's 1800 s default;
+            # the block above says why, and why it is a ceiling rather
+            # than a knob to raise whenever it is reached.
+            iteration_timeout: 3600
             # ran 1200 on 7ec5395d; see the floor note above the matrix
             min_tests: 800
           # The crate-split step 2 cut (2 Sep 2026) made this a unit
@@ -1298,6 +1378,79 @@ jobs:
             timeout: 45
             # ran 136 on 8099d6543; see the floor note above the matrix
             min_tests: 100
+          # THE FIRST VENDORED LEG, 8 Sep 2026. `unit-one-process` skipped
+          # every `vendor/` package until that day and this gate's own
+          # derivation skipped them with it, so `rars` was run in ONE
+          # process by no job in the repo - see the header of
+          # tools/one-process-roster.py, which carries the argument and
+          # points at the dispatch note in the private tree. It is
+          # a fork this repo edits (compressor, ratio, BLAKE2sp and
+          # recovery work, ~70 rows of divergence in
+          # vendor/rars/VENDORING.md), so its tests and its globals are
+          # ours.
+          #
+          # `--features parallel` IS LOAD-BEARING, and it is the same
+          # argument every feature note above makes. rars' own default set
+          # is empty; four first-party crates depend on it WITH that
+          # feature, so workspace unification turns it on in the archive
+          # `unit-one-process` runs. A bare `--lib` here would build a
+          # smaller binary - the rayon-backed decode and fold paths
+          # compile out - and the two jobs would campaign over different
+          # test sets under one target name.
+          #
+          # BUDGET 3000, matched to the `nzbfast-daemon` leg above on the
+          # measurement rather than on taste: 961 tests, 85.01 s SERIAL on
+          # the 32-core dev box (24.79 s at `--test-threads=4`), against
+          # that leg's 904 / 65.99 s at the same 3000. Loaded runner
+          # iterations should land around 2-3 minutes, so this buys well
+          # past the three-iteration floor the nzbfast leg's note sets. If
+          # it stops completing three, cut the leg with a
+          # `one-process-uncovered:` line rather than leaving it red.
+          #
+          # WHAT IT IS LIKELY TO FIND: `memtrack` is a pair of
+          # process-global atomics with a `peak()` reader, and a LIB test
+          # asserts on that peak (memtrack.rs:92) - which is (a)/(b)
+          # exactly. For (c), the shape only THIS job reaches, the extract
+          # and source paths carry 30-second deadlines with millisecond
+          # sleeps inside them (lib.rs:4279, source.rs:820), and a
+          # decode-heavy binary on a loaded two-core box is where a budget
+          # like that first runs out.
+          - id: rars:lib
+            package: rars
+            select: --lib --features parallel
+            budget: 3000
+            timeout: 90
+            # ran 956 (5 ignored) on 90e647539; see the floor note above
+            min_tests: 650
+          # The daemon's HTTP server, and the second vendored leg. Also a
+          # fork this repo edits: the task pool and the request/response
+          # deadlines are ours, and patch 13 added the rustls acceptor.
+          #
+          # THE CHEAPEST LEG IN THE MATRIX and the one with the clearest
+          # (c) case, which is why it is a leg rather than an excuse. 27
+          # tests, 1.00 s SERIAL on the dev box - an order of magnitude
+          # under `postfast:lib`'s 0.91 s / 136 - so 600 s buys hundreds
+          # of iterations even on a loaded runner. And nearly every one of
+          # those tests carries a wall-clock budget it never sets:
+          # `task_pool` spawns real threads and waits on
+          # `recv_timeout(10 s)` (task_pool.rs:342, 376, 406),
+          # `messages_queue` sleeps 200 ms and then asserts on an elapsed
+          # `Instant` (messages_queue.rs:138, 182), and `deadline`'s
+          # writer tests pace themselves with `sleep`. That is precisely
+          # the class that fails SOLO once the box is slow enough and that
+          # no other job in this repo can see.
+          #
+          # No features on the `select`: `ssl-rustls` is resolved ON in
+          # the archive (the daemon's native HTTPS turns it on), but it
+          # gates the acceptor rather than any test, so a bare `--lib`
+          # runs the same 27. Name it here if that stops being true.
+          - id: tiny_http:lib
+            package: tiny_http
+            select: --lib
+            budget: 600
+            timeout: 45
+            # ran 27 on 90e647539; see the floor note above the matrix
+            min_tests: 18
     # nzbfast's BIN root is a SHIM since the crate-split step 4.5
     # (2 Sep 2026) - `main.rs` sets the allocator and calls
     # `nzbfast::cli_main()`, and every test in the package belongs to the
@@ -1329,6 +1482,16 @@ jobs:
     # bin is excused. The bin is still worth re-reading if `postfast
     # gen` ever grows assertions of its own.
     # one-process-uncovered: postfast:bin/postfast - a one-verb CLI over the lib's generator with zero tests, so a loaded campaign has nothing to run
+    # `posting_denom`, the second bin in this crate, added 8 Sep 2026 by
+    # 89f902f6e1 to measure RAR5 creation's share of end-to-end posting
+    # wall time. It is a research driver, not a shipped verb: it times
+    # the production entry points a real post already calls and prints
+    # tab-separated phase timings, and it carries ZERO tests. So a loaded
+    # campaign over it has nothing to run, which is the same reason the
+    # `postfast` bin above is excused. If it ever grows assertions of its
+    # own, replace this line with a real matrix leg the way the `lib`
+    # excuse was replaced on 3 Sep 2026.
+    # one-process-uncovered: postfast:bin/posting_denom - a research-only timing driver with zero tests, so a loaded campaign has nothing to run
     # `parfast`, the par2cmdline-dialect CLI over the PAR2 engine
     # (chip 13, 3 Sep 2026). BOTH targets excused, and the reason is the
     # same for each: this crate carries no process-global state and no
@@ -1347,6 +1510,22 @@ jobs:
     # gate's population either way.
     # one-process-uncovered: parfast:lib - the parser, the verbosity ladder and the help screen; pure functions with no process-global state or timer for load to perturb
     # one-process-uncovered: parfast:bin/parfast - a shim that reads argv and calls parfast::run, so it carries no tests to load
+    # `lzma-rust2`, the third vendored default member, came into this
+    # gate's population on 8 Sep 2026 with `rars` and `tiny_http`. Its two
+    # siblings got legs and this one is excused, on the same test the
+    # `nzbtray` line above applies: this job exists for shape (c), a
+    # hidden WALL-CLOCK budget, and there is no clock in this crate to
+    # run out. The binary is a differential between the fastpath decoder
+    # and the pre-fastpath one over byte slices in memory - 41 tests,
+    # 6.98 s serial - with no thread, no timer, no socket and no
+    # filesystem in any of them, and its one piece of per-thread state is
+    # a scratch buffer in `decoder.rs`. Pollution and races over that are
+    # shapes (a) and (b), which `unit-one-process` reaches on every push
+    # now that it runs this binary at all - and that is where they would
+    # show. Replace this line with a real leg if the differential ever
+    # grows a timing assertion or a worker thread, the way the
+    # `postfast:lib` excuse was replaced on 3 Sep 2026.
+    # one-process-uncovered: lzma-rust2:lib - an in-memory decoder differential with no thread, timer, socket or file in it, so load has nothing to perturb; unit-one-process runs it on every push, which is where a pollution or race shape would show
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # FIRST, and it needs neither the toolchain nor the cache below, so
@@ -1501,6 +1680,16 @@ jobs:
       # THREADS that dilate the pacing on a two-core box. TODO 289 carries
       # both tables. Reach for `--starve` by hand on one suspect test,
       # which is how both 24 Aug flakes were actually found.
+      # `matrix.iteration_timeout || 1800` rather than a field on all
+      # thirteen legs: an absent matrix key is the empty string, which is
+      # falsy, so only the leg that sets it departs from the driver's own
+      # default. The 1800 here IS that default written twice - the
+      # driver's `--iteration-timeout` argparse line is the other copy -
+      # and the two must move together. It is a WEDGE detector: an
+      # iteration that crosses it is counted as a red named `<the process
+      # wedged...>`, so a leg whose honest iteration approaches it
+      # fabricates findings. The driver warns before that happens; the
+      # nzbkit-base block above is the incident that bought the warning.
       - name: loaded, repeated one-process runs of the ${{ matrix.id }} unit binary
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
@@ -1509,7 +1698,8 @@ jobs:
         run: |
           python3 tools/loaded-one-process.py --selftest
           python3 tools/loaded-one-process.py --budget-seconds ${{ matrix.budget }} \
-            --min-tests ${{ matrix.min_tests }} -- \
+            --min-tests ${{ matrix.min_tests }} \
+            --iteration-timeout ${{ matrix.iteration_timeout || 1800 }} -- \
             cargo test --locked -p ${{ matrix.package }} ${{ matrix.select }} -- --test-threads={threads}
       # No `how to read a red run` step, and its absence is the point:
       # the driver writes its own annotations, one per failing test with
@@ -1628,7 +1818,7 @@ jobs:
             target
           key: nightly-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       # --test-threads=1 is a hard requirement for the daemon suite
-      # (CLAUDE.md invariant 4), same as the Linux leg above.
+      # (project invariant 4), same as the Linux leg above.
       #
       # NZBFAST_NO_ENRICH keeps enrichment workers off the real
       # internet. NZBFAST_LAN_TESTS is deliberately NOT set: it opens an
@@ -2004,7 +2194,32 @@ jobs:
           # CC_*, so cargo-zigbuild translates the triple itself.
           # The loop pops each argument off the front and pushes the
           # keepers onto the back, exactly $# times.
-          strip='n=$#\nwhile [ "$n" -gt 0 ]; do\n  a=$1; shift; n=$((n-1))\n  case "$a" in --target=*) ;; *) set -- "$@" "$a" ;; esac\ndone\n'
+          # Two arg shapes zig cc will not take. `--target=*` is ours to
+          # drop because the shim already supplies `-target`. The second is
+          # rustc's, not ours: for `aarch64-unknown-linux-musl` it passes
+          # `-Wl,--fix-cortex-a53-843419` from the TARGET SPEC, and zig's
+          # linker answers "unsupported linker arg", which failed this job
+          # at LINK before a single test ran (run 34583096699).
+          #
+          # It has to be dropped HERE and cannot be turned off upstream:
+          # 843419 is a LINKER erratum flag, and the only Cortex-A53
+          # erratum rustc exposes as a codegen feature is 835769
+          # (`rustc --print target-features` lists that one and not this
+          # one), so `-C target-feature=-fix-cortex-a53-843419` is not a
+          # spelling that exists and would have silently done nothing.
+          #
+          # Safe to drop for what this job IS: a workaround for an erratum
+          # on Cortex-A53, in a test binary run under QEMU modelling
+          # Cortex-A72, which is not affected and is the whole point of the
+          # `-cpu` choice. Nothing shipped is built here.
+          #
+          # The second case is a NO-OP in the armv7 copy of this shim -
+          # rustc does not pass an aarch64 erratum flag for
+          # `arm-linux-musleabihf` - and is kept there anyway so the two
+          # recipes stay byte-identical. They are described in this file as
+          # the same recipe retargeted, and a divergence between them is
+          # how one gets fixed and the other quietly does not.
+          strip='n=$#\nwhile [ "$n" -gt 0 ]; do\n  a=$1; shift; n=$((n-1))\n  case "$a" in --target=*|-Wl,--fix-cortex-a53-843419) ;; *) set -- "$@" "$a" ;; esac\ndone\n'
           printf "#!/bin/sh\n${strip}exec zig cc -target %s \"\$@\"\n"  "$T" > "$HOME/zigshim/zig-cc"
           printf "#!/bin/sh\n${strip}exec zig c++ -target %s \"\$@\"\n" "$T" > "$HOME/zigshim/zig-cxx"
           printf '#!/bin/sh\nexec zig ar "$@"\n'                  > "$HOME/zigshim/zig-ar"
@@ -2185,7 +2400,7 @@ jobs:
           #
           # `--workspace` here is the LAST one left in either workflow
           # file, and it is deliberate. ci-private's two archive steps
-          # and CLAUDE.md's sweep all dropped it on 23 Aug 2026 because
+          # and CONTRIBUTING.md's sweep all dropped it on 23 Aug 2026 because
           # it overrides `default-members`, turns nzbfast's `ffi`
           # feature on and compiles the whole module tree a second time
           # as the lib target (measurements at ci-private's archive
@@ -2204,6 +2419,191 @@ jobs:
                 not binary(daemon) and not binary(e2e) and not binary(leak_soak) and
                 not binary(par2gen_large_set) and
                 not test(=sysbench::tests::compute_report_is_sane)'
+
+  # 64-bit ARM OFF APPLE SILICON, under qemu on a Cortex-A72 model -
+  # claim `fast-mode-arch-breadth-11sep`, 11 Sep 2026. WHAT THIS HOLDS
+  # THAT NOTHING ELSE DOES: gf16's aarch64 dispatch has two arms per
+  # kernel, sha3 and plain NEON (`xor_mul_multi_neon_sha3` against
+  # `xor_mul_multi_neon`, `butterfly_neon_sha3` against
+  # `butterfly_two_pass`), and every Apple core has sha3, so on every Mac
+  # in the fleet - and on the macOS runners - the plain arms are dead
+  # code reached by nothing. `gf16::scale_available()` answers `true` for
+  # ALL of aarch64 (it is what lets `parfast --fast` engage), and the
+  # Linux arm64 tarball ships to Graviton2, Ampere and Pi 4/5 cores that
+  # do not have sha3. Until this job, no test anywhere ran that dispatch.
+  #
+  # WHY `QEMU_CPU=cortex-a72` IS LOAD-BEARING: qemu-user's default model
+  # is `max`, which reads sha3=TRUE, so a plain binfmt run of these
+  # binaries (the way `armv7-cross` above executes its tests) exercises
+  # the Apple path a second time and this job's reason evaporates.
+  # Measured 11 Sep 2026 with a probe binary: `-cpu cortex-a72` and
+  # `-cpu neoverse-n1` both read sha3=false, `max` reads true. The
+  # variable is read by qemu-user itself, so it reaches the runner nextest
+  # names below without a wrapper.
+  #
+  # NARROW ON PURPOSE. `armv7-cross` runs the whole workspace because its
+  # oracle is 32-bit width and that can bite anywhere. This job's oracle
+  # is one file's dispatch, so it builds ONE test binary (nzbkit-base's
+  # lib, with the `test-support` feature the archive builds it with) and
+  # runs its `gf16::` and `par2repair::` modules - the kernels and the
+  # solve that sits on them. Measured locally under the same emulator
+  # (colima, qemu-user-static 8.2.2): the opt-level-2 binary builds in
+  # under a minute and the filtered run is minutes, against an hour for
+  # the armv7 sweep. Widen it when a second aarch64-gated arm appears
+  # outside those two modules, not before.
+  #
+  # musl and zig rather than the pinned `aarch64-unknown-linux-gnu`
+  # target: a static binary runs under qemu-user with no sysroot, which
+  # is the whole of why `armv7-cross` is musl too. The target is in
+  # rust-toolchain.toml's list for the same reason armv7's is.
+  aarch64-cross:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: toolchain
+        run: rustc -vV && rustup target list --installed
+      # Same recipe as `armv7-cross`, retargeted: zig supplies the musl
+      # cross-toolchain (rapidyenc is C++), qemu-user-static executes the
+      # test binary. The shims exist because nextest shells out to a bare
+      # `cargo test --no-run` that never sees cargo-zigbuild.
+      - name: cross + emulation toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static binfmt-support
+          python3 -m venv /tmp/zigvenv
+          /tmp/zigvenv/bin/pip install --quiet ziglang==0.16.0
+          printf '#!/bin/sh\nexec /tmp/zigvenv/bin/python -m ziglang "$@"\n' \
+            | sudo tee /usr/local/bin/zig >/dev/null
+          sudo chmod +x /usr/local/bin/zig
+          zig version
+          ver=0.23.0
+          sha=f0aa9cc8220a84788c6e4a9b6d80422f041659227b680fdef982d5a8ddffddb4
+          url="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${ver}/cargo-zigbuild-x86_64-unknown-linux-musl.tar.xz"
+          curl -fsSL -o cargo-zigbuild.tar.xz "$url"
+          echo "$sha  cargo-zigbuild.tar.xz" | sha256sum -c -
+          tar xf cargo-zigbuild.tar.xz --strip-components=1
+          sudo mv cargo-zigbuild /usr/local/bin/
+          rm -f cargo-zigbuild.tar.xz
+          mkdir -p "$HOME/zigshim"
+          T=aarch64-linux-musl
+          # Two arg shapes zig cc will not take. `--target=*` is ours to
+          # drop because the shim already supplies `-target`. The second is
+          # rustc's, not ours: for `aarch64-unknown-linux-musl` it passes
+          # `-Wl,--fix-cortex-a53-843419` from the TARGET SPEC, and zig's
+          # linker answers "unsupported linker arg", which failed this job
+          # at LINK before a single test ran (run 34583096699).
+          #
+          # It has to be dropped HERE and cannot be turned off upstream:
+          # 843419 is a LINKER erratum flag, and the only Cortex-A53
+          # erratum rustc exposes as a codegen feature is 835769
+          # (`rustc --print target-features` lists that one and not this
+          # one), so `-C target-feature=-fix-cortex-a53-843419` is not a
+          # spelling that exists and would have silently done nothing.
+          #
+          # Safe to drop for what this job IS: a workaround for an erratum
+          # on Cortex-A53, in a test binary run under QEMU modelling
+          # Cortex-A72, which is not affected and is the whole point of the
+          # `-cpu` choice. Nothing shipped is built here.
+          #
+          # The second case is a NO-OP in the armv7 copy of this shim -
+          # rustc does not pass an aarch64 erratum flag for
+          # `arm-linux-musleabihf` - and is kept there anyway so the two
+          # recipes stay byte-identical. They are described in this file as
+          # the same recipe retargeted, and a divergence between them is
+          # how one gets fixed and the other quietly does not.
+          strip='n=$#\nwhile [ "$n" -gt 0 ]; do\n  a=$1; shift; n=$((n-1))\n  case "$a" in --target=*|-Wl,--fix-cortex-a53-843419) ;; *) set -- "$@" "$a" ;; esac\ndone\n'
+          printf "#!/bin/sh\n${strip}exec zig cc -target %s \"\$@\"\n"  "$T" > "$HOME/zigshim/zig-cc"
+          printf "#!/bin/sh\n${strip}exec zig c++ -target %s \"\$@\"\n" "$T" > "$HOME/zigshim/zig-cxx"
+          printf '#!/bin/sh\nexec zig ar "$@"\n'                  > "$HOME/zigshim/zig-ar"
+          printf '#!/bin/sh\nexec zig ranlib "$@"\n'              > "$HOME/zigshim/zig-ranlib"
+          chmod +x "$HOME/zigshim"/zig-*
+          {
+            echo "CC_aarch64_unknown_linux_musl=$HOME/zigshim/zig-cc"
+            echo "CXX_aarch64_unknown_linux_musl=$HOME/zigshim/zig-cxx"
+            echo "AR_aarch64_unknown_linux_musl=$HOME/zigshim/zig-ar"
+            echo "RANLIB_aarch64_unknown_linux_musl=$HOME/zigshim/zig-ranlib"
+          } >> "$GITHUB_ENV"
+      - name: install cargo-nextest
+        run: |
+          set -euo pipefail
+          ver="0.9.140"
+          curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 20 -o cargo-nextest.tar.gz \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${ver}/cargo-nextest-${ver}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "4ee9aaa0d0171a985a5d0eb735b87355894c1c455972e9674fb9fdbd1387c9a3  cargo-nextest.tar.gz" | sha256sum -c -
+          tar -xzf cargo-nextest.tar.gz
+          sudo mv cargo-nextest /usr/local/bin/
+          rm cargo-nextest.tar.gz
+      - name: dependency cache key
+        id: depkey
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          echo "hash=$($py tools/dep-cache-key.py)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nightly-aarch64-v1-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+      # The CLI whose `--fast` this job is about, as the shipped static
+      # shape, and run ONCE under the non-sha3 model so a binary that
+      # trips on the dispatch at startup is a cheap red here rather than
+      # a confusing one below.
+      - name: build parfast for the target and run it on the Cortex-A72 model
+        env:
+          QEMU_CPU: cortex-a72
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release --locked -p parfast --target aarch64-unknown-linux-musl
+          out=$(file target/aarch64-unknown-linux-musl/release/parfast)
+          echo "$out"
+          echo "$out" | grep -q "ELF 64-bit"
+          echo "$out" | grep -q "aarch64"
+          echo "$out" | grep -q "statically linked"
+          qemu-aarch64-static target/aarch64-unknown-linux-musl/release/parfast -V
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ always() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nightly-aarch64-v1-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+      - name: gf16 and par2repair suites under qemu, Cortex-A72 model (no sha3)
+        env:
+          QEMU_CPU: cortex-a72
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER: /usr/bin/qemu-aarch64-static
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: /home/runner/zigshim/zig-cc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C link-self-contained=no"
+          # The same profile pins `armv7-cross` documents at length: the
+          # ORACLE is debug-assertions + overflow-checks, compiled at
+          # opt-level 2 so the emulator is not paying for work an
+          # optimizer deletes. Debuginfo off because the binary is static.
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          CARGO_PROFILE_DEV_OPT_LEVEL: "2"
+          CARGO_PROFILE_TEST_OPT_LEVEL: "2"
+          CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
+          CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "true"
+          CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
+          CARGO_PROFILE_TEST_OVERFLOW_CHECKS: "true"
+          CARGO_INCREMENTAL: "0"
+          NZBFAST_NO_ENRICH: "1"
+        run: |
+          set -euo pipefail
+          # `test-support` because that is the feature the archive builds
+          # this lib with (CLAUDE.md's per-crate line says why). The two
+          # modules are the population: everything aarch64-gated in
+          # nzbkit-base lives in gf16.rs, and par2repair is what consumes
+          # it - the joint solve's `scale_available` admission included.
+          cargo nextest run --profile qemu -p nzbkit-base --lib --features test-support \
+            --no-fail-fast --target aarch64-unknown-linux-musl \
+            -E 'test(/^gf16::/) | test(/^par2repair::/)'
 
   # Full cargo-deny pass (advisories, licenses, bans, sources) against
   # deny.toml at the repo root. ci-private runs the same check on every

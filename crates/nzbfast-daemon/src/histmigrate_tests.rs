@@ -390,7 +390,7 @@ fn gaining_the_raw_inputs_is_not_reported_as_a_correction() {
 // Durability: the stamp must not outrun the write
 // -------------------------------------------------------------------
 
-/// Codex sweep 7, M5: the stamp is written through a different door
+/// Review sweep 7, M5: the stamp is written through a different door
 /// from the corrections it claims to have made.
 ///
 /// Appending to `history.jsonl` needs write permission ON THE FILE;
@@ -442,7 +442,7 @@ fn a_correction_that_could_not_be_written_does_not_stamp_the_version() {
 // Gone is not the same as could-not-look
 // -------------------------------------------------------------------
 
-/// Codex sweep 7, M6: "no file" and "could not read" were the same
+/// Review sweep 7, M6: "no file" and "could not read" were the same
 /// answer, and the pass stamped the build over both.
 ///
 /// The daemon starts from launchd or systemd, often before a NAS has
@@ -572,7 +572,7 @@ fn a_row_whose_payload_is_mid_move_is_not_recorded_as_gone() {
 // The notice, told honestly
 // -------------------------------------------------------------------
 
-/// Codex sweep 7, L3: a dismissal that could not remove the file said
+/// Review sweep 7, L3: a dismissal that could not remove the file said
 /// it had.
 ///
 /// The strip's whole flag is the existence of `hist-notice.json`, so an

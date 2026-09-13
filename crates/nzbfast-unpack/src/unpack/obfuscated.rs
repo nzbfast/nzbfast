@@ -144,7 +144,7 @@ pub(crate) struct ObfReport {
     /// At least one member-bearing set extracted. A memberless set (a
     /// `.rev`-shaped recovery volume) extracts as a no-op and publishes
     /// nothing, so it does not count - else it would forgive a stray
-    /// fragment in `ok` (Codex F-23, 22 Aug 2026).
+    /// fragment in `ok` (review finding F-23, 22 Aug 2026).
     pub(crate) produced: bool,
     /// A set with a usable head could not be unpacked. Always the job's
     /// verdict: that IS a payload we failed to deliver.
@@ -463,7 +463,7 @@ pub(crate) fn extract_obfuscated_rar(
                     //
                     // Deliberately NOT the zip gap's rule - "an archive
                     // we cannot open FAILS the job when it is the
-                    // payload" (step 5 of `extract_nested`, Codex H2,
+                    // payload" (step 5 of `extract_nested`, review H2,
                     // 2 Aug) - because the shapes differ. An unopened zip
                     // is a payload we could deliver with better code, so
                     // Failed is honest and makes an *arr re-grab. A

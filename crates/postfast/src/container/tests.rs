@@ -124,7 +124,7 @@ fn c4_and_c5_encrypt_on_both_generations() {
                 "kind = \"rar-stored\"\nversion = \"{version}\"\nencryption = \"{enc}\"\n\
                  password = \"not-a-real-password\"\n"
             ));
-            let bytes = write_one_archive(&p.container, &members, [0xa1; 32])
+            let bytes = write_one_archive(&p.container, &members, [0xa1; 32], Packing::LAZY)
                 .unwrap_or_else(|e| panic!("{version}/{enc}: {e}"));
             let out = extract_set(std::slice::from_ref(&bytes), Some(PW)).unwrap_or_else(|e| {
                 panic!("{version}/{enc}: does not open with the password: {e}")
@@ -601,6 +601,21 @@ fn a_polyglot_the_client_never_has_to_read_is_refused() {
             "kind = \"7z-stored\"\nleading_bytes = 4096\npolyglot = \"7z\"\n",
             "names ONE format twice",
         ),
+        // A ZIP first half, in BOTH spellings. The client's forward
+        // scan has no zip family at all, so it would settle on the
+        // trailing archive outright and the row would measure that one.
+        // The `polyglot = "7z"` spelling used to be ACCEPTED - the
+        // first-family test read `is_sevenz()` and called everything
+        // else "rar" - and the `polyglot = "rar"` spelling was refused
+        // as "one format twice", which was the wrong reason.
+        (
+            "kind = \"zip-stored\"\nleading_bytes = 4096\npolyglot = \"7z\"\n",
+            "beside a zip container",
+        ),
+        (
+            "kind = \"zip-compressed\"\nleading_bytes = 4096\npolyglot = \"rar\"\n",
+            "beside a zip container",
+        ),
     ] {
         let msg = refusal(extra);
         assert!(msg.contains(want), "{extra:?} was refused as: {msg}");
@@ -862,7 +877,7 @@ fn shapes_no_writer_builds_are_refused_by_name() {
 /// research/POSTFAST-VS-NESTED-CORPUS-2026-09-03.md - because every
 /// stored volume entry point took a single entry. The fix is a
 /// writer arm, `Rar50VolumeWriter::stored_entries`, made in the fork
-/// at ~/Claude/rars and synced into vendor/rars; the refusal below
+/// at the upstream rars fork and synced into vendor/rars; the refusal below
 /// keeps the arm that is still real. The shape matters because it is
 /// the corpus's own baseline leg r1 and the commonest layout on the
 /// wire: several files in one split store set.
@@ -905,7 +920,7 @@ fn a_split_stored_set_of_several_files_builds_on_rar5() {
 /// This arm is what H0 did NOT close: `rar15_40::write`'s volume
 /// entry points took one entry each. `write_stored_volume_set` and
 /// `write_compressed_volume_set` are the plurals, made in the fork
-/// at ~/Claude/rars on 4 Sep 2026 and hand-ported into vendor/rars.
+/// at the upstream rars fork on 4 Sep 2026 and hand-ported into vendor/rars.
 /// A RAR4 set needed one thing its RAR5 twin did not: an ENDARC
 /// block with the next-volume flag on every volume but the last. A
 /// single member is split across EVERY volume, so the split flags
@@ -2122,4 +2137,277 @@ fn a_damaged_archive_fails_the_round_trip_loudly() {
     // And the message a profile would actually see names the class.
     let wrapped = ContainerError::RoundTrip(err).to_string();
     assert!(wrapped.contains("WRITER defect"), "{wrapped}");
+}
+
+/// [`Packing::SMALLEST`] reaches the bytes of every RAR 5 archive this
+/// plane writes, unsplit and split, and [`wrap`]'s own default is the
+/// archive it has always written.
+///
+/// The assertion is on the BYTES and it is strict, because a flag
+/// dropped anywhere on the way in - not read by `wrap_with`, not passed
+/// to `write_one_archive`, not put on the `WriterOptions` - produces two
+/// identical archives, and every softer check passes on both. Measured
+/// on this exact payload: 11,499 bytes lazy against 9,617 with the
+/// parse, so the margin is a sixth of the archive rather than a
+/// rounding.
+///
+/// The split arm is here rather than folded into the row above because
+/// `write_volume_set` builds its own `WriterOptions` - the two writer
+/// call sites are two chances to drop the flag, and a split post is the
+/// shape the catalog's C2 rows and most real posts have.
+#[test]
+fn the_cost_based_parse_reaches_the_archives_this_plane_writes() {
+    for extra in [
+        "kind = \"rar-compressed\"\n",
+        "kind = \"rar-compressed\"\nvolume_bytes = 8000\n",
+    ] {
+        let prof = Profile::parse(&format!(
+            "[layout]\nname = \"t\"\nseed = 1\n\n\
+             [source]\nfiles = [{{ name = \"movie.bin\", bytes = 60000, \
+             content = \"compressible\" }}]\n\n\
+             [container]\n{extra}"
+        ))
+        .expect("test profile parses");
+        let mut rng = Rng::for_profile(&prof);
+        let sources = crate::assemble::sources(&prof, &mut rng).expect("sources assemble");
+        let built = |packing| {
+            let mut rng = Rng::for_profile(&prof);
+            wrap_with(&prof, &sources, &mut rng, packing)
+                .unwrap_or_else(|e| panic!("{extra:?}: {e}"))
+                .expect("a container was selected")
+        };
+        let packed = |c: &Contained| c.volumes.iter().map(|v| v.bytes.len()).sum::<usize>();
+
+        let lazy = built(Packing::LAZY);
+        let best = built(Packing::SMALLEST);
+        assert!(
+            packed(&best) < packed(&lazy),
+            "{extra:?}: the cost-based parse packed {} bytes against the lazy walk's {}",
+            packed(&best),
+            packed(&lazy)
+        );
+        // The same payload comes back out of both, which is what makes
+        // the smaller one an archive rather than a shorter file. `wrap`
+        // reads its own archive back, so reaching here at all is most
+        // of it; the equality is what says the two agree.
+        assert_eq!(best.payload, lazy.payload, "{extra:?}");
+
+        // ...and the default did not move: a profile alone builds what
+        // it built before this flag existed.
+        let mut rng = Rng::for_profile(&prof);
+        let default = wrap(&prof, &sources, &mut rng)
+            .unwrap_or_else(|e| panic!("{extra:?}: {e}"))
+            .expect("a container was selected");
+        assert_eq!(
+            default.volumes, lazy.volumes,
+            "{extra:?}: wrap's default is no longer the lazy parser"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The streamed stored writers against the in-memory ones.
+//
+// The routing in `write_one_archive` / `write_volume_set` is only ever
+// allowed to change where the bytes are BUILT, never what they are, so
+// every arm is asserted against the writer it replaced under the options
+// production passes (`rar50_opts`, which is why that is one function and
+// not two). The catalog covers four of these shapes and the oracle
+// re-checks them end to end; the two it does not reach - a stored volume
+// set carrying a recovery record, and the encrypted set that has to fall
+// BACK to the in-memory writer because the streamed pair refuses a record
+// there - are only covered here.
+// ---------------------------------------------------------------------------
+
+/// A `[container]` table's `Container`, with the payload the rest of
+/// this file uses.
+fn container_of(extra: &str) -> Container {
+    profile(extra).container
+}
+
+const STREAM_SEED: [u8; 32] = [7u8; 32];
+
+fn stream_members() -> Vec<(String, Vec<u8>)> {
+    // Two members, so the multi-entry header path is in play, and
+    // incompressible-looking bytes that differ between them so a
+    // mis-ordered fragment cannot pass by coincidence.
+    vec![
+        (
+            "one.bin".to_string(),
+            (0..24000u32).map(|i| (i * 31) as u8).collect(),
+        ),
+        (
+            "two.bin".to_string(),
+            (0..9000u32).map(|i| (i * 17 + 5) as u8).collect(),
+        ),
+    ]
+}
+
+fn in_memory_archive(c: &Container, members: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let opts = rar50_opts(c, rars::Entropy::Seeded(STREAM_SEED), Packing::LAZY);
+    let recovery = (c.recovery_record_pct > 0).then_some(u64::from(c.recovery_record_pct));
+    let w = rars::rar50::Rar50Writer::new(opts).recovery_percent(recovery);
+    if c.encryption == Encryption::None {
+        let e: Vec<_> = members
+            .iter()
+            .map(|(n, d)| rars::rar50::StoredEntry {
+                name: n.as_bytes(),
+                data: d.as_slice(),
+                mtime: None,
+                attributes: 0,
+                host_os: 0,
+            })
+            .collect();
+        w.stored_entries(&e)
+            .finish()
+            .expect("the in-memory writer builds it")
+    } else {
+        let pw = c.password.as_bytes();
+        let e: Vec<_> = members
+            .iter()
+            .map(|(n, d)| rars::rar50::EncryptedStoredEntry {
+                name: n.as_bytes(),
+                data: d.as_slice(),
+                mtime: None,
+                attributes: 0,
+                host_os: 0,
+                password: pw,
+            })
+            .collect();
+        w.encrypted_stored_entries(&e)
+            .finish()
+            .expect("the in-memory writer builds it")
+    }
+}
+
+fn in_memory_volumes(c: &Container, members: &[(String, Vec<u8>)]) -> Vec<Vec<u8>> {
+    let opts = rar50_opts(c, rars::Entropy::Seeded(STREAM_SEED), Packing::LAZY);
+    let recovery = (c.recovery_record_pct > 0).then_some(u64::from(c.recovery_record_pct));
+    let per_volume = usize::try_from(c.volume_bytes).unwrap();
+    let w = rars::rar50::Rar50VolumeWriter::new(opts)
+        .max_payload_per_volume(per_volume)
+        .recovery_percent(recovery);
+    if c.encryption == Encryption::None {
+        let e: Vec<_> = members
+            .iter()
+            .map(|(n, d)| rars::rar50::StoredEntry {
+                name: n.as_bytes(),
+                data: d.as_slice(),
+                mtime: None,
+                attributes: 0,
+                host_os: 0,
+            })
+            .collect();
+        w.stored_entries(&e)
+            .finish()
+            .expect("the in-memory set writer builds it")
+    } else {
+        let pw = c.password.as_bytes();
+        let e: Vec<_> = members
+            .iter()
+            .map(|(n, d)| rars::rar50::EncryptedStoredEntry {
+                name: n.as_bytes(),
+                data: d.as_slice(),
+                mtime: None,
+                attributes: 0,
+                host_os: 0,
+                password: pw,
+            })
+            .collect();
+        w.encrypted_stored_entries(&e)
+            .finish()
+            .expect("the in-memory set writer builds it")
+    }
+}
+
+/// The four single-archive stored shapes, streamed, are the bytes the
+/// in-memory writer produced.
+#[test]
+fn a_streamed_stored_archive_is_the_in_memory_bytes() {
+    let members = stream_members();
+    for extra in [
+        "kind = \"rar-stored\"\n",
+        "kind = \"rar-stored\"\nrecovery_record_pct = 10\n",
+        "kind = \"rar-stored\"\nencryption = \"data\"\npassword = \"hunter2\"\n",
+        "kind = \"rar-stored\"\nencryption = \"header\"\npassword = \"hunter2\"\n",
+    ] {
+        let c = container_of(extra);
+        let got = write_one_archive(&c, &members, STREAM_SEED, Packing::LAZY)
+            .unwrap_or_else(|e| panic!("{extra:?}: {e}"));
+        assert_eq!(got, in_memory_archive(&c, &members), "{extra:?}");
+        // Not a tautology over an empty archive: the payload is in
+        // there, so a writer that wrote nothing twice cannot pass.
+        assert!(got.len() > 33_000, "{extra:?}: {} bytes", got.len());
+    }
+}
+
+/// ...and the volume sets likewise, INCLUDING the recovery-record set
+/// no catalog row builds.
+#[test]
+fn a_streamed_stored_volume_set_is_the_in_memory_bytes() {
+    let members = stream_members();
+    for extra in [
+        "kind = \"rar-stored\"\nvolume_bytes = 8000\n",
+        "kind = \"rar-stored\"\nvolume_bytes = 8000\nrecovery_record_pct = 10\n",
+        "kind = \"rar-stored\"\nvolume_bytes = 8000\nencryption = \"data\"\npassword = \"hunter2\"\n",
+        "kind = \"rar-stored\"\nvolume_bytes = 8000\nencryption = \"header\"\npassword = \"hunter2\"\n",
+    ] {
+        let c = container_of(extra);
+        let got = write_volume_set(&c, &members, STREAM_SEED, Packing::LAZY)
+            .unwrap_or_else(|e| panic!("{extra:?}: {e}"));
+        assert_eq!(got, in_memory_volumes(&c, &members), "{extra:?}");
+        assert!(got.len() > 2, "{extra:?}: {} volumes", got.len());
+    }
+}
+
+/// An ENCRYPTED stored shape carrying a recovery record stays on the
+/// in-memory writer, because the streamed encrypted pair refuses a
+/// record. Asserted as the ROUTING decision rather than through the
+/// output, since the whole point of the fallback is that the output is
+/// the same either way.
+#[test]
+fn an_encrypted_recovery_record_falls_back_to_the_in_memory_writer() {
+    let c = container_of("kind = \"rar-stored\"\nencryption = \"data\"\npassword = \"hunter2\"\n");
+    let opts = rar50_opts(&c, rars::Entropy::Seeded(STREAM_SEED), Packing::LAZY);
+    assert!(streamed_stored_opts(opts, None, true).is_some());
+    assert!(streamed_stored_opts(opts, Some(10), false).is_some());
+    assert!(
+        streamed_stored_opts(opts, Some(10), true).is_none(),
+        "an encrypted recovery record has to stay on the in-memory writer"
+    );
+}
+
+/// The flag `streamed_stored_opts` rewrites moves no byte: rar50's
+/// in-memory writers read the PERCENT and never the feature, so turning
+/// it on for the streamed pair's validator changes nothing they emit.
+/// Held here because the two halves of the fork disagree about it and a
+/// re-sync could quietly make the flag load-bearing.
+#[test]
+fn setting_the_recovery_feature_flag_moves_no_byte() {
+    let members = stream_members();
+    let c = container_of("kind = \"rar-stored\"\nrecovery_record_pct = 10\n");
+    let opts = rar50_opts(&c, rars::Entropy::Seeded(STREAM_SEED), Packing::LAZY);
+    let mut flagged = opts;
+    flagged.features.recovery_record = true;
+    let e: Vec<_> = members
+        .iter()
+        .map(|(n, d)| rars::rar50::StoredEntry {
+            name: n.as_bytes(),
+            data: d.as_slice(),
+            mtime: None,
+            attributes: 0,
+            host_os: 0,
+        })
+        .collect();
+    let off = rars::rar50::Rar50Writer::new(opts)
+        .recovery_percent(Some(10))
+        .stored_entries(&e)
+        .finish()
+        .unwrap();
+    let on = rars::rar50::Rar50Writer::new(flagged)
+        .recovery_percent(Some(10))
+        .stored_entries(&e)
+        .finish()
+        .unwrap();
+    assert_eq!(off, on);
 }

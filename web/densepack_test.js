@@ -46,7 +46,7 @@ const card = id => ({ id, span: 20 });
 // A and C under B, but the DOM now reads C, B, A. A single drain pass
 // met C while B was still waiting and auto-placed it, so the card sat in
 // whichever column was shortest while the menu still offered "Unstack"
-// (Codex sweep 7, M9).
+// (review sweep 7, M9).
 {
   const p = densePack([card('C'), card('B'), card('A')], 2, { B: 'A', C: 'B' }).placed;
   ok(p.B.col === p.A.col, 'B stays in A\'s column');

@@ -1598,3 +1598,196 @@ fn a_span_at_the_top_of_the_address_space_is_dropped_not_a_panic() {
     let mut m = VolumeMapper::new(64);
     assert!(m.feed(0, &[0u8; 8]), "an ordinary span still lands");
 }
+
+/// A vint that cannot fit a `u64` SATURATES rather than wrapping.
+///
+/// `7 * 9 == 63`, so the tenth byte's payload has one usable bit and
+/// everything above it used to be shifted off the top in silence: a
+/// stop payload of `0x02` produced `0`, which is a declared size of
+/// NOTHING over a real data area. `u64::MAX` is refused by every
+/// checked add downstream, and the record walk still gets to read the
+/// field after it.
+#[test]
+fn a_ten_byte_vint_saturates_instead_of_wrapping() {
+    // Nine continuation bytes, then the stop byte.
+    let mut b = vec![0x80u8; 9];
+    b.push(0x02);
+    assert_eq!(vint(&b), Some((u64::MAX, 10)));
+    b[9] = 0x7f;
+    assert_eq!(vint(&b), Some((u64::MAX, 10)));
+    // The one bit that IS representable still reads exactly.
+    b[9] = 0x01;
+    assert_eq!(vint(&b), Some((1u64 << 63, 10)));
+    b[9] = 0x00;
+    assert_eq!(vint(&b), Some((0, 10)));
+    // ...and nothing shorter changed.
+    assert_eq!(vint(&[0x7f]), Some((127, 1)));
+    assert_eq!(vint(&[0x80, 0x01]), Some((128, 2)));
+    assert_eq!(vint(&[0x80]), None);
+}
+
+/// The main header's recovery-record flag reaches `BlockResult::Skip` for
+/// both generations, and nothing else raises it. RAR5 archive flag 0x0008
+/// is what `rar 7.23 -rr3` writes (measured: flags 0x9 on a `-rr3`
+/// volume set, 0x1 without); RAR4 MHD_PROTECT 0x0040 is what the rar 3.00
+/// recovery fixture carries in its main header. The set-less settle arm
+/// reads this off a chased slot's HEAD to decide whether the tail is
+/// worth materializing for the recovery-record rung (6 Sep 2026).
+#[test]
+fn a_main_header_declares_its_recovery_record_in_both_generations() {
+    fn v5_main(aflags: u64) -> Vec<u8> {
+        fn vint_enc(mut v: u64, out: &mut Vec<u8>) {
+            loop {
+                let b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        let mut hdr = Vec::new();
+        vint_enc(1, &mut hdr); // type: main archive header
+        vint_enc(0, &mut hdr); // header flags
+        vint_enc(aflags, &mut hdr);
+        if aflags & 0x02 != 0 {
+            vint_enc(3, &mut hdr); // volume number
+        }
+        let mut sized = Vec::new();
+        vint_enc(hdr.len() as u64, &mut sized);
+        let mut blk = Vec::new();
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(&sized);
+        crc.update(&hdr);
+        blk.extend_from_slice(&crc.finalize().to_le_bytes());
+        blk.extend_from_slice(&sized);
+        blk.extend_from_slice(&hdr);
+        blk
+    }
+    for (aflags, want) in [(0x9u64, true), (0x1, false), (0xb, true), (0x0, false)] {
+        match parse_block_v5(&v5_main(aflags), 0) {
+            BlockResult::Skip {
+                recovery_record, ..
+            } => assert_eq!(recovery_record, want, "RAR5 archive flags {aflags:#x}"),
+            _ => panic!("RAR5 main header with flags {aflags:#x} did not parse as Skip"),
+        }
+    }
+
+    fn v4_main(flags: u16) -> Vec<u8> {
+        let mut h = vec![0u8, 0];
+        h.push(0x73);
+        h.extend_from_slice(&flags.to_le_bytes());
+        h.extend_from_slice(&13u16.to_le_bytes());
+        h.extend_from_slice(&[0u8; 6]);
+        let hc = (crc32fast::hash(&h[2..]) & 0xffff) as u16;
+        h[..2].copy_from_slice(&hc.to_le_bytes());
+        h
+    }
+    for (flags, want) in [(0x0040u16, true), (0x0000, false), (0x0041, true)] {
+        match parse_block_v4(&v4_main(flags), 7) {
+            BlockResult::Skip {
+                recovery_record, ..
+            } => assert_eq!(recovery_record, want, "RAR4 main flags {flags:#x}"),
+            _ => panic!("RAR4 main header with flags {flags:#x} did not parse as Skip"),
+        }
+    }
+    // The flag folds into the mapper and stays raised for the rest of the
+    // volume's headers.
+    let mut m = VolumeMapper::new(1 << 20);
+    assert!(!m.recovery_record);
+    let mut vol = SIG5.to_vec();
+    vol.extend_from_slice(&v5_main(0x9));
+    m.feed(0, &vol);
+    assert!(m.recovery_record, "the mapper carries the head's flag");
+}
+
+/// Which layer owns which bound, pinned as a PAIR.
+///
+/// A RAR4 `-hp` block declares two extents and they are checked in two
+/// different places, which is not obvious from either place alone and was
+/// re-derived wrong on 11 Sep 2026 (the `rar_map` fuzz target asserted the
+/// data-area bound against the block parser; fuzz-smoke run 34564492152 on
+/// `a6ed0da5` found the header that proves it does not hold, and the repro
+/// is `crates/nzbkit/fuzz/seeds/rar_map/`).
+///
+/// - The HEADER FRAME - salt plus AES-aligned body - is the block parser's,
+///   through the third conjunct of `plausible`. It has to be: a wrong
+///   password decrypts to a random `head_size` of up to 64 KB, and without
+///   this the parser would sit in `NeedMore` for bytes the volume does not
+///   contain and never reach a verdict at all.
+/// - The DATA AREA is `VolumeMapper::advance_to`'s. It cannot move down
+///   here, and not merely by convention: the encrypted parse's only two
+///   refusals are `Corrupt` and `BadPassword`, so an oversized data area
+///   would either call a CORRECT password wrong or lose the both-terms
+///   diagnostic `fail_volume_bound` writes for TODO 118 item 2. One rule,
+///   one home - and the home is the one place every `next` passes through.
+///
+/// So the parser ACCEPTING a cursor past the volume is the contract, not a
+/// defect, and the refusal happens one layer up.
+#[test]
+fn the_encrypted_v4_parse_bounds_the_header_but_leaves_the_data_area_to_the_mapper() {
+    // The `rar_map` target's throwaway key: what is under test is the
+    // length arithmetic over the bytes it decrypts to, never the schedule.
+    let key = [0x5a; 16];
+    let iv = [0xa5; 16];
+    // One block: a type the default arm skips, LONG_BLOCK set so the
+    // 4-byte `add_size` is read, `head_size` 11 so the whole header fits a
+    // single 16-byte AES block, and a 16 MiB data area.
+    const HSIZE: u16 = 11;
+    const ADD_SIZE: u32 = 0x0100_0000;
+    let mut plain = [0u8; 16];
+    plain[2] = 0x7a;
+    plain[3..5].copy_from_slice(&0x8000u16.to_le_bytes());
+    plain[5..7].copy_from_slice(&HSIZE.to_le_bytes());
+    plain[7..11].copy_from_slice(&ADD_SIZE.to_le_bytes());
+    let crc = (crc32fast::hash(&plain[2..HSIZE as usize]) & 0xffff) as u16;
+    plain[0..2].copy_from_slice(&crc.to_le_bytes());
+    let mut ct = plain;
+    rarcrypt::CbcEncStream::new(&rarcrypt::AesKey::Aes128(key), &iv).encrypt(&mut ct);
+    let mut block = vec![0u8; 8]; // the salt: the parser reads none of it
+    block.extend_from_slice(&ct);
+
+    // The header frame is 8 + align16(11) = 24 bytes, so at a declared
+    // volume of exactly 24 it fits and the parse is ACCEPTED - with a
+    // cursor 16 MiB past the end of that volume.
+    let frame = 24u64;
+    let (next, blocked) = fuzz_v4_encrypted_header(&block, 0, key, iv, frame);
+    let next = next.expect("a header that fits the volume is parsed");
+    assert!(!blocked);
+    assert_eq!(
+        next,
+        frame + u64::from(ADD_SIZE),
+        "the parser reports the cursor the header declares, data area and all"
+    );
+    assert!(
+        next > frame,
+        "and it is PAST the volume - the parser does not bound the data area"
+    );
+
+    // One byte less of volume and the HEADER no longer fits, which the
+    // parser does refuse. `BadPassword` is the right verdict here and not a
+    // near miss: a header shape this implausible is evidence about the key,
+    // which is what the finish ladder re-prompts on.
+    let (next_short, blocked_short) = fuzz_v4_encrypted_header(&block, 0, key, iv, frame - 1);
+    assert_eq!(next_short, None, "a header past the volume is refused");
+    assert!(blocked_short);
+
+    // And the cursor the parser DID hand out is refused one layer up, by
+    // the rule that owns it - with the blocker a field report carries.
+    let mut m = VolumeMapper::new(frame);
+    assert!(
+        !m.advance_to(next),
+        "the mapper must refuse a cursor past the volume"
+    );
+    assert!(matches!(
+        m.blocker,
+        Some(MapBlocker::Corrupt("data area exceeds volume"))
+    ));
+
+    // The same bound is absent when the volume size is unknown (a yEnc span
+    // with no `size=`), which is the weaker configuration both layers name.
+    let mut unknown = VolumeMapper::new(0);
+    assert!(unknown.advance_to(next));
+    assert!(unknown.blocker.is_none());
+}

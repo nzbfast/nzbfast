@@ -146,7 +146,7 @@ fn sender() -> &'static mpsc::Sender<Task> {
 /// on the box it was written on and took `check`, `slim-check`,
 /// `windows-clippy` and `windows-build` red on E0425 the moment CI
 /// compiled anything else. A host clippy run cannot see that class -
-/// see CLAUDE.md's SIXTEENTH gate. Both figures above are BOUNDS this
+/// see CONTRIBUTING.md's SIXTEENTH gate. Both figures above are BOUNDS this
 /// has to clear, not values it has to track, so nothing rots by
 /// restating them here in prose.
 #[cfg(test)]

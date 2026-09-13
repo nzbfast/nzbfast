@@ -58,7 +58,7 @@ fn the_operator_passwords_file_reaches_the_disk_ladder() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex sweep G, 13 Aug 2026: two encrypted containers in one post
+/// Review sweep G, 13 Aug 2026: two encrypted containers in one post
 /// need not share a password. The resolver ran once for the LEVEL and
 /// handed its answer to every job, so the second archive stayed packed
 /// while the pass reported success - and the top-level command exited
@@ -104,7 +104,7 @@ fn each_encrypted_container_resolves_its_own_password() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex sweep F, 13 Aug 2026: a ZipCrypto check byte is ONE byte, so
+/// Review sweep F, 13 Aug 2026: a ZipCrypto check byte is ONE byte, so
 /// it admits a wrong password once in 256 tries - which the docs said
 /// all along, while the caller stopped at the first value the check
 /// liked and never tried another. The checked-in `zipcrypto.zip` is
@@ -163,7 +163,7 @@ fn bomb_declaring_containers_fail_the_key_check_at_the_gate() {
     }
 }
 
-/// Codex sweep M, 13 Aug 2026: what rejects a wrong key on a
+/// Review sweep M, 13 Aug 2026: what rejects a wrong key on a
 /// data-encrypted 7z entry is the entry's CHECKSUM, at its END. The key
 /// check reads at most 64 MB, so a first member bigger than that never
 /// reached the checksum and the capped read came back "opens" for ANY
@@ -225,7 +225,7 @@ fn a_capped_7z_key_check_is_indeterminate_not_a_pass() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex sweep 13 Aug U1+U2: two encrypted NAMED RAR groups need not
+/// Review sweep 13 Aug U1+U2: two encrypted NAMED RAR groups need not
 /// share a password, and a harvested value must never shadow the one
 /// the caller supplied.
 ///
@@ -453,7 +453,7 @@ fn a_data_encrypted_7z_with_plaintext_headers_reads_as_encrypted() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex sweep F-10, 23 Aug 2026: a 7z whose FIRST block is plaintext
+/// Review sweep F-10, 23 Aug 2026: a 7z whose FIRST block is plaintext
 /// and whose second is AES must not settle its password off the
 /// plaintext one.
 ///

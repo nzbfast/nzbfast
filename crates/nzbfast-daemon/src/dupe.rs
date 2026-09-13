@@ -42,7 +42,7 @@ impl Daemon {
     ///
     /// Not `#[expect(dead_code)]`: `dead_code` is a rustc lint judged in
     /// every configuration, so an expectation that is fulfilled slim
-    /// goes UNFULFILLED in the default build - see CLAUDE.md's
+    /// goes UNFULFILLED in the default build - see CONTRIBUTING.md's
     /// FIFTEENTH gate entry.
     #[cfg(any(feature = "indexer", test))]
     pub fn dupe_collision(&self, stem: &str) -> Option<DupeCollision> {
@@ -52,7 +52,7 @@ impl Daemon {
     /// [`Self::dupe_collision`] with one record forgiven.
     ///
     /// `except` is a row this add is REPLACING, so colliding with it is
-    /// not a duplicate (§290, Codex F-09). It is applied inside both
+    /// not a duplicate (§290, review finding F-09). It is applied inside both
     /// scans rather than to the answer, because these scans report the
     /// FIRST hit: filtering afterwards would let the forgiven row mask
     /// an unrelated live copy sitting behind it in the queue.
@@ -239,7 +239,7 @@ impl Daemon {
             // The whole (provider, id) pair, never the number alone: one
             // column carries TVmaze, AniList and TMDB numbering, all of
             // them small and dense, so an equal number across two
-            // namespaces means nothing at all (Codex sweep 7, H2).
+            // namespaces means nothing at all (review sweep 7, H2).
             q.kind == nzbkit::release::Kind::Tv && self.tv_show_id(&q.key).as_ref() == Some(&my_id)
         })
     }

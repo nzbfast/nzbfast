@@ -31,7 +31,7 @@ const VISIBLE: &str = "EXISTS (SELECT 1 FROM releases r WHERE r.title_key = t.ke
 ///
 /// One literal because two callers have to agree about it exactly: the
 /// lane that DRAINS this queue, and the caps gate that will not promise
-/// `tvdbid` until it is empty (Codex sweep 7, M1). A drifted second copy
+/// `tvdbid` until it is empty (review sweep 7, M1). A drifted second copy
 /// would advertise the parameter against rows the lane is never going to
 /// reach, which is the false promise TODO 187 exists to prevent. See
 /// [`Index::titles_missing_tvdb`] for what each clause is doing.
@@ -138,7 +138,7 @@ pub struct TitleFill<'a> {
     /// because it is the only thing that makes the id readable: the
     /// column carries a TVmaze show id, an AniList media id, a TMDB id
     /// and an OMDb-supplied IMDb number, and a reader that guesses from
-    /// `kind` alone resolves one namespace's id in another's (Codex
+    /// `kind` alone resolves one namespace's id in another's (review
     /// sweep 7, H2). Anything that PRESERVES `tmdb_id` across a write -
     /// the manual wall-fix arm, a poster upload - must preserve this
     /// with it, or the id silently reverts to unlabelled.
@@ -575,7 +575,7 @@ impl Index {
     /// behind, `tvdbid=<A>` answered Sonarr with B's releases,
     /// `tvdbid=<B>` answered with nothing, and the row could never
     /// self-heal because [`Self::titles_missing_tvdb`] wants
-    /// `tvdb_tried = 0 AND tvdb = 0` (Codex sweep 7, M3). `tvdb_tried`
+    /// `tvdb_tried = 0 AND tvdb = 0` (review sweep 7, M3). `tvdb_tried`
     /// goes with it, which is what puts the row back in the backfill
     /// queue; clearing is NOT conditional on being able to refill,
     /// because a wrong id is worse than a missing one.
@@ -843,7 +843,7 @@ impl Index {
     /// the show we asked about, which a foreign id satisfies exactly
     /// whenever it is also a live TVmaze show id, so an unrelated
     /// series' thetvdb id was stamped on the row with `tvdb_tried=1` and
-    /// Sonarr's `tvdbid=` then resolved to the wrong title key (Codex
+    /// Sonarr's `tvdbid=` then resolved to the wrong title key (review
     /// sweep 7, H2). The legacy '' rows used to be admitted on the
     /// assumption that unlabelled meant TVmaze - but the AniList
     /// fallback was writing media ids into `tmdb_id` for three weeks
@@ -854,7 +854,7 @@ impl Index {
     /// The `t.key` tie-break is not cosmetic either: this queue is
     /// head-stable, so ties left to SQLite's row order make the head SET
     /// itself undefined, and the lane's backoff bookkeeping is reasoning
-    /// about which rows it just skipped (Codex sweep 7, M2).
+    /// about which rows it just skipped (review sweep 7, M2).
     pub fn titles_missing_tvdb(&self, limit: u32) -> rusqlite::Result<Vec<TitleRow>> {
         // The caps gate has always taken the EXISTS route (below); the
         // lane that DRAINS the queue used to pay for the full pick on
@@ -874,7 +874,7 @@ impl Index {
     /// a correlated MAX for every candidate row, and `t=caps` is a
     /// request an *arr can make at any time. `EXISTS` stops at the
     /// first row and needs no ordering at all - the caps gate does not
-    /// care WHICH row is outstanding, only whether one is (Codex sweep
+    /// care WHICH row is outstanding, only whether one is (review sweep
     /// 7, M1).
     pub fn tvdb_backfill_pending(&self) -> rusqlite::Result<bool> {
         self.titles_any(&tvdb_queue_where())
@@ -1613,7 +1613,7 @@ mod tests {
         .unwrap();
         assert_eq!(pending(&ix), vec![bb.clone()]);
 
-        // Codex sweep 7, H2: the lane asks TVmaze `/shows/<tmdb_id>`, so
+        // Review sweep 7, H2: the lane asks TVmaze `/shows/<tmdb_id>`, so
         // a row whose id belongs to somebody else's numbering must never
         // be offered. This is the worst of the namespace mixing, because
         // it is a permanent WRONG WRITE rather than a miss: `tvdb_of_show`
@@ -1654,7 +1654,7 @@ mod tests {
         assert_eq!(pending(&ix), vec![bb.clone()]);
         assert!(ix.tvdb_backfill_pending().unwrap());
 
-        // Codex sweep 7, M3: the id is a claim about WHICH SERIES this
+        // Review sweep 7, M3: the id is a claim about WHICH SERIES this
         // row is, so an identity correction has to drop it - the wall's
         // candidate arm swaps the provider identity and title_fill will
         // never rewrite this column, so series A's TVDB id used to

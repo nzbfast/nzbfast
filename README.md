@@ -151,6 +151,55 @@ Synology (Container Manager) has a step-by-step guide:
 [**docs/SYNOLOGY.md**](docs/SYNOLOGY.md). Unraid / TrueNAS SCALE / QNAP use
 the same image.
 
+## Windows warnings on first run
+
+The Windows builds are **not code-signed yet**, and Windows says so in two
+ways: SmartScreen shows "Windows protected your PC" (choose More info, then
+Run anyway), and the elevation prompt names an unknown publisher. Defender is
+more suspicious of unsigned binaries than of signed ones, and a small number
+of engines on VirusTotal score them the same way. That is expected on an
+unsigned build and it is not a statement about what the code does.
+
+What draws the heuristics, as far as we can tell from Defender's own reports
+on real machines:
+
+- `nzbtray.exe` starts `nzbfast.exe` as a hidden child process, so no console
+  window flashes up. A hidden-window child launch is one of the most heavily
+  weighted generic behaviours there is, and it is why the tray scores worse
+  than the engine.
+- The tray can write an autostart value under `HKCU\...\CurrentVersion\Run`.
+  It is a menu toggle, off unless you turn it on, but the code path is in the
+  binary and a Run key is a signature in its own right.
+- The x64 build is cross-compiled with mingw-w64, whose runtime startup stubs
+  are shared with a lot of old samples and are a known false-positive magnet.
+- It opens a local listener and then makes many concurrent TLS connections to
+  news servers, which as a behavioural profile resembles things it is not.
+
+What is **not** in the binaries: no packer or compressor, no UPX, no
+self-extracting stub, and no process injection of any kind - no
+`WriteProcessMemory`, `CreateRemoteThread`, `VirtualAllocEx` or
+`SetWindowsHookEx` anywhere in the tree or in its vendored dependencies. The
+app does not modify itself either: the update check fetches a signed static
+manifest and at most shows a banner with a link, and it can be turned off
+([docs/UPDATE-DESIGN.md](docs/UPDATE-DESIGN.md)).
+
+**Check what you downloaded.** Every release ships `SHA256SUMS.txt`, and the
+hashes on the release page are the ones to compare against:
+
+```powershell
+Get-FileHash .\nzbfast.exe -Algorithm SHA256
+```
+
+[Verifying a download](#verifying-a-download) below has the stronger
+build-provenance check, which ties a binary to the workflow run and commit
+that produced it.
+
+**Signing status.** We applied to the SignPath Foundation's free code-signing
+programme for open-source projects on 29 August 2026; the application is in
+review and there is no date yet. When a certificate is issued the Windows
+builds get signed and most of this section stops applying. Status is tracked
+in [issue #3](https://github.com/nzbfast/nzbfast/issues/3).
+
 ## Verifying a download
 
 From v1.0.5, releases include binaries built on GitHub's hosted runners
@@ -236,6 +285,17 @@ Contributions of every size are welcome - typo fixes, docs, UI polish,
 bug reports, code. Start with [CONTRIBUTING.md](CONTRIBUTING.md);
 issues labeled **`good first issue`** are picked to be approachable.
 Every PR gets built and tested by CI automatically.
+
+### AI tooling, stated up front
+
+This project is built with heavy use of AI coding assistants (mostly
+Claude), for code, tests, documentation and for drafting replies on
+issues and PRs. The maintainer reviews what ships and is accountable
+for everything published under the project's name, and when a reply
+goes out without that review it gets corrected in the open. The
+benchmark numbers, the test suite and the code are real and
+reproducible, and the repository is here so you can check rather
+than trust.
 
 ## License
 

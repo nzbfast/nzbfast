@@ -309,7 +309,7 @@ pub fn history_change_cat(d: &Daemon, id: &str, cat: &str) -> Value {
     // physically relocated the payload and then could not persist the
     // record restores the OLD one at restart, pointing every later
     // delete/retry/import at the emptied source while the bytes sit
-    // unclaimed at the destination (Codex sweep 5 Aug M5). The live
+    // unclaimed at the destination (review sweep 5 Aug M5). The live
     // record is right either way - what failed is durability, and the
     // caller has to hear it with both paths in hand. §129 1a: the
     // record lives in the history store now, so THAT append is the

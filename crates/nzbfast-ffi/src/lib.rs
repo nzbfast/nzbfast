@@ -175,7 +175,7 @@ const SAB_INI_FILE: &str = "sabnzbd.ini";
 /// into the caller's directory unasked, and it would close the
 /// adjacent-[`SAB_INI_FILE`] import above by putting a file where the
 /// search would have looked. And a refusal is the fail-closed answer in
-/// the same sense `hunt_metered` is (Codex F-10): where a config cannot
+/// the same sense `hunt_metered` is (review finding F-10): where a config cannot
 /// be read, the engine must not pick an answer that spends. A host that
 /// wants an unconfigured start writes `{"servers":[]}` itself, which is
 /// what both shipped callers do - an empty list is a definite answer,

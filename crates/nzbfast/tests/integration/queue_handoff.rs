@@ -787,7 +787,7 @@ async fn a_draining_predecessor_is_still_deferred_when_a_job_waits_behind_it() {
 }
 
 // ---------------------------------------------------------------------
-// Steering the DRAINING predecessor: pause and delete (Codex F-04).
+// Steering the DRAINING predecessor: pause and delete (review finding F-04).
 //
 // `owns_hub` answers for the ACTIVE transfer alone, so from the instant
 // the successor claims the hub every pause and delete aimed at the
@@ -904,7 +904,7 @@ async fn drain_rig(tag: &str) -> DrainRig {
             // RUST_LOG when NZBFAST_LOG is unset - a parent shell
             // exporting RUST_LOG=warn turned both draining-predecessor
             // tests into 60 s timeouts with the product behaving
-            // (Codex sweep 24 Aug, F-22). Pin INFO at the child.
+            // (review sweep 24 Aug, F-22). Pin INFO at the child.
             .env("NZBFAST_LOG", "info")
             .env_remove("RUST_LOG")
             .arg("--config")

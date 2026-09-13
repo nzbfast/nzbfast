@@ -59,7 +59,7 @@ use super::*;
 /// `cea15ceed`, hours after it was written, when a merge brought the
 /// disk-starvation measurement below. Four sites each spelling their
 /// own 60 is a fifth re-measurement that moves one and leaves three,
-/// which is the argument CLAUDE.md's fourteenth gate makes about a
+/// which is the argument CONTRIBUTING.md's fourteenth gate makes about a
 /// threshold hand-copied into four sibling drivers.
 ///
 /// AND IT STILL CANNOT COVER A STARVED BOX. Measured 31 Aug 2026 by
@@ -473,7 +473,7 @@ pub fn test_daemon(dir: &Path) -> Arc<Daemon> {
 /// therefore not metered, therefore the spend is admitted. On a CI
 /// runner there is no SABnzbd, the load fails, and `hunt_metered`
 /// answers TRUE - which is the right way round, an unreadable config
-/// must not authorise unlimited automatic spend (Codex F-10) - so the
+/// must not authorise unlimited automatic spend (review finding F-10) - so the
 /// same test says the opposite thing. The failure reads as "CI is
 /// broken" and is not.
 ///

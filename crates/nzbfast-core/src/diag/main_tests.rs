@@ -1467,7 +1467,7 @@ fn the_age_clause_reads_back() {
 /// sentence, and the gate turned that into "nothing is coming":
 /// the single automatic retry was suppressed and the failure went
 /// final, so a release that a journal-resume retry would have
-/// finished was reported to the indexer as dead (Codex sweep 3, M8).
+/// finished was reported to the indexer as dead (review sweep 3, M8).
 ///
 /// The census still SAYS the post is old - that is honest and Gary
 /// asked for it. What changed is that the gate now reads the whole
@@ -1538,7 +1538,7 @@ fn an_ambiguous_loss_is_never_proven_stale() {
         "damaged articles are re-fetchable at any age: {damaged}"
     );
 
-    // Codex sweep 5, M6: corrupt PARITY is damage too. The census
+    // Review sweep 5, M6: corrupt PARITY is damage too. The census
     // subtracts recovery errors from `derrs` - right for payload
     // completeness, wrong for the retry question - so an aged post
     // with one missing payload article and one corrupt parity

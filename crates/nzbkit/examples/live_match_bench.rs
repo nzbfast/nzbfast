@@ -40,6 +40,7 @@ fn synth_set(n: usize) -> Arc<Par2Set> {
         })
         .collect();
     Arc::new(Par2Set {
+        comment: None,
         recovery_set_id: [1u8; 16],
         block_size: 640 << 10,
         files,

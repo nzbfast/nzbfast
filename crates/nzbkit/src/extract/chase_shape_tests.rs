@@ -1162,11 +1162,25 @@ fn volumes_over_the_cap_trim_and_carry_one_pass(tag: &str, f: &[u8], vols: Vec<V
 /// and the assertions below name both edges so a drift says which way
 /// it went. Do NOT tighten this back to buy the ~1 s the smaller input
 /// would save.
+///
+/// Re-sized 5 Sep 2026 from 44 MiB to 49 MiB when the encoder's flat
+/// ring match index (a four-byte hash; `rars` VENDORING.md, that date)
+/// took the level-1 ratio on `noisy` from 0.768 to 0.725 and put the
+/// last volume at 7.1 MB, under the floor. At that ratio 49 MiB packs to
+/// about 35.5 MB, a last volume near 10.3 MB: roughly 2 MB above the
+/// floor and 2 MB below the fourth-volume edge, the old margin again.
+///
+/// Re-sized again 6 Sep 2026, 49 MiB to 57 MiB, when the encoder's
+/// Huffman tables went to one set per 256 KiB and its long-match table
+/// reached across the dictionary (`rars` VENDORING.md, that date): the
+/// level-1 ratio on `noisy` fell to 0.592 and the last volume to
+/// 5.26 MB. At 0.592, 57 MiB packs to about 35.4 MB, a last volume near
+/// 10.2 MB: 1.8 MB above the floor, 2.4 MB below the fourth-volume edge.
 #[test]
 fn a_chase_survives_trimming_the_volume_its_deferred_walk_resumes_in() {
     const PER_VOL: usize = 12 << 20;
     let dir = tmpdir("chase-volume-over-cap-finish");
-    let f = noisy(44 << 20, 250);
+    let f = noisy(57 << 20, 250);
     let vols = rars_compressed_volumes_at_level("F.bin", &f, PER_VOL, Some(1));
     assert_eq!(
         vols.len(),

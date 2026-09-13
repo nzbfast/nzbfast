@@ -1,0 +1,7 @@
+# Row 1, a TV episode with two articles missing.
+# The everyday case: a provider dropped an article, or the post is a day old
+# on a backbone with a gap. Two articles in ONE volume, not adjacent, because
+# independent drops are how single losses land.
+ARTICLE 768000
+episode.part07.rar 40
+episode.part07.rar 77

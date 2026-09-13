@@ -191,7 +191,7 @@ pub fn is_art_staging_name(n: &str) -> bool {
 /// Put `bytes` at `name` in the art directory without ever exposing a
 /// half-written file under that name.
 ///
-/// `m_wall_art`'s treatment (Codex F-07) for the OTHER two writers into
+/// `m_wall_art`'s treatment (review finding F-07) for the OTHER two writers into
 /// this directory, both of which used to write straight over the live
 /// path: stage under [`art_staging_name`], publish by same-directory
 /// rename. A crash mid-write then leaves its bytes on the staging name,
@@ -229,7 +229,7 @@ pub fn publish_art(art: &std::path::Path, name: &str, bytes: &[u8]) -> bool {
 ///
 /// `m_wall_art` writes an upload to [`art_staging_name`]'s
 /// dotted name and publishes it by rename only once the index row that
-/// names it has landed (Codex F-07, 8453aaf0a); every path that gives up
+/// names it has landed (review finding F-07, 8453aaf0a); every path that gives up
 /// on the upload removes its own staging file. What no such path can
 /// reach is one left by a process that DIED between the write and the
 /// rename, and nothing else ever looked for it: the name is unservable
@@ -301,7 +301,7 @@ mod tests {
             .expect("set mtime");
     }
 
-    /// The gap Codex F-07's fixer named and left open: a process that
+    /// The gap review finding F-07's fixer named and left open: a process that
     /// dies between the staged write and the publishing rename leaves a
     /// file no later request can reach, and until this sweep existed
     /// nothing collected it.

@@ -85,7 +85,7 @@ mod daemon_sfx;
 mod daemon_mediafast;
 // TODO 207: the persisted "why was this slow" verdict (sibling dir).
 mod daemon_whyslow;
-// Codex F-06: the relocation fence - the runner must not start a job
+// Review finding F-06: the relocation fence - the runner must not start a job
 // into a destination whose earlier progress is still being moved in
 // (sibling dir, size gate).
 mod daemon_relocate;
@@ -312,12 +312,26 @@ async fn serve(dir: &Path, build: impl Fn(u16) -> Command) -> Daemon {
         // RUST_LOG=warn exported filtered the markers away: three cases
         // completed every functional assertion and then failed on the
         // marker, and the prefetch and stream cases, which use a marker as
-        // a barrier, timed out. Five red tests, no product defect (Codex
+        // a barrier, timed out. Five red tests, no product defect (review
         // sweep 12 Aug). `info` IS the default filter, so this pins the
         // behaviour the tests were written against rather than changing it -
         // the same isolation tests/integration/watch_dedupe.rs already
         // applies per case.
-        cmd.env("NZBFAST_LOG", "info").env_remove("RUST_LOG");
+        //
+        // A DEFAULT, not an override: a case that needs a target at
+        // `debug` - `the_finishing_tail_...` reads the `lane` stream to
+        // learn which tail sections a job went through, rather than
+        // racing them in the queue payload - sets `NZBFAST_LOG` itself
+        // in its own `build` and keeps it. What the pin is FOR is the
+        // inherited value (a shell or runner exporting `RUST_LOG=warn`),
+        // and that is still defeated for every case.
+        if !cmd
+            .get_envs()
+            .any(|(k, v)| k == "NZBFAST_LOG" && v.is_some())
+        {
+            cmd.env("NZBFAST_LOG", "info");
+        }
+        cmd.env_remove("RUST_LOG");
         // Central disk-guard isolation, for the same reason as the log
         // filter above: `min_free` defaults to 2 GB and the runner it is
         // measured against is the HOST's, not anything this suite writes.
@@ -1004,7 +1018,7 @@ async fn scrambled_segment_numbering_single_file() {
 /// only for -3: an ordinary paused job re-prioritised by a client stays
 /// paused, which is what every SAB caller expects.
 ///
-/// Codex sweep 2, 3 Aug M4 extends it to the NZBGet `/jsonrpc` facade,
+/// Review sweep 2, 3 Aug M4 extends it to the NZBGet `/jsonrpc` facade,
 /// which kept its own copy of the priority write and never got the hold
 /// release - so which client type the user happened to configure in
 /// Sonarr decided whether the one documented escape from a duplicate
@@ -7532,7 +7546,7 @@ async fn nested_zip_in_a_real_store_rar_extracts_through_the_daemon() {
     let _log = d.stop();
 }
 
-/// Codex H5: `mode=change_cat` validated the job was Queued, released
+/// Review H5: `mode=change_cat` validated the job was Queued, released
 /// every lock, derived the new directory, then wrote `category` and
 /// `out_dir` WITHOUT revalidating - so a job the scheduler started in
 /// that window downloaded into its OLD directory while the record named
@@ -8293,6 +8307,13 @@ async fn the_finishing_tail_is_named_and_never_borrows_the_next_job_s_bar() {
         let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
         c.env("NZBFAST_OPEN", "1")
             .env("NZBFAST_NO_ENRICH", "1")
+            // The pipeline's own record of the sections this job passes
+            // through, which assertion (2b) reads instead of racing
+            // them. `lane` is the target both halves of that record
+            // write to - the engine's `note_activity` and the daemon's
+            // `note_tail_stage` - so one directive covers the whole
+            // tail.
+            .env("NZBFAST_LOG", "info,lane=debug")
             .arg("--config")
             .arg(&cfg)
             .arg("serve")
@@ -8311,7 +8332,7 @@ async fn the_finishing_tail_is_named_and_never_borrows_the_next_job_s_bar() {
     .await;
     let port = d.port;
 
-    tokio::task::spawn_blocking(move || {
+    let ids = tokio::task::spawn_blocking(move || {
         let add = |xml: &str, name: &str| {
             let b = "----tailboundary";
             let mut body = Vec::new();
@@ -8431,11 +8452,35 @@ async fn the_finishing_tail_is_named_and_never_borrows_the_next_job_s_bar() {
             }
         }
         // (2) The tail was named rather than reported as a download.
+        //
+        // ANY of SAB's tail words satisfies this, `Moving` included, and
+        // that is the fix for a standing red rather than a softening of
+        // it. What this line pins is that `tail_phase` reaches the WIRE
+        // at all - that a finishing job's row stops calling itself a
+        // download - and every word in the set is the same mechanism
+        // answering. Requiring specifically Verifying/Repairing/
+        // Extracting made it a sampling race instead: those sections are
+        // a few milliseconds wide, the loop above samples every 4 ms
+        // plus an HTTP round trip, and the CI runner is four vCPU.
+        // Measured on the dev Mac 10 Sep 2026 over 12 runs, this
+        // fixture caught a Verifying/Extracting row 2-11 times per run
+        // out of ~400 polls; the two nightlies that hard-failed on it
+        // (33491207417, 33857298155) caught it ZERO times, with three
+        // tail samples in the whole run. A wider payload does not buy
+        // the margin back - 6 MB against 24 MB, with and without a
+        // recovery set for the verify to chew on, moved the count from a
+        // median of 2 to a median of 3 over ten interleaved pairs, which
+        // is noise. The specific words are pinned DETERMINISTICALLY
+        // instead, at (2b) below and in
+        // `tail_phase_maps_hub_activity_to_sab_vocabulary`.
+        //
+        // The sampled half is safe where the narrow one was not because
+        // `Moving` spans the whole stretch from the end of extraction to
+        // the history row: 15-59 samples per run here, and 3 on the
+        // worst CI run on record - never zero.
         assert!(
-            tails
-                .iter()
-                .any(|(st, _, _)| st == "Verifying" || st == "Repairing" || st == "Extracting"),
-            "no verify/repair/unpack phase ever reached the queue payload; \
+            !tails.is_empty(),
+            "no named tail phase ever reached the queue payload; \
              a finishing job still calls itself Downloading. observed: {tails:?}"
         );
         // (3) ...and a named tail reports its own bytes as all in.
@@ -8471,9 +8516,30 @@ async fn the_finishing_tail_is_named_and_never_borrows_the_next_job_s_bar() {
                  between them - the header and the rows are describing different instants"
             );
         }
+        seen.keys().cloned().collect::<Vec<String>>()
     })
     .await
     .unwrap();
+
+    // (2b) ...and EVERY job really did verify and unpack, which the
+    // sampler above cannot say and never could.
+    //
+    // `hub.activity` is a live cell with no history, so until the
+    // pipeline logged its section transitions the only way to learn a
+    // job had verified was to be polling at the instant it did. This
+    // reads the record instead: it is exact, it covers BOTH jobs rather
+    // than whichever one a lucky sample landed on, and it cannot flake.
+    // See `note_activity_impl` for the other end.
+    let lane = d.log();
+    for id in &ids {
+        for stage in ["verifying", "extracting"] {
+            assert!(
+                lane.contains(&format!("{id}: tail stage -> {stage}")),
+                "{id} never recorded a {stage} stage - the pipeline skipped that \
+                 section, or stopped saying so.\n--- log ---\n{lane}"
+            );
+        }
+    }
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();

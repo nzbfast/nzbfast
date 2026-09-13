@@ -253,7 +253,7 @@ Object.assign(out, {
   // M32's route controls. These reach the form through the same tErr()
   // path; hand-editing them into en.reference.json instead left them out
   // of this list, so the next extract silently dropped all three
-  // (Codex sweep 7, L4).
+  // (review sweep 7, L4).
   'err.bind address: not an IP address': 'bind address: not an IP address',
   'err.proxy address: expected host:port': 'proxy address: expected host:port',
   'err.proxy address: put the user and password in their own boxes':

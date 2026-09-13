@@ -11,7 +11,7 @@ use super::*;
 #[cfg(unix)]
 use script::{SCRIPT_ERR_TAIL, run_capped_sieve};
 
-/// M5 (Codex sweep 5 Aug): a recategorize that physically moved the
+/// M5 (review sweep 5 Aug): a recategorize that physically moved the
 /// payload and then could not write the queue file answered
 /// `status:true` - and the restart restored the OLD record over the
 /// emptied source, orphaning the bytes at the destination. The
@@ -331,7 +331,7 @@ fn two_holders_that_exhaust_the_pool_both_finish() {
     }
 }
 
-/// The escape hatch that used to be here, run for a while. Codex
+/// The escape hatch that used to be here, run for a while. review
 /// found this on the 31 Jul sweep and it was real: the timeout
 /// release was granted to EVERY holder, every round, forever, so a
 /// set of stalled uploads ratcheted the pool upward by one chunk each
@@ -1203,19 +1203,34 @@ fn match_arms_of(src: &str, signature: &str) -> std::collections::BTreeSet<Strin
         .collect()
 }
 
-/// Every match arm in `apply_setting`, across BOTH halves of the table.
+/// Every match arm in `apply_setting`, across ALL FOUR links of the table.
 ///
 /// The dispatch outgrew the size gate's function ceiling and split at the
-/// indexer block (TODO 106): names the first half does not know fall
-/// through to `apply_setting_tail` in settings_apply.rs. Scanning only
-/// settings.rs would silently see half the arms and report every name in
-/// the other half as "declared but has no arm" - so both are scanned, and
-/// the arm-count floor below is what catches it if a third half appears.
+/// indexer block (TODO 106): names one link does not know fall through to
+/// the next, ending at `apply_setting_tail` in settings_apply.rs.
+/// Scanning only settings.rs would silently see part of the arms and
+/// report every name in the others as "declared but has no arm" - so all
+/// four are scanned, and the arm-count floor below is what catches it if
+/// a fifth link appears.
+///
+/// It DID catch exactly that, on 7 Sep 2026, when `apply_setting` was
+/// split again (naming and indexer blocks, claim
+/// `debt-split-hot-files-7sep`) - which is the direction this was written
+/// to fail in. Adding the new links here is the fix; loosening the floor
+/// would not be.
 fn apply_setting_arms() -> std::collections::BTreeSet<String> {
     let mut arms = match_arms_of(
         include_str!("../../nzbfast-daemon/src/settings.rs"),
         "\npub fn apply_setting(",
     );
+    arms.extend(match_arms_of(
+        include_str!("../../nzbfast-daemon/src/settings_apply_naming.rs"),
+        "\npub(super) fn apply_setting_naming(",
+    ));
+    arms.extend(match_arms_of(
+        include_str!("../../nzbfast-daemon/src/settings_apply_index.rs"),
+        "\npub(super) fn apply_setting_index(",
+    ));
     arms.extend(match_arms_of(
         include_str!("../../nzbfast-daemon/src/settings_apply.rs"),
         "\npub(super) fn apply_setting_tail(",
@@ -2046,7 +2061,7 @@ async fn mover_process_moves_a_pending_job_and_clears_the_marker() {
 }
 
 /// C: the mover step's record has to follow the bytes even when the
-/// store refuses the line (Codex sweep 7, M5 follow-up).
+/// store refuses the line (review sweep 7, M5 follow-up).
 ///
 /// `mover_process` is the sharpest of the callers that dropped
 /// `history_upsert_if_present`'s answer: it publishes the payload's NEW
@@ -2142,7 +2157,7 @@ fn mover_budget_follows_the_mode() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex sweep 10 Aug L1: a custom key like `a&b` authenticated direct
+/// Review sweep 10 Aug L1: a custom key like `a&b` authenticated direct
 /// calls but broke every URL the daemon generated with it, and `/watch`
 /// silently dropped other punctuation. Creation refuses the charset,
 /// and the generated-link boundaries encode whatever key they carry.
@@ -2160,7 +2175,7 @@ fn custom_keys_are_charset_checked_and_links_encode_them() {
     assert_eq!(query_escape("k%00#"), "k%2500%23");
 }
 
-/// Codex sweep 10 Aug M14, half 1: the single-flight latch. Two tabs
+/// Review sweep 10 Aug M14, half 1: the single-flight latch. Two tabs
 /// (or a manual run beside the schedule) must not run the benchmark
 /// workload concurrently; the second claim fails until the first
 /// guard drops - and a panic mid-run still releases it.
@@ -2185,7 +2200,7 @@ fn system_benchmarks_are_single_flight() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Codex sweep 10 Aug M14, half 2: the history append is a
+/// Review sweep 10 Aug M14, half 2: the history append is a
 /// load-modify-write, and unlocked, two concurrent appends both read
 /// the same file and one overwrote the other's row. Under the lock
 /// every row survives.

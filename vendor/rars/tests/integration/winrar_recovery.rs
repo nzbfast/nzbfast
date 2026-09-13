@@ -337,3 +337,116 @@ fn rar4_recovery_record_we_wrote_is_repaired_by_winrar() {
     eprintln!("rar4 recovery record: `rar r` rebuilt sector 100 byte-exact");
     fs::remove_dir_all(&dir).ok();
 }
+
+/// The RAR5 writer direction, MULTI-GROUP: a 32 MiB stored member with a
+/// recovery record built HERE (three groups per shard), tested by RARLab's
+/// `rar t`, then damaged in two places and repaired by `rar r`.
+///
+/// Until 6 Sep 2026 every RAR5 recovery record this writer produced over
+/// about 13 MB read as "Recovery record is corrupt" to rar 7.23 while our
+/// own reader read it fine: two fields of the `{RB}` record header were
+/// right only while there was a single group (the group's offset within
+/// its shard, and a trailing value rar requires to be the same in every
+/// record). The legs above build with `rar` and repair with us, which is
+/// the direction that could not see it; this one is the other.
+#[test]
+#[ignore = "needs the proprietary `rar` binary and builds a 32 MiB archive"]
+fn rar5_multi_group_recovery_record_we_wrote_is_accepted_and_repaired_by_winrar() {
+    if !have_rar() {
+        eprintln!("SKIP: `rar` not on PATH - this test needs RARLab's binary");
+        return;
+    }
+    let dir = workdir("rar5-rr-writer");
+    let payload = dir.join("payload.bin");
+    write_payload(&payload, 32 << 20);
+    let data = fs::read(&payload).expect("read payload");
+
+    let mut features = rars::FeatureSet::default();
+    features.recovery_record = true;
+    let options = rars::rar50::WriterOptions::new(rars::ArchiveVersion::Rar50, features)
+        .with_compression_level(0);
+    let pristine = rars::rar50::Rar50Writer::new(options)
+        .recovery_percent(Some(3))
+        .stored_entries(&[rars::rar50::StoredEntry {
+            name: b"payload.bin",
+            data: &data,
+            mtime: None,
+            attributes: 0,
+            host_os: 3,
+        }])
+        .finish()
+        .expect("write a RAR5 archive with a recovery record");
+    // Three groups per shard: 200 shards of ceil(32 MiB / 200) bytes, each
+    // cut at 64 KiB. A single-group archive would pass with the old bug.
+    let plan = rars::recovery::rar5::plan_inline_recovery(
+        (pristine.len() as u64).saturating_sub(2 << 20),
+        3,
+    )
+    .expect("plan");
+    assert!(
+        rars::recovery::rar5::recovery_groups(plan)
+            .expect("groups")
+            .len()
+            >= 3,
+        "the fixture must span several groups"
+    );
+    let original = dir.join("orig.rar");
+    fs::write(&original, &pristine).expect("write pristine");
+
+    // rar's own test of the record: "OK" and no "corrupt".
+    let output = Command::new("rar")
+        .arg("t")
+        .arg(&original)
+        .output()
+        .expect("run rar t");
+    let said = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    assert!(
+        output.status.success() && said.contains("recovery record") && !said.contains("corrupt"),
+        "rar t does not accept our recovery record: {said}"
+    );
+
+    // Two damaged stretches inside the member, then RARLab's repair.
+    let mut damaged_bytes = pristine.clone();
+    damaged_bytes[5_000_000..5_200_000].fill(0);
+    damaged_bytes[20_000_000..20_100_000].fill(0xff);
+    let damaged = dir.join("dmg.rar");
+    fs::write(&damaged, &damaged_bytes).expect("write damaged");
+    let output = Command::new("rar")
+        .args(["r", "-y"])
+        .arg(&damaged)
+        .current_dir(&dir)
+        .output()
+        .expect("run rar r");
+    assert!(
+        output.status.success(),
+        "rar r failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let fixed = dir.join("fixed.dmg.rar");
+    let fixed_bytes = fs::read(&fixed).expect("read rar's repair");
+    // rar rewrites the archive rather than patching bytes in place, so the
+    // comparison is the MEMBER it extracts, not the container.
+    let out = dir.join("out");
+    fs::create_dir_all(&out).expect("out dir");
+    let status = Command::new("rar")
+        .args(["x", "-y", "-inul"])
+        .arg(&fixed)
+        .arg(format!("{}/", out.display()))
+        .status()
+        .expect("run rar x");
+    assert!(status.success(), "rar x of the repaired archive failed");
+    assert_eq!(
+        fs::read(out.join("payload.bin")).expect("read extracted"),
+        data,
+        "the member RARLab repaired from our record is not the payload"
+    );
+    assert!(!fixed_bytes.is_empty());
+
+    // ...and our own repair of the same damage agrees.
+    let ours = repair_buffered(&damaged);
+    assert_eq!(
+        ours, pristine,
+        "our repair of our own record differs from what we wrote"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -187,7 +187,7 @@ ktls = ["nzbkit-base/ktls"]
 # `--features heavy-tests` where it runs the suites (the rigs are all
 # `#[ignore]`d and run by hand only).
 # Forwards to base as well: `par2gen_large_set` came down with `par2gen`,
-# and CLAUDE.md's clippy gate passes `--features nzbkit/heavy-tests`.
+# and CONTRIBUTING.md's clippy gate passes `--features nzbkit/heavy-tests`.
 heavy-tests = ["nzbkit-base/heavy-tests"]
 # Forwards the layer below's test seam so a crate ABOVE this facade can
 # reach it. `nzbkit-base/test-support` is what compiles

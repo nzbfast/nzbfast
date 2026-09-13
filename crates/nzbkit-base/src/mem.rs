@@ -218,18 +218,95 @@ fn parse_decimal_size(v: &str) -> Option<usize> {
 /// rule on hybrid x86, `NZBFAST_NTT_THREADS`), so a smaller answer here
 /// can only ever narrow a pool, never widen one.
 ///
-/// Read once. The value cannot change while the process runs, and these
-/// sites sit inside repair and decode loops where a `getenv` per call
-/// would be a syscall in a hot path.
+/// The environment is read once. The value cannot change while the
+/// process runs, and these sites sit inside repair and decode loops
+/// where a `getenv` per call would be a syscall in a hot path.
+/// [`set_cpu_workers`] is checked ahead of that cache, so an entry point
+/// that publishes a width still binds every site even if something read
+/// the default first.
 pub fn cpu_workers() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *N.get_or_init(|| {
-        let machine = std::thread::available_parallelism().map_or(4, |n| n.get());
-        match std::env::var("NZBFAST_CPU_WORKERS") {
-            Ok(v) => cpu_workers_override(&v).unwrap_or(machine),
-            Err(_) => machine,
-        }
-    })
+    match CPU_WORKERS_PUBLISHED.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => *N.get_or_init(|| {
+            let machine = std::thread::available_parallelism().map_or(4, |n| n.get());
+            match std::env::var("NZBFAST_CPU_WORKERS") {
+                Ok(v) => cpu_workers_override(&v).unwrap_or(machine),
+                Err(_) => machine,
+            }
+        }),
+        n => n,
+    }
+}
+
+/// The width an ENTRY POINT published, or 0 when none has - the pool
+/// twin of `PROCESS_BUDGET`, and set the same way, once, before any
+/// command runs.
+static CPU_WORKERS_PUBLISHED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Publish the pool width for this process: `parfast -t<n>`, which is
+/// par2cmdline's "number of threads used for main processing".
+///
+/// It beats `NZBFAST_CPU_WORKERS` on purpose. That variable is a
+/// launcher's ceiling for a process it starts (the Android
+/// `DeviceProfile.cpuWorkers` path); `-t` is the person at the keyboard
+/// naming a width for THIS run, and the more specific instruction wins.
+/// Clamped to the same 1..=1024 band the variable is, so a `-t0` is a
+/// serial run and not a hang, and so no caller has to re-apply `.max(1)`
+/// to a number that came from here.
+///
+/// Publishing rather than threading the count through every signature is
+/// the only shape that reaches the sites that matter: the fold, the
+/// solve, the packet scan and the catalog build all size themselves from
+/// [`cpu_workers`], and none of them takes a width from the CLI. See
+/// `set_process_budget` for the same decision about `-m`.
+pub fn set_cpu_workers(n: usize) {
+    CPU_WORKERS_PUBLISHED.store(n.clamp(1, 1024), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The FILE-level width an entry point published, or 0 when none has.
+/// Separate from [`CPU_WORKERS_PUBLISHED`] because the two axes are
+/// separate switches on the reference CLI and multiply rather than
+/// replace each other - see [`set_file_workers`].
+static FILE_WORKERS_PUBLISHED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many FILES to hash at once, when an entry point has named a
+/// number: `parfast -T<n>`, which is par2cmdline's "number of files
+/// hashed in parallel".
+///
+/// `None` - nothing published - means "derive it", which is what every
+/// caller did before this existed and still does by default. It is
+/// deliberately not folded into [`cpu_workers`]: `-t` and `-T` are two
+/// switches on the reference and a caller splits one budget across the
+/// other axis, so a site that read a single number could not tell a
+/// pinned file width from a pinned total.
+///
+/// A published 0 is not reachable - [`set_file_workers`] clamps to
+/// 1..=1024 exactly as [`set_cpu_workers`] does - so 0 unambiguously
+/// means unset.
+pub fn file_workers() -> Option<usize> {
+    match FILE_WORKERS_PUBLISHED.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        n => Some(n),
+    }
+}
+
+/// Publish the file-hash width for this process: `parfast -T<n>`.
+///
+/// The twin of [`set_cpu_workers`], set the same way - once, before any
+/// command runs - and clamped to the same 1..=1024 band, so `-T0` is a
+/// one-file-at-a-time run and not a hang.
+///
+/// It must NOT re-scale what `-t` published. A verify pass splits one
+/// budget across two axes (files in flight, and lanes inside a file);
+/// pinning the file axis leaves `cpu_workers` meaning what it meant, and
+/// the intra-file share takes the remainder. The two multiply, which is
+/// the same rule `parfast`'s own `verify::survey` applies to the same
+/// pair of switches. How much that remainder is worth is a separate
+/// question with a poor answer today - see TODO 339.
+pub fn set_file_workers(n: usize) {
+    FILE_WORKERS_PUBLISHED.store(n.clamp(1, 1024), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// What `NZBFAST_CPU_WORKERS` is allowed to mean, split out so it can be
@@ -552,6 +629,28 @@ impl MemBudget {
         );
         policy.max_tape_workers = policy.max_workers.min(rar_worker_cap());
         policy
+    }
+
+    /// RAR 5 WRITING's memory allowance - the counterpart of
+    /// [`Self::rar_execution_policy`], and a quarter of the budget for the
+    /// same reason: posting encodes while the rest of the pipeline is live,
+    /// so the writer shares rather than assuming it has the host to itself.
+    ///
+    /// It exists because nothing admitted the writer's memory at all. The
+    /// encoder's own defaults are host-sized - 128 MiB of block wave per
+    /// pool thread FLOORED AT A GIBIBYTE, a flat 512 MiB of parse hints,
+    /// and a match-finder tree of ten bytes per dictionary byte - so a
+    /// 32-bit target, whose whole [`Self::max_total`] is 1 GiB, was
+    /// outspent by the floor alone before a byte of payload arrived
+    /// (measured 8 Sep 2026: 1.4 to 2.1 GiB of live heap beyond the
+    /// caller's input, at every dictionary from 128 KiB to 32 MiB).
+    ///
+    /// The floor is deliberately low rather than absent: the encoder
+    /// narrows to a single block in flight rather than failing, so a small
+    /// allowance costs wall time and no bytes. The ceiling is where the
+    /// stock defaults already sat, so a large budget changes nothing.
+    pub fn rar_write_policy(&self) -> rars::Rar50WritePolicy {
+        rars::Rar50WritePolicy::from_working_memory((self.total / 4).clamp(64 << 20, 4 << 30))
     }
 }
 
@@ -1689,6 +1788,56 @@ mod tests {
         let a = cpu_time_secs().unwrap();
         let b = cpu_time_secs().unwrap();
         assert!(a >= 0.0 && b >= a);
+    }
+
+    /// The write policy's whole reason for existing is that a 32-bit
+    /// poster's budget is smaller than the writer's OWN default floor, so
+    /// this pins the relationship the target actually needs rather than the
+    /// arithmetic: whatever `max_total` is here, the allowance fits inside
+    /// it and the tree it admits fits inside the allowance.
+    #[test]
+    fn rar_write_policy_fits_inside_the_budget_it_came_from() {
+        for total in [
+            MemBudget::MIN,
+            256 << 20,
+            1 << 30,
+            8u64 << 30,
+            MemBudget::max_total(),
+        ] {
+            let budget = MemBudget::with_total(total);
+            let policy = budget.rar_write_policy();
+            // The allowance never exceeds the budget it was cut from. The
+            // stock encoder defaults - a 1 GiB wave floor plus 512 MiB of
+            // hints - fail this at every 32-bit budget, which is the defect.
+            assert!(
+                policy.working_memory_limit <= budget.total.max(64 << 20),
+                "{total}: allowance {} over budget {}",
+                policy.working_memory_limit,
+                budget.total,
+            );
+            // Ten bytes of tree per dictionary byte, inside the quarter of
+            // the allowance set aside for it - unless the format floor is
+            // wider than the allowance can pay for, which is a caller error
+            // to report and not a dictionary to invent.
+            let tree = policy.max_dictionary.saturating_mul(10);
+            assert!(
+                tree <= policy.working_memory_limit / 4
+                    || policy.max_dictionary == rars::Rar50WritePolicy::MIN_DICTIONARY,
+                "{total}: tree {tree} over its share of {}",
+                policy.working_memory_limit,
+            );
+        }
+
+        // Monotone: more budget never admits a narrower dictionary.
+        let mut previous = MemBudget::with_total(MemBudget::MIN).rar_write_policy();
+        for shift in 27..36 {
+            let policy = MemBudget::with_total(1u64 << shift).rar_write_policy();
+            assert!(
+                policy.max_dictionary >= previous.max_dictionary,
+                "1 << {shift}: {policy:?} under {previous:?}",
+            );
+            previous = policy;
+        }
     }
 
     /// Qualitative pins for the RAR execution policy, not exact numbers: a

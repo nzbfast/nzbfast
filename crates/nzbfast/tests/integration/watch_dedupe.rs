@@ -105,7 +105,7 @@ fn serve(dir: &Path, watch: &Path) -> Daemon {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
         cmd.env("NZBFAST_NO_ENRICH", "1")
             .env("NZBFAST_OPEN", "1")
-            // Q1 of the 08-10 Codex sweep. Every assertion in this file
+            // Q1 of the 08-10 review sweep. Every assertion in this file
             // reads the daemon's own log, so the filter has to be ours
             // rather than whatever the shell happened to export:
             // logging.rs honours RUST_LOG (second, after NZBFAST_LOG), and

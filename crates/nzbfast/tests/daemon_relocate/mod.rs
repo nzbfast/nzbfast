@@ -1,4 +1,4 @@
-//! Codex F-06 (24 Aug 2026 read-only sweep): the relocation fence.
+//! Review finding F-06 (24 Aug 2026 read-only sweep): the relocation fence.
 //!
 //! A submodule of the daemon target rather than its own `tests/*.rs`,
 //! for the reason every sibling here is one: a top-level file would
@@ -8,7 +8,7 @@
 
 use super::*;
 
-/// Codex F-06: the relocation fence. `requeue_category` publishes the
+/// Review finding F-06: the relocation fence. `requeue_category` publishes the
 /// new `category`/`out_dir` under `add_lock` and then, with every lock
 /// released, moves the earlier progress into that directory. The record
 /// is correct, still Queued and still runnable for the whole of that
@@ -371,7 +371,7 @@ fn wait_for_marker(log: &Path, needle: &str) -> std::time::Instant {
     );
 }
 
-/// Codex F-06, the `start_next` arm: a recategorize that lands entirely
+/// Review finding F-06, the `start_next` arm: a recategorize that lands entirely
 /// inside the gap between the pick and the flip cannot start the job.
 ///
 /// `pick_job` drops the job lock before it returns, so the fence it
@@ -508,7 +508,7 @@ async fn a_recategorize_inside_the_pick_to_start_gap_cannot_start_the_job() {
     let _log = rig.d.stop();
 }
 
-/// Codex F-06, the rename front: the label and the directory of one
+/// Review finding F-06, the rename front: the label and the directory of one
 /// rename can never be seen disagreeing.
 ///
 /// `rename_queued` runs the recategorize transaction to re-derive

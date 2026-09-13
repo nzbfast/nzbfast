@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex};
 /// "download it again") ran `drop_kept_nzb` and removed the spool
 /// copy while the history row still pointed at it, and the
 /// advertised retry then failed with a raw ENOENT out of the NZB
-/// read (Codex sweep 3, M11).
+/// read (review sweep 3, M11).
 #[test]
 fn a_history_owed_delete_keeps_its_nzb_out_of_the_kept_notice() {
     let dir = std::env::temp_dir().join(format!("nzbfast-parkcust-{}", std::process::id()));
@@ -851,7 +851,7 @@ fn a_next_episode_hunt_asks_one_account_and_names_by_join() {
 /// hold) keeps `pick_job` away. So pause -> resume -> pause on the
 /// last job announced the first idle edge and swallowed the second,
 /// even though the queue had genuinely gone runnable and quiet again
-/// in between (Codex sweep 14 Aug L2).
+/// in between (review sweep 14 Aug L2).
 #[test]
 fn resuming_a_job_re_arms_the_idle_latch() {
     let dir = scratch_dir("lifted", "idle-resume");

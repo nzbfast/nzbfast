@@ -16,7 +16,7 @@
 //! It lives here rather than in the watchdog that wrote it because the
 //! second caller arrived, and a sentence about what a rerun costs copied
 //! into two hand-maintained siblings is this repository's most
-//! documented defect class (CLAUDE.md's TENTH, ELEVENTH and FOURTEENTH
+//! documented defect class (CONTRIBUTING.md's TENTH, ELEVENTH and FOURTEENTH
 //! gates are each one instance of it). Nothing here is new: the enum,
 //! both constants and [`requeue_cost`] are the watchdog's own, moved
 //! verbatim with their doc comments, plus the caching entry point the

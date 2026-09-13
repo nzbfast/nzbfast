@@ -7,7 +7,7 @@
 //! land: [`CompactVerdict`] and [`compact_verdict`], with
 //! [`COMPACT_CHUNK_PAGES`] bounding how long a download can wait for a
 //! chunk. And for a statement ALREADY executing: the rendezvous between
-//! it and the watcher that may need to abort it (Codex sweep 3 Aug M5) -
+//! it and the watcher that may need to abort it (review sweep 3 Aug M5) -
 //! the `MaintenanceArm` both sides go through, and the watcher itself,
 //! polling at [`COMPACT_ABORT_POLL_MS`]. That last range is the case the
 //! other two structurally cannot reach, because by then the rewrite
@@ -46,7 +46,7 @@
 use super::*;
 
 /// The rendezvous between a maintenance statement and the watcher that
-/// may need to abort it (Codex sweep 3 Aug M5).
+/// may need to abort it (review sweep 3 Aug M5).
 ///
 /// An interrupt handle is per CONNECTION, not per statement, so handing
 /// the watcher a handle taken during an EARLIER `with_index` call was

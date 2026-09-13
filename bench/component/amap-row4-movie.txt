@@ -1,0 +1,4 @@
+# Row 4, a volume that fell off retention. The member is entirely absent and
+# the pars rebuild a file from nothing.
+ARTICLE 768000
+DELETE feature.part13.rar

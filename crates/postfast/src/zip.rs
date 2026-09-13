@@ -117,7 +117,10 @@ pub const STORED: CompressionMethod = CompressionMethod::Stored;
 /// crate's default (the module header says why that distinction
 /// matters), no permissions are set, and nothing here draws from the OS
 /// entropy the way the RAR encryption arms do.
-pub fn write_archive(members: &[(String, Vec<u8>)], compressed: bool) -> Result<Vec<u8>, String> {
+pub fn write_archive<B: AsRef<[u8]>>(
+    members: &[(String, B)],
+    compressed: bool,
+) -> Result<Vec<u8>, String> {
     let method = if compressed {
         CompressionMethod::Deflated
     } else {
@@ -140,7 +143,7 @@ pub fn write_archive(members: &[(String, Vec<u8>)], compressed: bool) -> Result<
         // `extract_set` asserts the count either way.
         w.start_file(name.as_str(), opts)
             .map_err(|e| format!("the zip writer refused {name:?}: {e}"))?;
-        w.write_all(bytes)
+        w.write_all(bytes.as_ref())
             .map_err(|e| format!("the zip writer would not take {name:?}: {e}"))?;
     }
     let out = w
@@ -158,8 +161,15 @@ pub fn write_archive(members: &[(String, Vec<u8>)], compressed: bool) -> Result<
 /// them on disk. Here the payloads are kilobytes and the check runs at
 /// generation, so the in-memory join is the simple reading of the same
 /// thing.
-pub fn extract_set(set: &[Vec<u8>]) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let joined: Vec<u8> = set.concat();
+pub fn extract_set<S: AsRef<[u8]>>(set: &[S]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    // Generic over the element so the round trip can hand this a
+    // BORROWED view of the posted set (`container::read_the_set_back`)
+    // without a `Vec<Vec<u8>>` of its own; every existing caller passes
+    // `&[Vec<u8>]` and is unchanged.
+    let mut joined: Vec<u8> = Vec::with_capacity(set.iter().map(|s| s.as_ref().len()).sum());
+    for part in set {
+        joined.extend_from_slice(part.as_ref());
+    }
     let mut r = ZipArchive::new(Cursor::new(joined))
         .map_err(|e| format!("the zip set does not parse: {e}"))?;
     let mut out = Vec::new();

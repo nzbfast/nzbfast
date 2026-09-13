@@ -118,7 +118,7 @@ pub fn extract_sevenz(
         // ATTEMPT, and only this call banks what the last one produced.
         crate::unpackprog::begin_set();
         // Per CONTAINER, like the zip arm: one resolved value per level
-        // handed every 7z job the first job's password (Codex sweep G).
+        // handed every 7z job the first job's password (review sweep G).
         // A shortlist rather than a pick, because a probe that hit the
         // 64 MB cap never reached the entry's checksum and cannot settle
         // anything (sweep M) - the extraction does.

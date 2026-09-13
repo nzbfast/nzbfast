@@ -39,7 +39,7 @@ pub struct BrowseQuery {
     /// whether its stem carried the year. Answering with one of them
     /// hid the rest of the title's releases from Sonarr and Radarr, and
     /// `total` agreed with the truncated page so nothing looked wrong
-    /// (Codex sweep 7, M4).
+    /// (review sweep 7, M4).
     pub title_keys: Vec<String>,
     /// M30: apply the user's wall curation (per-title hides + hide
     /// rules). Wall/list views set this; API facades (newznab, *arrs)

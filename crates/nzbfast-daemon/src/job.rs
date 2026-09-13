@@ -75,7 +75,7 @@ pub struct Job {
     /// [`FailKind`] is: a `pub` field naming a crate-private type is
     /// what `private_interfaces` refuses, and that lint is only
     /// reachable when `-p nzbfast-ffi` compiles this module as a LIB
-    /// (see CLAUDE.md's clippy gate). Narrowing the FIELD is the fix
+    /// (see CONTRIBUTING.md's clippy gate). Narrowing the FIELD is the fix
     /// d8bc07096 and bb8c6d633 both settled on for the same class;
     /// widening the type would publish an application classification
     /// nothing outside this crate has any use for.
@@ -204,7 +204,7 @@ pub struct Job {
     /// different release of the same episode is admitted and runs, so
     /// when IT fails it promoted a row that had been held against a
     /// still-COMPLETED original - the user got a second copy of
-    /// something they already had (Codex sweep K, 13 Aug 2026). An
+    /// something they already had (review sweep K, 13 Aug 2026). An
     /// empty value (a queue written before this field existed) keeps
     /// the old dupe_key-only behaviour, which is right for `smart`,
     /// where the two identities agree.
@@ -281,7 +281,7 @@ pub struct Job {
     /// Cleared by `retry`, beside `tombstone`, for the same reason - a
     /// re-queued job is a row the user is asking to SEE again.
     pub hidden: bool,
-    /// Codex F-06: a relocation transaction is in flight for this job -
+    /// Review finding F-06: a relocation transaction is in flight for this job -
     /// its `out_dir` has been published and the bytes behind that
     /// publication have not arrived yet. The runner must not start it.
     ///
@@ -1417,7 +1417,7 @@ pub(super) async fn finalize_completed_gen(
             // the payload out from under the recorded out_dir, insured
             // only by that marker - running them uninsured means a
             // crash mid-move restores a clean Completed record over a
-            // half-moved payload (Codex sweep 5 Aug M6). Leave the
+            // half-moved payload (review sweep 5 Aug M6). Leave the
             // finished files exactly where the record says they are,
             // and say why on the row; an unlock/retry re-runs this
             // whole tail once the disk is writable again.
@@ -1671,7 +1671,7 @@ pub struct DupeCollision {
 /// failed - true about that ONE row, and it switched BOTH duplicate
 /// arms off against every other row at once, so a hunted copy started
 /// downloading beside a live copy of the same release that the user or
-/// a watchlist had already queued (Codex sweep 24 Aug, F-09).
+/// a watchlist had already queued (review sweep 24 Aug, F-09).
 ///
 /// `Row` is deliberately by NZO ID and not by name or by key: the row
 /// the hunt replaces is a specific record, and every other record that
@@ -1783,7 +1783,7 @@ pub(crate) fn kept_notes_from_json(v: &Value) -> Option<VecDeque<KeptNote>> {
 /// removal itself goes through [`drop_spool`]: the copy sits in the
 /// spool under the adoptable name, so a refused unlink here is not "a
 /// small file left behind", it is the dismissed release re-enqueued at
-/// the next start (Codex sweep 24 Aug, F-04).
+/// the next start (review sweep 24 Aug, F-04).
 pub fn drop_kept_nzb(note: &KeptNote) {
     if !note.nzb.is_empty() {
         drop_spool(std::path::Path::new(&note.nzb));

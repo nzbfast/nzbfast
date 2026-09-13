@@ -57,7 +57,40 @@ use std::path::{Path, PathBuf};
 
 use crate::md5fast::{Digest, Md5};
 
-use crate::par2::{MAX_BLOCK_SIZE, TYPE_FILEDESC, TYPE_IFSC, TYPE_MAIN, TYPE_RECVSLIC};
+use crate::par2::{
+    MAX_BLOCK_SIZE, TYPE_COMMASCI, TYPE_COMMUNI, TYPE_FILEDESC, TYPE_IFSC, TYPE_MAIN, TYPE_RECVSLIC,
+};
+
+/// The create's progress sink, cancel gate and the trail a cancel
+/// unlinks - the repair's `par2repair::control` machinery, faced for
+/// this side. Added 12 Sep 2026 (claim `par2gen-create-control`).
+pub mod control;
+mod duplicates;
+/// The two transform arms of `recovery_slices` - split out on 9 Sep
+/// 2026 for the 500-line function ceiling.
+mod ntt;
+#[doc(hidden)] // `pub` only for its test doors; the creator's items stay `pub(super)`.
+pub mod ntt_range;
+mod packets;
+/// The single read pass over the members and the create admission that
+/// bounds it - split out on 9 Sep 2026 for the 4,000-line file ceiling.
+mod scan;
+mod stripe_first;
+/// The batch volume writer and the critical-block backfill - split out
+/// on 9 Sep 2026 for the 500-line function ceiling.
+mod volwrite;
+
+/// Census door onto [`duplicates::enabled`] (see `par2seams`).
+pub(crate) fn seam_duplicates(bs: usize, rows: usize, sources: usize) -> bool {
+    duplicates::enabled(bs, rows, sources)
+}
+use control::{CreateControl, CreatePhase, CreateTrail};
+use packets::{append_packet, prepare_recovery_seals, write_recovery_packet};
+// Glob rather than a list: the scan module is a lift of a contiguous
+// 1,270-line block out of this file, and every name in it kept the
+// unqualified spelling its call sites (here, in the sibling modules and
+// in `par2gen_tests.rs`) already used.
+use scan::*;
 
 /// Packet type of the Creator packet - free-form ASCII body naming the
 /// program that built the set. Not in `par2.rs`'s list because nothing
@@ -67,7 +100,13 @@ const TYPE_CREATOR: &[u8; 16] = b"PAR 2.0\0Creator\0";
 
 /// The PAR2 spec's own input-slice ceiling: 32768 naturals below 65535
 /// are coprime to it, and each input slice needs its own constant.
-const MAX_INPUT_SLICES: usize = 32768;
+///
+/// Public because a CALLER has to be able to ask the question before it
+/// builds a set: the engine refuses above this and tells the user to raise
+/// the block size, and parfast's `legal_block_size` does that for them
+/// rather than passing the refusal on. `par2repair` carries the same
+/// ceiling for the read side.
+pub const MAX_INPUT_SLICES: usize = 32768;
 
 /// Recovery-set members hold at most this many files. par2cmdline has
 /// no such limit; ours exists because the Main packet lists every file
@@ -86,6 +125,21 @@ pub enum Par2GenError {
     },
     #[error("{0}")]
     Other(String),
+    /// A caller raised its [`control::CreateControl`]'s cancel while
+    /// the create was running.
+    ///
+    /// THE PROMISE, which is why this is its own variant rather than
+    /// an `Other`: a cancelled create leaves NOTHING. The index and
+    /// every volume this run wrote have been removed before this error
+    /// reaches the caller, because the volumes are written to their
+    /// final names with the critical packets patched in last, so a
+    /// half-written set is a set that names no member and verifies
+    /// against nothing. A set this run was EXTENDING (`-f` onto an
+    /// existing one) keeps every file it already had - the trail a cancel
+    /// unlinks is a record of what this run CREATED, not a glob over
+    /// the directory (`control::CreateTrail`).
+    #[error("the recovery set was cancelled; every file it wrote has been removed")]
+    Cancelled,
 }
 
 fn io(path: &Path) -> impl Fn(std::io::Error) -> Par2GenError + '_ {
@@ -169,62 +223,6 @@ fn accum_budget_from(avail: u64) -> u64 {
 const ACCUM_MIN_BYTES: u64 = 256 << 20;
 const ACCUM_MAX_BYTES: u64 = 8 << 30;
 
-/// Smallest resident window the creator will hand to the transform, in
-/// slices: below this the per-window structural cost outweighs what the
-/// transform saves over the fold (measured, audit record section 13).
-const NTT_WINDOW_MIN: usize = 1024;
-
-/// Resident input window when the create-side NTT is admissible for this
-/// exact recovery batch. The single-member source-fusion dispatcher asks this
-/// same function before choosing the fold: sharing the predicate keeps a
-/// newly admitted NTT shape from being silently captured by the fused path,
-/// which cannot feed the transform from its sequential hash pass.
-fn create_ntt_window(
-    block_size: usize,
-    n_slices: usize,
-    first: usize,
-    count: usize,
-) -> Option<usize> {
-    if matches!(std::env::var("NZBFAST_NTT").as_deref(), Ok("0") | Ok("off")) {
-        return None;
-    }
-    let needed = first.checked_add(count)?;
-    if !create_ntt_shape_possible(block_size, n_slices, needed, count) {
-        return None;
-    }
-    let budget = crate::par2repair::ntt_budget_env()
-        .saturating_sub(crate::par2repair::ntt_worker_arenas(block_size, needed));
-    create_ntt_window_with_budget(block_size, n_slices, needed, count, budget)
-}
-
-fn create_ntt_shape_possible(
-    block_size: usize,
-    n_slices: usize,
-    needed: usize,
-    count: usize,
-) -> bool {
-    block_size > 0
-        && needed <= crate::par2ntt::N
-        && count >= crate::par2repair::NTT_MIN_MISSING
-        && n_slices >= crate::par2repair::NTT_MIN_PRESENT
-}
-
-/// Pure half of [`create_ntt_window`], kept separate so boundary tests can pin
-/// the transform's memory gate without mutating the process environment.
-fn create_ntt_window_with_budget(
-    block_size: usize,
-    n_slices: usize,
-    needed: usize,
-    count: usize,
-    budget: usize,
-) -> Option<usize> {
-    if !create_ntt_shape_possible(block_size, n_slices, needed, count) {
-        return None;
-    }
-    let window = (budget / block_size).min(n_slices);
-    (window >= NTT_WINDOW_MIN.min(n_slices)).then_some(window)
-}
-
 /// Peak bytes of INPUT block held at once, on top of the accumulators.
 ///
 /// The fold takes a batch of sources at a time (see [`recovery_slices`])
@@ -236,6 +234,149 @@ fn create_ntt_window_with_budget(
 /// target: a batch is also capped at the set's whole slice count, so a
 /// small post holds only what it has.
 const READ_BUDGET: u64 = 64 << 20;
+
+/// The direct fold's read window in bytes: [`READ_BUDGET`] unless
+/// `NZBFAST_CREATE_READ_BUDGET` (bytes, >= 1 MiB) says otherwise. A
+/// research knob for the create-pipeline lane (5 Sep 2026): every
+/// window's fold walks all `count` accumulators once, so a bigger window
+/// is fewer passes over them.
+/// The read window sized against the accumulators it is folded into:
+/// every window's fold walks ALL of them, so a window a quarter of their
+/// size bounds that traffic at four passes over the accumulators per pass
+/// over the payload. [`READ_BUDGET`] is the floor, 512 MiB the cap.
+/// Measured 5 Sep 2026 (the fused-multi handoff): ten 1 GiB members at
+/// 4 MiB slices, 256 rows - 161 windows of 16 blocks walked the 1 GiB
+/// accumulator set 161 times, 322 GB of traffic on a 1 GiB-of-arithmetic
+/// fold. At the 1 GiB / 1 MiB shape the accumulators are 103 MiB and the
+/// window stays at the floor (64 to 512 MiB measured flat there).
+fn create_read_budget_for(accum_bytes: u64) -> u64 {
+    static B: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let knob = *B.get_or_init(|| {
+        std::env::var("NZBFAST_CREATE_READ_BUDGET")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&b| b >= 1 << 20)
+    });
+    knob.unwrap_or_else(|| (accum_bytes / 4).clamp(READ_BUDGET, 512 << 20))
+}
+
+/// Reader threads per window: under read-ahead (below) ONE on Windows
+/// and two elsewhere, else the machine's workers capped at eight;
+/// `NZBFAST_CREATE_READERS` (1..=64) overrides either.
+///
+/// Measured on the i5-10600KF (6c/12t, Windows, 5 Sep 2026, the
+/// create-pipeline handoff rounds B-D), 1 GiB / 1 MiB / 103 rows: the
+/// page-cache copy costs ~2 CPU-seconds per GiB across eight readers
+/// (3.7 GB/s aggregate against 2.9 for one thread), so eight readers
+/// running under the fold slow it by exactly what they hide - batch
+/// 1.40-1.45 s with read-ahead on eight or four readers against
+/// 1.42-1.48 without. One reader copies the GiB in ~0.37 s, well under
+/// the ~1.1 s fold, and hides it for nothing: 1.37-1.41. Two readers
+/// the same. On the M3 Ultra, where eight readers copy the GiB in
+/// 55-73 ms, one reader under read-ahead reads slightly worse than the
+/// serial loop (batch 389-428 vs 374-396 ms) and two, four or eight
+/// are flat with it (378-410), so the non-Windows default is two.
+fn create_readers(under_fold: bool) -> usize {
+    static N: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let knob = *N.get_or_init(|| {
+        std::env::var("NZBFAST_CREATE_READERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| (1..=64).contains(&n))
+    });
+    // Under read-ahead Windows wants ONE reader (the page-cache copy is
+    // the cost there and readers contend for it; i5-10600KF, 5 Sep 2026).
+    // Off Windows the count stays at the fold's own: the 2 this arm
+    // first shipped with was never measured on unix and cost the M3
+    // Ultra 1.1 s on a 10 GiB / 4 MiB create (9.26-9.35 s vs 8.05-8.21
+    // with eight, measured 5 Sep 2026).
+    knob.unwrap_or_else(|| {
+        if under_fold && cfg!(windows) {
+            1
+        } else {
+            crate::mem::cpu_workers().clamp(1, 8)
+        }
+    })
+}
+
+/// Read window k+1 into a second arena while window k folds - on unless
+/// `NZBFAST_CREATE_OVERLAP=0`. Measured with the reader count above; the
+/// fused single-member scan keeps the serial loop (it hashes the window
+/// it just read through the descriptor it pinned).
+fn create_overlap_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NZBFAST_CREATE_OVERLAP").is_none_or(|v| v != "0"))
+}
+
+/// Blocks in the FIRST read-ahead window: the fold cannot start until it
+/// lands, and a whole 64 MiB window on one reader is 120-170 ms of
+/// exposed startup (round D). Eight blocks start the fold after a few
+/// ms; the reader then runs full windows ahead.
+const FIRST_WINDOW_BLOCKS: usize = 8;
+
+/// `NZBFAST_CREATE_PREPACK=1`: readers pack each block into the planar
+/// layout as it lands (`gf16::prepack_planar_in_place`) and the direct
+/// fold consumes it packed, so the split the tiled fold repeats per row
+/// group happens once per block. Off by default until measured (the
+/// create-pipeline lane, 5 Sep 2026).
+fn create_prepack_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NZBFAST_CREATE_PREPACK").is_some_and(|v| v == "1"))
+}
+
+/// Research knob (`NZBFAST_CREATE_WS_LOCK=1`, Windows): raise the
+/// process working-set minimum to cover the accumulators and the read
+/// arenas, then lock the accumulator rows. The suspect (the lane-chains
+/// handoff, 5 Sep 2026): on a ten-member 10 GiB create at 4 MiB slices
+/// the kernel time fell ~125 ms per fold window removed, which is what a
+/// soft-fault pass over a 1 GiB accumulator set costs - as if the memory
+/// manager trimmed the rows between windows while the page cache churned
+/// through 10 GiB of reads. Off the knob, nothing here runs.
+fn pin_accumulators(acc: &[Vec<u16>], accum_bytes: u64) {
+    if !std::env::var_os("NZBFAST_CREATE_WS_LOCK").is_some_and(|v| v == "1") {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Memory::VirtualLock;
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+        let min = accum_bytes
+            .saturating_add(read_arena_claim(accum_bytes))
+            .saturating_add(256 << 20) as usize;
+        let max = min.saturating_add(2 << 30);
+        // SAFETY: plain calls on the current process handle with sizes in
+        // bytes; results are advisory here and ignored.
+        unsafe {
+            let ok = SetProcessWorkingSetSize(GetCurrentProcess(), min, max);
+            let mut locked = 0usize;
+            if ok != 0 {
+                for row in acc {
+                    if VirtualLock(row.as_ptr() as *const std::ffi::c_void, row.len() * 2) != 0 {
+                        locked += 1;
+                    }
+                }
+            }
+            if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
+                tracing::info!(
+                    target: "repair-timing",
+                    "create ws-lock: SetProcessWorkingSetSize({min}, {max}) {}, {locked}/{} rows locked",
+                    if ok != 0 { "ok" } else { "failed" },
+                    acc.len()
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (acc, accum_bytes);
+    }
+}
+
+/// Bytes the read arenas claim from the gauge: one window, two with
+/// read-ahead.
+fn read_arena_claim(accum_bytes: u64) -> u64 {
+    create_read_budget_for(accum_bytes).saturating_mul(if create_overlap_enabled() { 2 } else { 1 })
+}
 
 /// Test door: [`accum_budget`], so the large-set suite in `tests/` can
 /// PROVE its fixture really crosses the batching boundary instead of
@@ -268,72 +409,6 @@ pub fn pin_accum_budget_for_tests(bytes: u64) {
     ACCUM_OVERRIDE.store(bytes, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Append one PAR2 packet directly to its destination: magic , length ,
-/// MD5(set_id,type,body) , set_id , type , body. The body must already be
-/// padded to a multiple of 4; the length field counts the whole packet
-/// including its 64-byte head. Building the body IN PLACE matters for the
-/// recovery packets: a slice can be many MiB, and the volume writer used to
-/// copy it into a body, then into a packet, then into the final volume
-/// buffer.
-fn append_packet(
-    out: &mut Vec<u8>,
-    set_id: &[u8; 16],
-    ptype: &[u8; 16],
-    body_len: usize,
-    append_body: impl FnOnce(&mut Vec<u8>),
-) {
-    debug_assert_eq!(body_len % 4, 0, "PAR2 packet bodies are 4-aligned");
-    let start = out.len();
-    out.reserve(64 + body_len);
-    out.extend_from_slice(crate::par2::MAGIC);
-    out.extend_from_slice(&(64 + body_len as u64).to_le_bytes());
-    // The digest precedes the bytes it covers, so leave its slot empty,
-    // append the body once, then seal straight over the destination.
-    out.extend_from_slice(&[0u8; 16]);
-    out.extend_from_slice(set_id);
-    out.extend_from_slice(ptype);
-    append_body(out);
-    assert_eq!(
-        out.len(),
-        start + 64 + body_len,
-        "PAR2 packet builder appended the wrong body length"
-    );
-    let end = out.len();
-    let digest: [u8; 16] = Md5::digest(&out[start + 32..end]).into();
-    out[start + 16..start + 32].copy_from_slice(&digest);
-}
-
-/// Seal and stream one recovery packet without materializing its
-/// block-sized body or packet. `slice` already lives in the GF accumulator;
-/// hashing and writing it there removes the final accumulator -> volume copy
-/// that [`append_packet`] alone still leaves.
-fn write_recovery_packet(
-    out: &mut impl std::io::Write,
-    set_id: &[u8; 16],
-    exponent: u32,
-    slice: &[u8],
-) -> std::io::Result<()> {
-    debug_assert_eq!(slice.len() % 4, 0, "PAR2 recovery slices are 4-aligned");
-    let exponent = exponent.to_le_bytes();
-    let mut md5 = Md5::new();
-    md5.update(set_id);
-    md5.update(TYPE_RECVSLIC);
-    md5.update(exponent);
-    md5.update(slice);
-
-    // The exponent is the first four bytes of the body, so one small header
-    // write followed by the accumulator bytes is the complete packet.
-    let mut header = [0u8; 68];
-    header[..8].copy_from_slice(crate::par2::MAGIC);
-    header[8..16].copy_from_slice(&(68 + slice.len() as u64).to_le_bytes());
-    header[16..32].copy_from_slice(&md5.finalize());
-    header[32..48].copy_from_slice(set_id);
-    header[48..64].copy_from_slice(TYPE_RECVSLIC);
-    header[64..68].copy_from_slice(&exponent);
-    out.write_all(&header)?;
-    out.write_all(slice)
-}
-
 /// Null-pad to the next multiple of 4. A FileDesc name is stored
 /// exactly this way, which is why `par2.rs` trims trailing NULs when it
 /// reads one back.
@@ -344,1052 +419,98 @@ fn pad4(mut v: Vec<u8>) -> Vec<u8> {
     v
 }
 
-/// Everything measured about one member in the single read pass.
-struct Scanned {
-    name_padded: Vec<u8>,
-    file_id: [u8; 16],
-    md5_whole: [u8; 16],
-    md5_16k: [u8; 16],
-    length: u64,
-    /// Per-block (MD5, CRC32) over the block ZERO-PADDED to `block_size`,
-    /// per spec. Empty for a 0-byte file - a real creator emits no IFSC
-    /// packet for one, and neither do we.
-    blocks: Vec<([u8; 16], u32)>,
-}
-
-/// Identity and change time of the source descriptor pinned for a fused pass.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SourceStamp {
-    length: u64,
-    #[cfg(unix)]
-    identity: (u64, u64, i64, i64),
-}
-
-impl SourceStamp {
-    fn of(metadata: &std::fs::Metadata) -> SourceStamp {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-        SourceStamp {
-            length: metadata.len(),
-            #[cfg(unix)]
-            identity: (
-                metadata.dev(),
-                metadata.ino(),
-                metadata.ctime(),
-                metadata.ctime_nsec(),
-            ),
-        }
-    }
-}
-
-/// Ordered checksum state for the sole member of a fused pass: the whole-file
-/// and 16 KiB chains plus the per-block products, all advanced from the SAME
-/// arena the parity fold is already reading, so the create makes one pass over
-/// the payload instead of two.
-struct FusedScan {
-    file: std::fs::File,
-    stamp: SourceStamp,
-    expected_head: [u8; 16],
-    whole: Md5,
-    head: Md5,
-    head_left: usize,
-    blocks: Vec<([u8; 16], u32)>,
-}
-
-impl FusedScan {
-    fn open(
-        length: u64,
-        expected_head: [u8; 16],
-        member: &Member,
-        block_size: u64,
-    ) -> Result<Option<FusedScan>, Par2GenError> {
-        let file = std::fs::File::open(&member.path).map_err(io(&member.path))?;
-        let metadata = file.metadata().map_err(io(&member.path))?;
-        // Pipes and devices have no stable positional snapshot contract. The
-        // ordinary scanner is the correct fallback for them.
-        if !metadata.is_file() {
-            return Ok(None);
-        }
-        let stamp = SourceStamp::of(&metadata);
-        if stamp.length != length {
-            return Err(Par2GenError::Other(format!(
-                "{} changed length while the PAR2 set was being built",
-                member.path.display()
-            )));
-        }
-        Ok(Some(FusedScan {
-            file,
-            stamp,
-            expected_head,
-            whole: Md5::new(),
-            head: Md5::new(),
-            head_left: scan_head_len(length),
-            blocks: Vec::with_capacity(length.div_ceil(block_size) as usize),
-        }))
-    }
-
-    /// The fused pass reads through a descriptor pinned before the fold, so
-    /// the "member changed under us" case the placeholder-and-backfill design
-    /// refuses has to be caught here instead: both the pinned handle and the
-    /// path must still carry the identity the head scan saw.
-    fn finish(self, member: &Member) -> Result<Scanned, Par2GenError> {
-        let handle_now = self.file.metadata().map_err(io(&member.path))?;
-        let path_now = std::fs::metadata(&member.path).map_err(io(&member.path))?;
-        if SourceStamp::of(&handle_now) != self.stamp || SourceStamp::of(&path_now) != self.stamp {
-            return Err(Par2GenError::Other(format!(
-                "{} changed while the PAR2 set was being built",
-                member.path.display()
-            )));
-        }
-        let actual = finish_scan(
-            member,
-            self.stamp.length,
-            self.whole.finalize().into(),
-            self.head.finalize().into(),
-            self.blocks,
-        );
-        if actual.md5_16k != self.expected_head {
-            return Err(Par2GenError::Other(format!(
-                "{} changed identity while the PAR2 set was being built",
-                member.path.display()
-            )));
-        }
-        Ok(actual)
-    }
-}
-
-/// Read exactly `want` bytes, or say which file ran out. A member that
-/// shrinks mid-build would otherwise silently produce a set describing
-/// bytes that are not there.
-fn read_exact_or_short(
-    r: &mut impl std::io::Read,
-    buf: &mut [u8],
-    path: &Path,
-) -> Result<(), Par2GenError> {
-    let mut got = 0usize;
-    while got < buf.len() {
-        let n = r.read(&mut buf[got..]).map_err(io(path))?;
-        if n == 0 {
-            return Err(Par2GenError::Other(format!(
-                "{} shrank while the recovery set was being built",
-                path.display()
-            )));
-        }
-        got += n;
-    }
-    Ok(())
-}
-
-/// Read one member once: whole-file MD5, first-16 KiB MD5, and the
-/// per-block checksums. Streamed at `block_size` so a member never has
-/// to fit in memory.
-/// Scan every member across threads. Files are independent, so the
-/// scan used to be the creator's one serial pass - every byte through
-/// the whole-file MD5 and again through its block MD5 on ONE core,
-/// which on a 1 GiB set is ~3 s of the 4.3 s a create took while 31
-/// cores idled (measured 2 Sep 2026, M3 Ultra; ParPar did the same set
-/// in 0.74 s). Largest file first off a shared queue, so no fixed-chunk
-/// straggler, and each file-level worker hands its file a fair share of
-/// the remaining cores for block-parallel hashing - the split
-/// `par2repair::verify_all_targets` uses, for the same reason: one big
-/// file on a wide box gets every lane instead of one.
-fn scan_all(
-    members: &[Member],
-    sizes: &[u64],
-    block_size: u64,
-    scan_pool: u64,
-) -> Result<Vec<Scanned>, Par2GenError> {
-    debug_assert_eq!(members.len(), sizes.len());
-    let mut order: Vec<usize> = (0..members.len()).collect();
-    order.sort_by_key(|&i| sizes[i]); // pop() takes the largest
-    let queue = std::sync::Mutex::new(order);
-    let machine = crate::mem::cpu_workers().max(1);
-    let (outer, inner) = scan_pool_geometry(sizes, block_size, machine, scan_pool);
-    let mut per_thread: Vec<Result<Vec<(usize, Scanned)>, Par2GenError>> = Vec::new();
-    std::thread::scope(|s| {
-        let handles: Vec<_> = (0..outer)
-            .map(|_| {
-                s.spawn(|| {
-                    let mut out = Vec::new();
-                    loop {
-                        let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
-                        let Some(i) = next else { return Ok(out) };
-                        out.push((i, scan_at_length(&members[i], sizes[i], block_size, inner)?));
-                    }
-                })
-            })
-            .collect();
-        per_thread = handles
-            .into_iter()
-            .map(|h| h.join().expect("par2gen scan worker panicked"))
-            .collect();
-    });
-    let mut slots: Vec<Option<Scanned>> = (0..members.len()).map(|_| None).collect();
-    for r in per_thread {
-        for (i, sc) in r? {
-            slots[i] = Some(sc);
-        }
-    }
-    Ok(slots
-        .into_iter()
-        .map(|s| s.expect("every member scanned"))
-        .collect())
-}
-
-/// Below this many bytes a file is hashed on its worker alone: the
-/// block fan-out is not worth its thread setup (the same threshold
-/// `par2repair`'s verify pool uses).
-const SCAN_PAR_MIN_BYTES: u64 = 8 << 20;
-/// Ceiling on the owned reader/hasher buffer pool of ONE file. This still
-/// matters for a single large member, but it is not an aggregate bound:
-/// with 32 independent files the dispatcher could allocate it 32 times.
-const SCAN_FILE_POOL_BYTES: u64 = 64 << 20;
-/// Aggregate ceiling on every member scan's owned payload buffers. A quarter
-/// of the process budget keeps a small configured box honest; 64 MiB is enough
-/// for all 32 ordinary two-buffer lanes, and 256 MiB keeps the same full
-/// fan-out through 128 workers on large machines. The 320 MiB upper edge also
-/// retains all 32 lanes at the 4.1 MiB default block of an 8 GiB post, leaving
-/// that common path byte-for-byte and scheduler-for-scheduler unchanged. One
-/// checksum vector per input slice is separate and globally bounded by
-/// `MAX_INPUT_SLICES` (under 1 MiB).
-const SCAN_POOL_MIN_BYTES: u64 = 64 << 20;
-const SCAN_POOL_MAX_BYTES: u64 = 320 << 20;
-/// Hash several small PAR2 blocks per hand-off. A channel trip per 4 KiB
-/// slice is measurable on a warm, finely sliced set; a roughly MiB chunk
-/// amortizes scheduling while every checksum still observes one exact
-/// zero-padded PAR2 block.
-const SCAN_HASH_CHUNK_BYTES: u64 = 1 << 20;
-/// Piece size for the one-worker large-block pipeline. Four MiB amortizes the
-/// channel and incremental-digest calls while 32 files still fit exactly in
-/// the 256 MiB aggregate ceiling (two pieces per file).
-const SCAN_STREAM_PIECE_BYTES: u64 = 4 << 20;
-/// Below eight MiB, retaining two whole blocks is at most 16 MiB per file and
-/// saves splitting the creator's common ~4 MiB default block across messages.
-const SCAN_STREAM_MIN_BLOCK_BYTES: u64 = 8 << 20;
-/// One GiB / one-MiB and larger single-member folds show a repeatable benefit
-/// from reading the payload once. Smaller inputs stay on the established
-/// overlapping scan/recovery path; `NZBFAST_PAR2GEN_FUSE=1` lowers only these
-/// measured floors, and `=0` refuses the route outright.
-const FUSED_SOURCE_MIN_BYTES: u64 = 1 << 30;
-const FUSED_SOURCE_MIN_BLOCK_BYTES: u64 = 1 << 20;
-
-fn source_fusion_shape_admitted(member_count: usize, n_recovery: usize, per_batch: usize) -> bool {
-    cfg!(unix) && member_count == 1 && n_recovery > 0 && n_recovery <= per_batch
-}
-
-/// A fine-sliced, low-redundancy set can have 8,192 or more inputs while
-/// sitting far below the NTT's 320-row crossover, so an input count alone is
-/// the wrong gate: 8 GiB at 1 MiB slices and 1% recovery is 8,193 inputs and
-/// only 82 rows, and its only arithmetic route is the fold either way.
-fn source_fusion_rows_admitted(n_slices: usize, n_recovery: usize) -> bool {
-    n_slices < crate::par2repair::NTT_MIN_PRESENT || n_recovery < crate::par2repair::NTT_MIN_MISSING
-}
-
-fn scan_pool_budget(process_budget: u64) -> u64 {
-    (process_budget / 4).clamp(SCAN_POOL_MIN_BYTES, SCAN_POOL_MAX_BYTES)
-}
-
-/// Payload-buffer bytes claimed by every `create_into` call LIVE in this
-/// process right now.
+/// The longest comment this engine will write into a set, in bytes of
+/// UTF-8.
 ///
-/// Every create budget above is a share of the process budget computed
-/// independently by each invocation, so before this gauge existed two
-/// simultaneous creates each took a full share and the process held twice
-/// the intended footprint - measured 3 Sep 2026 on an M3 Ultra, exactly
-/// linear in the lane count: peak RSS 619 MB / 1,119 MB / 2,233 MB at one,
-/// two and four concurrent `create_into` calls over the same 2 GiB set, and
-/// 2.247 GB / 4.273 GB under a published 512 MiB budget. The same shape as
-/// [`crate::mem::LZMA_DICT_OUTSTANDING`], and for the same reason: a
-/// per-call ceiling is not a process ceiling.
-static CREATE_ADMITTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// A ceiling rather than a taste. The comment rides in the CRITICAL
+/// BLOCK, and the critical block is the one thing in a PAR2 set that is
+/// written over and over: once per file under [`CriticalLayout::Head`],
+/// and `bit_length(slices)` times per volume under
+/// [`CriticalLayout::Interleaved`]. So a comment pasted out of a file is
+/// multiplied by the volume count before it reaches the disk and by it
+/// again on the wire, and on a file-light set the critical block is
+/// already the larger half of what a volume weighs. 16 KiB is far past
+/// anything a human types into a comment field and far short of a size
+/// that can move what a volume costs.
+pub const MAX_COMMENT_BYTES: usize = 16 * 1024;
 
-/// Test-only exclusivity between the admission gauge's own tests and every
-/// other create running in the same process. Nothing here reaches a shipped
-/// build.
+/// The comment a create was given, checked once at the door.
 ///
-/// [`CREATE_ADMITTED`] is process-global by design, and `cargo test` puts a
-/// crate's whole lib in ONE process with its tests on parallel threads - so
-/// "the FIRST create in an idle process", which is exactly what the two
-/// admission tests assert on, is not a fact a test may simply assume. It was
-/// not one: on 3 Sep 2026 the one-process line
-/// (`cargo test -p nzbkit-base --lib --features test-support`, and CI's
-/// `unit-one-process` job) failed deterministically because
-/// `a_block_size_past_the_parsers_own_ceiling_is_refused_at_create_time` - a
-/// `create_into` at `MAX_BLOCK_SIZE`, slow enough to still be running, and
-/// adjacent in the alphabetical order the runner starts tests in - held one
-/// whole share while the concurrent-admission test read the gauge. Its
-/// "solo" create therefore divided a ceiling that was already spoken for:
-/// 4,093,640,704 accumulator bytes against the 8,589,934,592 the formula
-/// gives at an idle 16 GiB ceiling, the arithmetic of exactly one
-/// outstanding share. Nextest cannot see this class at all - it gives every
-/// test its own process - so every CI shard was green throughout.
+/// PUBLIC so a preview pane can say "the create will refuse this"
+/// BEFORE the create runs, off this predicate rather than off a second
+/// reading of the rule. [`create_into_exact_with_comment`] calls it for
+/// itself, so a caller that skips it is refused all the same.
 ///
-/// Every acquire takes the READ side, so creates still run together exactly
-/// as they do in production and no shipped path is serialised; the admission
-/// tests take the WRITE side and so measure a gauge that really is idle.
-#[cfg(test)]
-static ADMISSION_QUIESCE: std::sync::RwLock<()> = std::sync::RwLock::new(());
-
-#[cfg(test)]
-thread_local! {
-    /// Set on the one thread holding [`ADMISSION_QUIESCE`] exclusively.
-    ///
-    /// The exclusive holder is itself a test that RUNS creates - measuring
-    /// what a first and a second create are handed is the whole point of it
-    /// - and a `std::sync::RwLock` is not reentrant, so without this the
-    /// guard would deadlock against its owner's very next `acquire`. Its own
-    /// creates pass straight through; every other thread still waits.
-    static ADMISSION_OWNED_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// [`CREATE_ADMITTED`] to the calling test alone, for as long as this is
-/// held. It subsumes plain mutual exclusion between the admission tests, so
-/// it is the only lock they need.
-#[cfg(test)]
-pub(crate) fn admission_quiesced_for_tests() -> AdmissionQuiesced {
-    let held = ADMISSION_QUIESCE
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    ADMISSION_OWNED_HERE.with(|owned| owned.set(true));
-    AdmissionQuiesced(held)
-}
-
-/// The guard [`admission_quiesced_for_tests`] returns.
-#[cfg(test)]
-pub(crate) struct AdmissionQuiesced(#[allow(dead_code)] std::sync::RwLockWriteGuard<'static, ()>);
-
-#[cfg(test)]
-impl Drop for AdmissionQuiesced {
-    fn drop(&mut self) {
-        ADMISSION_OWNED_HERE.with(|owned| owned.set(false));
-    }
-}
-
-/// One live create's share of the process's create budget, released when the
-/// call returns - by ANY path, which is why this is a guard and not a pair of
-/// statements around the body.
+/// # The refusals are the reader's acceptance rule, spelled the other
+/// way round
 ///
-/// The FIRST create in an idle process finds nothing outstanding, so it
-/// derives exactly the figures the per-invocation formulas gave before this
-/// existed: no shipping single-create path changes by a byte. A create that
-/// starts while another is running divides what is LEFT, and the floors in
-/// both formulas ([`SCAN_POOL_MIN_BYTES`], [`ACCUM_MIN_BYTES`]) mean it
-/// always gets a workable plan rather than blocking - so a late create pays
-/// extra passes over its own payload instead of the process paying another
-/// whole footprint, and nothing can deadlock waiting for a share.
-struct CreateAdmission {
-    scan_pool: u64,
-    accum: u64,
-    claimed: u64,
-    /// Held for this create's whole life so a test asserting on an idle
-    /// gauge can wait it out - `None` only on the exclusive holder's own
-    /// thread, which already has it. See [`ADMISSION_QUIESCE`].
-    #[cfg(test)]
-    _quiesce: Option<std::sync::RwLockReadGuard<'static, ()>>,
-}
-
-impl CreateAdmission {
-    fn acquire() -> Self {
-        // Taken before the ceiling is read, so a test holding the write side
-        // sees this create wholly outside its window or wholly inside it,
-        // never half-charged against the gauge it is measuring.
-        #[cfg(test)]
-        let _quiesce = (!ADMISSION_OWNED_HERE.with(|owned| owned.get())).then(|| {
-            ADMISSION_QUIESCE
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-        });
-        let ceiling = crate::mem::process_budget().total;
-        let mut plan = (0u64, 0u64, 0u64);
-        // A CAS loop rather than a load-then-add: two creates entering
-        // together must not both read the pre-claim total and both take a
-        // full share, which is precisely the overshoot this exists to bound.
-        let _ = CREATE_ADMITTED.fetch_update(
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-            |outstanding| {
-                let avail = ceiling.saturating_sub(outstanding);
-                let scan_pool = scan_pool_budget(avail);
-                let accum = accum_budget_from(avail);
-                let claimed = scan_pool.saturating_add(accum).saturating_add(READ_BUDGET);
-                plan = (scan_pool, accum, claimed);
-                Some(outstanding.saturating_add(claimed))
-            },
-        );
-        Self {
-            scan_pool: plan.0,
-            accum: plan.1,
-            claimed: plan.2,
-            #[cfg(test)]
-            _quiesce,
-        }
-    }
-}
-
-impl Drop for CreateAdmission {
-    fn drop(&mut self) {
-        CREATE_ADMITTED.fetch_sub(self.claimed, std::sync::atomic::Ordering::AcqRel);
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ScanPlan {
-    /// The whole-file MD5 chain streams on the caller's thread inside a
-    /// 1 MiB reader while `workers` independent positional readers hash
-    /// contiguous block ranges. The payload is read twice, and that is
-    /// DELIBERATE: a one-read pipeline that hands the MD5 lane's own buffers
-    /// to the block hashers was measured on a quiet 20-core M1 at 16 GiB /
-    /// 8 MiB slices and cost 5.0% of wall (31.97 -> 33.56 s median of three,
-    /// byte-identical output) while retired instructions FELL 0.14% - the
-    /// MD5 lane's working set goes from a 1 MiB buffer to a whole block, and
-    /// every hash worker then waits on that one lane through a shared receive
-    /// lock. See the drop record in
-    /// research/PAR2-TWO-LANES-COMPARED-2026-09-03.md.
-    Positional { workers: usize },
-    /// One sequential reader and one sequential block hasher exchange small
-    /// PIECES. This is the same two CPU lanes as a one-worker `Positional`
-    /// plan, without retaining a whole 32-256 MiB slice or reading the file
-    /// twice - so at a huge block it is strictly better on both counts and
-    /// there is no fan-out to throttle.
-    Streamed { piece_bytes: usize },
-    /// Tiny files and explicitly single-threaded tests hash both products on
-    /// one lane, with scratch capped independently of the PAR2 slice size.
-    Serial { scratch_bytes: usize },
-}
-
-impl ScanPlan {
-    fn buffer_bytes(self) -> u64 {
-        match self {
-            // Sized by `scan_plan_bytes`, which knows the slice size.
-            ScanPlan::Positional { .. } => 0,
-            ScanPlan::Streamed { piece_bytes } => piece_bytes.saturating_mul(2) as u64,
-            // `BufReader` retains its default 8 KiB beside the scratch.
-            ScanPlan::Serial { scratch_bytes } => scratch_bytes.saturating_add(8 << 10) as u64,
-        }
-    }
-}
-
-fn scan_plan(length: u64, block_size: u64, threads: usize) -> ScanPlan {
-    let n_blocks = length.div_ceil(block_size) as usize;
-    if length >= SCAN_PAR_MIN_BYTES && n_blocks >= 2 && threads > 0 {
-        let workers = threads
-            .min(n_blocks)
-            .min((SCAN_FILE_POOL_BYTES / block_size.max(1)).max(1) as usize)
-            .max(1);
-        // At one hash worker, retaining a whole multi-MiB block buys no block
-        // parallelism and costs a second full read. Stream pieces to that same
-        // worker instead: one lane either way, a fixed small pool, one read.
-        if workers == 1 && block_size >= SCAN_STREAM_MIN_BLOCK_BYTES {
-            return ScanPlan::Streamed {
-                piece_bytes: SCAN_STREAM_PIECE_BYTES.min(block_size) as usize,
-            };
-        }
-        return ScanPlan::Positional { workers };
-    }
-    ScanPlan::Serial {
-        scratch_bytes: SCAN_HASH_CHUNK_BYTES.min(block_size) as usize,
-    }
-}
-
-/// Payload buffers one member's scan holds at once, for the aggregate bound.
-/// `Positional` is sized here rather than in [`ScanPlan::buffer_bytes`]
-/// because its cost depends on the slice size the plan does not carry.
-fn scan_plan_bytes(plan: ScanPlan, block_size: u64) -> u64 {
-    match plan {
-        ScanPlan::Positional { workers } => (workers as u64)
-            .saturating_mul(block_size)
-            .saturating_add(1 << 20),
-        other => other.buffer_bytes(),
-    }
-}
-
-/// Choose the widest file-level fan-out whose worst possible simultaneous
-/// payload-buffer set fits one aggregate budget. The plan is recomputed at
-/// each candidate width because the remaining CPU lanes per file affect its
-/// owned chunk pool. Descending search keeps every normal lane: on a 32-core
-/// host, ordinary slices cost 32 x 2 MiB and retain all 32 outer workers.
-fn scan_pool_geometry(
-    sizes: &[u64],
-    block_size: u64,
-    machine: usize,
-    budget: u64,
-) -> (usize, usize) {
-    let natural = machine.max(1).min(sizes.len()).max(1);
-    for outer in (1..=natural).rev() {
-        let inner = (machine / outer).max(1);
-        let mut needs: Vec<u64> = sizes
-            .iter()
-            .map(|&length| scan_plan_bytes(scan_plan(length, block_size, inner), block_size))
-            .collect();
-        needs.sort_unstable_by(|a, b| b.cmp(a));
-        let worst = needs
-            .iter()
-            .take(outer)
-            .fold(0u64, |sum, &n| sum.saturating_add(n));
-        if worst <= budget || outer == 1 {
-            return (outer, inner);
-        }
-    }
-    unreachable!("one scan worker is always admitted")
-}
-
-/// Per-block (MD5, CRC32) for `[first, last)` blocks of `f`, each block
-/// zero-padded to `block_size` exactly as the serial scan pads it.
-fn hash_block_range(
-    f: &std::fs::File,
-    path: &Path,
-    length: u64,
-    block_size: u64,
-    first: usize,
-    last: usize,
-    out: &mut [([u8; 16], u32)],
-) -> Result<(), Par2GenError> {
-    let mut buf = vec![0u8; block_size as usize];
-    for (k, bi) in (first..last).enumerate() {
-        let off = bi as u64 * block_size;
-        let want = (length - off).min(block_size) as usize;
-        crate::disk::read_exact_at(f, &mut buf[..want], off).map_err(io(path))?;
-        buf[want..].fill(0);
-        out[k] = (Md5::digest(&buf).into(), crc32fast::hash(&buf));
-    }
-    Ok(())
-}
-
-/// Whole-file MD5 and the 16 KiB head stream on the calling thread (MD5 is
-/// one sequential chain; nothing splits it) while the per-block MD5+CRC -
-/// independent streams - run across `workers` positional readers over
-/// contiguous block ranges.
+/// `par2::packet::clean_comment` refuses a comment carrying any control
+/// character but newline, carriage return and tab, because a comment is
+/// the one field of a PAR2 set whose content an attacker chooses freely
+/// and which lands in front of a human unaltered - an ESC there is an
+/// escape sequence in the terminal `parfast` prints to. Writing one this
+/// engine would then refuse to read back would make a round trip through
+/// its own format lossy, which is worse than either half alone, so the
+/// two rules are one rule and
+/// `every_comment_this_engine_writes_reads_back` is the claim.
 ///
-/// The BLOCK WORKERS share the caller's handle on every platform, and
-/// that is correct on every platform: they read only through
-/// `disk::read_exact_at`, which is `pread` on unix and `seek_read` on
-/// Windows, and both take the offset per call. `seek_read` also leaves
-/// the shared file POINTER somewhere arbitrary, which matters to a
-/// reader that goes through the cursor and to nothing else.
-///
-/// The SEQUENTIAL lane below is that reader, and it is the one that
-/// reopens on Windows - see the comment at its `reopen_read_handle`.
-/// This doc used to say "other platforms open independent handles",
-/// which reads as a claim about the workers, is false of them, and sent
-/// a 4 Sep 2026 review hunting a race that 674a5d80f had already fixed
-/// in the lane that really had it. An 8-worker test over a shared
-/// handle (`par2gen_tests`, agrees-with-one-reader) covers this and has
-/// passed on a real Win11 box.
-fn scan_parallel_positional(
-    f: &std::fs::File,
-    path: &Path,
-    length: u64,
-    block_size: u64,
-    n_blocks: usize,
-    workers: usize,
-) -> Result<([u8; 16], [u8; 16], Vec<([u8; 16], u32)>), Par2GenError> {
-    let mut blocks = vec![([0u8; 16], 0); n_blocks];
-    let per = n_blocks.div_ceil(workers);
-    let whole = std::thread::scope(|s| -> Result<([u8; 16], [u8; 16]), Par2GenError> {
-        let handles: Vec<_> = blocks
-            .chunks_mut(per)
-            .enumerate()
-            .map(|(wi, chunk)| {
-                s.spawn(move || -> Result<(), Par2GenError> {
-                    let first = wi * per;
-                    hash_block_range(
-                        f,
-                        path,
-                        length,
-                        block_size,
-                        first,
-                        first + chunk.len(),
-                        chunk,
-                    )
-                })
-            })
-            .collect();
-
-        // THE BLOCK LANES SHARE `f` AND `read_exact_at` MOVES ITS CURSOR ON
-        // WINDOWS (see `disk::read_exact_at`), so this sequential lane - the
-        // only one here that reads THROUGH the cursor - cannot use the same
-        // handle there: it would digest whatever bytes a positional worker
-        // last left the pointer on, and write that as the member's FileDesc
-        // MD5. Unix `pread` leaves the cursor alone, so it keeps the original
-        // descriptor and both digest products stay on ONE inode even if the
-        // member is replaced mid-create. `ReOpenFile` resolves from the live
-        // handle rather than from a pathname, so the Windows arm keeps that
-        // property too. (Fix and the real-Win11 verdict: 674a5d80f.)
-        #[cfg(windows)]
-        let owned = crate::disk::reopen_read_handle(f).map_err(io(path))?;
-        #[cfg(windows)]
-        let source = &owned;
-        #[cfg(not(windows))]
-        let source = f;
-        let mut reader = std::io::BufReader::with_capacity(1 << 20, source);
-        let mut whole = Md5::new();
-        let mut head = Md5::new();
-        let mut head_left = 16384usize;
-        let mut buf = vec![0u8; 1 << 20];
-        let mut left = length;
-        while left > 0 {
-            let want = left.min(buf.len() as u64) as usize;
-            read_exact_or_short(&mut reader, &mut buf[..want], path)?;
-            whole.update(&buf[..want]);
-            if head_left > 0 {
-                let n = head_left.min(want);
-                head.update(&buf[..n]);
-                head_left -= n;
-            }
-            left -= want as u64;
-        }
-        for h in handles {
-            h.join().expect("par2gen block hasher panicked")?;
-        }
-        Ok((whole.finalize().into(), head.finalize().into()))
-    })?;
-    Ok((whole.0, whole.1, blocks))
-}
-
-struct ScanPiece {
-    block_index: usize,
-    used: usize,
-    end_block: bool,
-    padding: usize,
-    bytes: Vec<u8>,
-    hash: Option<([u8; 16], u32)>,
-}
-
-fn recycle_scan_piece(
-    done: &std::sync::mpsc::Receiver<ScanPiece>,
-    blocks: &mut [([u8; 16], u32)],
-    finished: &mut usize,
-    free: &mut Vec<ScanPiece>,
-) -> Result<(), Par2GenError> {
-    let mut piece = done.recv().map_err(|_| {
-        Par2GenError::Other("PAR2 streaming block hasher stopped before the scan completed".into())
-    })?;
-    if let Some(hash) = piece.hash.take() {
-        let Some(slot) = blocks.get_mut(piece.block_index) else {
-            return Err(Par2GenError::Other(
-                "PAR2 streaming block hasher returned an invalid block index".into(),
-            ));
-        };
-        *slot = hash;
-        *finished += 1;
-    }
-    free.push(piece);
-    Ok(())
-}
-
-/// Feed `zeros` zero bytes through `md5` using `scratch` as the source, so a
-/// tail block's spec-mandated zero padding costs no allocation of its own.
-fn update_md5_zeros(md5: &mut Md5, mut zeros: usize, scratch: &mut [u8]) {
-    if zeros == 0 {
-        return;
-    }
-    scratch.fill(0);
-    while zeros > 0 {
-        let take = zeros.min(scratch.len());
-        md5.update(&scratch[..take]);
-        zeros -= take;
-    }
-}
-
-/// One file read, with the whole-file MD5 on the reader lane and block
-/// MD5/CRC on one worker lane. PIECES, rather than whole PAR2 blocks, cross
-/// the bounded queue, so a 256 MiB slice has the same eight-MiB footprint as
-/// an eight-MiB slice. This supersedes the huge-block fallback, which
-/// allocated one full block per concurrent file and read every payload byte
-/// twice.
-fn scan_parallel_streamed(
-    f: &mut std::fs::File,
-    path: &Path,
-    length: u64,
-    block_size: usize,
-    n_blocks: usize,
-    piece_bytes: usize,
-) -> Result<([u8; 16], [u8; 16], Vec<([u8; 16], u32)>), Par2GenError> {
-    let mut blocks = vec![([0u8; 16], 0); n_blocks];
-    let mut free: Vec<ScanPiece> = (0..2)
-        .map(|_| ScanPiece {
-            block_index: 0,
-            used: 0,
-            end_block: false,
-            padding: 0,
-            bytes: vec![0u8; piece_bytes],
-            hash: None,
-        })
-        .collect();
-    let (jobs_tx, jobs_rx) = std::sync::mpsc::sync_channel::<ScanPiece>(1);
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<ScanPiece>();
-    let mut reader_result: Option<Result<([u8; 16], [u8; 16]), Par2GenError>> = None;
-    let mut finished = 0usize;
-
-    std::thread::scope(|s| {
-        let worker = s.spawn(move || {
-            let mut block_md5 = Md5::new();
-            let mut block_crc = crc32fast::Hasher::new();
-            while let Ok(mut piece) = jobs_rx.recv() {
-                block_md5.update(&piece.bytes[..piece.used]);
-                block_crc.update(&piece.bytes[..piece.used]);
-                if piece.end_block {
-                    update_md5_zeros(&mut block_md5, piece.padding, &mut piece.bytes);
-                    let md5 = std::mem::replace(&mut block_md5, Md5::new())
-                        .finalize()
-                        .into();
-                    let crc = crate::yenc_simd::crc32_zeros(
-                        std::mem::replace(&mut block_crc, crc32fast::Hasher::new()).finalize(),
-                        piece.padding as u64,
-                    );
-                    piece.hash = Some((md5, crc));
-                }
-                if done_tx.send(piece).is_err() {
-                    break;
-                }
-            }
-        });
-
-        reader_result = Some((|| {
-            let mut whole = Md5::new();
-            let mut head = Md5::new();
-            let mut head_left = 16384usize;
-            let mut file_left = length;
-            for bi in 0..n_blocks {
-                let block_data = file_left.min(block_size as u64) as usize;
-                let mut block_left = block_data;
-                while block_left > 0 {
-                    if free.is_empty() {
-                        recycle_scan_piece(&done_rx, &mut blocks, &mut finished, &mut free)?;
-                    }
-                    let mut piece = free.pop().expect("the scan reader owns a free piece");
-                    let take = block_left.min(piece_bytes);
-                    read_exact_or_short(f, &mut piece.bytes[..take], path)?;
-                    whole.update(&piece.bytes[..take]);
-                    if head_left > 0 {
-                        let n = head_left.min(take);
-                        head.update(&piece.bytes[..n]);
-                        head_left -= n;
-                    }
-                    piece.block_index = bi;
-                    piece.used = take;
-                    piece.end_block = take == block_left;
-                    piece.padding = if piece.end_block {
-                        block_size - block_data
-                    } else {
-                        0
-                    };
-                    jobs_tx.send(piece).map_err(|_| {
-                        Par2GenError::Other(
-                            "PAR2 streaming block hasher stopped before accepting the scan".into(),
-                        )
-                    })?;
-                    block_left -= take;
-                }
-                file_left -= block_data as u64;
-            }
-            while free.len() < 2 {
-                recycle_scan_piece(&done_rx, &mut blocks, &mut finished, &mut free)?;
-            }
-            debug_assert_eq!(file_left, 0);
-            if finished != n_blocks {
-                return Err(Par2GenError::Other(format!(
-                    "PAR2 streaming block hasher returned {finished} of {n_blocks} checksums"
-                )));
-            }
-            Ok((whole.finalize().into(), head.finalize().into()))
-        })());
-        drop(jobs_tx);
-        worker
-            .join()
-            .expect("par2gen streaming block hasher panicked");
-    });
-
-    let (whole, head) = reader_result.expect("the PAR2 streamed reader ran")?;
-    Ok((whole, head, blocks))
-}
-
-fn scan_at_length(
-    m: &Member,
-    expected_length: u64,
-    block_size: u64,
-    threads: usize,
-) -> Result<Scanned, Par2GenError> {
-    let mut f = std::fs::File::open(&m.path).map_err(io(&m.path))?;
-    let length = f.metadata().map_err(io(&m.path))?.len();
-    if length != expected_length {
+/// An EMPTY comment is not written at all rather than refused: the door
+/// takes `Option<&str>` and "" is the absence of a comment, which is
+/// what a UI with an untouched Comment field sends.
+pub fn check_comment(comment: &str) -> Result<(), Par2GenError> {
+    if comment.len() > MAX_COMMENT_BYTES {
         return Err(Par2GenError::Other(format!(
-            "{} changed length while the PAR2 set was being built",
-            m.path.display()
+            "comment is {} bytes, over the {MAX_COMMENT_BYTES}-byte limit for a PAR2 text packet",
+            comment.len()
         )));
     }
-    let n_blocks = length.div_ceil(block_size) as usize;
-    let block_size_usize = usize::try_from(block_size)
-        .map_err(|_| Par2GenError::Other("PAR2 block size does not fit this platform".into()))?;
-    match scan_plan(length, block_size, threads) {
-        ScanPlan::Positional { workers } => {
-            let (md5_whole, md5_16k, blocks) =
-                scan_parallel_positional(&f, &m.path, length, block_size, n_blocks, workers)?;
-            Ok(finish_scan(m, length, md5_whole, md5_16k, blocks))
-        }
-        ScanPlan::Streamed { piece_bytes } => {
-            let (md5_whole, md5_16k, blocks) = scan_parallel_streamed(
-                &mut f,
-                &m.path,
-                length,
-                block_size_usize,
-                n_blocks,
-                piece_bytes,
-            )?;
-            Ok(finish_scan(m, length, md5_whole, md5_16k, blocks))
-        }
-        ScanPlan::Serial { scratch_bytes } => {
-            let mut r = std::io::BufReader::new(f);
-            let mut whole = Md5::new();
-            let mut head = Md5::new();
-            let mut head_left = 16384usize;
-            let mut blocks = Vec::with_capacity(n_blocks);
-            let mut buf = vec![0u8; scratch_bytes];
-            let mut left = length;
-            while left > 0 {
-                let block_data = left.min(block_size) as usize;
-                let mut block_left = block_data;
-                let mut block_md5 = Md5::new();
-                let mut block_crc = crc32fast::Hasher::new();
-                while block_left > 0 {
-                    let take = block_left.min(buf.len());
-                    read_exact_or_short(&mut r, &mut buf[..take], &m.path)?;
-                    whole.update(&buf[..take]);
-                    block_md5.update(&buf[..take]);
-                    block_crc.update(&buf[..take]);
-                    if head_left > 0 {
-                        let n = head_left.min(take);
-                        head.update(&buf[..n]);
-                        head_left -= n;
-                    }
-                    block_left -= take;
-                }
-                // The spec hashes the block zero-padded to the full slice, so
-                // the tail block's checksum covers `block_size` bytes and not
-                // `block_data` of them.
-                let padding = block_size_usize - block_data;
-                update_md5_zeros(&mut block_md5, padding, &mut buf);
-                blocks.push((
-                    block_md5.finalize().into(),
-                    crate::yenc_simd::crc32_zeros(block_crc.finalize(), padding as u64),
-                ));
-                left -= block_data as u64;
-            }
-            let md5_whole: [u8; 16] = whole.finalize().into();
-            // A file SHORTER than 16 KiB has md5_16k == the whole-file MD5,
-            // because the "first 16k" is all of it. For a 0-byte file both are
-            // the MD5 of the empty string, which is exactly what a real creator
-            // stores and what `e2e_norar`'s empty-FileDesc patch writes.
-            let md5_16k: [u8; 16] = head.finalize().into();
-            Ok(finish_scan(m, length, md5_whole, md5_16k, blocks))
-        }
+    if let Some(c) = comment
+        .chars()
+        .find(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return Err(Par2GenError::Other(format!(
+            "comment carries the control character {:?}, which this engine refuses to write \
+             because it refuses to read one back - newline, carriage return and tab are the \
+             three it allows",
+            c
+        )));
     }
+    Ok(())
 }
 
-#[cfg(test)]
-fn scan(m: &Member, block_size: u64, threads: usize) -> Result<Scanned, Par2GenError> {
-    let length = std::fs::metadata(&m.path).map_err(io(&m.path))?.len();
-    scan_at_length(m, length, block_size, threads)
-}
-
-fn scan_head_len(length: u64) -> usize {
-    length.min(16_384) as usize
-}
-
-/// Read the identities needed to order recovery slices across the worker
-/// pool. A directory with thousands of small members used to open and hash
-/// every 16 KiB head serially before either the full scan or the recovery
-/// work could start. The full scan already fans files out, and the head pass
-/// has the same independent-per-file shape.
-fn scan_heads(members: &[Member]) -> Result<Vec<(usize, u64, [u8; 16], [u8; 16])>, Par2GenError> {
-    map_members_parallel(members, |i, member| {
-        let (length, md5_16k, file_id) = scan_head(member)?;
-        Ok((i, length, md5_16k, file_id))
-    })
-}
-
-/// Lengths are the only pre-scan data an index-only set needs. Recovery sets
-/// get them as part of [`scan_heads`], but doing the head read at zero
-/// redundancy only duplicated the first 16 KiB of every file without buying
-/// any overlap or ordering information.
-fn scan_lengths(members: &[Member]) -> Result<Vec<u64>, Par2GenError> {
-    map_members_parallel(members, |_, member| {
-        std::fs::metadata(&member.path)
-            .map(|v| v.len())
-            .map_err(io(&member.path))
-    })
-}
-
-/// Apply an independent metadata/identity probe to every member, preserving
-/// caller order in the result. Both creation prepasses are tiny per file but
-/// directory-wide, so one shared fan-out keeps their scheduling identical.
-fn map_members_parallel<T, F>(members: &[Member], f: F) -> Result<Vec<T>, Par2GenError>
-where
-    T: Send,
-    F: Fn(usize, &Member) -> Result<T, Par2GenError> + Sync,
-{
-    // These are short positional reads and metadata probes, not the CPU-heavy
-    // body hashes below. Thread setup is not repaid by ordinary 20-file sets;
-    // at the other end, beyond eight readers the filesystem queue is the
-    // bottleneck and extra threads only amplify seek/metadata contention.
-    let workers = if members.len() < 64 {
-        1
-    } else {
-        crate::mem::cpu_workers().min(8).min(members.len())
-    };
-    if workers == 1 {
-        return members.iter().enumerate().map(|(i, m)| f(i, m)).collect();
+/// The ONE text packet this engine writes for a comment: its type and
+/// its 4-aligned body.
+///
+/// # One packet, chosen by content - which is `unicode: "auto"`
+///
+/// The spec has two comment packets and a producer may write either or
+/// both. An ASCII comment gets the ASCII packet alone, because that is
+/// the packet every reader on record understands and a Unicode copy of
+/// the same characters buys nothing for twice the bytes in every volume.
+/// A comment with anything above U+007F gets the Unicode packet alone,
+/// because the alternative is inventing a lossy ASCII rendering of a
+/// comment the user actually wrote - and a transliterated comment beside
+/// the real one is exactly the shape `parse_unifilen`'s own note
+/// describes going wrong for filenames.
+///
+/// That policy is `unicode: "auto"` in `pf_capabilities`, and it is the
+/// only honest value while it is the only policy implemented. A `never`
+/// / `always` switch belongs on this function and nowhere else (plan
+/// 4.2 item 4).
+///
+/// The Unicode packet's leading 16 bytes are the MD5 of the analogous
+/// ASCII packet's body "if it exists". It never does here, by the
+/// paragraph above, so the field is the spec's own zeros.
+fn comment_packet(comment: &str) -> (&'static [u8; 16], Vec<u8>) {
+    if comment.is_ascii() {
+        return (TYPE_COMMASCI, pad4(comment.as_bytes().to_vec()));
     }
-    let per = members.len().div_ceil(workers);
-    let mut per_thread: Vec<Result<Vec<T>, Par2GenError>> = Vec::new();
-    std::thread::scope(|s| {
-        let handles: Vec<_> = members
-            .chunks(per)
-            .enumerate()
-            .map(|(chunk_index, chunk)| {
-                let f = &f;
-                s.spawn(move || {
-                    chunk
-                        .iter()
-                        .enumerate()
-                        .map(|(offset, member)| f(chunk_index * per + offset, member))
-                        .collect()
-                })
-            })
-            .collect();
-        per_thread = handles
-            .into_iter()
-            .map(|h| h.join().expect("par2gen member scanner panicked"))
-            .collect();
-    });
-    let mut out = Vec::with_capacity(members.len());
-    for result in per_thread {
-        out.extend(result?);
+    let mut body = Vec::with_capacity(16 + comment.len() * 2);
+    body.extend_from_slice(&[0u8; 16]);
+    for unit in comment.encode_utf16() {
+        body.extend_from_slice(&unit.to_le_bytes());
     }
-    Ok(out)
-}
-
-/// The recovery fold starts from the head scan's file-id order while the full
-/// scan runs beside it. Compare identities by their ORIGINAL member index
-/// rather than comparing only the final sorted Main packet: two same-length
-/// members could otherwise exchange contents and leave the set of file ids
-/// unchanged while the fold's coefficient order had changed.
-fn heads_match_scanned(heads: &[(usize, u64, [u8; 16], [u8; 16])], scanned: &[Scanned]) -> bool {
-    heads.len() == scanned.len()
-        && heads.iter().all(|&(i, length, md5_16k, file_id)| {
-            scanned.get(i).is_some_and(|actual| {
-                actual.length == length && actual.md5_16k == md5_16k && actual.file_id == file_id
-            })
-        })
-}
-
-/// The identity of a member without hashing its body: length, the
-/// 16 KiB head digest, and the file id derived from them - all a
-/// creator needs to fix the input-slice ORDER (Main lists ids sorted)
-/// before the whole-file and block hashes exist. Sixteen KiB per
-/// member, so it is cheap enough to run serially ahead of everything.
-fn scan_head(m: &Member) -> Result<(u64, [u8; 16], [u8; 16]), Par2GenError> {
-    let f = std::fs::File::open(&m.path).map_err(io(&m.path))?;
-    let length = f.metadata().map_err(io(&m.path))?.len();
-    // Clamp in u64 before narrowing. On a 32-bit target, narrowing a
-    // 4-GiB-aligned file length first produces zero and hashes an empty
-    // identity prefix instead of the required first 16 KiB.
-    let mut buf = vec![0u8; scan_head_len(length)];
-    crate::disk::read_exact_at(&f, &mut buf, 0).map_err(io(&m.path))?;
-    let md5_16k: [u8; 16] = Md5::digest(&buf).into();
-    let mut id = Md5::new();
-    id.update(md5_16k);
-    id.update(length.to_le_bytes());
-    // The UNPADDED name - see `finish_scan` for the whole story.
-    id.update(m.name.as_bytes());
-    Ok((length, md5_16k, id.finalize().into()))
-}
-
-/// The sort key a PAR2 file id carries, and the ONE spelling of it.
-///
-/// # A file id sorts as a 16-byte LITTLE-ENDIAN number
-///
-/// Not lexicographically. The spec's Main packet lists the recovery-set
-/// ids in ascending order, and "ascending" there means the numeric order
-/// of the id read little-endian - compare from the LAST byte back - so
-/// `df10..28` sorts before `7404..50` because 0x28 < 0x50, where a
-/// bytewise sort puts them the other way round.
-///
-/// That order is not cosmetic: `Par2Set::files` IS the global input
-/// slice index space, laid out by walking the Main list, so every
-/// recovery constant is keyed to it. Getting it wrong changes the
-/// recovery DATA.
-///
-/// # Why nothing caught it until 3 Sep 2026
-///
-/// A set built under the wrong order SELF-VERIFIES, and so does every
-/// repair from it, because each tool reads the order out of the Main
-/// packet it was handed rather than deriving one. Our own reader agreed
-/// with our own writer; par2cmdline agreed with both, on our sets and on
-/// its own. Only a byte-level diff against the reference over a set with
-/// at least two members whose ids straddle the difference shows it - the
-/// conformance harness's first such set, and the trap was already
-/// written down in `~/Claude/parfast/HANDOFF.md`, from the standalone
-/// build that hit it in August and never had a way to carry the finding
-/// back into this engine. That is the copy this crate's `parfast` front
-/// exists to end.
-fn id_order(id: &[u8; 16]) -> [u8; 16] {
-    let mut k = *id;
-    k.reverse();
-    k
-}
-
-/// The identity half of a scan, shared by the serial and fan-out paths
-/// so the file id is spelled once.
-fn finish_scan(
-    m: &Member,
-    length: u64,
-    md5_whole: [u8; 16],
-    md5_16k: [u8; 16],
-    blocks: Vec<([u8; 16], u32)>,
-) -> Scanned {
-    let name_padded = pad4(m.name.as_bytes().to_vec());
-    // File id = MD5(md5_16k | length | name), over the name WITHOUT its
-    // null padding. The stored id is authoritative on the read side
-    // (readers key Main/FileDesc/IFSC by it and never recompute), but it
-    // has to be RIGHT here or a conforming reader that does recompute
-    // rejects the set.
-    //
-    // IT WAS NOT, until 3 Sep 2026: both hashes here fed `name_padded`,
-    // so every member whose name length is not already a multiple of 4
-    // got an id derived from trailing NULs the spec does not hash. A
-    // name of 4, 8 or 12 characters padded to itself and came out right,
-    // which is why nothing caught it - the fixture names in this
-    // repository's own par2gen tests are `text.txt`, `data.bin`,
-    // `movie.mkv`: eight and eight and nine, and the nine-character one
-    // never had its id checked against the reference. The conformance
-    // harness found it on the first two-member set with a five-character
-    // name in it (`a.bin`), 3 Sep 2026: par2cmdline-turbo's FileDesc
-    // packets for the same bytes carried a different id, and the
-    // reference's matched `par2::filedesc_id` - this crate's own READER
-    // - while ours did not.
-    //
-    // What it cost: nothing that self-verifies. Every reader takes the
-    // id out of the packet, so our sets were internally consistent and
-    // par2cmdline verified and repaired them (which is what the interop
-    // suite proves and why it stayed green). What it cost was
-    // CONFORMANCE - a reader that recomputes would reject the set - and
-    // byte-identity with the reference, because the Main packet sorts
-    // members by id, so a wrong id also permutes the global slice index
-    // space and therefore every recovery constant.
-    let mut id = Md5::new();
-    id.update(md5_16k);
-    id.update(length.to_le_bytes());
-    id.update(m.name.as_bytes());
-
-    Scanned {
-        name_padded,
-        file_id: id.finalize().into(),
-        md5_whole,
-        md5_16k,
-        length,
-        blocks,
-    }
+    (TYPE_COMMUNI, pad4(body))
 }
 
 /// Pick a slice size for `total` payload bytes: a multiple of 4 that
@@ -1545,6 +666,137 @@ pub fn variable_volume_count(n_recovery: usize) -> usize {
     n
 }
 
+/// One file a create would write, as [`plan_files`] answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedFile {
+    /// The name on disk, in the ENGINE's own `vol{first:03}+{count:02}`
+    /// spelling. par2cmdline's widths - and the spec's own
+    /// `vol<first>-<last>` form - are a RENAME afterwards, so a caller
+    /// that shows the names a user will see maps this list through
+    /// `parfast::create::final_volume_names`, which is the one rule
+    /// `parfast::create::rename_volumes` applies to the files.
+    pub name: String,
+    /// The exponent of this volume's first recovery slice. Zero, and
+    /// meaningless, for the index file.
+    pub first_exponent: usize,
+    /// Recovery slices in this file. Zero for the index file, which
+    /// carries the critical block and no parity.
+    pub blocks: usize,
+    /// The file's length in bytes.
+    pub bytes: u64,
+}
+
+/// What [`create_into_exact`] WOULD write for this payload and plan,
+/// without reading a source byte or writing a file.
+///
+/// `members` is `(name, length)` per member, in the order they would be
+/// passed to the create. The answer is exact for the index file and for
+/// every volume: the critical block is BUILT here (over a placeholder
+/// whose packet lengths are the real ones - only the digests differ,
+/// and a digest is a fixed 16 bytes), the recovery packet is its
+/// 68-byte head plus one slice, and the interleaved layout's repetition
+/// is `interleave_schedule`'s own rule read once rather than restated.
+///
+/// THE ONE THING IT CANNOT PROMISE is the volume COUNT under a memory
+/// cap. `volume_layout` widens a plan whose volumes would not fit the
+/// accumulator budget, and that budget depends on what else is
+/// creating at the same moment (`CreateAdmission`). This reads the
+/// budget as it stands with nothing else in flight, which is what a
+/// preview pane in an idle app is looking at; a create that starts
+/// while another is running may write more, smaller volumes than the
+/// preview showed. Say so where the number is presented.
+///
+/// This exists because the alternative - a caller adding up packet
+/// headers for itself - is a second copy of the format, and the first
+/// thing such a copy does is disagree with the writer about a set
+/// nobody can re-create to check.
+pub fn plan_files(
+    members: &[(String, u64)],
+    base: &str,
+    block_size: u64,
+    n_recovery: usize,
+    plan: CreatePlan,
+) -> Vec<PlannedFile> {
+    plan_files_with_comment(members, base, block_size, n_recovery, plan, None)
+}
+
+/// [`plan_files`] for a create that will carry a comment.
+///
+/// A second door for the same reason [`create_into_exact_with_comment`]
+/// is one: the comment cannot ride on `CreatePlan`, which is `Copy` with
+/// no lifetimes. Pass the SAME comment the create will be given - a
+/// comment packet is bytes in the critical block and the critical block
+/// is in every file this answers for, so a preview that omits it
+/// under-reports the index and every volume.
+pub fn plan_files_with_comment(
+    members: &[(String, u64)],
+    base: &str,
+    block_size: u64,
+    n_recovery: usize,
+    plan: CreatePlan,
+    comment: Option<&str>,
+) -> Vec<PlannedFile> {
+    // A comment the create would REFUSE is priced as no comment at all.
+    // This function answers a preview pane and has no error channel; the
+    // create keeps the refusal, which is where a user can be told about
+    // it, and the two agree about every comment that is actually
+    // writable.
+    let comment = comment.filter(|c| !c.is_empty() && check_comment(c).is_ok());
+    let block_size = block_size.max(4);
+    let placeholder: Vec<Scanned> = members
+        .iter()
+        .map(|(name, length)| Scanned {
+            name_padded: pad4(name.as_bytes().to_vec()),
+            file_id: [0u8; 16],
+            md5_whole: [0u8; 16],
+            md5_16k: [0u8; 16],
+            length: *length,
+            blocks: vec![([0u8; 16], 0u32); length.div_ceil(block_size) as usize],
+        })
+        .collect();
+    let (_set_id, critical) = critical_packets(&placeholder, block_size, comment);
+    let index = PlannedFile {
+        name: format!("{base}.par2"),
+        first_exponent: 0,
+        blocks: 0,
+        bytes: critical.len() as u64,
+    };
+    let mut out = vec![index];
+    if n_recovery == 0 {
+        return out;
+    }
+    let cidx = critical_index(&critical);
+    // The Creator packet rides once per file and takes no part in the
+    // cycle; everything else is repeated `copies` times.
+    let creator_bytes = cidx.creator.1 as u64;
+    let cycle_bytes = critical.len() as u64 - creator_bytes;
+
+    let per_batch = (accum_budget() / block_size).max(1) as usize;
+    let per_vol = plan
+        .max_blocks_per_volume
+        .map_or(per_batch, |l| per_batch.min(l.max(1)));
+    for (first, count) in volume_layout(n_recovery, per_vol, plan.volumes, plan.first_exponent) {
+        let recovery_bytes = count as u64 * (68 + block_size);
+        let critical_bytes = match plan.critical {
+            CriticalLayout::Head => critical.len() as u64,
+            // `interleave_schedule`'s own copy count: the BIT LENGTH of
+            // the slice count, so a volume is logarithmically more
+            // redundant and not proportionally so.
+            CriticalLayout::Interleaved => {
+                let copies = (usize::BITS - count.leading_zeros()) as u64;
+                copies * cycle_bytes + creator_bytes
+            }
+        };
+        out.push(PlannedFile {
+            name: format!("{base}.vol{first:03}+{count:02}.par2"),
+            first_exponent: first,
+            blocks: count,
+            bytes: recovery_bytes + critical_bytes,
+        });
+    }
+    out
+}
+
 /// Volume layout for `n_recovery` slices under `plan`.
 ///
 /// Capped at `max_per_vol` so one volume's accumulators always fit the
@@ -1680,6 +932,8 @@ fn critical_index(critical: &[u8]) -> CriticalIndex {
 /// real block can be written over the placeholder once the member
 /// hashes land.
 enum CriticalPatch {
+    /// Final metadata was written initially; no backfill needed.
+    Complete,
     /// One copy at offset 0 - the index file, and every volume the
     /// [`CriticalLayout::Head`] layout writes.
     Head,
@@ -1706,7 +960,16 @@ pub fn create_into(
     base: &str,
     spec: &Par2Spec,
 ) -> Result<Vec<String>, Par2GenError> {
-    create_into_inner(dir, members, base, spec, None, CreatePlan::ENGINE)
+    create_into_inner(
+        dir,
+        members,
+        base,
+        spec,
+        None,
+        CreatePlan::ENGINE,
+        None,
+        &CreateControl::default(),
+    )
 }
 
 /// [`create_into`] with an EXACT recovery slice count instead of a
@@ -1739,23 +1002,126 @@ pub fn create_into_exact(
     recovery_blocks: usize,
     plan: CreatePlan,
 ) -> Result<Vec<String>, Par2GenError> {
+    create_into_exact_with_comment(dir, members, base, block_size, recovery_blocks, plan, None)
+}
+
+/// [`create_into_exact`] with the set's COMMENT - the spec's optional
+/// `CommASCI` / `CommUni` text packet, which MultiPar, QuickPar and
+/// MacPAR all show and which nothing wrote here before 12 Sep 2026.
+///
+/// # Why a second door and not a field on `CreatePlan`
+///
+/// [`CreatePlan`] is `Copy` with no lifetimes, and every engine caller
+/// names `CreatePlan::ENGINE` as a const. A `&str` on it would put a
+/// lifetime on all of them and a `String` would take the `Copy` away;
+/// either is a breaking change at every call site in the workspace for a
+/// field none of them sets. The layout knobs on `CreatePlan` are also
+/// genuinely one KIND of thing - how the bytes are split up - and a
+/// comment is not one of them.
+///
+/// # `None` writes what this engine has always written
+///
+/// `None`, and an empty comment, write NO text packet, and the set is
+/// byte-identical to what [`create_into_exact`] writes for the same
+/// inputs. That is not tidiness: the critical block's LENGTH is what a
+/// volume's byte size is built from, and four e2e fixtures poison or
+/// band a volume by its byte count, so an unconditional extra packet
+/// would move every set nzbfast posts. `no_comment_is_byte_identical_to_
+/// the_plain_create` is that claim.
+///
+/// The comment is refused rather than sanitized where it carries a
+/// control character or runs past [`MAX_COMMENT_BYTES`] - see
+/// [`check_comment`], which is the write half of the parser's own
+/// acceptance rule.
+pub fn create_into_exact_with_comment(
+    dir: &Path,
+    members: &[Member],
+    base: &str,
+    block_size: Option<u64>,
+    recovery_blocks: usize,
+    plan: CreatePlan,
+    comment: Option<&str>,
+) -> Result<Vec<String>, Par2GenError> {
+    create_into_exact_controlled(
+        dir,
+        members,
+        base,
+        block_size,
+        recovery_blocks,
+        plan,
+        comment,
+        &CreateControl::default(),
+    )
+}
+
+/// [`create_into_exact_with_comment`] with a
+/// [`control::CreateControl`]: the create's progress out, and the
+/// caller's cancel in.
+///
+/// # Why an eighth parameter and not a field on `CreatePlan`
+///
+/// The same reason the comment got its own door (above): `CreatePlan`
+/// is `Copy` with no lifetimes and every engine caller names
+/// `CreatePlan::ENGINE` as a const. A control is also not a LAYOUT
+/// choice - it decides nothing about the bytes, and two runs with and
+/// without one write byte-identical sets, which
+/// `a_watched_create_writes_the_same_set_as_an_unwatched_one` pins.
+///
+/// # What a cancel leaves
+///
+/// Nothing: see [`Par2GenError::Cancelled`]. A create is the one
+/// direction where stopping halfway cannot leave the payload alone -
+/// it is WRITING the set - so the cancel path removes the index and
+/// every volume this run wrote, and a set being extended keeps all of
+/// its own.
+///
+/// Every existing door delegates here with an inert control, and an
+/// inert control is one `Option` branch per already-chunked loop; the
+/// A/B that says so is
+/// `research/PAR2GEN-CREATE-CONTROL-AB-2026-09-12.md`.
+#[allow(clippy::too_many_arguments)]
+pub fn create_into_exact_controlled(
+    dir: &Path,
+    members: &[Member],
+    base: &str,
+    block_size: Option<u64>,
+    recovery_blocks: usize,
+    plan: CreatePlan,
+    comment: Option<&str>,
+    control: &CreateControl,
+) -> Result<Vec<String>, Par2GenError> {
     let spec = Par2Spec {
         redundancy_pct: 0,
         block_size,
     };
-    create_into_inner(dir, members, base, &spec, Some(recovery_blocks), plan)
+    let comment = comment.filter(|c| !c.is_empty());
+    if let Some(c) = comment {
+        check_comment(c)?;
+    }
+    create_into_inner(
+        dir,
+        members,
+        base,
+        &spec,
+        Some(recovery_blocks),
+        plan,
+        comment,
+        control,
+    )
 }
-
-/// The one implementation. `exact_recovery` overrides
-/// `spec.redundancy_pct` when it is `Some`.
-fn create_into_inner(
-    dir: &Path,
+/// The create's input refusals, out of `create_into_inner` so that
+/// function stays under the size gate: member count and base name, the
+/// exponent range (the field is 16 bits and the generator's order is
+/// 65535, so an exponent at or past it is a different, wrong slice -
+/// refused rather than wrapped, which would emit duplicate blocks) and
+/// duplicate member names (two FileDesc packets with one name give a
+/// reader two equally good answers for a slot, and the file id derives
+/// from the name).
+fn check_create_inputs(
     members: &[Member],
     base: &str,
-    spec: &Par2Spec,
-    exact_recovery: Option<usize>,
-    plan: CreatePlan,
-) -> Result<Vec<String>, Par2GenError> {
+    exponent_end: Option<(usize, usize)>,
+) -> Result<(), Par2GenError> {
     if members.is_empty() {
         return Err(Par2GenError::Other(
             "a PAR2 set needs at least one member".into(),
@@ -1772,25 +1138,11 @@ fn create_into_inner(
             "PAR2 base name {base:?} must be a non-empty single path component"
         )));
     }
-    // The exponent field is 16 bits and the generator field's order is
-    // 65535, so an exponent at or past it is not a large set - it is a
-    // different, wrong slice. Refused here rather than wrapped, because
-    // wrapping would silently emit a volume whose blocks duplicate ones
-    // already in the set it was meant to complement.
-    if let Some(last) = plan
-        .first_exponent
-        .checked_add(exact_recovery.unwrap_or(0))
-        .filter(|&n| n > 65535)
-    {
+    if let Some((first, last)) = exponent_end {
         return Err(Par2GenError::Other(format!(
-            "recovery exponents {}..{} run past the PAR2 limit of 65535",
-            plan.first_exponent, last
+            "recovery exponents {first}..{last} run past the PAR2 limit of 65535"
         )));
     }
-    // A duplicate name is not a naming nit here: two FileDesc packets
-    // sharing a name give a reader two equally good answers for one
-    // slot, and the file id is derived from the name, so two members
-    // with identical heads and lengths would collide outright.
     let mut seen = std::collections::HashSet::new();
     for m in members {
         if m.name.is_empty() {
@@ -1807,11 +1159,127 @@ fn create_into_inner(
             )));
         }
     }
+    Ok(())
+}
+
+/// `Some((first, last))` when the recovery exponents would run past
+/// 65535, for [`check_create_inputs`].
+///
+/// `pub` since 12 Sep 2026, for the same reason
+/// `parfast::create::volume_ceiling` is: a Create PANE has to be able to say
+/// that a create would be REFUSED before a human presses the button, and the
+/// only honest way to say it is to ask the predicate the refusal is made of.
+/// `parfast_session::planner::preview` reads this, so the pane's warning and
+/// the engine's error cannot drift apart - the alternative was a second copy
+/// of `> 65535` in the preview, which is a spec rule restated in a place
+/// nothing would re-derive it.
+pub fn spec_exponent_end(
+    first_exponent: usize,
+    exact_recovery: Option<usize>,
+) -> Option<(usize, usize)> {
+    first_exponent
+        .checked_add(exact_recovery.unwrap_or(0))
+        .filter(|&n| n > 65535)
+        .map(|last| (first_exponent, last))
+}
+
+/// The balanced packet-checksum seals for one recovery batch, or None
+/// when `NZBFAST_PAR2GEN_SEAL=off` keeps the per-volume sealing. ON by
+/// default since 5 Sep 2026 (the review's lead): same binary, mirrored - M3
+/// Ultra 1 MiB create 0.466 -> 0.420 s, 64 KiB 0.571 -> 0.540;
+/// i5-10600KF 1 MiB 1.34 -> 1.27, 64 KiB flat. `lanes` (the default)
+/// rides the eight-lane MD5 where it exists and is scalar elsewhere;
+/// `scalar` forces that.
+fn recovery_seals(set_id: &[u8; 16], first: usize, slices: &[Vec<u16>]) -> Option<Vec<[u8; 16]>> {
+    let seal_mode = std::env::var("NZBFAST_PAR2GEN_SEAL")
+        .ok()
+        .unwrap_or_else(|| "lanes".to_string());
+    match seal_mode.as_str() {
+        "scalar" | "lanes" => {
+            let st = std::time::Instant::now();
+            let d = prepare_recovery_seals(set_id, first, slices, seal_mode == "lanes");
+            if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
+                tracing::info!(
+                    target: "repair-timing",
+                    "create seals: mode={seal_mode} rows={} in {:?}",
+                    d.len(),
+                    st.elapsed()
+                );
+            }
+            Some(d)
+        }
+        _ => None,
+    }
+}
+
+/// The one implementation, plus the CANCEL's one promise: a create that
+/// was called off leaves nothing behind.
+///
+/// The unlink is here and not at any of the sites that write, because
+/// only here is it known that the whole run is over - a batch that
+/// wrote its volumes and then took a cancel in the NEXT batch must have
+/// its own removed too, which is the multi-pass case
+/// `a_cancel_in_a_later_pass_removes_the_earlier_passes_volumes` pins.
+/// Only [`Par2GenError::Cancelled`] triggers it: a create that failed
+/// for any other reason (a member that changed under it, a full disk)
+/// leaves what it left, exactly as it always has, because that is a
+/// diagnosis and not a user's decision.
+#[allow(clippy::too_many_arguments)]
+fn create_into_inner(
+    dir: &Path,
+    members: &[Member],
+    base: &str,
+    spec: &Par2Spec,
+    exact_recovery: Option<usize>,
+    plan: CreatePlan,
+    comment: Option<&str>,
+    control: &CreateControl,
+) -> Result<Vec<String>, Par2GenError> {
+    let control = control.or_env_arm();
+    let trail = CreateTrail::default();
+    let r = create_body(
+        dir,
+        members,
+        base,
+        spec,
+        exact_recovery,
+        plan,
+        comment,
+        &control,
+        &trail,
+    );
+    if matches!(r, Err(Par2GenError::Cancelled)) {
+        trail.unlink_all(dir);
+    }
+    r
+}
+
+/// [`create_into_inner`]'s body: everything between the input refusals
+/// and the finished list of names. Split from it on 12 Sep 2026 only so
+/// the cancel's unlink has one place to happen, by any exit.
+#[allow(clippy::too_many_arguments)]
+fn create_body(
+    dir: &Path,
+    members: &[Member],
+    base: &str,
+    spec: &Par2Spec,
+    exact_recovery: Option<usize>,
+    plan: CreatePlan,
+    comment: Option<&str>,
+    control: &CreateControl,
+    trail: &CreateTrail,
+) -> Result<Vec<String>, Par2GenError> {
+    check_create_inputs(
+        members,
+        base,
+        spec_exponent_end(plan.first_exponent, exact_recovery),
+    )?;
 
     // `NZBFAST_REPAIR_TIMING=1` prints the create's phase split on the
     // repair path's own key, so the two engines are read the same way.
     let timing = std::env::var_os("NZBFAST_REPAIR_TIMING").is_some();
     let t0 = std::time::Instant::now();
+    let _prep = ntt_range::PrepSpan::start("create");
 
     // Recovery needs the head digest early to put input slices in file-id
     // order while the full hashes run beside the fold. Index-only creation has
@@ -1822,7 +1290,7 @@ fn create_into_inner(
     let mut heads = if !wants_recovery {
         None
     } else {
-        Some(scan_heads(members)?)
+        Some(scan_heads(members, control)?)
     };
     let lengths: Vec<u64> = match &heads {
         Some(heads) => heads.iter().map(|&(_, length, _, _)| length).collect(),
@@ -1904,10 +1372,20 @@ fn create_into_inner(
     // critical block and overwrite it after the scan. Scan once, sort by the
     // resulting file ids, and write the finished index once.
     if n_recovery == 0 {
-        let mut scanned = scan_all(members, &lengths, block_size, admission.scan_pool)?;
+        control.begin(CreatePhase::Verify, total);
+        let mut scanned = scan_all(members, &lengths, block_size, admission.scan_pool, control)?;
+        control.finish(CreatePhase::Verify);
         scanned.sort_by_key(|s| id_order(&s.file_id));
-        let (_, critical) = critical_packets(&scanned, block_size);
+        let (_, critical) = critical_packets(&scanned, block_size, comment);
         let index = format!("{base}.par2");
+        // The same last poll the recovery path takes below: a cancel
+        // raised while the scan's last member was hashing must not be
+        // answered with a finished index.
+        control.check()?;
+        // Noted BEFORE the write: a cancel that lands between the two
+        // must still find the file if the write got as far as creating
+        // it. `remove_file` on a name that is not there is a no-op.
+        trail.note(&index);
         std::fs::write(dir.join(&index), &critical).map_err(io(&dir.join(&index)))?;
         if timing {
             tracing::info!(target: "repair-timing", "create index-only scan: {:.2?}", t0.elapsed());
@@ -1949,9 +1427,10 @@ fn create_into_inner(
             blocks: vec![([0u8; 16], 0u32); length.div_ceil(block_size) as usize],
         })
         .collect();
-    let (set_id, critical_shape) = critical_packets(&placeholder, block_size);
+    let (set_id, critical_shape) = critical_packets(&placeholder, block_size, comment);
     let index = format!("{base}.par2");
     let mut out: Vec<(String, CriticalPatch)> = vec![(index.clone(), CriticalPatch::Head)];
+    trail.note(&index);
     std::fs::write(dir.join(&index), &critical_shape).map_err(io(&dir.join(&index)))?;
     // Only the interleave needs the packet boundaries, and on a
     // file-heavy set walking them is tens of thousands of headers.
@@ -1977,7 +1456,7 @@ fn create_into_inner(
     // member even under its research override.
     let fuse = std::env::var("NZBFAST_PAR2GEN_FUSE").ok();
     let forced = matches!(fuse.as_deref(), Some("1") | Some("on"));
-    let eligible_shape = source_fusion_shape_admitted(members.len(), n_recovery, per_batch)
+    let eligible_shape = source_fusion_shape_admitted(members.len(), n_recovery, per_batch, block_size)
         && !matches!(fuse.as_deref(), Some("0") | Some("off"))
         // The fused arm is written for the whole set in ONE batch
         // starting at exponent 0, and it asserts both. A `-f` set starts
@@ -1992,8 +1471,8 @@ fn create_into_inner(
     // fusion cannot capture - that keeps the multi-member, multi-batch and
     // non-unix paths literally unchanged. An NTT-eligible shape stays
     // byte-for-byte on the established overlapped scan.
-    let create_ntt_admitted =
-        eligible_shape && create_ntt_window(block_size as usize, n_slices, 0, n_recovery).is_some();
+    let create_ntt_admitted = eligible_shape
+        && ntt_range::create_ntt_window(block_size as usize, n_slices, 0, n_recovery).is_some();
     // Keep high-row folds on their established scan lane even when a tight
     // NTT retention budget refuses the transform. At 8,193 x 1 MiB and 328
     // rows, lane B measured broad fusion saving the extra read and 7.7% RSS
@@ -2002,16 +1481,65 @@ fn create_into_inner(
     let fuse_admitted =
         eligible_shape && !create_ntt_admitted && source_fusion_rows_admitted(n_slices, n_recovery);
     let mut fused_scan = if fuse_admitted {
-        FusedScan::open(heads[0].1, heads[0].2, &members[0], block_size)?
+        FusedScan::open_all(&heads, members, block_size)?
     } else {
         None
     };
+    // THE ARM, named rather than inferred. Fusion decides which of the
+    // create's three routes runs and it used to leave no mark of its
+    // own: a reader had to work back from whether the TRANSFORM ran
+    // (`ntt_admitted` in `recovery_slices` is `fused_scan.is_none() &&
+    // ..`), which is an inference through code that is not about
+    // fusion. Two wrong mechanisms were proposed for one measured
+    // create on 12 Sep 2026 partly on the strength of it. One line, at
+    // the decision, under the timing knob every other create marker is
+    // already behind.
+    //
+    // It names the FUSION decision and the two gates that made it, and
+    // deliberately does not claim anything about the transform.
+    // `create_ntt_admitted` is not "the NTT runs": it is "this shape is
+    // one the transform would take, so fusion stands down for it", and
+    // it is false on every multi-member unix create - including the
+    // 36-member one that then took the transform in `recovery_slices`
+    // off its own, WIDER gate. Reported under the name it earns, so a
+    // reader cannot make this line say the thing the old inference
+    // wrongly said. Whether the transform ran is the `create ntt rows`
+    // line's to answer, and it prints only when it did.
+    if timing {
+        tracing::info!(
+            target: "repair-timing",
+            "create arms: n={n_slices} rows={n_recovery} batches={} fused={} (fusable shape={eligible_shape}, fusion displaced by the transform={create_ntt_admitted})",
+            stripe_first::batches(&layout, per_batch),
+            fused_scan.is_some()
+        );
+    }
     let mut fused_res: Option<Result<Vec<Scanned>, Par2GenError>> = None;
     let mut scan_res: Result<Vec<Scanned>, Par2GenError> = Ok(Vec::new());
+    // The two phases that span the WHOLE create, sized once here.
+    //
+    // `Verify` is the member hashing, which on the fused arm is done by
+    // the fold's own reader and reports nothing - that arm reads the
+    // payload once and `Fold` is the whole of it (module doc,
+    // `control`). `Write` is every recovery slice of the set, so a
+    // multi-pass create's write bar walks up across its passes instead
+    // of restarting at each; `Fold` is the one that re-sizes per batch,
+    // inside `recovery_slices`.
+    if fused_scan.is_none() {
+        control.begin(CreatePhase::Verify, total);
+    }
+    control.begin(CreatePhase::Write, n_recovery as u64 * block_size);
+    // Early FileDesc/IFSC metadata into the recovery volumes, ON by default
+    // since 5 Sep 2026 (the review's lead): i5-10600KF 1 MiB create 1.34 -> 1.27 s
+    // and 64 KiB 2.13 -> 2.08 (the backfill writes cost more where the
+    // page-cache copy does), M3 Ultra flat; `NZBFAST_CREATE_EARLY_METADATA=0`
+    // is the placeholder backfill, the A/B arm.
+    let early_metadata = std::env::var("NZBFAST_CREATE_EARLY_METADATA").as_deref() != Ok("0");
+    let mut ready_critical: Option<Vec<u8>> = None;
     let batches: Result<(), Par2GenError> = std::thread::scope(|sc| {
-        let h = if fused_scan.is_none() {
+        let mut h = if fused_scan.is_none() {
             Some(sc.spawn(|| {
-                let mut scanned = scan_all(members, &lengths, block_size, admission.scan_pool)?;
+                let mut scanned =
+                    scan_all(members, &lengths, block_size, admission.scan_pool, control)?;
                 if !heads_match_scanned(&heads, &scanned) {
                     return Err(Par2GenError::Other(
                         "member identity changed between the head scan and the hash scan - a \
@@ -2026,11 +1554,40 @@ fn create_into_inner(
             None
         };
         let mut body = || -> Result<(), Par2GenError> {
+            // Several batches on the transform: one pass for every row
+            // instead of a transform per batch (see `stripe_first`); a
+            // disagreeing check falls through to the batches below.
+            if let Some(volumes) = stripe_first::try_run(
+                control,
+                trail,
+                &slots,
+                block_size as usize,
+                n_slices,
+                plan.first_exponent,
+                n_recovery,
+                &layout,
+                per_batch,
+                fused_scan.is_some(),
+                cidx.as_ref(),
+                dir,
+                base,
+                &set_id,
+                ready_critical.as_ref(),
+                &critical_shape,
+            )? {
+                out.extend(volumes);
+                return Ok(());
+            }
             // Group whole volumes into batches that share one pass over
             // the payload: a batch costs `slices * block_size` of
             // accumulator, and one volume already fits by construction.
             let mut vi = 0usize;
             while vi < layout.len() {
+                // A batch boundary: the driver thread, holding nothing
+                // (the accumulators of the last batch are gone, the
+                // next batch's are not allocated), which is where a
+                // PAUSE is allowed to park - see `control::PauseGate`.
+                control.gate()?;
                 let mut vj = vi;
                 let mut held = 0usize;
                 while vj < layout.len() && (held == 0 || held + layout[vj].1 <= per_batch) {
@@ -2048,14 +1605,24 @@ fn create_into_inner(
                         n_slices,
                         first,
                         held,
-                        READ_BUDGET,
+                        create_read_budget_for(held as u64 * block_size),
                         Some(scan),
+                        control,
                     )?;
                     let finished = fused_scan.take().expect("the fused scan was present");
-                    fused_res = Some(finished.finish(&members[0]).map(|s| vec![s]));
+                    fused_res = Some(finished.finish_all(members));
                     slices
                 } else {
-                    recovery_slices(&slots, block_size, n_slices, first, held, READ_BUDGET, None)?
+                    recovery_slices(
+                        &slots,
+                        block_size,
+                        n_slices,
+                        first,
+                        held,
+                        create_read_budget_for(held as u64 * block_size),
+                        None,
+                        control,
+                    )?
                 };
                 if timing {
                     tracing::info!(
@@ -2065,89 +1632,48 @@ fn create_into_inner(
                         t0.elapsed()
                     );
                 }
-                // Volumes of one batch are sealed and written across
-                // threads: each is its own packet stream over its own
-                // slice range, and serially the 111 MB of a 10% set over
-                // 1 GiB cost ~170 ms of a 1.1 s create (measured 2 Sep
-                // 2026, M3 Ultra) - the MD5 seal of every recovery packet
-                // is the larger half of that.
-                let names: Vec<String> = layout[vi..vj]
-                    .iter()
-                    .map(|&(vfirst, count)| format!("{base}.vol{vfirst:03}+{count:02}.par2"))
-                    .collect();
-                let mut written: Vec<Option<Result<CriticalPatch, Par2GenError>>> =
-                    (0..names.len()).map(|_| None).collect();
-                std::thread::scope(|wsc| {
-                    for ((&(vfirst, count), name), slot) in
-                        layout[vi..vj].iter().zip(&names).zip(written.iter_mut())
-                    {
-                        let critical = &critical_shape;
-                        let slices = &slices;
-                        let set_id = &set_id;
-                        let cidx = cidx.as_ref();
-                        wsc.spawn(move || {
-                            let path = dir.join(name);
-                            let result = (|| -> std::io::Result<CriticalPatch> {
-                                let file = std::fs::File::create(&path)?;
-                                // Fine-sliced sets feed many 4 KiB packets, so
-                                // coalesce their small writes; a large slice
-                                // bypasses the buffer and streams straight out
-                                // of the accumulator with no volume-sized copy.
-                                let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
-                                let Some(cidx) = cidx else {
-                                    std::io::Write::write_all(&mut writer, critical)?;
-                                    for i in 0..count {
-                                        let e = vfirst + i;
-                                        let slice = crate::gf16::words_as_bytes(&slices[e - first]);
-                                        write_recovery_packet(
-                                            &mut writer,
-                                            set_id,
-                                            e as u32,
-                                            slice,
-                                        )?;
-                                    }
-                                    std::io::Write::flush(&mut writer)?;
-                                    return Ok(CriticalPatch::Head);
-                                };
-                                // par2cmdline's shape: a recovery packet, then
-                                // however many critical packets the schedule
-                                // owes at that point, and the Creator once at
-                                // the end. Offsets are recorded as they are
-                                // written, so the backfill patches exactly what
-                                // this loop laid down.
-                                let after = interleave_schedule(count, cidx.cycle.len());
-                                let mut offsets = Vec::with_capacity(after.iter().sum::<usize>());
-                                let mut pos = 0u64;
-                                let mut turn = 0usize;
-                                for (i, owed) in after.iter().enumerate() {
-                                    let e = vfirst + i;
-                                    let slice = crate::gf16::words_as_bytes(&slices[e - first]);
-                                    write_recovery_packet(&mut writer, set_id, e as u32, slice)?;
-                                    pos += 68 + slice.len() as u64;
-                                    for _ in 0..*owed {
-                                        let (o, l) = cidx.cycle[turn % cidx.cycle.len()];
-                                        std::io::Write::write_all(
-                                            &mut writer,
-                                            &critical[o..o + l],
-                                        )?;
-                                        offsets.push(pos);
-                                        pos += l as u64;
-                                        turn += 1;
-                                    }
-                                }
-                                let (o, l) = cidx.creator;
-                                std::io::Write::write_all(&mut writer, &critical[o..o + l])?;
-                                std::io::Write::flush(&mut writer)?;
-                                Ok(CriticalPatch::Interleaved(offsets))
-                            })();
-                            *slot = Some(result.map_err(io(&path)));
-                        });
+                // Both routes can already have final hashes: the independent
+                // scanner may have finished, and the fused reader finishes its
+                // hash states before returning this recovery batch. Never wait.
+                if early_metadata && ready_critical.is_none() {
+                    if h.as_ref().is_some_and(|h| h.is_finished()) {
+                        scan_res = h
+                            .take()
+                            .unwrap()
+                            .join()
+                            .expect("par2gen scan worker panicked");
                     }
-                });
-                for (name, w) in names.into_iter().zip(written) {
-                    let patch = w.expect("volume writer filled its slot")?;
-                    out.push((name, patch));
+                    let scanned = match fused_res.as_mut() {
+                        Some(Ok(scanned)) => Some(scanned),
+                        _ => scan_res.as_mut().ok().filter(|s| !s.is_empty()),
+                    };
+                    if let Some(scanned) = scanned {
+                        scanned.sort_by_key(|s| id_order(&s.file_id));
+                        let (real_id, critical) = critical_packets(scanned, block_size, comment);
+                        if real_id != set_id || critical.len() != critical_shape.len() {
+                            return Err(Par2GenError::Other(
+                                "member identity changed before volume write".into(),
+                            ));
+                        }
+                        ready_critical = Some(critical);
+                        if std::env::var_os("NZBFAST_CREATE_METADATA_TRACE").is_some() {
+                            eprintln!("EARLY_CRITICAL_READY first={first} rows={held}");
+                        }
+                    }
                 }
+                out.extend(volwrite::write_batch(volwrite::BatchVolumes {
+                    control,
+                    trail,
+                    dir,
+                    base,
+                    layout: &layout[vi..vj],
+                    set_id: &set_id,
+                    first,
+                    slices: &slices,
+                    ready_critical: ready_critical.as_deref(),
+                    critical_shape: &critical_shape,
+                    cidx: cidx.as_ref(),
+                })?);
                 vi = vj;
             }
             Ok(())
@@ -2163,11 +1689,19 @@ fn create_into_inner(
         None => scan_res?,
     };
     batches?;
+    // Both spanning phases land on full here rather than at their last
+    // batch: the scan thread and the last volume writer have joined by
+    // now, so this is the first point at which either is really over.
+    control.finish(CreatePhase::Verify);
+    control.finish(CreatePhase::Write);
     scanned.sort_by_key(|s| id_order(&s.file_id));
     if timing {
         tracing::info!(target: "repair-timing", "create scan + fold: {:.2?}", t0.elapsed());
     }
-    let (real_set_id, critical) = critical_packets(&scanned, block_size);
+    let (real_set_id, critical) = match ready_critical {
+        Some(critical) => (set_id, critical),
+        None => critical_packets(&scanned, block_size, comment),
+    };
     // Same ids, lengths and names in the same order, so the same Main
     // body, the same set id, and a critical block of the same length:
     // the placeholder's shape is what every file was sized for.
@@ -2178,31 +1712,17 @@ fn create_into_inner(
                 .into(),
         ));
     }
-    // Backfill: the real critical block over the placeholder - at the
-    // front of the index and of every `Head` volume, and at each
-    // recorded packet offset of an interleaved one. The placeholder and
-    // the real block hold the same packets at the same lengths (the
-    // check above is what makes that true), so a recorded offset still
-    // names the packet it named when it was written.
-    for (name, patch) in &out {
-        let path = dir.join(name);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .map_err(io(&path))?;
-        match patch {
-            CriticalPatch::Head => {
-                crate::disk::write_all_at(&f, &critical, 0).map_err(io(&path))?;
-            }
-            CriticalPatch::Interleaved(offsets) => {
-                let cidx = cidx.as_ref().expect("an interleaved file had an index");
-                for (k, &at) in offsets.iter().enumerate() {
-                    let (o, l) = cidx.cycle[k % cidx.cycle.len()];
-                    crate::disk::write_all_at(&f, &critical[o..o + l], at).map_err(io(&path))?;
-                }
-            }
-        }
-    }
+    // THE LAST POLL, and the one that makes the promise uniform. Every
+    // volume of a one-batch create is spawned before the first of them
+    // finishes, so a cancel raised while they are being written can
+    // reach no per-volume poll: without this check the create would
+    // backfill, return the names and leave a complete set behind a
+    // cancel the caller had already pressed. It is also the honest
+    // place to stop - the volumes still carry the PLACEHOLDER critical
+    // block until the backfill below lands, so up to this line the set
+    // on disk is not a set.
+    control.check()?;
+    volwrite::backfill_critical(dir, &out, &critical, cidx.as_ref())?;
     Ok(out.into_iter().map(|(name, _)| name).collect())
 }
 
@@ -2211,7 +1731,11 @@ fn create_into_inner(
 /// makes a set whose index article was lost still nameable from its
 /// volumes (the `a_damaged_par2_index_still_names_the_post_from_its_
 /// volumes` row), and it is what par2cmdline does.
-fn critical_packets(scanned: &[Scanned], block_size: u64) -> ([u8; 16], Vec<u8>) {
+fn critical_packets(
+    scanned: &[Scanned],
+    block_size: u64,
+    comment: Option<&str>,
+) -> ([u8; 16], Vec<u8>) {
     let mut main_body = Vec::with_capacity(12 + scanned.len() * 16);
     main_body.extend_from_slice(&block_size.to_le_bytes());
     main_body.extend_from_slice(&(scanned.len() as u32).to_le_bytes());
@@ -2238,7 +1762,14 @@ fn critical_packets(scanned: &[Scanned], block_size: u64) -> ([u8; 16], Vec<u8>)
                 }
         })
         .sum();
-    let expected_len = 64 + main_body.len() + member_bytes + 64 + creator.len();
+    // The optional Text packet, where one was asked for. It joins the
+    // block like any other packet and needs no case of its own anywhere
+    // below: `critical_index` WALKS the finished block rather than being
+    // handed offsets, so it falls into the interleave cycle on its own,
+    // and `plan_files` prices the cycle by the block's own length.
+    let comment = comment.map(comment_packet);
+    let comment_bytes = comment.as_ref().map_or(0, |(_, body)| 64 + body.len());
+    let expected_len = 64 + main_body.len() + comment_bytes + member_bytes + 64 + creator.len();
     let mut critical = Vec::with_capacity(expected_len);
     append_packet(
         &mut critical,
@@ -2249,6 +1780,16 @@ fn critical_packets(scanned: &[Scanned], block_size: u64) -> ([u8; 16], Vec<u8>)
             packet.extend_from_slice(&main_body);
         },
     );
+    // Directly after Main, so a reader that has only the head of a
+    // truncated volume has the set and then what it is about. The spec
+    // fixes no order and par2cmdline writes no comment packet at all, so
+    // there is no reference shape to match here the way the FileDesc /
+    // IFSC split below matches one.
+    if let Some((ptype, body)) = &comment {
+        append_packet(&mut critical, &set_id, ptype, body.len(), |packet| {
+            packet.extend_from_slice(body);
+        });
+    }
     // EVERY FileDesc, THEN every IFSC - not each member's pair together.
     //
     // The spec fixes no order and every reader takes the packets it
@@ -2311,6 +1852,18 @@ fn critical_packets(scanned: &[Scanned], block_size: u64) -> ([u8; 16], Vec<u8>)
     (set_id, critical)
 }
 
+/// Recovery row `e`'s coefficient for the source whose RS log is `log`:
+/// `g_i^e`. The multiply happens in u64 before the reduction, so a large
+/// exponent times a large log cannot wrap.
+///
+/// At module scope rather than inline at the four folds that want it:
+/// spelling it out at each cost `recovery_slices` its 500-line function
+/// ceiling once the folds grew their `memgauge` argument, and one
+/// spelling of the creator's coefficient is worth more than four anyway.
+fn row_coeff(log: u32, e: usize) -> u16 {
+    crate::gf16::pow2(log as u64 * e as u64 % crate::gf16::ORDER as u64)
+}
+
 /// Compute recovery slices for exponents `[first, first + count)`.
 ///
 /// One pass over the payload, folding each input slice into every
@@ -2336,9 +1889,10 @@ fn critical_packets(scanned: &[Scanned], block_size: u64) -> ([u8; 16], Vec<u8>)
 ///   width comes from `nzbkit::mem::cpu_workers()`, the house door, so
 ///   a phone sizes it off its big cores rather than its core count.
 /// * It builds the right TABLE. The loop called `MulTable::new(c)` per
-///   (block, exponent) - 512 field multiplies - when the only thing it
+///   (block, exponent) - 512 field multiplies at the time, a subset walk
+///   over a 1 KB working set since 11 Sep 2026 - when the only thing it
 ///   ever asked of that table was `xor_mul_into`, the fold.
-///   [`crate::gf16::FoldTable`] is the same fold at 64 multiplies, and
+///   [`crate::gf16::FoldTable`] is the same fold at a 128 B basis XOR, and
 ///   on a target with a fused multi-source kernel
 ///   ([`crate::gf16::multi_fold_width`] - NEON, or GFNI+AVX2) the steady
 ///   state builds no table at all. That build cost is 2.3% of the fold
@@ -2349,25 +1903,50 @@ fn critical_packets(scanned: &[Scanned], block_size: u64) -> ([u8; 16], Vec<u8>)
 /// one buffer: a fold call amortizes its thread scope and its
 /// coefficient tables over every source in the batch, and one source per
 /// call would spawn a pool per block.
-/// A read-only private mapping of one member, for the transform to
-/// read the payload in place: the page cache is the resident copy and
-/// the kernel's to reclaim, so no retention budget applies and the
-/// whole payload is ONE transform window. Unix only; elsewhere the
-/// creator keeps the copied windows.
-#[cfg(unix)]
-struct MappedMember {
+/// A read-only mapping of one member: the page cache is the resident
+/// copy and the kernel's to reclaim, so no retention budget applies,
+/// the whole payload is ONE transform window, and - since 5 Sep 2026 -
+/// the scan's chains and the direct fold read through it too instead
+/// of copying the payload out of the cache (on Windows that copy is
+/// ~1 kernel-CPU-second per GiB per pass, and the creator made three:
+/// the mapped-inputs handoff). Unix `mmap`, Windows
+/// `CreateFileMapping`/`MapViewOfFile`; `NZBFAST_PAR2GEN_MAP=0` keeps
+/// the copied paths everywhere.
+///
+/// A member truncated underneath a live mapping faults the reader
+/// (SIGBUS / EXCEPTION_IN_PAGE_ERROR) rather than returning short, on
+/// both platforms; the transform has carried that since 2 Sep 2026 and
+/// the scan and fold now share it. Growth is harmless (the mapping is
+/// `len` bytes, taken at open).
+pub(crate) struct MappedMember {
     ptr: *const u8,
     len: usize,
+    #[cfg(windows)]
+    mapping: windows_sys::Win32::Foundation::HANDLE,
+    #[cfg(windows)]
+    _file: std::fs::File,
 }
 
-#[cfg(unix)]
 impl MappedMember {
-    fn open(path: &Path, len: u64) -> std::io::Result<Option<MappedMember>> {
+    /// A read-only mapping of exactly `len` bytes of `path`, or `None`
+    /// for an empty member.
+    ///
+    /// **`len` is the caller's HEAD-SCAN length, re-stat'd here.**
+    /// `MappedPlan::open` never re-stats and indexes in at once, so a
+    /// member that shrank made `bytes()` a `from_raw_parts` past the
+    /// mapping - on Windows the section is created 0/0, the CURRENT
+    /// size, so the slice ran off it outright. `scan_at_length` refuses
+    /// this on the path it guards; the transform map does not.
+    #[cfg(unix)]
+    pub(crate) fn open(path: &Path, len: u64) -> std::io::Result<Option<MappedMember>> {
         use std::os::unix::io::AsRawFd;
         if len == 0 {
             return Ok(None);
         }
         let f = std::fs::File::open(path)?;
+        if f.metadata()?.len() != len {
+            return Err(std::io::Error::other("stale member length"));
+        }
         let len =
             usize::try_from(len).map_err(|_| std::io::Error::other("member too large to map"))?;
         // SAFETY: a fresh read-only private mapping of `len` bytes of an
@@ -2392,66 +1971,389 @@ impl MappedMember {
             len,
         }))
     }
+
+    /// See the `unix` arm above for why `len` is re-stat'd here.
+    #[cfg(windows)]
+    pub(crate) fn open(path: &Path, len: u64) -> std::io::Result<Option<MappedMember>> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Memory::{
+            CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY,
+        };
+        if len == 0 {
+            return Ok(None);
+        }
+        let f = std::fs::File::open(path)?;
+        if f.metadata()?.len() != len {
+            return Err(std::io::Error::other("stale member length"));
+        }
+        let len =
+            usize::try_from(len).map_err(|_| std::io::Error::other("member too large to map"))?;
+        // SAFETY: a read-only section over the whole file (0/0 = current
+        // size) on a handle we own; null names, no security attributes;
+        // checked for null below and closed in Drop.
+        let mapping = unsafe {
+            CreateFileMappingW(
+                f.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+                std::ptr::null(),
+                PAGE_READONLY,
+                0,
+                0,
+                std::ptr::null(),
+            )
+        };
+        if mapping.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a read-only view of the whole section just created;
+        // checked for null; unmapped in Drop.
+        let view = unsafe { MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0) };
+        if view.Value.is_null() {
+            let e = std::io::Error::last_os_error();
+            // SAFETY: the section handle is ours and unused past here.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(mapping) };
+            return Err(e);
+        }
+        Ok(Some(MappedMember {
+            ptr: view.Value as *const u8,
+            len,
+            mapping,
+            _file: f,
+        }))
+    }
+
+    /// The member's bytes.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        // SAFETY: `ptr` is a live read-only mapping of exactly `len`
+        // bytes for as long as `self` lives, and nothing writes it.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    /// Ask the kernel to populate the pages ahead of the readers: on
+    /// Windows one `PrefetchVirtualMemory` call maps the cached pages in
+    /// bulk where touching them would take a soft fault per 4 KiB page;
+    /// on unix `madvise(WILLNEED)`. Best effort, errors ignored.
+    ///
+    /// `pub(crate)` since 10 Sep 2026 for the packet catalog's scan of a
+    /// mapped volume (`par2repair::catalog::scan_one`), which was faulting
+    /// a cold 1 GiB volume in one page at a time - see there.
+    pub(crate) fn prefetch(&self) {
+        // Research knob: `NZBFAST_PAR2GEN_MAP_PREFETCH=0` skips the hint.
+        if std::env::var_os("NZBFAST_PAR2GEN_MAP_PREFETCH").is_some_and(|v| v == "0") {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Memory::{
+                PrefetchVirtualMemory, WIN32_MEMORY_RANGE_ENTRY,
+            };
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            let range = WIN32_MEMORY_RANGE_ENTRY {
+                VirtualAddress: self.ptr as *mut std::ffi::c_void,
+                NumberOfBytes: self.len,
+            };
+            // SAFETY: one range descriptor covering exactly this mapping;
+            // the call is advisory and its result is ignored.
+            unsafe {
+                PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
+            }
+        }
+        #[cfg(unix)]
+        {
+            // SAFETY: advisory call over exactly this mapping; ignored.
+            unsafe {
+                libc::madvise(self.ptr as *mut libc::c_void, self.len, libc::MADV_WILLNEED);
+            }
+        }
+    }
 }
 
-#[cfg(unix)]
 impl Drop for MappedMember {
     fn drop(&mut self) {
+        #[cfg(unix)]
         // SAFETY: the pointer and length are exactly what mmap returned.
         unsafe {
             libc::munmap(self.ptr as *mut libc::c_void, self.len);
+        }
+        #[cfg(windows)]
+        // SAFETY: the view and section handle are exactly what open
+        // created, unmapped and closed once, here.
+        unsafe {
+            let view = windows_sys::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: self.ptr as *mut std::ffi::c_void,
+            };
+            windows_sys::Win32::System::Memory::UnmapViewOfFile(view);
+            windows_sys::Win32::Foundation::CloseHandle(self.mapping);
         }
     }
 }
 
 // SAFETY: the mapping is read-only and immutable for its lifetime; the
-// transform's workers only read through it.
-#[cfg(unix)]
+// workers only read through it.
 unsafe impl Send for MappedMember {}
 // SAFETY: as above - shared read-only access.
-#[cfg(unix)]
 unsafe impl Sync for MappedMember {}
 
-/// Advance the whole-file/head chains and produce the per-block products from
-/// the exact arena the recovery fold is reading. Block products use two narrow
-/// lanes while the one ordered whole-file chain runs on this caller.
-fn scan_fused_window(
-    scan: &mut FusedScan,
-    window: &[(usize, u64, usize)],
-    arena: &[u8],
-    bs: usize,
-) {
-    debug_assert!(window.iter().all(|&(mi, _, _)| mi == 0));
-    let mut hashes = vec![([0u8; 16], 0u32); window.len()];
-    // One whole-file MD5 chain already consumes this window on the caller.
-    // Two block lanes are enough to keep the independent per-block MD5+CRC
-    // work below that serial floor; a machine-wide pool here would nest under
-    // the fold's own full pool and be recreated once per read window.
-    let workers = 2.min(window.len());
-    let per = window.len().div_ceil(workers);
-    std::thread::scope(|sc| {
-        for (hashes, bytes) in hashes
-            .chunks_mut(per)
-            .zip(arena.chunks(per.saturating_mul(bs)))
-        {
-            sc.spawn(move || {
-                for (hash, block) in hashes.iter_mut().zip(bytes.chunks_exact(bs)) {
-                    *hash = (Md5::digest(block).into(), crc32fast::hash(block));
-                }
-            });
-        }
-        for (&(_, _off, want), block) in window.iter().zip(arena.chunks_exact(bs)) {
-            scan.whole.update(&block[..want]);
-            if scan.head_left > 0 {
-                let take = scan.head_left.min(want);
-                scan.head.update(&block[..take]);
-                scan.head_left -= take;
-            }
-        }
-    });
-    scan.blocks.extend_from_slice(&hashes);
+/// Which payload reads go through a mapping. `NZBFAST_PAR2GEN_MAP=0`:
+/// none, every read on the copied paths. Unset: the TRANSFORM reads its
+/// corpus mapped (unix since 2 Sep 2026, Windows since 5 Sep) and the
+/// scan and the direct fold keep their reads. `all`: the scan and the
+/// direct fold read the mapping too.
+///
+/// `all` is the measured negative that shaped the default (the
+/// mapped-inputs handoff, rounds L-M, i5-10600KF and M3 Ultra, 5 Sep
+/// 2026): on the 1 MiB create it takes 0.5-1.0 s of kernel time OUT of
+/// the process and still costs 0.05-0.10 s of WALL, on both boxes, with
+/// or without the populate hint - soft faults taken inside twelve scan
+/// lanes and six fold workers serialise where a read's copy did not.
+/// The transform's stripe-wise walk does not pay that: 64 KiB create
+/// 3.47-3.69 s mapped against 3.53-3.71 copied on the i5, 0.3 s less
+/// kernel time.
+fn map_inputs_enabled() -> bool {
+    !ntt_range::map_off_pinned() && map_mode() != MapMode::Off
 }
 
+/// Whether the scan and the direct fold read mapped members (see
+/// [`map_inputs_enabled`]): only under `NZBFAST_PAR2GEN_MAP=all`.
+fn map_scan_and_fold_enabled() -> bool {
+    map_mode() == MapMode::All
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MapMode {
+    Off,
+    Transform,
+    All,
+}
+
+fn map_mode() -> MapMode {
+    static MODE: std::sync::OnceLock<MapMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(
+        || match std::env::var("NZBFAST_PAR2GEN_MAP").ok().as_deref() {
+            Some("0") => MapMode::Off,
+            Some("all") => MapMode::All,
+            _ => MapMode::Transform,
+        },
+    )
+}
+
+/// Every member of a plan mapped, with each block addressable: full
+/// blocks point into the mappings, tail blocks are copied zero-padded
+/// into `pad`. None when a member cannot be mapped (the caller keeps
+/// its copied path) or the tails alone would exceed `pad_cap` bytes.
+struct MappedPlan {
+    /// Held for the table's lifetime, never read directly.
+    _maps: Vec<Option<MappedMember>>,
+    /// As above: the tail slots the table points into.
+    _pad: Vec<u8>,
+    table: Vec<*const u8>,
+    tails: usize,
+}
+
+// SAFETY: read-only pointers into immutable mappings and the pad
+// arena, neither mutated while workers read them.
+unsafe impl Send for MappedPlan {}
+// SAFETY: as above.
+unsafe impl Sync for MappedPlan {}
+
+impl MappedPlan {
+    fn open(
+        scanned: &[(PathBuf, u64)],
+        plan: &[(usize, u64, usize)],
+        bs: usize,
+        pad_cap: usize,
+    ) -> Option<MappedPlan> {
+        let tails = plan.iter().filter(|&&(_, _, want)| want != bs).count();
+        if tails.saturating_mul(bs) > pad_cap {
+            return None;
+        }
+        let mut maps: Vec<Option<MappedMember>> = Vec::with_capacity(scanned.len());
+        for (path, length) in scanned {
+            match MappedMember::open(path, *length) {
+                Ok(m) => maps.push(m),
+                Err(_) => return None,
+            }
+        }
+        for m in maps.iter().flatten() {
+            m.prefetch();
+        }
+        let mut pad = vec![0u8; tails * bs];
+        let mut table: Vec<*const u8> = Vec::with_capacity(plan.len());
+        let mut pi = 0usize;
+        for &(mi, off, want) in plan {
+            let m = maps[mi].as_ref()?;
+            let off = usize::try_from(off).ok()?;
+            if want == bs {
+                // A full block lies inside the mapping (`off + bs <=
+                // length`, the plan's contract).
+                table.push(m.bytes().get(off..off + bs)?.as_ptr());
+            } else {
+                let slot = &mut pad[pi * bs..][..bs];
+                slot[..want].copy_from_slice(m.bytes().get(off..off + want)?);
+                table.push(slot.as_ptr());
+                pi += 1;
+            }
+        }
+        Some(MappedPlan {
+            _maps: maps,
+            _pad: pad,
+            table,
+            tails,
+        })
+    }
+
+    /// Block `i` as a slice of `bs` bytes.
+    fn block(&self, i: usize, bs: usize) -> &[u8] {
+        // SAFETY: every table entry is readable for `bs` bytes (a full
+        // block inside a mapping, or a pad slot) for as long as the maps
+        // and pad live, which is `self`'s lifetime.
+        unsafe { std::slice::from_raw_parts(self.table[i], bs) }
+    }
+}
+
+/// Per-block (MD5, CRC32) for the `n` blocks of a window arena, eight
+/// MD5 chains per `md5_many` pass. The arena already holds every block
+/// zero-padded to `bs` (the reader pads tails), which is the block the
+/// spec hashes.
+fn digest_window(arena: &[u8], n: usize, bs: usize) -> Vec<([u8; 16], u32)> {
+    let blocks: Vec<&[u8]> = (0..n).map(|k| &arena[k * bs..(k + 1) * bs]).collect();
+    let digests = crate::md5fast::multi::md5_many(&blocks);
+    digests
+        .into_iter()
+        .zip(&blocks)
+        .map(|(d, b)| (d, crc32fast::hash(b)))
+        .collect()
+}
+
+/// Advance every member's whole-file and head chain over one window of
+/// the arena the fold is reading, and file the window's block digests.
+/// With `lanes`, the window is lane-interleaved (see [`interleave_plan`]):
+/// each block carries its lane, a run of ascending lanes is one row, and
+/// a row is one lockstep step of the eight chains - a member's last block
+/// finalises its lane. Without lanes (a slice size that is not a
+/// multiple of 64) the members' scalar chains run one at a time. The
+/// chains are the create's one serial cost; this runs beside the fold.
+fn scan_fused_window(
+    state: &mut [FusedMemberState],
+    lanes: &mut Option<crate::md5fast::multi::Md5Lanes>,
+    window: &[(usize, u64, usize)],
+    lane_of: &[u8],
+    arena: &[u8],
+    bs: usize,
+    digests: Vec<([u8; 16], u32)>,
+) {
+    debug_assert_eq!(digests.len(), window.len());
+    let lengths: Vec<u64> = state.iter().map(|st| st.stamp.length).collect();
+    let mut row: [&[u8]; 8] = [&[]; 8];
+    let mut row_last: [Option<usize>; 8] = [None; 8];
+    let mut row_has = false;
+    let mut prev_lane = usize::MAX;
+    for (k, ((&(mi, off, want), block), digest)) in window
+        .iter()
+        .zip(arena.chunks_exact(bs))
+        .zip(digests)
+        .enumerate()
+    {
+        let st = &mut state[mi];
+        if st.head_left > 0 {
+            let take = st.head_left.min(want);
+            st.head.update(&block[..take]);
+            st.head_left -= take;
+        }
+        st.blocks.push(digest);
+        let Some(l) = lanes.as_mut() else {
+            st.whole.update(&block[..want]);
+            continue;
+        };
+        let lane = lane_of[k] as usize;
+        if row_has && lane <= prev_lane {
+            l.update(row);
+            for (j, last) in row_last.iter_mut().enumerate() {
+                if let Some(m) = last.take() {
+                    state[m].whole_digest = Some(l.finalize(j));
+                }
+            }
+            row = [&[]; 8];
+        }
+        row[lane] = &block[..want];
+        row_has = true;
+        prev_lane = lane;
+        if off + want as u64 >= lengths[mi] {
+            row_last[lane] = Some(mi);
+        }
+    }
+    if row_has && let Some(l) = lanes.as_mut() {
+        l.update(row);
+        for (j, last) in row_last.iter_mut().enumerate() {
+            if let Some(m) = last.take() {
+                state[m].whole_digest = Some(l.finalize(j));
+            }
+        }
+    }
+}
+
+/// The plan in lane order for the fused pass: eight members at a time,
+/// one block of each per round, a member taking over a lane as the one
+/// before it ends. Returns the reordered plan, the ORIGINAL slice index of
+/// each position (the base log belongs to the slice, not the position)
+/// and each position's lane.
+fn interleave_plan(
+    plan: &[(usize, u64, usize)],
+) -> (Vec<(usize, u64, usize)>, Vec<usize>, Vec<u8>) {
+    // Per member: the range of plan positions (member-major, contiguous).
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for (k, &(mi, _, _)) in plan.iter().enumerate() {
+        if ranges.len() <= mi {
+            ranges.resize(mi + 1, (k, k));
+        }
+        if ranges[mi].0 == ranges[mi].1 {
+            ranges[mi] = (k, k);
+        }
+        ranges[mi].1 = k + 1;
+    }
+    let mut out = Vec::with_capacity(plan.len());
+    let mut slice_of = Vec::with_capacity(plan.len());
+    let mut lane_of = Vec::with_capacity(plan.len());
+    let mut lane_member: [Option<usize>; 8] = [None; 8];
+    let mut lane_pos = [0usize; 8];
+    let mut next = 0usize;
+    let mut take_next = |lane_member: &mut Option<usize>, lane_pos: &mut usize| {
+        *lane_member = None;
+        while next < ranges.len() {
+            let m = next;
+            next += 1;
+            if ranges[m].1 > ranges[m].0 {
+                *lane_member = Some(m);
+                *lane_pos = ranges[m].0;
+                return;
+            }
+        }
+    };
+    for j in 0..8 {
+        take_next(&mut lane_member[j], &mut lane_pos[j]);
+    }
+    loop {
+        let mut any = false;
+        for j in 0..8 {
+            let Some(m) = lane_member[j] else { continue };
+            any = true;
+            let k = lane_pos[j];
+            out.push(plan[k]);
+            slice_of.push(k);
+            lane_of.push(j as u8);
+            lane_pos[j] += 1;
+            if lane_pos[j] >= ranges[m].1 {
+                take_next(&mut lane_member[j], &mut lane_pos[j]);
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    debug_assert_eq!(out.len(), plan.len());
+    (out, slice_of, lane_of)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn recovery_slices(
     scanned: &[(PathBuf, u64)],
     block_size: u64,
@@ -2459,15 +2361,25 @@ fn recovery_slices(
     first: usize,
     count: usize,
     read_budget: u64,
-    mut fused_scan: Option<&mut FusedScan>,
+    fused_scan: Option<&mut FusedScan>,
+    control: &CreateControl,
 ) -> Result<Vec<Vec<u16>>, Par2GenError> {
+    // This batch's fold, in bytes of input block fed. Re-entered per
+    // batch, which re-sizes the phase - see `RepairPhase`'s own note
+    // about a phase a caller may be told about more than once.
+    control.begin(CreatePhase::Fold, n_slices as u64 * block_size);
     let words = (block_size / 2) as usize;
     let logs = crate::par2repair::input_base_logs(n_slices)
         .map_err(|e| Par2GenError::Other(format!("assigning RS constants: {e}")))?;
     let mut acc: Vec<Vec<u16>> = vec![vec![0u16; words]; count];
+    pin_accumulators(&acc, count as u64 * block_size);
 
     let bs = block_size as usize;
     let per_read = ((read_budget / block_size).max(1) as usize).min(n_slices);
+    // Mutated before the window loop only by the unix mapped path's
+    // fold fallback, so the Windows build sees no mutation until the
+    // arena moves into `FoldWindows`.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut arena = vec![0u8; per_read * bs];
     // The global slice list: (member, byte offset, want) in input-slice
     // order, so an arena-full is a contiguous window of it and the base
@@ -2482,22 +2394,37 @@ fn recovery_slices(
         }
     }
     debug_assert_eq!(plan.len(), n_slices);
+    // The fused pass with lanes walks the plan eight members at a time;
+    // everything else keeps the member-major order (the transform's
+    // window and mapped paths index `plan` positionally against `logs`).
+    let (plan, slice_of, lane_of) = if fused_scan.as_ref().is_some_and(|f| f.lanes.is_some()) {
+        interleave_plan(&plan)
+    } else {
+        let n = plan.len();
+        (plan, (0..n).collect(), vec![0u8; n])
+    };
     // Readers fan out over the window exactly as the repair feed does
     // (contiguous runs per reader, positional reads, one handle per
     // member per reader): the read used to be one thread's BufReader
     // walking the payload between folds, and on a 1 GiB set that was
     // ~300 ms of every pass against a fold of ~120 ms (measured 2 Sep
     // 2026, M3 Ultra, page-cached payload).
-    let readers = crate::mem::cpu_workers().clamp(1, 8);
-    // One window of the plan into `dst`, across readers.
+    // One window of the plan into `dst`, across `readers` threads.
+    // `pack`: planar-pack each block as it lands (direct fold only; the
+    // transform and the fused scan read the interleaved bytes).
     let read_window = |w0: usize,
                        w1: usize,
                        dst: &mut [u8],
-                       pinned: Option<&std::fs::File>|
+                       pinned: Option<&[std::fs::File]>,
+                       pack: bool,
+                       readers: usize|
      -> Result<(), Par2GenError> {
         let window = &plan[w0..w1];
         let chunk = window.len().div_ceil(readers).max(1);
         let mut results: Vec<Result<(), Par2GenError>> = Vec::new();
+        let trace_scope =
+            w0 == 0 && std::env::var_os("NZBFAST_CREATE_READ_TRACE").is_some_and(|v| v == "1");
+        let t_scope = std::time::Instant::now();
         std::thread::scope(|sc| {
             let handles: Vec<_> = window
                 .chunks(chunk)
@@ -2505,17 +2432,25 @@ fn recovery_slices(
                 .map(|(jobs, slots)| {
                     sc.spawn(move || -> Result<(), Par2GenError> {
                         let mut open: Option<(usize, std::fs::File)> = None;
+                        // Research trace (`NZBFAST_CREATE_READ_TRACE=1`): per
+                        // open and per block wall for the first window.
+                        let trace = w0 == 0
+                            && std::env::var_os("NZBFAST_CREATE_READ_TRACE").is_some_and(|v| v == "1");
                         for (k, &(mi, off, want)) in jobs.iter().enumerate() {
+                            let t_blk = std::time::Instant::now();
                             // A fused pass reads through the descriptor it
                             // pinned before the fold, so its snapshot is the
                             // one the checksums are taken over.
-                            let f = if let Some(file) = pinned {
-                                debug_assert_eq!(mi, 0);
-                                file
+                            let f = if let Some(files) = pinned {
+                                &files[mi]
                             } else {
                                 if open.as_ref().is_none_or(|(o, _)| *o != mi) {
                                     let path = &scanned[mi].0;
+                                    let t_open = std::time::Instant::now();
                                     open = Some((mi, std::fs::File::open(path).map_err(io(path))?));
+                                    if trace {
+                                        tracing::info!(target: "repair-timing", "read-trace open member {mi}: {:.2?}", t_open.elapsed());
+                                    }
                                 }
                                 &open.as_ref().expect("just opened").1
                             };
@@ -2531,16 +2466,31 @@ fn recovery_slices(
                             // kernel where a short one drops to the
                             // remainder path.
                             slot[want..].fill(0);
+                            if pack {
+                                assert!(crate::gf16::prepack_planar_in_place(slot));
+                            }
+                            if trace {
+                                tracing::info!(target: "repair-timing", "read-trace block {k} (member {mi} off {off}): {:.2?}", t_blk.elapsed());
+                            }
                         }
                         Ok(())
                     })
                 })
                 .collect();
+            if trace_scope {
+                tracing::info!(target: "repair-timing", "read-trace spawned {} reader(s) at {:.2?}", handles.len(), t_scope.elapsed());
+            }
             results = handles
                 .into_iter()
                 .map(|h| h.join().expect("par2gen reader panicked"))
                 .collect();
+            if trace_scope {
+                tracing::info!(target: "repair-timing", "read-trace joined at {:.2?}", t_scope.elapsed());
+            }
         });
+        if trace_scope {
+            tracing::info!(target: "repair-timing", "read-trace scope done at {:.2?}", t_scope.elapsed());
+        }
         for r in results {
             r?;
         }
@@ -2561,7 +2511,6 @@ fn recovery_slices(
     // the resident corpus (a 1-row fold, milliseconds) and compared word
     // for word; any difference throws the whole transform away and the
     // fold below recomputes every row. `NZBFAST_NTT=0` forces the fold.
-    let needed = first + count;
 
     // The transform is linear in its inputs, so it runs over resident
     // WINDOWS of the payload with the outputs XORed together: a window
@@ -2577,7 +2526,7 @@ fn recovery_slices(
     // The fused caller deliberately enters only the copied fold path: an NTT
     // consumes stripe-wise source columns and cannot share a sequential hash
     // traversal without reading the mapping again.
-    let ntt_window = create_ntt_window(bs, n_slices, first, count);
+    let ntt_window = ntt_range::create_ntt_window(bs, n_slices, first, count);
     let ntt_admitted = fused_scan.is_none() && ntt_window.is_some();
     let ntt_window = ntt_window.unwrap_or(0);
     // Mapped single window (unix): every full block is read straight
@@ -2589,295 +2538,337 @@ fn recovery_slices(
     // 1,822 slices transformed in 25-37 s; the per-window cost is
     // dominated by the per-output combine stages, so one window is the
     // shape to be in.
-    #[cfg(unix)]
-    if ntt_admitted && !std::env::var_os("NZBFAST_PAR2GEN_MAP").is_some_and(|v| v == "0") {
-        let tails = plan.iter().filter(|&&(_, _, want)| want != bs).count();
-        let pad_ok = tails.saturating_mul(bs) <= ntt_window.saturating_mul(bs);
-        if pad_ok {
-            let t_ntt = std::time::Instant::now();
-            let mut maps: Vec<Option<MappedMember>> = Vec::with_capacity(scanned.len());
-            let mut map_err = None;
-            for (path, length) in scanned {
-                match MappedMember::open(path, *length) {
-                    Ok(m) => maps.push(m),
-                    Err(e) => {
-                        map_err = Some(e);
-                        break;
-                    }
-                }
-            }
-            if map_err.is_none() {
-                let mut pad = vec![0u8; tails * bs];
-                let mut table: Vec<*const u8> = Vec::with_capacity(n_slices);
-                let mut pi = 0usize;
-                for &(mi, off, want) in &plan {
-                    if want == bs {
-                        // SAFETY: `off + bs <= length` for a full block, and
-                        // the mapping covers `length` bytes.
-                        table.push(unsafe {
-                            maps[mi].as_ref().expect("mapped").ptr.add(off as usize)
-                        });
-                    } else {
-                        let slot = &mut pad[pi * bs..][..bs];
-                        // SAFETY: `off + want <= length`; the mapping covers
-                        // `length` bytes.
-                        let src = unsafe {
-                            std::slice::from_raw_parts(
-                                maps[mi].as_ref().expect("mapped").ptr.add(off as usize),
-                                want,
-                            )
-                        };
-                        slot[..want].copy_from_slice(src);
-                        table.push(slot.as_ptr());
-                        pi += 1;
-                    }
-                }
-                let present: Vec<(u32, crate::par2ntt::SrcId)> = logs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &l)| (l, i as crate::par2ntt::SrcId))
-                    .collect();
-                if let Ok(ntt) = crate::par2ntt::FlatPlan::build(&present, needed) {
-                    let (w, threads) = crate::par2repair::ntt_stripe_geometry(bs);
-                    let stripes = words.div_ceil(w);
-                    struct Rows(Vec<*mut u16>);
-                    // SAFETY: raw pointers into the accumulator rows; workers
-                    // write disjoint column ranges only (one stripe per
-                    // atomic claim), so sharing them across the scope's
-                    // threads races nothing.
-                    unsafe impl Send for Rows {}
-                    // SAFETY: as above.
-                    unsafe impl Sync for Rows {}
-                    struct Table(Vec<*const u8>);
-                    // SAFETY: read-only pointers into immutable mappings and
-                    // the pad arena, neither mutated while the scope's
-                    // workers read them.
-                    unsafe impl Send for Table {}
-                    // SAFETY: as above.
-                    unsafe impl Sync for Table {}
-                    let rows = Rows(acc.iter_mut().map(|r| r.as_mut_ptr()).collect());
-                    let table = Table(table);
-                    let next = std::sync::atomic::AtomicUsize::new(0);
-                    std::thread::scope(|sc| {
-                        for _ in 0..threads {
-                            let ntt = &ntt;
-                            let rows = &rows;
-                            let table = &table;
-                            let next = &next;
-                            sc.spawn(move || {
-                                let mut scratch = ntt.new_scratch(w);
-                                let mut out = vec![0u16; ntt.needed * w];
-                                loop {
-                                    let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    if c >= stripes {
-                                        break;
-                                    }
-                                    let len = w.min(words - c * w);
-                                    // SAFETY: every table entry is readable
-                                    // for `bs` bytes (full blocks inside a
-                                    // mapping, tails inside the pad arena),
-                                    // and c*w*2 + 2*len <= bs - transform's
-                                    // src_of contract.
-                                    let src_of = |id: crate::par2ntt::SrcId| unsafe {
-                                        table.0[id as usize].add(c * w * 2)
-                                    };
-                                    ntt.transform(&src_of, len, &mut scratch, &mut out);
-                                    for (j, &row) in rows.0.iter().enumerate() {
-                                        let e = first + j;
-                                        // SAFETY: row j is `words` long and
-                                        // c*w + len <= words; stripe c is
-                                        // this worker's alone.
-                                        let dst = unsafe {
-                                            std::slice::from_raw_parts_mut(row.add(c * w), len)
-                                        };
-                                        dst.copy_from_slice(&out[e * len..(e + 1) * len]);
-                                    }
-                                }
-                            });
-                        }
-                    });
-                    // The check: row `first` again, by the fold, over the
-                    // same sources.
-                    let mut probe = vec![vec![0u16; words]];
-                    // SAFETY: every table entry is readable for `bs` bytes
-                    // (see above) and nothing writes through them.
-                    let srcs: Vec<&[u8]> = table
-                        .0
-                        .iter()
-                        .map(|&p| unsafe { std::slice::from_raw_parts(p, bs) })
-                        .collect();
-                    crate::par2repair::linalg::fold_parallel(&mut probe, &srcs, &|_, i| {
-                        crate::gf16::pow2(logs[i] as u64 * first as u64 % crate::gf16::ORDER as u64)
-                    });
-                    drop(srcs);
-                    if probe[0] == acc[0] {
-                        if std::env::var_os("NZBFAST_NTT_PROFILE").is_some() {
-                            let r = crate::par2ntt::FlatPlan::profile_report();
-                            tracing::info!(
-                                target: "repair-timing",
-                                "ntt profile (inclusive thread-seconds): depth0 {:.2} depth1 {:.2} depth2 {:.2} leaves {:.2}",
-                                r[0], r[1], r[2], r[3]
-                            );
-                        }
-                        if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
-                            tracing::info!(
-                                target: "repair-timing",
-                                "create ntt rows {first}+{count} (n={n_slices}, mapped, {tails} tail(s) padded, W={w}, threads={threads}, probe ok): {:.2?}",
-                                t_ntt.elapsed()
-                            );
-                        }
-                        drop(maps);
-                        return Ok(acc);
-                    }
-                    tracing::warn!(
-                        target: "repair-timing",
-                        "create ntt rows {first}+{count} (mapped): probe row DISAGREES with the fold - recomputing every row by the fold"
-                    );
-                    for row in acc.iter_mut() {
-                        row.fill(0);
-                    }
-                    drop(maps);
-                    // Straight to the fold: a disagreeing transform is not
-                    // retried through the windows.
-                    let mut w0 = 0usize;
-                    while w0 < n_slices {
-                        let w1 = (w0 + per_read).min(n_slices);
-                        let window = &plan[w0..w1];
-                        read_window(w0, w1, &mut arena[..window.len() * bs], None)?;
-                        let held: Vec<u32> = logs[w0..w1].to_vec();
-                        fold_batch(&mut acc, &arena[..window.len() * bs], bs, &held, first);
-                        w0 = w1;
-                    }
-                    return Ok(acc);
-                }
-            }
-            // Mapping failed or the plan is unbuildable: the copied
-            // windows below take it.
-        }
+    let arms = ntt::NttArms {
+        control,
+        read_window: &read_window,
+        scanned,
+        plan: &plan,
+        logs: &logs,
+        bs,
+        words,
+        n_slices,
+        first,
+        count,
+        ntt_window,
+        per_read,
+    };
+    if ntt_admitted && map_inputs_enabled() && ntt::mapped_attempt(&arms, &mut acc, &mut arena)? {
+        control.finish(CreatePhase::Fold);
+        return Ok(acc);
     }
-    if ntt_admitted {
-        let t_ntt = std::time::Instant::now();
-        let (w, threads) = crate::par2repair::ntt_stripe_geometry(bs);
-        let stripes = words.div_ceil(w);
-        let mut corpus = vec![0u8; ntt_window * bs];
-        // The check: row `first` again, by the fold, over the same
-        // windows, accumulated the same way.
-        let mut probe = vec![vec![0u16; words]];
-        let mut ok = true;
-        let mut windows = 0usize;
-        let mut w0 = 0usize;
-        while w0 < n_slices {
-            let w1 = (w0 + ntt_window).min(n_slices);
-            let wn = w1 - w0;
-            read_window(w0, w1, &mut corpus[..wn * bs], None)?;
-            let present: Vec<(u32, crate::par2ntt::SrcId)> = logs[w0..w1]
-                .iter()
-                .enumerate()
-                .map(|(i, &l)| (l, i as crate::par2ntt::SrcId))
-                .collect();
-            let Ok(ntt) = crate::par2ntt::FlatPlan::build(&present, needed) else {
-                ok = false;
-                break;
-            };
-            struct Rows(Vec<*mut u16>);
-            // SAFETY: raw pointers into the accumulator rows; workers
-            // write disjoint column ranges only (one stripe per atomic
-            // claim), so sharing them across the scope's threads races
-            // nothing.
-            unsafe impl Send for Rows {}
-            // SAFETY: as above - every write is confined to the claiming
-            // worker's stripe columns.
-            unsafe impl Sync for Rows {}
-            let rows = Rows(acc.iter_mut().map(|r| r.as_mut_ptr()).collect());
-            let corpus_ref = &corpus;
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|sc| {
-                for _ in 0..threads {
-                    let ntt = &ntt;
-                    let rows = &rows;
-                    let next = &next;
-                    sc.spawn(move || {
-                        let mut scratch = ntt.new_scratch(w);
-                        let mut out = vec![0u16; ntt.needed * w];
-                        loop {
-                            let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if c >= stripes {
-                                break;
-                            }
-                            let len = w.min(words - c * w);
-                            // SAFETY: slot `id` holds a full block of
-                            // `bs` bytes in `corpus`, and c*w*2 + 2*len
-                            // <= bs because len = w.min(words - c*w) -
-                            // transform's src_of contract.
-                            let src_of = |id: crate::par2ntt::SrcId| unsafe {
-                                corpus_ref.as_ptr().add(id as usize * bs + c * w * 2)
-                            };
-                            ntt.transform(&src_of, len, &mut scratch, &mut out);
-                            for (j, &row) in rows.0.iter().enumerate() {
-                                let e = first + j;
-                                // SAFETY: row j is `words` long and c*w +
-                                // len <= words; stripe c is this worker's
-                                // alone, so no other thread touches these
-                                // columns.
-                                let dst =
-                                    unsafe { std::slice::from_raw_parts_mut(row.add(c * w), len) };
-                                for (d, o) in dst.iter_mut().zip(&out[e * len..(e + 1) * len]) {
-                                    *d ^= *o;
-                                }
-                            }
-                        }
-                    });
-                }
-            });
-            let srcs: Vec<&[u8]> = (0..wn).map(|i| &corpus[i * bs..][..bs]).collect();
-            crate::par2repair::linalg::fold_parallel(&mut probe, &srcs, &|_, i| {
-                crate::gf16::pow2(logs[w0 + i] as u64 * first as u64 % crate::gf16::ORDER as u64)
-            });
-            windows += 1;
-            w0 = w1;
-        }
-        drop(corpus);
-        if ok && probe[0] == acc[0] {
+    if ntt_admitted && ntt::windowed_attempt(&arms, &mut acc)? {
+        control.finish(CreatePhase::Fold);
+        return Ok(acc);
+    }
+
+    // Read-ahead (knob): window k+1 lands in a second arena on its own
+    // reader fan-out while window k folds on the main thread, so the
+    // read's wall hides under the fold's. Only on the plain path - the
+    // fused scan pins one descriptor and hashes the window it just read.
+    let prepack = create_prepack_enabled()
+        && fused_scan.is_none()
+        && crate::par2repair::linalg::prepacked_fold_admissible(words, count);
+    // The fold straight off the mappings: no read pass at all, the
+    // page cache is the source. Windows of 256 slices per fold call (the
+    // window budget measured flat from 64 to 512 MiB on the i5, so the
+    // call shape is the one the fold bench likes). The fused scan keeps
+    // its copied arena (it hashes the window it just read), and a plan
+    // that packs its sources needs them in an arena to pack.
+    if map_scan_and_fold_enabled()
+        && fused_scan.is_none()
+        && !prepack
+        && let Some(mp) = MappedPlan::open(scanned, &plan, bs, per_read * bs)
+    {
+        {
+            let t0 = std::time::Instant::now();
+            const MAP_FOLD_WINDOW: usize = 256;
+            let mut w0 = 0usize;
+            while w0 < n_slices {
+                let w1 = (w0 + MAP_FOLD_WINDOW).min(n_slices);
+                let srcs: Vec<&[u8]> = (w0..w1).map(|i| mp.block(i, bs)).collect();
+                let held = &logs[w0..w1];
+                let c = |j: usize, i: usize| row_coeff(held[i], first + j);
+                crate::par2repair::linalg::fold_parallel(&mut acc, &srcs, &c, None);
+                control.step(CreatePhase::Fold, (w1 - w0) as u64 * bs as u64);
+                w0 = w1;
+                // Between two fold windows on the driver thread with
+                // nothing held: a park site, and the cancel's grain on
+                // this arm.
+                control.gate()?;
+            }
             if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
                 tracing::info!(
                     target: "repair-timing",
-                    "create ntt rows {first}+{count} (n={n_slices}, {windows} window(s) of {ntt_window}, W={w}, threads={threads}, probe ok): {:.2?}",
-                    t_ntt.elapsed()
+                    "create direct fold (mapped, {n_slices} slices in windows of {MAP_FOLD_WINDOW}, {} tail(s) padded): {:.2?}",
+                    mp.tails,
+                    t0.elapsed()
                 );
             }
+            drop(mp);
+            control.finish(CreatePhase::Fold);
             return Ok(acc);
         }
-        tracing::warn!(
-            target: "repair-timing",
-            "create ntt rows {first}+{count}: {} - recomputing every row by the fold",
-            if ok { "probe row DISAGREES with the fold" } else { "plan unbuildable for a window" }
-        );
-        for row in acc.iter_mut() {
-            row.fill(0);
+    }
+    fold_windows(FoldWindows {
+        control,
+        read_window: &read_window,
+        logs: &logs,
+        acc: &mut acc,
+        arena,
+        per_read,
+        bs,
+        n_slices,
+        first,
+        prepack,
+        fused_scan,
+        plan: &plan,
+        slice_of: &slice_of,
+        lane_of: &lane_of,
+    })?;
+    control.finish(CreatePhase::Fold);
+    Ok(acc)
+}
+
+/// The direct fold's window loop, split out of [`recovery_slices`] for
+/// the size gate: everything it needs from there, by reference.
+struct FoldWindows<'a> {
+    control: &'a CreateControl,
+    read_window: &'a (
+            dyn Fn(
+        usize,
+        usize,
+        &mut [u8],
+        Option<&[std::fs::File]>,
+        bool,
+        usize,
+    ) -> Result<(), Par2GenError>
+                + Sync
+        ),
+    logs: &'a [u32],
+    acc: &'a mut [Vec<u16>],
+    arena: Vec<u8>,
+    per_read: usize,
+    bs: usize,
+    n_slices: usize,
+    first: usize,
+    prepack: bool,
+    fused_scan: Option<&'a mut FusedScan>,
+    plan: &'a [(usize, u64, usize)],
+    /// Plan position -> original slice index (identity unless the plan
+    /// is lane-interleaved), and -> lane.
+    slice_of: &'a [usize],
+    lane_of: &'a [u8],
+}
+
+/// Walk the plan window by window - read, fold - either with the next
+/// window read ahead on its own reader (the default) or serially (the
+/// fused single-member scan, or `NZBFAST_CREATE_OVERLAP=0`).
+fn fold_windows(w: FoldWindows<'_>) -> Result<(), Par2GenError> {
+    let FoldWindows {
+        control,
+        read_window,
+        logs,
+        acc,
+        mut arena,
+        per_read,
+        bs,
+        n_slices,
+        first,
+        prepack,
+        mut fused_scan,
+        plan,
+        slice_of,
+        lane_of,
+    } = w;
+    // Pack-once (knob): the planar split happens on the reader thread,
+    // once per block, instead of once per row group in the tiled fold.
+    // Only where the planar kernel is the selected one and every block is
+    // whole (the readers zero-pad tails to `bs`) - `prepack` carries
+    // that decision in.
+    let timing = std::env::var_os("NZBFAST_REPAIR_TIMING").is_some();
+    let mut t_read = std::time::Duration::ZERO;
+    let mut t_fold = std::time::Duration::ZERO;
+    let mut windows = 0usize;
+    if create_overlap_enabled() && n_slices > per_read {
+        // With a fused scan the reader also digests the window it just
+        // read (eight MD5 chains per pass, then the CRCs - ~20 ms per
+        // 64 MiB on an i5-10600KF against its ~22 ms read), and a third
+        // thread advances the members' whole-file chains over the window
+        // the fold is on (~67 ms per 64 MiB there, the create's one
+        // serial cost, now beside the ~65 ms fold instead of ahead of
+        // it). The payload is read ONCE.
+        let fused = fused_scan.as_deref_mut();
+        let (pinned, mut fused_state) = match fused {
+            Some(scan) => (
+                Some(scan.files.as_slice()),
+                Some((&mut scan.state, &mut scan.lanes)),
+            ),
+            None => (None, None),
+        };
+        let prepack = prepack && pinned.is_none();
+        let mut ahead = vec![0u8; per_read * bs];
+        let mut w0 = 0usize;
+        let mut w1 = per_read.min(FIRST_WINDOW_BLOCKS).min(n_slices);
+        let t0 = std::time::Instant::now();
+        let readers = create_readers(true);
+        read_window(
+            w0,
+            w1,
+            &mut arena[..(w1 - w0) * bs],
+            pinned,
+            prepack,
+            readers,
+        )?;
+        let mut digests = pinned.map(|_| digest_window(&arena[..(w1 - w0) * bs], w1 - w0, bs));
+        t_read += t0.elapsed();
+        while w0 < n_slices {
+            // THE GRAIN, and the whole of what this arm pays: one
+            // relaxed load per READ WINDOW (`per_read` blocks against
+            // the read budget - at the 1 MiB / 64 MiB default, 64
+            // blocks), on the driver thread between two windows with
+            // nothing held. A park site by `PauseGate`'s rule: the
+            // window's own scope is entered below and joined before the
+            // loop turns.
+            control.gate()?;
+            let held: Vec<u32> = slice_of[w0..w1].iter().map(|&k| logs[k]).collect();
+            let n0 = w1;
+            let n1 = (n0 + per_read).min(n_slices);
+            let t0 = std::time::Instant::now();
+            let this_digests = digests.take();
+            let (read_ahead, next_digests) = std::thread::scope(|sc| {
+                let reader = (n0 < n_slices).then(|| {
+                    sc.spawn(|| -> Result<Option<Vec<([u8; 16], u32)>>, Par2GenError> {
+                        read_window(
+                            n0,
+                            n1,
+                            &mut ahead[..(n1 - n0) * bs],
+                            pinned,
+                            prepack,
+                            readers,
+                        )?;
+                        Ok(pinned.map(|_| digest_window(&ahead[..(n1 - n0) * bs], n1 - n0, bs)))
+                    })
+                });
+                // Digests already belong to this immutable fused window.
+                // Preparation has fixed-capacity stack metadata and no new
+                // read/hash pass; the whole-file chains consume their original
+                // digests and bytes unchanged alongside the fold.
+                let duplicate_plan = if duplicates::enabled(bs, acc.len(), held.len()) {
+                    this_digests.as_deref().and_then(|d| {
+                        duplicates::prepare(
+                            &arena[..(w1 - w0) * bs],
+                            bs,
+                            &held,
+                            first,
+                            acc.len(),
+                            d,
+                        )
+                    })
+                } else {
+                    None
+                };
+                let chains = fused_state.as_mut().map(|(state, lanes)| {
+                    let d = this_digests.expect("a fused window carries its digests");
+                    let window = &plan[w0..w1];
+                    let lanes_here = &lane_of[w0..w1];
+                    let bytes = &arena[..(w1 - w0) * bs];
+                    let state: &mut Vec<FusedMemberState> = state;
+                    let lanes: &mut Option<crate::md5fast::multi::Md5Lanes> = lanes;
+                    sc.spawn(move || {
+                        scan_fused_window(state, lanes, window, lanes_here, bytes, bs, d)
+                    })
+                });
+                if let Some(plan) = duplicate_plan {
+                    plan.fold(acc, &arena[..(w1 - w0) * bs]);
+                } else {
+                    fold_batch(acc, &arena[..(w1 - w0) * bs], bs, &held, first, prepack);
+                }
+                if let Some(h) = chains {
+                    h.join().expect("par2gen fused chain worker panicked");
+                }
+                match reader.map(|h| h.join().expect("par2gen read-ahead reader panicked")) {
+                    Some(Ok(d)) => (None, d),
+                    Some(Err(e)) => (Some(e), None),
+                    None => (None, None),
+                }
+            });
+            t_fold += t0.elapsed();
+            windows += 1;
+            control.step(CreatePhase::Fold, (w1 - w0) as u64 * bs as u64);
+            if let Some(e) = read_ahead {
+                return Err(e);
+            }
+            digests = next_digests;
+            std::mem::swap(&mut arena, &mut ahead);
+            w0 = n0;
+            w1 = n1;
         }
+        if timing {
+            tracing::info!(
+                target: "repair-timing",
+                "create direct fold ({windows} windows of {per_read}, read-ahead{}{}): first read {:.2?}, fold+read {:.2?}",
+                if prepack { ", prepacked" } else { "" },
+                if pinned.is_some() { ", fused scan" } else { "" },
+                t_read,
+                t_fold
+            );
+        }
+        return Ok(());
     }
 
     let mut w0 = 0usize;
     while w0 < n_slices {
+        control.gate()?;
         let w1 = (w0 + per_read).min(n_slices);
         let window = &plan[w0..w1];
-        let pinned = fused_scan.as_deref().map(|scan| &scan.file);
-        read_window(w0, w1, &mut arena[..window.len() * bs], pinned)?;
-        let held: Vec<u32> = logs[w0..w1].to_vec();
+        let pinned = fused_scan.as_deref().map(|scan| scan.files.as_slice());
+        let t0 = std::time::Instant::now();
+        read_window(
+            w0,
+            w1,
+            &mut arena[..window.len() * bs],
+            pinned,
+            prepack,
+            create_readers(false),
+        )?;
+        t_read += t0.elapsed();
+        let held: Vec<u32> = slice_of[w0..w1].iter().map(|&k| logs[k]).collect();
+        let t0 = std::time::Instant::now();
         if let Some(scan) = fused_scan.as_deref_mut() {
             std::thread::scope(|sc| {
                 let fold = sc.spawn(|| {
-                    fold_batch(&mut acc, &arena[..window.len() * bs], bs, &held, first);
+                    fold_batch(acc, &arena[..window.len() * bs], bs, &held, first, false);
                 });
-                scan_fused_window(scan, window, &arena[..window.len() * bs], bs);
+                let digests = digest_window(&arena[..window.len() * bs], window.len(), bs);
+                scan_fused_window(
+                    &mut scan.state,
+                    &mut scan.lanes,
+                    window,
+                    &lane_of[w0..w1],
+                    &arena[..window.len() * bs],
+                    bs,
+                    digests,
+                );
                 fold.join().expect("par2gen fused fold worker panicked");
             });
         } else {
-            fold_batch(&mut acc, &arena[..window.len() * bs], bs, &held, first);
+            fold_batch(acc, &arena[..window.len() * bs], bs, &held, first, prepack);
         }
+        t_fold += t0.elapsed();
+        windows += 1;
+        control.step(CreatePhase::Fold, (w1 - w0) as u64 * bs as u64);
         w0 = w1;
     }
-    Ok(acc)
+    if timing {
+        tracing::info!(
+            target: "repair-timing",
+            "create direct fold ({windows} windows of {per_read}{}): read {:.2?}, fold {:.2?}",
+            if prepack { ", prepacked" } else { "" },
+            t_read,
+            t_fold
+        );
+    }
+    Ok(())
 }
 
 /// Fold one arena-full of input blocks into every accumulator.
@@ -2887,15 +2878,66 @@ fn recovery_slices(
 /// g_i^e = 2^(k_i * e mod 65535) - the same constant the repair side
 /// derives for the same slice off the same
 /// [`crate::par2repair::input_base_logs`] sequence.
-fn fold_batch(acc: &mut [Vec<u16>], arena: &[u8], bs: usize, held: &[u32], first: usize) {
+fn fold_batch(
+    acc: &mut [Vec<u16>],
+    arena: &[u8],
+    bs: usize,
+    held: &[u32],
+    first: usize,
+    prepacked: bool,
+) {
     let srcs: Vec<&[u8]> = (0..held.len()).map(|i| &arena[i * bs..][..bs]).collect();
-    crate::par2repair::linalg::fold_parallel(acc, &srcs, &|j, i| {
-        // The multiply happens in u64 before the reduction, so a large
-        // exponent times a large log cannot wrap.
-        crate::gf16::pow2(held[i] as u64 * (first + j) as u64 % crate::gf16::ORDER as u64)
-    });
+    let coeff = |j: usize, i: usize| row_coeff(held[i], first + j);
+    // `None`: the creator has no `Sub` of its own, and charging its
+    // folds as "PAR2 reconstruction working set" would be a lie in
+    // the one instrument that exists to keep terms attributed.
+    if prepacked {
+        crate::par2repair::linalg::fold_parallel_prepacked(acc, &srcs, &coeff, None);
+    } else {
+        crate::par2repair::linalg::fold_parallel(acc, &srcs, &coeff, None);
+    }
 }
 
 #[cfg(test)]
 #[path = "par2gen_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod seal_tests {
+    use super::*;
+    #[test]
+    fn prepared_seals_match_packets_for_tails_and_partial_lanes() {
+        let id = [73u8; 16];
+        for words in [0, 2, 12, 14, 16, 30, 32, 64, 32768] {
+            for count in [1, 7, 8, 9, 17] {
+                let rows: Vec<Vec<u16>> = (0..count)
+                    .map(|r| {
+                        (0..words)
+                            .map(|w| (r * 137 + w * 379 + 11) as u16)
+                            .collect()
+                    })
+                    .collect();
+                for lanes in [false, true] {
+                    let seals = prepare_recovery_seals(&id, 65500, &rows, lanes);
+                    for (j, row) in rows.iter().enumerate() {
+                        let bytes = crate::gf16::words_as_bytes(row);
+                        let mut a = Vec::new();
+                        let mut b = Vec::new();
+                        write_recovery_packet(&mut a, &id, (65500 + j) as u32, bytes, None)
+                            .unwrap();
+                        write_recovery_packet(
+                            &mut b,
+                            &id,
+                            (65500 + j) as u32,
+                            bytes,
+                            Some(&seals[j]),
+                        )
+                        .unwrap();
+                        assert_eq!(a, b, "words={words} rows={count} lanes={lanes}");
+                        assert_eq!(&a[16..32], &<[u8; 16]>::from(Md5::digest(&a[32..])));
+                    }
+                }
+            }
+        }
+    }
+}
