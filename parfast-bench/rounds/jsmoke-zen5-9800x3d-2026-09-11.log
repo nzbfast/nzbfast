@@ -1,0 +1,64 @@
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=jcross pid=27736 started=2026-09-11T16:57:21.7861278Z
+JCROSS-START 2026-09-11T16:57:21.8073187Z tag=jsmoke
+BOX host=amd-ryzen-9800x3d cpu=AMD Ryzen 7 9800X3D 8-Core Processor            caption=AMD64 Family 26 Model 68 Stepping 0 cores=8 threads=16 ram_gb=61.6 os=Microsoft Windows 11 Pro build=10.0.26200 Cfree_gb=688.5
+BIN parfast-jx sha256=f454519a1de1371ef99e87b116104bee5738d15159d6438c30bdab5b7805726f bytes=2469376 version=parfast version 1.5.0-beta.1 built from fa5278f21128
+PROTOCOL bin=<rig>\bin slice=65536 recovery_blocks=16384 source_blocks=16384 redundancy_pct=100.0 damage=scattered-seeded-slice-overwrite reps=1 arms=off/fast/aa gate=sha256-all-members prewarm=full-read-of-work-dir arm_order=alternating-by-rep threads=16 tflag=16 port_of=harness/jcross.py
+ARGV off repair='r -q -t16 -T16 f.par2' env=NZBFAST_FORNEY_JOINT=0
+ARGV fast repair='r -q -t16 -T16 --fast f.par2' env=-
+ARGV aa repair='r -q -t16 -T16 f.par2' env=NZBFAST_FORNEY_JOINT=0
+FIXTURE members=32 distinct_member_sha=32/32 bytes=1073741824 source_blocks=16384 member_bytes=33554432
+SLICE-PROBE index=5 unique=32/32
+GOLD p00.bin 3F1677554CACAF2D9C9DD2E904507B8D9C52BAC50760D073619D7D42F988B01D
+GOLD p01.bin 2A9AFF557927345BCEAA9FD067EAD7B4A37D3BEBB26ADF9C8DE46273B8F9C753
+GOLD p02.bin 57D50C66AF1F88D08EE2EF2311AF3EB67A0EAB70D92939BEF5BFA87E28DDEE16
+GOLD p03.bin 27D3B827EC6617D13D5301D0FA109AD19E6CA90ACBAD168841FC3013000FEA34
+GOLD p04.bin 086A2949CD2E3C32BDAAD704F59953C4D984C5A862855B92BE86EC4CB225C6B9
+GOLD p05.bin 57C5A45C2E2B5ED76287363FC44D6464634699DFFAEF1416B9C2F8AA9C547691
+GOLD p06.bin D9339471FD9FC95B2E193DC89C034D946FF16031ABCF67FBB5A7C9A5C53D0190
+GOLD p07.bin 5612D61505D66C69BE4920EE055E45147025E1E085E4017478B1ED385368B433
+GOLD p08.bin ED46D41A34C3D21364F9EEA59CC9E0F21A16C5F85B6121967B98A222EACE2E81
+GOLD p09.bin 8E86C0CA1408937F35340C53BDE063BD08130AD34CB8DB291EC651A467CEDA43
+GOLD p10.bin 4535962588D6CDA5331FAD2BE2D022464079A067233D20E16187AAA866C08A24
+GOLD p11.bin 8D3F99CB3DE92A2222983F1E0270971DFAE0B70D2BE303D3AC7C78EFBD7EC959
+GOLD p12.bin B335D6899E3094DF4FC7163A4934D797CDD7A070A7B6599E290503FED6051296
+GOLD p13.bin 55A168600BC9703B833D75A01902615BECAE5A97409197578DF36C111AE7080E
+GOLD p14.bin C445BCEEAA324833C16B5FCE3029CF7B93B541F1A61CE7C039821227BE7E0602
+GOLD p15.bin 388A2EC24F0BBB28D366729688336F22DC1D298E4C0FE5D7705166443F083FD6
+GOLD p16.bin EDC2A6B832AE6FABD15DFEC993AD0A7619B4B4CD19A7441B169B8ED7A49F7E34
+GOLD p17.bin 20F8DF143A2932D70A58DC5B5DF4235C87982B4B5D26DE567E6EA6F1020D7F30
+GOLD p18.bin 9179893765BB5D01D43D486478961B7A73357972A58049ABCF64E6652AE3319E
+GOLD p19.bin 726C461B82A85B949B3CA7E87A16FD0A2800485E37B48098CA8AE0998EC9FB62
+GOLD p20.bin 573030A4FAA072B2D33EB30F538E91B88E99B69E6C939D6585881C33F66EB6A7
+GOLD p21.bin 17A17BC831AC51259ACDF51C7B6AEDE3AED98D45BE8DAD6A13214AFB4D28E33B
+GOLD p22.bin 56D4887DECAFCB09C952534B7CBF66A8F1BE95BDDE9753C5DA39EEA3A61196E0
+GOLD p23.bin 2CEA95741C346CE54DCD78228B2B5BD5E623825FC227CCB1ABC6E134C0A5EBC3
+GOLD p24.bin CAFCB61049C785501920FA49E71134F2AC0AD25856A08E27B2CCD5422E4C0B67
+GOLD p25.bin 5ED838263DC574E9585F7F328FEA953E19DA7FF901AAD06029F368F8A311ED6E
+GOLD p26.bin 0779E36490BB659C6A5E33124FBD0514CF4E66F924E9DB821B6AB616BD49A63A
+GOLD p27.bin 36069F32EFA2CF74FC000C90F7FC576BB51F0E771F35038FC01E247D7ABF17ED
+GOLD p28.bin AE25F44964500DC4CDE298441099EF7167DA56682B321E2E699FA202092700FF
+GOLD p29.bin 917E2B310852A19711762F54C5657BAC85F59E386530432F17A63C81E4B6918A
+GOLD p30.bin E9903E2D4E38CD2F7FB9B3E74C814BB68A1AFCB2421761A897447A7BC00E8611
+GOLD p31.bin BBA2B54D7A422E3F80C69BD059A346A5F40944CB7BCD6F0CC075919B300112AB
+CREATE tool=parfast rc=0 wall=1.385 cpu=12.828 peak_mb=3062 par2files=16 par2bytes=1110694084 foreign_cpu=51.6 foreign_after=81.2 errlen=0
+WARMUP-START 2026-09-11T16:57:33.7957653Z
+LEG round=jsmoke rep=0 m=64 arm=off argv='r -q -t16 -T16 f.par2' wall=0.812 cpu=5.859 cpu_over_wall=7.22 peak_mb=1552.5 rc=0 restored=32/32 damaged_members=28 blocks_written=64 strays=28 seed=20260911 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=150 foreign_after=54.7 errlen=1101 ts=2026-09-11T16:57:37.4898034Z
+LEG round=jsmoke rep=0 m=64 arm=fast argv='r -q -t16 -T16 --fast f.par2' wall=0.683 cpu=5 cpu_over_wall=7.32 peak_mb=1551.6 rc=0 restored=32/32 damaged_members=28 blocks_written=64 strays=28 seed=20260911 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=51.6 foreign_after=37.5 errlen=1239 ts=2026-09-11T16:57:41.4299783Z
+LEG round=jsmoke rep=0 m=64 arm=aa argv='r -q -t16 -T16 f.par2' wall=0.671 cpu=4.844 cpu_over_wall=7.22 peak_mb=1551.9 rc=0 restored=32/32 damaged_members=28 blocks_written=64 strays=28 seed=20260911 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=28.1 foreign_after=39.1 errlen=1101 ts=2026-09-11T16:57:45.3336349Z
+WARMUP-END 2026-09-11T16:57:45.8062037Z
+LEG round=jsmoke rep=1 m=256 arm=off argv='r -q -t16 -T16 f.par2' wall=0.919 cpu=8.703 cpu_over_wall=9.47 peak_mb=1540.1 rc=0 restored=32/32 damaged_members=32 blocks_written=256 strays=32 seed=20262704 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=45.3 foreign_after=67.2 errlen=1105 ts=2026-09-11T16:57:49.5925085Z
+LEG round=jsmoke rep=1 m=256 arm=fast argv='r -q -t16 -T16 --fast f.par2' wall=0.917 cpu=9.078 cpu_over_wall=9.9 peak_mb=1540.8 rc=0 restored=32/32 damaged_members=32 blocks_written=256 strays=32 seed=20262704 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=46.9 foreign_after=34.4 errlen=1243 ts=2026-09-11T16:57:53.8622164Z
+LEG round=jsmoke rep=1 m=256 arm=aa argv='r -q -t16 -T16 f.par2' wall=0.923 cpu=9.531 cpu_over_wall=10.33 peak_mb=1540.2 rc=0 restored=32/32 damaged_members=32 blocks_written=256 strays=32 seed=20262704 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=57.8 foreign_after=103.1 errlen=1105 ts=2026-09-11T16:57:58.1313790Z
+LEG round=jsmoke rep=1 m=704 arm=off argv='r -q -t16 -T16 f.par2' wall=1.049 cpu=10.297 cpu_over_wall=9.82 peak_mb=1512.7 rc=0 restored=32/32 damaged_members=32 blocks_written=704 strays=32 seed=20265840 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=35.9 foreign_after=43.8 errlen=1187 ts=2026-09-11T16:58:02.6727596Z
+LEG round=jsmoke rep=1 m=704 arm=fast argv='r -q -t16 -T16 --fast f.par2' wall=1.056 cpu=10.734 cpu_over_wall=10.16 peak_mb=1512.1 rc=0 restored=32/32 damaged_members=32 blocks_written=704 strays=32 seed=20265840 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=151.6 foreign_after=82.8 errlen=1325 ts=2026-09-11T16:58:07.3060134Z
+LEG round=jsmoke rep=1 m=704 arm=aa argv='r -q -t16 -T16 f.par2' wall=1.055 cpu=10.578 cpu_over_wall=10.03 peak_mb=1512.6 rc=0 restored=32/32 damaged_members=32 blocks_written=704 strays=32 seed=20265840 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=51.6 foreign_after=59.4 errlen=1187 ts=2026-09-11T16:58:11.8853700Z
+LEG round=jsmoke rep=1 m=1024 arm=off argv='r -q -t16 -T16 f.par2' wall=1.139 cpu=11.328 cpu_over_wall=9.95 peak_mb=1492.3 rc=0 restored=32/32 damaged_members=32 blocks_written=1024 strays=32 seed=20268080 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=57.8 foreign_after=45.3 errlen=1188 ts=2026-09-11T16:58:16.6527787Z
+LEG round=jsmoke rep=1 m=1024 arm=fast argv='r -q -t16 -T16 --fast f.par2' wall=1.112 cpu=10.719 cpu_over_wall=9.64 peak_mb=1491.9 rc=0 restored=32/32 damaged_members=32 blocks_written=1024 strays=32 seed=20268080 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=59.4 foreign_after=53.1 errlen=1328 ts=2026-09-11T16:58:21.4529281Z
+LEG round=jsmoke rep=1 m=1024 arm=aa argv='r -q -t16 -T16 f.par2' wall=1.119 cpu=11.078 cpu_over_wall=9.9 peak_mb=1492.3 rc=0 restored=32/32 damaged_members=32 blocks_written=1024 strays=32 seed=20268080 stage1=no-label stage2=no-label stage1_raw='' stage2_raw='' foreign_cpu=42.2 foreign_after=48.4 errlen=1186 ts=2026-09-11T16:58:26.1996148Z
+LEG round=jsmoke rep=1 m=2048 arm=off argv='r -q -t16 -T16 f.par2' wall=1.321 cpu=12.047 cpu_over_wall=9.12 peak_mb=1428.1 rc=0 restored=32/32 damaged_members=32 blocks_written=2048 strays=32 seed=20275248 stage1=hankel stage2=evaluate stage1_raw='hankel, nseg=16, stripe 512w, dft=3x5x17' stage2_raw='evaluate, 128 group(s) in tiles of 31, stripe 512w' foreign_cpu=46.9 foreign_after=42.2 errlen=1240 ts=2026-09-11T16:58:31.5308264Z
+LEG round=jsmoke rep=1 m=2048 arm=fast argv='r -q -t16 -T16 --fast f.par2' wall=1.259 cpu=12.609 cpu_over_wall=10.02 peak_mb=1428.5 rc=0 restored=32/32 damaged_members=32 blocks_written=2048 strays=32 seed=20275248 stage1=joint-whole-demand stage2=joint-FALLBACK stage1_raw='joint whole/demand, stripe 512w' stage2_raw='joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w' foreign_cpu=BOX-BUSY-WAIT try=1 foreign_cpu=173.4 ceiling=160 at=r1-m2048-fast ts=2026-09-11T16:58:34.3098103Z BOX-BUSY-WAIT try=2 foreign_cpu=181.2 ceiling=160 at=r1-m2048-fast ts=2026-09-11T16:59:05.3726347Z 128.1 foreign_after=45.3 errlen=1475 ts=2026-09-11T16:59:39.0011044Z
+LEG round=jsmoke rep=1 m=2048 arm=aa argv='r -q -t16 -T16 f.par2' wall=1.343 cpu=12.906 cpu_over_wall=9.61 peak_mb=1428.9 rc=0 restored=32/32 damaged_members=32 blocks_written=2048 strays=32 seed=20275248 stage1=hankel stage2=evaluate stage1_raw='hankel, nseg=16, stripe 512w, dft=3x5x17' stage2_raw='evaluate, 128 group(s) in tiles of 31, stripe 512w' foreign_cpu=39.1 foreign_after=40.6 errlen=1240 ts=2026-09-11T16:59:44.3881813Z
+JCROSS-REP-END rep=1 2026-09-11T16:59:44.9230568Z
+JCROSS-END 2026-09-11T16:59:44.9240566Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+

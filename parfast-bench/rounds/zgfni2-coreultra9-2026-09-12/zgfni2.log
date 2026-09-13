@@ -1,0 +1,81 @@
+﻿RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=gfni pid=11204 started=2026-09-12T01:23:49.0064635Z
+FULL-START 2026-09-12T01:23:49.0139720Z
+BOX host=intel-core-ultra-9-386h cpu=Intel(R) Core(TM) Ultra 9 386H caption=Intel64 Family 6 Model 204 Stepping 2 cores=16 threads=16 ram_gb=31.4 os=Microsoft Windows 11 Home build=10.0.26200 Cfree_gb=398.3
+BIN pf-base sha256=2b65025052810c0394ce08520321b60ccbfd686a101369d8e2f470791f753701 bytes=2468352 version=parfast version 1.5.0-beta.1 built from e0b44df99c31
+BIN pf-leaf sha256=7b6cf5249168bcfd430ae54544a5af77908c1c3bb2528e3517cae69d52502ede bytes=2468352 version=parfast version 1.5.0-beta.1 built from 3667a696d50b
+PROTOCOL slice=768000 recovery_blocks=32177 source_blocks=32177 redundancy_pct=100.0 damage=scattered-seeded-slice-overwrite reps=2 gate=sha256-all-members prewarm=full-read-of-work-dir arms=base/basegate/leaf/leafgate pairs=base-vs-leaf(additive-leaf-in-place),leaf-vs-leafgate(fused-butterfly-alone) create_env=per-arm
+ARGV base exe=pf-base repair='r -q -t16 -T16 f.par2' verify='v -q -t16 -T16 f.par2' env=NZBFAST_FORNEY_JOINT=0
+ARGV basegate exe=pf-base repair='r -q -t16 -T16 f.par2' verify='v -q -t16 -T16 f.par2' env=NZBFAST_FORNEY_JOINT=0,NZBFAST_GF16_ROWOP_GFNI=1
+ARGV leaf exe=pf-leaf repair='r -q -t16 -T16 f.par2' verify='v -q -t16 -T16 f.par2' env=NZBFAST_FORNEY_JOINT=0
+ARGV leafgate exe=pf-leaf repair='r -q -t16 -T16 f.par2' verify='v -q -t16 -T16 f.par2' env=NZBFAST_FORNEY_JOINT=0,NZBFAST_GF16_ROWOP_GFNI=1
+PAYLOAD-READY members=23 bytes=24696061952
+FIXTURE members=23 distinct_member_sha=23/23 bytes=24696061952
+SLICE-PROBE index=5 unique=23/23
+GOLD p00.bin 784E10F9FE8A6DF557891FE77D7463B3C3EC30668A6E9190413ACE883929E8A2
+GOLD p01.bin 427580D39068340A1A4683391B5CE621B61465BE3CCE59467D2B595464DBA289
+GOLD p02.bin 9C874271C023166E4C8A149CB58F5151E16801FCB5A96D0ED67F135CCAF561A4
+GOLD p03.bin 9794E8FBA5C555A7CFF08AF380DCFEA93CABA07C84E54789B0AB2D2E5F2B3CF2
+GOLD p04.bin 0A795B0471940005BDCF32E1B12905DDD37070A3B7367939A6D24AD09EBBF8AA
+GOLD p05.bin 76E334DC68D8592D2D62E73FC7EA708E74B1BF783C55176C6ABA016B6523BE51
+GOLD p06.bin A963DD4BA69AE9E161CF038564A70FE83141EA0DA27DA99052C006F4602979C6
+GOLD p07.bin 146457BF02A6CA615C0BF84542D678CF2C74159D6CE14A67DDF229AA86605779
+GOLD p08.bin 4D87BF03C8D6333BD0D88C9E2BC54F2296F96772DD225640CB0FFE4208B20E81
+GOLD p09.bin 6FEE4A4D667FC5B45997910871CBC94FD36EE62DC9D26B46859A45072BB2DDF8
+GOLD p10.bin 14BD165DB1161265A83001147D1C7C8A86AF5300F6DB3917B0D50F6D8AFF214E
+GOLD p11.bin AA31F3773520065442D0EC29B3E55B2F509AE591BF5B5F7BB46CE73F12685109
+GOLD p12.bin E9228B437C64D080E149CF09B8D00CDD387A89164C8A2CD409853ECCBD8ADDEE
+GOLD p13.bin E390A6F96F4868F3B26E0A3D2D62BCDC42C19BE7E6E21D5A4147BC5E32DF0EA8
+GOLD p14.bin 01BE71BCFC634AD4B6FD4A358874182440EF0E77314A2028DF22952DC46B7F92
+GOLD p15.bin F1771965D0FD456AA39B46EE937F1C8E518C49A95D91551F8BAB5A4A57E89054
+GOLD p16.bin 1D79F26326077191BFA4CEF9CA8E75883CAE4DD2DBF07F39BD9C9668239EAB60
+GOLD p17.bin D480BDF8783830E3069A6A5E00966CC11A2A588993429571AADF20BDABACAF5D
+GOLD p18.bin 7AD762B39592AF1723C5533015A80DE87BB3C05DAA1B7120D81E58E4EA25E7FA
+GOLD p19.bin 1D16C63E08CFCAA332CA4BFC75AFE5465BAAC9F8CA767FFDE9628B159B7B1BBC
+GOLD p20.bin 40C3D618D5DD1ECDBB6D2B359D4DC1E6828C9C7D1CA530D3DEC0B220F27C3203
+GOLD p21.bin 4C04B5AF321A220EEBFD3B768C69B8090CB61176E721004BF5E2946A7258E59E
+GOLD p22.bin 103935C6C759C0F1C8D4CAA043E90AB8387C8A481AF58E1D9D8C44493E23E839
+CREATE round=zgfni arm=base rc=0 wall=98.971 cpu=511.562 peak_mb=25345.1 par2files=19 setsha=21F98ADD5355E7FF foreign_cpu=18.8 foreign_after=23.4 errlen=0
+CREATE round=zgfni arm=basegate rc=0 wall=126.9 cpu=416.75 peak_mb=25459.3 par2files=19 setsha=21F98ADD5355E7FF foreign_cpu=82.8 foreign_after=35.9 errlen=0
+CREATE round=zgfni arm=leaf rc=0 wall=127.894 cpu=370.688 peak_mb=25424.3 par2files=19 setsha=21F98ADD5355E7FF foreign_cpu=54.7 foreign_after=51.6 errlen=0
+CREATE round=zgfni arm=leafgate rc=0 wall=158.624 cpu=363.781 peak_mb=25324.6 par2files=19 setsha=21F98ADD5355E7FF foreign_cpu=37.5 foreign_after=28.1 errlen=0
+CREATE-IDENTICAL all_arms=True base_sha=21F98ADD5355E7FF base_wall=98.971 basegate_sha=21F98ADD5355E7FF basegate_wall=126.9 leaf_sha=21F98ADD5355E7FF leaf_wall=127.894 leafgate_sha=21F98ADD5355E7FF leafgate_wall=158.624
+CREATE tool=parfast rc=0 wall=158.624 cpu=363.781 peak_mb=25324.6 par2files=19 par2mb=23665.7 errlen=0
+WARMUP-START 2026-09-12T01:39:53.3397769Z
+LEG round=zgfni rep=0 m=1 tool=base argv='r -q -t16 -T16 f.par2' wall=32.507 cpu=131.609 cpu_over_wall=4.05 peak_mb=11515 rc=0 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=1 stage1='no-label' seed=20260917 foreign_cpu=39.1 foreign_after=18.8 errlen=929 ts=2026-09-12T01:41:04.2840135Z
+LEG round=zgfni rep=0 m=1 tool=basegate argv='r -q -t16 -T16 f.par2' wall=22.712 cpu=134.031 cpu_over_wall=5.9 peak_mb=8066.5 rc=0 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=1 stage1='no-label' seed=20260917 foreign_cpu=6.2 foreign_after=54.7 errlen=925 ts=2026-09-12T01:43:11.3646575Z
+LEG round=zgfni rep=0 m=1 tool=leaf argv='r -q -t16 -T16 f.par2' wall=25.259 cpu=127.031 cpu_over_wall=5.03 peak_mb=9748.4 rc=0 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=1 stage1='no-label' seed=20260917 foreign_cpu=34.4 foreign_after=53.1 errlen=926 ts=2026-09-12T01:45:08.9032126Z
+LEG round=zgfni rep=0 m=1 tool=leafgate argv='r -q -t16 -T16 f.par2' wall=18.394 cpu=130.406 cpu_over_wall=7.09 peak_mb=9665.5 rc=0 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=1 stage1='no-label' seed=20260917 foreign_cpu=18.8 foreign_after=18.8 errlen=925 ts=2026-09-12T01:47:11.0419504Z
+LEG round=zgfni rep=0 m=64 tool=base argv='r -q -t16 -T16 f.par2' wall=76.816 cpu=198.844 cpu_over_wall=2.59 peak_mb=10146.5 rc=0 restored=23/23 damaged_members=21 touched_members=21 blocks_written=64 strays=21 stage1='no-label' seed=20261358 foreign_cpu=26.6 foreign_after=20.3 errlen=997 ts=2026-09-12T01:49:53.9628900Z
+LEG round=zgfni rep=0 m=64 tool=basegate argv='r -q -t16 -T16 f.par2' wall=65.5 cpu=207.031 cpu_over_wall=3.16 peak_mb=10243.3 rc=0 restored=23/23 damaged_members=21 touched_members=21 blocks_written=64 strays=21 stage1='no-label' seed=20261358 foreign_cpu=100 foreign_after=18.8 errlen=995 ts=2026-09-12T01:52:38.0261433Z
+LEG round=zgfni rep=0 m=64 tool=leaf argv='r -q -t16 -T16 f.par2' wall=73.807 cpu=198.969 cpu_over_wall=2.7 peak_mb=9053.4 rc=0 restored=23/23 damaged_members=21 touched_members=21 blocks_written=64 strays=21 stage1='no-label' seed=20261358 foreign_cpu=32.8 foreign_after=60.9 errlen=997 ts=2026-09-12T01:55:29.6462932Z
+LEG round=zgfni rep=0 m=64 tool=leafgate argv='r -q -t16 -T16 f.par2' wall=73.169 cpu=199.906 cpu_over_wall=2.73 peak_mb=10189.2 rc=0 restored=23/23 damaged_members=21 touched_members=21 blocks_written=64 strays=21 stage1='no-label' seed=20261358 foreign_cpu=101.6 foreign_after=28.1 errlen=995 ts=2026-09-12T01:58:23.1609165Z
+WARMUP-END 2026-09-12T01:59:27.6200700Z
+VERIFY round=zgfni rep=1 tool=base argv='v -q -t16 -T16 f.par2' wall=7.542 cpu=38 cpu_over_wall=5.04 peak_mb=108.2 rc=0 intact=23/23 foreign_cpu=18.8 foreign_after=29.7 errlen=0 ts=2026-09-12T02:00:10.7187101Z
+VERIFY round=zgfni rep=1 tool=basegate argv='v -q -t16 -T16 f.par2' wall=7.26 cpu=37.141 cpu_over_wall=5.12 peak_mb=108.2 rc=0 intact=23/23 foreign_cpu=48.4 foreign_after=60.9 errlen=0 ts=2026-09-12T02:00:47.6328438Z
+VERIFY round=zgfni rep=1 tool=leaf argv='v -q -t16 -T16 f.par2' wall=7.517 cpu=37.953 cpu_over_wall=5.05 peak_mb=107.9 rc=0 intact=23/23 foreign_cpu=48.4 foreign_after=59.4 errlen=0 ts=2026-09-12T02:01:24.0529510Z
+VERIFY round=zgfni rep=1 tool=leafgate argv='v -q -t16 -T16 f.par2' wall=7.453 cpu=37.859 cpu_over_wall=5.08 peak_mb=107.5 rc=0 intact=23/23 foreign_cpu=20.3 foreign_after=45.3 errlen=0 ts=2026-09-12T02:02:00.7763275Z
+LEG round=zgfni rep=1 m=16384 tool=base argv='r -q -t16 -T16 f.par2' wall=255.52 cpu=1795.172 cpu_over_wall=7.03 peak_mb=11224.6 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=23 stage1='no-label' seed=20375599 foreign_cpu=23.4 foreign_after=17.2 errlen=2280 ts=2026-09-12T02:08:17.2948600Z
+LEG round=zgfni rep=1 m=16384 tool=basegate argv='r -q -t16 -T16 f.par2' wall=248.633 cpu=1799.562 cpu_over_wall=7.24 peak_mb=10595.7 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=23 stage1='no-label' seed=20375599 foreign_cpu=12.5 foreign_after=15.6 errlen=2280 ts=2026-09-12T02:16:14.4343464Z
+LEG round=zgfni rep=1 m=16384 tool=leaf argv='r -q -t16 -T16 f.par2' wall=238.817 cpu=1795.109 cpu_over_wall=7.52 peak_mb=10968 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=23 stage1='no-label' seed=20375599 foreign_cpu=43.8 foreign_after=26.6 errlen=2279 ts=2026-09-12T02:24:05.4333716Z
+LEG round=zgfni rep=1 m=16384 tool=leafgate argv='r -q -t16 -T16 f.par2' wall=238.69 cpu=1801.562 cpu_over_wall=7.55 peak_mb=10730.6 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=23 stage1='no-label' seed=20375599 foreign_cpu=26.6 foreign_after=26.6 errlen=2279 ts=2026-09-12T02:31:49.1277507Z
+LEG round=zgfni rep=1 m=30000 tool=base argv='r -q -t16 -T16 f.par2' wall=463.787 cpu=1977.719 cpu_over_wall=4.26 peak_mb=20340.1 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=30000 strays=23 stage1='no-label' seed=20470911 foreign_cpu=28.1 foreign_after=143.8 errlen=3719 ts=2026-09-12T02:44:36.4423310Z
+LEG round=zgfni rep=1 m=30000 tool=basegate argv='r -q -t16 -T16 f.par2' wall=457.751 cpu=1969.953 cpu_over_wall=4.3 peak_mb=19404.3 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=30000 strays=23 stage1='no-label' seed=20470911 foreign_cpu=51.6 foreign_after=40.6 errlen=3719 ts=2026-09-12T02:57:39.7926557Z
+LEG round=zgfni rep=1 m=30000 tool=leaf argv='r -q -t16 -T16 f.par2' wall=457.407 cpu=1977 cpu_over_wall=4.32 peak_mb=19554.9 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=30000 strays=23 stage1='no-label' seed=20470911 foreign_cpu=20.3 foreign_after=26.6 errlen=3719 ts=2026-09-12T03:10:53.7796339Z
+LEG round=zgfni rep=1 m=30000 tool=leafgate argv='r -q -t16 -T16 f.par2' wall=448.151 cpu=1971.156 cpu_over_wall=4.4 peak_mb=20253 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=30000 strays=23 stage1='no-label' seed=20470911 foreign_cpu=10.9 foreign_after=20.3 errlen=3719 ts=2026-09-12T03:23:40.4060628Z
+FULL-REP-END rep=1 2026-09-12T03:25:47.5116626Z
+VERIFY round=zgfni rep=2 tool=base argv='v -q -t16 -T16 f.par2' wall=9.032 cpu=36.844 cpu_over_wall=4.08 peak_mb=108.2 rc=0 intact=23/23 foreign_cpu=18.8 foreign_after=51.6 errlen=0 ts=2026-09-12T03:26:23.7410217Z
+VERIFY round=zgfni rep=2 tool=basegate argv='v -q -t16 -T16 f.par2' wall=7.199 cpu=37.516 cpu_over_wall=5.21 peak_mb=107.9 rc=0 intact=23/23 foreign_cpu=18.8 foreign_after=15.6 errlen=0 ts=2026-09-12T03:26:57.7301533Z
+VERIFY round=zgfni rep=2 tool=leaf argv='v -q -t16 -T16 f.par2' wall=7.175 cpu=37.75 cpu_over_wall=5.26 peak_mb=108 rc=0 intact=23/23 foreign_cpu=59.4 foreign_after=12.5 errlen=0 ts=2026-09-12T03:27:33.1514187Z
+VERIFY round=zgfni rep=2 tool=leafgate argv='v -q -t16 -T16 f.par2' wall=7.159 cpu=37.828 cpu_over_wall=5.28 peak_mb=108 rc=0 intact=23/23 foreign_cpu=60.9 foreign_after=26.6 errlen=0 ts=2026-09-12T03:28:08.7882194Z
+LEG round=zgfni rep=2 m=16384 tool=base argv='r -q -t16 -T16 f.par2' wall=230.186 cpu=1802.141 cpu_over_wall=7.83 peak_mb=11059.2 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=23 stage1='no-label' seed=20375600 foreign_cpu=71.9 foreign_after=21.9 errlen=2276 ts=2026-09-12T03:34:00.2844392Z
+LEG round=zgfni rep=2 m=16384 tool=basegate argv='r -q -t16 -T16 f.par2' wall=232.709 cpu=1804.781 cpu_over_wall=7.76 peak_mb=10799.7 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=23 stage1='no-label' seed=20375600 foreign_cpu=32.8 foreign_after=43.8 errlen=2279 ts=2026-09-12T03:41:07.6472007Z
+LEG round=zgfni rep=2 m=16384 tool=leaf argv='r -q -t16 -T16 f.par2' wall=236.386 cpu=1796.109 cpu_over_wall=7.6 peak_mb=10738.5 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=23 stage1='no-label' seed=20375600 foreign_cpu=21.9 foreign_after=32.8 errlen=2279 ts=2026-09-12T03:48:30.1762101Z
+LEG round=zgfni rep=2 m=16384 tool=leafgate argv='r -q -t16 -T16 f.par2' wall=243.506 cpu=1807.406 cpu_over_wall=7.42 peak_mb=11037.3 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=23 stage1='no-label' seed=20375600 foreign_cpu=81.2 foreign_after=25 errlen=2279 ts=2026-09-12T03:55:57.3324147Z
+LEG round=zgfni rep=2 m=30000 tool=base argv='r -q -t16 -T16 f.par2' wall=453.915 cpu=1957.25 cpu_over_wall=4.31 peak_mb=20099.2 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=30000 strays=23 stage1='no-label' seed=20470912 foreign_cpu=10.9 foreign_after=15.6 errlen=3719 ts=2026-09-12T04:08:30.6971981Z
+LEG round=zgfni rep=2 m=30000 tool=basegate argv='r -q -t16 -T16 f.par2' wall=473.96 cpu=1973.281 cpu_over_wall=4.16 peak_mb=19477.6 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=30000 strays=23 stage1='no-label' seed=20470912 foreign_cpu=43.8 foreign_after=153.1 errlen=3719 ts=2026-09-12T04:21:53.8559093Z
+LEG round=zgfni rep=2 m=30000 tool=leaf argv='r -q -t16 -T16 f.par2' wall=447.835 cpu=1950.016 cpu_over_wall=4.35 peak_mb=19285.3 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=30000 strays=23 stage1='no-label' seed=20470912 foreign_cpu=18.8 foreign_after=40.6 errlen=3719 ts=2026-09-12T04:34:54.1216391Z
+LEG round=zgfni rep=2 m=30000 tool=leafgate argv='r -q -t16 -T16 f.par2' wall=452.908 cpu=1966.453 cpu_over_wall=4.34 peak_mb=19906.5 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=30000 strays=23 stage1='no-label' seed=20470912 foreign_cpu=23.4 foreign_after=76.6 errlen=3719 ts=2026-09-12T04:48:11.8694975Z
+FULL-REP-END rep=2 2026-09-12T04:50:20.4890765Z
+NOISE-SETTLED after rep=2
+FULL-END 2026-09-12T04:50:20.5128305Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock

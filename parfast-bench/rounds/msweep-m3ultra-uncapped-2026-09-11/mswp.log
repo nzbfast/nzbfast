@@ -1,0 +1,167 @@
+RIG-LOCK-TAKEN <rig>/.parfast-rig.lock pid=21764
+WARN-FOREIGN-CPU at=round-start foreign_cpu=112% ceiling=320% top=[xpcproxy_sim(21755)=81% /Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python(21762)=6% /usr/libexec/opendirectoryd(620)=6% /System/Library/PrivateFrameworks/AOSKit.framework/Versions/A/XPCServices/com.apple.iCloudHelper.xpc/Contents/MacOS/com.apple.iCloudHelper(21749)=5%]
+MSWP-START 2026-09-11T07:16:39Z
+BOX host=apple-m3-ultra cpu=Apple M3 Ultra cores=32 ram_gb=256.0 os=macOS 27.0 free_gb=181.1
+BIN parfast sha256=5d0707ee7581f46ef06f84b27973fb85328ffc226c5a49fbcd93993609b1f571 bytes=2723536 version=parfast version 1.5.0-beta.1 built from 8b0b67ec4d15
+BIN par2turbo sha256=f15cc37cd102f9fd64bbe6adb84d9f4009406bea86e8748dbfca2f85d37d3a31 bytes=624712 version=par2cmdline-turbo version 1.5.0 built from ?
+PROTOCOL sizes_gib=[10, 15, 20, 23, 30, 40, 50, 60, 70, 80] redundancy_pct=[10, 15, 20] threads=32 recovery=in-place verify_reps=2 slice_cap=32768 base_slice=768000
+PAYLOAD-READY members=80 bytes=85899345920
+CC size=10 red=10 bs=768000 blocks=13990 arm=parfast wall=3.675 cpu=106.548 cpu_over_wall=28.99 peak_mb=11847.7 recovery_mb=1042 files=12 rc=0 errlen=0 ts=2026-09-11T07:21:56Z
+CC size=10 red=10 bs=768000 blocks=13990 arm=turbo wall=22.773 cpu=531.013 cpu_over_wall=23.32 peak_mb=1055.2 recovery_mb=1042 files=12 rc=0 errlen=0 ts=2026-09-11T07:22:19Z
+CC size=10 red=15 bs=768000 blocks=13990 arm=parfast wall=3.964 cpu=111.43 cpu_over_wall=28.11 peak_mb=12518.1 recovery_mb=1557 files=13 rc=0 errlen=0 ts=2026-09-11T07:22:23Z
+CC size=10 red=15 bs=768000 blocks=13990 arm=turbo wall=29.959 cpu=790.852 cpu_over_wall=26.4 peak_mb=1568.2 recovery_mb=1557 files=13 rc=0 errlen=0 ts=2026-09-11T07:22:53Z
+CC size=10 red=20 bs=768000 blocks=13990 arm=parfast wall=4.059 cpu=115.462 cpu_over_wall=28.45 peak_mb=13186.2 recovery_mb=2070 files=13 rc=0 errlen=0 ts=2026-09-11T07:22:58Z
+XV size=10 set=parfast by=turbo rc=0 wall=9.516 errlen=0
+VV size=10 set=parfast rep=1 arm=parfast wall=1.496 cpu=14.575 cpu_over_wall=9.74 peak_mb=30.0 rc=0 errlen=0 ts=2026-09-11T07:23:09Z
+VV size=10 set=parfast rep=1 arm=turbo wall=9.437 cpu=16.284 cpu_over_wall=1.73 peak_mb=8.8 rc=0 errlen=0 ts=2026-09-11T07:23:18Z
+BOX-BUSY-WAIT try=1 foreign_cpu=414% ceiling=320% at=vv-10-2-parfast ts=2026-09-11T07:23:18Z
+VV size=10 set=parfast rep=2 arm=parfast wall=1.5 cpu=14.537 cpu_over_wall=9.69 peak_mb=30.0 rc=0 errlen=0 ts=2026-09-11T07:23:50Z
+VV size=10 set=parfast rep=2 arm=turbo wall=9.208 cpu=15.861 cpu_over_wall=1.72 peak_mb=8.8 rc=0 errlen=0 ts=2026-09-11T07:23:59Z
+CC size=10 red=20 bs=768000 blocks=13990 arm=turbo wall=38.975 cpu=1053.542 cpu_over_wall=27.03 peak_mb=2080.4 recovery_mb=2070 files=13 rc=0 errlen=0 ts=2026-09-11T07:24:38Z
+XV size=10 set=turbo by=parfast rc=0 wall=1.5 errlen=0
+SIZE-DONE 10 2026-09-11T07:24:40Z
+CC size=15 red=10 bs=768000 blocks=20985 arm=parfast wall=4.845 cpu=141.52 cpu_over_wall=29.21 peak_mb=17660.2 recovery_mb=1567 files=13 rc=0 errlen=0 ts=2026-09-11T07:24:45Z
+CC size=15 red=10 bs=768000 blocks=20985 arm=turbo wall=44.009 cpu=1182.888 cpu_over_wall=26.88 peak_mb=1568.5 recovery_mb=1567 files=13 rc=0 errlen=0 ts=2026-09-11T07:25:29Z
+CC size=15 red=15 bs=768000 blocks=20985 arm=parfast wall=5.219 cpu=147.241 cpu_over_wall=28.21 peak_mb=18662.7 recovery_mb=2337 files=13 rc=0 errlen=0 ts=2026-09-11T07:25:35Z
+WARN-FOREIGN-CPU at=cc-15-15-turbo foreign_cpu=107% ceiling=320% top=[xpcproxy_sim(22418)=85% /Applications/Utilities/Adobe Creative Cloud Experience/CCXProcess/CCXProcess.app/Contents/MacOS/Creative Cloud Content Manager.node(1689)=11% /System/Library/PrivateFrameworks/CoreSuggestions.framework/Versions/A/Support/suggestd(1075)=6% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=2%]
+CC size=15 red=15 bs=768000 blocks=20985 arm=turbo wall=62.46 cpu=1783.719 cpu_over_wall=28.56 peak_mb=2337.2 recovery_mb=2337 files=13 rc=0 errlen=0 ts=2026-09-11T07:26:37Z
+CC size=15 red=20 bs=768000 blocks=20985 arm=parfast wall=5.548 cpu=153.672 cpu_over_wall=27.7 peak_mb=19667.2 recovery_mb=3109 files=14 rc=0 errlen=0 ts=2026-09-11T07:26:43Z
+XV size=15 set=parfast by=turbo rc=0 wall=15.366 errlen=0
+VV size=15 set=parfast rep=1 arm=parfast wall=1.508 cpu=21.889 cpu_over_wall=14.52 peak_mb=46.4 rc=0 errlen=0 ts=2026-09-11T07:27:00Z
+WARN-FOREIGN-CPU at=vv-15-1-turbo foreign_cpu=107% ceiling=320% top=[xpcproxy_sim(22521)=88% /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow(656)=9% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=4% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(651)=2%]
+VV size=15 set=parfast rep=1 arm=turbo wall=15.294 cpu=25.107 cpu_over_wall=1.64 peak_mb=11.7 rc=0 errlen=0 ts=2026-09-11T07:27:15Z
+VV size=15 set=parfast rep=2 arm=parfast wall=1.507 cpu=21.906 cpu_over_wall=14.54 peak_mb=46.5 rc=0 errlen=0 ts=2026-09-11T07:27:17Z
+VV size=15 set=parfast rep=2 arm=turbo wall=15.402 cpu=25.314 cpu_over_wall=1.64 peak_mb=11.0 rc=0 errlen=0 ts=2026-09-11T07:27:32Z
+CC size=15 red=20 bs=768000 blocks=20985 arm=turbo wall=82.861 cpu=2371.023 cpu_over_wall=28.61 peak_mb=3106.0 recovery_mb=3109 files=14 rc=0 errlen=0 ts=2026-09-11T07:28:55Z
+XV size=15 set=turbo by=parfast rc=0 wall=1.507 errlen=0
+SIZE-DONE 15 2026-09-11T07:28:57Z
+WARN-FOREIGN-CPU at=cc-20-10-parfast foreign_cpu=255% ceiling=320% top=[/Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/PairedSync.framework/Support/pairedsyncd(22649)=80% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(22663)=11% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(22654)=11% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(22664)=11%]
+CC size=20 red=10 bs=768000 blocks=27980 arm=parfast wall=5.753 cpu=165.809 cpu_over_wall=28.82 peak_mb=23421.0 recovery_mb=2091 files=13 rc=0 errlen=0 ts=2026-09-11T07:29:03Z
+WARN-FOREIGN-CPU at=cc-20-10-turbo foreign_cpu=142% ceiling=320% top=[/Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/FaceTimeMessageStore.framework/facetimemessagestored(22676)=45% /usr/libexec/proactiveeventtrackerd(22674)=41% /usr/libexec/mlhostd(22675)=20% /usr/libexec/searchpartyuseragent(1220)=14%]
+CC size=20 red=10 bs=768000 blocks=27980 arm=turbo wall=74.403 cpu=2106.059 cpu_over_wall=28.31 peak_mb=2081.1 recovery_mb=2091 files=13 rc=0 errlen=0 ts=2026-09-11T07:30:18Z
+CC size=20 red=15 bs=768000 blocks=27980 arm=parfast wall=6.153 cpu=172.89 cpu_over_wall=28.1 peak_mb=24759.3 recovery_mb=3121 files=14 rc=0 errlen=0 ts=2026-09-11T07:30:24Z
+CC size=20 red=15 bs=768000 blocks=27980 arm=turbo wall=108.687 cpu=3158.433 cpu_over_wall=29.06 peak_mb=3106.4 recovery_mb=3121 files=14 rc=0 errlen=0 ts=2026-09-11T07:32:13Z
+CC size=20 red=20 bs=768000 blocks=27980 arm=parfast wall=6.567 cpu=176.927 cpu_over_wall=26.94 peak_mb=25944.1 recovery_mb=4147 files=14 rc=0 errlen=0 ts=2026-09-11T07:32:20Z
+XV size=20 set=parfast by=turbo rc=0 wall=19.552 errlen=0
+VV size=20 set=parfast rep=1 arm=parfast wall=1.51 cpu=29.327 cpu_over_wall=19.42 peak_mb=62.2 rc=0 errlen=0 ts=2026-09-11T07:32:41Z
+VV size=20 set=parfast rep=1 arm=turbo wall=19.5 cpu=33.546 cpu_over_wall=1.72 peak_mb=13.9 rc=0 errlen=0 ts=2026-09-11T07:33:00Z
+VV size=20 set=parfast rep=2 arm=parfast wall=1.51 cpu=29.146 cpu_over_wall=19.3 peak_mb=62.3 rc=0 errlen=0 ts=2026-09-11T07:33:02Z
+VV size=20 set=parfast rep=2 arm=turbo wall=19.264 cpu=33.344 cpu_over_wall=1.73 peak_mb=13.1 rc=0 errlen=0 ts=2026-09-11T07:33:21Z
+CC size=20 red=20 bs=768000 blocks=27980 arm=turbo wall=142.857 cpu=4208.944 cpu_over_wall=29.46 peak_mb=4131.3 recovery_mb=4147 files=14 rc=0 errlen=0 ts=2026-09-11T07:35:44Z
+XV size=20 set=turbo by=parfast rc=0 wall=1.508 errlen=0
+SIZE-DONE 20 2026-09-11T07:35:46Z
+BOX-BUSY-WAIT try=1 foreign_cpu=346% ceiling=320% at=cc-23-10-parfast ts=2026-09-11T07:35:46Z
+WARN-FOREIGN-CPU at=cc-23-10-parfast foreign_cpu=131% ceiling=320% top=[/usr/bin/top(23143)=85% /Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/PairedSync.framework/Support/pairedsyncd(23142)=28% /System/Library/PrivateFrameworks/TCC.framework/Support/tccd(652)=4% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=3%]
+CC size=23 red=10 bs=768000 blocks=32177 arm=parfast wall=6.272 cpu=179.647 cpu_over_wall=28.64 peak_mb=26912.2 recovery_mb=2405 files=13 rc=0 errlen=0 ts=2026-09-11T07:36:23Z
+CC size=23 red=10 bs=768000 blocks=32177 arm=turbo wall=96.174 cpu=2791.017 cpu_over_wall=29.02 peak_mb=2389.2 recovery_mb=2405 files=13 rc=0 errlen=0 ts=2026-09-11T07:37:59Z
+CC size=23 red=15 bs=768000 blocks=32177 arm=parfast wall=6.828 cpu=186.922 cpu_over_wall=27.38 peak_mb=28393.4 recovery_mb=3591 files=14 rc=0 errlen=0 ts=2026-09-11T07:38:06Z
+WARN-FOREIGN-CPU at=cc-23-15-turbo foreign_cpu=154% ceiling=320% top=[/Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/Applications/News.app/PlugIns/NewsToday2.appex/NewsToday2(3439)=97% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(23259)=8% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(23260)=7% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(23261)=6%]
+CC size=23 red=15 bs=768000 blocks=32177 arm=turbo wall=140.532 cpu=4181.493 cpu_over_wall=29.75 peak_mb=3568.1 recovery_mb=3591 files=14 rc=0 errlen=0 ts=2026-09-11T07:40:27Z
+WARN-FOREIGN-CPU at=cc-23-20-parfast foreign_cpu=128% ceiling=320% top=[xpcproxy_sim(23387)=82% /Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/Frameworks/ManagedAppDistribution.framework/Support/managedappdistributiond(23386)=46%]
+CC size=23 red=20 bs=768000 blocks=32177 arm=parfast wall=6.958 cpu=189.734 cpu_over_wall=27.27 peak_mb=29730.8 recovery_mb=4770 files=14 rc=0 errlen=0 ts=2026-09-11T07:40:34Z
+XV size=23 set=parfast by=turbo rc=0 wall=23.144 errlen=0
+VV size=23 set=parfast rep=1 arm=parfast wall=1.514 cpu=33.824 cpu_over_wall=22.34 peak_mb=71.1 rc=0 errlen=0 ts=2026-09-11T07:40:59Z
+VV size=23 set=parfast rep=1 arm=turbo wall=22.867 cpu=38.338 cpu_over_wall=1.68 peak_mb=14.7 rc=0 errlen=0 ts=2026-09-11T07:41:22Z
+VV size=23 set=parfast rep=2 arm=parfast wall=1.505 cpu=33.705 cpu_over_wall=22.4 peak_mb=71.2 rc=0 errlen=0 ts=2026-09-11T07:41:23Z
+WARN-FOREIGN-CPU at=vv-23-2-turbo foreign_cpu=131% ceiling=320% top=[/System/Library/PrivateFrameworks/PhotoAnalysis.framework/Versions/A/Support/photoanalysisd(1262)=72% /System/Library/Frameworks/Contacts.framework/Support/contactsd(2599)=22% /usr/libexec/sysmond(827)=19% /System/Library/PrivateFrameworks/CalendarDaemon.framework/Support/calaccessd(1224)=9%]
+VV size=23 set=parfast rep=2 arm=turbo wall=22.733 cpu=38.163 cpu_over_wall=1.68 peak_mb=14.7 rc=0 errlen=0 ts=2026-09-11T07:41:46Z
+WARN-FOREIGN-CPU at=cc-23-20-turbo foreign_cpu=183% ceiling=320% top=[/System/Library/PrivateFrameworks/PhotoLibraryServices.framework/Versions/A/Support/photolibraryd(1051)=88% /usr/bin/top(23495)=77% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/managedcorespotlightd(1235)=8% /System/Library/PrivateFrameworks/CoreAnalytics.framework/Support/analyticsd(655)=3%]
+CC size=23 red=20 bs=768000 blocks=32177 arm=turbo wall=187.524 cpu=5552.42 cpu_over_wall=29.61 peak_mb=4746.4 recovery_mb=4770 files=14 rc=0 errlen=0 ts=2026-09-11T07:44:54Z
+XV size=23 set=turbo by=parfast rc=0 wall=1.511 errlen=0
+SIZE-DONE 23 2026-09-11T07:44:55Z
+WARN-FOREIGN-CPU at=cc-30-10-parfast foreign_cpu=234% ceiling=320% top=[/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd(1260)=99% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(23694)=8% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(23691)=8% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(23687)=8%]
+CC size=30 red=10 bs=983284 blocks=32760 arm=parfast wall=7.697 cpu=215.784 cpu_over_wall=28.03 peak_mb=34902.6 recovery_mb=3121 files=13 rc=0 errlen=0 ts=2026-09-11T07:45:03Z
+WARN-FOREIGN-CPU at=cc-30-10-turbo foreign_cpu=193% ceiling=320% top=[/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd(1260)=108% /Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/PairedSync.framework/Support/pairedsyncd(23713)=85%]
+CC size=30 red=10 bs=983284 blocks=32760 arm=turbo wall=128.319 cpu=3672.968 cpu_over_wall=28.62 peak_mb=3111.6 recovery_mb=3121 files=13 rc=0 errlen=0 ts=2026-09-11T07:47:12Z
+CC size=30 red=15 bs=983284 blocks=32760 arm=parfast wall=8.358 cpu=225.241 cpu_over_wall=26.95 peak_mb=36761.5 recovery_mb=4665 files=14 rc=0 errlen=0 ts=2026-09-11T07:47:20Z
+BOX-BUSY-WAIT try=1 foreign_cpu=343% ceiling=320% at=cc-30-15-turbo ts=2026-09-11T07:47:20Z
+WARN-FOREIGN-CPU at=cc-30-15-turbo foreign_cpu=112% ceiling=320% top=[xpcproxy_sim(23875)=98% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=4% /usr/libexec/PerfPowerServices(31080)=4% /usr/libexec/sysmond(827)=3%]
+CC size=30 red=15 bs=983284 blocks=32760 arm=turbo wall=186.553 cpu=5520.316 cpu_over_wall=29.59 peak_mb=4648.1 recovery_mb=4665 files=14 rc=0 errlen=0 ts=2026-09-11T07:50:57Z
+CC size=30 red=20 bs=983284 blocks=32760 arm=parfast wall=8.733 cpu=228.942 cpu_over_wall=26.22 peak_mb=38482.0 recovery_mb=6202 files=14 rc=0 errlen=0 ts=2026-09-11T07:51:06Z
+XV size=30 set=parfast by=turbo rc=0 wall=29.395 errlen=0
+VV size=30 set=parfast rep=1 arm=parfast wall=1.627 cpu=46.954 cpu_over_wall=28.86 peak_mb=74.1 rc=0 errlen=0 ts=2026-09-11T07:51:37Z
+VV size=30 set=parfast rep=1 arm=turbo wall=28.716 cpu=49.677 cpu_over_wall=1.73 peak_mb=17.4 rc=0 errlen=0 ts=2026-09-11T07:52:06Z
+VV size=30 set=parfast rep=2 arm=parfast wall=1.618 cpu=46.942 cpu_over_wall=29.01 peak_mb=74.0 rc=0 errlen=0 ts=2026-09-11T07:52:08Z
+VV size=30 set=parfast rep=2 arm=turbo wall=28.256 cpu=48.776 cpu_over_wall=1.73 peak_mb=17.4 rc=0 errlen=0 ts=2026-09-11T07:52:36Z
+CC size=30 red=20 bs=983284 blocks=32760 arm=turbo wall=246.378 cpu=7348.975 cpu_over_wall=29.83 peak_mb=6184.6 recovery_mb=6202 files=14 rc=0 errlen=0 ts=2026-09-11T07:56:43Z
+WARN-FOREIGN-CPU at=xv-30-turbo-by-parfast foreign_cpu=120% ceiling=320% top=[/usr/sbin/spindump(1264)=87% /System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd(1031)=12% com.macpaw.CleanMyMac5.HealthMonitor(1571)=10% /System/Library/PrivateFrameworks/UsageTracking.framework/Versions/A/UsageTrackingAgent(1114)=3%]
+XV size=30 set=turbo by=parfast rc=0 wall=1.66 errlen=0
+SIZE-DONE 30 2026-09-11T07:56:45Z
+WARN-FOREIGN-CPU at=cc-40-10-parfast foreign_cpu=119% ceiling=320% top=[(facetimemessages)(24390)=62% /usr/libexec/airportd(712)=7% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(24384)=4% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(24386)=4%]
+CC size=40 red=10 bs=1311044 blocks=32760 arm=parfast wall=10.645 cpu=300.338 cpu_over_wall=28.21 peak_mb=46206.8 recovery_mb=4146 files=13 rc=0 errlen=0 ts=2026-09-11T07:56:56Z
+CC size=40 red=10 bs=1311044 blocks=32760 arm=turbo wall=171.049 cpu=4952.285 cpu_over_wall=28.95 peak_mb=4146.3 recovery_mb=4146 files=13 rc=0 errlen=0 ts=2026-09-11T07:59:47Z
+BOX-BUSY-WAIT try=1 foreign_cpu=337% ceiling=320% at=cc-40-15-parfast ts=2026-09-11T07:59:47Z
+CC size=40 red=15 bs=1311044 blocks=32760 arm=parfast wall=11.429 cpu=312.203 cpu_over_wall=27.32 peak_mb=48579.5 recovery_mb=6201 files=14 rc=0 errlen=0 ts=2026-09-11T08:00:29Z
+CC size=40 red=15 bs=1311044 blocks=32760 arm=turbo wall=248.849 cpu=7421.467 cpu_over_wall=29.82 peak_mb=6194.9 recovery_mb=6201 files=14 rc=0 errlen=0 ts=2026-09-11T08:04:38Z
+CC size=40 red=20 bs=1311044 blocks=32760 arm=parfast wall=19.175 cpu=328.612 cpu_over_wall=17.14 peak_mb=43336.7 recovery_mb=8250 files=14 rc=0 errlen=0 ts=2026-09-11T08:04:57Z
+WARN-FOREIGN-CPU at=xv-40-parfast-by-turbo foreign_cpu=113% ceiling=320% top=[xpcproxy_sim(24883)=99% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=10% /Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/usr/libexec/diagnosticd(2294)=2% /System/Library/CoreServices/launchservicesd(622)=2%]
+XV size=40 set=parfast by=turbo rc=0 wall=39.087 errlen=0
+VV size=40 set=parfast rep=1 arm=parfast wall=3.126 cpu=62.185 cpu_over_wall=19.89 peak_mb=74.1 rc=0 errlen=0 ts=2026-09-11T08:05:40Z
+VV size=40 set=parfast rep=1 arm=turbo wall=38.174 cpu=65.933 cpu_over_wall=1.73 peak_mb=13.4 rc=0 errlen=0 ts=2026-09-11T08:06:18Z
+VV size=40 set=parfast rep=2 arm=parfast wall=3.107 cpu=62.143 cpu_over_wall=20.0 peak_mb=74.2 rc=0 errlen=0 ts=2026-09-11T08:06:21Z
+VV size=40 set=parfast rep=2 arm=turbo wall=37.231 cpu=64.167 cpu_over_wall=1.72 peak_mb=13.4 rc=0 errlen=0 ts=2026-09-11T08:06:59Z
+CC size=40 red=20 bs=1311044 blocks=32760 arm=turbo wall=328.37 cpu=9889.905 cpu_over_wall=30.12 peak_mb=8243.6 recovery_mb=8250 files=14 rc=0 errlen=0 ts=2026-09-11T08:12:28Z
+XV size=40 set=turbo by=parfast rc=0 wall=3.121 errlen=0
+SIZE-DONE 40 2026-09-11T08:12:31Z
+CC size=50 red=10 bs=1639304 blocks=32750 arm=parfast wall=13.94 cpu=384.717 cpu_over_wall=27.6 peak_mb=57493.9 recovery_mb=5170 files=13 rc=0 errlen=0 ts=2026-09-11T08:12:45Z
+BOX-BUSY-WAIT try=1 foreign_cpu=997% ceiling=320% at=cc-50-10-turbo ts=2026-09-11T08:12:46Z
+CC size=50 red=10 bs=1639304 blocks=32750 arm=turbo wall=214.25 cpu=6215.807 cpu_over_wall=29.01 peak_mb=5180.8 recovery_mb=5170 files=13 rc=0 errlen=0 ts=2026-09-11T08:16:50Z
+WARN-FOREIGN-CPU at=cc-50-15-parfast foreign_cpu=119% ceiling=320% top=[/System/Library/CoreServices/TimeMachine/backupd-helper(861)=99% /usr/libexec/PerfPowerServices(31080)=9% /usr/libexec/sysmond(827)=3% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=3%]
+CC size=50 red=15 bs=1639304 blocks=32750 arm=parfast wall=14.778 cpu=402.273 cpu_over_wall=27.22 peak_mb=60381.7 recovery_mb=7738 files=14 rc=0 errlen=0 ts=2026-09-11T08:17:05Z
+CC size=50 red=15 bs=1639304 blocks=32750 arm=turbo wall=310.036 cpu=9323.611 cpu_over_wall=30.07 peak_mb=7742.4 recovery_mb=7738 files=14 rc=0 errlen=0 ts=2026-09-11T08:22:16Z
+CC size=50 red=20 bs=1639304 blocks=32750 arm=parfast wall=17.632 cpu=421.928 cpu_over_wall=23.93 peak_mb=53581.8 recovery_mb=10298 files=14 rc=0 errlen=0 ts=2026-09-11T08:22:34Z
+XV size=50 set=parfast by=turbo rc=0 wall=48.834 errlen=0
+WARN-FOREIGN-CPU at=vv-50-1-parfast foreign_cpu=134% ceiling=320% top=[/usr/libexec/mobileassetd(729)=55% xpcproxy_sim(25918)=39% /System/Library/CoreServices/SubmitDiagInfo(1265)=12% xpcproxy_sim(25919)=9%]
+VV size=50 set=parfast rep=1 arm=parfast wall=3.158 cpu=76.848 cpu_over_wall=24.33 peak_mb=76.6 rc=0 errlen=0 ts=2026-09-11T08:23:26Z
+VV size=50 set=parfast rep=1 arm=turbo wall=47.281 cpu=81.703 cpu_over_wall=1.73 peak_mb=13.8 rc=0 errlen=0 ts=2026-09-11T08:24:13Z
+VV size=50 set=parfast rep=2 arm=parfast wall=3.101 cpu=76.919 cpu_over_wall=24.8 peak_mb=76.2 rc=0 errlen=0 ts=2026-09-11T08:24:16Z
+VV size=50 set=parfast rep=2 arm=turbo wall=46.295 cpu=79.761 cpu_over_wall=1.72 peak_mb=14.9 rc=0 errlen=0 ts=2026-09-11T08:25:03Z
+CC size=50 red=20 bs=1639304 blocks=32750 arm=turbo wall=412.712 cpu=12407.476 cpu_over_wall=30.06 peak_mb=10302.0 recovery_mb=10298 files=14 rc=0 errlen=0 ts=2026-09-11T08:31:56Z
+XV size=50 set=turbo by=parfast rc=0 wall=3.123 errlen=0
+SIZE-DONE 50 2026-09-11T08:32:00Z
+CC size=60 red=10 bs=1966564 blocks=32760 arm=parfast wall=16.281 cpu=463.056 cpu_over_wall=28.44 peak_mb=68800.3 recovery_mb=6194 files=13 rc=0 errlen=0 ts=2026-09-11T08:32:16Z
+WARN-FOREIGN-CPU at=cc-60-10-turbo foreign_cpu=199% ceiling=320% top=[/usr/bin/top(26421)=99% /Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/PairedSync.framework/Support/pairedsyncd(26418)=95% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=2% /Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/usr/libexec/diagnosticd(2294)=2%]
+CC size=60 red=10 bs=1966564 blocks=32760 arm=turbo wall=252.948 cpu=7381.944 cpu_over_wall=29.18 peak_mb=6215.6 recovery_mb=6194 files=13 rc=0 errlen=0 ts=2026-09-11T08:36:30Z
+CC size=60 red=15 bs=1966564 blocks=32760 arm=parfast wall=21.48 cpu=487.237 cpu_over_wall=22.68 peak_mb=63541.2 recovery_mb=9273 files=14 rc=0 errlen=0 ts=2026-09-11T08:36:51Z
+CC size=60 red=15 bs=1966564 blocks=32760 arm=turbo wall=368.653 cpu=11061.265 cpu_over_wall=30.0 peak_mb=9288.3 recovery_mb=9273 files=14 rc=0 errlen=0 ts=2026-09-11T08:43:01Z
+CC size=60 red=20 bs=1966564 blocks=32760 arm=parfast wall=31.255 cpu=502.859 cpu_over_wall=16.09 peak_mb=63899.1 recovery_mb=12346 files=14 rc=0 errlen=0 ts=2026-09-11T08:43:33Z
+XV size=60 set=parfast by=turbo rc=0 wall=58.108 errlen=0
+VV size=60 set=parfast rep=1 arm=parfast wall=3.191 cpu=93.654 cpu_over_wall=29.35 peak_mb=76.1 rc=0 errlen=0 ts=2026-09-11T08:44:34Z
+VV size=60 set=parfast rep=1 arm=turbo wall=56.799 cpu=97.754 cpu_over_wall=1.72 peak_mb=15.6 rc=0 errlen=0 ts=2026-09-11T08:45:31Z
+VV size=60 set=parfast rep=2 arm=parfast wall=3.194 cpu=93.73 cpu_over_wall=29.35 peak_mb=76.1 rc=0 errlen=0 ts=2026-09-11T08:45:34Z
+VV size=60 set=parfast rep=2 arm=turbo wall=55.557 cpu=95.69 cpu_over_wall=1.72 peak_mb=15.6 rc=0 errlen=0 ts=2026-09-11T08:46:30Z
+CC size=60 red=20 bs=1966564 blocks=32760 arm=turbo wall=489.942 cpu=14712.233 cpu_over_wall=30.03 peak_mb=12360.8 recovery_mb=12346 files=14 rc=0 errlen=0 ts=2026-09-11T08:54:41Z
+XV size=60 set=turbo by=parfast rc=0 wall=3.294 errlen=0
+SIZE-DONE 60 2026-09-11T08:54:45Z
+CC size=70 red=10 bs=2294324 blocks=32760 arm=parfast wall=18.833 cpu=537.777 cpu_over_wall=28.56 peak_mb=80105.5 recovery_mb=7218 files=13 rc=0 errlen=0 ts=2026-09-11T08:55:04Z
+CC size=70 red=10 bs=2294324 blocks=32760 arm=turbo wall=291.048 cpu=8671.817 cpu_over_wall=29.8 peak_mb=7250.2 recovery_mb=7218 files=13 rc=0 errlen=0 ts=2026-09-11T08:59:55Z
+CC size=70 red=15 bs=2294324 blocks=32760 arm=parfast wall=22.99 cpu=565.813 cpu_over_wall=24.61 peak_mb=73776.7 recovery_mb=10809 files=14 rc=0 errlen=0 ts=2026-09-11T09:00:19Z
+CC size=70 red=15 bs=2294324 blocks=32760 arm=turbo wall=432.986 cpu=12992.777 cpu_over_wall=30.01 peak_mb=10834.9 recovery_mb=10809 files=14 rc=0 errlen=0 ts=2026-09-11T09:07:33Z
+CC size=70 red=20 bs=2294324 blocks=32760 arm=parfast wall=32.163 cpu=586.984 cpu_over_wall=18.25 peak_mb=74127.6 recovery_mb=14395 files=14 rc=0 errlen=0 ts=2026-09-11T09:08:05Z
+XV size=70 set=parfast by=turbo rc=0 wall=67.908 errlen=0
+VV size=70 set=parfast rep=1 arm=parfast wall=4.715 cpu=110.159 cpu_over_wall=23.36 peak_mb=77.0 rc=0 errlen=0 ts=2026-09-11T09:09:18Z
+WARN-FOREIGN-CPU at=vv-70-1-turbo foreign_cpu=126% ceiling=320% top=[/Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/PairedSync.framework/Support/pairedsyncd(28489)=85% (top)(28490)=29% /sbin/launchd(1)=10% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=3%]
+VV size=70 set=parfast rep=1 arm=turbo wall=65.387 cpu=112.718 cpu_over_wall=1.72 peak_mb=16.2 rc=0 errlen=0 ts=2026-09-11T09:10:23Z
+VV size=70 set=parfast rep=2 arm=parfast wall=4.762 cpu=110.219 cpu_over_wall=23.15 peak_mb=76.2 rc=0 errlen=0 ts=2026-09-11T09:10:28Z
+VV size=70 set=parfast rep=2 arm=turbo wall=64.594 cpu=111.291 cpu_over_wall=1.72 peak_mb=15.1 rc=0 errlen=0 ts=2026-09-11T09:11:33Z
+BOX-BUSY-WAIT try=1 foreign_cpu=854% ceiling=320% at=cc-70-20-turbo ts=2026-09-11T09:11:35Z
+CC size=70 red=20 bs=2294324 blocks=32760 arm=turbo wall=575.342 cpu=17317.232 cpu_over_wall=30.1 peak_mb=14419.5 recovery_mb=14395 files=14 rc=0 errlen=0 ts=2026-09-11T09:21:40Z
+XV size=70 set=turbo by=parfast rc=0 wall=4.732 errlen=0
+SIZE-DONE 70 2026-09-11T09:21:45Z
+CC size=80 red=10 bs=2625288 blocks=32720 arm=parfast wall=23.22 cpu=615.306 cpu_over_wall=26.5 peak_mb=83557.3 recovery_mb=8242 files=13 rc=0 errlen=0 ts=2026-09-11T09:22:09Z
+CC size=80 red=10 bs=2625288 blocks=32720 arm=turbo wall=332.836 cpu=9933.33 cpu_over_wall=29.84 peak_mb=8285.2 recovery_mb=8242 files=13 rc=0 errlen=0 ts=2026-09-11T09:27:42Z
+CC size=80 red=15 bs=2625288 blocks=32720 arm=parfast wall=25.424 cpu=645.428 cpu_over_wall=25.39 peak_mb=84056.6 recovery_mb=12345 files=14 rc=0 errlen=0 ts=2026-09-11T09:28:08Z
+CC size=80 red=15 bs=2625288 blocks=32720 arm=turbo wall=494.778 cpu=14849.979 cpu_over_wall=30.01 peak_mb=12381.8 recovery_mb=12345 files=14 rc=0 errlen=0 ts=2026-09-11T09:36:24Z
+CC size=80 red=20 bs=2625288 blocks=32720 arm=parfast wall=35.952 cpu=673.279 cpu_over_wall=18.73 peak_mb=84416.6 recovery_mb=16443 files=14 rc=0 errlen=0 ts=2026-09-11T09:37:00Z
+XV size=80 set=parfast by=turbo rc=0 wall=77.499 errlen=0
+WARN-FOREIGN-CPU at=vv-80-1-parfast foreign_cpu=115% ceiling=320% top=[/Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/PairedSync.framework/Support/pairedsyncd(30050)=95% /sbin/launchd(1)=14% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=4% /usr/libexec/sysmond(827)=2%]
+VV size=80 set=parfast rep=1 arm=parfast wall=4.785 cpu=124.386 cpu_over_wall=25.99 peak_mb=76.1 rc=0 errlen=0 ts=2026-09-11T09:38:23Z
+WARN-FOREIGN-CPU at=vv-80-1-turbo foreign_cpu=138% ceiling=320% top=[/System/Library/ExtensionKit/Extensions/AssetMetricsExtension.appex/Contents/MacOS/AssetMetricsExtension(30059)=98% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=15% /usr/libexec/sysmond(827)=12% /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter(1068)=10%]
+VV size=80 set=parfast rep=1 arm=turbo wall=74.317 cpu=128.099 cpu_over_wall=1.72 peak_mb=16.9 rc=0 errlen=0 ts=2026-09-11T09:39:37Z
+VV size=80 set=parfast rep=2 arm=parfast wall=4.765 cpu=124.663 cpu_over_wall=26.16 peak_mb=76.6 rc=0 errlen=0 ts=2026-09-11T09:39:42Z
+VV size=80 set=parfast rep=2 arm=turbo wall=74.004 cpu=127.407 cpu_over_wall=1.72 peak_mb=16.9 rc=0 errlen=0 ts=2026-09-11T09:40:56Z
+CC size=80 red=20 bs=2625288 blocks=32720 arm=turbo wall=660.294 cpu=19914.075 cpu_over_wall=30.16 peak_mb=16478.3 recovery_mb=16443 files=14 rc=0 errlen=0 ts=2026-09-11T09:51:59Z
+XV size=80 set=turbo by=parfast rc=0 wall=4.832 errlen=0
+SIZE-DONE 80 2026-09-11T09:52:04Z
+MSWP-END 2026-09-11T09:52:04Z
+RIG-LOCK-RELEASED <rig>/.parfast-rig.lock

@@ -1,0 +1,22 @@
+RIG-LOCK-TAKEN <rig>/.parfast-rig.lock pid=56732
+WARN-FOREIGN-CPU at=round-start foreign_cpu=134% ceiling=320% top=[/Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/PairedSync.framework/Support/pairedsyncd(56801)=99% com.macpaw.CleanMyMac5.HealthMonitor(1571)=24% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=9% /System/Library/CoreServices/launchservicesd(622)=2%]
+MRED-START 2026-09-11T15:53:42Z
+BOX host=apple-m3-ultra cpu=Apple M3 Ultra cores=32 ram_gb=256.0 os=macOS 27.0 free_gb=344.9
+BIN parfast sha256=5d0707ee7581f46ef06f84b27973fb85328ffc226c5a49fbcd93993609b1f571 bytes=2723536 version=parfast version 1.5.0-beta.1 built from 8b0b67ec4d15
+BIN par2turbo sha256=f15cc37cd102f9fd64bbe6adb84d9f4009406bea86e8748dbfca2f85d37d3a31 bytes=624712 version=par2cmdline-turbo version 1.5.0 built from ?
+PROTOCOL sizes_gib=[10, 23, 30, 50, 80] redundancy_pct=[25, 30] reps=3 threads=32 recovery=in-place slice_cap=32768 rep_order=interleaved gate=recovery-size-and-shape-never-rc
+PAYLOAD-READY members=80 bytes=85899345920
+SLICE-PROBE index=5 unique=80/80
+HIRED size=10 red=25 bs=768000 blocks=13990 rep=1 arm=parfast wall=4.35 cpu=119.076 cpu_over_wall=27.37 peak_mb=13856.3 recovery_mb=2583 files=13 rc=0 foreign_cpu=10.3 errlen=0 ts=2026-09-11T15:58:57Z
+WARN-FOREIGN-CPU at=hi-10-25-r1-turbo foreign_cpu=167% ceiling=320% top=[xpcproxy_sim(57192)=91% /usr/libexec/sysmond(827)=42% /System/Library/Frameworks/SafariServices.framework/Versions/A/XPCServices/com.apple.SafariServices.ExtensionHelper.xpc/Contents/MacOS/com.apple.SafariServices.ExtensionHelper(1719)=20% /usr/libexec/runningboardd(657)=9%]
+HIRED size=10 red=25 bs=768000 blocks=13990 rep=1 arm=turbo wall=47.786 cpu=1318.409 cpu_over_wall=27.59 peak_mb=2593.2 recovery_mb=2583 files=13 rc=0 foreign_cpu=167.2 errlen=0 ts=2026-09-11T15:59:45Z
+HIRED size=10 red=30 bs=768000 blocks=13990 rep=1 arm=parfast wall=4.559 cpu=123.31 cpu_over_wall=27.05 peak_mb=14525.1 recovery_mb=3097 files=14 rc=0 foreign_cpu=64.6 errlen=0 ts=2026-09-11T15:59:50Z
+WARN-FOREIGN-CPU at=hi-10-30-r1-turbo foreign_cpu=225% ceiling=320% top=[/Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/PairedSync.framework/Support/pairedsyncd(57248)=88% /Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/Frameworks/ManagedAppDistribution.framework/Support/managedappdistributiond(57250)=66% (facetimemessages)(57249)=66% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=3%]
+HIRED size=10 red=30 bs=768000 blocks=13990 rep=1 arm=turbo wall=56.269 cpu=1582.801 cpu_over_wall=28.13 peak_mb=3105.5 recovery_mb=3097 files=14 rc=0 foreign_cpu=159.6 errlen=0 ts=2026-09-11T16:00:46Z
+HIRED-SIZE-DONE size=10 rep=1 2026-09-11T16:00:46Z
+HIRED size=23 red=25 bs=768000 blocks=32177 rep=1 arm=parfast wall=7.26 cpu=192.993 cpu_over_wall=26.58 peak_mb=31067.5 recovery_mb=5948 files=14 rc=0 foreign_cpu=113.7 errlen=0 ts=2026-09-11T16:00:54Z
+WARN-FOREIGN-CPU at=hi-23-25-r1-turbo foreign_cpu=129% ceiling=320% top=[/Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/FaceTimeMessageStore.framework/facetimemessagestored(57334)=62% /Library/Developer/CoreSimulator<rig>/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/Frameworks/ManagedAppDistribution.framework/Support/managedappdistributiond(57335)=58% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(1475)=4% /usr/libexec/diagnosticd(2303)=2%]
+HIRED size=23 red=25 bs=768000 blocks=32177 rep=1 arm=turbo wall=233.884 cpu=7015.159 cpu_over_wall=29.99 peak_mb=5925.5 recovery_mb=5948 files=14 rc=0 foreign_cpu=129.1 errlen=0 ts=2026-09-11T16:04:48Z
+HIRED size=23 red=30 bs=768000 blocks=32177 rep=1 arm=parfast wall=7.507 cpu=195.897 cpu_over_wall=26.1 peak_mb=32405.8 recovery_mb=7134 files=15 rc=0 foreign_cpu=45.1 errlen=0 ts=2026-09-11T16:04:55Z
+DRIVER-TERMINATED sig=15 ts=2026-09-11T16:09:01Z
+RIG-LOCK-RELEASED <rig>/.parfast-rig.lock

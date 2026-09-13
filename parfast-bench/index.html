@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>parfast benchmark logs</title>
+<meta name="description" content="Every log and harness behind the parfast benchmark page, published so each figure can be traced to the line it came from.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9889;</text></svg>">
+<link rel="stylesheet" href="../assets/site.css">
+<style>
+.ev{max-width:var(--max);margin:0 auto;padding:28px 24px 80px}
+.ev h1{font-size:30px;margin:0 0 14px;letter-spacing:-.02em}
+.ev h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;
+ color:var(--dim);margin:34px 0 6px;font-weight:600}
+.ev p{max-width:78ch;color:var(--dim);margin:0 0 12px}
+.ev p b{color:var(--fg)}
+.ev table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0 4px}
+.ev th,.ev td{text-align:left;padding:5px 12px 5px 0;border-bottom:1px solid
+ var(--line);vertical-align:top}
+.ev th{color:var(--dim);font:600 11px/1 var(--mono);letter-spacing:.06em;
+ text-transform:uppercase}
+.ev td.n{text-align:right;font-family:var(--mono);white-space:nowrap;
+ color:var(--dim)}
+.ev td a{font-family:var(--mono);word-break:break-all}
+</style>
+</head>
+<body>
+
+<header><div class="wrap"><a class="logo" href="../index.html"><span class="bolt">&#9889;</span> nzbfast</a><nav><a href="../parfast-benchmarks.html">Back to the parfast benchmarks</a></nav></div></header>
+
+<div class="ev">
+<h1>parfast benchmark logs</h1>
+<p>Every log behind <a href="../parfast-benchmarks.html">the parfast benchmark page</a>, the JSON the page is built from, and the harnesses that produced all of it. Each figure on that page is a median of timings written to one of these files, so any of them can be traced back to the line it came from.</p>
+<p>Machines are named by their silicon rather than by a hostname: <b>intel-i5-10600kf</b>, <b>intel-core-ultra-9-386h</b>, <b>amd-ryzen-9800x3d</b>, <b>apple-m5-max</b>, <b>apple-m3-ultra</b>, <b>apple-m1-ultra-64gb</b> and <b>apple-m1-ultra-128gb</b>. The <b>BOX</b> line at the head of each round carries the core count, the memory and the operating system, which is what a figure has to be read against. Working directories read <b>&lt;rig&gt;</b>: which drive a round ran on says nothing about the measurement.</p>
+<h2>Where each round's numbers come from</h2>
+<table><thead><tr><th>Round</th><th>File</th></tr></thead><tbody>
+<tr><td>Intel i5-10600KF, 15% ladder</td><td><a href="i5lad.log">i5lad.log</a></td></tr>
+<tr><td>Intel Core Ultra 9 386H, 15% ladder</td><td><a href="zenlad.log">zenlad.log</a></td></tr>
+<tr><td>Apple M3 Ultra, 15% ladder</td><td><a href="applad.log">applad.log</a></td></tr>
+<tr><td>Apple M5 Max, 15% ladder</td><td><a href="m5lad.log">m5lad.log</a></td></tr>
+<tr><td>Intel i5-10600KF, full range</td><td><a href="rounds/intel-fullrange-2026-09-11/i5full-rep1.log">rounds/intel-fullrange-2026-09-11/i5full-rep1.log</a></td></tr>
+<tr><td>Intel Core Ultra 9 386H, full range</td><td><a href="rounds/intel-fullrange-2026-09-11/zfull.log">rounds/intel-fullrange-2026-09-11/zfull.log</a></td></tr>
+<tr><td>Apple M5 Max, full range</td><td><a href="rounds/m5-full-range-2026-09-11.log">rounds/m5-full-range-2026-09-11.log</a></td></tr>
+<tr><td>Apple M3 Ultra, full range, turbo uncapped</td><td><a href="m3full-uncapped.log">m3full-uncapped.log</a></td></tr>
+<tr><td>Apple M3 Ultra, create sweep</td><td><a href="rounds/msweep-m3ultra-uncapped-2026-09-11/mswp.log">rounds/msweep-m3ultra-uncapped-2026-09-11/mswp.log</a></td></tr>
+<tr><td>Core Ultra 9 386H, create sweep with a memory-capped arm</td><td><a href="rounds/zswp2-coreultra9-2026-09-12/zswp2.log">rounds/zswp2-coreultra9-2026-09-12/zswp2.log</a></td></tr>
+<tr><td>25% and 30% redundancy</td><td><a href="rounds/mred-m3ultra-2026-09-12/mred.log">rounds/mred-m3ultra-2026-09-12/mred.log</a></td></tr>
+<tr><td>Fast mode, per class of machine</td><td><a href="fastmode-rounds-2026-09-12/README.md">fastmode-rounds-2026-09-12/README.md</a></td></tr>
+</tbody></table>
+<h2>rounds/</h2>
+<p>Banked rounds, one directory or file per round, including the ones that were aborted or came back partial. A round whose name says ABORTED or PARTIAL is kept because throwing away the legs that went wrong is how a benchmark stops being checkable, not because anything on the page quotes it.</p>
+<table><thead><tr><th>File</th><th>Size</th></tr></thead><tbody>
+<tr><td><a href="rounds/field-i5-2026-09-12/NOTE.md">rounds/field-i5-2026-09-12/NOTE.md</a></td><td class="n">1.1 KB</td></tr>
+<tr><td><a href="rounds/field-i5-2026-09-12/field100-phase2-to-4096.log">rounds/field-i5-2026-09-12/field100-phase2-to-4096.log</a></td><td class="n">11.7 KB</td></tr>
+<tr><td><a href="rounds/field-i5-2026-09-12/field15-phase1.log">rounds/field-i5-2026-09-12/field15-phase1.log</a></td><td class="n">16.5 KB</td></tr>
+<tr><td><a href="rounds/i5-verify-ladder-2026-09-11.log">rounds/i5-verify-ladder-2026-09-11.log</a></td><td class="n">24.5 KB</td></tr>
+<tr><td><a href="rounds/i5lad2-2026-09-12/i5lad2.log">rounds/i5lad2-2026-09-12/i5lad2.log</a></td><td class="n">41.4 KB</td></tr>
+<tr><td><a href="rounds/intel-fullrange-2026-09-11/i5full-rep1.log">rounds/intel-fullrange-2026-09-11/i5full-rep1.log</a></td><td class="n">14.9 KB</td></tr>
+<tr><td><a href="rounds/intel-fullrange-2026-09-11/zfull.log">rounds/intel-fullrange-2026-09-11/zfull.log</a></td><td class="n">38.6 KB</td></tr>
+<tr><td><a href="rounds/jcross-abort-m1ultra-128gb-spotlight-2026-09-11.log">rounds/jcross-abort-m1ultra-128gb-spotlight-2026-09-11.log</a></td><td class="n">17.8 KB</td></tr>
+<tr><td><a href="rounds/jcross-abort-m5max-16legs-spotlight-2026-09-11.log">rounds/jcross-abort-m5max-16legs-spotlight-2026-09-11.log</a></td><td class="n">9.1 KB</td></tr>
+<tr><td><a href="rounds/jcross-abort-m5max-27legs-spotlight-2026-09-11.log">rounds/jcross-abort-m5max-27legs-spotlight-2026-09-11.log</a></td><td class="n">12.0 KB</td></tr>
+<tr><td><a href="rounds/jcross-intel-fastmode-2026-09-11/jcross-coreultra9.log">rounds/jcross-intel-fastmode-2026-09-11/jcross-coreultra9.log</a></td><td class="n">59.0 KB</td></tr>
+<tr><td><a href="rounds/jcross-intel-fastmode-2026-09-11/jcross-i5-10600KF.log">rounds/jcross-intel-fastmode-2026-09-11/jcross-i5-10600KF.log</a></td><td class="n">59.0 KB</td></tr>
+<tr><td><a href="rounds/jcross1-m1london-2026-09-11.log">rounds/jcross1-m1london-2026-09-11.log</a></td><td class="n">62.2 KB</td></tr>
+<tr><td><a href="rounds/jcross1-m3antigua-2026-09-11.log">rounds/jcross1-m3antigua-2026-09-11.log</a></td><td class="n">51.0 KB</td></tr>
+<tr><td><a href="rounds/jcross1-m5max-2026-09-11.log">rounds/jcross1-m5max-2026-09-11.log</a></td><td class="n">12.0 KB</td></tr>
+<tr><td><a href="rounds/jcross1m-m3antigua-2026-09-11.log">rounds/jcross1m-m3antigua-2026-09-11.log</a></td><td class="n">21.7 KB</td></tr>
+<tr><td><a href="rounds/jforce-probe-coreultra9-2026-09-12/jforce-probe.log">rounds/jforce-probe-coreultra9-2026-09-12/jforce-probe.log</a></td><td class="n">15.0 KB</td></tr>
+<tr><td><a href="rounds/jsmoke-zen5-9800x3d-2026-09-11.NOTE.md">rounds/jsmoke-zen5-9800x3d-2026-09-11.NOTE.md</a></td><td class="n">2.9 KB</td></tr>
+<tr><td><a href="rounds/jsmoke-zen5-9800x3d-2026-09-11.log">rounds/jsmoke-zen5-9800x3d-2026-09-11.log</a></td><td class="n">9.5 KB</td></tr>
+<tr><td><a href="rounds/jstage2-m1london-2026-09-11.log">rounds/jstage2-m1london-2026-09-11.log</a></td><td class="n">35.1 KB</td></tr>
+<tr><td><a href="rounds/m1ultra-verify-64gb-2026-09-11.log">rounds/m1ultra-verify-64gb-2026-09-11.log</a></td><td class="n">13.0 KB</td></tr>
+<tr><td><a href="rounds/m5-full-range-2026-09-11.log">rounds/m5-full-range-2026-09-11.log</a></td><td class="n">17.4 KB</td></tr>
+<tr><td><a href="rounds/m5max-fastmode-pregate-2026-09-11.log">rounds/m5max-fastmode-pregate-2026-09-11.log</a></td><td class="n">36.3 KB</td></tr>
+<tr><td><a href="rounds/m5max-verify-128gb-2026-09-11.log">rounds/m5max-verify-128gb-2026-09-11.log</a></td><td class="n">12.7 KB</td></tr>
+<tr><td><a href="rounds/mfast-m1ultra-128gb-pregate-2026-09-11.log">rounds/mfast-m1ultra-128gb-pregate-2026-09-11.log</a></td><td class="n">34.9 KB</td></tr>
+<tr><td><a href="rounds/mred-ABORTED-boxload-356pct-m3ultra-2026-09-11.log">rounds/mred-ABORTED-boxload-356pct-m3ultra-2026-09-11.log</a></td><td class="n">5.1 KB</td></tr>
+<tr><td><a href="rounds/mred-PARTIAL-7legs-under-simulator-load-m3ultra-2026-09-11.log">rounds/mred-PARTIAL-7legs-under-simulator-load-m3ultra-2026-09-11.log</a></td><td class="n">4.4 KB</td></tr>
+<tr><td><a href="rounds/mred-m3ultra-2026-09-12/mred.log">rounds/mred-m3ultra-2026-09-12/mred.log</a></td><td class="n">16.2 KB</td></tr>
+<tr><td><a href="rounds/msweep-m3ultra-uncapped-2026-09-11/mswp.log">rounds/msweep-m3ultra-uncapped-2026-09-11/mswp.log</a></td><td class="n">27.4 KB</td></tr>
+<tr><td><a href="rounds/nband-m1ultra-london-2026-09-12/NOTE.md">rounds/nband-m1ultra-london-2026-09-12/NOTE.md</a></td><td class="n">2.1 KB</td></tr>
+<tr><td><a href="rounds/nband-m1ultra-london-2026-09-12/nband-m1ultra-a.log">rounds/nband-m1ultra-london-2026-09-12/nband-m1ultra-a.log</a></td><td class="n">32.0 KB</td></tr>
+<tr><td><a href="rounds/nband-m1ultra-london-2026-09-12/nband-m1ultra-b.log">rounds/nband-m1ultra-london-2026-09-12/nband-m1ultra-b.log</a></td><td class="n">37.5 KB</td></tr>
+<tr><td><a href="rounds/nband-m5max-2026-09-12/NOTE.md">rounds/nband-m5max-2026-09-12/NOTE.md</a></td><td class="n">1.4 KB</td></tr>
+<tr><td><a href="rounds/nband-m5max-2026-09-12/nband.log">rounds/nband-m5max-2026-09-12/nband.log</a></td><td class="n">33.8 KB</td></tr>
+<tr><td><a href="rounds/zen5-whole-arm-9800x3d-2026-09-11.log">rounds/zen5-whole-arm-9800x3d-2026-09-11.log</a></td><td class="n">24.3 KB</td></tr>
+<tr><td><a href="rounds/zgfni2-coreultra9-2026-09-12/NOTE.md">rounds/zgfni2-coreultra9-2026-09-12/NOTE.md</a></td><td class="n">1.2 KB</td></tr>
+<tr><td><a href="rounds/zgfni2-coreultra9-2026-09-12/zgfni2.log">rounds/zgfni2-coreultra9-2026-09-12/zgfni2.log</a></td><td class="n">13.9 KB</td></tr>
+<tr><td><a href="rounds/zswp2-coreultra9-2026-09-12/zswp2.log">rounds/zswp2-coreultra9-2026-09-12/zswp2.log</a></td><td class="n">24.7 KB</td></tr>
+</tbody></table>
+<h2>fastmode-rounds-2026-09-12/</h2>
+<p>The fast-mode cross-class rounds: eleven depths on the two x86 classes, nine half-step depths on three Apple parts, each with an A/A control.</p>
+<table><thead><tr><th>File</th><th>Size</th></tr></thead><tbody>
+<tr><td><a href="fastmode-rounds-2026-09-12/README.md">fastmode-rounds-2026-09-12/README.md</a></td><td class="n">1.2 KB</td></tr>
+<tr><td><a href="fastmode-rounds-2026-09-12/jx2-m1.log">fastmode-rounds-2026-09-12/jx2-m1.log</a></td><td class="n">53.3 KB</td></tr>
+<tr><td><a href="fastmode-rounds-2026-09-12/jx3-m1.log">fastmode-rounds-2026-09-12/jx3-m1.log</a></td><td class="n">51.0 KB</td></tr>
+<tr><td><a href="fastmode-rounds-2026-09-12/jx5-zenbook.log">fastmode-rounds-2026-09-12/jx5-zenbook.log</a></td><td class="n">96.5 KB</td></tr>
+<tr><td><a href="fastmode-rounds-2026-09-12/jx6-i5-stage-lines.txt">fastmode-rounds-2026-09-12/jx6-i5-stage-lines.txt</a></td><td class="n">101.4 KB</td></tr>
+<tr><td><a href="fastmode-rounds-2026-09-12/jx6-i5.log">fastmode-rounds-2026-09-12/jx6-i5.log</a></td><td class="n">115.6 KB</td></tr>
+<tr><td><a href="fastmode-rounds-2026-09-12/jx7-i5.log">fastmode-rounds-2026-09-12/jx7-i5.log</a></td><td class="n">59.6 KB</td></tr>
+<tr><td><a href="fastmode-rounds-2026-09-12/jx8-zenbook.log">fastmode-rounds-2026-09-12/jx8-zenbook.log</a></td><td class="n">59.6 KB</td></tr>
+</tbody></table>
+<h2>harness/</h2>
+<p>The harnesses themselves. Every leg on this site was run by one of these, unattended, and each refuses to time a leg on a box that is not quiet.</p>
+<table><thead><tr><th>File</th><th>Size</th></tr></thead><tbody>
+<tr><td><a href="harness/after.ps1">harness/after.ps1</a></td><td class="n">2.8 KB</td></tr>
+<tr><td><a href="harness/deadline.ps1">harness/deadline.ps1</a></td><td class="n">5.9 KB</td></tr>
+<tr><td><a href="harness/detach.py">harness/detach.py</a></td><td class="n">0.9 KB</td></tr>
+<tr><td><a href="harness/detachq.py">harness/detachq.py</a></td><td class="n">1.0 KB</td></tr>
+<tr><td><a href="harness/field.ps1">harness/field.ps1</a></td><td class="n">4.5 KB</td></tr>
+<tr><td><a href="harness/fieldcore.ps1">harness/fieldcore.ps1</a></td><td class="n">13.3 KB</td></tr>
+<tr><td><a href="harness/full.ps1">harness/full.ps1</a></td><td class="n">12.8 KB</td></tr>
+<tr><td><a href="harness/iswp.ps1">harness/iswp.ps1</a></td><td class="n">0.3 KB</td></tr>
+<tr><td><a href="harness/jcross.ps1">harness/jcross.ps1</a></td><td class="n">29.3 KB</td></tr>
+<tr><td><a href="harness/jcross.py">harness/jcross.py</a></td><td class="n">33.4 KB</td></tr>
+<tr><td><a href="harness/jlaunch.py">harness/jlaunch.py</a></td><td class="n">1.1 KB</td></tr>
+<tr><td><a href="harness/jsmoke-avx2.ps1">harness/jsmoke-avx2.ps1</a></td><td class="n">0.1 KB</td></tr>
+<tr><td><a href="harness/jsmoke.ps1">harness/jsmoke.ps1</a></td><td class="n">6.4 KB</td></tr>
+<tr><td><a href="harness/jsum.py">harness/jsum.py</a></td><td class="n">15.2 KB</td></tr>
+<tr><td><a href="harness/jwait.ps1">harness/jwait.ps1</a></td><td class="n">2.5 KB</td></tr>
+<tr><td><a href="harness/lad2.ps1">harness/lad2.ps1</a></td><td class="n">7.9 KB</td></tr>
+<tr><td><a href="harness/mcross.py">harness/mcross.py</a></td><td class="n">15.4 KB</td></tr>
+<tr><td><a href="harness/mfast.py">harness/mfast.py</a></td><td class="n">14.7 KB</td></tr>
+<tr><td><a href="harness/mqueue.py">harness/mqueue.py</a></td><td class="n">3.4 KB</td></tr>
+<tr><td><a href="harness/mred.py">harness/mred.py</a></td><td class="n">11.9 KB</td></tr>
+<tr><td><a href="harness/nband.py">harness/nband.py</a></td><td class="n">1.4 KB</td></tr>
+<tr><td><a href="harness/pdrv.py">harness/pdrv.py</a></td><td class="n">32.3 KB</td></tr>
+<tr><td><a href="harness/plib.ps1">harness/plib.ps1</a></td><td class="n">32.0 KB</td></tr>
+<tr><td><a href="harness/repstop.ps1">harness/repstop.ps1</a></td><td class="n">5.2 KB</td></tr>
+<tr><td><a href="harness/runqueue3.ps1">harness/runqueue3.ps1</a></td><td class="n">3.9 KB</td></tr>
+<tr><td><a href="harness/runqueue4.ps1">harness/runqueue4.ps1</a></td><td class="n">4.3 KB</td></tr>
+<tr><td><a href="harness/s2sum.py">harness/s2sum.py</a></td><td class="n">23.4 KB</td></tr>
+<tr><td><a href="harness/s2x86.ps1">harness/s2x86.ps1</a></td><td class="n">4.6 KB</td></tr>
+<tr><td><a href="harness/s2x86low.ps1">harness/s2x86low.ps1</a></td><td class="n">2.2 KB</td></tr>
+<tr><td><a href="harness/s2x86p2.ps1">harness/s2x86p2.ps1</a></td><td class="n">2.1 KB</td></tr>
+<tr><td><a href="harness/swpcore.ps1">harness/swpcore.ps1</a></td><td class="n">5.5 KB</td></tr>
+<tr><td><a href="harness/waitquiet.py">harness/waitquiet.py</a></td><td class="n">1.4 KB</td></tr>
+<tr><td><a href="harness/wfast.ps1">harness/wfast.ps1</a></td><td class="n">11.6 KB</td></tr>
+<tr><td><a href="harness/wlaunch.ps1">harness/wlaunch.ps1</a></td><td class="n">7.0 KB</td></tr>
+<tr><td><a href="harness/wquiet.ps1">harness/wquiet.ps1</a></td><td class="n">2.3 KB</td></tr>
+<tr><td><a href="harness/zen5.ps1">harness/zen5.ps1</a></td><td class="n">1.3 KB</td></tr>
+<tr><td><a href="harness/zen5aa.ps1">harness/zen5aa.ps1</a></td><td class="n">2.2 KB</td></tr>
+<tr><td><a href="harness/zen5rev.ps1">harness/zen5rev.ps1</a></td><td class="n">3.5 KB</td></tr>
+<tr><td><a href="harness/zgfni.ps1">harness/zgfni.ps1</a></td><td class="n">25.0 KB</td></tr>
+</tbody></table>
+<h2>Round book inputs</h2>
+<p>The 15% ladders and the uncapped full range, read under these names by the extractor, plus the JSON the page is built from.</p>
+<table><thead><tr><th>File</th><th>Size</th></tr></thead><tbody>
+<tr><td><a href="applad.log">applad.log</a></td><td class="n">20.1 KB</td></tr>
+<tr><td><a href="bench-all.json">bench-all.json</a></td><td class="n">65.9 KB</td></tr>
+<tr><td><a href="field100.json">field100.json</a></td><td class="n">1.1 KB</td></tr>
+<tr><td><a href="field7.json">field7.json</a></td><td class="n">1.0 KB</td></tr>
+<tr><td><a href="i5create.json">i5create.json</a></td><td class="n">0.2 KB</td></tr>
+<tr><td><a href="i5lad.log">i5lad.log</a></td><td class="n">26.6 KB</td></tr>
+<tr><td><a href="m3full-uncapped.log">m3full-uncapped.log</a></td><td class="n">19.5 KB</td></tr>
+<tr><td><a href="m5lad.log">m5lad.log</a></td><td class="n">20.0 KB</td></tr>
+<tr><td><a href="protection.json">protection.json</a></td><td class="n">2.6 KB</td></tr>
+<tr><td><a href="redundancy.json">redundancy.json</a></td><td class="n">2.0 KB</td></tr>
+<tr><td><a href="verify.json">verify.json</a></td><td class="n">1.8 KB</td></tr>
+<tr><td><a href="vfy-apple.json">vfy-apple.json</a></td><td class="n">2.6 KB</td></tr>
+<tr><td><a href="zenlad.log">zenlad.log</a></td><td class="n">25.0 KB</td></tr>
+</tbody></table>
+<p>98 files, 1.9 MB in all.</p>
+</div>
+</body>
+</html>

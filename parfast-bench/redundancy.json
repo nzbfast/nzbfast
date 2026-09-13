@@ -1,0 +1,152 @@
+[
+ {
+  "gib": 20,
+  "red": 20,
+  "parfast": 6.51,
+  "turbo": 142.6,
+  "ratio": 21.9,
+  "n": 3,
+  "pf_spread": 1.4,
+  "tb_spread": 0.4
+ },
+ {
+  "gib": 23,
+  "red": 20,
+  "parfast": 7.08,
+  "turbo": 186.7,
+  "ratio": 26.4,
+  "n": 3,
+  "pf_spread": 2.0,
+  "tb_spread": 0.6
+ },
+ {
+  "gib": 30,
+  "red": 20,
+  "parfast": 8.66,
+  "turbo": 246.35,
+  "ratio": 28.4,
+  "n": 3,
+  "pf_spread": 1.8,
+  "tb_spread": 0.5
+ },
+ {
+  "gib": 40,
+  "red": 20,
+  "parfast": 13.7,
+  "turbo": 328.68,
+  "ratio": 24.0,
+  "n": 3,
+  "pf_spread": 1.4,
+  "tb_spread": 0.0
+ },
+ {
+  "gib": 80,
+  "red": 20,
+  "parfast": 27.9,
+  "turbo": 675.77,
+  "ratio": 24.2,
+  "n": 3,
+  "pf_spread": 28.8,
+  "tb_spread": 1.1
+ },
+ {
+  "gib": 10,
+  "red": 25,
+  "parfast": 4.31,
+  "turbo": 47.5,
+  "ratio": 11.0,
+  "n": 3,
+  "pf_spread": 22.4,
+  "tb_spread": 3.0
+ },
+ {
+  "gib": 10,
+  "red": 30,
+  "parfast": 4.44,
+  "turbo": 56.1,
+  "ratio": 12.6,
+  "n": 3,
+  "pf_spread": 0.6,
+  "tb_spread": 1.1
+ },
+ {
+  "gib": 23,
+  "red": 25,
+  "parfast": 7.18,
+  "turbo": 231.4,
+  "ratio": 32.2,
+  "n": 3,
+  "pf_spread": 5.5,
+  "tb_spread": 2.1
+ },
+ {
+  "gib": 23,
+  "red": 30,
+  "parfast": 7.47,
+  "turbo": 283.0,
+  "ratio": 37.9,
+  "n": 3,
+  "pf_spread": 0.6,
+  "tb_spread": 5.2
+ },
+ {
+  "gib": 30,
+  "red": 25,
+  "parfast": 8.97,
+  "turbo": 316.8,
+  "ratio": 35.3,
+  "n": 3,
+  "pf_spread": 4.2,
+  "tb_spread": 5.7
+ },
+ {
+  "gib": 30,
+  "red": 30,
+  "parfast": 11.32,
+  "turbo": 380.4,
+  "ratio": 33.6,
+  "n": 3,
+  "pf_spread": 1.8,
+  "tb_spread": 5.0
+ },
+ {
+  "gib": 50,
+  "red": 25,
+  "parfast": 18.98,
+  "turbo": 533.5,
+  "ratio": 28.1,
+  "n": 3,
+  "pf_spread": 35.3,
+  "tb_spread": 5.0
+ },
+ {
+  "gib": 50,
+  "red": 30,
+  "parfast": 19.91,
+  "turbo": 644.6,
+  "ratio": 32.4,
+  "n": 3,
+  "pf_spread": 16.7,
+  "tb_spread": 2.7
+ },
+ {
+  "gib": 80,
+  "red": 25,
+  "parfast": 36.68,
+  "turbo": 847.0,
+  "ratio": 23.1,
+  "n": 3,
+  "pf_spread": 18.0,
+  "tb_spread": 2.5
+ },
+ {
+  "gib": 80,
+  "red": 30,
+  "parfast": 38.83,
+  "turbo": 1008.1,
+  "ratio": 26.0,
+  "n": 3,
+  "pf_spread": 44.9,
+  "tb_spread": 2.0
+ }
+]

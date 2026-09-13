@@ -1,0 +1,14 @@
+{
+ "create": {
+  "parfast": 18.8,
+  "par2turbo": 153.5,
+  "par2classic": 1635.7,
+  "phpar2": 1957.5,
+  "par2j64": 163.1,
+  "parpar": 147.0,
+  "rarpar": 177.4
+ },
+ "gib": 10,
+ "red": 15,
+ "box": "Intel i5-10600KF, 6 cores / 12 threads, 64 GB, Windows 11"
+}

@@ -1,0 +1,66 @@
+RIG-LOCK-TAKEN <rig>/.parfast-rig.lock pid=61329
+JCROSS-START 2026-09-11T13:31:48Z tag=jcross1
+BOX host=apple-m5-max cpu=Apple M5 Max cores=18 ram_gb=128.0 os=macOS 27.0 free_gb=1440.9
+BIN parfast-jx sha256=f7c2b5230df7e3e579df5fb6cd4a97a8d6e12e78eac13fe96809eb6e7ef5e51b bytes=2806720 version=parfast version 1.5.0-beta.1 built from 8c3da7d70d2d
+PROTOCOL slice=262144 recovery_blocks=16384 source_blocks=16384 redundancy_pct=100.0 damage=scattered-seeded-slice-overwrite reps=5 arms=off/fast/aa gate=sha256-all-members prewarm=full-read-of-work-dir arm_order=alternating-by-rep
+ARGV off repair='r -q -t18 -T18 f.par2' env=-
+ARGV fast repair='r -q -t18 -T18 --fast f.par2' env=-
+ARGV aa repair='r -q -t18 -T18 f.par2' env=-
+FIXTURE members=32 distinct_member_sha=32/32 bytes=4294967296 source_blocks=16384
+SLICE-PROBE index=5 unique=32/32
+GOLD p00.bin 42a7899f7ef578a7175bcf060b925706037fe03111f69414893c2432aeabc66c
+GOLD p01.bin a30dfecc15d9c0a88e3619d7d9ab34d761e1bd5425d1cfdd0f1a58167fd3542d
+GOLD p02.bin 66132e09c2e81c55437781a3c531f3926ffdc4ac1639333d933d5ae00c1e9b82
+GOLD p03.bin e5fd8692e25d3173317acc3ab283d49351b43d17d62264aee6083aca3c59c0db
+GOLD p04.bin 71b0813a9783c7bad2a86edb1f87a1d48f091cc886c7c27cbe542d7efadf04f4
+GOLD p05.bin 0bdaac82f33e2292f001cdf60cd0290a879b5ed7d8109e62496c2af1a83c476d
+GOLD p06.bin 7ca4689d034cff5510690a06aa4a6c9e3e013d90cd79eaf49a81c04542b2a607
+GOLD p07.bin 343a3dfd9539af840eb5e4b3f9ab3585898cb45ddea99be6d02be8ece650fdaa
+GOLD p08.bin 8956c35951331ae3139074c4e86a42610296d2aded00ed4c5e881da9e139ca72
+GOLD p09.bin e7623b2c95588e472d18c79e8d0137ef48a64998dced0b058f9ee687b87801a0
+GOLD p10.bin 4421311f8eaf09d195b9156c451dc745022566de722b3560ba74bbf631422367
+GOLD p11.bin d8bbf7118b230ed76edd9414388e7896334103ff87943dadb6ed8589dba7ba31
+GOLD p12.bin 79d83c52ba21b361314404cd0857d6d2fe2b4fb131190f8ffa48264068f26bf5
+GOLD p13.bin aeff90f1269aef5677606198464cf5b1954a6c3fab6ba9939afba82c0819ac54
+GOLD p14.bin 3369c27ab2f37dd77049e5188a8ca1cc9773671127f12e9990460980dc7be8ec
+GOLD p15.bin 2903d4fca15a4ebd4fffbed96272ed774ae46d7d7d1de872fc498e301536fed1
+GOLD p16.bin 5da94b52a07cd9e34ebd0faa93465c19d479b5f71ba7f0f7c53919ca416a3c28
+GOLD p17.bin d0a2d72da2c46340d2a7153a03658cbc562783c9203c3214c5848119f2dd9849
+GOLD p18.bin 210a12c8caeadd7fe3f3a44c34e24c413af364c7d3ac154a5e65c14e170d3cdd
+GOLD p19.bin 74893fb2dce9cc88503018c696f868758bfddaec6a6d7336ff0b5b7bffaac533
+GOLD p20.bin 60f4bf814fcc5d090b402dc818c7b28b062ce533308e783c8886102a6aff7b07
+GOLD p21.bin 96e3f05880d255bc68e194396d41c22e897188292f41c304c8503a5ec4477636
+GOLD p22.bin 4c36523d79a8542fa8d06ad6dc75c4768d7d2a6915a3979a551f640584d14cd9
+GOLD p23.bin 7c5997db3d47fd302bdfda4a06ce647e427310a385c6f785ea279b6532b6799b
+GOLD p24.bin 54830bdb500c7d37e46f6239412cee70830a0ae6f36281f80099b33cab44f267
+GOLD p25.bin ffdf53b36035e0f0fc3f790853839091db81f0a9d2d29d9e7c03acd9913edbef
+GOLD p26.bin 482a8ad4dafe35d47004e7b334f175028542269052f0c4114cf937a2a2674007
+GOLD p27.bin 23460414e6277a4b8221af082e7f61bca010f4d2cfedb2d3f71ba392ef6fa75b
+GOLD p28.bin d079c585f577f685e0d91c242af066dd059eb68baff3c6887e96a6a43949c6eb
+GOLD p29.bin 8795db139295ef99ae39a14211b3c9115ace608f15c7e94547475b5500d80a55
+GOLD p30.bin 60c4643667936c8d916a4d324e1bdf847b8e383a349953b56e10a27357ab6b15
+GOLD p31.bin 3865f1f9559c3e9020d1d6eb49e6f57d55960a23e7c4e0eb9d41adbfefce8a7c
+CREATE tool=parfast rc=0 wall=3.086 cpu=45.213 peak_mb=9484.1 par2files=16 par2bytes=4331919556 errlen=0
+WARMUP-START 2026-09-11T13:32:04Z
+WARN-FOREIGN-CPU at=warm-off foreign_cpu=88% ceiling=180% top=[/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(61449)=14% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(61450)=14% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(61448)=14% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(61451)=12%]
+LEG round=jcross1 rep=0 m=64 arm=off wall=1.372 cpu=20.697 cpu_over_wall=15.09 peak_mb=4204.6 rc=0 restored=32/32 damaged_members=25 blocks_written=64 strays=25 seed=20260911 stage1=no-label stage2=no-label foreign_cpu=57.0 errlen=939 ts=2026-09-11T13:32:06Z
+LEG round=jcross1 rep=0 m=64 arm=fast wall=1.375 cpu=20.721 cpu_over_wall=15.07 peak_mb=4219.6 rc=0 restored=32/32 damaged_members=25 blocks_written=64 strays=25 seed=20260911 stage1=no-label stage2=no-label foreign_cpu=1.7 errlen=1077 ts=2026-09-11T13:32:09Z
+LEG round=jcross1 rep=0 m=64 arm=aa wall=1.377 cpu=20.83 cpu_over_wall=15.13 peak_mb=4220.3 rc=0 restored=32/32 damaged_members=25 blocks_written=64 strays=25 seed=20260911 stage1=no-label stage2=no-label foreign_cpu=23.9 errlen=939 ts=2026-09-11T13:32:12Z
+WARMUP-END 2026-09-11T13:32:13Z
+WARN-FOREIGN-CPU at=r1-m256-off foreign_cpu=111% ceiling=180% top=[/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd(1312)=68% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(617)=13% /usr/libexec/spotlightknowledged.updater(1315)=12% /System/Library/CoreServices/NotificationCenter.app/Contents/MacOS/NotificationCenter(1306)=8%]
+LEG round=jcross1 rep=1 m=256 arm=off wall=2.376 cpu=37.786 cpu_over_wall=15.9 peak_mb=5393.8 rc=0 restored=32/32 damaged_members=32 blocks_written=256 strays=32 seed=20262704 stage1=no-label stage2=no-label foreign_cpu=110.7 errlen=1027 ts=2026-09-11T13:32:17Z
+LEG round=jcross1 rep=1 m=256 arm=fast wall=2.414 cpu=38.22 cpu_over_wall=15.83 peak_mb=5388.8 rc=0 restored=32/32 damaged_members=32 blocks_written=256 strays=32 seed=20262704 stage1=no-label stage2=no-label foreign_cpu=52.7 errlen=1166 ts=2026-09-11T13:32:21Z
+LEG round=jcross1 rep=1 m=256 arm=aa wall=2.405 cpu=38.234 cpu_over_wall=15.9 peak_mb=5397.6 rc=0 restored=32/32 damaged_members=32 blocks_written=256 strays=32 seed=20262704 stage1=no-label stage2=no-label foreign_cpu=9.1 errlen=1028 ts=2026-09-11T13:32:25Z
+LEG round=jcross1 rep=1 m=704 arm=off wall=2.789 cpu=43.02 cpu_over_wall=15.42 peak_mb=5573.7 rc=0 restored=32/32 damaged_members=32 blocks_written=704 strays=32 seed=20265840 stage1=no-label stage2=evaluate, 128 group(s) in tiles of 31, stripe 512w foreign_cpu=1.2 errlen=1150 ts=2026-09-11T13:32:30Z
+LEG round=jcross1 rep=1 m=704 arm=fast wall=2.807 cpu=43.864 cpu_over_wall=15.63 peak_mb=5567.3 rc=0 restored=32/32 damaged_members=32 blocks_written=704 strays=32 seed=20265840 stage1=whole/demand, stripe 512w stage2=FALLBACK foreign_cpu=64.6 errlen=1380 ts=2026-09-11T13:32:35Z
+LEG round=jcross1 rep=1 m=704 arm=aa wall=2.778 cpu=44.112 cpu_over_wall=15.88 peak_mb=5555.8 rc=0 restored=32/32 damaged_members=32 blocks_written=704 strays=32 seed=20265840 stage1=no-label stage2=evaluate, 128 group(s) in tiles of 31, stripe 512w foreign_cpu=8.9 errlen=1150 ts=2026-09-11T13:32:39Z
+LEG round=jcross1 rep=1 m=1024 arm=off wall=2.875 cpu=45.607 cpu_over_wall=15.86 peak_mb=5684.7 rc=0 restored=32/32 damaged_members=32 blocks_written=1024 strays=32 seed=20268080 stage1=no-label stage2=evaluate, 128 group(s) in tiles of 31, stripe 512w foreign_cpu=8.7 errlen=1157 ts=2026-09-11T13:32:44Z
+LEG round=jcross1 rep=1 m=1024 arm=fast wall=2.934 cpu=45.978 cpu_over_wall=15.67 peak_mb=5682.3 rc=0 restored=32/32 damaged_members=32 blocks_written=1024 strays=32 seed=20268080 stage1=whole/demand, stripe 512w stage2=FALLBACK foreign_cpu=16.6 errlen=1389 ts=2026-09-11T13:32:49Z
+LEG round=jcross1 rep=1 m=1024 arm=aa wall=2.981 cpu=47.265 cpu_over_wall=15.86 peak_mb=5679.9 rc=0 restored=32/32 damaged_members=32 blocks_written=1024 strays=32 seed=20268080 stage1=no-label stage2=evaluate, 128 group(s) in tiles of 31, stripe 512w foreign_cpu=6.0 errlen=1157 ts=2026-09-11T13:32:54Z
+LEG round=jcross1 rep=1 m=1536 arm=off wall=3.179 cpu=49.373 cpu_over_wall=15.53 peak_mb=5867.0 rc=0 restored=32/32 damaged_members=32 blocks_written=1536 strays=32 seed=20271664 stage1=no-label stage2=evaluate, 128 group(s) in tiles of 31, stripe 512w foreign_cpu=25.4 errlen=1158 ts=2026-09-11T13:33:00Z
+LEG round=jcross1 rep=1 m=1536 arm=fast wall=3.279 cpu=51.426 cpu_over_wall=15.68 peak_mb=5867.2 rc=0 restored=32/32 damaged_members=32 blocks_written=1536 strays=32 seed=20271664 stage1=whole/demand, stripe 256w stage2=FALLBACK foreign_cpu=8.2 errlen=1393 ts=2026-09-11T13:33:05Z
+LEG round=jcross1 rep=1 m=1536 arm=aa wall=3.256 cpu=50.92 cpu_over_wall=15.64 peak_mb=5873.7 rc=0 restored=32/32 damaged_members=32 blocks_written=1536 strays=32 seed=20271664 stage1=no-label stage2=evaluate, 128 group(s) in tiles of 31, stripe 512w foreign_cpu=4.4 errlen=1158 ts=2026-09-11T13:33:11Z
+LEG round=jcross1 rep=1 m=2048 arm=off wall=3.448 cpu=53.681 cpu_over_wall=15.57 peak_mb=6024.4 rc=0 restored=32/32 damaged_members=32 blocks_written=2048 strays=32 seed=20275248 stage1=no-label stage2=evaluate, 128 group(s) in tiles of 31, stripe 512w foreign_cpu=1.4 errlen=1161 ts=2026-09-11T13:33:17Z
+BOX-BUSY foreign_cpu=194% ceiling=180% cores=18 top=[/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd(1312)=194%]
+ABORT-LOAD at=r1-m2048-fast ts=2026-09-11T13:33:19Z
+RIG-LOCK-RELEASED <rig>/.parfast-rig.lock

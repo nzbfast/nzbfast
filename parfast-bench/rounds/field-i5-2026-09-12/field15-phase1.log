@@ -1,0 +1,94 @@
+﻿FIELD-PHASE-1 15% parity, all seven tools, one depth - and the calibration for phase 2
+GUARD-OK round=field15 pct=15 source_blocks=13990 recovery_blocks=2098 deepest_rung=1399
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=field pid=3324 started=2026-09-12T00:15:13.7158585Z
+FIELD-START 2026-09-12T00:15:13.7251981Z
+BOX host=intel-i5-10600kf cpu=Intel(R) Core(TM) i5-10600KF CPU @ 4.10GHz caption=Intel64 Family 6 Model 165 Stepping 5 cores=6 threads=12 ram_gb=63.9 os=Microsoft Windows 11 Pro build=10.0.26200 Dfree_gb=7108.2
+BIN parfast sha256=cae5a6f368af74f1eb31afa483eb935c663ea976ddd0eecb5b76e6c4487360e9 bytes=2596864 version=parfast version 1.5.0-beta.1 built from 8b0b67ec4d15
+BIN par2turbo sha256=36ce11d92c895a552485ba8cb1ad4b92ca62a00333f1aa6308daafbc371e69e9 bytes=1653248 version=par2cmdline-turbo version 1.5.0 built from ?
+BIN par2classic sha256=cbf0e53b209d7a410c79f995f9662baa1743d90378d84d943744573a49d36efb bytes=509440 version=par2cmdline version 1.4.0 built from ?
+BIN phpar2 sha256=8f17bbc944674f558f25eae7336775772996506f17c13bc196b2fa2ac0cdc7eb bytes=465920 version=Not enough command line arguments. built from ?
+BIN par2j64 sha256=8e75c2a3f256094cc0313f477b6e56e492cc7d258f9cb6b755bee98cf289620a bytes=416768 version=Parchive 2.0 client version 1.3.3.5 by Yutaka Sawada built from ?
+BIN parpar sha256=d2143cbd1ce0404ab82c2729256c91051cc1248adf099b25b1451b9f560cc431 bytes=22306336 version=Unknown option specified in `-VV` built from ?
+BIN rarpar sha256=8cae1ba313a167f2e888bb9ec7cc98ad1e380e930a6cfdfca5cde2c8cf05f4e2 bytes=9226752 version=rarpar 0.4.1 built from ?
+PROTOCOL slice=768000 redundancy_pct=15 source_blocks=13990 damage=delete-p00.bin missing_blocks=1399 reps=2 gate=sha256-all-members prewarm=full-read-of-work-dir
+FIXTURE members=10 distinct_member_sha=10/10 bytes=10737418240
+GOLD p00.bin 784E10F9FE8A6DF557891FE77D7463B3C3EC30668A6E9190413ACE883929E8A2
+GOLD p01.bin 427580D39068340A1A4683391B5CE621B61465BE3CCE59467D2B595464DBA289
+GOLD p02.bin 9C874271C023166E4C8A149CB58F5151E16801FCB5A96D0ED67F135CCAF561A4
+GOLD p03.bin 9794E8FBA5C555A7CFF08AF380DCFEA93CABA07C84E54789B0AB2D2E5F2B3CF2
+GOLD p04.bin 0A795B0471940005BDCF32E1B12905DDD37070A3B7367939A6D24AD09EBBF8AA
+GOLD p05.bin 76E334DC68D8592D2D62E73FC7EA708E74B1BF783C55176C6ABA016B6523BE51
+GOLD p06.bin A963DD4BA69AE9E161CF038564A70FE83141EA0DA27DA99052C006F4602979C6
+GOLD p07.bin 146457BF02A6CA615C0BF84542D678CF2C74159D6CE14A67DDF229AA86605779
+GOLD p08.bin 4D87BF03C8D6333BD0D88C9E2BC54F2296F96772DD225640CB0FFE4208B20E81
+GOLD p09.bin 6FEE4A4D667FC5B45997910871CBC94FD36EE62DC9D26B46859A45072BB2DDF8
+CREATE round=field15 rep=1 tool=parfast argv='c -q -t12 -T16 -s768000 -r15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=18.801 cpu=190.656 cpu_over_wall=10.14 peak_mb=11991.2 rc=0 par2files=13 par2bytes=1632770240 sources_intact=10/10 errlen=0 ts=2026-09-12T00:16:18.5697047Z
+CREATE round=field15 rep=1 tool=par2turbo argv='c -q -t12 -T16 -s768000 -r15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=153.545 cpu=1669.422 cpu_over_wall=10.87 peak_mb=1562.7 rc=0 par2files=13 par2bytes=1632770604 sources_intact=10/10 errlen=0 ts=2026-09-12T00:19:14.1638941Z
+CREATE round=field15 rep=1 tool=par2classic argv='c -q -s768000 -r15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=1807.583 cpu=19831.312 cpu_over_wall=10.97 peak_mb=1600.1 rc=0 par2files=13 par2bytes=1632770552 sources_intact=10/10 errlen=0 ts=2026-09-12T00:49:38.3623658Z
+CREATE round=field15 rep=1 tool=phpar2 argv='c -q -s768000 -r15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=1802.82 cpu=18969.328 cpu_over_wall=10.52 peak_mb=1600.4 rc=0 par2files=13 par2bytes=1632770448 sources_intact=10/10 errlen=0 ts=2026-09-12T01:19:57.3413309Z
+CREATE round=field15 rep=1 tool=par2j64 argv='c /ss768000 /rr15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=170.719 cpu=935.766 cpu_over_wall=5.48 peak_mb=11793.1 rc=0 par2files=2 par2bytes=1615842392 sources_intact=10/10 errlen=0 ts=2026-09-12T01:23:35.9481790Z
+CREATE round=field15 rep=1 tool=parpar argv='-q -s 768000b -r 15% -o f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=153.659 cpu=1694.656 cpu_over_wall=11.03 peak_mb=1632.3 rc=0 par2files=13 par2bytes=1629949600 sources_intact=10/10 errlen=0 ts=2026-09-12T01:26:28.2305655Z
+CREATE round=field15 rep=1 tool=rarpar argv='par create --quiet -s 768000 -r 15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=195.469 cpu=2089.391 cpu_over_wall=10.69 peak_mb=1623.4 rc=0 par2files=13 par2bytes=1632770136 sources_intact=10/10 errlen=0 ts=2026-09-12T01:29:59.4016207Z
+SET files=13 bytes=1632770240 written_by=parfast
+VERIFY round=field15 rep=1 tool=parfast argv='v -q -t12 -T16 f.par2' wall=1.684 cpu=15.781 cpu_over_wall=9.37 peak_mb=25.2 rc=0 intact=10/10 foreign_cpu=67.2 foreign_after=60.9 errlen=0 ts=2026-09-12T01:30:20.2446877Z
+VERIFY round=field15 rep=1 tool=par2turbo argv='v -q -t12 -T16 f.par2' wall=4.477 cpu=24.469 cpu_over_wall=5.47 peak_mb=14.9 rc=0 intact=10/10 foreign_cpu=54.7 foreign_after=57.8 errlen=0 ts=2026-09-12T01:30:48.6076640Z
+VERIFY round=field15 rep=1 tool=par2classic argv='v -q f.par2' wall=8.157 cpu=60.828 cpu_over_wall=7.46 peak_mb=25.6 rc=0 intact=10/10 foreign_cpu=81.2 foreign_after=81.2 errlen=0 ts=2026-09-12T01:31:13.3853989Z
+VERIFY round=field15 rep=1 tool=phpar2 argv='v -q f.par2' wall=52.041 cpu=51.953 cpu_over_wall=1 peak_mb=9 rc=0 intact=10/10 foreign_cpu=68.8 foreign_after=60.9 errlen=0 ts=2026-09-12T01:32:23.3180714Z
+VERIFY round=field15 rep=1 tool=par2j64 argv='v f.par2' wall=9.562 cpu=20.266 cpu_over_wall=2.12 peak_mb=11.7 rc=0 intact=10/10 foreign_cpu=57.8 foreign_after=57.8 errlen=0 ts=2026-09-12T01:32:50.0599973Z
+VERIFY round=field15 rep=1 tool=rarpar argv='par verify --quiet f.par2' wall=15.014 cpu=30.984 cpu_over_wall=2.06 peak_mb=14 rc=0 intact=10/10 foreign_cpu=62.5 foreign_after=57.8 errlen=0 ts=2026-09-12T01:33:21.5716414Z
+REPAIR round=field15 rep=1 m=1399 tool=parfast argv='r -q -t12 -T16 f.par2' blocks_written=1399 touched_members=10 wall=28.362 cpu=259.656 cpu_over_wall=9.16 peak_mb=10454.7 rc=0 restored=10/10 still_absent=0 strays=10 seed=20270705 foreign_cpu=98.4 foreign_after=81.2 errlen=0 ts=2026-09-12T01:34:31.4981972Z
+REPAIR round=field15 rep=1 m=1399 tool=par2turbo argv='r -q -t12 -T16 f.par2' blocks_written=1399 touched_members=10 wall=113.797 cpu=1210.25 cpu_over_wall=10.64 peak_mb=1089.4 rc=0 restored=10/10 still_absent=0 strays=10 seed=20270705 foreign_cpu=54.7 foreign_after=79.7 errlen=0 ts=2026-09-12T01:37:11.4472778Z
+REPAIR round=field15 rep=1 m=1399 tool=par2classic argv='r -q f.par2' blocks_written=1399 touched_members=10 wall=1263.388 cpu=12866.75 cpu_over_wall=10.18 peak_mb=1088.3 rc=0 restored=10/10 still_absent=0 strays=10 seed=20270705 foreign_cpu=67.2 foreign_after=184.4 errlen=0 ts=2026-09-12T01:59:00.9319801Z
+REPAIR round=field15 rep=1 m=1399 tool=phpar2 argv='r -q f.par2' blocks_written=1399 touched_members=10 wall=1236.552 cpu=11487.234 cpu_over_wall=9.29 peak_mb=1072.3 rc=0 restored=10/10 still_absent=0 strays=10 seed=20270705 foreign_cpu=57.8 foreign_after=17.2 errlen=0 ts=2026-09-12T02:20:22.3728925Z
+REPAIR round=field15 rep=1 m=1399 tool=par2j64 argv='r f.par2' blocks_written=1399 touched_members=10 wall=163.67 cpu=646.438 cpu_over_wall=3.95 peak_mb=11316.7 rc=16 restored=10/10 still_absent=0 strays=0 seed=20270705 foreign_cpu=6.2 foreign_after=35.9 errlen=0 ts=2026-09-12T02:23:47.4267892Z
+REPAIR round=field15 rep=1 m=1399 tool=rarpar argv='par repair --quiet f.par2' blocks_written=1399 touched_members=10 wall=132.657 cpu=1360.109 cpu_over_wall=10.25 peak_mb=104.6 rc=0 restored=10/10 still_absent=0 strays=0 seed=20270705 foreign_cpu=34.4 foreign_after=12.5 errlen=0 ts=2026-09-12T02:26:42.4328232Z
+FIELD-REP-END rep=1 2026-09-12T02:26:42.4328232Z
+CREATE round=field15 rep=2 tool=parfast argv='c -q -t12 -T16 -s768000 -r15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=18.031 cpu=191.516 cpu_over_wall=10.62 peak_mb=11985.3 rc=0 par2files=13 par2bytes=1632770240 sources_intact=10/10 errlen=0 ts=2026-09-12T02:27:15.5220674Z
+CREATE round=field15 rep=2 tool=par2turbo argv='c -q -t12 -T16 -s768000 -r15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=138.578 cpu=1619.703 cpu_over_wall=11.69 peak_mb=1562.9 rc=0 par2files=13 par2bytes=1632770604 sources_intact=10/10 errlen=0 ts=2026-09-12T02:29:48.9592467Z
+CREATE round=field15 rep=2 tool=par2classic argv='c -q -s768000 -r15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=1463.861 cpu=17355.641 cpu_over_wall=11.86 peak_mb=1600.1 rc=0 par2files=13 par2bytes=1632770552 sources_intact=10/10 errlen=0 ts=2026-09-12T02:54:28.1113512Z
+CREATE round=field15 rep=2 tool=phpar2 argv='c -q -s768000 -r15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=2112.126 cpu=24471.312 cpu_over_wall=11.59 peak_mb=1600.4 rc=0 par2files=13 par2bytes=1632770448 sources_intact=10/10 errlen=0 ts=2026-09-12T03:29:55.4595851Z
+CREATE round=field15 rep=2 tool=par2j64 argv='c /ss768000 /rr15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=155.442 cpu=860.953 cpu_over_wall=5.54 peak_mb=11793.2 rc=0 par2files=2 par2bytes=1615842392 sources_intact=10/10 errlen=0 ts=2026-09-12T03:32:45.4729650Z
+CREATE round=field15 rep=2 tool=parpar argv='-q -s 768000b -r 15% -o f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=140.422 cpu=1645.375 cpu_over_wall=11.72 peak_mb=1632.1 rc=0 par2files=13 par2bytes=1629949600 sources_intact=10/10 errlen=0 ts=2026-09-12T03:35:21.6124706Z
+CREATE round=field15 rep=2 tool=rarpar argv='par create --quiet -s 768000 -r 15 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=159.408 cpu=1759.703 cpu_over_wall=11.04 peak_mb=1623.4 rc=0 par2files=13 par2bytes=1632770136 sources_intact=10/10 errlen=0 ts=2026-09-12T03:38:15.5848255Z
+VERIFY round=field15 rep=2 tool=parfast argv='v -q -t12 -T16 f.par2' wall=1.691 cpu=15.672 cpu_over_wall=9.27 peak_mb=25.3 rc=0 intact=10/10 foreign_cpu=17.2 foreign_after=9.4 errlen=0 ts=2026-09-12T03:38:34.4904369Z
+VERIFY round=field15 rep=2 tool=par2turbo argv='v -q -t12 -T16 f.par2' wall=4.206 cpu=22.906 cpu_over_wall=5.45 peak_mb=14.9 rc=0 intact=10/10 foreign_cpu=3.1 foreign_after=20.3 errlen=0 ts=2026-09-12T03:38:54.8076338Z
+VERIFY round=field15 rep=2 tool=par2classic argv='v -q f.par2' wall=7.947 cpu=59.844 cpu_over_wall=7.53 peak_mb=25.7 rc=0 intact=10/10 foreign_cpu=18.8 foreign_after=21.9 errlen=0 ts=2026-09-12T03:39:22.2331037Z
+VERIFY round=field15 rep=2 tool=phpar2 argv='v -q f.par2' wall=50.728 cpu=50.688 cpu_over_wall=1 peak_mb=9 rc=0 intact=10/10 foreign_cpu=17.2 foreign_after=29.7 errlen=0 ts=2026-09-12T03:40:28.5762557Z
+VERIFY round=field15 rep=2 tool=par2j64 argv='v f.par2' wall=9.303 cpu=19.578 cpu_over_wall=2.1 peak_mb=11.7 rc=0 intact=10/10 foreign_cpu=12.5 foreign_after=14.1 errlen=0 ts=2026-09-12T03:40:53.5178724Z
+VERIFY round=field15 rep=2 tool=rarpar argv='par verify --quiet f.par2' wall=14.431 cpu=29.094 cpu_over_wall=2.02 peak_mb=14 rc=0 intact=10/10 foreign_cpu=12.5 foreign_after=29.7 errlen=0 ts=2026-09-12T03:41:24.0208785Z
+REPAIR round=field15 rep=2 m=1399 tool=parfast argv='r -q -t12 -T16 f.par2' blocks_written=1399 touched_members=10 wall=25.047 cpu=248.562 cpu_over_wall=9.92 peak_mb=10465.7 rc=0 restored=10/10 still_absent=0 strays=10 seed=20270706 foreign_cpu=7.8 foreign_after=23.4 errlen=0 ts=2026-09-12T03:42:29.2411227Z
+REPAIR round=field15 rep=2 m=1399 tool=par2turbo argv='r -q -t12 -T16 f.par2' blocks_written=1399 touched_members=10 wall=102.291 cpu=1165.547 cpu_over_wall=11.39 peak_mb=1089.5 rc=0 restored=10/10 still_absent=0 strays=10 seed=20270706 foreign_cpu=26.6 foreign_after=26.6 errlen=0 ts=2026-09-12T03:44:55.5112395Z
+REPAIR round=field15 rep=2 m=1399 tool=par2classic argv='r -q f.par2' blocks_written=1399 touched_members=10 wall=1063.477 cpu=11426.25 cpu_over_wall=10.74 peak_mb=1088.2 rc=0 restored=10/10 still_absent=0 strays=10 seed=20270706 foreign_cpu=17.2 foreign_after=6.2 errlen=0 ts=2026-09-12T04:03:19.6384733Z
+REPAIR round=field15 rep=2 m=1399 tool=phpar2 argv='r -q f.par2' blocks_written=1399 touched_members=10 wall=1210.586 cpu=11941.031 cpu_over_wall=9.86 peak_mb=1072.3 rc=0 restored=10/10 still_absent=0 strays=10 seed=20270706 foreign_cpu=28.1 foreign_after=4.7 errlen=0 ts=2026-09-12T04:24:11.4699875Z
+REPAIR round=field15 rep=2 m=1399 tool=par2j64 argv='r f.par2' blocks_written=1399 touched_members=10 wall=164.243 cpu=651.719 cpu_over_wall=3.97 peak_mb=11316.8 rc=16 restored=10/10 still_absent=0 strays=0 seed=20270706 foreign_cpu=6.2 foreign_after=34.4 errlen=0 ts=2026-09-12T04:27:35.0451866Z
+REPAIR round=field15 rep=2 m=1399 tool=rarpar argv='par repair --quiet f.par2' blocks_written=1399 touched_members=10 wall=146.115 cpu=1512.719 cpu_over_wall=10.35 peak_mb=104.6 rc=0 restored=10/10 still_absent=0 strays=0 seed=20270706 foreign_cpu=15.6 foreign_after=14.1 errlen=0 ts=2026-09-12T04:30:43.1623827Z
+FIELD-REP-END rep=2 2026-09-12T04:30:43.1623827Z
+FIELD-END 2026-09-12T04:30:44.3896492Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+FIELD-CALIBRATION none found - phase 2 will attempt every create unbudgeted
+FIELD-PHASE-2 100% parity, depths to 13,990; the two slow tools stop at 5,500 with one repetition
+GUARD-OK round=field100 pct=100 source_blocks=13990 recovery_blocks=13990 deepest_rung=13990
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=field pid=3324 started=2026-09-12T04:30:44.4599950Z
+FIELD-START 2026-09-12T04:30:44.4610297Z
+BOX host=intel-i5-10600kf cpu=Intel(R) Core(TM) i5-10600KF CPU @ 4.10GHz caption=Intel64 Family 6 Model 165 Stepping 5 cores=6 threads=12 ram_gb=63.9 os=Microsoft Windows 11 Pro build=10.0.26200 Dfree_gb=7095.1
+BIN parfast sha256=cae5a6f368af74f1eb31afa483eb935c663ea976ddd0eecb5b76e6c4487360e9 bytes=2596864 version=parfast version 1.5.0-beta.1 built from 8b0b67ec4d15
+BIN par2turbo sha256=36ce11d92c895a552485ba8cb1ad4b92ca62a00333f1aa6308daafbc371e69e9 bytes=1653248 version=par2cmdline-turbo version 1.5.0 built from ?
+BIN par2classic sha256=cbf0e53b209d7a410c79f995f9662baa1743d90378d84d943744573a49d36efb bytes=509440 version=par2cmdline version 1.4.0 built from ?
+BIN phpar2 sha256=8f17bbc944674f558f25eae7336775772996506f17c13bc196b2fa2ac0cdc7eb bytes=465920 version=Not enough command line arguments. built from ?
+BIN par2j64 sha256=8e75c2a3f256094cc0313f477b6e56e492cc7d258f9cb6b755bee98cf289620a bytes=416768 version=Parchive 2.0 client version 1.3.3.5 by Yutaka Sawada built from ?
+BIN parpar sha256=d2143cbd1ce0404ab82c2729256c91051cc1248adf099b25b1451b9f560cc431 bytes=22306336 version=Unknown option specified in `-VV` built from ?
+BIN rarpar sha256=8cae1ba313a167f2e888bb9ec7cc98ad1e380e930a6cfdfca5cde2c8cf05f4e2 bytes=9226752 version=rarpar 0.4.1 built from ?
+PROTOCOL slice=768000 redundancy_pct=100 source_blocks=13990 damage=delete-p00.bin missing_blocks=1399 reps=2 gate=sha256-all-members prewarm=full-read-of-work-dir
+FIXTURE members=10 distinct_member_sha=10/10 bytes=10737418240
+GOLD p00.bin 784E10F9FE8A6DF557891FE77D7463B3C3EC30668A6E9190413ACE883929E8A2
+GOLD p01.bin 427580D39068340A1A4683391B5CE621B61465BE3CCE59467D2B595464DBA289
+GOLD p02.bin 9C874271C023166E4C8A149CB58F5151E16801FCB5A96D0ED67F135CCAF561A4
+GOLD p03.bin 9794E8FBA5C555A7CFF08AF380DCFEA93CABA07C84E54789B0AB2D2E5F2B3CF2
+GOLD p04.bin 0A795B0471940005BDCF32E1B12905DDD37070A3B7367939A6D24AD09EBBF8AA
+GOLD p05.bin 76E334DC68D8592D2D62E73FC7EA708E74B1BF783C55176C6ABA016B6523BE51
+GOLD p06.bin A963DD4BA69AE9E161CF038564A70FE83141EA0DA27DA99052C006F4602979C6
+GOLD p07.bin 146457BF02A6CA615C0BF84542D678CF2C74159D6CE14A67DDF229AA86605779
+GOLD p08.bin 4D87BF03C8D6333BD0D88C9E2BC54F2296F96772DD225640CB0FFE4208B20E81
+GOLD p09.bin 6FEE4A4D667FC5B45997910871CBC94FD36EE62DC9D26B46859A45072BB2DDF8
+CREATE round=field100 rep=1 tool=parfast argv='c -q -t12 -T16 -s768000 -r100 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=32.552 cpu=267.719 cpu_over_wall=8.22 peak_mb=11669.7 rc=0 par2files=15 par2bytes=10774894700 sources_intact=10/10 errlen=0 ts=2026-09-12T04:32:02.1009370Z
+CREATE round=field100 rep=1 tool=par2turbo argv='c -q -t12 -T16 -s768000 -r100 f.par2 p00.bin p01.bin p02.bin p03.bin p04.bin p05.bin p06.bin p07.bin p08.bin p09.bin' wall=919.797 cpu=10720.328 cpu_over_wall=11.66 peak_mb=8184.3 rc=0 par2files=15 par2bytes=10774895120 sources_intact=10/10 errlen=0 ts=2026-09-12T04:48:14.7783061Z

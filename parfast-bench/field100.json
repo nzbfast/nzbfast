@@ -1,0 +1,59 @@
+{
+ "box": "Intel i5-10600KF, 6 cores / 12 threads, 64 GB, Windows 11",
+ "set": "10 GiB in 10 files, 100% parity, 13,990 source and 13,990 recovery blocks",
+ "rungs": [
+  {
+   "m": 1399,
+   "parfast": 28.5,
+   "parfast_n": 1,
+   "par2turbo": 113.0,
+   "par2turbo_n": 1,
+   "par2classic": 1130.2,
+   "par2classic_n": 1,
+   "phpar2": 1166.2,
+   "phpar2_n": 1,
+   "par2j64": 176.3,
+   "par2j64_n": 1,
+   "rarpar": 118.0,
+   "rarpar_n": 1
+  },
+  {
+   "m": 2098,
+   "parfast": 32.1,
+   "parfast_n": 1,
+   "par2turbo": 159.0,
+   "par2turbo_n": 1,
+   "par2classic": 1635.6,
+   "par2classic_n": 1,
+   "phpar2": 1794.8,
+   "phpar2_n": 1,
+   "par2j64": 238.6,
+   "par2j64_n": 1,
+   "rarpar": 165.4,
+   "rarpar_n": 1
+  },
+  {
+   "m": 4096,
+   "parfast": 44.1,
+   "parfast_n": 1,
+   "par2turbo": 292.8,
+   "par2turbo_n": 1,
+   "par2classic": 3571.5,
+   "par2classic_n": 1,
+   "phpar2": 4177.3,
+   "phpar2_n": 1,
+   "par2j64": 427.8,
+   "par2j64_n": 1,
+   "rarpar": 386.8,
+   "rarpar_n": 1
+  }
+ ],
+ "tools": [
+  "parfast",
+  "par2turbo",
+  "par2classic",
+  "phpar2",
+  "par2j64",
+  "rarpar"
+ ]
+}

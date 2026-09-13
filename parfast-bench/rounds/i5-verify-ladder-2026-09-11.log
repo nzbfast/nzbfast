@@ -1,0 +1,135 @@
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=vfy pid=7596 started=2026-09-11T04:13:57.2584638Z
+VFY-START 2026-09-11T04:13:57.2684370Z
+BOX host=intel-i5-10600kf cpu=Intel(R) Core(TM) i5-10600KF CPU @ 4.10GHz caption=Intel64 Family 6 Model 165 Stepping 5 cores=6 threads=12 ram_gb=63.9 os=Microsoft Windows 11 Pro build=10.0.26200 Dfree_gb=7197.5
+BIN parfast sha256=cae5a6f368af74f1eb31afa483eb935c663ea976ddd0eecb5b76e6c4487360e9 bytes=2596864 version=parfast version 1.5.0-beta.1 built from 8b0b67ec4d15
+BIN par2turbo sha256=36ce11d92c895a552485ba8cb1ad4b92ca62a00333f1aa6308daafbc371e69e9 bytes=1653248 version=par2cmdline-turbo version 1.5.0 built from ?
+BIN par2classic sha256=cbf0e53b209d7a410c79f995f9662baa1743d90378d84d943744573a49d36efb bytes=509440 version=par2cmdline version 1.4.0 built from ?
+BIN phpar2 sha256=8f17bbc944674f558f25eae7336775772996506f17c13bc196b2fa2ac0cdc7eb bytes=465920 version=Not enough command line arguments. built from ?
+BIN par2j64 sha256=8e75c2a3f256094cc0313f477b6e56e492cc7d258f9cb6b755bee98cf289620a bytes=416768 version=Parchive 2.0 client version 1.3.3.5 by Yutaka Sawada built from ?
+BIN rarpar sha256=8cae1ba313a167f2e888bb9ec7cc98ad1e380e930a6cfdfca5cde2c8cf05f4e2 bytes=9226752 version=rarpar 0.4.1 built from ?
+PROTOCOL sizes_gib=1,10,20,40,80 redundancy_pct=15 reps=3 verb=verify set_written_by=parfast shape_control_at_gib=20
+PAYLOAD-READY members=80 bytes=85899345920
+VSET label=n1 size_gib=1 files=1 slice=768000 blocks=1399 create_wall=2.29 create_rc=0 recovery_mb=155 par2files=9
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=1 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=1.364 cpu=1.328 cpu_over_wall=0.97 peak_mb=5.4 rc=0 errlen=0 ts=2026-09-11T04:14:07.8944277Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=1 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=1.61 cpu=1.594 cpu_over_wall=0.99 peak_mb=5.4 rc=0 errlen=0 ts=2026-09-11T04:14:11.6385550Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=1 tool=par2classic argv='v -q pub.par2' wall=1.014 cpu=7.547 cpu_over_wall=7.44 peak_mb=22.5 rc=0 errlen=0 ts=2026-09-11T04:14:14.8122184Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=1 tool=phpar2 argv='v -q pub.par2' wall=5.512 cpu=5.5 cpu_over_wall=1 peak_mb=6.6 rc=0 errlen=0 ts=2026-09-11T04:14:22.4734305Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=1 tool=par2j64 argv='v pub.par2' wall=1.979 cpu=1.969 cpu_over_wall=0.99 peak_mb=10.4 rc=0 errlen=0 ts=2026-09-11T04:14:26.5895847Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=1 tool=rarpar argv='par verify --quiet pub.par2' wall=2.65 cpu=2.609 cpu_over_wall=0.98 peak_mb=6.8 rc=0 errlen=0 ts=2026-09-11T04:14:31.3356059Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=2 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=1.368 cpu=1.344 cpu_over_wall=0.98 peak_mb=5.4 rc=0 errlen=0 ts=2026-09-11T04:14:34.7991164Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=2 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=1.65 cpu=1.609 cpu_over_wall=0.98 peak_mb=5.4 rc=0 errlen=0 ts=2026-09-11T04:14:38.5488996Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=2 tool=par2classic argv='v -q pub.par2' wall=1.022 cpu=7.484 cpu_over_wall=7.32 peak_mb=22.5 rc=0 errlen=0 ts=2026-09-11T04:14:41.7257002Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=2 tool=phpar2 argv='v -q pub.par2' wall=5.57 cpu=5.531 cpu_over_wall=0.99 peak_mb=6.6 rc=0 errlen=0 ts=2026-09-11T04:14:49.4221845Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=2 tool=par2j64 argv='v pub.par2' wall=1.978 cpu=1.969 cpu_over_wall=1 peak_mb=10.4 rc=0 errlen=0 ts=2026-09-11T04:14:53.5116206Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=2 tool=rarpar argv='par verify --quiet pub.par2' wall=2.663 cpu=2.672 cpu_over_wall=1 peak_mb=6.9 rc=0 errlen=0 ts=2026-09-11T04:14:58.3132843Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=3 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=1.413 cpu=1.391 cpu_over_wall=0.98 peak_mb=5.5 rc=0 errlen=0 ts=2026-09-11T04:15:01.8422191Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=3 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=1.637 cpu=1.625 cpu_over_wall=0.99 peak_mb=5.4 rc=0 errlen=0 ts=2026-09-11T04:15:05.6095269Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=3 tool=par2classic argv='v -q pub.par2' wall=1.016 cpu=7.594 cpu_over_wall=7.47 peak_mb=22.6 rc=0 errlen=0 ts=2026-09-11T04:15:08.7483644Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=3 tool=phpar2 argv='v -q pub.par2' wall=5.55 cpu=5.516 cpu_over_wall=0.99 peak_mb=6.6 rc=0 errlen=0 ts=2026-09-11T04:15:16.4328686Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=3 tool=par2j64 argv='v pub.par2' wall=1.979 cpu=1.922 cpu_over_wall=0.97 peak_mb=10.4 rc=0 errlen=0 ts=2026-09-11T04:15:20.5225991Z
+VERIFY round=i5vfy label=n1 size_gib=1 files=1 slice=768000 rep=3 tool=rarpar argv='par verify --quiet pub.par2' wall=2.669 cpu=2.672 cpu_over_wall=1 peak_mb=6.8 rc=0 errlen=0 ts=2026-09-11T04:15:25.2942249Z
+SIZE-DONE 1 2026-09-11T04:15:25.2974048Z
+VSET label=n10 size_gib=10 files=10 slice=768000 blocks=13990 create_wall=19.562 create_rc=0 recovery_mb=1557 par2files=13
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=1 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=1.676 cpu=15.953 cpu_over_wall=9.52 peak_mb=25.1 rc=0 errlen=0 ts=2026-09-11T04:15:59.5717878Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=1 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=4.265 cpu=24.75 cpu_over_wall=5.8 peak_mb=14.9 rc=0 errlen=0 ts=2026-09-11T04:16:05.9658665Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=1 tool=par2classic argv='v -q pub.par2' wall=8.22 cpu=60.703 cpu_over_wall=7.38 peak_mb=25 rc=0 errlen=0 ts=2026-09-11T04:16:16.3022386Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=1 tool=phpar2 argv='v -q pub.par2' wall=52.663 cpu=52.25 cpu_over_wall=0.99 peak_mb=9 rc=0 errlen=0 ts=2026-09-11T04:17:11.1144585Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=1 tool=par2j64 argv='v pub.par2' wall=9.765 cpu=20.766 cpu_over_wall=2.13 peak_mb=11.8 rc=0 errlen=0 ts=2026-09-11T04:17:22.9833472Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=1 tool=rarpar argv='par verify --quiet pub.par2' wall=15.105 cpu=30.984 cpu_over_wall=2.05 peak_mb=14 rc=0 errlen=0 ts=2026-09-11T04:17:40.1991953Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=2 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=1.681 cpu=15.984 cpu_over_wall=9.51 peak_mb=25.2 rc=0 errlen=0 ts=2026-09-11T04:17:44.0351275Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=2 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=4.325 cpu=24.75 cpu_over_wall=5.72 peak_mb=14.9 rc=0 errlen=0 ts=2026-09-11T04:17:50.4867879Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=2 tool=par2classic argv='v -q pub.par2' wall=8.185 cpu=60.5 cpu_over_wall=7.39 peak_mb=25.7 rc=0 errlen=0 ts=2026-09-11T04:18:00.8094514Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=2 tool=phpar2 argv='v -q pub.par2' wall=52.587 cpu=52.359 cpu_over_wall=1 peak_mb=9 rc=0 errlen=0 ts=2026-09-11T04:18:55.5358649Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=2 tool=par2j64 argv='v pub.par2' wall=9.844 cpu=20.906 cpu_over_wall=2.12 peak_mb=11.8 rc=0 errlen=0 ts=2026-09-11T04:19:07.4964153Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=2 tool=rarpar argv='par verify --quiet pub.par2' wall=15.197 cpu=31.078 cpu_over_wall=2.05 peak_mb=14 rc=0 errlen=0 ts=2026-09-11T04:19:24.8053140Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=3 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=1.676 cpu=16 cpu_over_wall=9.55 peak_mb=25.1 rc=0 errlen=0 ts=2026-09-11T04:19:28.5876003Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=3 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=4.31 cpu=24.359 cpu_over_wall=5.65 peak_mb=14.5 rc=0 errlen=0 ts=2026-09-11T04:19:35.0156436Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=3 tool=par2classic argv='v -q pub.par2' wall=8.224 cpu=60.703 cpu_over_wall=7.38 peak_mb=25.1 rc=0 errlen=0 ts=2026-09-11T04:19:45.3784326Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=3 tool=phpar2 argv='v -q pub.par2' wall=52.417 cpu=52.219 cpu_over_wall=1 peak_mb=9 rc=0 errlen=0 ts=2026-09-11T04:20:39.9343235Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=3 tool=par2j64 argv='v pub.par2' wall=9.752 cpu=20.812 cpu_over_wall=2.13 peak_mb=11.8 rc=0 errlen=0 ts=2026-09-11T04:20:51.8389891Z
+VERIFY round=i5vfy label=n10 size_gib=10 files=10 slice=768000 rep=3 tool=rarpar argv='par verify --quiet pub.par2' wall=15.106 cpu=30.812 cpu_over_wall=2.04 peak_mb=14 rc=0 errlen=0 ts=2026-09-11T04:21:09.0810404Z
+SIZE-DONE 10 2026-09-11T04:21:09.0820481Z
+VSET label=n20 size_gib=20 files=20 slice=768000 blocks=27980 create_wall=36.516 create_rc=0 recovery_mb=3121 par2files=14
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=1 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=3.671 cpu=31.891 cpu_over_wall=8.69 peak_mb=53.1 rc=0 errlen=0 ts=2026-09-11T04:22:11.9105773Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=1 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=8.726 cpu=52.375 cpu_over_wall=6 peak_mb=22.5 rc=0 errlen=0 ts=2026-09-11T04:22:22.7583802Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=1 tool=par2classic argv='v -q pub.par2' wall=16.5 cpu=120.672 cpu_over_wall=7.31 peak_mb=28 rc=0 errlen=0 ts=2026-09-11T04:22:41.3738641Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=1 tool=phpar2 argv='v -q pub.par2' wall=104.341 cpu=103.906 cpu_over_wall=1 peak_mb=11.6 rc=0 errlen=0 ts=2026-09-11T04:24:27.8643597Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=1 tool=par2j64 argv='v pub.par2' wall=17.984 cpu=41.859 cpu_over_wall=2.33 peak_mb=12.3 rc=0 errlen=0 ts=2026-09-11T04:24:47.9905709Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=1 tool=rarpar argv='par verify --quiet pub.par2' wall=30.323 cpu=62.328 cpu_over_wall=2.06 peak_mb=16 rc=0 errlen=0 ts=2026-09-11T04:25:20.4733582Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=2 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=3.73 cpu=32.281 cpu_over_wall=8.65 peak_mb=52.9 rc=0 errlen=0 ts=2026-09-11T04:25:26.3015434Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=2 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=8.777 cpu=51.859 cpu_over_wall=5.91 peak_mb=22.6 rc=0 errlen=0 ts=2026-09-11T04:25:37.1862829Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=2 tool=par2classic argv='v -q pub.par2' wall=16.455 cpu=121.609 cpu_over_wall=7.39 peak_mb=27.9 rc=0 errlen=0 ts=2026-09-11T04:25:55.7706494Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=2 tool=phpar2 argv='v -q pub.par2' wall=104.912 cpu=104.609 cpu_over_wall=1 peak_mb=11.6 rc=0 errlen=0 ts=2026-09-11T04:27:42.8156910Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=2 tool=par2j64 argv='v pub.par2' wall=17.881 cpu=41.859 cpu_over_wall=2.34 peak_mb=12.3 rc=0 errlen=0 ts=2026-09-11T04:28:02.8518014Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=2 tool=rarpar argv='par verify --quiet pub.par2' wall=30.216 cpu=62.312 cpu_over_wall=2.06 peak_mb=16 rc=0 errlen=0 ts=2026-09-11T04:28:35.2138719Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=3 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=3.463 cpu=32 cpu_over_wall=9.24 peak_mb=53 rc=0 errlen=0 ts=2026-09-11T04:28:40.8164393Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=3 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=8.787 cpu=51.938 cpu_over_wall=5.91 peak_mb=22.6 rc=0 errlen=0 ts=2026-09-11T04:28:51.7216046Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=3 tool=par2classic argv='v -q pub.par2' wall=16.542 cpu=121.781 cpu_over_wall=7.36 peak_mb=27.9 rc=0 errlen=0 ts=2026-09-11T04:29:10.3735086Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=3 tool=phpar2 argv='v -q pub.par2' wall=104.617 cpu=104.281 cpu_over_wall=1 peak_mb=11.6 rc=0 errlen=0 ts=2026-09-11T04:30:57.1976852Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=3 tool=par2j64 argv='v pub.par2' wall=18.089 cpu=42.266 cpu_over_wall=2.34 peak_mb=12.3 rc=0 errlen=0 ts=2026-09-11T04:31:17.4029182Z
+VERIFY round=i5vfy label=n20 size_gib=20 files=20 slice=768000 rep=3 tool=rarpar argv='par verify --quiet pub.par2' wall=30.099 cpu=62.156 cpu_over_wall=2.07 peak_mb=16 rc=0 errlen=0 ts=2026-09-11T04:31:49.6134513Z
+SIZE-DONE 20 2026-09-11T04:31:49.6134513Z
+VSET label=n40 size_gib=40 files=40 slice=1311044 blocks=32760 create_wall=708.543 create_rc=0 recovery_mb=6201 par2files=14
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=1 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=8.549 cpu=65.156 cpu_over_wall=7.62 peak_mb=66.6 rc=0 errlen=0 ts=2026-09-11T04:44:49.8767669Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=1 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=28.255 cpu=106.359 cpu_over_wall=3.76 peak_mb=31.9 rc=0 errlen=0 ts=2026-09-11T04:45:20.2485698Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=1 tool=par2classic argv='v -q pub.par2' wall=48.388 cpu=306.078 cpu_over_wall=6.33 peak_mb=41.3 rc=0 errlen=0 ts=2026-09-11T04:46:10.7651391Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=1 tool=phpar2 argv='v -q pub.par2' wall=264.459 cpu=218.984 cpu_over_wall=0.83 peak_mb=13.3 rc=0 errlen=0 ts=2026-09-11T04:50:37.3751518Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=1 tool=par2j64 argv='v pub.par2' wall=41.904 cpu=75.828 cpu_over_wall=1.81 peak_mb=12.4 rc=0 errlen=0 ts=2026-09-11T04:51:21.4079880Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=1 tool=rarpar argv='par verify --quiet pub.par2' wall=60.876 cpu=125.203 cpu_over_wall=2.06 peak_mb=19.5 rc=0 errlen=0 ts=2026-09-11T04:52:24.3999904Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=2 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=6.172 cpu=64.531 cpu_over_wall=10.46 peak_mb=66.8 rc=0 errlen=0 ts=2026-09-11T04:52:32.7064315Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=2 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=26.763 cpu=106.875 cpu_over_wall=3.99 peak_mb=31.9 rc=0 errlen=0 ts=2026-09-11T04:53:01.6242225Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=2 tool=par2classic argv='v -q pub.par2' wall=48.479 cpu=307.156 cpu_over_wall=6.34 peak_mb=41.3 rc=0 errlen=0 ts=2026-09-11T04:53:52.2265608Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=2 tool=phpar2 argv='v -q pub.par2' wall=264.614 cpu=216.203 cpu_over_wall=0.82 peak_mb=13.3 rc=0 errlen=0 ts=2026-09-11T04:58:19.0086543Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=2 tool=par2j64 argv='v pub.par2' wall=42.46 cpu=75.656 cpu_over_wall=1.78 peak_mb=12.4 rc=0 errlen=0 ts=2026-09-11T04:59:03.6284501Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=2 tool=rarpar argv='par verify --quiet pub.par2' wall=60.715 cpu=125.484 cpu_over_wall=2.07 peak_mb=19.5 rc=0 errlen=0 ts=2026-09-11T05:00:06.4802174Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=3 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=6.518 cpu=64.719 cpu_over_wall=9.93 peak_mb=66.6 rc=0 errlen=0 ts=2026-09-11T05:00:15.1290926Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=3 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=26.967 cpu=107.578 cpu_over_wall=3.99 peak_mb=31.9 rc=0 errlen=0 ts=2026-09-11T05:00:44.2278439Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=3 tool=par2classic argv='v -q pub.par2' wall=48.438 cpu=306.703 cpu_over_wall=6.33 peak_mb=41.2 rc=0 errlen=0 ts=2026-09-11T05:01:34.8008581Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=3 tool=phpar2 argv='v -q pub.par2' wall=264.64 cpu=217.547 cpu_over_wall=0.82 peak_mb=13.3 rc=0 errlen=0 ts=2026-09-11T05:06:01.5847238Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=3 tool=par2j64 argv='v pub.par2' wall=41.766 cpu=75.156 cpu_over_wall=1.8 peak_mb=12.4 rc=0 errlen=0 ts=2026-09-11T05:06:45.4801330Z
+VERIFY round=i5vfy label=n40 size_gib=40 files=40 slice=1311044 rep=3 tool=rarpar argv='par verify --quiet pub.par2' wall=60.91 cpu=125.594 cpu_over_wall=2.06 peak_mb=19.5 rc=0 errlen=0 ts=2026-09-11T05:07:48.5154624Z
+SIZE-DONE 40 2026-09-11T05:07:48.5164654Z
+VSET label=n80 size_gib=80 files=80 slice=2625288 blocks=32720 create_wall=1179.672 create_rc=0 recovery_mb=12345 par2files=14
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=1 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=127.591 cpu=122.25 cpu_over_wall=0.96 peak_mb=66.5 rc=0 errlen=0 ts=2026-09-11T05:33:01.3135589Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=1 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=141.142 cpu=162.844 cpu_over_wall=1.15 peak_mb=52 rc=0 errlen=0 ts=2026-09-11T05:35:24.6268088Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=1 tool=par2classic argv='v -q pub.par2' wall=163.457 cpu=854.906 cpu_over_wall=5.23 peak_mb=71.5 rc=0 errlen=0 ts=2026-09-11T05:38:10.2583578Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=1 tool=phpar2 argv='v -q pub.par2' wall=600.192 cpu=449.906 cpu_over_wall=0.75 peak_mb=16.1 rc=0 errlen=0 ts=2026-09-11T05:48:12.6165521Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=1 tool=par2j64 argv='v pub.par2' wall=126.087 cpu=151.766 cpu_over_wall=1.2 peak_mb=12.5 rc=0 errlen=0 ts=2026-09-11T05:50:20.9047368Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=1 tool=rarpar argv='par verify --quiet pub.par2' wall=294.723 cpu=243.922 cpu_over_wall=0.83 peak_mb=19.7 rc=0 errlen=0 ts=2026-09-11T05:55:17.7943537Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=2 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=110.226 cpu=122.312 cpu_over_wall=1.11 peak_mb=66.6 rc=0 errlen=0 ts=2026-09-11T05:57:10.1905541Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=2 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=127.591 cpu=156.547 cpu_over_wall=1.23 peak_mb=52 rc=0 errlen=0 ts=2026-09-11T05:59:19.9403586Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=2 tool=par2classic argv='v -q pub.par2' wall=149.155 cpu=879.703 cpu_over_wall=5.9 peak_mb=72.2 rc=0 errlen=0 ts=2026-09-11T06:01:51.2442759Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=2 tool=phpar2 argv='v -q pub.par2' wall=576.08 cpu=454.609 cpu_over_wall=0.79 peak_mb=16.1 rc=0 errlen=0 ts=2026-09-11T06:11:29.4935646Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=2 tool=par2j64 argv='v pub.par2' wall=112.221 cpu=150.188 cpu_over_wall=1.34 peak_mb=12.5 rc=0 errlen=0 ts=2026-09-11T06:13:23.8962785Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=2 tool=rarpar argv='par verify --quiet pub.par2' wall=264.893 cpu=243.531 cpu_over_wall=0.92 peak_mb=19.7 rc=0 errlen=0 ts=2026-09-11T06:17:50.9406785Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=3 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=108.532 cpu=122.75 cpu_over_wall=1.13 peak_mb=66.6 rc=0 errlen=0 ts=2026-09-11T06:19:41.6367653Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=3 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=125.783 cpu=157.75 cpu_over_wall=1.25 peak_mb=52.1 rc=0 errlen=0 ts=2026-09-11T06:21:49.5699090Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=3 tool=par2classic argv='v -q pub.par2' wall=148.957 cpu=860.266 cpu_over_wall=5.78 peak_mb=71.5 rc=0 errlen=0 ts=2026-09-11T06:24:20.6838073Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=3 tool=phpar2 argv='v -q pub.par2' wall=575.786 cpu=451.453 cpu_over_wall=0.78 peak_mb=16.1 rc=0 errlen=0 ts=2026-09-11T06:33:58.6293274Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=3 tool=par2j64 argv='v pub.par2' wall=110.9 cpu=150.469 cpu_over_wall=1.36 peak_mb=12.5 rc=0 errlen=0 ts=2026-09-11T06:35:51.7050703Z
+VERIFY round=i5vfy label=n80 size_gib=80 files=80 slice=2625288 rep=3 tool=rarpar argv='par verify --quiet pub.par2' wall=265.727 cpu=245.594 cpu_over_wall=0.92 peak_mb=19.7 rc=0 errlen=0 ts=2026-09-11T06:40:19.6002279Z
+SIZE-DONE 80 2026-09-11T06:40:19.6012333Z
+SHAPE-FIXTURE one_file_bytes=21474836480 built_from=p00..p19 (the same bytes as the 20 x 1 GiB set)
+VSET label=one20 size_gib=20 files=1 slice=768000 blocks=27980 create_wall=36.906 create_rc=0 recovery_mb=3118 par2files=14
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=1 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=23.382 cpu=27.891 cpu_over_wall=1.19 peak_mb=52.2 rc=0 errlen=0 ts=2026-09-11T06:42:22.1645555Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=1 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=32.248 cpu=31.953 cpu_over_wall=0.99 peak_mb=10.4 rc=0 errlen=0 ts=2026-09-11T06:42:56.5561977Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=1 tool=par2classic argv='v -q pub.par2' wall=18.93 cpu=148.062 cpu_over_wall=7.82 peak_mb=27.9 rc=0 errlen=0 ts=2026-09-11T06:43:17.6194284Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=1 tool=phpar2 argv='v -q pub.par2' wall=105.065 cpu=104.719 cpu_over_wall=1 peak_mb=11.6 rc=0 errlen=0 ts=2026-09-11T06:45:04.8340794Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=1 tool=par2j64 argv='v pub.par2' wall=39.284 cpu=39.031 cpu_over_wall=0.99 peak_mb=11.3 rc=0 errlen=0 ts=2026-09-11T06:45:46.2637343Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=1 tool=rarpar argv='par verify --quiet pub.par2' wall=53.449 cpu=52.938 cpu_over_wall=0.99 peak_mb=15.6 rc=0 errlen=0 ts=2026-09-11T06:46:41.8752445Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=2 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=23.615 cpu=28.406 cpu_over_wall=1.2 peak_mb=52.3 rc=0 errlen=0 ts=2026-09-11T06:47:07.6164722Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=2 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=32.423 cpu=32.281 cpu_over_wall=1 peak_mb=10.4 rc=0 errlen=0 ts=2026-09-11T06:47:42.1651623Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=2 tool=par2classic argv='v -q pub.par2' wall=18.941 cpu=149.625 cpu_over_wall=7.9 peak_mb=27.9 rc=0 errlen=0 ts=2026-09-11T06:48:03.2713212Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=2 tool=phpar2 argv='v -q pub.par2' wall=104.522 cpu=103.938 cpu_over_wall=0.99 peak_mb=11.6 rc=0 errlen=0 ts=2026-09-11T06:49:49.9353798Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=2 tool=par2j64 argv='v pub.par2' wall=39.075 cpu=38.953 cpu_over_wall=1 peak_mb=11.3 rc=0 errlen=0 ts=2026-09-11T06:50:31.1368254Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=2 tool=rarpar argv='par verify --quiet pub.par2' wall=53.276 cpu=53.031 cpu_over_wall=1 peak_mb=7.9 rc=0 errlen=0 ts=2026-09-11T06:51:26.5455369Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=3 tool=parfast argv='v -q -t12 -T16 pub.par2' wall=23.543 cpu=28.172 cpu_over_wall=1.2 peak_mb=52.3 rc=0 errlen=0 ts=2026-09-11T06:51:52.1949131Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=3 tool=par2turbo argv='v -q -t12 -T16 pub.par2' wall=32.161 cpu=31.875 cpu_over_wall=0.99 peak_mb=10.4 rc=0 errlen=0 ts=2026-09-11T06:52:26.4709227Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=3 tool=par2classic argv='v -q pub.par2' wall=18.917 cpu=150.469 cpu_over_wall=7.95 peak_mb=27.9 rc=0 errlen=0 ts=2026-09-11T06:52:47.5144656Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=3 tool=phpar2 argv='v -q pub.par2' wall=104.246 cpu=103.734 cpu_over_wall=1 peak_mb=11.6 rc=0 errlen=0 ts=2026-09-11T06:54:33.9235499Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=3 tool=par2j64 argv='v pub.par2' wall=39.29 cpu=39.141 cpu_over_wall=1 peak_mb=11.3 rc=0 errlen=0 ts=2026-09-11T06:55:15.3437022Z
+VERIFY round=i5vfy label=one20 size_gib=20 files=1 slice=768000 rep=3 tool=rarpar argv='par verify --quiet pub.par2' wall=53.112 cpu=52.875 cpu_over_wall=1 peak_mb=9.2 rc=0 errlen=0 ts=2026-09-11T06:56:10.5851422Z
+SHAPE-DONE 2026-09-11T06:56:10.5861469Z
+VFY-END 2026-09-11T06:56:13.0441973Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+

@@ -211,7 +211,7 @@
   <div class="wrap">
     <h2>Deployment</h2>
     <ul class="plain">
-      <li><b>Single self-contained executable.</b> par2 and RAR unpacking are native code compiled into the binary. Nothing gets extracted on first run, and there's no runtime and no installer to fuss with.</li>
+      <li><b>Single self-contained executable.</b> par2 and RAR unpacking are native code compiled into the binary. Nothing gets extracted on first run, and there's no runtime and no installer to fuss with. The PAR2 half is measured on its own, as the parfast command-line tool, on <a href="parfast-benchmarks.html">its own benchmark page</a>.</li>
       <li><b>macOS, first-class:</b> a universal binary for Apple Silicon and Intel, a native SwiftUI menu-bar app, a launchd unit, and a Homebrew formula.</li>
       <li><b>Windows:</b> a fully static x64 exe that runs on stock Windows 10 and 11, with a double-click launcher and guided setup.</li>
       <li><b>Linux, Docker and NAS:</b> a hardened systemd unit, a multi-stage Docker image with a linuxserver-style PUID/PGID entrypoint, a compose file in the box, a Synology package, and step-by-step guides for Unraid and Synology. <a href="download.html">All platforms →</a></li>

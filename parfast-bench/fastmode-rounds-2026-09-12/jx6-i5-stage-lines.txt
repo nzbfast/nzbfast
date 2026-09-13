@@ -1,0 +1,621 @@
+<rig>\jcross-262144\logs\r1-m1024-aa.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 11.85s repair
+<rig>\jcross-262144\logs\r1-m1024-fast.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 12.25s repair
+<rig>\jcross-262144\logs\r1-m1024-off.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 11.68s repair
+<rig>\jcross-262144\logs\r1-m10240-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=80, stripe 512w, dft=3x5x17): 10.23s
+<rig>\jcross-262144\logs\r1-m10240-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 10.97s
+<rig>\jcross-262144\logs\r1-m10240-aa.err: INFO repair-timing: forney solve: 21.20s over 1 solve(s) (stage 1 10.23s, stage 2 10.97s) - 64.163% of the 33.04s repair
+<rig>\jcross-262144\logs\r1-m10240-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 14.39s of 24.19s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m10240-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 9.80s of 24.19s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m10240-fast.err: INFO repair-timing: forney solve: 24.19s over 1 solve(s) (stage 1 14.39s, stage 2 9.80s) - 69.831% of the 34.64s repair
+<rig>\jcross-262144\logs\r1-m10240-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 13.32s of 23.44s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m10240-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 10.12s of 23.44s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m10240-fastb.err: INFO repair-timing: forney solve: 23.44s over 1 solve(s) (stage 1 13.32s, stage 2 10.12s) - 70.241% of the 33.37s repair
+<rig>\jcross-262144\logs\r1-m10240-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 15.37s of 25.07s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m10240-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 9.70s of 25.07s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m10240-fastdir.err: INFO repair-timing: forney solve: 25.07s over 1 solve(s) (stage 1 15.37s, stage 2 9.70s) - 71.368% of the 35.12s repair
+<rig>\jcross-262144\logs\r1-m10240-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=80, stripe 512w, dft=3x5x17): 10.21s
+<rig>\jcross-262144\logs\r1-m10240-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 11.03s
+<rig>\jcross-262144\logs\r1-m10240-off.err: INFO repair-timing: forney solve: 21.24s over 1 solve(s) (stage 1 10.21s, stage 2 11.03s) - 65.165% of the 32.60s repair
+<rig>\jcross-262144\logs\r1-m10240-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 8.03s of 16.94s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m10240-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 8.91s of 16.94s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m10240-s1off.err: INFO repair-timing: forney solve: 16.94s over 1 solve(s) (stage 1 8.03s, stage 2 8.91s) - 62.047% of the 27.30s repair
+<rig>\jcross-262144\logs\r1-m12288-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=96, stripe 512w, dft=3x5x17): 14.30s
+<rig>\jcross-262144\logs\r1-m12288-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 13.06s
+<rig>\jcross-262144\logs\r1-m12288-aa.err: INFO repair-timing: forney solve: 27.36s over 1 solve(s) (stage 1 14.30s, stage 2 13.05s) - 69.017% of the 39.64s repair
+<rig>\jcross-262144\logs\r1-m12288-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 15.72s of 26.74s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m12288-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 11.03s of 26.74s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m12288-fast.err: INFO repair-timing: forney solve: 26.74s over 1 solve(s) (stage 1 15.72s, stage 2 11.03s) - 71.605% of the 37.35s repair
+<rig>\jcross-262144\logs\r1-m12288-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 13.46s of 25.04s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m12288-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 11.58s of 25.04s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m12288-fastb.err: INFO repair-timing: forney solve: 25.04s over 1 solve(s) (stage 1 13.46s, stage 2 11.58s) - 70.718% of the 35.40s repair
+<rig>\jcross-262144\logs\r1-m12288-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 13.56s of 25.34s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m12288-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 11.79s of 25.34s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m12288-fastdir.err: INFO repair-timing: forney solve: 25.34s over 1 solve(s) (stage 1 13.56s, stage 2 11.79s) - 68.996% of the 36.73s repair
+<rig>\jcross-262144\logs\r1-m12288-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=96, stripe 512w, dft=3x5x17): 14.11s
+<rig>\jcross-262144\logs\r1-m12288-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 13.08s
+<rig>\jcross-262144\logs\r1-m12288-off.err: INFO repair-timing: forney solve: 27.19s over 1 solve(s) (stage 1 14.11s, stage 2 13.08s) - 69.272% of the 39.25s repair
+<rig>\jcross-262144\logs\r1-m12288-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 11.52s of 21.97s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m12288-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 10.45s of 21.97s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m12288-s1off.err: INFO repair-timing: forney solve: 21.97s over 1 solve(s) (stage 1 11.52s, stage 2 10.45s) - 67.971% of the 32.32s repair
+<rig>\jcross-262144\logs\r1-m1536-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=12, stripe 512w, dft=3x5x17): 517.19ms
+<rig>\jcross-262144\logs\r1-m1536-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.01s
+<rig>\jcross-262144\logs\r1-m1536-aa.err: INFO repair-timing: forney solve: 2.53s over 1 solve(s) (stage 1 517.19ms, stage 2 2.01s) - 21.937% of the 11.51s repair
+<rig>\jcross-262144\logs\r1-m1536-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 688.63ms of 2.78s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m1536-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 2.09s of 2.78s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m1536-fast.err: INFO repair-timing: forney solve: 2.78s over 1 solve(s) (stage 1 688.63ms, stage 2 2.09s) - 24.697% of the 11.25s repair
+<rig>\jcross-262144\logs\r1-m1536-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 747.36ms of 2.82s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m1536-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 2.07s of 2.82s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m1536-fastb.err: INFO repair-timing: forney solve: 2.82s over 1 solve(s) (stage 1 747.36ms, stage 2 2.07s) - 24.857% of the 11.34s repair
+<rig>\jcross-262144\logs\r1-m1536-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 709.66ms of 2.80s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m1536-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 2.09s of 2.80s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m1536-fastdir.err: INFO repair-timing: forney solve: 2.80s over 1 solve(s) (stage 1 709.66ms, stage 2 2.09s) - 24.425% of the 11.47s repair
+<rig>\jcross-262144\logs\r1-m1536-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=12, stripe 512w, dft=3x5x17): 518.75ms
+<rig>\jcross-262144\logs\r1-m1536-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.04s
+<rig>\jcross-262144\logs\r1-m1536-off.err: INFO repair-timing: forney solve: 2.55s over 1 solve(s) (stage 1 518.74ms, stage 2 2.04s) - 22.236% of the 11.49s repair
+<rig>\jcross-262144\logs\r1-m1536-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 446.69ms of 2.35s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m1536-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 1.91s of 2.35s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m1536-s1off.err: INFO repair-timing: forney solve: 2.35s over 1 solve(s) (stage 1 446.69ms, stage 2 1.91s) - 21.178% of the 11.11s repair
+<rig>\jcross-262144\logs\r1-m16384-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=128, stripe 512w, dft=3x5x17): 24.12s
+<rig>\jcross-262144\logs\r1-m16384-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 17.24s
+<rig>\jcross-262144\logs\r1-m16384-aa.err: INFO repair-timing: forney solve: 41.36s over 1 solve(s) (stage 1 24.12s, stage 2 17.24s) - 72.478% of the 57.07s repair
+<rig>\jcross-262144\logs\r1-m16384-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 18.67s of 32.69s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m16384-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 14.02s of 32.69s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m16384-fast.err: INFO repair-timing: forney solve: 32.69s over 1 solve(s) (stage 1 18.67s, stage 2 14.02s) - 71.507% of the 45.72s repair
+<rig>\jcross-262144\logs\r1-m16384-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 18.09s of 31.92s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m16384-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 13.83s of 31.92s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m16384-fastb.err: INFO repair-timing: forney solve: 31.92s over 1 solve(s) (stage 1 18.09s, stage 2 13.83s) - 71.258% of the 44.80s repair
+<rig>\jcross-262144\logs\r1-m16384-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 17.70s of 31.85s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m16384-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 14.15s of 31.85s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m16384-fastdir.err: INFO repair-timing: forney solve: 31.85s over 1 solve(s) (stage 1 17.70s, stage 2 14.15s) - 70.946% of the 44.89s repair
+<rig>\jcross-262144\logs\r1-m16384-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=128, stripe 512w, dft=3x5x17): 24.32s
+<rig>\jcross-262144\logs\r1-m16384-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 17.45s
+<rig>\jcross-262144\logs\r1-m16384-off.err: INFO repair-timing: forney solve: 41.78s over 1 solve(s) (stage 1 24.32s, stage 2 17.45s) - 72.850% of the 57.35s repair
+<rig>\jcross-262144\logs\r1-m16384-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 20.14s of 33.28s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m16384-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 13.14s of 33.28s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m16384-s1off.err: INFO repair-timing: forney solve: 33.28s over 1 solve(s) (stage 1 20.14s, stage 2 13.14s) - 71.422% of the 46.60s repair
+<rig>\jcross-262144\logs\r1-m2048-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=16, stripe 512w, dft=3x5x17): 748.58ms
+<rig>\jcross-262144\logs\r1-m2048-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.54s
+<rig>\jcross-262144\logs\r1-m2048-aa.err: INFO repair-timing: forney solve: 3.29s over 1 solve(s) (stage 1 748.58ms, stage 2 2.54s) - 25.930% of the 12.68s repair
+<rig>\jcross-262144\logs\r1-m2048-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 1.28s of 3.89s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m2048-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.61s of 3.89s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m2048-fast.err: INFO repair-timing: forney solve: 3.89s over 1 solve(s) (stage 1 1.28s, stage 2 2.61s) - 30.959% of the 12.57s repair
+<rig>\jcross-262144\logs\r1-m2048-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 1.19s of 3.81s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m2048-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.62s of 3.81s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m2048-fastb.err: INFO repair-timing: forney solve: 3.81s over 1 solve(s) (stage 1 1.19s, stage 2 2.62s) - 30.614% of the 12.45s repair
+<rig>\jcross-262144\logs\r1-m2048-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 1.21s of 3.80s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m2048-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.59s of 3.80s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m2048-fastdir.err: INFO repair-timing: forney solve: 3.80s over 1 solve(s) (stage 1 1.21s, stage 2 2.59s) - 30.349% of the 12.53s repair
+<rig>\jcross-262144\logs\r1-m2048-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=16, stripe 512w, dft=3x5x17): 756.37ms
+<rig>\jcross-262144\logs\r1-m2048-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.49s
+<rig>\jcross-262144\logs\r1-m2048-off.err: INFO repair-timing: forney solve: 3.25s over 1 solve(s) (stage 1 756.35ms, stage 2 2.49s) - 26.085% of the 12.44s repair
+<rig>\jcross-262144\logs\r1-m2048-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 624.10ms of 2.95s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m2048-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.33s of 2.95s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m2048-s1off.err: INFO repair-timing: forney solve: 2.95s over 1 solve(s) (stage 1 624.10ms, stage 2 2.33s) - 24.322% of the 12.14s repair
+<rig>\jcross-262144\logs\r1-m256-aa.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 8.28s repair
+<rig>\jcross-262144\logs\r1-m256-fast.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 8.61s repair
+<rig>\jcross-262144\logs\r1-m256-off.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 8.68s repair
+<rig>\jcross-262144\logs\r1-m3072-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=24, stripe 512w, dft=3x5x17): 1.61s
+<rig>\jcross-262144\logs\r1-m3072-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 3.53s
+<rig>\jcross-262144\logs\r1-m3072-aa.err: INFO repair-timing: forney solve: 5.15s over 1 solve(s) (stage 1 1.61s, stage 2 3.53s) - 34.750% of the 14.81s repair
+<rig>\jcross-262144\logs\r1-m3072-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 2.44s of 6.04s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m3072-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.60s of 6.04s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m3072-fast.err: INFO repair-timing: forney solve: 6.04s over 1 solve(s) (stage 1 2.44s, stage 2 3.60s) - 40.203% of the 15.02s repair
+<rig>\jcross-262144\logs\r1-m3072-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 2.32s of 5.94s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m3072-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.62s of 5.94s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m3072-fastb.err: INFO repair-timing: forney solve: 5.94s over 1 solve(s) (stage 1 2.32s, stage 2 3.62s) - 37.732% of the 15.74s repair
+<rig>\jcross-262144\logs\r1-m3072-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 2.29s of 5.90s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m3072-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.61s of 5.90s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m3072-fastdir.err: INFO repair-timing: forney solve: 5.90s over 1 solve(s) (stage 1 2.29s, stage 2 3.61s) - 38.260% of the 15.43s repair
+<rig>\jcross-262144\logs\r1-m3072-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=24, stripe 512w, dft=3x5x17): 1.39s
+<rig>\jcross-262144\logs\r1-m3072-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 3.47s
+<rig>\jcross-262144\logs\r1-m3072-off.err: INFO repair-timing: forney solve: 4.86s over 1 solve(s) (stage 1 1.39s, stage 2 3.47s) - 33.657% of the 14.43s repair
+<rig>\jcross-262144\logs\r1-m3072-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 1.06s of 4.34s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m3072-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.28s of 4.34s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m3072-s1off.err: INFO repair-timing: forney solve: 4.34s over 1 solve(s) (stage 1 1.06s, stage 2 3.28s) - 31.763% of the 13.68s repair
+<rig>\jcross-262144\logs\r1-m4096-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=32, stripe 512w, dft=3x5x17): 2.13s
+<rig>\jcross-262144\logs\r1-m4096-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 4.54s
+<rig>\jcross-262144\logs\r1-m4096-aa.err: INFO repair-timing: forney solve: 6.68s over 1 solve(s) (stage 1 2.13s, stage 2 4.54s) - 39.549% of the 16.89s repair
+<rig>\jcross-262144\logs\r1-m4096-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 3.45s of 8.07s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m4096-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.62s of 8.07s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m4096-fast.err: INFO repair-timing: forney solve: 8.07s over 1 solve(s) (stage 1 3.45s, stage 2 4.62s) - 42.742% of the 18.87s repair
+<rig>\jcross-262144\logs\r1-m4096-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 3.05s of 7.72s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m4096-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.68s of 7.72s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m4096-fastb.err: INFO repair-timing: forney solve: 7.72s over 1 solve(s) (stage 1 3.05s, stage 2 4.68s) - 44.007% of the 17.55s repair
+<rig>\jcross-262144\logs\r1-m4096-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 3.27s of 7.96s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m4096-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.69s of 7.96s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m4096-fastdir.err: INFO repair-timing: forney solve: 7.96s over 1 solve(s) (stage 1 3.27s, stage 2 4.69s) - 45.314% of the 17.57s repair
+<rig>\jcross-262144\logs\r1-m4096-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=32, stripe 512w, dft=3x5x17): 2.10s
+<rig>\jcross-262144\logs\r1-m4096-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 4.64s
+<rig>\jcross-262144\logs\r1-m4096-off.err: INFO repair-timing: forney solve: 6.74s over 1 solve(s) (stage 1 2.10s, stage 2 4.64s) - 39.867% of the 16.91s repair
+<rig>\jcross-262144\logs\r1-m4096-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 1.64s of 5.86s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m4096-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.22s of 5.86s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m4096-s1off.err: INFO repair-timing: forney solve: 5.86s over 1 solve(s) (stage 1 1.64s, stage 2 4.22s) - 37.391% of the 15.68s repair
+<rig>\jcross-262144\logs\r1-m5120-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=40, stripe 512w, dft=3x5x17): 3.07s
+<rig>\jcross-262144\logs\r1-m5120-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 5.70s
+<rig>\jcross-262144\logs\r1-m5120-aa.err: INFO repair-timing: forney solve: 8.77s over 1 solve(s) (stage 1 3.07s, stage 2 5.70s) - 45.278% of the 19.38s repair
+<rig>\jcross-262144\logs\r1-m5120-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.56s of 11.43s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m5120-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.86s of 11.43s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m5120-fast.err: INFO repair-timing: forney solve: 11.43s over 1 solve(s) (stage 1 5.56s, stage 2 5.86s) - 53.839% of the 21.22s repair
+<rig>\jcross-262144\logs\r1-m5120-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.75s of 11.51s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m5120-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.76s of 11.51s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m5120-fastb.err: INFO repair-timing: forney solve: 11.51s over 1 solve(s) (stage 1 5.75s, stage 2 5.76s) - 54.434% of the 21.15s repair
+<rig>\jcross-262144\logs\r1-m5120-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.69s of 11.51s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m5120-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.82s of 11.51s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m5120-fastdir.err: INFO repair-timing: forney solve: 11.51s over 1 solve(s) (stage 1 5.69s, stage 2 5.82s) - 54.073% of the 21.28s repair
+<rig>\jcross-262144\logs\r1-m5120-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=40, stripe 512w, dft=3x5x17): 3.07s
+<rig>\jcross-262144\logs\r1-m5120-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 5.69s
+<rig>\jcross-262144\logs\r1-m5120-off.err: INFO repair-timing: forney solve: 8.77s over 1 solve(s) (stage 1 3.07s, stage 2 5.69s) - 46.011% of the 19.05s repair
+<rig>\jcross-262144\logs\r1-m5120-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 2.27s of 7.51s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m5120-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.24s of 7.51s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m5120-s1off.err: INFO repair-timing: forney solve: 7.51s over 1 solve(s) (stage 1 2.27s, stage 2 5.24s) - 43.735% of the 17.16s repair
+<rig>\jcross-262144\logs\r1-m6144-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=48, stripe 512w, dft=3x5x17): 4.14s
+<rig>\jcross-262144\logs\r1-m6144-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 6.74s
+<rig>\jcross-262144\logs\r1-m6144-aa.err: INFO repair-timing: forney solve: 10.88s over 1 solve(s) (stage 1 4.14s, stage 2 6.74s) - 51.729% of the 21.03s repair
+<rig>\jcross-262144\logs\r1-m6144-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.42s of 13.05s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m6144-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.64s of 13.05s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m6144-fast.err: INFO repair-timing: forney solve: 13.05s over 1 solve(s) (stage 1 6.42s, stage 2 6.64s) - 57.331% of the 22.77s repair
+<rig>\jcross-262144\logs\r1-m6144-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.90s of 12.65s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m6144-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.76s of 12.65s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m6144-fastb.err: INFO repair-timing: forney solve: 12.65s over 1 solve(s) (stage 1 5.90s, stage 2 6.76s) - 55.241% of the 22.90s repair
+<rig>\jcross-262144\logs\r1-m6144-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.23s of 13.00s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m6144-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.77s of 13.00s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m6144-fastdir.err: INFO repair-timing: forney solve: 13.00s over 1 solve(s) (stage 1 6.23s, stage 2 6.77s) - 57.361% of the 22.67s repair
+<rig>\jcross-262144\logs\r1-m6144-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=48, stripe 512w, dft=3x5x17): 4.15s
+<rig>\jcross-262144\logs\r1-m6144-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 6.74s
+<rig>\jcross-262144\logs\r1-m6144-off.err: INFO repair-timing: forney solve: 10.89s over 1 solve(s) (stage 1 4.15s, stage 2 6.74s) - 50.886% of the 21.39s repair
+<rig>\jcross-262144\logs\r1-m6144-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 2.96s of 9.19s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m6144-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.23s of 9.19s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m6144-s1off.err: INFO repair-timing: forney solve: 9.19s over 1 solve(s) (stage 1 2.96s, stage 2 6.23s) - 49.000% of the 18.76s repair
+<rig>\jcross-262144\logs\r1-m704-aa.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 9.89s repair
+<rig>\jcross-262144\logs\r1-m704-fast.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 10.05s repair
+<rig>\jcross-262144\logs\r1-m704-off.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 9.83s repair
+<rig>\jcross-262144\logs\r1-m7168-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=56, stripe 512w, dft=3x5x17): 5.35s
+<rig>\jcross-262144\logs\r1-m7168-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 7.68s
+<rig>\jcross-262144\logs\r1-m7168-aa.err: INFO repair-timing: forney solve: 13.03s over 1 solve(s) (stage 1 5.35s, stage 2 7.68s) - 55.608% of the 23.44s repair
+<rig>\jcross-262144\logs\r1-m7168-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.84s of 13.73s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m7168-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.88s of 13.73s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m7168-fast.err: INFO repair-timing: forney solve: 13.73s over 1 solve(s) (stage 1 5.84s, stage 2 7.88s) - 58.534% of the 23.45s repair
+<rig>\jcross-262144\logs\r1-m7168-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.66s of 13.41s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m7168-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.75s of 13.41s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m7168-fastb.err: INFO repair-timing: forney solve: 13.41s over 1 solve(s) (stage 1 5.66s, stage 2 7.75s) - 57.560% of the 23.29s repair
+<rig>\jcross-262144\logs\r1-m7168-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.86s of 13.73s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m7168-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.87s of 13.73s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m7168-fastdir.err: INFO repair-timing: forney solve: 13.73s over 1 solve(s) (stage 1 5.86s, stage 2 7.87s) - 58.535% of the 23.46s repair
+<rig>\jcross-262144\logs\r1-m7168-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=56, stripe 512w, dft=3x5x17): 5.37s
+<rig>\jcross-262144\logs\r1-m7168-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 7.75s
+<rig>\jcross-262144\logs\r1-m7168-off.err: INFO repair-timing: forney solve: 13.11s over 1 solve(s) (stage 1 5.37s, stage 2 7.75s) - 54.476% of the 24.07s repair
+<rig>\jcross-262144\logs\r1-m7168-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 4.12s of 11.43s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m7168-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.31s of 11.43s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m7168-s1off.err: INFO repair-timing: forney solve: 11.43s over 1 solve(s) (stage 1 4.12s, stage 2 7.31s) - 53.209% of the 21.47s repair
+<rig>\jcross-262144\logs\r1-m8192-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=64, stripe 512w, dft=3x5x17): 6.75s
+<rig>\jcross-262144\logs\r1-m8192-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 8.73s
+<rig>\jcross-262144\logs\r1-m8192-aa.err: INFO repair-timing: forney solve: 15.48s over 1 solve(s) (stage 1 6.75s, stage 2 8.73s) - 58.456% of the 26.48s repair
+<rig>\jcross-262144\logs\r1-m8192-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 7.90s of 15.98s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m8192-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 8.08s of 15.98s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m8192-fast.err: INFO repair-timing: forney solve: 15.98s over 1 solve(s) (stage 1 7.90s, stage 2 8.08s) - 61.048% of the 26.17s repair
+<rig>\jcross-262144\logs\r1-m8192-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 7.48s of 15.44s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m8192-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 7.96s of 15.44s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m8192-fastb.err: INFO repair-timing: forney solve: 15.44s over 1 solve(s) (stage 1 7.48s, stage 2 7.96s) - 59.608% of the 25.90s repair
+<rig>\jcross-262144\logs\r1-m8192-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 7.85s of 15.94s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m8192-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 8.09s of 15.94s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m8192-fastdir.err: INFO repair-timing: forney solve: 15.94s over 1 solve(s) (stage 1 7.85s, stage 2 8.09s) - 61.538% of the 25.90s repair
+<rig>\jcross-262144\logs\r1-m8192-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=64, stripe 512w, dft=3x5x17): 6.79s
+<rig>\jcross-262144\logs\r1-m8192-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 8.85s
+<rig>\jcross-262144\logs\r1-m8192-off.err: INFO repair-timing: forney solve: 15.65s over 1 solve(s) (stage 1 6.79s, stage 2 8.85s) - 58.600% of the 26.70s repair
+<rig>\jcross-262144\logs\r1-m8192-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 5.23s of 12.65s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m8192-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 7.43s of 12.65s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r1-m8192-s1off.err: INFO repair-timing: forney solve: 12.65s over 1 solve(s) (stage 1 5.23s, stage 2 7.43s) - 55.990% of the 22.60s repair
+<rig>\jcross-262144\logs\r2-m1024-aa.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 12.13s repair
+<rig>\jcross-262144\logs\r2-m1024-fast.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 12.28s repair
+<rig>\jcross-262144\logs\r2-m1024-off.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 11.74s repair
+<rig>\jcross-262144\logs\r2-m10240-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=80, stripe 512w, dft=3x5x17): 10.13s
+<rig>\jcross-262144\logs\r2-m10240-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 11.02s
+<rig>\jcross-262144\logs\r2-m10240-aa.err: INFO repair-timing: forney solve: 21.15s over 1 solve(s) (stage 1 10.13s, stage 2 11.02s) - 64.366% of the 32.85s repair
+<rig>\jcross-262144\logs\r2-m10240-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 14.75s of 24.50s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m10240-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 9.75s of 24.50s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m10240-fast.err: INFO repair-timing: forney solve: 24.50s over 1 solve(s) (stage 1 14.75s, stage 2 9.75s) - 70.250% of the 34.87s repair
+<rig>\jcross-262144\logs\r2-m10240-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 14.59s of 24.16s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m10240-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 9.57s of 24.16s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m10240-fastb.err: INFO repair-timing: forney solve: 24.16s over 1 solve(s) (stage 1 14.59s, stage 2 9.57s) - 69.653% of the 34.69s repair
+<rig>\jcross-262144\logs\r2-m10240-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 14.70s of 24.46s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m10240-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 9.76s of 24.46s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m10240-fastdir.err: INFO repair-timing: forney solve: 24.46s over 1 solve(s) (stage 1 14.70s, stage 2 9.76s) - 70.894% of the 34.51s repair
+<rig>\jcross-262144\logs\r2-m10240-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=80, stripe 512w, dft=3x5x17): 10.14s
+<rig>\jcross-262144\logs\r2-m10240-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 10.99s
+<rig>\jcross-262144\logs\r2-m10240-off.err: INFO repair-timing: forney solve: 21.13s over 1 solve(s) (stage 1 10.14s, stage 2 10.99s) - 64.588% of the 32.72s repair
+<rig>\jcross-262144\logs\r2-m10240-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 7.77s of 16.67s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m10240-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 8.90s of 16.67s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m10240-s1off.err: INFO repair-timing: forney solve: 16.67s over 1 solve(s) (stage 1 7.77s, stage 2 8.90s) - 61.432% of the 27.14s repair
+<rig>\jcross-262144\logs\r2-m12288-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=96, stripe 512w, dft=3x5x17): 14.01s
+<rig>\jcross-262144\logs\r2-m12288-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 13.12s
+<rig>\jcross-262144\logs\r2-m12288-aa.err: INFO repair-timing: forney solve: 27.13s over 1 solve(s) (stage 1 14.01s, stage 2 13.12s) - 69.529% of the 39.02s repair
+<rig>\jcross-262144\logs\r2-m12288-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 15.09s of 26.25s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m12288-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 11.16s of 26.25s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m12288-fast.err: INFO repair-timing: forney solve: 26.25s over 1 solve(s) (stage 1 15.09s, stage 2 11.16s) - 71.316% of the 36.80s repair
+<rig>\jcross-262144\logs\r2-m12288-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 15.07s of 26.21s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m12288-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 11.14s of 26.21s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m12288-fastb.err: INFO repair-timing: forney solve: 26.21s over 1 solve(s) (stage 1 15.07s, stage 2 11.14s) - 71.449% of the 36.68s repair
+<rig>\jcross-262144\logs\r2-m12288-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 15.19s of 26.53s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m12288-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 11.34s of 26.53s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m12288-fastdir.err: INFO repair-timing: forney solve: 26.53s over 1 solve(s) (stage 1 15.19s, stage 2 11.34s) - 71.769% of the 36.96s repair
+<rig>\jcross-262144\logs\r2-m12288-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=96, stripe 512w, dft=3x5x17): 14.14s
+<rig>\jcross-262144\logs\r2-m12288-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 13.18s
+<rig>\jcross-262144\logs\r2-m12288-off.err: INFO repair-timing: forney solve: 27.32s over 1 solve(s) (stage 1 14.14s, stage 2 13.18s) - 69.362% of the 39.38s repair
+<rig>\jcross-262144\logs\r2-m12288-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 10.78s of 21.35s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m12288-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 10.57s of 21.35s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m12288-s1off.err: INFO repair-timing: forney solve: 21.35s over 1 solve(s) (stage 1 10.78s, stage 2 10.57s) - 62.367% of the 34.23s repair
+<rig>\jcross-262144\logs\r2-m1536-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=12, stripe 512w, dft=3x5x17): 823.73ms
+<rig>\jcross-262144\logs\r2-m1536-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.03s
+<rig>\jcross-262144\logs\r2-m1536-aa.err: INFO repair-timing: forney solve: 2.85s over 1 solve(s) (stage 1 823.72ms, stage 2 2.03s) - 24.794% of the 11.51s repair
+<rig>\jcross-262144\logs\r2-m1536-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 697.15ms of 2.77s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m1536-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 2.07s of 2.77s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m1536-fast.err: INFO repair-timing: forney solve: 2.77s over 1 solve(s) (stage 1 697.15ms, stage 2 2.07s) - 24.295% of the 11.40s repair
+<rig>\jcross-262144\logs\r2-m1536-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 722.83ms of 2.82s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m1536-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 2.10s of 2.82s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m1536-fastb.err: INFO repair-timing: forney solve: 2.82s over 1 solve(s) (stage 1 722.83ms, stage 2 2.10s) - 24.643% of the 11.45s repair
+<rig>\jcross-262144\logs\r2-m1536-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 574.24ms of 2.66s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m1536-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 2.09s of 2.66s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m1536-fastdir.err: INFO repair-timing: forney solve: 2.66s over 1 solve(s) (stage 1 574.24ms, stage 2 2.09s) - 23.643% of the 11.27s repair
+<rig>\jcross-262144\logs\r2-m1536-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=12, stripe 512w, dft=3x5x17): 518.06ms
+<rig>\jcross-262144\logs\r2-m1536-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.05s
+<rig>\jcross-262144\logs\r2-m1536-off.err: INFO repair-timing: forney solve: 2.57s over 1 solve(s) (stage 1 518.04ms, stage 2 2.05s) - 22.635% of the 11.34s repair
+<rig>\jcross-262144\logs\r2-m1536-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 449.17ms of 2.34s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m1536-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 1.90s of 2.34s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m1536-s1off.err: INFO repair-timing: forney solve: 2.34s over 1 solve(s) (stage 1 449.17ms, stage 2 1.90s) - 21.167% of the 11.08s repair
+<rig>\jcross-262144\logs\r2-m16384-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=128, stripe 512w, dft=3x5x17): 24.36s
+<rig>\jcross-262144\logs\r2-m16384-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 17.33s
+<rig>\jcross-262144\logs\r2-m16384-aa.err: INFO repair-timing: forney solve: 41.69s over 1 solve(s) (stage 1 24.36s, stage 2 17.33s) - 72.299% of the 57.66s repair
+<rig>\jcross-262144\logs\r2-m16384-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 17.16s of 31.39s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m16384-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 14.22s of 31.39s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m16384-fast.err: INFO repair-timing: forney solve: 31.39s over 1 solve(s) (stage 1 17.16s, stage 2 14.22s) - 69.249% of the 45.32s repair
+<rig>\jcross-262144\logs\r2-m16384-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 17.27s of 31.35s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m16384-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 14.08s of 31.35s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m16384-fastb.err: INFO repair-timing: forney solve: 31.35s over 1 solve(s) (stage 1 17.27s, stage 2 14.08s) - 70.601% of the 44.41s repair
+<rig>\jcross-262144\logs\r2-m16384-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 17.36s of 31.96s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m16384-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 14.60s of 31.96s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m16384-fastdir.err: INFO repair-timing: forney solve: 31.96s over 1 solve(s) (stage 1 17.36s, stage 2 14.60s) - 70.155% of the 45.56s repair
+<rig>\jcross-262144\logs\r2-m16384-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=128, stripe 512w, dft=3x5x17): 23.92s
+<rig>\jcross-262144\logs\r2-m16384-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 17.33s
+<rig>\jcross-262144\logs\r2-m16384-off.err: INFO repair-timing: forney solve: 41.25s over 1 solve(s) (stage 1 23.92s, stage 2 17.33s) - 71.991% of the 57.31s repair
+<rig>\jcross-262144\logs\r2-m16384-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 20.52s of 33.66s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m16384-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 13.14s of 33.66s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m16384-s1off.err: INFO repair-timing: forney solve: 33.66s over 1 solve(s) (stage 1 20.52s, stage 2 13.14s) - 71.500% of the 47.08s repair
+<rig>\jcross-262144\logs\r2-m2048-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=16, stripe 512w, dft=3x5x17): 749.43ms
+<rig>\jcross-262144\logs\r2-m2048-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.48s
+<rig>\jcross-262144\logs\r2-m2048-aa.err: INFO repair-timing: forney solve: 3.23s over 1 solve(s) (stage 1 749.40ms, stage 2 2.48s) - 26.522% of the 12.16s repair
+<rig>\jcross-262144\logs\r2-m2048-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 1.34s of 3.91s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m2048-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.58s of 3.91s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m2048-fast.err: INFO repair-timing: forney solve: 3.91s over 1 solve(s) (stage 1 1.34s, stage 2 2.58s) - 31.065% of the 12.59s repair
+<rig>\jcross-262144\logs\r2-m2048-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 1.18s of 4.02s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m2048-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.84s of 4.02s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m2048-fastb.err: INFO repair-timing: forney solve: 4.02s over 1 solve(s) (stage 1 1.18s, stage 2 2.84s) - 30.384% of the 13.23s repair
+<rig>\jcross-262144\logs\r2-m2048-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 1.29s of 3.87s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m2048-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.58s of 3.87s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m2048-fastdir.err: INFO repair-timing: forney solve: 3.87s over 1 solve(s) (stage 1 1.29s, stage 2 2.58s) - 30.836% of the 12.55s repair
+<rig>\jcross-262144\logs\r2-m2048-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=16, stripe 512w, dft=3x5x17): 762.61ms
+<rig>\jcross-262144\logs\r2-m2048-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.47s
+<rig>\jcross-262144\logs\r2-m2048-off.err: INFO repair-timing: forney solve: 3.23s over 1 solve(s) (stage 1 762.58ms, stage 2 2.47s) - 26.678% of the 12.12s repair
+<rig>\jcross-262144\logs\r2-m2048-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 619.10ms of 2.94s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m2048-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.32s of 2.94s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m2048-s1off.err: INFO repair-timing: forney solve: 2.94s over 1 solve(s) (stage 1 619.10ms, stage 2 2.32s) - 25.413% of the 11.55s repair
+<rig>\jcross-262144\logs\r2-m256-aa.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 8.37s repair
+<rig>\jcross-262144\logs\r2-m256-fast.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 8.06s repair
+<rig>\jcross-262144\logs\r2-m256-off.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 8.17s repair
+<rig>\jcross-262144\logs\r2-m3072-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=24, stripe 512w, dft=3x5x17): 1.63s
+<rig>\jcross-262144\logs\r2-m3072-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 3.49s
+<rig>\jcross-262144\logs\r2-m3072-aa.err: INFO repair-timing: forney solve: 5.12s over 1 solve(s) (stage 1 1.63s, stage 2 3.49s) - 34.131% of the 14.99s repair
+<rig>\jcross-262144\logs\r2-m3072-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 2.55s of 6.13s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m3072-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.58s of 6.13s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m3072-fast.err: INFO repair-timing: forney solve: 6.13s over 1 solve(s) (stage 1 2.55s, stage 2 3.58s) - 40.040% of the 15.30s repair
+<rig>\jcross-262144\logs\r2-m3072-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 2.46s of 5.97s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m3072-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.52s of 5.97s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m3072-fastb.err: INFO repair-timing: forney solve: 5.97s over 1 solve(s) (stage 1 2.46s, stage 2 3.52s) - 39.672% of the 15.06s repair
+<rig>\jcross-262144\logs\r2-m3072-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 2.22s of 6.08s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m3072-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.86s of 6.08s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m3072-fastdir.err: INFO repair-timing: forney solve: 6.08s over 1 solve(s) (stage 1 2.22s, stage 2 3.86s) - 39.958% of the 15.22s repair
+<rig>\jcross-262144\logs\r2-m3072-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=24, stripe 512w, dft=3x5x17): 1.35s
+<rig>\jcross-262144\logs\r2-m3072-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 3.46s
+<rig>\jcross-262144\logs\r2-m3072-off.err: INFO repair-timing: forney solve: 4.81s over 1 solve(s) (stage 1 1.35s, stage 2 3.46s) - 33.958% of the 14.16s repair
+<rig>\jcross-262144\logs\r2-m3072-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 1.06s of 4.33s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m3072-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.28s of 4.33s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m3072-s1off.err: INFO repair-timing: forney solve: 4.33s over 1 solve(s) (stage 1 1.06s, stage 2 3.28s) - 31.695% of the 13.67s repair
+<rig>\jcross-262144\logs\r2-m4096-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=32, stripe 512w, dft=3x5x17): 2.14s
+<rig>\jcross-262144\logs\r2-m4096-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 4.48s
+<rig>\jcross-262144\logs\r2-m4096-aa.err: INFO repair-timing: forney solve: 6.62s over 1 solve(s) (stage 1 2.14s, stage 2 4.48s) - 39.594% of the 16.72s repair
+<rig>\jcross-262144\logs\r2-m4096-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 3.44s of 8.09s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m4096-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.65s of 8.09s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m4096-fast.err: INFO repair-timing: forney solve: 8.09s over 1 solve(s) (stage 1 3.44s, stage 2 4.65s) - 45.153% of the 17.92s repair
+<rig>\jcross-262144\logs\r2-m4096-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 3.24s of 7.85s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m4096-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.61s of 7.85s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m4096-fastb.err: INFO repair-timing: forney solve: 7.85s over 1 solve(s) (stage 1 3.24s, stage 2 4.61s) - 44.957% of the 17.47s repair
+<rig>\jcross-262144\logs\r2-m4096-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 3.25s of 7.90s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m4096-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.65s of 7.90s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m4096-fastdir.err: INFO repair-timing: forney solve: 7.90s over 1 solve(s) (stage 1 3.25s, stage 2 4.65s) - 45.000% of the 17.56s repair
+<rig>\jcross-262144\logs\r2-m4096-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=32, stripe 512w, dft=3x5x17): 2.15s
+<rig>\jcross-262144\logs\r2-m4096-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 4.49s
+<rig>\jcross-262144\logs\r2-m4096-off.err: INFO repair-timing: forney solve: 6.65s over 1 solve(s) (stage 1 2.15s, stage 2 4.49s) - 39.491% of the 16.84s repair
+<rig>\jcross-262144\logs\r2-m4096-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 1.69s of 5.99s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m4096-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.30s of 5.99s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m4096-s1off.err: INFO repair-timing: forney solve: 5.99s over 1 solve(s) (stage 1 1.69s, stage 2 4.30s) - 37.767% of the 15.87s repair
+<rig>\jcross-262144\logs\r2-m5120-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=40, stripe 512w, dft=3x5x17): 3.07s
+<rig>\jcross-262144\logs\r2-m5120-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 5.55s
+<rig>\jcross-262144\logs\r2-m5120-aa.err: INFO repair-timing: forney solve: 8.62s over 1 solve(s) (stage 1 3.07s, stage 2 5.55s) - 45.500% of the 18.94s repair
+<rig>\jcross-262144\logs\r2-m5120-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.46s of 11.45s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m5120-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.99s of 11.45s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m5120-fast.err: INFO repair-timing: forney solve: 11.45s over 1 solve(s) (stage 1 5.46s, stage 2 5.99s) - 54.028% of the 21.19s repair
+<rig>\jcross-262144\logs\r2-m5120-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.06s of 11.74s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m5120-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.68s of 11.74s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m5120-fastb.err: INFO repair-timing: forney solve: 11.74s over 1 solve(s) (stage 1 6.06s, stage 2 5.68s) - 54.540% of the 21.52s repair
+<rig>\jcross-262144\logs\r2-m5120-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.86s of 11.67s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m5120-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.81s of 11.67s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m5120-fastdir.err: INFO repair-timing: forney solve: 11.67s over 1 solve(s) (stage 1 5.86s, stage 2 5.81s) - 54.644% of the 21.35s repair
+<rig>\jcross-262144\logs\r2-m5120-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=40, stripe 512w, dft=3x5x17): 3.18s
+<rig>\jcross-262144\logs\r2-m5120-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 5.67s
+<rig>\jcross-262144\logs\r2-m5120-off.err: INFO repair-timing: forney solve: 8.85s over 1 solve(s) (stage 1 3.18s, stage 2 5.67s) - 43.296% of the 20.44s repair
+<rig>\jcross-262144\logs\r2-m5120-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 2.20s of 7.44s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m5120-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.24s of 7.44s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m5120-s1off.err: INFO repair-timing: forney solve: 7.44s over 1 solve(s) (stage 1 2.20s, stage 2 5.24s) - 43.207% of the 17.22s repair
+<rig>\jcross-262144\logs\r2-m6144-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=48, stripe 512w, dft=3x5x17): 4.31s
+<rig>\jcross-262144\logs\r2-m6144-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 6.63s
+<rig>\jcross-262144\logs\r2-m6144-aa.err: INFO repair-timing: forney solve: 10.94s over 1 solve(s) (stage 1 4.31s, stage 2 6.63s) - 51.068% of the 21.43s repair
+<rig>\jcross-262144\logs\r2-m6144-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.33s of 12.30s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m6144-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.97s of 12.30s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m6144-fast.err: INFO repair-timing: forney solve: 12.30s over 1 solve(s) (stage 1 5.33s, stage 2 6.97s) - 55.861% of the 22.02s repair
+<rig>\jcross-262144\logs\r2-m6144-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.29s of 12.95s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m6144-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.66s of 12.95s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m6144-fastb.err: INFO repair-timing: forney solve: 12.95s over 1 solve(s) (stage 1 6.29s, stage 2 6.66s) - 56.994% of the 22.72s repair
+<rig>\jcross-262144\logs\r2-m6144-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.28s of 13.08s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m6144-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.80s of 13.08s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m6144-fastdir.err: INFO repair-timing: forney solve: 13.08s over 1 solve(s) (stage 1 6.28s, stage 2 6.80s) - 57.332% of the 22.82s repair
+<rig>\jcross-262144\logs\r2-m6144-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=48, stripe 512w, dft=3x5x17): 4.13s
+<rig>\jcross-262144\logs\r2-m6144-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 6.59s
+<rig>\jcross-262144\logs\r2-m6144-off.err: INFO repair-timing: forney solve: 10.72s over 1 solve(s) (stage 1 4.13s, stage 2 6.59s) - 50.796% of the 21.11s repair
+<rig>\jcross-262144\logs\r2-m6144-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 3.01s of 9.27s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m6144-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.25s of 9.27s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m6144-s1off.err: INFO repair-timing: forney solve: 9.27s over 1 solve(s) (stage 1 3.01s, stage 2 6.25s) - 48.596% of the 19.07s repair
+<rig>\jcross-262144\logs\r2-m704-aa.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 9.81s repair
+<rig>\jcross-262144\logs\r2-m704-fast.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 10.08s repair
+<rig>\jcross-262144\logs\r2-m704-off.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 9.93s repair
+<rig>\jcross-262144\logs\r2-m7168-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=56, stripe 512w, dft=3x5x17): 5.38s
+<rig>\jcross-262144\logs\r2-m7168-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 7.72s
+<rig>\jcross-262144\logs\r2-m7168-aa.err: INFO repair-timing: forney solve: 13.11s over 1 solve(s) (stage 1 5.38s, stage 2 7.72s) - 54.943% of the 23.86s repair
+<rig>\jcross-262144\logs\r2-m7168-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.19s of 14.06s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m7168-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.87s of 14.06s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m7168-fast.err: INFO repair-timing: forney solve: 14.06s over 1 solve(s) (stage 1 6.19s, stage 2 7.87s) - 58.284% of the 24.12s repair
+<rig>\jcross-262144\logs\r2-m7168-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.50s of 14.17s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m7168-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.67s of 14.17s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m7168-fastb.err: INFO repair-timing: forney solve: 14.17s over 1 solve(s) (stage 1 6.50s, stage 2 7.67s) - 58.626% of the 24.17s repair
+<rig>\jcross-262144\logs\r2-m7168-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.46s of 14.29s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m7168-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.84s of 14.29s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m7168-fastdir.err: INFO repair-timing: forney solve: 14.29s over 1 solve(s) (stage 1 6.46s, stage 2 7.84s) - 59.335% of the 24.09s repair
+<rig>\jcross-262144\logs\r2-m7168-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=56, stripe 512w, dft=3x5x17): 5.39s
+<rig>\jcross-262144\logs\r2-m7168-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 7.64s
+<rig>\jcross-262144\logs\r2-m7168-off.err: INFO repair-timing: forney solve: 13.03s over 1 solve(s) (stage 1 5.39s, stage 2 7.64s) - 55.170% of the 23.63s repair
+<rig>\jcross-262144\logs\r2-m7168-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 4.21s of 11.45s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m7168-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.25s of 11.45s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m7168-s1off.err: INFO repair-timing: forney solve: 11.45s over 1 solve(s) (stage 1 4.21s, stage 2 7.25s) - 53.658% of the 21.35s repair
+<rig>\jcross-262144\logs\r2-m8192-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=64, stripe 512w, dft=3x5x17): 6.76s
+<rig>\jcross-262144\logs\r2-m8192-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 8.78s
+<rig>\jcross-262144\logs\r2-m8192-aa.err: INFO repair-timing: forney solve: 15.55s over 1 solve(s) (stage 1 6.76s, stage 2 8.78s) - 58.872% of the 26.41s repair
+<rig>\jcross-262144\logs\r2-m8192-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 7.51s of 15.53s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m8192-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 8.02s of 15.53s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m8192-fast.err: INFO repair-timing: forney solve: 15.53s over 1 solve(s) (stage 1 7.51s, stage 2 8.02s) - 60.965% of the 25.48s repair
+<rig>\jcross-262144\logs\r2-m8192-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 7.60s of 15.54s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m8192-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 7.94s of 15.54s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m8192-fastb.err: INFO repair-timing: forney solve: 15.54s over 1 solve(s) (stage 1 7.60s, stage 2 7.94s) - 60.702% of the 25.60s repair
+<rig>\jcross-262144\logs\r2-m8192-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 8.43s of 16.38s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m8192-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 7.94s of 16.38s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m8192-fastdir.err: INFO repair-timing: forney solve: 16.38s over 1 solve(s) (stage 1 8.43s, stage 2 7.94s) - 61.810% of the 26.49s repair
+<rig>\jcross-262144\logs\r2-m8192-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=64, stripe 512w, dft=3x5x17): 6.81s
+<rig>\jcross-262144\logs\r2-m8192-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 8.78s
+<rig>\jcross-262144\logs\r2-m8192-off.err: INFO repair-timing: forney solve: 15.59s over 1 solve(s) (stage 1 6.81s, stage 2 8.78s) - 58.895% of the 26.47s repair
+<rig>\jcross-262144\logs\r2-m8192-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 5.17s of 12.54s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m8192-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 7.37s of 12.54s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r2-m8192-s1off.err: INFO repair-timing: forney solve: 12.54s over 1 solve(s) (stage 1 5.17s, stage 2 7.37s) - 55.598% of the 22.55s repair
+<rig>\jcross-262144\logs\r3-m1024-aa.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 12.06s repair
+<rig>\jcross-262144\logs\r3-m1024-fast.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 11.69s repair
+<rig>\jcross-262144\logs\r3-m1024-off.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 12.10s repair
+<rig>\jcross-262144\logs\r3-m10240-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=80, stripe 512w, dft=3x5x17): 10.12s
+<rig>\jcross-262144\logs\r3-m10240-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 10.94s
+<rig>\jcross-262144\logs\r3-m10240-aa.err: INFO repair-timing: forney solve: 21.06s over 1 solve(s) (stage 1 10.12s, stage 2 10.94s) - 61.618% of the 34.18s repair
+<rig>\jcross-262144\logs\r3-m10240-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 14.55s of 24.26s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m10240-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 9.71s of 24.26s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m10240-fast.err: INFO repair-timing: forney solve: 24.26s over 1 solve(s) (stage 1 14.55s, stage 2 9.71s) - 70.047% of the 34.64s repair
+<rig>\jcross-262144\logs\r3-m10240-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 15.39s of 24.80s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m10240-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 9.40s of 24.80s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m10240-fastb.err: INFO repair-timing: forney solve: 24.80s over 1 solve(s) (stage 1 15.39s, stage 2 9.40s) - 70.198% of the 35.32s repair
+<rig>\jcross-262144\logs\r3-m10240-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 14.84s of 24.59s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m10240-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 9.75s of 24.59s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m10240-fastdir.err: INFO repair-timing: forney solve: 24.59s over 1 solve(s) (stage 1 14.84s, stage 2 9.75s) - 70.108% of the 35.07s repair
+<rig>\jcross-262144\logs\r3-m10240-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=80, stripe 512w, dft=3x5x17): 10.04s
+<rig>\jcross-262144\logs\r3-m10240-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 10.94s
+<rig>\jcross-262144\logs\r3-m10240-off.err: INFO repair-timing: forney solve: 20.98s over 1 solve(s) (stage 1 10.04s, stage 2 10.94s) - 64.275% of the 32.64s repair
+<rig>\jcross-262144\logs\r3-m10240-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 7.60s of 16.59s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m10240-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 9.00s of 16.59s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m10240-s1off.err: INFO repair-timing: forney solve: 16.59s over 1 solve(s) (stage 1 7.60s, stage 2 9.00s) - 62.098% of the 26.72s repair
+<rig>\jcross-262144\logs\r3-m12288-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=96, stripe 512w, dft=3x5x17): 14.03s
+<rig>\jcross-262144\logs\r3-m12288-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 13.18s
+<rig>\jcross-262144\logs\r3-m12288-aa.err: INFO repair-timing: forney solve: 27.22s over 1 solve(s) (stage 1 14.03s, stage 2 13.18s) - 69.040% of the 39.42s repair
+<rig>\jcross-262144\logs\r3-m12288-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 15.52s of 26.77s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m12288-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 11.25s of 26.77s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m12288-fast.err: INFO repair-timing: forney solve: 26.77s over 1 solve(s) (stage 1 15.52s, stage 2 11.25s) - 71.499% of the 37.44s repair
+<rig>\jcross-262144\logs\r3-m12288-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 13.64s of 25.19s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m12288-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 11.55s of 25.19s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m12288-fastb.err: INFO repair-timing: forney solve: 25.19s over 1 solve(s) (stage 1 13.64s, stage 2 11.55s) - 70.846% of the 35.55s repair
+<rig>\jcross-262144\logs\r3-m12288-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 14.11s of 25.62s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m12288-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 11.50s of 25.62s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m12288-fastdir.err: INFO repair-timing: forney solve: 25.62s over 1 solve(s) (stage 1 14.11s, stage 2 11.50s) - 71.107% of the 36.03s repair
+<rig>\jcross-262144\logs\r3-m12288-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=96, stripe 512w, dft=3x5x17): 14.03s
+<rig>\jcross-262144\logs\r3-m12288-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 13.26s
+<rig>\jcross-262144\logs\r3-m12288-off.err: INFO repair-timing: forney solve: 27.29s over 1 solve(s) (stage 1 14.03s, stage 2 13.26s) - 69.585% of the 39.22s repair
+<rig>\jcross-262144\logs\r3-m12288-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 10.61s of 21.07s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m12288-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 10.46s of 21.07s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m12288-s1off.err: INFO repair-timing: forney solve: 21.07s over 1 solve(s) (stage 1 10.61s, stage 2 10.46s) - 67.246% of the 31.33s repair
+<rig>\jcross-262144\logs\r3-m1536-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=12, stripe 512w, dft=3x5x17): 516.96ms
+<rig>\jcross-262144\logs\r3-m1536-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.05s
+<rig>\jcross-262144\logs\r3-m1536-aa.err: INFO repair-timing: forney solve: 2.56s over 1 solve(s) (stage 1 516.95ms, stage 2 2.05s) - 22.857% of the 11.22s repair
+<rig>\jcross-262144\logs\r3-m1536-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 769.61ms of 2.85s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m1536-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 2.08s of 2.85s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m1536-fast.err: INFO repair-timing: forney solve: 2.85s over 1 solve(s) (stage 1 769.61ms, stage 2 2.08s) - 25.162% of the 11.33s repair
+<rig>\jcross-262144\logs\r3-m1536-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 584.39ms of 2.64s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m1536-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 2.06s of 2.64s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m1536-fastb.err: INFO repair-timing: forney solve: 2.64s over 1 solve(s) (stage 1 584.39ms, stage 2 2.06s) - 22.987% of the 11.49s repair
+<rig>\jcross-262144\logs\r3-m1536-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 752.70ms of 2.84s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m1536-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 2.09s of 2.84s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m1536-fastdir.err: INFO repair-timing: forney solve: 2.84s over 1 solve(s) (stage 1 752.70ms, stage 2 2.09s) - 25.194% of the 11.28s repair
+<rig>\jcross-262144\logs\r3-m1536-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=12, stripe 512w, dft=3x5x17): 512.04ms
+<rig>\jcross-262144\logs\r3-m1536-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.02s
+<rig>\jcross-262144\logs\r3-m1536-off.err: INFO repair-timing: forney solve: 2.53s over 1 solve(s) (stage 1 512.03ms, stage 2 2.02s) - 22.465% of the 11.26s repair
+<rig>\jcross-262144\logs\r3-m1536-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 455.52ms of 2.39s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m1536-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=1536, gate 8192, FALLBACK arithmetic, stripe 512w): 1.93s of 2.39s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m1536-s1off.err: INFO repair-timing: forney solve: 2.39s over 1 solve(s) (stage 1 455.52ms, stage 2 1.93s) - 22.018% of the 10.85s repair
+<rig>\jcross-262144\logs\r3-m16384-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=128, stripe 512w, dft=3x5x17): 23.82s
+<rig>\jcross-262144\logs\r3-m16384-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 17.59s
+<rig>\jcross-262144\logs\r3-m16384-aa.err: INFO repair-timing: forney solve: 41.41s over 1 solve(s) (stage 1 23.82s, stage 2 17.59s) - 72.606% of the 57.03s repair
+<rig>\jcross-262144\logs\r3-m16384-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 17.20s of 31.43s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m16384-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 14.23s of 31.43s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m16384-fast.err: INFO repair-timing: forney solve: 31.43s over 1 solve(s) (stage 1 17.20s, stage 2 14.23s) - 70.855% of the 44.36s repair
+<rig>\jcross-262144\logs\r3-m16384-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 17.57s of 31.57s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m16384-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 14.00s of 31.57s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m16384-fastb.err: INFO repair-timing: forney solve: 31.57s over 1 solve(s) (stage 1 17.57s, stage 2 14.00s) - 69.369% of the 45.51s repair
+<rig>\jcross-262144\logs\r3-m16384-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 17.87s of 32.05s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m16384-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 14.18s of 32.05s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m16384-fastdir.err: INFO repair-timing: forney solve: 32.05s over 1 solve(s) (stage 1 17.87s, stage 2 14.18s) - 70.923% of the 45.19s repair
+<rig>\jcross-262144\logs\r3-m16384-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=128, stripe 512w, dft=3x5x17): 24.34s
+<rig>\jcross-262144\logs\r3-m16384-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 17.31s
+<rig>\jcross-262144\logs\r3-m16384-off.err: INFO repair-timing: forney solve: 41.65s over 1 solve(s) (stage 1 24.34s, stage 2 17.31s) - 73.297% of the 56.83s repair
+<rig>\jcross-262144\logs\r3-m16384-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 20.46s of 33.68s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m16384-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 13.22s of 33.68s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m16384-s1off.err: INFO repair-timing: forney solve: 33.68s over 1 solve(s) (stage 1 20.46s, stage 2 13.22s) - 71.774% of the 46.92s repair
+<rig>\jcross-262144\logs\r3-m2048-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=16, stripe 512w, dft=3x5x17): 738.80ms
+<rig>\jcross-262144\logs\r3-m2048-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.48s
+<rig>\jcross-262144\logs\r3-m2048-aa.err: INFO repair-timing: forney solve: 3.22s over 1 solve(s) (stage 1 738.79ms, stage 2 2.48s) - 26.577% of the 12.11s repair
+<rig>\jcross-262144\logs\r3-m2048-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 1.21s of 3.86s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m2048-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.65s of 3.86s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m2048-fast.err: INFO repair-timing: forney solve: 3.86s over 1 solve(s) (stage 1 1.21s, stage 2 2.65s) - 30.233% of the 12.76s repair
+<rig>\jcross-262144\logs\r3-m2048-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 1.28s of 3.88s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m2048-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.60s of 3.88s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m2048-fastb.err: INFO repair-timing: forney solve: 3.88s over 1 solve(s) (stage 1 1.28s, stage 2 2.60s) - 30.785% of the 12.59s repair
+<rig>\jcross-262144\logs\r3-m2048-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 1.26s of 3.87s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m2048-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.60s of 3.87s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m2048-fastdir.err: INFO repair-timing: forney solve: 3.87s over 1 solve(s) (stage 1 1.26s, stage 2 2.60s) - 30.558% of the 12.65s repair
+<rig>\jcross-262144\logs\r3-m2048-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=16, stripe 512w, dft=3x5x17): 768.18ms
+<rig>\jcross-262144\logs\r3-m2048-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 2.52s
+<rig>\jcross-262144\logs\r3-m2048-off.err: INFO repair-timing: forney solve: 3.29s over 1 solve(s) (stage 1 768.17ms, stage 2 2.52s) - 26.937% of the 12.21s repair
+<rig>\jcross-262144\logs\r3-m2048-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 612.96ms of 2.93s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m2048-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.32s of 2.93s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m2048-s1off.err: INFO repair-timing: forney solve: 2.93s over 1 solve(s) (stage 1 612.96ms, stage 2 2.32s) - 24.341% of the 12.04s repair
+<rig>\jcross-262144\logs\r3-m256-aa.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 8.32s repair
+<rig>\jcross-262144\logs\r3-m256-fast.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 8.17s repair
+<rig>\jcross-262144\logs\r3-m256-off.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 8.53s repair
+<rig>\jcross-262144\logs\r3-m3072-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=24, stripe 512w, dft=3x5x17): 1.39s
+<rig>\jcross-262144\logs\r3-m3072-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 3.50s
+<rig>\jcross-262144\logs\r3-m3072-aa.err: INFO repair-timing: forney solve: 4.89s over 1 solve(s) (stage 1 1.39s, stage 2 3.50s) - 34.329% of the 14.23s repair
+<rig>\jcross-262144\logs\r3-m3072-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 1.78s of 5.75s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m3072-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.97s of 5.75s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m3072-fast.err: INFO repair-timing: forney solve: 5.75s over 1 solve(s) (stage 1 1.78s, stage 2 3.97s) - 37.072% of the 15.50s repair
+<rig>\jcross-262144\logs\r3-m3072-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 2.38s of 5.95s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m3072-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.57s of 5.95s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m3072-fastb.err: INFO repair-timing: forney solve: 5.95s over 1 solve(s) (stage 1 2.38s, stage 2 3.57s) - 39.959% of the 14.90s repair
+<rig>\jcross-262144\logs\r3-m3072-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 2.29s of 6.04s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m3072-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.74s of 6.04s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m3072-fastdir.err: INFO repair-timing: forney solve: 6.04s over 1 solve(s) (stage 1 2.29s, stage 2 3.74s) - 38.653% of the 15.62s repair
+<rig>\jcross-262144\logs\r3-m3072-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=24, stripe 512w, dft=3x5x17): 1.36s
+<rig>\jcross-262144\logs\r3-m3072-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 3.48s
+<rig>\jcross-262144\logs\r3-m3072-off.err: INFO repair-timing: forney solve: 4.84s over 1 solve(s) (stage 1 1.36s, stage 2 3.48s) - 33.844% of the 14.29s repair
+<rig>\jcross-262144\logs\r3-m3072-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 1.09s of 4.55s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m3072-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=3072, gate 8192, FALLBACK arithmetic, stripe 512w): 3.46s of 4.55s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m3072-s1off.err: INFO repair-timing: forney solve: 4.55s over 1 solve(s) (stage 1 1.09s, stage 2 3.46s) - 32.356% of the 14.07s repair
+<rig>\jcross-262144\logs\r3-m4096-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=32, stripe 512w, dft=3x5x17): 2.14s
+<rig>\jcross-262144\logs\r3-m4096-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 4.45s
+<rig>\jcross-262144\logs\r3-m4096-aa.err: INFO repair-timing: forney solve: 6.59s over 1 solve(s) (stage 1 2.14s, stage 2 4.45s) - 39.826% of the 16.55s repair
+<rig>\jcross-262144\logs\r3-m4096-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 3.14s of 7.75s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m4096-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.62s of 7.75s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m4096-fast.err: INFO repair-timing: forney solve: 7.75s over 1 solve(s) (stage 1 3.14s, stage 2 4.62s) - 44.170% of the 17.55s repair
+<rig>\jcross-262144\logs\r3-m4096-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 3.49s of 8.14s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m4096-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.65s of 8.14s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m4096-fastb.err: INFO repair-timing: forney solve: 8.14s over 1 solve(s) (stage 1 3.49s, stage 2 4.65s) - 45.383% of the 17.94s repair
+<rig>\jcross-262144\logs\r3-m4096-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 3.39s of 8.02s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m4096-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.63s of 8.02s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m4096-fastdir.err: INFO repair-timing: forney solve: 8.02s over 1 solve(s) (stage 1 3.39s, stage 2 4.63s) - 45.365% of the 17.67s repair
+<rig>\jcross-262144\logs\r3-m4096-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=32, stripe 512w, dft=3x5x17): 2.11s
+<rig>\jcross-262144\logs\r3-m4096-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 4.57s
+<rig>\jcross-262144\logs\r3-m4096-off.err: INFO repair-timing: forney solve: 6.67s over 1 solve(s) (stage 1 2.11s, stage 2 4.57s) - 40.146% of the 16.62s repair
+<rig>\jcross-262144\logs\r3-m4096-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 1.63s of 5.85s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m4096-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.23s of 5.85s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m4096-s1off.err: INFO repair-timing: forney solve: 5.85s over 1 solve(s) (stage 1 1.63s, stage 2 4.23s) - 37.312% of the 15.69s repair
+<rig>\jcross-262144\logs\r3-m5120-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=40, stripe 512w, dft=3x5x17): 3.04s
+<rig>\jcross-262144\logs\r3-m5120-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 5.57s
+<rig>\jcross-262144\logs\r3-m5120-aa.err: INFO repair-timing: forney solve: 8.61s over 1 solve(s) (stage 1 3.04s, stage 2 5.57s) - 45.267% of the 19.02s repair
+<rig>\jcross-262144\logs\r3-m5120-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.85s of 11.60s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m5120-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.76s of 11.60s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m5120-fast.err: INFO repair-timing: forney solve: 11.60s over 1 solve(s) (stage 1 5.85s, stage 2 5.76s) - 54.396% of the 21.33s repair
+<rig>\jcross-262144\logs\r3-m5120-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 4.96s of 11.02s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m5120-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 6.06s of 11.02s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m5120-fastb.err: INFO repair-timing: forney solve: 11.02s over 1 solve(s) (stage 1 4.96s, stage 2 6.06s) - 52.716% of the 20.91s repair
+<rig>\jcross-262144\logs\r3-m5120-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.15s of 11.88s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m5120-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.73s of 11.88s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m5120-fastdir.err: INFO repair-timing: forney solve: 11.88s over 1 solve(s) (stage 1 6.15s, stage 2 5.73s) - 54.877% of the 21.64s repair
+<rig>\jcross-262144\logs\r3-m5120-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=40, stripe 512w, dft=3x5x17): 3.04s
+<rig>\jcross-262144\logs\r3-m5120-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 5.55s
+<rig>\jcross-262144\logs\r3-m5120-off.err: INFO repair-timing: forney solve: 8.59s over 1 solve(s) (stage 1 3.04s, stage 2 5.55s) - 45.677% of the 18.80s repair
+<rig>\jcross-262144\logs\r3-m5120-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 2.23s of 7.48s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m5120-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=5120, gate 8192, FALLBACK arithmetic, stripe 512w): 5.24s of 7.48s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m5120-s1off.err: INFO repair-timing: forney solve: 7.48s over 1 solve(s) (stage 1 2.23s, stage 2 5.24s) - 44.081% of the 16.96s repair
+<rig>\jcross-262144\logs\r3-m6144-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=48, stripe 512w, dft=3x5x17): 4.17s
+<rig>\jcross-262144\logs\r3-m6144-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 6.60s
+<rig>\jcross-262144\logs\r3-m6144-aa.err: INFO repair-timing: forney solve: 10.77s over 1 solve(s) (stage 1 4.17s, stage 2 6.60s) - 50.218% of the 21.46s repair
+<rig>\jcross-262144\logs\r3-m6144-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.41s of 13.11s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m6144-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.70s of 13.11s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m6144-fast.err: INFO repair-timing: forney solve: 13.11s over 1 solve(s) (stage 1 6.41s, stage 2 6.70s) - 57.666% of the 22.73s repair
+<rig>\jcross-262144\logs\r3-m6144-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.93s of 12.74s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m6144-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.81s of 12.74s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m6144-fastb.err: INFO repair-timing: forney solve: 12.74s over 1 solve(s) (stage 1 5.93s, stage 2 6.81s) - 56.055% of the 22.72s repair
+<rig>\jcross-262144\logs\r3-m6144-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.74s of 12.60s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m6144-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.86s of 12.60s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m6144-fastdir.err: INFO repair-timing: forney solve: 12.60s over 1 solve(s) (stage 1 5.74s, stage 2 6.86s) - 56.497% of the 22.30s repair
+<rig>\jcross-262144\logs\r3-m6144-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=48, stripe 512w, dft=3x5x17): 4.28s
+<rig>\jcross-262144\logs\r3-m6144-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 6.65s
+<rig>\jcross-262144\logs\r3-m6144-off.err: INFO repair-timing: forney solve: 10.93s over 1 solve(s) (stage 1 4.28s, stage 2 6.65s) - 51.513% of the 21.22s repair
+<rig>\jcross-262144\logs\r3-m6144-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 2.97s of 9.18s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m6144-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=6144, gate 8192, FALLBACK arithmetic, stripe 512w): 6.21s of 9.18s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m6144-s1off.err: INFO repair-timing: forney solve: 9.18s over 1 solve(s) (stage 1 2.97s, stage 2 6.21s) - 48.663% of the 18.87s repair
+<rig>\jcross-262144\logs\r3-m704-aa.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 10.68s repair
+<rig>\jcross-262144\logs\r3-m704-fast.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 10.09s repair
+<rig>\jcross-262144\logs\r3-m704-off.err: INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 9.72s repair
+<rig>\jcross-262144\logs\r3-m7168-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=56, stripe 512w, dft=3x5x17): 5.40s
+<rig>\jcross-262144\logs\r3-m7168-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 7.73s
+<rig>\jcross-262144\logs\r3-m7168-aa.err: INFO repair-timing: forney solve: 13.13s over 1 solve(s) (stage 1 5.40s, stage 2 7.73s) - 54.885% of the 23.92s repair
+<rig>\jcross-262144\logs\r3-m7168-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.04s of 13.86s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m7168-fast.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.81s of 13.86s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m7168-fast.err: INFO repair-timing: forney solve: 13.86s over 1 solve(s) (stage 1 6.04s, stage 2 7.81s) - 58.253% of the 23.79s repair
+<rig>\jcross-262144\logs\r3-m7168-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 6.76s of 14.36s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m7168-fastb.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.60s of 14.36s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m7168-fastb.err: INFO repair-timing: forney solve: 14.36s over 1 solve(s) (stage 1 6.76s, stage 2 7.60s) - 58.954% of the 24.36s repair
+<rig>\jcross-262144\logs\r3-m7168-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, kernel 256w): 5.83s of 13.70s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m7168-fastdir.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.86s of 13.70s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m7168-fastdir.err: INFO repair-timing: forney solve: 13.70s over 1 solve(s) (stage 1 5.83s, stage 2 7.86s) - 58.264% of the 23.51s repair
+<rig>\jcross-262144\logs\r3-m7168-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=56, stripe 512w, dft=3x5x17): 5.46s
+<rig>\jcross-262144\logs\r3-m7168-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 7.74s
+<rig>\jcross-262144\logs\r3-m7168-off.err: INFO repair-timing: forney solve: 13.20s over 1 solve(s) (stage 1 5.46s, stage 2 7.74s) - 55.264% of the 23.89s repair
+<rig>\jcross-262144\logs\r3-m7168-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 4.00s of 11.24s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m7168-s1off.err: INFO repair-timing:   forney stage 2 (joint scheduler, m=7168, gate 8192, FALLBACK arithmetic, stripe 512w): 7.24s of 11.24s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m7168-s1off.err: INFO repair-timing: forney solve: 11.24s over 1 solve(s) (stage 1 4.00s, stage 2 7.24s) - 53.294% of the 21.09s repair
+<rig>\jcross-262144\logs\r3-m8192-aa.err: INFO repair-timing:   forney stage 1 (hankel, nseg=64, stripe 512w, dft=3x5x17): 6.80s
+<rig>\jcross-262144\logs\r3-m8192-aa.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 8.73s
+<rig>\jcross-262144\logs\r3-m8192-aa.err: INFO repair-timing: forney solve: 15.53s over 1 solve(s) (stage 1 6.80s, stage 2 8.73s) - 58.448% of the 26.57s repair
+<rig>\jcross-262144\logs\r3-m8192-fast.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 7.84s of 15.82s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m8192-fast.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 7.97s of 15.82s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m8192-fast.err: INFO repair-timing: forney solve: 15.82s over 1 solve(s) (stage 1 7.84s, stage 2 7.97s) - 60.590% of the 26.10s repair
+<rig>\jcross-262144\logs\r3-m8192-fastb.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 7.25s of 15.35s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m8192-fastb.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 8.10s of 15.35s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m8192-fastb.err: INFO repair-timing: forney solve: 15.35s over 1 solve(s) (stage 1 7.25s, stage 2 8.10s) - 60.743% of the 25.27s repair
+<rig>\jcross-262144\logs\r3-m8192-fastdir.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w): 7.03s of 15.35s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m8192-fastdir.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 8.32s of 15.35s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m8192-fastdir.err: INFO repair-timing: forney solve: 15.35s over 1 solve(s) (stage 1 7.03s, stage 2 8.32s) - 60.566% of the 25.35s repair
+<rig>\jcross-262144\logs\r3-m8192-off.err: INFO repair-timing:   forney stage 1 (hankel, nseg=64, stripe 512w, dft=3x5x17): 6.79s
+<rig>\jcross-262144\logs\r3-m8192-off.err: INFO repair-timing:   forney stage 2 (evaluate, 128 group(s) in tiles of 31, stripe 512w): 8.68s
+<rig>\jcross-262144\logs\r3-m8192-off.err: INFO repair-timing: forney solve: 15.47s over 1 solve(s) (stage 1 6.79s, stage 2 8.68s) - 58.395% of the 26.49s repair
+<rig>\jcross-262144\logs\r3-m8192-s1off.err: INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic): 5.04s of 12.52s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m8192-s1off.err: INFO repair-timing:   forney stage 2 (joint factor, 8 tile(s), stripe 512w): 7.48s of 12.52s wall (attributed by worker share)
+<rig>\jcross-262144\logs\r3-m8192-s1off.err: INFO repair-timing: forney solve: 12.52s over 1 solve(s) (stage 1 5.04s, stage 2 7.48s) - 55.601% of the 22.52s repair

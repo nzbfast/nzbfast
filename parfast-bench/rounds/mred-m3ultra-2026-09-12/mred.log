@@ -1,0 +1,96 @@
+BOX-QUIET foreign_cpu=39% starting <rig>/pubrun/mred.py at 2026-09-12T11:37:19Z
+RIG-LOCK-TAKEN <rig>/.parfast-rig.lock pid=18831
+MRED-START 2026-09-12T11:38:19Z
+BOX host=apple-m3-ultra cpu=Apple M3 Ultra cores=32 ram_gb=256.0 os=macOS 27.0 free_gb=228.8
+BIN parfast sha256=5d0707ee7581f46ef06f84b27973fb85328ffc226c5a49fbcd93993609b1f571 bytes=2723536 version=parfast version 1.5.0-beta.1 built from 8b0b67ec4d15
+BIN par2turbo sha256=f15cc37cd102f9fd64bbe6adb84d9f4009406bea86e8748dbfca2f85d37d3a31 bytes=624712 version=par2cmdline-turbo version 1.5.0 built from ?
+PROTOCOL sizes_gib=[10, 23, 30, 50, 80] redundancy_pct=[25, 30] reps=3 threads=32 recovery=in-place slice_cap=32768 rep_order=interleaved gate=recovery-size-and-shape-never-rc
+PAYLOAD-READY members=80 bytes=85899345920
+SLICE-PROBE index=5 unique=80/80
+HIRED size=10 red=25 bs=768000 blocks=13990 rep=1 arm=parfast wall=5.232 cpu=118.471 cpu_over_wall=22.64 peak_mb=13753.0 recovery_mb=2583 files=13 rc=0 foreign_cpu=13.6 errlen=0 ts=2026-09-12T11:38:24Z
+HIRED size=10 red=25 bs=768000 blocks=13990 rep=1 arm=turbo wall=46.808 cpu=1321.155 cpu_over_wall=28.22 peak_mb=2593.3 recovery_mb=2583 files=13 rc=0 foreign_cpu=57.2 errlen=0 ts=2026-09-12T11:39:11Z
+HIRED size=10 red=30 bs=768000 blocks=13990 rep=1 arm=parfast wall=4.466 cpu=123.569 cpu_over_wall=27.67 peak_mb=14525.2 recovery_mb=3097 files=14 rc=0 foreign_cpu=25.6 errlen=0 ts=2026-09-12T11:39:16Z
+HIRED size=10 red=30 bs=768000 blocks=13990 rep=1 arm=turbo wall=56.023 cpu=1581.591 cpu_over_wall=28.23 peak_mb=3105.4 recovery_mb=3097 files=14 rc=0 foreign_cpu=31.8 errlen=0 ts=2026-09-12T11:40:12Z
+HIRED-SIZE-DONE size=10 rep=1 2026-09-12T11:40:12Z
+WARN-FOREIGN-CPU at=hi-23-25-r1-parfast foreign_cpu=108% ceiling=320% top=[/usr/sbin/spindump(1264)=100% /sbin/launchd(1)=4% /usr/libexec/opendirectoryd(620)=2% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds(608)=2%]
+HIRED size=23 red=25 bs=768000 blocks=32177 rep=1 arm=parfast wall=7.527 cpu=193.695 cpu_over_wall=25.73 peak_mb=31066.4 recovery_mb=5948 files=14 rc=0 foreign_cpu=108.1 errlen=0 ts=2026-09-12T11:40:20Z
+HIRED size=23 red=25 bs=768000 blocks=32177 rep=1 arm=turbo wall=230.655 cpu=6996.124 cpu_over_wall=30.33 peak_mb=5925.6 recovery_mb=5948 files=14 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T11:44:10Z
+HIRED size=23 red=30 bs=768000 blocks=32177 rep=1 arm=parfast wall=7.492 cpu=195.851 cpu_over_wall=26.14 peak_mb=32405.8 recovery_mb=7134 files=15 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T11:44:18Z
+WARN-FOREIGN-CPU at=hi-23-30-r1-turbo foreign_cpu=162% ceiling=320% top=[/sbin/launchd(1)=52% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(19091)=13% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(19090)=13% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(19095)=11%]
+HIRED size=23 red=30 bs=768000 blocks=32177 rep=1 arm=turbo wall=274.274 cpu=8352.82 cpu_over_wall=30.45 peak_mb=7104.4 recovery_mb=7134 files=15 rc=0 foreign_cpu=161.5 errlen=0 ts=2026-09-12T11:48:52Z
+HIRED-SIZE-DONE size=23 rep=1 2026-09-12T11:48:52Z
+BOX-BUSY-WAIT try=1 foreign_cpu=781% ceiling=320% at=hi-30-25-r1-parfast ts=2026-09-12T11:48:53Z
+HIRED size=30 red=25 bs=983284 blocks=32760 rep=1 arm=parfast wall=8.875 cpu=233.227 cpu_over_wall=26.28 peak_mb=40202.7 recovery_mb=7738 files=14 rc=0 foreign_cpu=5.8 errlen=0 ts=2026-09-12T11:49:32Z
+HIRED size=30 red=25 bs=983284 blocks=32760 rep=1 arm=turbo wall=301.801 cpu=9200.78 cpu_over_wall=30.49 peak_mb=7721.1 recovery_mb=7738 files=14 rc=0 foreign_cpu=92.8 errlen=0 ts=2026-09-12T11:54:33Z
+HIRED size=30 red=30 bs=983284 blocks=32760 rep=1 arm=parfast wall=11.317 cpu=252.069 cpu_over_wall=22.27 peak_mb=33778.7 recovery_mb=9282 files=15 rc=0 foreign_cpu=5.2 errlen=0 ts=2026-09-12T11:54:45Z
+WARN-FOREIGN-CPU at=hi-30-30-r1-turbo foreign_cpu=160% ceiling=320% top=[/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd(1260)=112% /usr/bin/top(19429)=37% /Applications/Tailscale.app/Contents/PlugIns/IPNExtension.appex/Contents/MacOS/IPNExtension(1654)=4% com.macpaw.CleanMyMac5.HealthMonitor(57940)=3%]
+HIRED size=30 red=30 bs=983284 blocks=32760 rep=1 arm=turbo wall=361.877 cpu=11019.935 cpu_over_wall=30.45 peak_mb=9257.8 recovery_mb=9282 files=15 rc=0 foreign_cpu=142.3 errlen=0 ts=2026-09-12T12:00:48Z
+HIRED-SIZE-DONE size=30 rep=1 2026-09-12T12:00:48Z
+WARN-FOREIGN-CPU at=hi-50-25-r1-parfast foreign_cpu=188% ceiling=320% top=[/sbin/launchd(1)=36% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(19561)=17% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(19565)=17% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(19564)=16%]
+HIRED size=50 red=25 bs=1639304 blocks=32750 rep=1 arm=parfast wall=18.975 cpu=440.58 cpu_over_wall=23.22 peak_mb=53941.6 recovery_mb=12859 files=14 rc=0 foreign_cpu=184.9 errlen=0 ts=2026-09-12T12:01:07Z
+HIRED size=50 red=25 bs=1639304 blocks=32750 rep=1 arm=turbo wall=512.661 cpu=15670.034 cpu_over_wall=30.57 peak_mb=12863.4 recovery_mb=12859 files=14 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T12:09:41Z
+HIRED size=50 red=30 bs=1639304 blocks=32750 rep=1 arm=parfast wall=23.091 cpu=449.04 cpu_over_wall=19.45 peak_mb=54305.7 recovery_mb=15426 files=15 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T12:10:04Z
+HIRED size=50 red=30 bs=1639304 blocks=32750 rep=1 arm=turbo wall=627.563 cpu=19247.865 cpu_over_wall=30.67 peak_mb=15423.2 recovery_mb=15426 files=15 rc=0 foreign_cpu=12.0 errlen=0 ts=2026-09-12T12:20:33Z
+HIRED-SIZE-DONE size=50 rep=1 2026-09-12T12:20:33Z
+HIRED size=80 red=25 bs=2625288 blocks=32720 rep=1 arm=parfast wall=36.676 cpu=688.437 cpu_over_wall=18.77 peak_mb=84769.4 recovery_mb=20545 files=15 rc=0 foreign_cpu=18.8 errlen=0 ts=2026-09-12T12:21:10Z
+HIRED size=80 red=25 bs=2625288 blocks=32720 rep=1 arm=turbo wall=832.737 cpu=25573.674 cpu_over_wall=30.71 peak_mb=20575.0 recovery_mb=20539 files=14 rc=0 foreign_cpu=6.1 errlen=0 ts=2026-09-12T12:35:05Z
+HIRED size=80 red=30 bs=2625288 blocks=32720 rep=1 arm=parfast wall=38.833 cpu=711.904 cpu_over_wall=18.33 peak_mb=85142.5 recovery_mb=24643 files=15 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T12:35:44Z
+HIRED size=80 red=30 bs=2625288 blocks=32720 rep=1 arm=turbo wall=999.167 cpu=30682.348 cpu_over_wall=30.71 peak_mb=24671.7 recovery_mb=24643 files=15 rc=0 foreign_cpu=2.2 errlen=0 ts=2026-09-12T12:52:26Z
+HIRED-SIZE-DONE size=80 rep=1 2026-09-12T12:52:26Z
+MRED-REP-END rep=1 2026-09-12T12:52:26Z
+HIRED size=10 red=25 bs=768000 blocks=13990 rep=2 arm=parfast wall=4.268 cpu=120.036 cpu_over_wall=28.12 peak_mb=13852.8 recovery_mb=2583 files=13 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T12:52:30Z
+HIRED size=10 red=25 bs=768000 blocks=13990 rep=2 arm=turbo wall=47.467 cpu=1326.438 cpu_over_wall=27.94 peak_mb=2593.2 recovery_mb=2583 files=13 rc=0 foreign_cpu=1.1 errlen=0 ts=2026-09-12T12:53:18Z
+HIRED size=10 red=30 bs=768000 blocks=13990 rep=2 arm=parfast wall=4.443 cpu=123.415 cpu_over_wall=27.78 peak_mb=14525.1 recovery_mb=3097 files=14 rc=0 foreign_cpu=57.4 errlen=0 ts=2026-09-12T12:53:23Z
+HIRED size=10 red=30 bs=768000 blocks=13990 rep=2 arm=turbo wall=56.643 cpu=1579.996 cpu_over_wall=27.89 peak_mb=3105.5 recovery_mb=3097 files=14 rc=0 foreign_cpu=13.9 errlen=0 ts=2026-09-12T12:54:19Z
+HIRED-SIZE-DONE size=10 rep=2 2026-09-12T12:54:19Z
+HIRED size=23 red=25 bs=768000 blocks=32177 rep=2 arm=parfast wall=7.178 cpu=192.445 cpu_over_wall=26.81 peak_mb=31068.3 recovery_mb=5948 files=14 rc=0 foreign_cpu=2.2 errlen=0 ts=2026-09-12T12:54:27Z
+HIRED size=23 red=25 bs=768000 blocks=32177 rep=2 arm=turbo wall=231.437 cpu=6970.065 cpu_over_wall=30.12 peak_mb=5925.5 recovery_mb=5948 files=14 rc=0 foreign_cpu=8.2 errlen=0 ts=2026-09-12T12:58:18Z
+HIRED size=23 red=30 bs=768000 blocks=32177 rep=2 arm=parfast wall=7.446 cpu=195.358 cpu_over_wall=26.24 peak_mb=32405.8 recovery_mb=7134 files=15 rc=0 foreign_cpu=12.6 errlen=0 ts=2026-09-12T12:58:26Z
+HIRED size=23 red=30 bs=768000 blocks=32177 rep=2 arm=turbo wall=282.96 cpu=8627.629 cpu_over_wall=30.49 peak_mb=7104.5 recovery_mb=7134 files=15 rc=0 foreign_cpu=21.0 errlen=0 ts=2026-09-12T13:03:09Z
+HIRED-SIZE-DONE size=23 rep=2 2026-09-12T13:03:09Z
+HIRED size=30 red=25 bs=983284 blocks=32760 rep=2 arm=parfast wall=8.97 cpu=233.658 cpu_over_wall=26.05 peak_mb=40203.1 recovery_mb=7738 files=14 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T13:03:18Z
+HIRED size=30 red=25 bs=983284 blocks=32760 rep=2 arm=turbo wall=316.841 cpu=9660.383 cpu_over_wall=30.49 peak_mb=7721.3 recovery_mb=7738 files=14 rc=0 foreign_cpu=42.2 errlen=0 ts=2026-09-12T13:08:35Z
+HIRED size=30 red=30 bs=983284 blocks=32760 rep=2 arm=parfast wall=11.167 cpu=253.212 cpu_over_wall=22.68 peak_mb=33771.8 recovery_mb=9282 files=15 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T13:08:46Z
+HIRED size=30 red=30 bs=983284 blocks=32760 rep=2 arm=turbo wall=380.353 cpu=11633.64 cpu_over_wall=30.59 peak_mb=9257.7 recovery_mb=9282 files=15 rc=0 foreign_cpu=5.2 errlen=0 ts=2026-09-12T13:15:07Z
+HIRED-SIZE-DONE size=30 rep=2 2026-09-12T13:15:08Z
+WARN-FOREIGN-CPU at=hi-50-25-r2-parfast foreign_cpu=167% ceiling=320% top=[/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(21809)=22% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(21808)=22% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(21812)=21% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(21810)=20%]
+HIRED size=50 red=25 bs=1639304 blocks=32750 rep=2 arm=parfast wall=25.527 cpu=440.124 cpu_over_wall=17.24 peak_mb=53943.1 recovery_mb=12859 files=14 rc=0 foreign_cpu=167.2 errlen=0 ts=2026-09-12T13:15:33Z
+HIRED size=50 red=25 bs=1639304 blocks=32750 rep=2 arm=turbo wall=533.48 cpu=16358.584 cpu_over_wall=30.66 peak_mb=12863.4 recovery_mb=12859 files=14 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T13:24:28Z
+HIRED size=50 red=30 bs=1639304 blocks=32750 rep=2 arm=parfast wall=19.915 cpu=443.0 cpu_over_wall=22.24 peak_mb=54304.2 recovery_mb=15426 files=15 rc=0 foreign_cpu=1.1 errlen=0 ts=2026-09-12T13:24:48Z
+HIRED size=50 red=30 bs=1639304 blocks=32750 rep=2 arm=turbo wall=644.764 cpu=19770.835 cpu_over_wall=30.66 peak_mb=15423.2 recovery_mb=15426 files=15 rc=0 foreign_cpu=27.2 errlen=0 ts=2026-09-12T13:35:34Z
+HIRED-SIZE-DONE size=50 rep=2 2026-09-12T13:35:34Z
+HIRED size=80 red=25 bs=2625288 blocks=32720 rep=2 arm=parfast wall=36.763 cpu=689.259 cpu_over_wall=18.75 peak_mb=84785.2 recovery_mb=20545 files=15 rc=0 foreign_cpu=67.4 errlen=0 ts=2026-09-12T13:36:11Z
+HIRED size=80 red=25 bs=2625288 blocks=32720 rep=2 arm=turbo wall=846.984 cpu=26023.686 cpu_over_wall=30.73 peak_mb=20574.9 recovery_mb=20539 files=14 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T13:50:20Z
+HIRED size=80 red=30 bs=2625288 blocks=32720 rep=2 arm=parfast wall=32.151 cpu=714.01 cpu_over_wall=22.21 peak_mb=85146.1 recovery_mb=24643 files=15 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T13:50:53Z
+HIRED size=80 red=30 bs=2625288 blocks=32720 rep=2 arm=turbo wall=1019.405 cpu=31328.85 cpu_over_wall=30.73 peak_mb=24671.7 recovery_mb=24643 files=15 rc=0 foreign_cpu=1.1 errlen=0 ts=2026-09-12T14:07:55Z
+HIRED-SIZE-DONE size=80 rep=2 2026-09-12T14:07:55Z
+MRED-REP-END rep=2 2026-09-12T14:07:55Z
+WARN-FOREIGN-CPU at=hi-10-25-r3-parfast foreign_cpu=113% ceiling=320% top=[/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd(1260)=107% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(23224)=6%]
+HIRED size=10 red=25 bs=768000 blocks=13990 rep=3 arm=parfast wall=4.311 cpu=120.648 cpu_over_wall=27.99 peak_mb=13856.2 recovery_mb=2583 files=13 rc=0 foreign_cpu=112.9 errlen=0 ts=2026-09-12T14:07:59Z
+HIRED size=10 red=25 bs=768000 blocks=13990 rep=3 arm=turbo wall=48.21 cpu=1351.197 cpu_over_wall=28.03 peak_mb=2593.1 recovery_mb=2583 files=13 rc=0 foreign_cpu=106.1 errlen=0 ts=2026-09-12T14:08:48Z
+HIRED size=10 red=30 bs=768000 blocks=13990 rep=3 arm=parfast wall=4.441 cpu=122.961 cpu_over_wall=27.69 peak_mb=14525.1 recovery_mb=3097 files=14 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T14:08:52Z
+HIRED size=10 red=30 bs=768000 blocks=13990 rep=3 arm=turbo wall=56.142 cpu=1593.497 cpu_over_wall=28.38 peak_mb=3105.4 recovery_mb=3097 files=14 rc=0 foreign_cpu=13.8 errlen=0 ts=2026-09-12T14:09:48Z
+HIRED-SIZE-DONE size=10 rep=3 2026-09-12T14:09:48Z
+HIRED size=23 red=25 bs=768000 blocks=32177 rep=3 arm=parfast wall=7.133 cpu=192.646 cpu_over_wall=27.01 peak_mb=31067.4 recovery_mb=5948 files=14 rc=0 foreign_cpu=102.8 errlen=0 ts=2026-09-12T14:09:56Z
+HIRED size=23 red=25 bs=768000 blocks=32177 rep=3 arm=turbo wall=235.514 cpu=7185.28 cpu_over_wall=30.51 peak_mb=5925.4 recovery_mb=5948 files=14 rc=0 foreign_cpu=1.0 errlen=0 ts=2026-09-12T14:13:51Z
+HIRED size=23 red=30 bs=768000 blocks=32177 rep=3 arm=parfast wall=7.472 cpu=195.933 cpu_over_wall=26.22 peak_mb=32405.8 recovery_mb=7134 files=15 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T14:13:59Z
+HIRED size=23 red=30 bs=768000 blocks=32177 rep=3 arm=turbo wall=288.924 cpu=8815.12 cpu_over_wall=30.51 peak_mb=7104.4 recovery_mb=7134 files=15 rc=0 foreign_cpu=70.7 errlen=0 ts=2026-09-12T14:18:48Z
+HIRED-SIZE-DONE size=23 rep=3 2026-09-12T14:18:48Z
+HIRED size=30 red=25 bs=983284 blocks=32760 rep=3 arm=parfast wall=9.253 cpu=234.482 cpu_over_wall=25.34 peak_mb=40196.5 recovery_mb=7738 files=14 rc=0 foreign_cpu=53.7 errlen=0 ts=2026-09-12T14:18:57Z
+HIRED size=30 red=25 bs=983284 blocks=32760 rep=3 arm=turbo wall=319.795 cpu=9741.638 cpu_over_wall=30.46 peak_mb=7721.2 recovery_mb=7738 files=14 rc=0 foreign_cpu=3.1 errlen=0 ts=2026-09-12T14:24:17Z
+HIRED size=30 red=30 bs=983284 blocks=32760 rep=3 arm=parfast wall=11.376 cpu=251.4 cpu_over_wall=22.1 peak_mb=33779.0 recovery_mb=9282 files=15 rc=0 foreign_cpu=33.0 errlen=0 ts=2026-09-12T14:24:29Z
+HIRED size=30 red=30 bs=983284 blocks=32760 rep=3 arm=turbo wall=381.052 cpu=11670.226 cpu_over_wall=30.63 peak_mb=9257.8 recovery_mb=9282 files=15 rc=0 foreign_cpu=45.4 errlen=0 ts=2026-09-12T14:30:51Z
+HIRED-SIZE-DONE size=30 rep=3 2026-09-12T14:30:51Z
+HIRED size=50 red=25 bs=1639304 blocks=32750 rep=3 arm=parfast wall=18.827 cpu=442.748 cpu_over_wall=23.52 peak_mb=53941.4 recovery_mb=12859 files=14 rc=0 foreign_cpu=94.7 errlen=0 ts=2026-09-12T14:31:10Z
+HIRED size=50 red=25 bs=1639304 blocks=32750 rep=3 arm=turbo wall=539.263 cpu=16519.324 cpu_over_wall=30.63 peak_mb=12863.3 recovery_mb=12859 files=14 rc=0 foreign_cpu=0.0 errlen=0 ts=2026-09-12T14:40:10Z
+HIRED size=50 red=30 bs=1639304 blocks=32750 rep=3 arm=parfast wall=19.761 cpu=450.394 cpu_over_wall=22.79 peak_mb=54309.5 recovery_mb=15426 files=15 rc=0 foreign_cpu=54.5 errlen=0 ts=2026-09-12T14:40:30Z
+HIRED size=50 red=30 bs=1639304 blocks=32750 rep=3 arm=turbo wall=644.627 cpu=19783.29 cpu_over_wall=30.69 peak_mb=15423.4 recovery_mb=15426 files=15 rc=0 foreign_cpu=2.4 errlen=0 ts=2026-09-12T14:51:17Z
+HIRED-SIZE-DONE size=50 rep=3 2026-09-12T14:51:17Z
+HIRED size=80 red=25 bs=2625288 blocks=32720 rep=3 arm=parfast wall=30.145 cpu=686.907 cpu_over_wall=22.79 peak_mb=84767.4 recovery_mb=20545 files=15 rc=0 foreign_cpu=12.2 errlen=0 ts=2026-09-12T14:51:47Z
+HIRED size=80 red=25 bs=2625288 blocks=32720 rep=3 arm=turbo wall=853.77 cpu=26240.86 cpu_over_wall=30.74 peak_mb=20575.0 recovery_mb=20539 files=14 rc=0 foreign_cpu=13.5 errlen=0 ts=2026-09-12T15:06:03Z
+HIRED size=80 red=30 bs=2625288 blocks=32720 rep=3 arm=parfast wall=49.575 cpu=703.181 cpu_over_wall=14.18 peak_mb=85138.5 recovery_mb=24643 files=15 rc=0 foreign_cpu=10.4 errlen=0 ts=2026-09-12T15:06:52Z
+HIRED size=80 red=30 bs=2625288 blocks=32720 rep=3 arm=turbo wall=1008.097 cpu=30951.351 cpu_over_wall=30.7 peak_mb=24671.7 recovery_mb=24643 files=15 rc=0 foreign_cpu=4.4 errlen=0 ts=2026-09-12T15:23:43Z
+HIRED-SIZE-DONE size=80 rep=3 2026-09-12T15:23:43Z
+MRED-REP-END rep=3 2026-09-12T15:23:43Z
+MRED-END 2026-09-12T15:23:43Z
+RIG-LOCK-RELEASED <rig>/.parfast-rig.lock

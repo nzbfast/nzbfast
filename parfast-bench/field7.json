@@ -1,0 +1,58 @@
+{
+ "box": "Intel i5-10600KF, 6 cores / 12 threads, 64 GB, Windows 11",
+ "set": "10 GiB in 10 files, 15% parity, 13,990 source blocks",
+ "damage": "one whole member deleted - 1,399 blocks missing",
+ "reps": 2,
+ "create": {
+  "parfast": 18.8,
+  "par2turbo": 153.5,
+  "par2classic": 1635.7,
+  "phpar2": 1957.5,
+  "par2j64": 163.1,
+  "parpar": 147.0,
+  "rarpar": 177.4
+ },
+ "verify": {
+  "parfast": 1.7,
+  "par2turbo": 4.3,
+  "par2classic": 8.1,
+  "phpar2": 51.4,
+  "par2j64": 9.4,
+  "rarpar": 14.7
+ },
+ "repair": {
+  "parfast": 26.7,
+  "par2turbo": 108.0,
+  "par2classic": 1163.4,
+  "phpar2": 1223.6,
+  "par2j64": 164.0,
+  "rarpar": 139.4
+ },
+ "n": {
+  "create": {
+   "parfast": 3,
+   "par2turbo": 3,
+   "par2classic": 2,
+   "phpar2": 2,
+   "par2j64": 2,
+   "parpar": 2,
+   "rarpar": 2
+  },
+  "verify": {
+   "parfast": 2,
+   "par2turbo": 2,
+   "par2classic": 2,
+   "phpar2": 2,
+   "par2j64": 2,
+   "rarpar": 2
+  },
+  "repair": {
+   "parfast": 2,
+   "par2turbo": 2,
+   "par2classic": 2,
+   "phpar2": 2,
+   "par2j64": 2,
+   "rarpar": 2
+  }
+ }
+}

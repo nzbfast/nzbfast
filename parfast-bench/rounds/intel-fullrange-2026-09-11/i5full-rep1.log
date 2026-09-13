@@ -1,0 +1,81 @@
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=full pid=3324 started=2026-09-11T07:23:07.0999982Z
+FULL-START 2026-09-11T07:23:07.1111402Z
+BOX host=intel-i5-10600kf cpu=Intel(R) Core(TM) i5-10600KF CPU @ 4.10GHz caption=Intel64 Family 6 Model 165 Stepping 5 cores=6 threads=12 ram_gb=63.9 os=Microsoft Windows 11 Pro build=10.0.26200 Dfree_gb=7151.4
+BIN parfast sha256=cae5a6f368af74f1eb31afa483eb935c663ea976ddd0eecb5b76e6c4487360e9 bytes=2596864 version=parfast version 1.5.0-beta.1 built from 8b0b67ec4d15
+BIN par2turbo sha256=36ce11d92c895a552485ba8cb1ad4b92ca62a00333f1aa6308daafbc371e69e9 bytes=1653248 version=par2cmdline-turbo version 1.5.0 built from ?
+BIN par2j64 sha256=8e75c2a3f256094cc0313f477b6e56e492cc7d258f9cb6b755bee98cf289620a bytes=416768 version=Parchive 2.0 client version 1.3.3.5 by Yutaka Sawada built from ?
+PROTOCOL slice=768000 recovery_blocks=32177 source_blocks=32177 redundancy_pct=100.0 damage=scattered-seeded-slice-overwrite reps=2 gate=sha256-all-members prewarm=full-read-of-work-dir
+ARGV parfast='r -q -t12 -T12 f.par2' par2turbo='r -q -t12 -T12 f.par2' par2j64='r f.par2'
+PAYLOAD-READY members=23 bytes=24696061952
+FIXTURE members=23 distinct_member_sha=23/23 bytes=24696061952
+SLICE-PROBE index=5 unique=23/23
+GOLD p00.bin 784E10F9FE8A6DF557891FE77D7463B3C3EC30668A6E9190413ACE883929E8A2
+GOLD p01.bin 427580D39068340A1A4683391B5CE621B61465BE3CCE59467D2B595464DBA289
+GOLD p02.bin 9C874271C023166E4C8A149CB58F5151E16801FCB5A96D0ED67F135CCAF561A4
+GOLD p03.bin 9794E8FBA5C555A7CFF08AF380DCFEA93CABA07C84E54789B0AB2D2E5F2B3CF2
+GOLD p04.bin 0A795B0471940005BDCF32E1B12905DDD37070A3B7367939A6D24AD09EBBF8AA
+GOLD p05.bin 76E334DC68D8592D2D62E73FC7EA708E74B1BF783C55176C6ABA016B6523BE51
+GOLD p06.bin A963DD4BA69AE9E161CF038564A70FE83141EA0DA27DA99052C006F4602979C6
+GOLD p07.bin 146457BF02A6CA615C0BF84542D678CF2C74159D6CE14A67DDF229AA86605779
+GOLD p08.bin 4D87BF03C8D6333BD0D88C9E2BC54F2296F96772DD225640CB0FFE4208B20E81
+GOLD p09.bin 6FEE4A4D667FC5B45997910871CBC94FD36EE62DC9D26B46859A45072BB2DDF8
+GOLD p10.bin 14BD165DB1161265A83001147D1C7C8A86AF5300F6DB3917B0D50F6D8AFF214E
+GOLD p11.bin AA31F3773520065442D0EC29B3E55B2F509AE591BF5B5F7BB46CE73F12685109
+GOLD p12.bin E9228B437C64D080E149CF09B8D00CDD387A89164C8A2CD409853ECCBD8ADDEE
+GOLD p13.bin E390A6F96F4868F3B26E0A3D2D62BCDC42C19BE7E6E21D5A4147BC5E32DF0EA8
+GOLD p14.bin 01BE71BCFC634AD4B6FD4A358874182440EF0E77314A2028DF22952DC46B7F92
+GOLD p15.bin F1771965D0FD456AA39B46EE937F1C8E518C49A95D91551F8BAB5A4A57E89054
+GOLD p16.bin 1D79F26326077191BFA4CEF9CA8E75883CAE4DD2DBF07F39BD9C9668239EAB60
+GOLD p17.bin D480BDF8783830E3069A6A5E00966CC11A2A588993429571AADF20BDABACAF5D
+GOLD p18.bin 7AD762B39592AF1723C5533015A80DE87BB3C05DAA1B7120D81E58E4EA25E7FA
+GOLD p19.bin 1D16C63E08CFCAA332CA4BFC75AFE5465BAAC9F8CA767FFDE9628B159B7B1BBC
+GOLD p20.bin 40C3D618D5DD1ECDBB6D2B359D4DC1E6828C9C7D1CA530D3DEC0B220F27C3203
+GOLD p21.bin 4C04B5AF321A220EEBFD3B768C69B8090CB61176E721004BF5E2946A7258E59E
+GOLD p22.bin 103935C6C759C0F1C8D4CAA043E90AB8387C8A481AF58E1D9D8C44493E23E839
+CREATE tool=parfast rc=0 wall=58.249 cpu=403.625 peak_mb=26245.3 par2files=17 par2mb=23651.5 errlen=0
+WARMUP-START 2026-09-11T07:26:28.5045473Z
+LEG round=i5full rep=0 m=1 tool=parfast argv='r -q -t12 -T12 f.par2' wall=13.798 cpu=117.703 cpu_over_wall=8.53 peak_mb=9429.8 rc=0 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=1 seed=20260917 foreign_cpu=60.9 errlen=0 ts=2026-09-11T07:27:34.8353148Z
+LEG round=i5full rep=0 m=1 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=42.681 cpu=106.078 cpu_over_wall=2.49 peak_mb=37.1 rc=0 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=1 seed=20260917 foreign_cpu=68.8 errlen=0 ts=2026-09-11T07:31:04.3704273Z
+LEG round=i5full rep=0 m=1 tool=par2j64 argv='r f.par2' wall=77.698 cpu=98.078 cpu_over_wall=1.26 peak_mb=23577.1 rc=16 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=0 seed=20260917 foreign_cpu=62.5 errlen=0 ts=2026-09-11T07:35:16.1910098Z
+LEG round=i5full rep=0 m=64 tool=parfast argv='r -q -t12 -T12 f.par2' wall=30.631 cpu=277.672 cpu_over_wall=9.07 peak_mb=8477.8 rc=0 restored=23/23 damaged_members=21 touched_members=21 blocks_written=64 strays=21 seed=20261358 foreign_cpu=78.1 errlen=0 ts=2026-09-11T07:37:31.2597193Z
+LEG round=i5full rep=0 m=64 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=66.872 cpu=296.109 cpu_over_wall=4.43 peak_mb=87.1 rc=0 restored=23/23 damaged_members=21 touched_members=21 blocks_written=64 strays=21 seed=20261358 foreign_cpu=53.1 errlen=0 ts=2026-09-11T07:40:18.4098990Z
+LEG round=i5full rep=0 m=64 tool=par2j64 argv='r f.par2' wall=190.683 cpu=242.484 cpu_over_wall=1.27 peak_mb=23627.1 rc=16 restored=23/23 damaged_members=21 touched_members=21 blocks_written=64 strays=0 seed=20261358 foreign_cpu=60.9 errlen=0 ts=2026-09-11T07:45:10.5685993Z
+WARMUP-END 2026-09-11T07:46:18.8998598Z
+VERIFY round=i5full rep=1 tool=parfast argv='v -q -t12 -T12 f.par2' wall=3.774 cpu=37.156 cpu_over_wall=9.85 peak_mb=96.7 rc=0 intact=23/23 foreign_cpu=98.4 errlen=0 ts=2026-09-11T07:46:56.2281454Z
+VERIFY round=i5full rep=1 tool=par2turbo argv='v -q -t12 -T12 f.par2' wall=34.789 cpu=85.438 cpu_over_wall=2.46 peak_mb=25.7 rc=0 intact=23/23 foreign_cpu=62.5 errlen=0 ts=2026-09-11T07:47:52.8780889Z
+VERIFY round=i5full rep=1 tool=par2j64 argv='v f.par2' wall=51.929 cpu=78.859 cpu_over_wall=1.52 peak_mb=12.7 rc=0 intact=23/23 foreign_cpu=BOX-BUSY-WAIT try=1 foreign_cpu=131.2 ceiling=120 at=verify-par2j64-r1 ts=2026-09-11T07:48:04.9638028Z 62.5 errlen=0 ts=2026-09-11T07:49:39.4169321Z
+LEG round=i5full rep=1 m=1 tool=parfast argv='r -q -t12 -T12 f.par2' wall=13.654 cpu=117.281 cpu_over_wall=8.59 peak_mb=9099 rc=0 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=1 seed=20260918 foreign_cpu=76.6 errlen=0 ts=2026-09-11T07:50:20.4142420Z
+LEG round=i5full rep=1 m=1 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=42.462 cpu=104.938 cpu_over_wall=2.47 peak_mb=37.1 rc=0 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=1 seed=20260918 foreign_cpu=65.6 errlen=0 ts=2026-09-11T07:52:49.2447924Z
+LEG round=i5full rep=1 m=1 tool=par2j64 argv='r f.par2' wall=76.71 cpu=97.328 cpu_over_wall=1.27 peak_mb=23577.1 rc=16 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=0 seed=20260918 foreign_cpu=75 errlen=0 ts=2026-09-11T07:55:47.9229459Z
+LEG round=i5full rep=1 m=4 tool=parfast argv='r -q -t12 -T12 f.par2' wall=15.286 cpu=130.844 cpu_over_wall=8.56 peak_mb=11072.2 rc=0 restored=23/23 damaged_members=4 touched_members=4 blocks_written=4 strays=4 seed=20260939 foreign_cpu=87.5 errlen=0 ts=2026-09-11T07:57:48.5924615Z
+LEG round=i5full rep=1 m=4 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=44.728 cpu=119.844 cpu_over_wall=2.68 peak_mb=39.5 rc=0 restored=23/23 damaged_members=4 touched_members=4 blocks_written=4 strays=4 seed=20260939 foreign_cpu=56.2 errlen=0 ts=2026-09-11T08:00:17.4533587Z
+LEG round=i5full rep=1 m=4 tool=par2j64 argv='r f.par2' wall=85.812 cpu=114.188 cpu_over_wall=1.33 peak_mb=23579.5 rc=16 restored=23/23 damaged_members=4 touched_members=4 blocks_written=4 strays=0 seed=20260939 foreign_cpu=62.5 errlen=0 ts=2026-09-11T08:03:30.0134019Z
+LEG round=i5full rep=1 m=16 tool=parfast argv='r -q -t12 -T12 f.par2' wall=19.336 cpu=160.266 cpu_over_wall=8.29 peak_mb=9052.7 rc=0 restored=23/23 damaged_members=11 touched_members=11 blocks_written=16 strays=11 seed=20261023 foreign_cpu=76.6 errlen=0 ts=2026-09-11T08:05:35.0054567Z
+LEG round=i5full rep=1 m=16 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=49.312 cpu=172.766 cpu_over_wall=3.5 peak_mb=49 rc=0 restored=23/23 damaged_members=11 touched_members=11 blocks_written=16 strays=11 seed=20261023 foreign_cpu=89.1 errlen=0 ts=2026-09-11T08:08:06.6084918Z
+LEG round=i5full rep=1 m=16 tool=par2j64 argv='r f.par2' wall=130.447 cpu=161.641 cpu_over_wall=1.24 peak_mb=23589 rc=16 restored=23/23 damaged_members=11 touched_members=11 blocks_written=16 strays=0 seed=20261023 foreign_cpu=71.9 errlen=0 ts=2026-09-11T08:12:11.5507474Z
+LEG round=i5full rep=1 m=64 tool=parfast argv='r -q -t12 -T12 f.par2' wall=35.909 cpu=274.562 cpu_over_wall=7.65 peak_mb=10848.5 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=64 strays=23 seed=20261359 foreign_cpu=87.5 errlen=0 ts=2026-09-11T08:14:58.7008380Z
+LEG round=i5full rep=1 m=64 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=71.33 cpu=306.812 cpu_over_wall=4.3 peak_mb=87.1 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=64 strays=23 seed=20261359 foreign_cpu=68.8 errlen=0 ts=2026-09-11T08:18:25.9155868Z
+LEG round=i5full rep=1 m=64 tool=par2j64 argv='r f.par2' wall=168.961 cpu=242.406 cpu_over_wall=1.43 peak_mb=23627.1 rc=16 restored=23/23 damaged_members=23 touched_members=23 blocks_written=64 strays=0 seed=20261359 foreign_cpu=73.4 errlen=0 ts=2026-09-11T08:23:41.4047319Z
+LEG round=i5full rep=1 m=256 tool=parfast argv='r -q -t12 -T12 f.par2' wall=65.73 cpu=351.406 cpu_over_wall=5.35 peak_mb=16759.4 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=256 strays=23 seed=20262703 foreign_cpu=92.2 errlen=0 ts=2026-09-11T08:26:35.0456089Z
+LEG round=i5full rep=1 m=256 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=94.569 cpu=696.953 cpu_over_wall=7.37 peak_mb=239.6 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=256 strays=23 seed=20262703 foreign_cpu=67.2 errlen=0 ts=2026-09-11T08:30:36.6839494Z
+LEG round=i5full rep=1 m=256 tool=par2j64 argv='r f.par2' wall=194.924 cpu=438.656 cpu_over_wall=2.25 peak_mb=23779.5 rc=16 restored=23/23 damaged_members=23 touched_members=23 blocks_written=256 strays=0 seed=20262703 foreign_cpu=89.1 errlen=0 ts=2026-09-11T08:36:30.4935599Z
+LEG round=i5full rep=1 m=1024 tool=parfast argv='r -q -t12 -T12 f.par2' wall=65.807 cpu=438.906 cpu_over_wall=6.67 peak_mb=17329.2 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=1024 strays=23 seed=20268079 foreign_cpu=70.3 errlen=0 ts=2026-09-11T08:39:16.0169826Z
+LEG round=i5full rep=1 m=1024 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=219.942 cpu=2092.594 cpu_over_wall=9.51 peak_mb=849.4 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=1024 strays=23 seed=20268079 foreign_cpu=65.6 errlen=0 ts=2026-09-11T08:45:05.0044019Z
+LEG round=i5full rep=1 m=1024 tool=par2j64 argv='r f.par2' wall=334.175 cpu=1199.562 cpu_over_wall=3.59 peak_mb=24389.2 rc=16 restored=23/23 damaged_members=23 touched_members=23 blocks_written=1024 strays=0 seed=20268079 foreign_cpu=54.7 errlen=0 ts=2026-09-11T08:52:37.0992592Z
+LEG round=i5full rep=1 m=2048 tool=parfast argv='r -q -t12 -T12 f.par2' wall=70.617 cpu=507.438 cpu_over_wall=7.19 peak_mb=18057.6 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=2048 strays=23 seed=20275247 foreign_cpu=84.4 errlen=0 ts=2026-09-11T08:55:31.6508626Z
+LEG round=i5full rep=1 m=2048 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=390.071 cpu=3965.469 cpu_over_wall=10.17 peak_mb=1662.6 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=2048 strays=23 seed=20275247 foreign_cpu=60.9 errlen=0 ts=2026-09-11T09:04:20.3543914Z
+LEG round=i5full rep=1 m=2048 tool=par2j64 argv='r f.par2' wall=534.896 cpu=2242.609 cpu_over_wall=4.19 peak_mb=25202.2 rc=16 restored=23/23 damaged_members=23 touched_members=23 blocks_written=2048 strays=0 seed=20275247 foreign_cpu=79.7 errlen=0 ts=2026-09-11T09:15:06.1369212Z
+LEG round=i5full rep=1 m=4096 tool=parfast argv='r -q -t12 -T12 f.par2' wall=89.075 cpu=672.375 cpu_over_wall=7.55 peak_mb=19519.7 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=4096 strays=23 seed=20289583 foreign_cpu=81.2 errlen=0 ts=2026-09-11T09:18:33.2008449Z
+LEG round=i5full rep=1 m=4096 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=735.085 cpu=7710.953 cpu_over_wall=10.49 peak_mb=3288.9 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=4096 strays=23 seed=20289583 foreign_cpu=65.6 errlen=0 ts=2026-09-11T09:33:27.5296411Z
+LEG round=i5full rep=1 m=4096 tool=par2j64 argv='r f.par2' wall=954.961 cpu=4464.156 cpu_over_wall=4.67 peak_mb=26828 rc=16 restored=23/23 damaged_members=23 touched_members=23 blocks_written=4096 strays=0 seed=20289583 foreign_cpu=82.8 errlen=0 ts=2026-09-11T09:51:25.2078594Z
+LEG round=i5full rep=1 m=8192 tool=parfast argv='r -q -t12 -T12 f.par2' wall=115.219 cpu=997.406 cpu_over_wall=8.66 peak_mb=22464.9 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=8192 strays=23 seed=20318255 foreign_cpu=64.1 errlen=0 ts=2026-09-11T09:55:39.0127548Z
+LEG round=i5full rep=1 m=8192 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=1441.746 cpu=15377.203 cpu_over_wall=10.67 peak_mb=6541.2 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=8192 strays=23 seed=20318255 foreign_cpu=48.4 errlen=0 ts=2026-09-11T10:22:17.9197359Z
+LEG round=i5full rep=1 m=8192 tool=par2j64 argv='r f.par2' wall=1908.804 cpu=9276.812 cpu_over_wall=4.86 peak_mb=30079.6 rc=16 restored=23/23 damaged_members=23 touched_members=23 blocks_written=8192 strays=0 seed=20318255 foreign_cpu=59.4 errlen=0 ts=2026-09-11T10:56:32.5769871Z
+LEG round=i5full rep=1 m=16384 tool=parfast argv='r -q -t12 -T12 f.par2' wall=245.146 cpu=1870.047 cpu_over_wall=7.63 peak_mb=16081.1 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=23 seed=20375599 foreign_cpu=59.4 errlen=0 ts=2026-09-11T11:03:50.0186631Z
+LEG round=i5full rep=1 m=16384 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=2964.454 cpu=31589.219 cpu_over_wall=10.66 peak_mb=9201 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=23 seed=20375599 foreign_cpu=73.4 errlen=0 ts=2026-09-11T11:56:46.3951785Z
+LEG round=i5full rep=1 m=16384 tool=par2j64 argv='r f.par2' wall=4208.186 cpu=20596.125 cpu_over_wall=4.89 peak_mb=36582.7 rc=16 restored=23/23 damaged_members=23 touched_members=23 blocks_written=16384 strays=0 seed=20375599 foreign_cpu=57.8 errlen=0 ts=2026-09-11T13:10:19.9401519Z
+LEG round=i5full rep=1 m=24576 tool=parfast argv='r -q -t12 -T12 f.par2' wall=659.663 cpu=3463.891 cpu_over_wall=5.25 peak_mb=18012.2 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=24576 strays=23 seed=20432943 foreign_cpu=67.2 errlen=0 ts=2026-09-11T13:25:40.1390292Z
+LEG round=i5full rep=1 m=24576 tool=par2turbo argv='r -q -t12 -T12 f.par2' wall=4446.141 cpu=47200.016 cpu_over_wall=10.62 peak_mb=9708.3 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=24576 strays=23 seed=20432943 foreign_cpu=56.2 errlen=0 ts=2026-09-11T14:44:07.1026393Z
+LEG round=i5full rep=1 m=24576 tool=par2j64 argv='r f.par2' wall=7139.502 cpu=34342.203 cpu_over_wall=4.81 peak_mb=43085.9 rc=16 restored=23/23 damaged_members=23 touched_members=23 blocks_written=24576 strays=0 seed=20432943 foreign_cpu=56.2 errlen=0 ts=2026-09-11T16:47:22.0448471Z
+LEG round=i5full rep=1 m=32177 tool=parfast argv='r -q -t12 -T12 f.par2' wall=1135.347 cpu=6000.219 cpu_over_wall=5.28 peak_mb=22007.5 rc=0 restored=23/23 damaged_members=23 touched_members=23 blocks_written=32177 strays=23 seed=20486150 foreign_cpu=75 errlen=0 ts=2026-09-11T17:11:17.3102856Z
+
