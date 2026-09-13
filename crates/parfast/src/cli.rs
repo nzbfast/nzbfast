@@ -308,7 +308,34 @@ fn parse_options(command: Command, args: &[String]) -> Result<Options, ParseErro
         };
         let mut chars = body.chars();
         let spell = chars.next().expect("body is non-empty");
-        let value: String = chars.collect();
+        let mut value: String = chars.collect();
+
+        // `-B` TAKES ITS PATH AS THE NEXT ARGUMENT WHEN IT IS BARE, and
+        // it is the only switch in the dialect that does.
+        //
+        // Measured against par2cmdline 1.2.0 rather than assumed, and
+        // the reference is not consistent about this: `-B <dir>` is
+        // accepted (exit 0) while `-m 512` and `-t 2` are REFUSED
+        // (exit 3) exactly as parfast refuses them. So this is one
+        // special case in the reference, not a general separated-value
+        // rule, and widening it to the other value switches would be a
+        // divergence in the opposite direction.
+        //
+        // It matters because SABnzbd emits precisely this shape. It
+        // probes `par2 -h`, and on seeing "Set the basepath" it does
+        // `command.insert(2, "-B"); command.insert(3, parfolder)` -
+        // two separate argv entries - for EVERY repair
+        // (sabnzbd/newsunpack.py, par2cmdline_verify). Without this,
+        // parfast took the empty attached value, consumed the FOLDER as
+        // the par2 file and answered "failed to set the main par file",
+        // exit 3, on every job. The drop-in claim was untrue for the
+        // largest caller of par2 there is.
+        if spell == 'B' && value.is_empty() {
+            let Some(v) = it.next() else {
+                return Err(ParseError::msg(format!("Option {arg} requires a value.")));
+            };
+            value = v.to_string();
+        }
         apply_switch(command, &mut o, &mut archive, spell, &value)?;
     }
     // -S without -N is the reference's own refusal, and it is checked

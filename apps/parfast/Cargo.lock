@@ -797,7 +797,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "parfast"
-version = "1.5.0-beta.1"
+version = "1.5.0-beta.2"
 dependencies = [
  "libc",
  "nzbkit",

@@ -43,7 +43,8 @@ TAG=$1; shift
 case "$TAG" in
   v[0-9]*) ;;
   parfast-v[0-9]*) ;;
-  *) echo "first argument must be the tag (vX.Y.Z or parfast-vX.Y.Z), got: $TAG" >&2; exit 1 ;;
+  parfast-gui-v[0-9]*) ;;
+  *) echo "first argument must be the tag (vX.Y.Z, parfast-vX.Y.Z or parfast-gui-vX.Y.Z), got: $TAG" >&2; exit 1 ;;
 esac
 
 LOGIN=$(gh api user --jq .login 2>/dev/null || true)

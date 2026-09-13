@@ -439,6 +439,60 @@ fn fast_note(command: Command, reach: nzbkit::par2repair::JointReach) -> Option<
 
 #[cfg(test)]
 mod switch_tests {
+    /// `-B <dir>` as TWO arguments, which is what SABnzbd emits.
+    ///
+    /// SAB probes `par2 -h`, sees "Set the basepath" on our help screen,
+    /// and then does `insert(2, "-B"); insert(3, parfolder)` for every
+    /// repair (sabnzbd/newsunpack.py, par2cmdline_verify). Until this
+    /// was accepted, parfast took the empty attached value, consumed the
+    /// FOLDER as the par2 file and answered "failed to set the main par
+    /// file" - exit 3 on every SABnzbd job, which made the drop-in claim
+    /// untrue for the largest caller of par2 there is.
+    ///
+    /// PINNED AGAINST THE REFERENCE rather than invented, and the second
+    /// half is why this is one special case and not a general rule:
+    /// par2cmdline 1.2.0 accepts `-B <dir>` (exit 0) and REFUSES
+    /// `-m 512` and `-t 2` (exit 3), which parfast also refuses.
+    /// Widening separated values to the other switches would be a
+    /// divergence in the opposite direction.
+    #[test]
+    fn basepath_takes_a_separated_path_the_way_the_reference_does() {
+        let args: Vec<String> = ["r", "-B", "/tmp/set", "/tmp/set/x.par2"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let p = super::cli::parse("parfast", &args).expect("-B <dir> must parse");
+        assert_eq!(
+            p.opts.basepath.as_deref(),
+            Some(std::path::Path::new("/tmp/set")),
+            "the next argument is the basepath"
+        );
+        assert_eq!(
+            p.opts.par2.as_deref(),
+            Some(std::path::Path::new("/tmp/set/x.par2")),
+            "and it must NOT have been eaten as the par2 file"
+        );
+
+        // The attached spelling the help screen documents still works.
+        let args: Vec<String> = ["r", "-B/tmp/set", "/tmp/set/x.par2"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let p = super::cli::parse("parfast", &args).expect("-B<dir> must parse");
+        assert_eq!(
+            p.opts.basepath.as_deref(),
+            Some(std::path::Path::new("/tmp/set"))
+        );
+
+        // A bare -B at the end of the line says so rather than silently
+        // taking an empty path.
+        let args: Vec<String> = ["r", "-B"].iter().map(|s| (*s).to_string()).collect();
+        assert!(
+            super::cli::parse("parfast", &args).is_err(),
+            "-B with nothing after it must refuse"
+        );
+    }
+
     /// `--fast` must PARSE, on every command, and must not be confused
     /// with a reference switch or with an unknown long option.
     #[test]
