@@ -1,4 +1,4 @@
-WAIT foreign_cpu=1766% ceiling=180% top=/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python(11772)=68% ts=2026-09-11T00:21:30Z
+WAIT foreign_cpu=1766% ceiling=180% top=<app>)=68% ts=2026-09-11T00:21:30Z
 BOX-QUIET foreign_cpu=2% starting m5full.py at 2026-09-11T00:22:30Z
 RIG-LOCK-TAKEN <rig>/.parfast-rig.lock pid=14120
 M5FULL-START 2026-09-11T00:22:30Z
@@ -39,7 +39,7 @@ VERIFY round=m5full rep=1 tool=par2turbo argv='v -q -t18 -T18 f.par2' wall=28.09
 LEG round=m5full rep=1 m=1 tool=parfast argv='r -q -t18 -T18 f.par2' wall=4.515 cpu=61.616 cpu_over_wall=13.65 peak_mb=22226.6 rc=0 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=1 seed=20260918 errlen=0 ts=2026-09-11T00:24:27Z
 WARN-FOREIGN-CPU at=r1-m1-par2turbo foreign_cpu=78% ceiling=180% top=[/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd(1336)=78%]
 LEG round=m5full rep=1 m=1 tool=par2turbo argv='r -q -t18 -T18 f.par2' wall=31.532 cpu=60.945 cpu_over_wall=1.93 peak_mb=56.9 rc=0 restored=23/23 damaged_members=1 touched_members=1 blocks_written=1 strays=1 seed=20260918 errlen=0 ts=2026-09-11T00:25:09Z
-WARN-FOREIGN-CPU at=r1-m4-parfast foreign_cpu=76% ceiling=180% top=[/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd(1336)=73% /usr/libexec/dasd(597)=2% /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor(6484)=1%]
+WARN-FOREIGN-CPU at=r1-m4-parfast foreign_cpu=76% ceiling=180% top=[/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd(1336)=73% /usr/libexec/dasd(597)=2% /System<app> Monitor.app/Contents/MacOS/Activity Monitor(6484)=1%]
 LEG round=m5full rep=1 m=4 tool=parfast argv='r -q -t18 -T18 f.par2' wall=5.536 cpu=63.007 cpu_over_wall=11.38 peak_mb=22245.8 rc=0 restored=23/23 damaged_members=4 touched_members=4 blocks_written=4 strays=4 seed=20260939 errlen=0 ts=2026-09-11T00:25:24Z
 LEG round=m5full rep=1 m=4 tool=par2turbo argv='r -q -t18 -T18 f.par2' wall=31.764 cpu=70.095 cpu_over_wall=2.21 peak_mb=60.2 rc=0 restored=23/23 damaged_members=4 touched_members=4 blocks_written=4 strays=4 seed=20260939 errlen=0 ts=2026-09-11T00:26:06Z
 LEG round=m5full rep=1 m=16 tool=parfast argv='r -q -t18 -T18 f.par2' wall=5.602 cpu=72.753 cpu_over_wall=12.99 peak_mb=22244.1 rc=0 restored=23/23 damaged_members=12 touched_members=12 blocks_written=16 strays=12 seed=20261023 errlen=0 ts=2026-09-11T00:26:21Z
