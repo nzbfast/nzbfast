@@ -1,0 +1,187 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- 19041 is the SDK's floor for WinUI 3; SupportedOSPlatformVersion is what
+         sets the MINIMUM the app runs on, and the plan asks for Windows 10 1809
+         (build 17763). The Windows App SDK's own floor is 17763 for an
+         unpackaged app, so the two lines differ on purpose: the first is what we
+         COMPILE against, the second what we RUN on. Do not "tidy" them together. -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <RootNamespace>Parfast.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- NO <Platforms> LIST, AND A DEFAULT RID. Both halves are load-bearing and
+         the first real CI build is what proved it (NETSDK1032, "the
+         RuntimeIdentifier platform win-x64 and the PlatformTarget x86 must be
+         compatible").
+
+         The WinUI template's `<Platforms>x86;x64;ARM64</Platforms>` does not
+         include AnyCPU, and the solution asks every project for `Any CPU`. With no
+         match MSBuild falls back to the FIRST platform in the list - x86 - while
+         the RuntimeIdentifiers are 64-bit only, and the two disagree. Declaring no
+         platforms lets this project take AnyCPU like the other four and lets the
+         RID decide the architecture, which is what actually governs a
+         self-contained build.
+
+         The RID must be SET rather than merely listed, because SelfContained
+         needs one and a bare `dotnet build Parfast.sln -c Release` (which is what
+         CI runs) supplies none. Conditional, so `-r win-arm64` still wins. -->
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+
+    <!-- AND THE PLATFORM TARGET SET FROM THE RID, which is the half that actually
+         fixed it. Removing the <Platforms> list was necessary and NOT sufficient:
+         the second CI build failed with the same NETSDK1032, because the x86 does
+         not come from that list at all - the Windows App SDK's own props default
+         PlatformTarget to x86 when Platform is AnyCPU, which is what a solution
+         built with no platform gives them. Stating it from the RID removes the
+         disagreement at its source instead of guessing at who set it.
+         Evaluated after RuntimeIdentifier above, so these conditions see it. -->
+    <PlatformTarget Condition="'$(RuntimeIdentifier)' == 'win-x64'">x64</PlatformTarget>
+    <PlatformTarget Condition="'$(RuntimeIdentifier)' == 'win-arm64'">ARM64</PlatformTarget>
+    <UseWinUI>true</UseWinUI>
+    <!-- UNPACKAGED and SELF-CONTAINED, per plan 6.2: it ships as a zip and an
+         Inno Setup installer like nzbfast, not as an MSIX. WindowsPackageType
+         None is what lets it run without an identity, and
+         WindowsAppSDKSelfContained is what stops it needing the Windows App SDK
+         runtime installed on the user's machine. Both are required; either alone
+         produces an app that starts on the build box and not on a clean one. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <!-- EnableMsixTooling=true ON AN APP THAT SHIPS NO MSIX, WHICH IS NOT THE
+         contradiction it reads as. This property was `false` until 12 Sep 2026,
+         on the reasonable-looking grounds that this app ships as a zip and an
+         installer - and it is the single line that made the project unbuildable
+         everywhere, by everyone, including CI, for the whole of the day it
+         landed.
+
+         What the property actually selects is WHICH RESOURCE (PRI) TOOLING the
+         Windows App SDK hands the project, not whether a package is produced:
+
+           * not true -> the legacy MrtCore.PriGen path, whose UsingTask
+             declarations point at
+             $(MSBuildExtensionsPath)\Microsoft\VisualStudio\v$(VisualStudioVersion)\AppxPackage\,
+             a Visual Studio MSBuild directory that does not exist under
+             `dotnet build` in ANY SDK version. Hence, on every push since the
+             app landed:
+
+               MrtCore.PriGen.targets(914,5): error MSB4062: the
+               "Microsoft.Build.Packaging.Pri.Tasks.ExpandPriContent" task could
+               not be loaded from ...\sdk\<ver>\Microsoft\VisualStudio\v17.0\AppxPackage\
+               Microsoft.Build.Packaging.Pri.Tasks.dll
+
+             It was not a missing component and not one box: the GitHub runner
+             fails identically on SDK 10.0.400 with v18.0 in the path, and the
+             `windows` CI job was reported as having compiled this app while
+             failing on exactly this.
+
+           * true -> Microsoft.Build.Msix.Pri.targets, whose tasks live INSIDE
+             the NuGet package, so they are present wherever the package
+             restored. Those targets turn the legacy path off themselves, with a
+             comment in Microsoft.Build.Msix.Common.props saying the two are
+             incompatible.
+
+         The packaging half stays off regardless, which is what makes this safe:
+         WindowsPackageType is None above, so the app is unpackaged and has no
+         identity, and nothing here produces or requires an .msix or a
+         Package.appxmanifest.
+
+         AND IT HAS TO BE THE RESOURCE TOOLING RATHER THAN NO RESOURCE TOOLING,
+         which a build verdict cannot tell you. Suppressing the legacy path
+         instead - either -p:AppxGeneratePriEnabled=false or
+         EnableCoreMrtTooling=false - BUILDS GREEN and produces an executable
+         that dies four seconds in with 0xc000027b (a stowed WinRT exception)
+         inside Microsoft.UI.Xaml.dll, because compiled XAML is addressed as
+         ms-appx:/// and resolved through MRT, so an app with no resources.pri
+         cannot load its own App.xaml. Both were tried on 12 Sep 2026 and both
+         are green-build, dead-app. If this property is ever changed, RUN the
+         app before believing the build. -->
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <AssemblyName>parfast-gui</AssemblyName>
+    <ApplicationIcon>Assets\parfast.ico</ApplicationIcon>
+    <DefaultLanguage>en-US</DefaultLanguage>
+    <!-- The XAML compiler emits code this solution's TreatWarningsAsErrors would
+         otherwise fail on, and it is generated code nobody here can fix.
+         Narrowed to the specific numbers rather than turning the setting off. -->
+    <NoWarn>$(NoWarn);CS8305;CA1416;MSB3277</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250228001" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Parfast.Core\Parfast.Core.csproj" />
+    <ProjectReference Include="..\Parfast.ViewModels\Parfast.ViewModels.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- NO EXPLICIT PRIResource ITEM FOR THE GENERATED COPY TABLE, and it is
+         not an omission. The table is
+         Parfast.App/Strings/en-US/Resources.resw, written by Parfast.Gen from
+         apps/parfast/shared/strings/en.json, and x:Uid resolves against it.
+         The .NET SDK already globs **/*.resw into PRIResource by default, so
+         naming it here as well is the duplicate NETSDK1022 refuses:
+
+           error NETSDK1022: Duplicate 'PRIResource' items were included ...
+           The duplicate items were: 'Strings\en-US\Resources.resw'
+
+         That was invisible while the legacy resource tooling was selected,
+         because the build never got as far as collecting these items - see the
+         EnableMsixTooling note above. Add EnableDefaultPriItems=false if this
+         ever needs to be listed by hand; do not list it twice. -->
+  </ItemGroup>
+
+  <!-- The cdylib from parfast-ffi, copied beside the exe if it has been built.
+
+       FIRST MATCH WINS, picked by a property rather than by a conditional item.
+       The obvious spelling - one <None Include="@(Candidate)"
+       Condition="Exists('%(Identity)')" /> - is MSB4190: built-in metadata is not
+       allowed in a condition in an ItemGroup outside a target. That error is what
+       the first CI build of this tree returned, and it is the whole content of
+       this comment because the spelling looks right and is not.
+
+       The order below is the search order. The first two are where decision D2a
+       puts the artefacts - the crates are in a DETACHED cargo workspace at
+       apps/parfast/Cargo.toml, so they land in apps/parfast/target/, which is what
+       .github/workflows/parfast-gui.yml's windows job builds and names. The
+       root-target paths are a fallback for a local build made before D2a landed.
+
+       Conditional, never hard: the app builds and runs on MockCore when the
+       library is absent, and a missing file must not fail the build. -->
+  <PropertyGroup>
+    <ParfastFfiDllSearch1>$(MSBuildThisFileDirectory)..\..\target\release\parfast_ffi.dll</ParfastFfiDllSearch1>
+    <ParfastFfiDllSearch2>$(MSBuildThisFileDirectory)..\..\target\x86_64-pc-windows-msvc\release\parfast_ffi.dll</ParfastFfiDllSearch2>
+    <!-- The mingw cross-build, which is what a Mac produces for Windows and what
+         packaging/build-parfast-bundles.sh already uses for the CLI. -->
+    <ParfastFfiDllSearch2b>$(MSBuildThisFileDirectory)..\..\target\x86_64-pc-windows-gnu\release\parfast_ffi.dll</ParfastFfiDllSearch2b>
+    <ParfastFfiDllSearch3>$(MSBuildThisFileDirectory)..\..\..\..\target\release\parfast_ffi.dll</ParfastFfiDllSearch3>
+    <ParfastFfiDllSearch4>$(MSBuildThisFileDirectory)..\..\..\..\target\x86_64-pc-windows-gnu\release\parfast_ffi.dll</ParfastFfiDllSearch4>
+
+    <ParfastFfiDll Condition="'$(ParfastFfiDll)' == '' And Exists('$(ParfastFfiDllSearch1)')">$(ParfastFfiDllSearch1)</ParfastFfiDll>
+    <ParfastFfiDll Condition="'$(ParfastFfiDll)' == '' And Exists('$(ParfastFfiDllSearch2)')">$(ParfastFfiDllSearch2)</ParfastFfiDll>
+    <ParfastFfiDll Condition="'$(ParfastFfiDll)' == '' And Exists('$(ParfastFfiDllSearch2b)')">$(ParfastFfiDllSearch2b)</ParfastFfiDll>
+    <ParfastFfiDll Condition="'$(ParfastFfiDll)' == '' And Exists('$(ParfastFfiDllSearch3)')">$(ParfastFfiDllSearch3)</ParfastFfiDll>
+    <ParfastFfiDll Condition="'$(ParfastFfiDll)' == '' And Exists('$(ParfastFfiDllSearch4)')">$(ParfastFfiDllSearch4)</ParfastFfiDll>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(ParfastFfiDll)' != ''">
+    <None Include="$(ParfastFfiDll)">
+      <Link>parfast_ffi.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <Target Name="ParfastFfiReport" BeforeTargets="Build">
+    <!-- Say which core this build will use. A silent fallback to the mock is the
+         one thing about this app that must never be a surprise. -->
+    <Message Importance="high" Condition="'$(ParfastFfiDll)' != ''"
+             Text="parfast: engine library found at $(ParfastFfiDll)" />
+    <Message Importance="high" Condition="'$(ParfastFfiDll)' == ''"
+             Text="parfast: no parfast_ffi.dll found; this build runs on MockCore." />
+  </Target>
+</Project>

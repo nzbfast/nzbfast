@@ -1,0 +1,1508 @@
+//! One worker thread per job, and the three controls a host has over it.
+//!
+//! # The snapshot is the only channel
+//!
+//! A job publishes into an `Arc<Mutex<JobSnapshot>>` and rings a wake
+//! function; the host polls. There is no event stream, no queue of
+//! deltas and no callback carrying data, because every one of those is
+//! a cross-thread hazard in a UI toolkit and both hosts would have to
+//! solve it separately. A snapshot is a value: whoever reads it owns
+//! it, whenever they like, from wherever they like.
+//!
+//! # The process-global knobs
+//!
+//! `nzbkit::mem::set_cpu_workers`, `set_file_workers`,
+//! `set_process_budget` and `par2repair::set_joint_arm` are
+//! PROCESS-wide. A CLI sets them once in `run_with` and exits; a
+//! long-lived app has to set them per job, and with two jobs running at
+//! once the last writer wins. That is not a bug this crate can fix - it
+//! is what the engine's interface is - so the queue takes a lock around
+//! the setting and the START of the job, the Settings pane says
+//! plainly that the performance knobs are shared above concurrency 1,
+//! and [`KnobLock`] is the one place any of them is written.
+//!
+//! # What cancel and pause can actually reach today
+//!
+//! Honestly, and this is what `pf_capabilities` reports:
+//!
+//! * a VERIFY is cancellable and pausable between members, through
+//!   `parfast::verify::SurveyWatch` - so a 200-member set stops within
+//!   one member's hashing;
+//! * a REPAIR is cancellable at the engine's survey handshake
+//!   (`parfast::repair::RepairWatch::before_fold`, where nothing is
+//!   written yet) AND from inside the repair itself, since 12 Sep 2026
+//!   (`RepairWatch::control`, plan section 4.2 item 1): the engine's
+//!   hashing loop, feed, solve and patch all poll this job's cancel and
+//!   report a fraction back into the snapshot. Pause parks in all of
+//!   them except the SOLVE, whose work grid is a shared queue - see
+//!   `nzbkit::par2repair::control::PauseGate`. The job's [`Control`] IS
+//!   the engine's gate rather than a copy of it, so one press means one
+//!   thing;
+//! * a CREATE is cancellable and reports its phases from INSIDE the
+//!   engine, since 12 Sep 2026 (`parfast::create::CreateWatch` ->
+//!   `nzbkit::par2gen::control`): the member hashing, the fold or the
+//!   transform, and the volume writes all poll this job's cancel and
+//!   report a fraction back into the snapshot, and a cancelled create
+//!   leaves NOTHING on disk - the engine unlinks the index and every
+//!   volume it wrote, because a volume's critical packets are patched
+//!   in last and a half-written set names no member. Pause parks at a
+//!   fold window, a batch boundary and a member's block range, and NOT
+//!   inside a transform, whose stripes come off a shared queue - the
+//!   same exception the repair's solve has;
+//! * a CHECKSUM job is cancellable and pausable between files.
+//!
+//! A control that cannot be honoured is still RECORDED - the job goes
+//! to `cancelled` when it finishes - so a host never shows a button
+//! that does nothing, and `pf_capabilities.pause` is what a host reads
+//! to decide whether to show one at all.
+
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use nzbkit::par2repair;
+use parfast::out::Sink;
+
+use crate::job::{
+    ChecksumFormat, ChecksumResult, CreateSpec, JobError, JobKind, JobResult, JobSnapshot, JobSpec,
+    JobState, Phase, RepairSpec, VerifySpec, WrittenFile,
+};
+use crate::planner;
+use crate::settings::Settings;
+use crate::survey::{SurveyModel, Verdict};
+
+/// The three controls, as one shared value.
+///
+/// # It is the ENGINE's gate, not a second copy of it
+///
+/// Since 12 Sep 2026 the two bits live in
+/// `nzbkit::par2repair::PauseGate` and this type is a thin face over
+/// it. That is deliberate and it is the whole point: a repair's fold,
+/// solve and write loops poll the ENGINE's cancel, and a `Control` that
+/// kept its own pair beside it would be two sources of truth for one
+/// button - the host presses Cancel, one of them is set, and whether
+/// the repair stops depends on which loop happened to be running.
+/// [`engine_gate`](Self::engine_gate) hands the very same value to
+/// `par2repair::RepairControl`.
+///
+/// The gate's own doc carries the argument for the shape: why the state
+/// is under a mutex rather than in atomics beside it (the wait loop
+/// must open on a terminating check that reads the guard - the shape
+/// `tools/wait-recheck-gate.py` refuses to classify otherwise), why
+/// pause is a condvar and not a spin, and the rule about where a
+/// PauseGate may park. Every caller of [`gate`](Self::gate) in this
+/// crate is between units of work - between two members of a verify,
+/// between two files of a checksum - which is that rule.
+#[derive(Debug, Default)]
+pub struct Control {
+    gate: Arc<par2repair::PauseGate>,
+}
+
+impl Control {
+    pub fn new() -> Arc<Control> {
+        Arc::new(Control::default())
+    }
+
+    /// The gate to hand `par2repair::RepairControl`, so the engine's
+    /// loops poll THIS job's cancel and park on THIS job's pause.
+    pub fn engine_gate(&self) -> Arc<par2repair::PauseGate> {
+        self.gate.clone()
+    }
+
+    pub fn cancel(&self) {
+        self.gate.cancel();
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.gate.set_paused(paused);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.gate.is_cancelled()
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.gate.is_paused()
+    }
+
+    /// Block while paused; answer `false` once cancelled.
+    pub fn gate(&self) -> bool {
+        self.gate.gate()
+    }
+}
+
+/// The shared snapshot plus the host's wake function.
+///
+/// The wake carries NO data and may fire on any thread; that rule is
+/// the whole of the threading contract both apps are written against,
+/// and it is why this type hands out nothing but a `&JobSnapshot`
+/// under a lock.
+pub struct Publisher {
+    pub snapshot: Mutex<JobSnapshot>,
+    wake: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+impl Publisher {
+    pub fn new(snapshot: JobSnapshot) -> Arc<Publisher> {
+        Arc::new(Publisher {
+            snapshot: Mutex::new(snapshot),
+            wake: Mutex::new(None),
+        })
+    }
+
+    pub fn set_wake(&self, f: Option<Box<dyn Fn() + Send + Sync>>) {
+        *self.wake.lock().unwrap_or_else(|p| p.into_inner()) = f;
+    }
+
+    /// Change the snapshot and ring the host. The lock is NEVER held
+    /// across the wake: a host that calls back into the session from
+    /// its wake handler would deadlock on it, and that is exactly what
+    /// a UI thread does when it marshals and polls.
+    pub fn update(&self, f: impl FnOnce(&mut JobSnapshot)) {
+        {
+            let mut s = self.snapshot.lock().unwrap_or_else(|p| p.into_inner());
+            f(&mut s);
+        }
+        self.ring();
+    }
+
+    pub fn ring(&self) {
+        let held = self.wake.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(w) = held.as_ref() {
+            w();
+        }
+    }
+
+    pub fn get(&self) -> JobSnapshot {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+/// The one place any process-global engine knob is written.
+///
+/// Held for the whole job and not merely for the write: two jobs that
+/// each set their own thread count and then both ran would be running
+/// under whichever set it last, which is worse than running under one
+/// of them on purpose.
+pub struct KnobLock(pub Mutex<()>);
+
+impl KnobLock {
+    pub fn new() -> Arc<KnobLock> {
+        Arc::new(KnobLock(Mutex::new(())))
+    }
+}
+
+impl Default for KnobLock {
+    fn default() -> KnobLock {
+        KnobLock(Mutex::new(()))
+    }
+}
+
+/// Apply a job's performance knobs. Returns nothing, deliberately: the
+/// engine has no way to hand the previous values back, so there is
+/// nothing to restore and a caller that believed otherwise would be
+/// wrong.
+fn apply_knobs(threads: Option<usize>, memory_mb: Option<u64>, fast_solver: Option<bool>) {
+    if let Some(t) = threads.filter(|&t| t > 0) {
+        nzbkit::mem::set_cpu_workers(t);
+    }
+    if let Some(mb) = memory_mb.filter(|&m| m > 0) {
+        nzbkit::mem::set_process_budget(nzbkit::mem::MemBudget {
+            total: mb
+                .saturating_mul(1024 * 1024)
+                .max(nzbkit::mem::MemBudget::MIN),
+        });
+    }
+    if let Some(on) = fast_solver {
+        nzbkit::par2repair::set_joint_arm(on);
+        nzbkit::par2repair::reset_joint_reach();
+    }
+}
+
+/// [`Control::gate`], with the job's STATE kept in step.
+///
+/// A host presses Pause and then looks at the snapshot; if the state
+/// still said `running` while the worker was parked, the button would
+/// appear not to have worked. The two halves are here rather than
+/// inside `Control` because `Control` is shared with the queue, which
+/// pauses a job that has not started yet and has no worker to park.
+pub fn gated(job: &Job) -> bool {
+    if job.control.is_paused() {
+        job.publisher.update(|s| {
+            if s.state == JobState::Running {
+                s.state = JobState::Paused;
+            }
+        });
+    }
+    let go = job.control.gate();
+    if go {
+        job.publisher.update(|s| {
+            if s.state == JobState::Paused {
+                s.state = JobState::Running;
+            }
+        });
+    }
+    go
+}
+
+/// Everything one job needs to run.
+pub struct Job {
+    pub spec: JobSpec,
+    pub control: Arc<Control>,
+    pub publisher: Arc<Publisher>,
+    pub knobs: Arc<KnobLock>,
+    pub settings: Settings,
+}
+
+/// Run one job to completion on the calling thread.
+pub fn run(job: &Job) {
+    let started = Instant::now();
+    job.publisher.update(|s| {
+        s.state = JobState::Running;
+        s.phase = Phase::Scanning;
+        s.progress = 0.0;
+    });
+    let outcome = if !gated(job) {
+        Outcome::cancelled()
+    } else {
+        let _held = job.knobs.0.lock().unwrap_or_else(|p| p.into_inner());
+        match &job.spec {
+            JobSpec::Create { create } => run_create(job, create, started),
+            JobSpec::Verify { verify } => run_verify(job, verify, started),
+            JobSpec::Repair { repair } => run_repair(job, repair, started),
+            JobSpec::ChecksumCreate { checksum_create } => {
+                crate::runner::checksums::create(job, checksum_create, started)
+            }
+            JobSpec::ChecksumVerify { checksum_verify } => {
+                crate::runner::checksums::verify(job, checksum_verify, started)
+            }
+        }
+    };
+    let elapsed = started.elapsed().as_millis() as u64;
+    // A cancel that arrived while the work was already past its last
+    // honouring point still decides the STATE: a host that pressed
+    // Cancel must not be told the job simply finished. That is right
+    // for work which can stop part-way, which is nearly all of it - a
+    // half-repaired file, a verify abandoned between members.
+    //
+    // It is NOT right for work the engine COMMITTED, and until 12 Sep
+    // 2026 there was no way to say so. A PAR2 create is all-or-nothing:
+    // it either sealed the whole set or removed every file it wrote,
+    // and it says which in its exit code. Labelling a sealed set
+    // "Cancelled" left a complete, valid recovery set on disk that the
+    // job named none of and that API.md forbids the host to offer to
+    // clean up. So an outcome may now declare itself the engine's, and
+    // exactly one does - see `Outcome::committed` and the create.
+    let state = final_state(job.control.is_cancelled(), &outcome);
+    job.publisher.update(|s| {
+        s.state = state;
+        s.phase = Phase::Finishing;
+        s.elapsed_ms = elapsed;
+        s.eta_ms = None;
+        s.progress = if state == JobState::Done {
+            1.0
+        } else {
+            s.progress
+        };
+        s.result = outcome.result;
+        s.error = outcome.error;
+        if let Some(m) = outcome.survey {
+            s.survey = Some(m);
+        }
+        if state == JobState::Cancelled {
+            s.phase_text = "Cancelled".to_string();
+        }
+    });
+}
+
+/// The state a finished job REPORTS, which is its own outcome unless a
+/// late cancel overrides it. Named rather than inlined because it is a
+/// rule with two halves and a test that pins only one of them would
+/// look complete - see the comment at its one call site.
+fn final_state(cancelled: bool, outcome: &Outcome) -> JobState {
+    if cancelled && !outcome.committed {
+        JobState::Cancelled
+    } else {
+        outcome.state
+    }
+}
+
+/// What one job's own work came to, before the cancel flag is applied.
+struct Outcome {
+    state: JobState,
+    result: Option<JobResult>,
+    error: Option<JobError>,
+    survey: Option<SurveyModel>,
+    /// Whether the ENGINE committed this outcome, so a late cancel must
+    /// not rewrite it. False for everything that can be stopped
+    /// part-way, which is nearly everything - see the cancel rule at
+    /// the one site that reads this.
+    committed: bool,
+}
+
+impl Outcome {
+    fn cancelled() -> Outcome {
+        Outcome {
+            state: JobState::Cancelled,
+            result: None,
+            error: None,
+            survey: None,
+            committed: false,
+        }
+    }
+    fn failed(code: &str, message: impl Into<String>) -> Outcome {
+        Outcome {
+            state: JobState::Failed,
+            result: None,
+            error: Some(JobError::new(code, message)),
+            survey: None,
+            committed: false,
+        }
+    }
+}
+
+/// A sink that appends to the job's log tail and rings the host.
+fn sink_for(job: &Job) -> Sink {
+    let pub_ = Arc::clone(&job.publisher);
+    let cap = job.settings.log_tail_lines.max(1);
+    let mut sink = Sink::tapped(Box::new(move |line, is_err| {
+        pub_.update(|s| {
+            let line = if is_err {
+                format!("! {line}")
+            } else {
+                line.to_string()
+            };
+            if s.log_tail.len() >= cap {
+                s.log_tail.remove(0);
+            }
+            s.log_tail.push(line);
+        });
+    }));
+    sink.set_level(job.settings.advanced.log_level);
+    sink
+}
+
+/// The `parfast` options a verify or a repair runs under.
+fn verify_options(
+    par2: &std::path::Path,
+    extra: &[std::path::PathBuf],
+    o: &crate::job::VerifyOptions,
+    purge: bool,
+    level: i32,
+) -> parfast::cli::Options {
+    parfast::cli::Options {
+        level,
+        threads: o.threads,
+        purge,
+        rename_only: o.rename_only,
+        data_skip: o.data_skipping,
+        // `-S` without `-N` is the reference's own refusal, so a leaway
+        // with no skipping is dropped rather than sent to a parser that
+        // would refuse the whole line.
+        skip_leaway: o.skip_leaway.filter(|_| o.data_skipping),
+        fast: o.fast_solver.unwrap_or(false),
+        par2: Some(par2.to_path_buf()),
+        files: extra.to_vec(),
+        ..Default::default()
+    }
+}
+
+/// The verify half, orchestrated here rather than through
+/// `parfast::verify::run` because the SURVEY is the product: `run`
+/// answers an exit code and prints, and a block map cannot be drawn
+/// from either.
+fn run_verify(job: &Job, spec: &VerifySpec, started: Instant) -> Outcome {
+    let opts = verify_options(
+        &spec.par2,
+        &spec.extra_dirs,
+        &spec.options,
+        false,
+        job.settings.advanced.log_level,
+    );
+    apply_knobs(
+        spec.options.threads.or(job.settings.performance.threads),
+        job.settings.performance.memory_mb,
+        spec.options
+            .fast_solver
+            .or(Some(job.settings.performance.fast_solver)),
+    );
+    let mut sink = sink_for(job);
+    job.publisher.update(|s| {
+        s.phase = Phase::Scanning;
+        s.phase_text = "Reading the recovery set".to_string();
+        s.survey = Some(SurveyModel::pending(
+            spec.par2
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            spec.par2
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ));
+    });
+    let mut loaded = match parfast::verify::load(&opts, &mut sink) {
+        Ok(l) => l,
+        Err(code) => {
+            return Outcome {
+                state: JobState::Failed,
+                result: Some(JobResult {
+                    exit_code: Some(code),
+                    ..Default::default()
+                }),
+                error: Some(JobError::new(
+                    "load_failed",
+                    format!("could not load {}", spec.par2.display()),
+                )),
+                survey: None,
+                committed: false,
+            };
+        }
+    };
+    parfast::verify::print_set_summary(&loaded, &mut sink);
+    job.publisher.update(|s| {
+        s.phase = Phase::Hashing;
+    });
+    let watch = HashWatch {
+        job,
+        started,
+        bytes: loaded.set.files.iter().map(|f| f.length).sum(),
+    };
+    let Some((mut survey, bits)) =
+        parfast::verify::survey_watched(&loaded, &opts, &mut sink, &watch)
+    else {
+        return Outcome::cancelled();
+    };
+    if survey.damaged() {
+        survey.recovery_blocks = parfast::verify::ensure_recovery(&mut loaded);
+    }
+    parfast::verify::print_targets(&survey, &mut sink);
+    let code = parfast::verify::print_verdict(&loaded, &survey, &mut sink);
+    let candidates = parfast::verify::extra_candidates(&loaded, &survey);
+    let model = SurveyModel::from_parfast(&loaded, &survey, &bits, &candidates);
+    Outcome {
+        state: JobState::Done,
+        result: Some(JobResult {
+            exit_code: Some(code),
+            ..Default::default()
+        }),
+        error: None,
+        survey: Some(model),
+        committed: false,
+    }
+}
+
+/// The repair, through `parfast::repair::run_watched` so every safety
+/// rail - the `<name>.1` backup aside, the `-p` purge's provenance
+/// rule, the `-B` refusal - is the CLI's own and not a second copy.
+fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
+    let opts = verify_options(
+        &spec.par2,
+        &spec.extra_dirs,
+        &spec.options,
+        spec.purge,
+        job.settings.advanced.log_level,
+    );
+    apply_knobs(
+        spec.options.threads.or(job.settings.performance.threads),
+        job.settings.performance.memory_mb,
+        spec.options
+            .fast_solver
+            .or(Some(job.settings.performance.fast_solver)),
+    );
+    let mut sink = sink_for(job);
+    job.publisher.update(|s| {
+        s.phase = Phase::Hashing;
+        s.phase_text = "Verifying before repair".to_string();
+    });
+    // ONE cancel bit and ONE pause bit for the whole job: the engine's
+    // gate IS the job's `Control`, adapted rather than mirrored. A
+    // second copy of either would be the two-sources-of-truth bug this
+    // crate exists to avoid - a host pressing Pause and watching the
+    // state stay `running` is exactly the shape `gated` was written for.
+    let watch = FoldWatch {
+        job,
+        started,
+        control: par2repair::RepairControl::new(
+            Some(Arc::new(RepairProgress {
+                publisher: job.publisher.clone(),
+            })),
+            Some(job.control.engine_gate()),
+        ),
+    };
+    let code = parfast::repair::run_watched(&opts, &mut sink, &watch);
+    if job.control.is_cancelled() {
+        return Outcome::cancelled();
+    }
+    // The map the watch captured before the fold, brought forward. A
+    // repair that completed made every member whole, so the strip is
+    // redrawn from the verdict rather than from a THIRD pass over the
+    // payload - `repair::run` has already read it twice.
+    let repaired = code == parfast::EXIT_SUCCESS;
+    let mut model = watch.take_survey();
+    let repaired_files = model
+        .as_ref()
+        .map(|m| {
+            m.files
+                .iter()
+                .filter(|f| f.status != crate::survey::FileStatus::Complete)
+                .count()
+        })
+        .unwrap_or(0);
+    if let Some(m) = model.as_mut() {
+        m.verdict = if repaired {
+            Verdict::Repaired
+        } else {
+            Verdict::Failed
+        };
+        if repaired {
+            for f in &mut m.files {
+                f.status = crate::survey::FileStatus::Complete;
+                f.blocks_ok = f.blocks_total;
+                f.found_as = None;
+            }
+            m.recovery_needed = 0;
+            m.block_runs = if m.source_blocks == 0 {
+                Vec::new()
+            } else {
+                vec![[
+                    u64::from(crate::survey::block_state::PRESENT),
+                    m.source_blocks as u64,
+                ]]
+            };
+        }
+    }
+    let state = if repaired {
+        JobState::Done
+    } else {
+        JobState::Failed
+    };
+    Outcome {
+        state,
+        result: Some(JobResult {
+            repaired_files: if repaired { repaired_files } else { 0 },
+            purged: spec.purge && repaired,
+            exit_code: Some(code),
+            ..Default::default()
+        }),
+        error: (!repaired).then(|| {
+            JobError::new(
+                if code == parfast::EXIT_REPAIR_NOT_POSSIBLE {
+                    "unrepairable"
+                } else {
+                    "repair_failed"
+                },
+                format!("parfast exited {code}"),
+            )
+        }),
+        survey: model,
+        committed: false,
+    }
+}
+
+/// The create, through `parfast::create::run` for the same reason.
+fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
+    let members =
+        match planner::expand_sources(&spec.sources, spec.path_mode, spec.base_path.as_deref()) {
+            Ok(m) => m,
+            Err(e) => return Outcome::failed(e.code, e.message),
+        };
+    let preview = match planner::preview(spec) {
+        Ok(p) => p,
+        Err(e) => return Outcome::failed(e.code, e.message),
+    };
+    let (mut opts, _warnings) = match planner::options_for(spec, &members) {
+        Ok(v) => v,
+        Err(e) => return Outcome::failed(e.code, e.message),
+    };
+    // The run must use the SAME switches as the preview or it would
+    // write a set the pane never described, so both sides read ONE
+    // translation - `planner::options_for`, which resolves the volume
+    // scheme as well as everything else. It did not always: the scheme
+    // was resolved inside `preview` alone, and this argv was built from
+    // an `Options` that had never seen it, so every scheme a user
+    // picked was written as the exponential default. The line below is
+    // unchanged; what changed is that `options_for` now returns the
+    // whole answer. See its doc comment and
+    // `queue::tests::a_create_writes_exactly_the_files_its_preview_drew`.
+    let args: Vec<String> = std::iter::once("c".to_string())
+        .chain(planner::command_args(
+            &opts,
+            &members,
+            spec,
+            preview.recovery_blocks,
+        ))
+        .collect();
+    match parfast::cli::parse("parfast", &args) {
+        Ok(parsed) => opts = parsed.opts,
+        Err(e) => return Outcome::failed("bad_plan", e.message),
+    }
+    opts.level = job.settings.advanced.log_level;
+    apply_knobs(
+        spec.perf.threads.or(job.settings.performance.threads),
+        spec.perf.memory_mb.or(job.settings.performance.memory_mb),
+        Some(job.settings.performance.fast_solver),
+    );
+    if !spec.overwrite && spec.output.exists() {
+        return Outcome::failed(
+            "exists",
+            format!("{} already exists", spec.output.display()),
+        );
+    }
+    job.publisher.update(|s| {
+        s.phase = Phase::Solving;
+        s.phase_text = format!(
+            "Creating {} recovery blocks over {} source blocks",
+            preview.recovery_blocks, preview.block_count
+        );
+    });
+    let mut sink = sink_for(job);
+    // ONE cancel bit and ONE pause bit, as for the repair above: the
+    // engine's gate IS this job's `Control`.
+    let watch = CreateProgress::watch(job);
+    let code = parfast::create::run_watched(&opts, &mut sink, &watch);
+    // THE ENGINE'S VERDICT DECIDES, and the order of these two checks
+    // is the whole of it.
+    //
+    // A create is ATOMIC: `EXIT_SUCCESS` means the complete, sealed set
+    // is on disk, and a create that really honoured a cancel returns a
+    // failure code having removed every file it wrote (`par2gen`'s
+    // `CreateTrail`, and `create::run`'s `Err(Cancelled)` arm). So the
+    // two cases are already perfectly separated by the code, and until
+    // 12 Sep 2026 this read the cancel FLAG first and threw that
+    // separation away: a Cancel that lost the race by milliseconds -
+    // the engine takes its last poll immediately before sealing the
+    // volumes - reported `Cancelled` with `result: None`, so a complete
+    // valid recovery set sat on disk with the job claiming none and
+    // API.md telling the host not to offer to clean up after it. That
+    // is the one outcome nobody wants: files the user paid for that the
+    // app refuses to name.
+    //
+    // Now a job reports cancelled only when the engine actually
+    // unwound, which is what makes API.md's "a cancelled create leaves
+    // NOTHING" true rather than aspirational, and what lets a host act
+    // on it. The cost is showing Done to somebody who pressed Cancel,
+    // which is accurate - that is what happened - and was weighed
+    // against the alternative of a contract no host can rely on.
+    if code != parfast::EXIT_SUCCESS {
+        if job.control.is_cancelled() {
+            return Outcome::cancelled();
+        }
+        return Outcome {
+            state: JobState::Failed,
+            result: Some(JobResult {
+                exit_code: Some(code),
+                ..Default::default()
+            }),
+            error: Some(JobError::new(
+                "create_failed",
+                format!("parfast exited {code}"),
+            )),
+            survey: None,
+            committed: false,
+        };
+    }
+    // What is ON DISK, not what was planned: the reference renames its
+    // volumes to par2cmdline's field widths after the writer has
+    // finished, so the planned names are the engine's and these are the
+    // user's.
+    let dir = spec
+        .output
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let base = planner::base_name(&spec.output);
+    let mut written: Vec<WrittenFile> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_ours = name == format!("{base}.par2")
+                || (name.starts_with(&format!("{base}.vol")) && name.ends_with(".par2"));
+            is_ours.then(|| {
+                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                WrittenFile { name, size }
+            })
+        })
+        .collect();
+    written.sort_by(|a, b| a.name.cmp(&b.name));
+    Outcome {
+        state: JobState::Done,
+        result: Some(JobResult {
+            written,
+            exit_code: Some(code),
+            ..Default::default()
+        }),
+        error: None,
+        survey: None,
+        // The engine sealed this set. See the exit-code comment above:
+        // this is the ONE outcome in this file a late cancel may not
+        // rewrite, because it is the one whose work is all-or-nothing
+        // and already finished.
+        committed: true,
+    }
+}
+
+/// The verify pass's progress and cancel, as `parfast` sees them.
+struct HashWatch<'a> {
+    job: &'a Job,
+    started: Instant,
+    bytes: u64,
+}
+
+impl parfast::verify::SurveyWatch for HashWatch<'_> {
+    fn should_continue(&self) -> bool {
+        gated(self.job)
+    }
+
+    fn member_done(&self, done: usize, total: usize) {
+        let frac = if total == 0 {
+            1.0
+        } else {
+            done as f64 / total as f64
+        };
+        let ms = self.started.elapsed().as_millis() as u64;
+        let rate = (frac > 0.0 && ms > 0)
+            .then(|| ((self.bytes as f64 * frac) / (ms as f64 / 1000.0)) as u64);
+        let eta = (frac > 0.0 && frac < 1.0).then(|| ((ms as f64) * (1.0 - frac) / frac) as u64);
+        self.job.publisher.update(|s| {
+            s.phase = Phase::Hashing;
+            s.phase_text = format!("Hashing {done} of {total} files");
+            s.progress = frac;
+            s.elapsed_ms = ms;
+            s.eta_ms = eta;
+            s.rate_bytes_per_s = rate;
+        });
+    }
+}
+
+/// The repair's pre-fold moment - the survey is captured for the block
+/// map - and, since 12 Sep 2026, the control the engine reports through
+/// for the rest of it.
+///
+/// The two are one type because they answer one job: `before_fold` is
+/// the last moment nothing is written, and [`RepairProgress`] is
+/// everything after it.
+struct FoldWatch<'a> {
+    job: &'a Job,
+    started: Instant,
+    /// Handed to the engine once, at the top of the repair. Holds the
+    /// job's own [`Control`] as the pause gate, so one Pause press
+    /// parks the engine and one Cancel press is seen by its loops -
+    /// there is no second copy of either bit.
+    control: par2repair::RepairControl,
+}
+
+/// The engine's progress, as the one bar and the one sentence a host
+/// draws.
+///
+/// WHY THE WEIGHTS ARE HERE AND NOT IN THE ENGINE. The engine reports
+/// four phases in four different units and refuses to weigh them,
+/// because only a caller knows what its user is waiting on
+/// (`par2repair::RepairPhase`). This is that decision, taken once for
+/// both apps so they cannot disagree: the verify half is the first
+/// 45% of a repair's bar, the fold the next 40%, the solve 10% and the
+/// write the last 5%. Those are the shape of an ordinary damaged repair
+/// on the measured corpus - the fold and the hashing dominate, the
+/// structured solve is seconds - and they are a LABELLING choice, not a
+/// prediction: a bar that is honest about which phase is running and
+/// monotone within it beats one that lies smoothly.
+struct RepairProgress {
+    publisher: Arc<Publisher>,
+}
+
+impl RepairProgress {
+    /// `(bar offset, bar span)` for a phase.
+    fn band(phase: par2repair::RepairPhase) -> (f64, f64) {
+        use par2repair::RepairPhase as P;
+        match phase {
+            P::Verify => (0.0, 0.45),
+            P::Fold => (0.45, 0.40),
+            P::Solve => (0.85, 0.10),
+            P::Write => (0.95, 0.05),
+        }
+    }
+}
+
+impl par2repair::ProgressSink for RepairProgress {
+    fn progress(&self, phase: par2repair::RepairPhase, done: u64, total: u64) {
+        use par2repair::RepairPhase as P;
+        let (base, span) = RepairProgress::band(phase);
+        let frac = if total == 0 {
+            0.0
+        } else {
+            (done as f64 / total as f64).clamp(0.0, 1.0)
+        };
+        let pct = (frac * 100.0).round() as u64;
+        self.publisher.update(|s| {
+            s.phase = match phase {
+                P::Verify => Phase::Hashing,
+                P::Fold | P::Solve => Phase::Solving,
+                P::Write => Phase::Writing,
+            };
+            s.phase_text = match phase {
+                P::Verify => format!("Verifying before repair - {pct}%"),
+                P::Fold => format!("Reading the good blocks - {pct}%"),
+                P::Solve => format!("Rebuilding the missing blocks - {pct}%"),
+                P::Write => format!("Writing the repaired files - {pct}%"),
+            };
+            // MONOTONE ACROSS PHASES as well as within one: the engine
+            // may re-enter `Solve` once per slab, and a bar that went
+            // back to 85% on the second slab would read as a restart.
+            s.progress = s.progress.max(base + span * frac);
+        });
+    }
+}
+
+/// The create's progress and cancel, as `parfast` sees them.
+///
+/// # Why the create's bar is not banded like the repair's
+///
+/// [`RepairProgress`] gives each of the repair's four phases a slice of
+/// the bar, because they run one after another. A create's do NOT: it
+/// hashes the members on one thread while the fold reads the same
+/// payload on another - that overlap is what the creator's whole
+/// pipeline is built around - and on the fused arm the fold's own
+/// reader does the hashing, so the hash phase never reports at all.
+/// Banding them would make the bar jump backwards on one shape and
+/// stall at 45% on the other.
+///
+/// So HASHING and the FOLD share one span, 0 to 90%, and the bar is
+/// whichever of the two is further along - honest on every arm, and
+/// monotone because the snapshot only ever takes the larger value. The
+/// volume WRITES are the last 10%: on a one-pass create they land at
+/// the end, and on a multi-pass one they interleave with the folds,
+/// which is exactly what the user sees happening.
+struct CreateProgress {
+    publisher: Arc<Publisher>,
+}
+
+impl CreateProgress {
+    /// The watch to hand `parfast::create::run_watched`: this job's own
+    /// gate, and a sink that publishes into its snapshot.
+    fn watch(job: &Job) -> CreateWatch {
+        CreateWatch {
+            control: nzbkit::par2gen::control::CreateControl::new(
+                Some(Arc::new(CreateProgress {
+                    publisher: job.publisher.clone(),
+                })),
+                Some(job.control.engine_gate()),
+            ),
+        }
+    }
+}
+
+/// The create's half of [`FoldWatch`]: one control, fetched once.
+struct CreateWatch {
+    control: nzbkit::par2gen::control::CreateControl,
+}
+
+impl parfast::create::CreateWatch for CreateWatch {
+    fn control(&self) -> nzbkit::par2gen::control::CreateControl {
+        self.control.clone()
+    }
+}
+
+impl par2repair::ProgressSink for CreateProgress {
+    fn progress(&self, phase: par2repair::RepairPhase, done: u64, total: u64) {
+        use par2repair::RepairPhase as P;
+        let frac = if total == 0 {
+            0.0
+        } else {
+            (done as f64 / total as f64).clamp(0.0, 1.0)
+        };
+        let pct = (frac * 100.0).round() as u64;
+        let (base, span) = match phase {
+            // The two that overlap, sharing one span - see the type doc.
+            P::Verify | P::Fold => (0.0, 0.90),
+            P::Write => (0.90, 0.10),
+            // A create has nothing to solve; `par2gen` never sends it.
+            P::Solve => return,
+        };
+        self.publisher.update(|s| {
+            s.phase = match phase {
+                P::Verify => Phase::Hashing,
+                P::Write => Phase::Writing,
+                _ => Phase::Solving,
+            };
+            s.phase_text = match phase {
+                P::Verify => format!("Hashing the source files - {pct}%"),
+                P::Write => format!("Writing the recovery volumes - {pct}%"),
+                _ => format!("Building the recovery blocks - {pct}%"),
+            };
+            s.progress = s.progress.max(base + span * frac);
+        });
+    }
+}
+
+impl FoldWatch<'_> {
+    /// The model the watch built, if it reached the handshake at all.
+    fn take_survey(&self) -> Option<SurveyModel> {
+        self.job
+            .publisher
+            .snapshot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .survey
+            .clone()
+    }
+}
+
+impl parfast::repair::RepairWatch for FoldWatch<'_> {
+    fn control(&self) -> par2repair::RepairControl {
+        self.control.clone()
+    }
+    fn before_fold(&self, survey: &parfast::verify::Survey) -> bool {
+        let ms = self.started.elapsed().as_millis() as u64;
+        let model = model_from_counts(survey);
+        self.job.publisher.update(|s| {
+            s.phase = Phase::Solving;
+            s.phase_text = format!(
+                "Rebuilding {} of {} blocks",
+                survey.owed(),
+                survey.total_blocks
+            );
+            s.elapsed_ms = ms;
+            s.survey = Some(model);
+        });
+        gated(self.job)
+    }
+}
+
+/// A survey model from per-member COUNTS alone - what the repair path
+/// has before the fold.
+///
+/// The positions in this strip are not measured: the engine's survey
+/// reports how many of a member's blocks are present, not which, so
+/// the present ones are drawn first. A verify job draws the real
+/// positions (it has the bitmap); this is the transient picture during
+/// a repair and `crates/parfast-ffi/API.md` says so.
+fn model_from_counts(survey: &parfast::verify::Survey) -> SurveyModel {
+    use crate::survey::{FileRow, FileStatus};
+    use parfast::verify::Target;
+
+    let mut files = Vec::with_capacity(survey.targets.len());
+    let mut runs: Vec<[u64; 2]> = Vec::new();
+    for (name, t) in &survey.targets {
+        let (status, ok, total) = match t {
+            Target::Found => (FileStatus::Complete, 0usize, 0usize),
+            Target::Damaged { have, total } => (FileStatus::Damaged, *have, *total),
+            Target::Missing => (FileStatus::Missing, 0, 0),
+        };
+        let bits: Vec<bool> = (0..total).map(|i| i < ok).collect();
+        crate::survey::push_blocks(&mut runs, status, &bits, total);
+        files.push(FileRow {
+            name: name.clone(),
+            size: 0,
+            status,
+            blocks_ok: ok,
+            blocks_total: total,
+            found_as: None,
+            progress: 1.0,
+        });
+    }
+    SurveyModel {
+        set_name: String::new(),
+        folder: String::new(),
+        block_size: 0,
+        source_blocks: survey.total_blocks,
+        recovery_available: survey.recovery_blocks,
+        recovery_needed: survey.owed(),
+        verdict: if survey.repairable() {
+            Verdict::Repairable
+        } else {
+            Verdict::Unrepairable
+        },
+        files,
+        block_runs: runs,
+    }
+}
+
+/// The two checksum jobs, which are wholly this crate's - see
+/// [`crate::checksum`] for why they are not `nzbfast-engine`'s parser.
+mod checksums {
+    use super::*;
+    use crate::checksum;
+    use crate::job::{ChecksumCreateSpec, ChecksumVerifySpec};
+
+    pub(super) fn create(job: &Job, spec: &ChecksumCreateSpec, started: Instant) -> Outcome {
+        let members = match crate::planner::expand_sources(
+            &spec.sources,
+            if spec.relative {
+                crate::job::PathMode::Relative
+            } else {
+                crate::job::PathMode::Basename
+            },
+            spec.output.parent(),
+        ) {
+            Ok(m) => m,
+            Err(e) => return Outcome::failed(e.code, e.message),
+        };
+        let total = members.len();
+        let mut entries = Vec::with_capacity(total);
+        for (i, m) in members.iter().enumerate() {
+            if !gated(job) {
+                return Outcome::cancelled();
+            }
+            publish_file_progress(job, i, total, started, "Hashing");
+            entries.push((m.name.clone(), m.path.clone()));
+        }
+        let text = match checksum::write_text(&entries, spec.format) {
+            Ok(t) => t,
+            Err(e) => return Outcome::failed("io", e.to_string()),
+        };
+        if let Err(e) = std::fs::write(&spec.output, text.as_bytes()) {
+            return Outcome::failed("io", format!("{}: {e}", spec.output.display()));
+        }
+        let size = std::fs::metadata(&spec.output)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        Outcome {
+            state: JobState::Done,
+            result: Some(JobResult {
+                written: vec![WrittenFile {
+                    name: spec
+                        .output
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    size,
+                }],
+                checksum: Some(ChecksumResult {
+                    ok: total,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            error: None,
+            survey: None,
+            committed: false,
+        }
+    }
+
+    pub(super) fn verify(job: &Job, spec: &ChecksumVerifySpec, started: Instant) -> Outcome {
+        let text = match std::fs::read_to_string(&spec.file) {
+            Ok(t) => t,
+            Err(e) => return Outcome::failed("io", format!("{}: {e}", spec.file.display())),
+        };
+        let hint = spec
+            .file
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(ChecksumFormat::from_extension);
+        let parsed = match checksum::parse(&text, hint) {
+            Ok(p) => p,
+            Err(e) => return Outcome::failed(e.code, e.message),
+        };
+        let base = spec
+            .file
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let total = parsed.entries.len();
+        let mut tally = ChecksumResult::default();
+        let mut rows = Vec::with_capacity(total);
+        for (i, e) in parsed.entries.iter().enumerate() {
+            if !gated(job) {
+                return Outcome::cancelled();
+            }
+            publish_file_progress(job, i, total, started, "Checking");
+            let one = checksum::ChecksumFile {
+                format: parsed.format,
+                entries: vec![e.clone()],
+            };
+            let row = match checksum::check(&one, &base) {
+                Ok(mut r) => r.remove(0),
+                Err(err) => return Outcome::failed("io", err.to_string()),
+            };
+            match row.status {
+                checksum::RowStatus::Ok => tally.ok += 1,
+                checksum::RowStatus::Mismatch => tally.mismatch += 1,
+                checksum::RowStatus::Missing => tally.missing += 1,
+            }
+            rows.push(row);
+        }
+        let clean = tally.mismatch == 0 && tally.missing == 0;
+        // Read off before the tally is moved into the result below.
+        let (mismatch, missing) = (tally.mismatch, tally.missing);
+        job.publisher.update(|s| {
+            s.log_tail.extend(rows.iter().map(|r| {
+                format!(
+                    "{}: {}",
+                    r.name,
+                    match r.status {
+                        checksum::RowStatus::Ok => "OK",
+                        checksum::RowStatus::Mismatch => "MISMATCH",
+                        checksum::RowStatus::Missing => "MISSING",
+                    }
+                )
+            }));
+        });
+        Outcome {
+            state: if clean {
+                JobState::Done
+            } else {
+                JobState::Failed
+            },
+            result: Some(JobResult {
+                checksum: Some(ChecksumResult {
+                    entries: rows,
+                    ..tally
+                }),
+                ..Default::default()
+            }),
+            error: (!clean).then(|| {
+                JobError::new(
+                    "checksum_mismatch",
+                    format!("{mismatch} mismatched, {missing} missing of {total}"),
+                )
+            }),
+            survey: None,
+            committed: false,
+        }
+    }
+
+    fn publish_file_progress(job: &Job, i: usize, total: usize, started: Instant, verb: &str) {
+        let frac = if total == 0 {
+            1.0
+        } else {
+            i as f64 / total as f64
+        };
+        let ms = started.elapsed().as_millis() as u64;
+        job.publisher.update(|s| {
+            s.phase = Phase::Hashing;
+            s.phase_text = format!("{verb} {} of {total} files", i + 1);
+            s.progress = frac;
+            s.elapsed_ms = ms;
+        });
+    }
+}
+
+/// A job kind's own name, for the queue's table.
+pub fn kind_label(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::Create => "Create",
+        JobKind::Verify => "Verify",
+        JobKind::Repair => "Repair",
+        JobKind::ChecksumCreate => "Checksum",
+        JobKind::ChecksumVerify => "Check",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The gate blocks while paused and comes back the moment the
+    /// pause is lifted - the property a Pause button is.
+    #[test]
+    fn the_gate_parks_while_paused_and_returns_on_resume() {
+        let c = Control::new();
+        c.set_paused(true);
+        let c2 = Arc::clone(&c);
+        let done = Arc::new(AtomicBool::new(false));
+        let d2 = Arc::clone(&done);
+        let h = std::thread::spawn(move || {
+            let ok = c2.gate();
+            d2.store(true, Ordering::SeqCst);
+            ok
+        });
+        // Not a sleep-and-hope: the flag must still be false while the
+        // worker is parked, and the only way past is the resume below.
+        for _ in 0..20 {
+            if done.load(Ordering::SeqCst) {
+                panic!("the gate let a paused job through");
+            }
+            std::thread::yield_now();
+        }
+        c.set_paused(false);
+        assert!(h.join().expect("gate thread"), "resume lets it through");
+    }
+
+    /// A cancel WHILE PAUSED takes effect at once. Without this a
+    /// cancelled job would sit parked until somebody pressed Resume,
+    /// which is the one thing they are not going to do.
+    #[test]
+    fn a_cancel_while_paused_releases_the_gate_and_answers_false() {
+        let c = Control::new();
+        c.set_paused(true);
+        let c2 = Arc::clone(&c);
+        let h = std::thread::spawn(move || c2.gate());
+        c.cancel();
+        assert!(!h.join().expect("gate thread"));
+    }
+
+    #[test]
+    fn a_cancelled_control_never_parks_again() {
+        let c = Control::new();
+        c.cancel();
+        c.set_paused(true);
+        assert!(!c.gate(), "a cancelled control answers immediately");
+        assert!(!c.is_paused(), "cancel outranks pause");
+    }
+
+    /// The wiring, end to end and with no clock in it: a create job
+    /// whose Control is ALREADY cancelled reaches the engine, unwinds
+    /// at its first poll, and leaves nothing on disk.
+    ///
+    /// What it would catch: a `run_create` that built a watch and did
+    /// not pass it, or passed a control holding a SECOND gate. Either
+    /// writes the whole set and returns `Done`, and both are the
+    /// two-sources-of-truth shape `Control`'s doc exists for. Nothing
+    /// here races - `run_create` is called directly, so the cancel is
+    /// in place before the first member is opened.
+    #[test]
+    fn a_create_whose_job_is_cancelled_writes_nothing_and_reports_cancelled() {
+        use crate::job::{
+            BlockSpec, CreateSpec, PathMode, RecoverySpec, Source, UnicodePolicy, VolumeSpec,
+        };
+        let d = std::env::temp_dir().join(format!(
+            "parfast-session-createcancel-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("temp dir");
+        std::fs::write(d.join("a.bin"), vec![5u8; 200_000]).expect("member");
+        let spec = CreateSpec {
+            sources: vec![Source {
+                path: d.join("a.bin"),
+                recursive: false,
+            }],
+            path_mode: PathMode::Basename,
+            base_path: None,
+            block: Some(BlockSpec::Size { size: 2_048 }),
+            recovery: Some(RecoverySpec::Count { count: 20 }),
+            output: d.join("set.par2"),
+            volumes: VolumeSpec::Pow2,
+            first_recovery_block: 0,
+            comment: String::new(),
+            overwrite: false,
+            std_naming: false,
+            unicode: UnicodePolicy::Auto,
+            perf: Default::default(),
+        };
+        let job = Job {
+            spec: JobSpec::Create {
+                create: spec.clone(),
+            },
+            control: Control::new(),
+            publisher: Publisher::new(JobSnapshot::queued(
+                1,
+                JobKind::Create,
+                "2026-09-12T00:00:00Z".into(),
+                false,
+            )),
+            knobs: KnobLock::new(),
+            settings: Settings::default(),
+        };
+        job.control.cancel();
+        let outcome = run_create(&job, &spec, Instant::now());
+        assert_eq!(
+            outcome.state,
+            JobState::Cancelled,
+            "error: {:?}",
+            outcome.error
+        );
+        let left: Vec<String> = std::fs::read_dir(&d)
+            .expect("read dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".par2"))
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a cancelled create job left files: {left:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A Cancel that lost the race to a SEALED set reports Done and
+    /// names the files, rather than reporting Cancelled and naming
+    /// none.
+    ///
+    /// # Why the race is not raced here
+    ///
+    /// The window is between the engine's last poll - which it takes
+    /// immediately before sealing the volumes - and the runner reading
+    /// the flag, so it is sub-millisecond and cannot be hit on purpose
+    /// from outside. Nothing here tries. The create is run to
+    /// completion for real, which establishes the two facts that matter
+    /// (the engine returns a COMMITTED outcome, and the set is on
+    /// disk), and the cancel is then applied to `final_state`, which is
+    /// the rule the runner applies at exactly that seam.
+    ///
+    /// Both halves of that rule are pinned. A test that checked only
+    /// the create would pass just as well against a runner that ignored
+    /// every late cancel for every job kind, which is the opposite
+    /// defect and a worse one.
+    #[test]
+    fn a_cancel_that_lost_the_race_to_a_sealed_set_reports_done_and_names_the_files() {
+        use crate::job::{
+            BlockSpec, CreateSpec, PathMode, RecoverySpec, Source, UnicodePolicy, VolumeSpec,
+        };
+        let d = std::env::temp_dir().join(format!(
+            "parfast-session-latecancel-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("temp dir");
+        std::fs::write(d.join("a.bin"), vec![5u8; 200_000]).expect("member");
+        let spec = CreateSpec {
+            sources: vec![Source {
+                path: d.join("a.bin"),
+                recursive: false,
+            }],
+            path_mode: PathMode::Basename,
+            base_path: None,
+            block: Some(BlockSpec::Size { size: 2_048 }),
+            recovery: Some(RecoverySpec::Count { count: 20 }),
+            output: d.join("set.par2"),
+            volumes: VolumeSpec::Pow2,
+            first_recovery_block: 0,
+            comment: String::new(),
+            overwrite: false,
+            std_naming: false,
+            unicode: UnicodePolicy::Auto,
+            perf: Default::default(),
+        };
+        let job = Job {
+            spec: JobSpec::Create {
+                create: spec.clone(),
+            },
+            control: Control::new(),
+            publisher: Publisher::new(JobSnapshot::queued(
+                1,
+                JobKind::Create,
+                "2026-09-12T00:00:00Z".into(),
+                false,
+            )),
+            knobs: KnobLock::new(),
+            settings: Settings::default(),
+        };
+        // Uncancelled: the engine runs to the end and seals the set.
+        let outcome = run_create(&job, &spec, Instant::now());
+        assert_eq!(outcome.state, JobState::Done, "error: {:?}", outcome.error);
+        assert!(
+            outcome.committed,
+            "a sealed set must declare itself the engine's, or the rule below has nothing to act on"
+        );
+        let written = outcome
+            .result
+            .as_ref()
+            .expect("a finished create names what it wrote")
+            .written
+            .clone();
+        assert!(!written.is_empty(), "a finished create wrote no files");
+        let on_disk: Vec<String> = std::fs::read_dir(&d)
+            .expect("read dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".par2"))
+            .collect();
+        assert_eq!(
+            written.len(),
+            on_disk.len(),
+            "the outcome names {} files and the disk holds {}: {on_disk:?}",
+            written.len(),
+            on_disk.len()
+        );
+
+        // The press lands NOW - after the engine committed.
+        job.control.cancel();
+        assert_eq!(
+            final_state(job.control.is_cancelled(), &outcome),
+            JobState::Done,
+            "a set that is sealed on disk must not be reported as cancelled"
+        );
+
+        // The other half: an outcome the engine did NOT commit still
+        // takes the cancel, which is every other job kind.
+        let interruptible = Outcome {
+            state: JobState::Done,
+            result: None,
+            error: None,
+            survey: None,
+            committed: false,
+        };
+        assert_eq!(
+            final_state(true, &interruptible),
+            JobState::Cancelled,
+            "a late cancel must still decide the state for work that can stop part-way"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A create's bar: the two OVERLAPPING phases share one span and
+    /// the writes are the last tenth, monotone throughout.
+    ///
+    /// This is the mapping `CreateProgress`'s doc argues for, pinned -
+    /// because the failure it avoids (a bar that stalls at 45% on one
+    /// engine arm and jumps backwards on another) is invisible in any
+    /// test that only runs one arm.
+    #[test]
+    fn a_creates_hash_and_fold_share_one_span_and_the_writes_are_the_last_tenth() {
+        use par2repair::ProgressSink;
+        let p = Publisher::new(JobSnapshot::queued(
+            1,
+            JobKind::Create,
+            "2026-09-12T00:00:00Z".into(),
+            false,
+        ));
+        let sink = CreateProgress {
+            publisher: Arc::clone(&p),
+        };
+        sink.progress(par2repair::RepairPhase::Verify, 1, 2);
+        assert!((p.get().progress - 0.45).abs() < 1e-9, "{:?}", p.get());
+        assert_eq!(p.get().phase, Phase::Hashing);
+        // The fold, further along than the hashing, moves the bar; the
+        // hashing reporting again behind it does NOT move it back.
+        sink.progress(par2repair::RepairPhase::Fold, 3, 4);
+        assert!((p.get().progress - 0.675).abs() < 1e-9, "{:?}", p.get());
+        sink.progress(par2repair::RepairPhase::Verify, 1, 4);
+        assert!(
+            (p.get().progress - 0.675).abs() < 1e-9,
+            "a create bar went backwards"
+        );
+        // The writes are the last tenth, and they land on full.
+        sink.progress(par2repair::RepairPhase::Write, 1, 2);
+        assert!((p.get().progress - 0.95).abs() < 1e-9, "{:?}", p.get());
+        assert_eq!(p.get().phase, Phase::Writing);
+        sink.progress(par2repair::RepairPhase::Write, 2, 2);
+        assert!((p.get().progress - 1.0).abs() < 1e-9, "{:?}", p.get());
+        // A create has nothing to solve and the engine never sends it;
+        // if one ever arrived it must not move a create's bar to 85%.
+        let before = p.get().progress;
+        sink.progress(par2repair::RepairPhase::Solve, 1, 2);
+        assert!((p.get().progress - before).abs() < f64::EPSILON);
+    }
+
+    /// The publisher must not hold its lock across the wake: a host
+    /// marshals the wake to its UI thread and polls, and a wake handler
+    /// that polls synchronously would deadlock on a held lock.
+    #[test]
+    fn the_wake_fires_with_no_lock_held() {
+        let p = Publisher::new(JobSnapshot::queued(
+            1,
+            JobKind::Verify,
+            "2026-09-12T00:00:00Z".into(),
+            false,
+        ));
+        let seen = Arc::new(Mutex::new(0usize));
+        let p2 = Arc::clone(&p);
+        let s2 = Arc::clone(&seen);
+        p.set_wake(Some(Box::new(move || {
+            // Exactly what a host does: poll from the wake.
+            let _ = p2.get();
+            *s2.lock().expect("counter") += 1;
+        })));
+        p.update(|s| s.progress = 0.5);
+        assert_eq!(*seen.lock().expect("counter"), 1);
+        assert!((p.get().progress - 0.5).abs() < f64::EPSILON);
+    }
+}

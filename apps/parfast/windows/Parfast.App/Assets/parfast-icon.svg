@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  PLACEHOLDER APP ICON for the parfast GUI.
+
+  The real master belongs in apps/parfast/shared/icon/, which chip B (the mac
+  lane) owns: one source rendered to .icns and .ico by script, the way
+  packaging/icon/ does it for nzbfast. This file exists so the Windows app has
+  an icon to build and ship with before that lands, and so the screenshots are
+  not taken with a blank tile. When the shared master arrives, point
+  tools/make-icon.py at it and delete this.
+
+  The mark is the block map, which is the app's signature visual: four rows of
+  recovery blocks, three of them whole and one with a gap being filled from the
+  row below. Drawn at 1024 and scaled by the script.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5E5CE6" />
+      <stop offset="1" stop-color="#3A38B4" />
+    </linearGradient>
+  </defs>
+
+  <!-- The tile. 22.37% of the side is the Windows and macOS squircle radius. -->
+  <rect x="0" y="0" width="1024" height="1024" rx="229" ry="229" fill="url(#tile)" />
+
+  <g>
+    <!-- Three intact rows. -->
+    <g fill="#FFFFFF" opacity="0.95">
+      <rect x="192" y="268" width="132" height="96" rx="20" />
+      <rect x="344" y="268" width="132" height="96" rx="20" />
+      <rect x="496" y="268" width="132" height="96" rx="20" />
+      <rect x="648" y="268" width="132" height="96" rx="20" />
+
+      <rect x="192" y="392" width="132" height="96" rx="20" />
+      <rect x="344" y="392" width="132" height="96" rx="20" />
+      <rect x="496" y="392" width="132" height="96" rx="20" />
+      <rect x="648" y="392" width="132" height="96" rx="20" />
+    </g>
+
+    <!-- The damaged row: one block missing, drawn as an outline, and the
+         recovery block below it in the recovery colour, which is the whole
+         story of a PAR2 set in one picture. -->
+    <g fill="#FFFFFF" opacity="0.95">
+      <rect x="192" y="516" width="132" height="96" rx="20" />
+      <rect x="496" y="516" width="132" height="96" rx="20" />
+      <rect x="648" y="516" width="132" height="96" rx="20" />
+    </g>
+    <rect x="344" y="516" width="132" height="96" rx="20"
+          fill="none" stroke="#FFFFFF" stroke-width="12" stroke-dasharray="30 22" opacity="0.55" />
+
+    <g fill="#34C759">
+      <rect x="192" y="656" width="132" height="96" rx="20" />
+      <rect x="344" y="656" width="132" height="96" rx="20" />
+      <rect x="496" y="656" width="132" height="96" rx="20" />
+      <rect x="648" y="656" width="132" height="96" rx="20" />
+    </g>
+
+    <!-- The arrow that says the gap is filled from the recovery row. Sized to
+         read at 128 px: at the first drawing it was 52 units tall in a 1024
+         canvas, which resolved to six pixels of green dash. -->
+    <path d="M410 652 L410 620 L374 620 L410 556 L446 620 L410 620 Z" fill="#34C759" />
+  </g>
+</svg>

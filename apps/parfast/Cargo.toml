@@ -1,0 +1,142 @@
+# A DETACHED CARGO WORKSPACE. The root manifest never names it.
+#
+# Decision D2a (12 Sep 2026): the desktop GUI's two Rust crates live in
+# a workspace of their own rather than under `crates/`.
+# `packaging/PUBLIC_MANIFEST` ships `crates/` wholesale AND ships the
+# root `Cargo.toml` and `Cargo.lock`, so both obvious routes fail - a
+# crate under `crates/` publishes, and holding one back with a removal
+# line in `publish-public.sh` leaves the exported root manifest naming a
+# workspace member that is not in the tree, which breaks `cargo build`
+# on the public repo's first push. A workspace the root does not name
+# has neither problem: `apps/` is not on the manifest, so nothing is
+# exported and nothing is stripped.
+#
+# The precedent is `crates/nzbkit/fuzz`, which cargo-fuzz detaches the
+# same way, and it has the same consequence: NO `-p` list in this
+# repository reaches these crates. That is paid for in four places, and
+# a fifth crate added here needs all four:
+#
+#   * `.github/workflows/ci-private.yml` - its own fmt and clippy steps
+#     carrying `--manifest-path apps/parfast/Cargo.toml`, in the fuzz
+#     crate's shape, with CLAUDE.md's copies beside the fuzz crate's;
+#   * `.github/workflows/parfast-gui.yml` - the `one-process` job, which
+#     is the ONLY place these crates' unit tests run in one process;
+#   * `tools/size-gate.py` - `apps/parfast/crates` is a SECOND scanned
+#     root, because the gate walks the literal string `crates` from the
+#     repo root;
+#   * CLAUDE.md's `cargo test --lib` list - a hand line, since
+#     `tools/one-process-roster.py` and `unit-one-process` both derive
+#     from the ROOT manifest and so cannot see this one.
+#
+# UNLIKE the fuzz crate, this workspace COMMITS its `Cargo.lock`, so
+# every cargo line for it carries `--locked`. That lock goes stale on
+# ordinary work in `crates/` - a dependency added to `crates/parfast` or
+# `crates/nzbkit` refreshes the ROOT lock and leaves this one describing
+# a package that no longer exists, and the next push dies at RESOLUTION
+# under `--locked`, on a job whose name says clippy or build. It cost
+# main an hour on 12 Sep 2026. `tools/detached-lock-gate.py` is what
+# catches it before the push now (it is in `tools/preflight.py`'s
+# roster, so it runs on any diff reaching a manifest or a lock); the
+# remedy it prints is `cargo update --manifest-path apps/parfast/
+# Cargo.toml --workspace`, and NEVER dropping the flag.
+#
+# Released 12 Sep 2026: `apps/parfast` is on `PUBLIC_MANIFEST` and the
+# GUI ships. Whether to fold these two crates back into the root
+# workspace is a separate tidy-up, not a requirement - the detached
+# workspace is what keeps their lint and lock lines explicit.
+[workspace]
+members = [
+    "crates/parfast-session",
+    "crates/parfast-ffi",
+]
+resolver = "2"
+
+# Both members are named here, unlike the root workspace, which holds
+# `nzbfast-ffi` out of its default set for the whole-archive link a
+# `staticlib` costs. That argument does not apply here: this workspace
+# exists TO build that staticlib and that cdylib, and there is nothing
+# else in it for the link to be a tax on.
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/nzbfast/nzbfast"
+
+# The lints are the ROOT workspace's, copied because a detached
+# workspace inherits nothing - not the version, not the lints table, and
+# NOT `[patch.crates-io]`, which is the one this sentence used to leave
+# unsaid and which now has its own copy at the foot of this file. Only
+# the arms that can fire in these two crates are here; the rest are debt
+# entries and house-style waivers about code that is not in this tree.
+# If the root's table changes in a way that matters here, this is the
+# second copy to move, and `undocumented_unsafe_blocks` is the one that
+# must never be dropped: `parfast-ffi` is a C ABI and is nearly all
+# `unsafe`.
+[workspace.lints.rust]
+clashing_extern_declarations = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+# Every `unsafe` block, `unsafe impl` and `unsafe fn` body carries a
+# `// SAFETY:` line above it saying WHY it is sound - the invariant,
+# never "this is safe". The root workspace's 26 Aug 2026 ratchet, and
+# the reason `parfast-ffi` is readable at all.
+undocumented_unsafe_blocks = "deny"
+too_many_arguments = "allow"
+type_complexity = "allow"
+large_enum_variant = "allow"
+# House style, not debt, exactly as the root says: copy rules ban
+# em-dashes, an aside is a spaced hyphen, and a reflow puts one at the
+# start of a line where markdown reads it as a bullet.
+doc_lazy_continuation = "allow"
+doc_overindented_list_items = "allow"
+
+# THE ROOT WORKSPACE'S PATCH TABLE, COPIED, for the same reason the lints
+# above are copied: `[patch]` applies from the WORKSPACE ROOT and this
+# workspace has its own. Without these two lines this tree resolved BOTH
+# crates from crates.io while every other binary in this repo links the
+# vendored fork - measured 12 Sep 2026 off the two committed locks, root
+# `lzma-rust2 0.20.0` LOCAL against detached `0.20.1` from the registry,
+# so the repo held two different source trees of one crate and nobody
+# was watching the second.
+#
+# IT WAS INERT AT THE TIME AND THAT IS NOT THE ARGUMENT. The two GUI
+# crates name neither crate, and both forks' divergences are perf and
+# determinism rather than correctness
+# (vendor/lzma-rust2/README-nzbfast.md, vendor/sevenz-rust2/
+# README-nzbfast.md). But `nzbkit-base` names both - `src/zip.rs` for zip
+# method 14 and `src/nameprobe.rs` - and this workspace compiles
+# `nzbkit-base` whole, so the divergence was already linked in. What
+# copying the table buys is not today's bytes, it is this: the sevenz
+# fork adds a PUBLIC MODULE upstream does not have (`write_entropy`,
+# the seeded `Entropy` the posting-layout fixtures need). The day a lane
+# working in `crates/` reaches a fork-only symbol from `nzbkit-base`,
+# an unpatched tree stops COMPILING - and that red lands on
+# `parfast-gui.yml` and `fuzz-gate`, whose names say nothing about the
+# engine, on a lane that has never opened `apps/`. That is the 12 Sep
+# lock-drift incident one level up, and the same answer applies: make
+# the detached tree resolve what the root resolves.
+#
+# `../../` because this manifest is two levels below the repo root -
+# check it rather than copying the root's `vendor/...` spelling, which
+# resolves to nothing from here and fails as a MISSING PACKAGE rather
+# than as a bad patch.
+#
+# REGENERATING THIS IS NOT THE ONE LINE `detached-lock-gate` PRINTS, and
+# that is worth knowing before the next fork bump. `cargo update
+# --manifest-path apps/parfast/Cargo.toml --workspace` applied the
+# sevenz patch (same version both sides) and left the lzma one UNUSED,
+# because the lock pinned 0.20.1 and a patch at 0.20.0 is a downgrade
+# `--workspace` will not take. Cargo says so as a WARNING and exits 0:
+#
+#     cargo update --manifest-path apps/parfast/Cargo.toml \
+#         -p lzma-rust2 --precise 0.20.0
+#
+# was the second line, and the general rule is `--precise <the vendored
+# version>` for any patched crate whose fork is not at the version this
+# lock already holds. A declared patch that does not APPLY is silent, so
+# `tools/detached-lock-gate.py` checks the LOCK and not this table - see
+# its header, "THE PATCH-PARITY ARM".
+[patch.crates-io]
+sevenz-rust2 = { path = "../../vendor/sevenz-rust2" }
+lzma-rust2 = { path = "../../vendor/lzma-rust2" }

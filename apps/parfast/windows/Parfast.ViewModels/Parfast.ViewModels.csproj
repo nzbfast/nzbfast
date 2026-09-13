@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Plain net8.0, like Parfast.Core and for the same reason: the view
+         models are the product's behaviour and are unit-tested on any host.
+         A WinUI type must never appear here - the moment one does, the tests
+         need a Windows box and this lane loses its ability to make progress
+         while the only such box on the fleet is busy. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Parfast.ViewModels</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Parfast.Core\Parfast.Core.csproj" />
+  </ItemGroup>
+</Project>

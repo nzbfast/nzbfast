@@ -1,0 +1,12 @@
+{
+  "solution": {
+    "path": "..\\Parfast.sln",
+    "projects": [
+      "Parfast.Core\\Parfast.Core.csproj",
+      "Parfast.Check\\Parfast.Check.csproj",
+      "Parfast.Gen\\Parfast.Gen.csproj",
+      "Parfast.Tests\\Parfast.Tests.csproj",
+      "Parfast.ViewModels\\Parfast.ViewModels.csproj"
+    ]
+  }
+}

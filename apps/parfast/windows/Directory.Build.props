@@ -1,0 +1,35 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- CS1591 (missing XML comment) is off: these are app assemblies, not
+         a published API surface. Everything else is fatal, which is the
+         .NET equivalent of the repo's clippy -D warnings gate. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- One version for the whole GUI, tracking nzbfast's (publication
+         spec D3). Bumped by packaging, not by hand in five csproj files. -->
+    <ParfastGuiVersion>1.5.0</ParfastGuiVersion>
+    <Version>$(ParfastGuiVersion)</Version>
+    <Company>parfast</Company>
+    <Product>parfast</Product>
+    <Copyright>GPL-3.0-or-later</Copyright>
+    <!-- NO BUILD MACHINE PATHS IN THE SHIPPED ASSEMBLIES. A Release build
+         writes the absolute path of its .pdb into the assembly, so without
+         this every DLL in the bundle carries
+         C:\Users\<whoever built it>\...\obj\Release\... - measured on the
+         1.5.0-alpha.1 bundle, which shipped it in parfast-gui.dll,
+         Parfast.Core.dll and Parfast.ViewModels.dll.
+         This project is published anonymously, so that is an identity leak
+         and packaging/scan-release-assets.sh refuses an asset carrying one.
+         Embedding the symbols removes the external path entirely and keeps
+         a usable stack trace, which <DebugType>none</DebugType> would not.
+         DeterministicSourcePaths maps the source root to /_/ so the paths
+         INSIDE the embedded symbols are not the build machine's either. -->
+    <DebugType>embedded</DebugType>
+    <EmbedAllSources>false</EmbedAllSources>
+    <DeterministicSourcePaths>true</DeterministicSourcePaths>
+  </PropertyGroup>
+</Project>

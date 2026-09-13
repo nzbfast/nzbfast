@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Parfast.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:views="using:Parfast.App.Views"
+    xmlns:controls="using:Parfast.App.Controls">
+
+    <Grid x:Name="RootGrid" AllowDrop="True" DragOver="OnDragOver" Drop="OnDrop">
+        <Grid.RowDefinitions>
+            <!-- The drag strip. The title bar is extended into the client area
+                 (plan 6.2), so this row IS the title bar as far as Windows is
+                 concerned and SetTitleBar names it. -->
+            <RowDefinition Height="40" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid x:Name="TitleStrip" Grid.Row="0" Padding="14,0,0,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="10">
+                <Image Source="ms-appx:///Assets/parfast.ico" Width="16" Height="16" />
+                <TextBlock x:Name="TitleText" Text="parfast" FontSize="12" VerticalAlignment="Center" />
+                <Border x:Name="MockBadge"
+                        Visibility="Collapsed"
+                        Background="{ThemeResource SubtleBackground}"
+                        BorderBrush="{ThemeResource CardBorder}"
+                        BorderThickness="1"
+                        CornerRadius="999"
+                        Padding="8,1,8,1">
+                    <TextBlock x:Name="MockBadgeText" FontSize="11" Opacity="0.8" />
+                </Border>
+            </StackPanel>
+        </Grid>
+
+        <NavigationView x:Name="Nav"
+                        Grid.Row="1"
+                        PaneDisplayMode="LeftCompact"
+                        IsBackButtonVisible="Collapsed"
+                        IsSettingsVisible="True"
+                        OpenPaneLength="212"
+                        SelectionChanged="OnNavSelectionChanged">
+            <NavigationView.MenuItems>
+                <NavigationViewItem x:Name="NavVerify" Tag="verify">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE72E;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavCreate" Tag="create">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE710;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavChecksums" Tag="checksums">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE9D9;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavQueue" Tag="queue">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8FD;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0">
+                    <views:VerifyPage x:Name="PageVerify" />
+                    <views:CreatePage x:Name="PageCreate" Visibility="Collapsed" />
+                    <views:ChecksumsPage x:Name="PageChecksums" Visibility="Collapsed" />
+                    <views:QueuePage x:Name="PageQueue" Visibility="Collapsed" />
+                    <views:SettingsPage x:Name="PageSettings" Visibility="Collapsed" />
+                </Grid>
+
+                <!-- The log drawer, shared by every mode (plan 5.2). It is a row
+                     of the content grid rather than an overlay, so opening it
+                     shrinks the page instead of covering the thing the user is
+                     reading. -->
+                <Border x:Name="LogDrawer"
+                        Grid.Row="1"
+                        Visibility="Collapsed"
+                        Height="180"
+                        Background="{ThemeResource LogBackground}"
+                        BorderBrush="{ThemeResource SeparatorBrush}"
+                        BorderThickness="0,1,0,0">
+                    <Grid Padding="16,10,16,12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <Grid Grid.Row="0" Margin="0,0,0,6">
+                            <TextBlock x:Name="LogTitle" Style="{StaticResource ColumnHeader}" />
+                            <Button x:Name="LogClose"
+                                    HorizontalAlignment="Right"
+                                    Padding="6,2,6,2"
+                                    Click="OnToggleLog">
+                                <FontIcon Glyph="&#xE711;" FontSize="12" />
+                            </Button>
+                        </Grid>
+
+                        <TextBlock x:Name="LogEmpty"
+                                   Grid.Row="1"
+                                   Style="{StaticResource MutedCaption}"
+                                   VerticalAlignment="Center"
+                                   HorizontalAlignment="Center"
+                                   Visibility="Collapsed" />
+
+                        <ScrollViewer Grid.Row="1"
+                                      x:Name="LogScroller"
+                                      HorizontalScrollMode="Auto"
+                                      HorizontalScrollBarVisibility="Auto"
+                                      VerticalScrollBarVisibility="Auto">
+                            <ItemsControl x:Name="LogLines">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}" Style="{StaticResource LogText}" />
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+
+                        <StackPanel Grid.Row="2"
+                                    Orientation="Horizontal"
+                                    Spacing="8"
+                                    Margin="0,8,0,0">
+                            <TextBlock x:Name="CommandLine"
+                                       Style="{StaticResource CommandText}"
+                                       MaxWidth="700"
+                                       VerticalAlignment="Center" />
+                            <Button x:Name="CopyCommand" Click="OnCopyCommand" Padding="10,3,10,3" />
+                            <Button x:Name="CopyLog" Click="OnCopyLog" Padding="10,3,10,3" />
+                            <TextBlock x:Name="CopyConfirmation"
+                                       Style="{StaticResource MutedCaption}"
+                                       VerticalAlignment="Center"
+                                       Visibility="Collapsed" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </Grid>
+        </NavigationView>
+    </Grid>
+</Window>

@@ -1,0 +1,10 @@
+{
+  "_about": "Windows-local copy. Entries here are PENDING adoption by apps/parfast/shared/strings/en.json, which chip B owns and this lane only reads: each is copy the shared table has no equivalent for, is visible only on Windows until they take it, and is listed in this lane's handoff so it cannot be forgotten. The generator prints the list on every run. This file was empty for a while after chip B landed PLATFORM SPLITS for the five strings that named macOS; a rewording of an EXISTING key belongs in a split in their file, never here. The thirteen create.cost / progress.rate / verify.file_strip keys of the three charts of the 12 Sep prettiness review section 4 were written here Windows-first on purpose, and the mac charts lane ADOPTED them into the shared table on 12 Sep 2026 - the channel working exactly as intended, and the reason to write copy here rather than as a Windows dialect. Both apps draw those three charts from apps/parfast/shared/strings/en.json now. (The handoff that wrote them called them eleven; there are thirteen, which is also the difference between the seventeen entries the generator was printing and the four left here.)",
+  "_version": 3,
+  "strings": {
+    "empty.verify.open_folder": "Open folder...",
+    "mode.settings": "Settings",
+    "settings.verb_verify": "Verify with parfast",
+    "settings.verb_create": "Create PAR2 with parfast"
+  }
+}

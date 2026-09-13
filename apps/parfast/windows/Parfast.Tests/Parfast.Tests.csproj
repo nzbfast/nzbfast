@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- net8.0, so `dotnet test` is green on the dev Mac as well as on the
+         Windows build box. The view models carry no WinUI type by design and
+         this line is what enforces it: a UI reference here would not compile. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Parfast.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+  <!-- The real engine library, copied beside the test assembly when it has been
+       built, so FfiIntegrationTests can drive it. Conditional: the suite SKIPS
+       with a message naming the cargo line when it is absent, because a test that
+       fails over an optional artefact teaches people to ignore red.
+       Host-shaped on purpose - a .dylib here, a .dll on the Windows runner - and
+       .NET's own probing turns DllImport("parfast_ffi") into either. -->
+  <PropertyGroup>
+    <ParfastFfiHostLib Condition="$([MSBuild]::IsOSPlatform('OSX'))">$(MSBuildThisFileDirectory)..\..\target\release\libparfast_ffi.dylib</ParfastFfiHostLib>
+    <ParfastFfiHostLib Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(MSBuildThisFileDirectory)..\..\target\release\parfast_ffi.dll</ParfastFfiHostLib>
+    <ParfastFfiHostLib Condition="$([MSBuild]::IsOSPlatform('Linux'))">$(MSBuildThisFileDirectory)..\..\target\release\libparfast_ffi.so</ParfastFfiHostLib>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(ParfastFfiHostLib)' != '' And Exists('$(ParfastFfiHostLib)')">
+    <None Include="$(ParfastFfiHostLib)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Parfast.Core\Parfast.Core.csproj" />
+    <ProjectReference Include="..\Parfast.ViewModels\Parfast.ViewModels.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,49 @@
+[package]
+name = "parfast-ffi"
+version = "1.5.0-beta.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "C ABI over parfast-session, for the parfast desktop apps (SwiftUI on macOS, WinUI on Windows)"
+publish = false
+
+[lints]
+workspace = true
+
+# staticlib is what the macOS app links; cdylib is what the .NET app
+# P/Invokes on Windows (a static Rust archive is not something the
+# .NET loader can take); rlib keeps `cargo check` and the crate's own
+# Rust tests working on the host.
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+parfast-session = { path = "../parfast-session" }
+# For `pf_capabilities` only: the engine's version string and the row
+# kernel its own dispatcher would run here. Both are things a host's
+# About box reports about THE ENGINE, so they come from the engine.
+nzbkit = { path = "../../../../crates/nzbkit", default-features = false }
+serde_json = "1.0.150"
+
+[build-dependencies]
+# Compiles tests/smoke.c - see build.rs for why the C side is built
+# here rather than inside the test.
+cc = "1"
+
+[dev-dependencies]
+# The committed header is GENERATED and then reviewed: `tests/header.rs`
+# regenerates it with cbindgen and fails if the bytes differ from the
+# committed copy, so a signature change is a diff a human reads rather
+# than a struct a host decodes wrongly.
+#
+# A DEV dependency and not a build one, deliberately: a `build.rs` that
+# rewrote a checked-in file on every build would make the tree dirty
+# from a bare `cargo build` and would run on every consumer's machine
+# for nothing. `PARFAST_FFI_WRITE_HEADER=1 cargo test -p parfast-ffi
+# --test header` is the regeneration, and it is a thing a human does on
+# purpose.
+cbindgen = { version = "0.29", default-features = false }
+# The C smoke test compiles a real C translation unit against the
+# committed header and links it to this crate's rlib, so the ABI is
+# exercised BY A C COMPILER and not by a Rust re-declaration of it.
+cc = "1"

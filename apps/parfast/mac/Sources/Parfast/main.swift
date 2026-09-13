@@ -1,0 +1,3 @@
+import ParfastApp
+
+ParfastMain.run()

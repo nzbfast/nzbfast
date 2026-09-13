@@ -31,9 +31,19 @@ if [ $# -lt 2 ]; then
   exit 1
 fi
 TAG=$1; shift
+# TWO PRODUCTS SHIP FROM THIS REPO, so two tag shapes are valid.
+# nzbfast tags `vX.Y.Z`; parfast ships as its own PRE-RELEASE on the same
+# landing repo under a parfast tag (SPEC-PARFAST-PUBLICATION-2026-09-10
+# item 7), so `parfast-vX.Y.Z[-beta.N]` is equally a tag. The guard
+# accepted only the first shape and refused parfast's outright, which
+# would have pushed a release engineer to `gh release upload` and around
+# the scan-stamp enforcement this script exists to apply - the one thing
+# that must not be bypassed. It is a LIST rather than a loosened glob so
+# a typo is still refused.
 case "$TAG" in
   v[0-9]*) ;;
-  *) echo "first argument must be the tag (vX.Y.Z), got: $TAG" >&2; exit 1 ;;
+  parfast-v[0-9]*) ;;
+  *) echo "first argument must be the tag (vX.Y.Z or parfast-vX.Y.Z), got: $TAG" >&2; exit 1 ;;
 esac
 
 LOGIN=$(gh api user --jq .login 2>/dev/null || true)

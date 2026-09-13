@@ -1,0 +1,14 @@
+// The module map over chip A's COMMITTED header, by relative path into the
+// crate rather than a copy.
+//
+// This is the whole point of the brief's "link it through a module map over
+// the header": a signature that drifts is a COMPILE error here, at the call
+// site, rather than a `@_silgen_name` declaration that agrees with nothing and
+// crashes at run time. The iOS bridging header carries the same reasoning.
+//
+// The path is relative to THIS file: Sources/CParfastFFI -> apps/parfast/mac
+// -> apps/parfast -> crates/parfast-ffi/include.
+module CParfastFFI {
+    header "../../../crates/parfast-ffi/include/parfast_ffi.h"
+    export *
+}

@@ -1,0 +1,26 @@
+# The header this generates is COMMITTED at include/parfast_ffi.h and is
+# reviewed source: `tests/header.rs` fails if regenerating would change
+# a byte. Regenerate with
+# `PARFAST_FFI_WRITE_HEADER=1 cargo test -p parfast-ffi --test header`.
+language = "C"
+include_guard = "PARFAST_FFI_H"
+pragma_once = false
+cpp_compat = true
+documentation = true
+documentation_style = "doxy"
+# `cargo expand` is not installed on every box that has to build this,
+# and nothing here is behind a macro cbindgen cannot see except the
+# `id_op!` family - which is why those four functions carry an explicit
+# declaration in `extra_bindings` below rather than a parse step.
+parse = { parse_deps = false }
+
+[export]
+include = ["pf_session"]
+
+[defines]
+
+[fn]
+sort_by = "None"
+
+[const]
+sort_by = "None"

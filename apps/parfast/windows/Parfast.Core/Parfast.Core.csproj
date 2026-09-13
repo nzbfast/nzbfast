@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Plain net8.0 ON PURPOSE, not net8.0-windows. Everything that is
+         not pixels lives here or in Parfast.ViewModels, so both build and
+         unit-test on macOS and Linux. Only Parfast.App needs a Windows
+         host, which is what lets this lane make progress while the only
+         WinUI-capable box on the fleet is busy with a bench round. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Parfast.Core</RootNamespace>
+  </PropertyGroup>
+</Project>

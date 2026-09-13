@@ -1,0 +1,536 @@
+# Compile the two parfast desktop apps. Nothing else in CI ever will.
+#
+# `apps/parfast/mac` is a SwiftUI app and `apps/parfast/windows` is a
+# WinUI 3 / .NET 8 app, both over the C ABI of
+# `apps/parfast/crates/parfast-ffi` on top of
+# `apps/parfast/crates/parfast-session`. Design record:
+# research/PLAN-PARFAST-GUI-2026-09-12.md, sections 4.4 and 6.3
+# (TODO 342).
+#
+# THOSE TWO CRATES ARE IN A DETACHED CARGO WORKSPACE, at
+# `apps/parfast/Cargo.toml`, which the root manifest never names
+# (decision D2a: the GUI stays private until release, and `crates/`, the
+# root `Cargo.toml` and `Cargo.lock` all ship publicly). The precedent is
+# `crates/nzbkit/fuzz`, and it has the same consequence: NO `-p` list in
+# this repository reaches these crates, so every cargo line below carries
+# `--manifest-path apps/parfast/Cargo.toml`, and the one-process job at
+# the bottom is the ONLY place their unit tests run in one process at
+# all. CLAUDE.md's `cargo test --lib` list carries the matching hand
+# line, for the same reason it carries one per crate.
+#
+# THE ARGUMENT IS macapp.yml's AND ios-app.yml's, THIRD TIME. Every gate
+# in this repository reads crates/, web/, docs/, website/, packaging/ or
+# research/. Not one of them can see a Swift type error, a bad selector,
+# a C# nullable warning promoted to an error, or a call to an API the
+# deployment target does not have. macapp.yml made that case for seven
+# AppKit files in Aug 2026 after three lanes landed in them inside one
+# hour, each compiling only because its author happened to run
+# `swift build` by hand; ios-app.yml made it again for nineteen. Two
+# native app trees written by two parallel chips against an FFI header
+# that a third chip is still writing is the same situation with a
+# sharper edge on it, because the thing all three must agree about -
+# the header - changes under them.
+#
+# ---------------------------------------------------------------------
+# WHY ITS OWN FILE
+#
+# Settled four times now (macapp.yml, android-lint.yml,
+# mobile-targets.yml, ios-app.yml) and the answer has not moved.
+# size-gate.yml earns its every-branch placement by being BUILD-FREE;
+# a macOS runner with a Swift toolchain and a Windows runner with the
+# .NET SDK falsify that. ci-private.yml is main-only on a main taking a
+# push every ~90 seconds, so its verdicts are routinely superseded,
+# which is why tools/ci-verdict.py has to exist to dig a real one out.
+# And a job added to an existing file COLLIDES with every other lane
+# adding one; a union merge of that job slot emits two job headers over
+# one body, which is silently broken yaml. A new file merges clean.
+#
+# ---------------------------------------------------------------------
+# THE PATH FILTER
+#
+# `apps/parfast/**`, and nothing wider - which now covers the two crates
+# AND the Inno Setup script, both of which D2a moved under it. This list
+# named `packaging/windows/parfast-gui.iss` until 12 Sep 2026; that file
+# is now `apps/parfast/windows/packaging/parfast-gui.iss`, moved because
+# `packaging` is one bare wholesale line on PUBLIC_MANIFEST and an
+# installer sitting there shipped verbatim, which D2a forbids. The line
+# went rather than being re-pointed: the new path is already inside
+# `apps/parfast/**`, and a second entry that can only ever match what
+# the first one matched is a thing to keep true for no benefit. NOT `crates/**`: the FFI crate
+# compiles the PAR2 engine underneath it by a relative path dependency,
+# and the engine takes commits daily from the PAR2 campaign, so a
+# `crates/**` filter would spin a macOS runner and a Windows runner on
+# very nearly every push in this repo to rebuild two app trees that did
+# not change.
+# ios-app.yml priced that exact question against thirty days of commits
+# and reached the same answer. The cost of the narrow filter is that an
+# engine change which breaks the FFI is caught by ci-private's own build
+# of `-p parfast-ffi` rather than here, which is where it belongs: this
+# file is about the APPS. The narrow filter has one more consequence
+# worth naming: the detached workspace's `Cargo.lock` is committed and
+# every cargo line here is `--locked`, so an engine change that would
+# need a lock update fails here loudly rather than silently resolving to
+# something the committed lock does not describe.
+#
+# `workflow_dispatch` is there so the whole thing can be run by hand
+# after an engine change, which is the escape hatch that makes the
+# narrow filter safe rather than merely cheap.
+#
+# ---------------------------------------------------------------------
+# THE APP TREES DO NOT EXIST YET, AND THIS FILE LANDS FIRST
+#
+# This workflow is chip D's, and chips B and C write the app trees.
+# Landing the gate before its subject is deliberate - it is ready the
+# day the first app tree lands, rather than being the thing somebody
+# remembers afterwards - but it means each job must handle an absent
+# subject, and must not do it QUIETLY. A job that reports success over
+# nothing is this repository's most repeated gate defect; leak-check's
+# "0 public file(s) clean" is the canonical instance, and CLAUDE.md
+# names it outright.
+#
+# So the absence arm is LOUD: the job writes a line to the run summary
+# saying which tree was absent and that nothing was compiled, and the
+# step that would have built prints it too. It is green rather than red
+# because a red main for however long chip A takes teaches everyone to
+# ignore this file, which is worse than the hole.
+#
+# ONE ARM PER SUBJECT, and this cost a day of blind runs to learn.
+# Until 12 Sep 2026 each app job had ONE flag requiring BOTH the FFI
+# crate and its own app tree. Chips B and C then landed both app trees
+# while chip A's crates were still unwritten, and on run 34676897392
+# every real step in BOTH app jobs concluded `skipped` while both jobs
+# concluded `success`: two complete native app trees, 110 C# tests among
+# them, compiled by nothing and reported green. Found by chip C reading
+# the step conclusions rather than the summary line.
+#
+# The coupling was never true. Neither app NEEDS the library to compile:
+# both are mock-first by design (plan 3.3), the Swift package declares no
+# system library at all, and the C# copies the cdylib through a
+# conditional item and falls back to MockCore when it is absent. So each
+# job now carries TWO independent flags - `ffi` and `app` - and each step
+# is gated on the one it actually needs. A subject that is present is
+# compiled even when its neighbour is not.
+#
+#   DELETE THE ABSENCE ARMS once the tree they guard is on origin/main,
+#   one at a time as each lands. They are dated 12 Sep 2026. An arm left
+#   in place after its subject exists is a way for a DELETED tree to
+#   pass, which is the same defect pointing the other way.
+#
+# ---------------------------------------------------------------------
+# NOT PUBLISHED, TWO WAYS
+#
+# `.github` ships wholesale in packaging/PUBLIC_MANIFEST and `apps/`
+# does not (plan decision D2), so a published copy of this file would
+# point at directories the public tree has never had and fail on its
+# first push there. That is journeys.yml's situation exactly, and it
+# takes journeys.yml's answer: publish-public.sh removes this file from
+# the export (the braces), and the `github.repository` guard on each job
+# below makes it inert rather than red if that line ever stops matching
+# (the belt). Both go the day D2 flips and `apps` joins the manifest.
+name: parfast-gui
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'apps/parfast/**'
+      - '.github/workflows/parfast-gui.yml'
+  pull_request:
+    paths:
+      - 'apps/parfast/**'
+      - '.github/workflows/parfast-gui.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Same reasoning as .claude/settings.json's session env and every
+  # other workflow here: CI does near-clean builds, so the incremental
+  # cache is about a byte of state per byte of artifact for no benefit.
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The acceptance corpus generator, which is neither app and needs
+  # neither app tree, so it is the one job in this file that compiles
+  # something real today. It is on ubuntu rather than beside the mac job
+  # for the obvious reason - a Linux runner minute is the cheap one, and
+  # nothing it does is platform-specific.
+  #
+  # Its `--selftest` has two halves and only reports OK when BOTH ran:
+  # the logic half needs nothing, and the end to end half builds three
+  # scenarios through a real parfast and checks them. Hence the parfast
+  # build below. A run where the binary was missing prints PARTIAL and
+  # still exits 0, which is correct for a developer and would be a
+  # rubber stamp here, so the step greps for the word rather than
+  # trusting the exit code.
+  corpus:
+    name: corpus (acceptance scenarios)
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: parfast-gui-corpus-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: versions
+        run: |
+          python3 --version
+          rustc --version
+          cargo --version
+
+      - name: parfast
+        run: cargo build --release --locked -p parfast
+
+      - name: corpus selftest
+        run: |
+          out=$(apps/parfast/shared/corpus/make-corpus.py --selftest 2>&1) || {
+            echo "$out"; exit 1; }
+          echo "$out"
+          case "$out" in
+            *"SELFTEST OK"*) ;;
+            *) echo "::error::the corpus selftest did not run its end to end half"
+               exit 1 ;;
+          esac
+
+  # The detached workspace's unit tests, in ONE PROCESS.
+  #
+  # This job is not a nicety, it is the only coverage of its kind these
+  # two crates will ever have. CLAUDE.md's long note on the per-crate
+  # `cargo test --lib` lines is the argument: nextest gives every test
+  # its own process, so the class "test A leaves process-global state
+  # that test B reads" is invisible to every nextest run in this
+  # repository, and a `cargo test` target is the only thing that puts a
+  # whole crate in one process. main was red a full day on exactly that
+  # once with every CI job green. The repo's two mechanisms for it -
+  # `unit-one-process`, which inventories the nextest archive, and
+  # tools/one-process-roster.py, which holds nightly's matrix to the
+  # workspace manifests - BOTH derive from the ROOT manifest, and the
+  # root manifest never names these crates. So neither reaches here, and
+  # this step is the answer.
+  #
+  # `--manifest-path` and not a `-p` line, for the same reason, and
+  # `--locked` because this workspace commits its own Cargo.lock.
+  one-process:
+    name: one process (detached workspace)
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: parfast-gui-one-process-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # This job's absence arm, and the one that stays a SINGLE flag:
+      # unlike the two app jobs it has exactly one subject, and without
+      # the workspace manifest there is no workspace to test. Dated
+      # 12 Sep 2026, deleted when that manifest is on origin/main.
+      - name: subject
+        id: subject
+        run: |
+          if [ -f apps/parfast/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "NOT TESTED: apps/parfast/Cargo.toml does not exist in this" \
+              "tree, so the detached workspace has nothing to run. This job" \
+              "ran NO tests (plan chip A)." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # `--test-threads=1` on top of the single process, so an ordering
+      # dependency is deterministic rather than a flake somebody retries.
+      # CLAUDE.md names tools/pollution-bisect.py as what to reach for
+      # when this is the line that goes red.
+      - name: cargo test --lib
+        if: steps.subject.outputs.present == 'true'
+        run: |
+          cargo test --manifest-path apps/parfast/Cargo.toml --locked --lib \
+            -- --test-threads=1
+
+      # AND THE C ABI'S INTEGRATION TARGETS, which `--lib` above does not
+      # build and which are the two that a UI lane's build depends on
+      # most directly (chip A, 12 Sep 2026):
+      #
+      #   * `tests/header.rs` regenerates `include/parfast_ffi.h` with
+      #     cbindgen and fails if a byte differs from the committed copy.
+      #     The mac app consumes that header through a bridging header
+      #     and the Windows app by hand-translating it into P/Invoke
+      #     declarations, so a signature change nobody noticed is a
+      #     corrupted stack frame in a shipped app rather than a compile
+      #     error. It also asserts that every function the contract names
+      #     is IN the header, because a byte comparison cannot see two
+      #     equally incomplete files.
+      #   * `tests/c_smoke.rs` drives a whole PAR2 life cycle - preview,
+      #     create, damage, verify, cancel, repair, verify - through the
+      #     C ABI, with a C compiler reading that header. It builds its
+      #     sets with the ENGINE and not with an external par2, which is
+      #     why it needs no `have_par2()` guard.
+      #
+      # HERE rather than in ci-private.yml because a detached workspace
+      # is reached by no `-p` list there, and this is the job that
+      # already has the workspace checked out and built.
+      - name: cargo test -p parfast-ffi (header gate + C smoke test)
+        if: ${{ !cancelled() && steps.subject.outputs.present == 'true' }}
+        run: cargo test --manifest-path apps/parfast/Cargo.toml --locked -p parfast-ffi
+
+  mac:
+    name: mac (SwiftUI + universal staticlib)
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    concurrency:
+      group: parfast-gui-mac-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Recorded so a future failure can be read against a toolchain or
+      # image bump rather than against the diff.
+      - name: versions
+        run: |
+          swift --version
+          rustc --version
+          cargo --version
+
+      # The absence arms, one per subject. Dated 12 Sep 2026; delete each
+      # when its own tree is on origin/main. See the header for why this
+      # is two flags and not one.
+      - name: subject
+        id: subject
+        run: |
+          ffi=false; app=false
+          [ -d apps/parfast/crates/parfast-ffi ] && ffi=true
+          [ -d apps/parfast/mac ] && app=true
+          echo "ffi=$ffi" >> "$GITHUB_OUTPUT"
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          [ "$ffi" = true ] || echo \
+            "NOT BUILT: apps/parfast/crates/parfast-ffi does not exist, so no
+             staticlib was produced and the header was not checked (plan chip A)." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$app" = true ] || echo \
+            "NOT COMPILED: apps/parfast/mac does not exist, so NO SWIFT WAS
+             COMPILED by this job (plan chip B)." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$ffi" = false ] && [ "$app" = false ]; then
+            echo "This job built NOTHING AT ALL and is green only because
+                  neither subject exists yet." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The app links a universal staticlib, so both host targets are
+      # built here. NOT added to rust-toolchain.toml's `targets` list,
+      # for mobile-targets.yml's reason: that list is installed by rustup
+      # on the first cargo invocation in any checkout of this repo, so an
+      # entry there costs every dev box and every Rust job in CI a std
+      # set to serve one job in this file. x86_64-apple-darwin is already
+      # a host target on an Intel runner and is not on an arm64 one.
+      - name: rust targets
+        if: steps.subject.outputs.ffi == 'true'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: staticlib
+        if: steps.subject.outputs.ffi == 'true'
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --manifest-path apps/parfast/Cargo.toml \
+              --release --locked -p parfast-ffi --target "$t"
+          done
+          # The detached workspace has its own target directory, so the
+          # paths below are apps/parfast/target and not the root one. A
+          # line that reached the root target here would find nothing and
+          # say so as a missing file, which reads like a build failure.
+          mkdir -p apps/parfast/target/universal
+          lipo -create -output apps/parfast/target/universal/libparfast_ffi.a \
+            apps/parfast/target/aarch64-apple-darwin/release/libparfast_ffi.a \
+            apps/parfast/target/x86_64-apple-darwin/release/libparfast_ffi.a
+          # Assert the positive. A `lipo -create` that quietly produced a
+          # thin archive links fine on the runner and fails on the other
+          # half of the machines the app is for, which is the failure
+          # this job exists to keep out of a bundle.
+          lipo -info apps/parfast/target/universal/libparfast_ffi.a \
+            | grep -q 'arm64 x86_64\|x86_64 arm64'
+          # AND PUT IT WHERE Package.swift LOOKS, which is the only path it
+          # checks. Without this the library above is built, lipo'd and
+          # asserted universal - and then never used: `hasFFI` is false, so
+          # `PARFAST_FFI` stays undefined, FfiCoreTests' fourteen real-engine
+          # tests COMPILE OUT, and `swift test` reports a green 138 where a
+          # full run is 152. Measured on run 34723537097, and the only reason
+          # it was visible at all is that `testTheRealEngineTestsAreCompiledIn`
+          # prints its skip into the log; nothing else in a green run said so.
+          #
+          # It is a copy and not a symlink because SwiftPM's own file check is
+          # the consumer and a relative link out of a gitignored directory is
+          # one more thing to be wrong about.
+          mkdir -p apps/parfast/mac/vendor/lib
+          cp apps/parfast/target/universal/libparfast_ffi.a \
+            apps/parfast/mac/vendor/lib/libparfast_ffi.a
+
+      # The committed header is source, reviewed in the diff (plan 4.3:
+      # cbindgen generates it, the bytes are committed, and a test
+      # asserts a regeneration matches). If it is missing the Swift side
+      # cannot import the module at all, so say which file rather than
+      # letting the failure arrive as an unresolved identifier.
+      - name: header
+        if: steps.subject.outputs.ffi == 'true'
+        run: |
+          h=apps/parfast/crates/parfast-ffi/include/parfast_ffi.h
+          [ -f "$h" ] || { echo "missing $h - the app imports it"; exit 1; }
+          grep -c . "$h"
+
+      # DELIBERATELY UNCACHED, macapp.yml's reason unchanged: SwiftPM
+      # re-emits nothing for an unchanged module, so a stale or partially
+      # restored `.build` is the one way this step could report success
+      # without having compiled the code in front of it.
+      #
+      # GATED ON THE APP TREE ALONE, and that is still right: the package
+      # builds and tests against MockCore with no staticlib anywhere, which
+      # is plan 3.3 working as designed and is why coupling this to the FFI
+      # hid two app trees for a day. What changed on 12 Sep 2026 is only what
+      # happens when the staticlib IS there: `Package.swift` now declares a
+      # conditional `CParfastFFI` system-library target and defines
+      # `PARFAST_FFI` when `mac/vendor/lib/libparfast_ffi.a` exists, so the
+      # `staticlib` step above installs it and the real-engine tests compile
+      # in.
+      #
+      # READ THE `subject` STEP BEFORE REASONING ABOUT THE TWO FLAGS: they are
+      # TREE-EXISTENCE checks and not path filters, so both are true on every
+      # run today and the staticlib is always built. They are the absence arms
+      # the step's own comment dates and schedules for deletion. The `ffi`
+      # condition on the check below is therefore defensive rather than load
+      # bearing now - it is what keeps the check honest on the day those arms
+      # go, or the day they become real path filters, because a push that
+      # builds no staticlib must compile the real-engine tests OUT and say so
+      # through the probe rather than fail.
+      - name: swift build
+        if: steps.subject.outputs.app == 'true'
+        working-directory: apps/parfast/mac
+        run: swift build
+
+      # ASSERTED IN THE SAME INVOCATION AS THE RUN, which is the whole
+      # subtlety here. When this run built the staticlib, the fourteen
+      # real-engine tests must have COMPILED IN - and a green `swift test`
+      # cannot say that on its own, because a compiled-out test reports
+      # nothing and the total just shrinks (138 where a full run is 152).
+      #
+      # `FfiCoreTests.testTheRealEngineTestsAreCompiledIn` is compiled
+      # unconditionally for exactly this, and SKIPS with a message when
+      # `PARFAST_FFI` is off, so the run's own output is the signal and this
+      # greps it.
+      #
+      # IT HAS TO BE THIS RUN'S OUTPUT AND NOT A SECOND COMMAND. The first
+      # shape of this was a separate `swift test --list-tests` step, and on
+      # the dev Mac two consecutive invocations DISAGREED with the staticlib
+      # in place the whole time - `--list-tests` listed all fifteen cases and
+      # the `swift test` beside it ran 138. SwiftPM's manifest cache is
+      # per-user, outlives `.build`, and is keyed on the manifest rather than
+      # on the filesystem state the manifest inspects, so an evaluation can
+      # flip between commands. A fresh runner starts with an empty cache and
+      # evaluates once, after the copy above - but an assertion about a
+      # DIFFERENT invocation would be unsound wherever that is not true.
+      #
+      # Conditioned on BOTH flags, for the reason above: today that changes
+      # nothing, because both are always true, and it is what stops this
+      # failing on a future run that legitimately has no staticlib.
+      - name: swift test
+        if: steps.subject.outputs.app == 'true'
+        working-directory: apps/parfast/mac
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee /tmp/parfast-swift-test.log
+          if [ "${{ steps.subject.outputs.ffi }}" = "true" ] \
+             && grep -q 'built without the staticlib' /tmp/parfast-swift-test.log; then
+            echo "::error::this run built the staticlib, but swift test ran with" \
+                 "PARFAST_FFI off - the fourteen real-engine tests were compiled" \
+                 "out and the green above says nothing about them. Check the copy" \
+                 "into apps/parfast/mac/vendor/lib/ in the staticlib step, and that" \
+                 "nothing evaluated the package manifest before it."
+            exit 1
+          fi
+
+  windows:
+    name: windows (WinUI 3 + cdylib)
+    if: github.repository != 'nzbfast/nzbfast'
+    # windows-latest carries Visual Studio and the .NET SDK; the Windows
+    # App SDK arrives as a NuGet package reference from the project
+    # file, so nothing is installed here by hand.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    concurrency:
+      group: parfast-gui-win-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: versions
+        shell: bash
+        run: |
+          dotnet --info | head -20
+          rustc --version
+          cargo --version
+
+      # The absence arms' twins. Same date, same one-at-a-time deletion.
+      - name: subject
+        id: subject
+        shell: bash
+        run: |
+          ffi=false; app=false
+          [ -d apps/parfast/crates/parfast-ffi ] && ffi=true
+          [ -d apps/parfast/windows ] && app=true
+          echo "ffi=$ffi" >> "$GITHUB_OUTPUT"
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          [ "$ffi" = true ] || echo \
+            "NOT BUILT: apps/parfast/crates/parfast-ffi does not exist, so no
+             cdylib was produced (plan chip A)." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$app" = true ] || echo \
+            "NOT COMPILED: apps/parfast/windows does not exist, so NO C# WAS
+             COMPILED by this job (plan chip C)." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$ffi" = false ] && [ "$app" = false ]; then
+            echo "This job built NOTHING AT ALL and is green only because
+                  neither subject exists yet." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: cdylib
+        if: steps.subject.outputs.ffi == 'true'
+        shell: bash
+        run: |
+          cargo build --manifest-path apps/parfast/Cargo.toml \
+            --release --locked -p parfast-ffi
+          # The app P/Invokes this by name. If the crate ever stops
+          # emitting a cdylib - a crate-type edit, a feature flip - the
+          # C# side fails at RUNTIME with a DllNotFoundException that no
+          # build here would have seen, so the file is named and checked.
+          ls -l apps/parfast/target/release/parfast_ffi.dll
+
+      # Gated on the APP tree alone, for the reason in the header: the
+      # C# copies the cdylib through a conditional item and falls back to
+      # MockCore when it is absent, so the whole tree compiles and its
+      # tests run with no library present.
+      #
+      # THE SOLUTION IS NAMED, and that is deliberate rather than
+      # verbose. A bare `dotnet build` probes its working directory for
+      # ONE project-or-solution file and fails MSB1011 on two. That
+      # directory holds exactly one today - chip C moved the
+      # `Parfast.Portable.slnf` filter down into `build/` for precisely
+      # this reason - so the bare form would work, and naming the file
+      # is what keeps this job independent of that arrangement in BOTH
+      # directions: it cannot break when a second solution-shaped file
+      # is added, and it cannot silently start building a SUBSET if the
+      # filter ever comes back up beside the solution and sorts first.
+      # The full solution and not the portable filter: that filter
+      # exists to leave `Parfast.App` out for boxes without the Windows
+      # App SDK, and compiling `Parfast.App` is the entire reason this
+      # job runs on a Windows runner at all.
+      - name: dotnet build
+        if: steps.subject.outputs.app == 'true'
+        working-directory: apps/parfast/windows
+        run: dotnet build Parfast.sln -c Release
+
+      - name: dotnet test
+        if: steps.subject.outputs.app == 'true'
+        working-directory: apps/parfast/windows
+        run: dotnet test Parfast.sln -c Release --no-build

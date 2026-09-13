@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Parfast.Gen</RootNamespace>
+    <AssemblyName>parfast-gen</AssemblyName>
+    <!-- Not referenced by any other project: it WRITES their source. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+</Project>

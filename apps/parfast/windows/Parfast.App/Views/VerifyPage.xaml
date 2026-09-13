@@ -1,0 +1,269 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Parfast.App.Views.VerifyPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Parfast.App.Controls"
+    xmlns:vm="using:Parfast.ViewModels">
+
+    <Grid>
+        <!-- Empty state: the drop zone is the WHOLE content area, not a box
+             inside it (plan 5.1). -->
+        <Grid x:Name="EmptyState" Padding="24">
+            <Border Style="{StaticResource DropZone}">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12" MaxWidth="420">
+                    <FontIcon Glyph="&#xE72E;" FontSize="42" Opacity="0.55" />
+                    <TextBlock x:Name="EmptyTitle"
+                               Style="{StaticResource SectionTitle}"
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center" />
+                    <TextBlock x:Name="EmptyBody"
+                               Style="{StaticResource MutedCaption}"
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8" Margin="0,8,0,0">
+                        <Button x:Name="OpenFileButton" Style="{StaticResource AccentButtonStyle}" Click="OnOpenFile" />
+                        <Button x:Name="OpenFolderButton" Click="OnOpenFolder" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <Grid x:Name="SetView" Visibility="Collapsed" Padding="{StaticResource PagePadding}" RowSpacing="12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Header card: set name, folder, and the four figures, with the
+                 verdict pill on the right. -->
+            <Border Grid.Row="0" Style="{StaticResource Card}">
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" Spacing="8">
+                        <TextBlock x:Name="SetName"
+                                   Style="{StaticResource SectionTitle}"
+                                   FontSize="22"
+                                   TextTrimming="CharacterEllipsis" />
+                        <HyperlinkButton x:Name="FolderLink" Padding="0" Click="OnRevealFolder">
+                            <TextBlock x:Name="FolderText"
+                                       FontSize="12"
+                                       TextTrimming="CharacterEllipsis" />
+                        </HyperlinkButton>
+
+                        <StackPanel Orientation="Horizontal" Spacing="28" Margin="0,4,0,0">
+                            <StackPanel>
+                                <TextBlock x:Name="FilesLabel" Style="{StaticResource FieldLabel}" />
+                                <TextBlock x:Name="FilesValue" Style="{StaticResource BigFigureText}" />
+                            </StackPanel>
+                            <StackPanel>
+                                <TextBlock x:Name="BlockSizeLabel" Style="{StaticResource FieldLabel}" />
+                                <TextBlock x:Name="BlockSizeValue" Style="{StaticResource BigFigureText}" />
+                            </StackPanel>
+                            <StackPanel>
+                                <TextBlock x:Name="SourceBlocksLabel" Style="{StaticResource FieldLabel}" />
+                                <TextBlock x:Name="SourceBlocksValue" Style="{StaticResource BigFigureText}" />
+                            </StackPanel>
+                            <StackPanel>
+                                <TextBlock x:Name="RecoveryLabel" Style="{StaticResource FieldLabel}" />
+                                <TextBlock x:Name="RecoveryValue" Style="{StaticResource BigFigureText}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </StackPanel>
+
+                    <controls:StatusPill x:Name="Verdict"
+                                         Grid.Column="1"
+                                         VerticalAlignment="Top" />
+                </Grid>
+            </Border>
+
+            <!-- The signature visual. -->
+            <Border Grid.Row="1" Style="{StaticResource Card}">
+                <StackPanel Spacing="8">
+                    <Grid>
+                        <TextBlock x:Name="MapLabel" Style="{StaticResource ColumnHeader}" />
+                        <TextBlock x:Name="MapCounts"
+                                   Style="{StaticResource ColumnHeader}"
+                                   HorizontalAlignment="Right"
+                                   Opacity="0.9" />
+                    </Grid>
+                    <controls:BlockMap x:Name="Map" />
+                    <Grid>
+                        <controls:Legend x:Name="MapLegend" />
+                        <TextBlock x:Name="RecoveryNeededText"
+                                   Style="{StaticResource MutedCaption}"
+                                   HorizontalAlignment="Right" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Post-repair summary. Appears only after a successful repair. -->
+            <Border x:Name="SummaryCard" Grid.Row="2" Style="{StaticResource SubtleCard}" Visibility="Collapsed">
+                <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE73E;" FontSize="16" />
+                    <TextBlock x:Name="SummaryText" VerticalAlignment="Center" />
+                    <Button x:Name="SummaryReveal" Click="OnRevealFolder" Padding="10,3,10,3" />
+                    <Button x:Name="SummaryPurge" Click="OnPurge" Padding="10,3,10,3" />
+                    <Button x:Name="SummaryLog" Click="OnToggleLog" Padding="10,3,10,3" />
+                </StackPanel>
+            </Border>
+
+            <!-- File table. -->
+            <Border Grid.Row="3" Style="{StaticResource Card}" Padding="0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0" Padding="16,12,16,8">
+                        <TextBlock x:Name="FilesHeader" Style="{StaticResource GroupHeader}" Margin="0" />
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                            <TextBlock x:Name="ProblemCount"
+                                       Style="{StaticResource MutedCaption}"
+                                       VerticalAlignment="Center" />
+                            <ToggleSwitch x:Name="ProblemsOnly"
+                                          OffContent=""
+                                          OnContent=""
+                                          MinWidth="0"
+                                          Toggled="OnProblemsOnlyToggled" />
+                        </StackPanel>
+                    </Grid>
+
+                    <Grid Grid.Row="1"
+                          Padding="16,0,16,8"
+                          ColumnSpacing="12"
+                          BorderBrush="{ThemeResource SeparatorBrush}"
+                          BorderThickness="0,0,0,1">
+                        <!-- The Blocks column is 132 rather than 110 since 12 Sep
+                             2026: it carries the row's own block strip under its
+                             figure, and the strip wants a run wide enough for the
+                             merge budget FileStripModel cuts to. THE TWO COLUMN
+                             LISTS MUST MATCH - this header grid and the item
+                             template below are separate Grids with separate
+                             definitions, so a width changed in one and not the
+                             other silently unaligns the table. -->
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="110" />
+                            <ColumnDefinition Width="210" />
+                            <ColumnDefinition Width="132" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="ColName" Grid.Column="0" Style="{StaticResource ColumnHeader}" />
+                        <TextBlock x:Name="ColSize" Grid.Column="1" Style="{StaticResource ColumnHeader}"
+                                   HorizontalAlignment="Right" />
+                        <TextBlock x:Name="ColStatus" Grid.Column="2" Style="{StaticResource ColumnHeader}" />
+                        <TextBlock x:Name="ColBlocks" Grid.Column="3" Style="{StaticResource ColumnHeader}"
+                                   HorizontalAlignment="Right" />
+                    </Grid>
+
+                    <ListView x:Name="FileList"
+                              Grid.Row="2"
+                              SelectionMode="Extended"
+                              Padding="8,4,8,8"
+                              ItemContainerTransitions="{x:Null}">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="vm:FileRow">
+                                <Grid ColumnSpacing="12" Padding="8,4,8,4" Opacity="{x:Bind RowOpacity, Mode=OneWay}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="210" />
+                                        <ColumnDefinition Width="132" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Grid.Column="0"
+                                               Text="{x:Bind Name, Mode=OneWay}"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTipService.ToolTip="{x:Bind Name, Mode=OneWay}"
+                                               VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1"
+                                               Style="{StaticResource FigureText}"
+                                               Text="{x:Bind SizeText, Mode=OneWay}"
+                                               HorizontalAlignment="Right"
+                                               VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="3">
+                                        <TextBlock Text="{x:Bind StatusText, Mode=OneWay}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   ToolTipService.ToolTip="{x:Bind StatusText, Mode=OneWay}" />
+                                        <ProgressBar Height="2"
+                                                     Value="{x:Bind Progress, Mode=OneWay}"
+                                                     Maximum="1"
+                                                     Visibility="{x:Bind IsHashing, Mode=OneWay}" />
+                                    </StackPanel>
+                                    <!-- The figure keeps its place and the strip
+                                         SUPPLEMENTS it. "29 / 32" is the value; the
+                                         strip is the only thing on this screen that
+                                         says WHICH 3, and it is the file's own slice
+                                         of the map above. The strip collapses itself
+                                         on a row with no blocks and on a set whose
+                                         totals did not reconcile, so the cell falls
+                                         back to what it showed before. -->
+                                    <StackPanel Grid.Column="3" VerticalAlignment="Center" Spacing="4">
+                                        <TextBlock Style="{StaticResource FigureText}"
+                                                   Text="{x:Bind BlocksText, Mode=OneWay}"
+                                                   HorizontalAlignment="Right" />
+                                        <controls:MiniBlockStrip Model="{x:Bind Strip, Mode=OneWay}" />
+                                    </StackPanel>
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </Grid>
+            </Border>
+
+            <!-- Action bar. -->
+            <Grid Grid.Row="4" ColumnSpacing="8">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="VerifyAgain" Click="OnVerifyAgain" />
+                    <Button x:Name="ScanOther" Click="OnScanOther" />
+                    <Button x:Name="OptionsButton">
+                        <Button.Flyout>
+                            <Flyout>
+                                <StackPanel Spacing="10" MinWidth="340">
+                                    <CheckBox x:Name="OptPurge" Checked="OnOptionChanged" Unchecked="OnOptionChanged" />
+                                    <CheckBox x:Name="OptKeepDamaged" Checked="OnOptionChanged" Unchecked="OnOptionChanged" />
+                                    <CheckBox x:Name="OptRenameOnly" Checked="OnOptionChanged" Unchecked="OnOptionChanged" />
+                                    <StackPanel x:Name="OptSkipRow" Orientation="Horizontal" Spacing="8">
+                                        <CheckBox x:Name="OptDataSkipping" Checked="OnOptionChanged" Unchecked="OnOptionChanged" />
+                                        <NumberBox x:Name="OptSkipLeaway"
+                                                   Minimum="0"
+                                                   Maximum="65536"
+                                                   SpinButtonPlacementMode="Compact"
+                                                   Width="120"
+                                                   ValueChanged="OnLeawayChanged" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="OptFastSolver" Checked="OnOptionChanged" Unchecked="OnOptionChanged" />
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock x:Name="OptThreadsLabel" VerticalAlignment="Center" />
+                                        <NumberBox x:Name="OptThreads"
+                                                   Minimum="0"
+                                                   Maximum="256"
+                                                   SpinButtonPlacementMode="Compact"
+                                                   Width="120"
+                                                   ValueChanged="OnThreadsChanged" />
+                                    </StackPanel>
+                                    <ItemsControl x:Name="ExtraDirList" />
+                                </StackPanel>
+                            </Flyout>
+                        </Button.Flyout>
+                    </Button>
+                    <Button x:Name="LogButton" Click="OnToggleLog" />
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button x:Name="CancelButton" Click="OnCancel" Visibility="Collapsed" />
+                    <Button x:Name="RepairButton" Style="{StaticResource AccentButtonStyle}" Click="OnRepair" />
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </Grid>
+</UserControl>

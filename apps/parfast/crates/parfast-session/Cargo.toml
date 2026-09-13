@@ -1,0 +1,58 @@
+[package]
+name = "parfast-session"
+version = "1.5.0-beta.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The shared session model behind the parfast desktop apps: jobs, the create planner, the survey model, the queue and the checksum formats"
+# Same reason as `parfast`: whether this ships as its own package is an
+# open project decision, and nothing here is useful without the engine
+# beside it. This crate is also PRIVATE to this repo under decision D2a
+# - see the header of apps/parfast/Cargo.toml, the detached workspace it
+# belongs to.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The facade, not nzbkit-base, and `default-features = false`, for the
+# same two reasons `crates/parfast` gives at length: a module that moves
+# between base and the facade must not reach this crate, and a desktop
+# PAR2 tool has no business linking sqlite.
+nzbkit = { path = "../../../../crates/nzbkit", default-features = false }
+
+# THE CLI CRATE AS A LIBRARY, AND THAT IS THE POINT. A surprising amount
+# of the product's own logic is not in the engine: the reference's block
+# sizing and redundancy arithmetic, the volume naming, the survey
+# verdict, the `-p` purge and the `<name>.1` backup-aside are all in
+# `parfast`, every one of them measured against par2cmdline and pinned
+# by `tools/conformance/run.py`. A GUI that re-derived any of them would
+# be a second answer to a question this workspace has already settled
+# once - which is exactly the drift
+# the maintainer notes is about.
+parfast = { path = "../../../../crates/parfast" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.150"
+
+# The two checksum formats the engine does not already carry. CRC32 is
+# `nzbkit::yenc_simd::crc32` and MD5 is `nzbkit::md5fast`, both of them
+# the same implementations the download path uses; SHA-1 and SHA-256 are
+# these, at the same versions nzbkit-base already resolves, so the
+# workspace unifies rather than adding a second copy of either.
+sha1 = "0.11"
+sha2 = "0.11"
+
+# For the `digest` TRAITS only, and at 0.10 on purpose: `nzbkit::md5fast
+# ::Md5` implements RustCrypto's traits at the version `md-5 0.10`
+# publishes, which is a DIFFERENT `digest` crate from the 0.11 `sha1`
+# and `sha2` above resolve. Both are in the tree already (Cargo.lock has
+# digest 0.10.7 and 0.11.3 side by side), so this adds nothing to the
+# build; what it adds is the trait in scope, without which the
+# workspace's own MD5 cannot be driven at all and a second MD5
+# implementation would have to be pulled in to hash a checksum file.
+md-5 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

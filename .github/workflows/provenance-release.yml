@@ -112,8 +112,26 @@ jobs:
     # Automatic path: the public repo only (a fork, or the private repo,
     # cannot write attestations - private ones need Enterprise). Dispatch
     # path: whenever the `binaries` input is left on.
+    #
+    # AND ONLY FOR AN nzbfast TAG. This repo publishes TWO products, and
+    # `on: release: published` fires for every release including a
+    # prerelease - so cutting parfast 1.5.0-beta.1 on 12 Sep 2026 built
+    # the nzbfast per-target tarballs from that tag and attached twelve
+    # of them, `nzbfast-x86_64-apple-darwin.tar.gz` and friends, to the
+    # PARFAST release page. They were nzbfast 1.5.0 binaries advertised
+    # as parfast downloads, and the attestations vouched for them, which
+    # makes the mistake authoritative rather than obvious. Removed by
+    # hand; this is what stops the next parfast release repeating it.
+    #
+    # The tag shape is the discriminator because it is the only thing
+    # the event carries that names the product: nzbfast tags `vX.Y.Z`,
+    # parfast tags `parfast-vX.Y.Z...` (SPEC-PARFAST-PUBLICATION item 7).
+    # A dispatch is left alone - it names its own tag deliberately, and
+    # attesting a parfast tag on purpose is a thing somebody may one day
+    # want.
     if: >-
-      ${{ (github.event_name == 'release' && github.repository == 'nzbfast/nzbfast')
+      ${{ (github.event_name == 'release' && github.repository == 'nzbfast/nzbfast'
+           && startsWith(github.event.release.tag_name, 'v'))
           || (github.event_name == 'workflow_dispatch' && inputs.binaries) }}
     permissions:
       id-token: write       # Sigstore keyless signing (OIDC identity token)

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The 16 / 24 / 32 px master. PLACEHOLDER, like its larger sibling; see
+  parfast-icon.svg.
+
+  An .ico stores one image per size, and the small entries are rasterized from
+  THIS file rather than downscaled from the big one. At 16 px the four-column
+  grid of the full mark resamples into grey mush, so the small mark is two
+  columns and two rows: still a block map, still legible at one sixty-fourth of
+  the area. That split is the same judgement packaging/icon/make-ico.py makes
+  for nzbfast, and its header explains why at length.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5E5CE6" />
+      <stop offset="1" stop-color="#3A38B4" />
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="229" ry="229" fill="url(#tile)" />
+  <g fill="#FFFFFF">
+    <rect x="212" y="236" width="256" height="200" rx="44" />
+    <rect x="556" y="236" width="256" height="200" rx="44" />
+    <rect x="212" y="500" width="256" height="200" rx="44" />
+  </g>
+  <rect x="556" y="500" width="256" height="200" rx="44" fill="#34C759" />
+</svg>

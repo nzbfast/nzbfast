@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ContentDialog
+    x:Class="Parfast.App.Views.ProgressSheet"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Parfast.App.Controls"
+    DefaultButton="None"
+    MinWidth="560">
+
+    <!-- NO MinWidth ON THE CONTENT. It was 520 while the dialog's own MinWidth is
+         560, and a ContentDialog puts padding either side of its content, so the
+         content was wider than the space it had and the overflow came off the
+         RIGHT: the Cancel button rendered as "Canc" against the dialog edge in
+         the first Windows screenshot of this sheet (12 Sep 2026). Only that row
+         showed it, because it is the only right-aligned thing in here - the rest
+         is left-aligned and simply lost its right margin, which is invisible.
+         The dialog's MinWidth is what keeps this sheet from collapsing; the
+         content sizes to the dialog. -->
+    <StackPanel Spacing="12">
+        <ProgressBar x:Name="Bar" Height="6" Maximum="1" CornerRadius="3" />
+
+        <Grid>
+            <TextBlock x:Name="StatusLine" TextTrimming="CharacterEllipsis" />
+            <TextBlock x:Name="PercentText" Style="{StaticResource FigureText}" HorizontalAlignment="Right" />
+        </Grid>
+
+        <Grid ColumnSpacing="24">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0">
+                <TextBlock x:Name="ElapsedLabel" Style="{StaticResource FieldLabel}" />
+                <TextBlock x:Name="ElapsedValue" Style="{StaticResource FigureText}" />
+            </StackPanel>
+            <StackPanel Grid.Column="1">
+                <TextBlock x:Name="RemainingLabel" Style="{StaticResource FieldLabel}" />
+                <TextBlock x:Name="RemainingValue" Style="{StaticResource FigureText}" />
+            </StackPanel>
+            <!-- The rate is a STAT TILE and not a lone figure: label, value, then the
+                 trend as a picture and as a sentence. The other two columns stay bare
+                 figures on purpose - elapsed and remaining have no shape worth
+                 drawing, and three charts in a row would make none of them read. -->
+            <StackPanel Grid.Column="2">
+                <TextBlock x:Name="RateLabel" Style="{StaticResource FieldLabel}" />
+                <TextBlock x:Name="RateValue" Style="{StaticResource FigureText}" />
+                <controls:Sparkline x:Name="RateChart" Height="26" Margin="0,4,0,0" />
+                <TextBlock x:Name="RateTrend" Style="{StaticResource MutedCaption}"
+                           TextTrimming="CharacterEllipsis" />
+            </StackPanel>
+        </Grid>
+
+        <Border Style="{StaticResource SubtleCard}" Padding="10" MaxHeight="150">
+            <ScrollViewer x:Name="LogScroller" VerticalScrollBarVisibility="Auto">
+                <ItemsControl x:Name="LogLines">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding}" Style="{StaticResource LogText}" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+
+        <StackPanel Orientation="Horizontal" Spacing="16">
+            <CheckBox x:Name="LowPriorityBox" Checked="OnLowPriorityChanged" Unchecked="OnLowPriorityChanged" />
+            <CheckBox x:Name="NotifyBox" Checked="OnNotifyChanged" Unchecked="OnNotifyChanged" />
+        </StackPanel>
+
+        <!-- The cancel confirmation is INLINE, not a second dialog. WinUI allows
+             exactly one ContentDialog open at a time, so a nested confirm throws
+             rather than asking. -->
+        <!-- The two buttons are InfoBar's CONTENT, not its ActionButton.
+             ActionButton is typed ButtonBase and takes exactly one button, so a
+             panel of two in that slot does not compile. Content takes any
+             element and renders under the message, which is where a pair of
+             choices belongs anyway. -->
+        <InfoBar x:Name="ConfirmBar" IsOpen="False" Severity="Warning" IsClosable="False">
+            <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,8,0,4">
+                <Button x:Name="ConfirmStop" Click="OnConfirmStop" />
+                <Button x:Name="ConfirmKeep" Click="OnConfirmKeep" />
+            </StackPanel>
+        </InfoBar>
+
+        <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button x:Name="PauseButton" Click="OnPause" />
+            <Button x:Name="CancelButton" Click="OnCancel" />
+            <Button x:Name="CloseButton" Style="{StaticResource AccentButtonStyle}" Click="OnClose"
+                    Visibility="Collapsed" />
+        </StackPanel>
+    </StackPanel>
+</ContentDialog>

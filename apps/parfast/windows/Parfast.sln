@@ -1,0 +1,52 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Parfast.Core", "Parfast.Core\Parfast.Core.csproj", "{86FE37E2-D325-4BC1-B762-C281E26625A2}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Parfast.ViewModels", "Parfast.ViewModels\Parfast.ViewModels.csproj", "{30D10320-61BC-4EBB-A703-3F23CB854A78}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Parfast.Gen", "Parfast.Gen\Parfast.Gen.csproj", "{B6522DA2-DD9D-4441-A749-3FF5F36CD47A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Parfast.Tests", "Parfast.Tests\Parfast.Tests.csproj", "{7242CFA6-D11B-40EF-85A0-DB7A3FC07EC8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Parfast.App", "Parfast.App\Parfast.App.csproj", "{AFDA74C1-35BA-4546-97A8-912BFF708878}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Parfast.Check", "Parfast.Check\Parfast.Check.csproj", "{3778FA37-D624-4149-8A57-CAD8011B4C45}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{86FE37E2-D325-4BC1-B762-C281E26625A2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{86FE37E2-D325-4BC1-B762-C281E26625A2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{86FE37E2-D325-4BC1-B762-C281E26625A2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{86FE37E2-D325-4BC1-B762-C281E26625A2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{30D10320-61BC-4EBB-A703-3F23CB854A78}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{30D10320-61BC-4EBB-A703-3F23CB854A78}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{30D10320-61BC-4EBB-A703-3F23CB854A78}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{30D10320-61BC-4EBB-A703-3F23CB854A78}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B6522DA2-DD9D-4441-A749-3FF5F36CD47A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B6522DA2-DD9D-4441-A749-3FF5F36CD47A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B6522DA2-DD9D-4441-A749-3FF5F36CD47A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B6522DA2-DD9D-4441-A749-3FF5F36CD47A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7242CFA6-D11B-40EF-85A0-DB7A3FC07EC8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7242CFA6-D11B-40EF-85A0-DB7A3FC07EC8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7242CFA6-D11B-40EF-85A0-DB7A3FC07EC8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7242CFA6-D11B-40EF-85A0-DB7A3FC07EC8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AFDA74C1-35BA-4546-97A8-912BFF708878}.Debug|Any CPU.ActiveCfg = Debug|x86
+		{AFDA74C1-35BA-4546-97A8-912BFF708878}.Debug|Any CPU.Build.0 = Debug|x86
+		{AFDA74C1-35BA-4546-97A8-912BFF708878}.Release|Any CPU.ActiveCfg = Release|x86
+		{AFDA74C1-35BA-4546-97A8-912BFF708878}.Release|Any CPU.Build.0 = Release|x86
+		{3778FA37-D624-4149-8A57-CAD8011B4C45}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3778FA37-D624-4149-8A57-CAD8011B4C45}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3778FA37-D624-4149-8A57-CAD8011B4C45}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3778FA37-D624-4149-8A57-CAD8011B4C45}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

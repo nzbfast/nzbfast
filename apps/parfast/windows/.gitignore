@@ -1,0 +1,10 @@
+# Build output. The published app and the installer are artefacts of
+# tools/build.ps1 and belong in a release, never in the tree.
+bin/
+obj/
+out/
+
+# NuGet's own restore state.
+packages/
+*.nuget.props
+*.nuget.targets
