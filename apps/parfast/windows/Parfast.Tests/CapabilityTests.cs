@@ -251,7 +251,7 @@ public class CapabilityTests
     public void TheQueueStoreIsOpenedAtTheHostsPathWhenItNamesOne()
     {
         var core = new MockCore();
-        var host = new NullShellHost { QueueStorePath = @"C:\Users\tester\AppData\Local\parfast\queue.json" };
+        var host = new NullShellHost { QueueStorePath = @"C:\ProgramData\parfast-test\queue.json" };
         _ = new ShellViewModel(core, new ImmediateDispatcher(), host);
         Assert.Equal(host.QueueStorePath, core.LastQueueStorePath);
     }
