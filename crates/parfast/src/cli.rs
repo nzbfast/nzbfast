@@ -75,10 +75,22 @@ pub struct Options {
     pub limit: bool,
     pub recovery_files: Option<u32>,
     pub recurse: bool,
-    /// `--fast`: arm the EXPERIMENTAL joint solve for this run. Not a
-    /// reference switch - see [`apply_switch`]'s long-option arm for
-    /// why a non-reference spelling is safe here and what it costs.
-    pub fast: bool,
+    /// `--slow`: verify and repair verdicts from the FileDesc whole-file
+    /// MD5 chain, one serial thread over every byte, instead of the
+    /// default per-block IFSC MD5 + CRC32 plus the 16 KiB head, which
+    /// runs on every core (8.86 GB: 11 s against 0.5 s). The two agree
+    /// on every honest set; they differ on one spec-legal crafted shape
+    /// (a set pairing one file's descriptor with another's block list),
+    /// which the whole-file digest rejects and par2cmdline rejects with
+    /// it - `--slow` is the switch for someone who needs that verdict.
+    /// Not a reference switch, so a long option per spec R.3; accepted
+    /// on every command, as every parfast long option is (a wrapper that
+    /// passes one set of switches to all three commands must not fail on
+    /// the two where it does nothing). Sets the engine's one
+    /// fast-check value (`nzbkit::par2::set_fast_check`), the same value
+    /// the daemon's `fast_final_check` setting and `nzbfast verify --fast`
+    /// set, so CLI and daemon answer under one rule.
+    pub slow: bool,
     /// `--comment`: the set's comment, written as the spec's optional
     /// text packet. Not a reference switch either - par2cmdline
     /// implements neither comment packet, which is exactly why this is a
@@ -512,7 +524,14 @@ fn apply_switch(
         // wrapper that passes `--fast` to all three commands fail on
         // one of them, and the reference's own `creating_only` refusals
         // exist to match par2cmdline, which has nothing to match here.
-        '-' if value == "fast" => o.fast = true,
+        // The whole-file verdict (see `Options::slow`). A long option and
+        // not `-s`-anything for spec R.3's reason. `--fast` (the joint
+        // solve, now the default everywhere) and `--fast-check` (the
+        // per-block tier, now the default) were both dropped on 13 Sep
+        // 2026 rather than kept as no-ops: neither had shipped past a
+        // day-old beta, and a switch that does nothing is a lie a script
+        // learns to rely on.
+        '-' if value == "slow" => o.slow = true,
         // `--comment=<text>` (and `--comment <text>`, joined into this
         // shape by the loop above): the set's comment, written as the
         // spec's optional `CommASCI` / `CommUni` packet. The second of

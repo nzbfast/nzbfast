@@ -1,5 +1,30 @@
-//! MD5 for nzbfast, with a Rust-native x86-64 assembly block function on
-//! Windows.
+//! MD5 for nzbfast: AWS-LC's assembly block function on every x86-64 and
+//! ARM64 desktop target, with a Rust-native x86-64 inline-assembly port
+//! kept beside it.
+//!
+//! # Routing, as measured (13 Sep 2026)
+//!
+//! [`Md5`] is [`awslc::Md5`] on x86-64 and ARM64 macOS, Linux and
+//! (x86-64 only) Windows, and `md5::Md5` everywhere else. The choice is
+//! the single-file PAR2 create's whole bound - one file is one 64-step
+//! chain on one core, and every other cost overlaps it - so it was
+//! decided by `md5_ab_bench`, the three (four on Windows) arms in one
+//! process, 1 GiB, best of five, single core:
+//!
+//! ```text
+//! box                              awslc   md-5 asm   winasm   md-5 soft
+//! Zen 4 EPYC 9354P, Linux          0.808   0.623      -        -         (+29.7%)
+//! Core Ultra 9 386H, Windows       0.761   -          0.714    0.557     (+6.6% over winasm)
+//! M3 Ultra, macOS                  0.807   -          -        0.749     (+7.8%)
+//! ```
+//!
+//! GB/s. The x86-64 Linux/macOS number is the one that changed a
+//! decision: `md5-asm` (Nayuki's routine as written) folds the round
+//! function into the destination with a three-operand LEA ON the chain,
+//! the same thing the `winasm` port below was written to avoid, and
+//! `md5-x86_64.pl` keeps its LEA off the chain. Rig, corpus and the
+//! end-to-end create legs that confirm the kernel gain reaches the wall:
+//! research/PARFAST-SINGLE-FILE-MD5-HEADROOM-2026-09-13.md.
 //!
 //! # Why this module exists
 //!
@@ -18,11 +43,14 @@
 //! legs sit well above the Macs' (research/PAR2-PERF-AUDIT-2026-09-02.md
 //! section 6 item 0c).
 //!
-//! This module closes that gap without reintroducing a C toolchain: the
+//! This module closed that gap without reintroducing a C toolchain: the
 //! block function is written with `core::arch::asm!`, which LLVM
 //! assembles itself, so it builds under MSVC exactly as it does under
-//! mingw. Nothing about the other targets changes - off Windows x86-64
-//! [`Md5`] is `md5::Md5` verbatim, asm feature and all.
+//! mingw. It was the Windows arm of [`Md5`] from 3 Sep to 13 Sep 2026;
+//! AWS-LC's routine measured 6.6% ahead of it on the Zenbook (table
+//! above) and is linked into every desktop binary already, so the alias
+//! moved and this port stays as the A/B arm and the reference for the
+//! shape below.
 //!
 //! # What the assembly is
 //!
@@ -110,9 +138,10 @@
 //! finishes both halves, which is the shape
 //! [`crate::par2repair::Md5Resume`] depends on; and
 //! `md5_rfc1321_vectors` is absolute, so a mistake shared by both sides
-//! could not pass. They compile and run on every target; off Windows
-//! x86-64 the differential arms compare `md-5` against itself, which is
-//! cheap and keeps the harness in place for whoever widens the `cfg`.
+//! could not pass. They compile and run on every target; wherever
+//! [`Md5`] is `md5::Md5` (32-bit x86, ARM64 Windows, the phone targets)
+//! the differential arms compare `md-5` against itself, which is cheap
+//! and keeps the harness in place for whoever widens the `cfg` again.
 //!
 //! For a speed A/B (the arms are a compile-time `cfg`, so "before and
 //! after" is otherwise two builds), `cargo run --release -p nzbkit
@@ -124,29 +153,48 @@ pub use md5::Digest;
 
 /// The MD5 hasher this crate uses.
 ///
-/// On Windows x86-64 this is the inline-assembly implementation in this
-/// module; everywhere else it is `md5::Md5` unchanged, which already has
-/// the `md5-asm` backend on x86-64 and the portable one elsewhere. Both
-/// are `digest::CoreWrapper`s, so they are the same type shape: `new`,
-/// `update`, `finalize`, `digest`, `Clone`, `Default`, `Reset`.
-#[cfg(all(windows, target_arch = "x86_64"))]
-pub type Md5 = md5::digest::core_api::CoreWrapper<winasm::Md5AsmCore>;
-
-/// The MD5 hasher this crate uses - the ARM64 arm; see the module header.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
+/// AWS-LC's assembly block function on every x86-64 and ARM64 desktop
+/// target - the routing table in the module header, with the numbers
+/// that chose it. `md5::Md5` elsewhere. Every arm has the `digest`
+/// shape: `new`, `update`, `finalize`, `digest`, `Clone`, `Default`,
+/// `Reset`, and `Clone` reproduces the exact prefix state
+/// [`crate::par2repair::Md5Resume`] depends on.
+#[cfg(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
+))]
 pub type Md5 = awslc::Md5;
 
-/// The MD5 hasher this crate uses - see the accelerated arms above.
+/// The MD5 hasher this crate uses - see the accelerated arm above.
 #[cfg(not(any(
-    all(windows, target_arch = "x86_64"),
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux"))
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 )))]
 pub type Md5 = md5::Md5;
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
+/// The inline-assembly Windows x86-64 hasher, as a `digest` type - the
+/// `winasm` arm of `md5_ab_bench`, and what [`Md5`] was on Windows from
+/// 3 Sep to 13 Sep 2026.
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub type Md5WinAsm = md5::digest::core_api::CoreWrapper<winasm::Md5AsmCore>;
+
+#[cfg(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
+))]
 pub mod awslc {
     //! A `digest`-shaped wrapper over the AWS-LC that is already linked
-    //! into this binary as rustls' crypto provider.
+    //! into this binary as rustls' crypto provider: `md5-armv8.pl` on
+    //! ARM64, `md5-x86_64.pl` on x86-64.
     //!
     //! Public only because [`super::Md5`] names the type; nothing here is
     //! API. `MD5_CTX` is a plain 92-byte POD value with no pointers and no

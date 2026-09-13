@@ -308,14 +308,31 @@ pub(super) fn source_fusion_shape_admitted(
     // chains take (a multiple of 64) - the fused pass then hashes eight
     // members' whole-file chains per step beside the fold and reads the
     // payload once (the fused-multi and lane-chains handoffs, 5 Sep
-    // 2026). A single member's chain is serial and in situ runs at
+    // 2026). A single member's chain is serial and in situ ran at
     // ~0.56 GB/s beside the fold: fused 2.04-2.10 s against the
     // overlapped scan's 1.61-1.63 on the i5-10600KF for one 1 GiB member,
-    // so that shape keeps the two-pass scan. Unix keeps its
+    // so that shape kept the two-pass scan UNTIL 13 Sep 2026. "Beside
+    // the fold" was the cause, not the chain: twelve fold workers on six
+    // cores shared the chain's core round-robin, which is the starvation
+    // `fold_windows` now paces away (`paced_width`), and the chain's own
+    // kernel moved to AWS-LC the same day. Re-measured on that day, 8.86 GB
+    // one member at 5%, fused against the two-pass scan on Windows:
+    // Core Ultra 9 386H 11.34 -> 9.02 s (-20.5%, three of three pairs), i5-10600KF 12.14 -> 10.07 s (-17%, three of three) (research/
+    // PARFAST-SINGLE-FILE-MD5-HEADROOM-2026-09-13.md). The single-member
+    // shape is admitted on Windows from that measurement. The
+    // multiple-of-64 slice rule is the LANE chains' (eight members' chains
+    // advanced in lockstep need every block to end on an MD5 block
+    // boundary) and a single member has one scalar chain and no lanes, so
+    // it is exempt - and it has to be: parfast's default slice for this
+    // 8.86 GB file is 4,429,188 bytes, four past a multiple of 64, which
+    // is what kept the first cut of this change on the two-pass scan
+    // (`fused=false` in its route marker) while the research override
+    // that bypassed the gate measured the gain. Unix keeps its
     // single-member gate (measured on an M1 by lane B for large members;
-    // at 1 GiB the M3 reads 1.59-1.82 fused against 1.39-1.51, which is
-    // a threshold that lane did not set and this one leaves alone).
-    let windows_ok = cfg!(windows) && member_count >= 2 && block_size.is_multiple_of(64);
+    // at 1 GiB the M3 reads 1.59-1.82 fused against 1.39-1.51, which is a
+    // threshold that lane did not set and this one leaves alone).
+    let windows_ok = cfg!(windows)
+        && (member_count == 1 || (member_count >= 2 && block_size.is_multiple_of(64)));
     let unix_ok = cfg!(unix) && member_count == 1;
     (windows_ok || unix_ok) && n_recovery > 0 && n_recovery <= per_batch
 }

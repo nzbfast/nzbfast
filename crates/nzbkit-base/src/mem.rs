@@ -264,6 +264,63 @@ pub fn set_cpu_workers(n: usize) {
     CPU_WORKERS_PUBLISHED.store(n.clamp(1, 1024), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// A ceiling on the WINDOW FOLD's worker count, published by a create
+/// that has measured its fold outrunning its whole-file MD5 chain, or 0
+/// when none is in force. Read by `linalg::fold_parallel` under
+/// [`cpu_workers`]; never above it.
+///
+/// Why a create would ask for FEWER fold workers: a single-file (or
+/// few-file) create is bound by the whole-file MD5 chain - one serial
+/// thread - and the fold overlaps it. On a box with cores to spare the
+/// fold's workers cost the chain nothing; on an 8-vCPU box every fold
+/// worker past what the fold needs to keep pace is a thread the OS
+/// schedules fairly AGAINST the one thread whose length is the wall.
+/// Measured 13 Sep 2026 on a Zen 4 VM, 8.86 GB one file at 5%: eight
+/// fold workers 13.26 s, seven 12.90, six 12.34, four 11.91 - the same
+/// binary, `-t` the only change (research/PARFAST-SINGLE-FILE-MD5-
+/// HEADROOM-2026-09-13.md). `par2gen::fold_windows` paces the width
+/// from what it measures window by window and clears it on exit.
+static FOLD_WIDTH_CAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The width the window fold may use right now: [`cpu_workers`] unless a
+/// create has published a lower ceiling through [`FoldWidthCap`].
+pub fn fold_workers() -> usize {
+    let cores = cpu_workers().max(1);
+    match FOLD_WIDTH_CAP.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => cores,
+        cap => cap.clamp(1, cores),
+    }
+}
+
+/// The published fold-width ceiling, held for exactly as long as the
+/// create that measured it: `Drop` clears it, so a create that returns
+/// early (an error, a cancel) cannot leave the process's next fold
+/// narrowed. Process-global by design, like [`set_cpu_workers`]: the
+/// fold is reached through a free function with no handle to thread a
+/// width through, and the parfast queue runs one create at a time.
+pub struct FoldWidthCap(());
+
+impl FoldWidthCap {
+    /// Publish `width` (clamped to `1..=cpu_workers()`) and hold it.
+    pub fn publish(width: usize) -> FoldWidthCap {
+        let cap = FoldWidthCap(());
+        cap.set(width);
+        cap
+    }
+
+    /// Move the ceiling while held.
+    pub fn set(&self, width: usize) {
+        let cores = cpu_workers().max(1);
+        FOLD_WIDTH_CAP.store(width.clamp(1, cores), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Drop for FoldWidthCap {
+    fn drop(&mut self) {
+        FOLD_WIDTH_CAP.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The FILE-level width an entry point published, or 0 when none has.
 /// Separate from [`CPU_WORKERS_PUBLISHED`] because the two axes are
 /// separate switches on the reference CLI and multiply rather than

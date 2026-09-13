@@ -308,7 +308,7 @@ fn the_verify_pass_retains_the_blocks_it_proves() {
         .expect("the default budget holds a block");
     let out = {
         let mut sink = corpus.sink();
-        verify_pass1_retaining(&path, &meta, BS, 1, 3, Some(&mut sink)).unwrap()
+        verify_pass1_retaining(&path, &meta, BS, 1, 3, Some(&mut sink), false).unwrap()
     };
     assert_eq!(out.present.as_deref(), Some(&[true, false, true, true][..]));
     let (batches, held) = corpus.take();
@@ -1044,6 +1044,100 @@ fn ifsc_contradicting_the_filedesc_md5_is_rejected_by_both_paths() {
         !md5_matches(&p, &meta).unwrap(),
         "a repair may not report success on bytes the FileDesc MD5 denies"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The fast-check tier (`verify_pass1_tiered(.., true)`) answers exactly
+/// as the chain pass on every HONEST shape: clean, one damaged block,
+/// truncated, and missing. Both tiers over one fixture in one process,
+/// which is why the tier is a parameter and not the global.
+#[test]
+fn the_fast_tier_agrees_with_the_chain_on_honest_files() {
+    let dir = tmpdir("fasttier");
+    let bs = 4096usize;
+    let len = (HASH_PAR_MIN_BYTES as usize) + bs * 3 + 91;
+    let data = payload(len, 71);
+    let meta = meta_for("honest.bin", &data, bs);
+    let p = dir.join("honest.bin");
+    let both = |p: &std::path::Path, what: &str| {
+        for threads in [1usize, 8] {
+            let slow = verify_pass1_tiered(p, &meta, bs, threads, false).unwrap();
+            let fast = verify_pass1_tiered(p, &meta, bs, threads, true).unwrap();
+            assert_eq!(
+                fast.exists, slow.exists,
+                "{what}: exists (threads={threads})"
+            );
+            assert_eq!(fast.clean, slow.clean, "{what}: clean (threads={threads})");
+            assert_eq!(
+                fast.intact, slow.intact,
+                "{what}: intact (threads={threads})"
+            );
+            let present = |o: &Pass1Out| o.present.clone().unwrap_or_default();
+            assert_eq!(
+                present(&fast),
+                present(&slow),
+                "{what}: presence (threads={threads})"
+            );
+            assert!(fast.resume.is_none(), "{what}: the fast tier ran no chain");
+        }
+    };
+    std::fs::write(&p, &data).unwrap();
+    both(&p, "clean");
+    assert!(verify_pass1_tiered(&p, &meta, bs, 8, true).unwrap().clean);
+    assert!(
+        blocks_match_fast(&p, &meta, bs).unwrap(),
+        "self-prove of a clean file"
+    );
+    let mut damaged = data.clone();
+    damaged[bs * 2 + 5] ^= 0x40;
+    std::fs::write(&p, &damaged).unwrap();
+    both(&p, "one damaged block");
+    assert!(
+        !blocks_match_fast(&p, &meta, bs).unwrap(),
+        "self-prove sees the damage"
+    );
+    std::fs::write(&p, &data[..len - bs - 3]).unwrap();
+    both(&p, "truncated");
+    std::fs::remove_file(&p).unwrap();
+    both(&p, "missing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The ONE shape the tiers disagree on, pinned honestly rather than
+/// hidden: H7's crafted set (FileDesc of A, IFSC of B, same name, length
+/// and head) passes the fast tier and fails the chain. This is the
+/// documented cost of `--fast-check` and why it is opt-in.
+#[test]
+fn the_fast_tier_diverges_only_on_h7() {
+    let dir = tmpdir("h7fast");
+    let bs = 4096usize;
+    let len = (HASH_PAR_MIN_BYTES as usize) + bs * 2 + 77;
+    let a = payload(len, 61);
+    let mut b = a.clone();
+    // Same first 16 KiB (the head check must pass), different bytes after.
+    for x in b[16384..].iter_mut() {
+        *x ^= 0x5a;
+    }
+    let desc_a = meta_for("split.bin", &a, bs);
+    let ifsc_b = meta_for("split.bin", &b, bs);
+    let meta = Par2File {
+        blocks: ifsc_b.blocks,
+        ..desc_a
+    };
+    let p = dir.join("split.bin");
+    std::fs::write(&p, &b).unwrap();
+    let chain = verify_pass1_tiered(&p, &meta, bs, 8, false).unwrap();
+    let fast = verify_pass1_tiered(&p, &meta, bs, 8, true).unwrap();
+    assert!(
+        !chain.clean,
+        "the chain tier rejects bytes the FileDesc MD5 denies"
+    );
+    assert!(
+        fast.clean,
+        "the fast tier accepts them - the documented H7 divergence"
+    );
+    assert!(blocks_match_fast(&p, &meta, bs).unwrap());
+    assert!(!md5_matches(&p, &meta).unwrap());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

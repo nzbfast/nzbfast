@@ -3022,7 +3022,11 @@ fn repair_dir_set_inner(
     control.finish(control::RepairPhase::Write);
     mark("patch");
     // Whole-file MD5 for everything written - files are independent, so
-    // verify across threads.
+    // verify across threads. Under the fast-check tier (see
+    // `verify_pass1_tiered`) the proof is per block instead: the scan
+    // ran no chain, so there is no `resume` state, and a full reread
+    // chain here would be the whole wall of a single large member.
+    let fast_check = crate::par2::fast_check_enabled();
     if !checks.is_empty() {
         let machine = crate::mem::cpu_workers();
         let threads = machine.min(checks.len()).max(1);
@@ -3035,9 +3039,13 @@ fn repair_dir_set_inner(
                 s.spawn(move || {
                     for ((path, ti, in_place), r) in cchunk.iter().zip(rchunk) {
                         let t = &targets_ref[*ti];
-                        *r = Some(match &t.resume {
-                            Some(res) if *in_place => md5_matches_resumed(path, &t.file, res),
-                            _ => md5_matches(path, &t.file),
+                        *r = Some(if fast_check {
+                            blocks_match_fast(path, &t.file, bs)
+                        } else {
+                            match &t.resume {
+                                Some(res) if *in_place => md5_matches_resumed(path, &t.file, res),
+                                _ => md5_matches(path, &t.file),
+                            }
                         });
                     }
                 });

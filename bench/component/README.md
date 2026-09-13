@@ -244,7 +244,10 @@ row7a row7b row8 row9 row10 row10v`. Arms: `parfast turboT turbo turbo140
 parpar` (creates only) `rarpar classic`, plus `par2j` (MultiPar) on Windows,
 plus the rival-survey arms `turbo120 gopar par2rs` (`par2rs` verify/repair
 only, never creates; `gopar` needs `-g` on Apple silicon or it panics -
-round2.sh passes it, see the script's own header).
+round2.sh passes it, see the script's own header), plus `parmesan` (pesto's
+PAR2 tool, added 13 Sep 2026 for the next full all-tools round; its own
+`create`/`verify`/`repair` dialect, build recipe in round2.sh's header, first
+numbers in `research/PARMESAN-COMPARE-2026-09-13.md`).
 
 The protocol is the published one, and it is stricter than the legs above:
 each round runs the tool order forward and then MIRRORED, idles `SETTLE_MS`

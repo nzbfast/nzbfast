@@ -137,7 +137,16 @@ md-5 = { version = "0.10", features = ["asm"] }
 # without building or linking a second copy of anything. macOS and Linux
 # only: the aarch64-windows target has no aws-lc-sys prebuilt path here
 # and keeps the portable md-5, as it already did.
-[target.'cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))'.dependencies]
+#
+# AND x86-64 (13 Sep 2026): the same `-sys` crate is already linked
+# there too, and its `md5-x86_64.pl` keeps the round constant's LEA OFF
+# the 64-step chain, where the `md5-asm` crate above (Nayuki's routine
+# as written) has it ON the chain - the exact difference `md5fast`'s
+# `winasm` port was written to remove. Exposing it on every x86-64
+# target lets `md5_ab_bench` run the three of them in one process;
+# which one `md5fast::Md5` resolves to is decided in that module's
+# header from the measurement, not here.
+[target.'cfg(any(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")), all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))))'.dependencies]
 aws-lc-sys = { version = "0.44.0", default-features = false, features = ["all-bindings"] }
 
 # There is deliberately NO matching aarch64 `asm` entry for sha2 beside

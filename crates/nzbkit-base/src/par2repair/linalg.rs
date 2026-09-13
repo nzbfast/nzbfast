@@ -917,7 +917,11 @@ fn fold_parallel_opts(
     });
     let prepared_table = prepared_table.as_deref();
     let stride = srcs.len();
-    let cores = crate::mem::cpu_workers().max(1);
+    // `fold_workers`, not `cpu_workers`: the same number unless a create
+    // has measured its fold outrunning its whole-file MD5 chain and
+    // published a lower ceiling (`mem::FoldWidthCap`) - the one case
+    // where fewer fold threads make the WALL shorter.
+    let cores = crate::mem::fold_workers().max(1);
     // Hybrid x86: fold on PHYSICAL cores only, SMT siblings idle (par2j
     // runs 14 threads on the i7-1280P, never 20). Measured on that box:
     // HT added nothing to the old kernel and REGRESSED the affine2x one

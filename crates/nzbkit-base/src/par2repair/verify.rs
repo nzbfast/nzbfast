@@ -469,7 +469,107 @@ pub fn verify_pass1(
     bs: usize,
     threads: usize,
 ) -> Result<Pass1Out, RepairError> {
-    verify_pass1_retaining(path, file, bs, threads, 0, None)
+    verify_pass1_tiered(path, file, bs, threads, crate::par2::fast_check_enabled())
+}
+
+/// [`verify_pass1`] with the fast-check tier chosen by the caller rather
+/// than read from [`crate::par2::fast_check_enabled`].
+///
+/// THE FAST TIER (13 Sep 2026, `parfast --fast-check`, the daemon's
+/// `fast_final_check`, `nzbfast verify --fast` - one global, one rule):
+/// the CLEAN verdict rests on the per-block IFSC MD5 + CRC32 over every
+/// block plus the FileDesc's 16 KiB head, all-core, instead of the
+/// whole-file MD5 chain, which is one serial thread and the entire wall
+/// of a single large member (8.86 GB: 11.4 s against 0.45 s, research/
+/// PARFAST-SINGLE-FILE-MD5-HEADROOM-2026-09-13.md addendum 2). Presence
+/// for a damaged member is the same per-block answer either way. What the
+/// tier gives up is the one spec-legal set where the two claims disagree
+/// (H7: a FileDesc from file A beside an IFSC from file B, same name,
+/// length and head - `the_fast_tier_diverges_only_on_h7` pins it), and
+/// that is why it is opt-in. The bool is a parameter here for the same
+/// reason [`crate::par2::verify_file_path_tiered`] takes one: the tests
+/// run both tiers over one fixture in one process, which a global two
+/// parallel tests race on cannot do.
+///
+/// The tier answers only when the IFSC describes every byte of the
+/// member; otherwise it declines to the unchanged pass. It never carries
+/// a `resume` state (no chain ran), so a repair's self-prove of such a
+/// target takes the per-block route too ([`blocks_match_fast`]).
+#[doc(hidden)]
+pub fn verify_pass1_tiered(
+    path: &Path,
+    file: &Par2File,
+    bs: usize,
+    threads: usize,
+    fast: bool,
+) -> Result<Pass1Out, RepairError> {
+    verify_pass1_retaining(path, file, bs, threads, 0, None, fast)
+}
+
+/// The fast tier's pass: `None` when it cannot answer (no per-block
+/// checksums for every byte), otherwise the same [`Pass1Out`] shape the
+/// chain pass produces, with `clean` resting on the blocks and the head.
+fn fast_pass1(
+    path: &Path,
+    file: &Par2File,
+    bs: usize,
+    threads: usize,
+) -> Result<Option<Pass1Out>, RepairError> {
+    if !crate::par2::ifsc_covers_every_block(file, bs as u64) {
+        return Ok(None);
+    }
+    let mut f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(Pass1Out {
+                exists: false,
+                intact: false,
+                clean: false,
+                present: None,
+                resume: None,
+                md5_unfinished: false,
+            }));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let disk_len = f.metadata()?.len();
+    let head_ok = crate::par2::verify_head(file, &mut f)?;
+    let blocks = crate::par2::verify_blocks_path_or_streaming(
+        path, &mut f, file, bs as u64, disk_len, threads,
+    )?;
+    let all = !blocks.is_empty() && blocks.iter().all(|&b| b);
+    let clean = head_ok && all;
+    Ok(Some(Pass1Out {
+        exists: true,
+        intact: clean && disk_len == file.length,
+        clean,
+        present: if clean { None } else { Some(blocks) },
+        resume: None,
+        md5_unfinished: false,
+    }))
+}
+
+/// The fast tier's self-prove of a written target: every block's IFSC
+/// MD5 + CRC32 plus the 16 KiB head, all-core, in place of
+/// [`md5_matches`]'s whole-file chain. Same verdict on every honest
+/// file; the H7 caveat of [`verify_pass1_tiered`] applies.
+pub fn blocks_match_fast(path: &Path, file: &Par2File, bs: usize) -> Result<bool, RepairError> {
+    if !crate::par2::ifsc_covers_every_block(file, bs as u64) {
+        return md5_matches(path, file);
+    }
+    let mut f = File::open(path)?;
+    let disk_len = f.metadata()?.len();
+    if disk_len != file.length {
+        return Ok(false);
+    }
+    if !crate::par2::verify_head(file, &mut f)? {
+        return Ok(false);
+    }
+    let threads = crate::mem::cpu_workers().max(1);
+    let blocks = crate::par2::verify_blocks_path_or_streaming(
+        path, &mut f, file, bs as u64, disk_len, threads,
+    )?;
+    Ok(!blocks.is_empty() && blocks.iter().all(|&b| b))
 }
 
 /// [`verify_pass1`] that also hands every block it proves to `sink`
@@ -484,7 +584,18 @@ pub(super) fn verify_pass1_retaining(
     threads: usize,
     first_slice: usize,
     mut sink: Option<&mut retain::RetainSink<'_>>,
+    fast: bool,
 ) -> Result<Pass1Out, RepairError> {
+    // The fast-check tier (`verify_pass1_tiered`) sits under the
+    // retaining entry too, because the repair's scan comes in here with
+    // a sink and its chain up to the first hole was 5.7 s of an 11.4 s
+    // single-member repair. It RETAINS NOTHING: the parallel block
+    // verifier does not hand chunks to the sink, and an empty sink is
+    // the shape retention already has when its budget is spent or the
+    // knob is 0 - the fold re-reads the blocks it needs from the file.
+    if fast && let Some(out) = fast_pass1(path, file, bs, threads)? {
+        return Ok(out);
+    }
     let f = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -757,6 +868,9 @@ pub(super) fn verify_all_targets(
     retain: Option<&retain::RetainedCorpus>,
     control: &control::RepairControl,
 ) -> Result<(), RepairError> {
+    // The fast-check tier, read ONCE for the whole scan so every member
+    // of one set answers under one rule (see `verify_pass1_tiered`).
+    let fast_check = crate::par2::fast_check_enabled();
     if targets.is_empty() {
         return Ok(());
     }
@@ -838,6 +952,7 @@ pub(super) fn verify_all_targets(
                                 inner,
                                 t.first_slice,
                                 sink.as_mut(),
+                                fast_check,
                             )?,
                         ));
                         control.step(control::RepairPhase::Verify, t.file.length);
@@ -937,11 +1052,19 @@ impl ChunkSource {
     /// (turbo 1.5.0 15.6-15.8), because the page-cache copy that the
     /// chain thread otherwise makes for itself is ~3 s of that wall;
     /// ten 1 GiB members 2.09-2.12 either way (ten chains already fill
-    /// the cores) and the 21-member rig flat. The M3 Ultra is flat on
-    /// every shape (its page-cache read costs ~40 ms per GiB). So: on
-    /// Windows, members of [`READAHEAD_MIN_BYTES`] and up; `NZBFAST_
+    /// the cores) and the 21-member rig flat. The M3 Ultra was flat on
+    /// every shape measured then (its page-cache read costs ~40 ms per
+    /// GiB), which is why this was Windows-only until 13 Sep 2026. That
+    /// day, one 8.86 GB member, `parfast v`, mirrored, three pairs each:
+    /// M3 Ultra serial 11.59 / 11.71 / 11.83 s against 11.49 / 11.43 /
+    /// 11.20 with the reader (three of three, -2.4% on medians); Zen 4
+    /// EPYC Linux 12.66 / 12.49 / 12.41 against 11.65 / 11.58 / 12.85
+    /// (two of three, -7%); Windows Core Ultra 9 8.68 either way, which
+    /// is this rule already on there. So: members of
+    /// [`READAHEAD_MIN_BYTES`] and up on every platform; `NZBFAST_
     /// VERIFY_READAHEAD=1` forces the thread for every member above the
-    /// parallel floor, `0` keeps every member serial.
+    /// parallel floor, `0` keeps every member serial (research/PARFAST-
+    /// SINGLE-FILE-MD5-HEADROOM-2026-09-13.md).
     fn readahead_enabled(limit: u64) -> bool {
         static KNOB: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
         match *KNOB.get_or_init(|| {
@@ -952,7 +1075,7 @@ impl ChunkSource {
             }
         }) {
             Some(forced) => forced,
-            None => cfg!(windows) && limit >= Self::READAHEAD_MIN_BYTES,
+            None => limit >= Self::READAHEAD_MIN_BYTES,
         }
     }
 

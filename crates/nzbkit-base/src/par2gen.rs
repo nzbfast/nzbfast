@@ -308,6 +308,58 @@ fn create_overlap_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("NZBFAST_CREATE_OVERLAP").is_none_or(|v| v != "0"))
 }
 
+/// Fold pacing (13 Sep 2026), ON by default; `NZBFAST_CREATE_FOLD_PACING=0`
+/// is the A/B arm. A fused create is bound by the whole-file MD5 chain
+/// (one serial thread) and its fold overlaps that chain window by window;
+/// wherever the fold finishes well inside the chain, its extra workers
+/// buy nothing and, on a box without cores to spare, the OS shares the
+/// chain's core with them. The pacer measures both per window and
+/// narrows the fold to the width that still keeps pace. Measured on an
+/// 8-vCPU Zen 4 VM, 8.86 GB one file at 5%: 13.26 s at eight workers
+/// against 11.91 at four with everything else equal - see `paced_width`.
+fn create_fold_pacing_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NZBFAST_CREATE_FOLD_PACING").is_none_or(|v| v != "0"))
+}
+
+/// The fold width the next window should run at, given that this window
+/// folded in `fold` on `width` workers while the chain took `chain`.
+///
+/// The target is a fold at ~80% of the chain: short enough that a slow
+/// window does not poke past the chain and lengthen the wall, long
+/// enough that the workers freed are real. The step is proportional
+/// (fold time is near enough 1/width over the band this walks) so eight
+/// workers reach four in one or two windows, and a fold that has crept
+/// within 90% of the chain snaps back to the full width at once - the
+/// asymmetry is deliberate: over-shedding costs wall, under-shedding
+/// costs only the gain. Floor of 2 so the fold never becomes the pole
+/// on a two-core box by this hand; ceiling `max`, the published width.
+fn paced_width(
+    width: usize,
+    max: usize,
+    fold: std::time::Duration,
+    chain: std::time::Duration,
+) -> usize {
+    let max = max.max(1);
+    if chain.is_zero() || fold.is_zero() {
+        return width.clamp(1, max);
+    }
+    // Integer nanoseconds throughout, so the 90% and 70% edges are exact
+    // (90 ms over 100 ms is 0.8999.. as an f64 and missed the snap-back
+    // in the first cut of the test below).
+    let (fold, chain) = (fold.as_nanos(), chain.as_nanos());
+    if fold * 10 >= chain * 9 {
+        return max;
+    }
+    if fold * 10 >= chain * 7 {
+        return width.clamp(1, max);
+    }
+    // Under 70%: the fold has slack. Aim it at 80% of the chain -
+    // ceil(width * fold / (0.8 * chain)).
+    let want = (width as u128 * fold * 10).div_ceil(chain * 8) as usize;
+    want.clamp(2.min(max), max).min(width)
+}
+
 /// Blocks in the FIRST read-ahead window: the fold cannot start until it
 /// lands, and a whole 64 MiB window on one reader is 120-170 ms of
 /// exposed startup (round D). Eight blocks start the fold after a few
@@ -2689,6 +2741,17 @@ fn fold_windows(w: FoldWindows<'_>) -> Result<(), Par2GenError> {
     let mut t_read = std::time::Duration::ZERO;
     let mut t_fold = std::time::Duration::ZERO;
     let mut windows = 0usize;
+    // Fold pacing state (see `create_fold_pacing_enabled`): the width the
+    // fold runs at, its ceiling, and the trajectory for the timing line.
+    let pace_max = crate::mem::cpu_workers().max(1);
+    let mut pace_width = pace_max;
+    let mut pace_min_seen = pace_max;
+    let mut pace_moves = 0usize;
+    // The chain's and the fold's own summed time, against the windows'
+    // wall: what the timing line reports so a gap between the chain
+    // thread's work and the wall it is supposed to be is a number.
+    let mut t_chain_sum = std::time::Duration::ZERO;
+    let mut t_fold_sum = std::time::Duration::ZERO;
     if create_overlap_enabled() && n_slices > per_read {
         // With a fused scan the reader also digests the window it just
         // read (eight MD5 chains per pass, then the CRCs - ~20 ms per
@@ -2706,6 +2769,10 @@ fn fold_windows(w: FoldWindows<'_>) -> Result<(), Par2GenError> {
             None => (None, None),
         };
         let prepack = prepack && pinned.is_none();
+        // Only a fused create has a chain to pace against; the cap is
+        // held for the loop and cleared by `Drop` on every exit.
+        let pacing = fused_state.is_some() && create_fold_pacing_enabled();
+        let pace_cap = pacing.then(|| crate::mem::FoldWidthCap::publish(pace_width));
         let mut ahead = vec![0u8; per_read * bs];
         let mut w0 = 0usize;
         let mut w1 = per_read.min(FIRST_WINDOW_BLOCKS).min(n_slices);
@@ -2775,16 +2842,30 @@ fn fold_windows(w: FoldWindows<'_>) -> Result<(), Par2GenError> {
                     let state: &mut Vec<FusedMemberState> = state;
                     let lanes: &mut Option<crate::md5fast::multi::Md5Lanes> = lanes;
                     sc.spawn(move || {
-                        scan_fused_window(state, lanes, window, lanes_here, bytes, bs, d)
+                        let t_chain = std::time::Instant::now();
+                        scan_fused_window(state, lanes, window, lanes_here, bytes, bs, d);
+                        t_chain.elapsed()
                     })
                 });
+                let t_fold_w = std::time::Instant::now();
                 if let Some(plan) = duplicate_plan {
                     plan.fold(acc, &arena[..(w1 - w0) * bs]);
                 } else {
                     fold_batch(acc, &arena[..(w1 - w0) * bs], bs, &held, first, prepack);
                 }
-                if let Some(h) = chains {
-                    h.join().expect("par2gen fused chain worker panicked");
+                let fold_took = t_fold_w.elapsed();
+                t_fold_sum += fold_took;
+                let chain_took =
+                    chains.map(|h| h.join().expect("par2gen fused chain worker panicked"));
+                t_chain_sum += chain_took.unwrap_or_default();
+                if let (Some(cap), Some(chain_took)) = (pace_cap.as_ref(), chain_took) {
+                    let next = paced_width(pace_width, pace_max, fold_took, chain_took);
+                    if next != pace_width {
+                        pace_width = next;
+                        pace_moves += 1;
+                        pace_min_seen = pace_min_seen.min(next);
+                        cap.set(next);
+                    }
                 }
                 match reader.map(|h| h.join().expect("par2gen read-ahead reader panicked")) {
                     Some(Ok(d)) => (None, d),
@@ -2806,13 +2887,23 @@ fn fold_windows(w: FoldWindows<'_>) -> Result<(), Par2GenError> {
         if timing {
             tracing::info!(
                 target: "repair-timing",
-                "create direct fold ({windows} windows of {per_read}, read-ahead{}{}): first read {:.2?}, fold+read {:.2?}",
+                "create direct fold ({windows} windows of {per_read}, read-ahead{}{}): first read {:.2?}, fold+read {:.2?} (fold alone {:.2?}, chain alone {:.2?}){}",
                 if prepack { ", prepacked" } else { "" },
                 if pinned.is_some() { ", fused scan" } else { "" },
                 t_read,
-                t_fold
+                t_fold,
+                t_fold_sum,
+                t_chain_sum,
+                if pace_cap.is_some() {
+                    format!(
+                        "; fold paced {pace_max} -> {pace_width} workers (min {pace_min_seen}, {pace_moves} move(s))"
+                    )
+                } else {
+                    String::new()
+                }
             );
         }
+        drop(pace_cap);
         return Ok(());
     }
 
@@ -2939,5 +3030,41 @@ mod seal_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fold_pacing_tests {
+    use super::paced_width;
+    use std::time::Duration;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn a_fold_with_slack_sheds_workers_toward_eighty_percent_of_the_chain() {
+        // Fold at 40% of the chain on 8 workers: aim for 0.8 -> 8*0.4/0.8 = 4.
+        assert_eq!(paced_width(8, 8, ms(40), ms(100)), 4);
+        // On 32 workers a 20% fold aims at 8.
+        assert_eq!(paced_width(32, 32, ms(20), ms(100)), 8);
+        // Never below two, never above what it had.
+        assert_eq!(paced_width(2, 8, ms(1), ms(100)), 2);
+        assert_eq!(paced_width(4, 8, ms(1), ms(100)), 2);
+    }
+
+    #[test]
+    fn a_fold_near_the_chain_holds_and_one_past_ninety_percent_snaps_back() {
+        assert_eq!(paced_width(4, 8, ms(75), ms(100)), 4);
+        assert_eq!(paced_width(4, 8, ms(89), ms(100)), 4);
+        assert_eq!(paced_width(4, 8, ms(90), ms(100)), 8);
+        assert_eq!(paced_width(4, 8, ms(130), ms(100)), 8);
+    }
+
+    #[test]
+    fn degenerate_timings_leave_the_width_alone() {
+        assert_eq!(paced_width(6, 8, Duration::ZERO, ms(100)), 6);
+        assert_eq!(paced_width(6, 8, ms(50), Duration::ZERO), 6);
+        assert_eq!(paced_width(6, 0, ms(50), ms(100)), 1);
     }
 }

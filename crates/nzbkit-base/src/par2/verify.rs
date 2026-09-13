@@ -620,7 +620,7 @@ pub fn fast_check_enabled() -> bool {
 /// length the declared size asks for. A zero-length member has no
 /// blocks at all: "every block proved" is then vacuously true over no
 /// bytes, which is precisely the claim this must never make.
-fn ifsc_covers_every_block(file: &Par2File, block_size: u64) -> bool {
+pub(crate) fn ifsc_covers_every_block(file: &Par2File, block_size: u64) -> bool {
     if block_size == 0 || file.length == 0 {
         return false;
     }
@@ -991,7 +991,7 @@ fn regular_file_size_mismatch(is_file: bool, observed: u64, expected: u64) -> bo
     is_file && observed != expected
 }
 
-fn verify_blocks_path_or_streaming(
+pub(crate) fn verify_blocks_path_or_streaming(
     path: &Path,
     src: &mut File,
     file: &Par2File,
@@ -1076,7 +1076,7 @@ fn verify_md5_sized<R: Read>(
     Ok(total == file.length && <[u8; 16]>::from(whole.finalize()) == file.md5)
 }
 
-fn verify_head<R: Read>(file: &Par2File, src: &mut R) -> std::io::Result<bool> {
+pub(crate) fn verify_head<R: Read>(file: &Par2File, src: &mut R) -> std::io::Result<bool> {
     let mut buf = [0u8; HASH16K_LEN];
     let mut filled = 0usize;
     while filled < buf.len() {

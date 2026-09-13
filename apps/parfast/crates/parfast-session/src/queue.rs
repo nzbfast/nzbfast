@@ -121,6 +121,15 @@ impl Session {
     /// A fresh session. `settings` is `None` for the defaults, which is
     /// what `pf_session_new(NULL)` means.
     pub fn new(settings: Option<Settings>) -> Session {
+        // The per-block verify verdict, which parfast 1.5.0-beta.3 made
+        // its default (d89e1027da): the engine's tier is process-global
+        // and OFF until a surface chooses, and until 13 Sep 2026 no
+        // surface in this app did, so every check here ran the
+        // whole-file MD5 chain on one thread - 11 s against 0.5 s on an
+        // 8.86 GB member. The CLI's `--slow` has no counterpart in the
+        // app yet; when it gets one it lands as a Settings field and
+        // this call reads it.
+        nzbkit::par2::set_fast_check(true);
         let inner = Arc::new(Inner {
             jobs: Mutex::new(BTreeMap::new()),
             next_id: AtomicI64::new(1),

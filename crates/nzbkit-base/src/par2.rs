@@ -337,6 +337,7 @@ pub use verify::{
     verify_file, verify_file_blocks, verify_file_md5_path, verify_file_md5_streaming,
     verify_file_path, verify_file_path_tiered, verify_file_seekable, verify_file_streaming,
 };
+pub(crate) use verify::{ifsc_covers_every_block, verify_blocks_path_or_streaming, verify_head};
 
 /// Parsed metadata of one PAR2 recovery set.
 #[derive(Debug, Clone)]

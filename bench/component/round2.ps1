@@ -49,6 +49,10 @@ if ($Leg -like "row*" -or $Leg -eq "all") {
   $SRARPAR  = if ($env:SCEN_RARPAR)  { $env:SCEN_RARPAR }  else { "$env:USERPROFILE\rarshoot\bin\rarpar.exe" }
   $SPAR2J   = if ($env:SCEN_PAR2J)   { $env:SCEN_PAR2J }   else { "C:\Program Files (x86)\MultiPar\par2j64.exe" }
   $SPHPAR2  = if ($env:SCEN_PHPAR2)  { $env:SCEN_PHPAR2 }  else { "" }
+  # pesto's parmesan (added 13 Sep 2026): `cargo build --release -p
+  # parmesan-par2` natively; not par2cmdline's dialect - see round2.sh's
+  # header note and research/PARMESAN-COMPARE-2026-09-13.md.
+  $SPARMESAN = if ($env:SCEN_PARMESAN) { $env:SCEN_PARMESAN } else { "$SB\parmesan.exe" }
   $SWORK    = "$env:TEMP\parscen-work"
   $SHERE    = Split-Path -Parent $PSCommandPath
   if (-not $PSBoundParameters.ContainsKey('Tools')) { $Tools = "parfast,turboT,parpar,par2j,rarpar" }
@@ -269,6 +273,8 @@ namespace PSPMemCounters {
         "turbo140" { $m = SRunTimed $STURBO14 (@("c","-q","-s$cbs","-r$Redundancy","-T$Threads","-B$src","$out\set.par2") + $files) $src }
         "turbo120" { $m = SRunTimed $STURBO12 (@("c","-q","-s$cbs","-r$Redundancy","-T$Threads","-B$src","$out\set.par2") + $files) $src }
         "phpar2"  { $m = SRunTimed $SPHPAR2 (@("c","-q","-s$cbs","-r$Redundancy","$out\set.par2") + $files) $src }
+        # parmesan names its output by directory + base name, never by path.
+        "parmesan" { $m = SRunTimed $SPARMESAN (@("create","-q","-s","$cbs","-r","$Redundancy","-o",$out,"-b","set") + $files) $src }
         default   { return }
       }
       # A created set counts only if a DIFFERENT tool can read it back - and
@@ -311,6 +317,8 @@ namespace PSPMemCounters {
       # syntax. Both are recorded by exit code and decided by the sha gate.
       "par2j"   { $m = SRunTimed $SPAR2J @($verb,$par) $SWORK }
       "phpar2"  { $m = SRunTimed $SPHPAR2 @($verb,"-q",$par) $SWORK }
+      # parmesan spells its verbs out and scans the index file's directory.
+      "parmesan" { $m = SRunTimed $SPARMESAN @($(if ($kind -eq "verify") { "verify" } else { "repair" }),"-q",$par) $SWORK }
       "rarpar"  { $m = if ($kind -eq "verify") { SRunTimed $SRARPAR @("par","verify",$SWORK) $SWORK }
                        else { SRunTimed $SRARPAR @("par","repair","-C",$SWORK,$SWORK) $SWORK } }
       default   { return }

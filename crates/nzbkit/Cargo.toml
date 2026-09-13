@@ -120,6 +120,12 @@ sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256
 # Windows x86-64, `md5::Md5` verbatim everywhere else, which is what
 # keeps this entry load-bearing. Measured +28.7% on an i5-10600KF.
 # That module's header is the full story.
+#
+# AND SINCE 13 Sep 2026 `md5fast::Md5` IS AWS-LC ON x86-64 TOO (+29.7%
+# over this crate's asm on a Zen 4 - the module header has the table),
+# so this entry is off the hot path everywhere and stays for the test
+# differential's reference side; the base crate's copy of this comment
+# says why.
 [target.'cfg(all(target_arch = "x86_64", not(target_os = "windows")))'.dependencies]
 md-5 = { version = "0.10", features = ["asm"] }
 

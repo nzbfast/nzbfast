@@ -24,7 +24,7 @@
 # Rows: row1 row2 row3a row3b row4 row5s100 row5s110 row5m100 row5m110
 #       row6 row7a row7b row8 row9 row10 row10v
 # Tools: parfast turbo turboT turbo140 parpar (creates only) rarpar classic
-#        gopar par2rs (verify/repair only, never creates) turbo120
+#        gopar par2rs (verify/repair only, never creates) turbo120 parmesan
 #
 # gopar and par2rs (added 7 Sep 2026, roster completion from
 # research/PAR2-RIVAL-SURVEY-2026-09-05.md): both take the same `r`/`v`
@@ -35,6 +35,19 @@
 # not a percentage, so run_create derives it from the members' block
 # count at that slice size. par2rs has no create subcommand at all -
 # its create arm is a no-op, same as rarpar/parpar's out-of-scope arms.
+#
+# parmesan (added 13 Sep 2026, for the next full all-tools round) is
+# pesto's PAR2 tool, https://github.com/franzopl/pesto
+# crates/parmesan - build `cargo build --release -p parmesan-par2` and copy
+# target/release/parmesan into $BIN. It does NOT speak par2cmdline's
+# dialect: subcommands `create` / `verify` / `repair`, `-o <dir> -b <base>`
+# instead of an output path, and verify/repair scan the INDEX file's own
+# directory for members and volumes (no -B). Arms run at its defaults (auto
+# threads, 1 GiB memory limit). Its exit codes are par2cmdline's (0 ok,
+# 1 damaged-repairable, 2 not repairable), so it needs no rc-ok.tsv row.
+# First measured in research/PARMESAN-COMPARE-2026-09-13.md: creation near
+# turbo, repair 5-16x behind turbo on a 1,000-file set (no NEON/GFNI decode
+# kernel yet), 18/18 cross-tool repairs byte-identical.
 set -euo pipefail
 
 # Timed-leg discipline: rc captured, stderr kept, success decided PER TOOL
@@ -63,6 +76,7 @@ if [[ ${1:-} == row* || ${1:-} == all ]]; then
   GOPAR=${GOPAR:-$BIN/gopar}
   PAR2RS=${PAR2RS:-$BIN/par2rs-cli}
   TURBO120=${TURBO120:-$BIN/par2turbo120utf8}
+  PARMESAN=${PARMESAN:-$BIN/parmesan}
   # Recovery percentage for the CREATE legs (row7a/row7b) - see the fuller
   # comment on the legacy path's own default below. Redefined here because
   # the scenario block returns via `exit 0` before ever reaching that line,
@@ -224,6 +238,9 @@ if [[ ${1:-} == row* || ${1:-} == all ]]; then
       # carries straight through. gopar needs -g (see the header note).
       gopar)   timed "$label" "$GOPAR" -g "$THREADS" "$verb" "$W/r/$par" ;;
       par2rs)  timed "$label" "$PAR2RS" "$verb" "$W/r/$par" ;;
+      # parmesan spells the verbs out; see the header note.
+      parmesan) if [[ $kind == verify ]]; then timed "$label" "$PARMESAN" verify -q "$W/r/$par"
+                else timed "$label" "$PARMESAN" repair -q "$W/r/$par"; fi ;;
       *) echo "unknown tool $tool" >&2; return 0 ;;
     esac
     local sha=n/a
@@ -274,6 +291,9 @@ if [[ ${1:-} == row* || ${1:-} == all ]]; then
           ln -sf "$f" "$out/$(basename "$f")"; gfiles+=("$out/$(basename "$f")")
         done
         timed "$label" "$GOPAR" -g "$THREADS" c -s "$cbs" -c "$(( (nb * REDUND + 99) / 100 ))" "$out/set.par2" "${gfiles[@]}" ;;
+      # parmesan names its output by directory + base name, never by path,
+      # and stores each member by its bare file name like the others.
+      parmesan) timed "$label" "$PARMESAN" create -q -s "$cbs" -r "$REDUND" -o "$out" -b set $files ;;
       *) echo "unknown tool $tool" >&2; return 0 ;;
     esac
     # A created set counts only if a DIFFERENT tool can read it back.

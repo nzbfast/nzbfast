@@ -14,10 +14,10 @@
 #[cfg(unix)]
 mod cancel;
 mod creator_packet;
-/// TODO 340: `--fast` is accepted on every host and reaches the joint
-/// solve on only some of them; this holds it to SAYING so when it does
-/// not.
-mod fast_switch;
+/// The verify tier: the default per-block verdict and `--slow`'s
+/// whole-file one answer the same on an honest set, by exit code, stdout
+/// and repaired bytes.
+mod fast_check;
 /// `-p` deletes files, and this holds it to deleting only the ones the
 /// run made - the 10 Sep 2026 data-loss defect.
 mod purge;

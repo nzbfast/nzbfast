@@ -31,7 +31,7 @@
 //! rather than assumed: `run.py` captures the REFERENCE's help into
 //! `inventory/` and parses it for the spellings a drop-in must ACCEPT; it
 //! never diffs our screen against theirs, and it could not, since ours
-//! says parfast throughout and carries `--fast`. The in-crate test that
+//! says parfast throughout and carries `--slow`. The in-crate test that
 //! does read our screen is `every_inventoried_switch_appears_on_our_help
 //! _screen`, which checks switch SPELLINGS, not the prose beside them. Same switches,
 //! same sections, same order, same placeholders - so
@@ -112,9 +112,10 @@ Options: (verify or repair)
              useful for quickly fixing renamed files)
   -N       : Data skipping (find badly mispositioned data blocks)
   -S<n>    : Skip leaway (distance +/- from expected block position, default {leaway})
-  --fast   : Use the fast solver for the final rebuild step. It is
-             already the default; where it cannot run, parfast says
-             why on stderr.
+  --slow   : Verdicts from the whole-file MD5 (one serial pass) instead
+             of the default per-block checksums (all cores). Only a set
+             whose block list disagrees with its file description tells
+             the two apart; par2cmdline answers as --slow does there.
 Options: (create)
   -b<n>    : Set the Block-Count (default {blocks})
   -s<n>    : Set the Block-Size (don't use both -b and -s)

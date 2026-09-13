@@ -12,9 +12,19 @@
 //! function and arm B is `md-5`'s portable Rust one - the comparison the
 //! 2 Sep 2026 PAR2 audit's section 6 item 0c asks for. On ARM64 macOS
 //! and Linux arm A is AWS-LC's assembly block function and arm B is the
-//! same portable `md-5`. On every other target the two arms are the same
-//! code and the run is a noise floor, which is itself worth printing: it
-//! says how much of any delta is method rather than implementation.
+//! same portable `md-5`. On x86-64 macOS and Linux arm A is `md-5` WITH
+//! its `asm` feature (the `md5-asm` crate, Nayuki's routine) and arm B
+//! is that same crate, so the A/B pair is a noise floor - which is
+//! itself worth printing: it says how much of any delta is method rather
+//! than implementation.
+//!
+//! Wherever `md5fast::awslc` compiles (every x86-64 and ARM64 desktop
+//! target since 13 Sep 2026) a THIRD arm, `awslc`, runs AWS-LC's
+//! assembly block function beside the two. On ARM64 that is arm A
+//! again; on x86-64 it is the comparison the single-file create chip
+//! asked for (research/PARFAST-SINGLE-FILE-CREATE-VS-PARPAR-2026-09-13.md):
+//! `md5-x86_64.pl` keeps its LEA off the 64-step chain and `md5-asm`
+//! has it on, and only a number says what that is worth.
 //!
 //! Shape copied from `sysbench::compute` deliberately, so the per-core
 //! figure here is comparable with `nzbfast bench-cpu`'s md5 line: 1 MiB
@@ -73,6 +83,41 @@ fn main() {
             black_box(d);
         }
     };
+    #[cfg(any(
+        all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")),
+        all(
+            target_arch = "x86_64",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        )
+    ))]
+    let awslc = Some(|p: &[u8]| {
+        use nzbkit::md5fast::Digest;
+        use nzbkit::md5fast::awslc::Md5;
+        for c in p.chunks(1 << 20) {
+            let d: [u8; 16] = Md5::digest(c).into();
+            black_box(d);
+        }
+    });
+    #[cfg(not(any(
+        all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")),
+        all(
+            target_arch = "x86_64",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        )
+    )))]
+    let awslc: Option<fn(&[u8])> = None;
+    // The fourth arm, Windows x86-64 only: the inline-assembly port that
+    // was the Windows `Md5` until 13 Sep 2026.
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    let winasm = Some(|p: &[u8]| {
+        use nzbkit::md5fast::{Digest, Md5WinAsm};
+        for c in p.chunks(1 << 20) {
+            let d: [u8; 16] = Md5WinAsm::digest(c).into();
+            black_box(d);
+        }
+    });
+    #[cfg(not(all(windows, target_arch = "x86_64")))]
+    let winasm: Option<fn(&[u8])> = None;
 
     // Correctness before speed: a fast wrong hash is worth nothing, and
     // this prints on the same box that produced the timings.
@@ -96,8 +141,32 @@ fn main() {
                 <nzbkit::md5fast::Md5 as nzbkit::md5fast::Digest>::digest(&p[..n]).into();
             let b: [u8; 16] = md5::Md5::digest(&p[..n]).into();
             assert_eq!(a, b, "md5 mismatch at len {n}");
+            #[cfg(any(
+                all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")),
+                all(
+                    target_arch = "x86_64",
+                    any(target_os = "macos", target_os = "linux", target_os = "windows")
+                )
+            ))]
+            {
+                let c: [u8; 16] =
+                    <nzbkit::md5fast::awslc::Md5 as nzbkit::md5fast::Digest>::digest(&p[..n])
+                        .into();
+                assert_eq!(c, b, "awslc md5 mismatch at len {n}");
+            }
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            {
+                let w: [u8; 16] =
+                    <nzbkit::md5fast::Md5WinAsm as nzbkit::md5fast::Digest>::digest(&p[..n]).into();
+                assert_eq!(w, b, "winasm md5 mismatch at len {n}");
+            }
         }
-        println!("AGREE ours == md-5 over 12 lengths up to {} MiB", mib);
+        println!(
+            "AGREE ours == md-5{}{} over 12 lengths up to {} MiB",
+            if awslc.is_some() { " == awslc" } else { "" },
+            if winasm.is_some() { " == winasm" } else { "" },
+            mib
+        );
     }
 
     println!("cpu cores={cores} payload={mib} MiB reps={reps}  (GB/s, higher is better)");
@@ -107,25 +176,50 @@ fn main() {
     // reps of the SAME code.
     timed(&p, cores, &ours);
     timed(&p, cores, &refr);
+    if let Some(f) = awslc.as_ref() {
+        timed(&p, cores, f);
+    }
+    if let Some(f) = winasm.as_ref() {
+        timed(&p, cores, f);
+    }
 
-    let mut best = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut best = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for r in 1..=reps {
         let (o1, oa) = timed(&p, cores, &ours);
         let (r1, ra) = timed(&p, cores, &refr);
-        println!(
+        let (l1, la) = awslc.as_ref().map_or((0.0, 0.0), |f| timed(&p, cores, f));
+        let (w1, wa) = winasm.as_ref().map_or((0.0, 0.0), |f| timed(&p, cores, f));
+        print!(
             "REP {r} ours 1c={o1:.3} all={oa:.3} | md-5 1c={r1:.3} all={ra:.3} | \
              delta 1c={:+.1}% all={:+.1}%",
             (o1 / r1 - 1.0) * 100.0,
             (oa / ra - 1.0) * 100.0
         );
+        if awslc.is_some() {
+            print!(
+                " | awslc 1c={l1:.3} all={la:.3} | awslc/md-5 1c={:+.1}% all={:+.1}%",
+                (l1 / r1 - 1.0) * 100.0,
+                (la / ra - 1.0) * 100.0
+            );
+        }
+        if winasm.is_some() {
+            print!(
+                " | winasm 1c={w1:.3} all={wa:.3} | winasm/md-5 1c={:+.1}% all={:+.1}%",
+                (w1 / r1 - 1.0) * 100.0,
+                (wa / ra - 1.0) * 100.0
+            );
+        }
+        println!();
         best = (
             best.0.max(o1),
             best.1.max(oa),
             best.2.max(r1),
             best.3.max(ra),
+            best.4.max(l1),
+            best.5.max(la),
         );
     }
-    println!(
+    print!(
         "BEST ours 1c={:.3} all={:.3} | md-5 1c={:.3} all={:.3} | delta 1c={:+.1}% all={:+.1}%",
         best.0,
         best.1,
@@ -134,4 +228,14 @@ fn main() {
         (best.0 / best.2 - 1.0) * 100.0,
         (best.1 / best.3 - 1.0) * 100.0
     );
+    if awslc.is_some() {
+        print!(
+            " | awslc 1c={:.3} all={:.3} | awslc/md-5 1c={:+.1}% all={:+.1}%",
+            best.4,
+            best.5,
+            (best.4 / best.2 - 1.0) * 100.0,
+            (best.5 / best.3 - 1.0) * 100.0
+        );
+    }
+    println!();
 }

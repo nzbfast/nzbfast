@@ -402,7 +402,13 @@ fn verify_options(
         // with no skipping is dropped rather than sent to a parser that
         // would refuse the whole line.
         skip_leaway: o.skip_leaway.filter(|_| o.data_skipping),
-        fast: o.fast_solver.unwrap_or(false),
+        // `fast` went with parfast's `--fast` (d89e1027da): the joint
+        // solve it armed is the engine's default on every class that
+        // can run it, so `o.fast_solver` now selects nothing and the
+        // setting stays in the model only until the two apps drop the
+        // toggle. `slow` is the CLI's whole-file verdict; the app has no
+        // counterpart yet and takes the default, which `Session::new`
+        // sets process-wide.
         par2: Some(par2.to_path_buf()),
         files: extra.to_vec(),
         ..Default::default()

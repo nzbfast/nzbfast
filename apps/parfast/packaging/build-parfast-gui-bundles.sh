@@ -120,7 +120,7 @@ CLI_VERSION=$(grep -m1 '^version' crates/parfast/Cargo.toml | sed 's/.*"\(.*\)".
 # that means something. Bump GUI_STAGE, not the number, as the app firms
 # up; when it is genuinely beta this becomes beta.N and the filenames
 # follow with no other edit.
-GUI_STAGE=alpha.1
+GUI_STAGE=alpha.3
 VERSION="${CLI_VERSION%%-*}-$GUI_STAGE"
 
 # The stage in the filename, exactly once. $VERSION now always carries one,
