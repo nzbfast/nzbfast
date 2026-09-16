@@ -27,10 +27,6 @@ pub fn current_servers(cfg_path: &std::path::Path) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// Merge an incoming UI server object over an existing one (if any):
-/// a blank password keeps the stored secret (secrets never round-trip
-/// through the UI), cleared optional fields are removed (matching the
-/// setup wizard's output), numbers are clamped sane.
 /// Well-known NZBGet config locations, per platform.
 pub fn nzbget_conf_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -60,6 +56,15 @@ pub fn nzbget_conf_paths() -> Vec<PathBuf> {
     out
 }
 
+/// Merge an incoming UI server object over an existing one (if any):
+/// a blank password keeps the stored secret (secrets never round-trip
+/// through the UI), cleared optional fields are removed (matching the
+/// setup wizard's output), numbers are clamped sane.
+///
+/// This doc sat on `nzbget_conf_paths` above - which lists config file
+/// locations and has nothing to do with any of it - while the function
+/// it describes carried none. Two doc lines had collided when the
+/// module was cut.
 pub fn normalized_server(
     existing: Option<&Value>,
     incoming: &Value,

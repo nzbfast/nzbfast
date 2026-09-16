@@ -470,19 +470,12 @@ impl Extractor {
         if let Some((gk, key)) = route_new {
             let child = self.ensure_child(inner);
             let cs = child.alloc_slot();
-            // A §94 A map-mode replay preclaimed its SOURCE files under a
-            // volume slot of this group (review finding F-03); the child's claims
-            // are its own, so the grant moves to the routed slot.
-            let ck = name_collision_key(inner.fold_names, &sanitize_out_name(&key));
-            if let Some(&pre) = inner.preclaimed.get(&ck)
-                && inner.groups[&gk].slots.contains(&pre)
-            {
-                child.inner.lock_ok().preclaimed.insert(ck, cs);
-            }
             // §94 D: a zip split part routed here opens its set on the
             // child before the first forwarded byte reaches it.
             self.open_zip_split(inner, &gk, &child, &key);
             inner.groups.get_mut(&gk).unwrap().routed.insert(key, cs);
+            // §94 A: the new route inherits a preclaimed source name.
+            self.hand_over_preclaims(inner, &gk);
             // §156.1: a member routed AFTER a terminal verdict on one of
             // its group's volumes still inherits the loss mark - the
             // hole lives inside this archive, wherever it routes.
@@ -631,6 +624,59 @@ impl Extractor {
         if let Some(c) = inner.child.clone() {
             for cs in routed {
                 c.abandon_slot(cs);
+            }
+        }
+    }
+
+    /// §94 A map mode: a replay preclaims its SOURCE files under a volume
+    /// slot (review finding F-03), and the child's claims are its own, so
+    /// the grant has to move to the child slot the member routed to. It
+    /// moves only when the preclaiming volume is a member of the group, so
+    /// a foreign archive's same-named member is never granted.
+    ///
+    /// Offered when a member routes AND again whenever a slot joins or
+    /// merges into the group, because the volume that routes a member need
+    /// not hold the grant. A mapped store set keeps no header bytes on
+    /// disk, so a resume refetches every volume's head; when part2's lands
+    /// first it founds the group and routes the member while part1 - the
+    /// only seeded volume, so the grant's holder - is not a member yet.
+    /// Offered only at routing, the grant never moved and the payload
+    /// finished byte-perfect as `000-movie.mkv` beside the restored partial
+    /// still at `movie.mkv` (15 Sep 2026). The join is in time for that
+    /// shape: part2's bytes hold until part1 fixes their base, and the
+    /// child writer that claims the name is made when they drain.
+    ///
+    /// A grant already naming a slot this group still routes stands, as
+    /// the first claimant does in `preclaim_name`: two raw names that
+    /// sanitize alike route to two child slots, and granting both would
+    /// put two writers on one file. One naming a slot the group no longer
+    /// routes (a merge abandoned it) is replaced.
+    pub(super) fn hand_over_preclaims(&self, inner: &Inner, gk: &str) {
+        if inner.preclaimed.is_empty() {
+            return;
+        }
+        let (Some(child), Some(g)) = (inner.child.as_ref(), inner.groups.get(gk)) else {
+            return;
+        };
+        let grants: Vec<(String, usize)> = g
+            .routed
+            .iter()
+            .filter_map(|(key, &cs)| {
+                let ck = name_collision_key(inner.fold_names, &sanitize_out_name(key));
+                let &pre = inner.preclaimed.get(&ck)?;
+                g.slots.contains(&pre).then_some((ck, cs))
+            })
+            .collect();
+        if grants.is_empty() {
+            return;
+        }
+        let mut c = child.inner.lock_ok();
+        for (ck, cs) in grants {
+            match c.preclaimed.get(&ck) {
+                Some(held) if g.routed.values().any(|v| v == held) => {}
+                _ => {
+                    c.preclaimed.insert(ck, cs);
+                }
             }
         }
     }

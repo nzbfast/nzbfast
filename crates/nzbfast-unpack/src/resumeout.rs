@@ -344,14 +344,20 @@ pub(crate) fn keep(paths: &[PathBuf]) {
 
 /// Did this job's unpack COMPLETE a member by resuming it?
 ///
-/// One caller, and it is about deleting the volume set. The spent-volume
-/// rule wants proof that the unpack published something before it will
-/// remove the set it read, and it takes that proof from a before/after
-/// diff of the directory - which a resumed member cannot appear in,
-/// because its path was already there when the snapshot was taken. Left
-/// at that, the very shape this module exists for would finish with the
-/// payload complete AND its whole volume set still beside it, which is
-/// the 144-volume / 57 GB regression Part B of the one-pass spec closed.
+/// Two callers, and both are about deleting the volume set: the
+/// named-set `spent` closure in `rarfix.rs` and the obfuscated set's
+/// `sweep_spent_obfuscated`. The spent-volume rule wants proof that the
+/// unpack published something before it will remove the set it read, and
+/// it takes that proof from a before/after diff of the directory - which
+/// a resumed member cannot appear in, because its path was already there
+/// when the snapshot was taken. Left at that, the very shape this module
+/// exists for would finish with the payload complete AND its whole volume
+/// set still beside it, which is the 144-volume / 57 GB regression Part B
+/// of the one-pass spec closed.
+///
+/// The obfuscated caller was added on 16 Sep 2026: it had the same
+/// before/after diff and not this clause, so the identical regression
+/// stood on the obfuscated half alone.
 pub(crate) fn finished_any() -> bool {
     ARMED.with(|a| a.borrow().iter().any(|e| e.finished))
 }

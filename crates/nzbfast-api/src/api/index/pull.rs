@@ -701,6 +701,11 @@ pub(super) fn m_indexer_grab(
                 .cloned()
         };
         match hit {
+            // KEYED for i18n: this exact sentence is an `err.` key in
+            // web/i18n/extract.js and all 27 catalogues (census 16 Sep 2026,
+            // research/API-ERROR-KEY-CENSUS-2026-09-16.md). tErr() matches the
+            // WHOLE string, so rewording it here silently un-translates 27
+            // locales with every gate green. Change both sides together.
             None => json!({"status": false,
                             "error": "result expired - search again"}),
             Some(h) => {

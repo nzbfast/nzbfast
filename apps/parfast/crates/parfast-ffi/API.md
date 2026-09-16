@@ -442,7 +442,8 @@ with `pf_settings_get` and you get exactly this, defaults filled in:
            "recovery_count":0,"recovery_size":0,"scheme":"pow2",
            "std_naming":false,"unicode":"auto","overwrite":false},
  "performance":{"threads":null,"memory_mb":null,"fast_solver":false,
-                "low_priority":false},
+                "low_priority":false,"pair_large_creates":true,
+                "digest_cache":false},
  "integration":{"handle_par2":true,"handle_sfv":false,"handle_md5":false,
                 "handle_sha256":false,"shell_menu":true},
  "advanced":{"show_command":true,"log_level":0,"log_folder":null},
@@ -482,10 +483,14 @@ handler is a platform call in each app. `performance` is the three
 process-GLOBAL engine knobs; above concurrency 1 the last job to start
 wins, and the pane says so.
 
-`integration` is REMEMBERED and never acted on: registering a file
-handler is a platform call in each app. `performance` is the three
-process-GLOBAL engine knobs; above concurrency 1 the last job to start
-wins, and the pane says so.
+**`pf_digest_cache_clear`** (added 15 Sep 2026) is the "Clear remembered
+checksums" button under `performance.digest_cache`. It deletes every
+record in the per-user store that setting fills
+(`~/Library/Caches/parfast/digests`, `%LOCALAPPDATA%\parfast\digests`)
+and answers how many files went, 0 where there is no store. A failure is
+`PF_ERR_REFUSED` with the folder in `pf_last_error`. It is safe while a
+job runs - a record that vanishes is a miss, never a wrong checksum - and
+it does not change the setting.
 
 ---
 
@@ -498,6 +503,7 @@ wins, and the pane says so.
 
 | Field | Status | Why |
 |---|---|---|
+| `settings.performance.pair_large_creates` | **ADDED** (15 Sep 2026), default **true** | Start a second large single-file create beside a running one when the machine has the cores and the memory for both, WHATEVER `concurrency` says. A create over one large file is bound by one serial MD5 chain and leaves most of a big machine idle: two measured 11.5 s against 11.4 s for one on an M3 Ultra, so a queue of them finishes in about half the time. It makes NO single job faster - say that in any copy that mentions it. The rule (`parfast-session`'s `pairing` module): both jobs are one-file creates from exponent 0 with the same `performance` knobs; the running one's fold pacer has settled; half the machine less a core for each chain leaves each fold above the pacer's floor of two (so a 4-core machine, or `NZBFAST_CPU_WORKERS=4`, never pairs); a core for each chain plus the settled fold width twice over fits; and the engine says the second create still takes the paced single-file route in the memory budget the first has left. A create the rule refuses stays `queued` rather than starting and blocking, at any concurrency. From a spinning disk it buys nothing: under a one-disk read cap of 200 and 120 MB/s the pair tied the serial queue (0.98-1.00x of its wall, addendum 8 of `research/PARFAST-SINGLE-FILE-MD5-HEADROOM-2026-09-13.md`), and head seek, which that cap could not model, can only make it worse, so turn it off there. The paired job's `log_tail` carries a line saying it started beside another. |
 | `post_action_due` | **ADDED** | The queue has drained and the action has not been carried out. The session REPORTS the action; the HOST performs it, because sleeping or shutting down a machine is a platform call and a decision a human has to be able to stop. Call `pf_queue_clear_post_action` once you have dealt with it; it will not fall due again until a new job is submitted. |
 
 Two functions outside section 4.5:

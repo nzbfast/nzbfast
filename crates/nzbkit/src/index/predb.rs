@@ -1382,17 +1382,39 @@ impl Index {
     /// resets exactly when a seed import lands (`predb_seed_gen`
     /// bumps) - a bigger pre corpus is the only event that makes
     /// re-walking worth anything.
-    /// Returns (examined, suggested, applied).
+    ///
+    /// TWO budgets, and they bound different things. `budget` is the
+    /// row count, which is a THROUGHPUT knob sized against the
+    /// population (see the caller). `hold` is a wall-clock bound on
+    /// this call, which is a LATENCY knob sized against the mutex the
+    /// caller holds while it runs: on a 125 GB index a row costs about
+    /// 12 ms (measured, section 10a of
+    /// `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md`), so a row count
+    /// alone says nothing about how long the write mutex is held and
+    /// 400 rows held it for a median of 4.7 s - past
+    /// `Daemon::HTTP_INDEX_WAIT`. Pass `Duration::MAX` for no bound.
+    ///
+    /// Unlike `shatter_fold`, whose unit is a whole group and whose
+    /// overrun past its budget measured +1.3 s at p90, the unit here is
+    /// ONE `corr_consider`, so the realized hold is the bound plus
+    /// about one row.
+    ///
+    /// Stopping early never skips a row: the cursor parks just below
+    /// the last id actually considered, so the remainder of the stride
+    /// is re-selected on the next call. Returns
+    /// (examined, suggested, applied).
     pub fn predb_corr_backlog(
         &mut self,
         budget: u32,
         window_secs: i64,
         auto: bool,
         now: i64,
+        hold: std::time::Duration,
     ) -> rusqlite::Result<(usize, usize, usize)> {
-        if budget == 0 {
+        if budget == 0 || hold.is_zero() {
             return Ok((0, 0, 0));
         }
+        let started = std::time::Instant::now();
         let seed_gen = self.kv_get("predb_seed_gen").unwrap_or_default();
         if self.kv_get("predb_corr_seed_gen").unwrap_or_default() != seed_gen {
             self.db
@@ -1433,21 +1455,27 @@ impl Index {
             stmt.query_map(rusqlite::params![lo, cursor, budget], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
-        let next = if ids.len() as u32 >= budget {
-            ids.last().map(|id| id - 1).unwrap_or(lo)
-        } else {
-            lo
-        };
         let (mut suggested, mut applied) = (0usize, 0usize);
+        let mut examined = 0usize;
         for rid in &ids {
+            // The bound is checked BEFORE the row, not after: a row
+            // already paid for cannot be un-held, and checking first is
+            // what keeps the overrun to one unit.
+            if started.elapsed() >= hold {
+                break;
+            }
+            examined += 1;
             match self.corr_consider(*rid, auto, now)? {
                 CorrOutcome::Suggested => suggested += 1,
                 CorrOutcome::Applied => applied += 1,
                 CorrOutcome::Nothing => {}
             }
         }
+        let Some(next) = corr_next_cursor(&ids, examined, budget, lo) else {
+            return Ok((0, 0, 0));
+        };
         self.kv_set("predb_corr_cursor", &next.to_string())?;
-        Ok((ids.len(), suggested, applied))
+        Ok((examined, suggested, applied))
     }
 
     /// Live pre-driven correlation: fresh title-only rows open a
@@ -2021,5 +2049,87 @@ impl Index {
         }
         tx.commit()?;
         Ok(stored)
+    }
+}
+
+/// Where the correlation backlog walk parks its cursor after one call.
+/// Pure, and out here rather than inline, because it is the part of the
+/// hold bound that can get a release lost: a walk that parked past rows
+/// it never examined does not revisit them until the next seed
+/// generation, and nothing would ever say so. Three cases, and only the
+/// first two existed before the bound (16 Sep 2026):
+///
+/// - `None` - nothing was examined, so the cursor must not move at all.
+///   Moving it would step over the whole stride.
+/// - Stopped short of the selection (the clock) - park just below the
+///   last id actually CONSIDERED, so the rest of the stride is
+///   re-selected next call.
+/// - Walked the whole selection - the pre-existing rule: below the
+///   lowest id seen when the row budget FILLED (there may be more
+///   matching rows further down this stride), at the stride floor when
+///   it did not (the stride is exhausted).
+///
+/// `ids` is descending, as the selection orders it.
+fn corr_next_cursor(ids: &[i64], examined: usize, budget: u32, lo: i64) -> Option<i64> {
+    if examined == 0 {
+        return None;
+    }
+    if examined < ids.len() {
+        return Some(ids[examined - 1] - 1);
+    }
+    Some(if ids.len() as u32 >= budget {
+        ids.last().map(|id| id - 1).unwrap_or(lo)
+    } else {
+        lo
+    })
+}
+
+#[cfg(test)]
+mod corr_cursor_tests {
+    use super::corr_next_cursor;
+
+    /// The clock-stop case, which is the one the hold bound added and
+    /// the one no timing-dependent test can pin: whatever the split, the
+    /// cursor lands one below the last id considered, so every
+    /// unexamined id is still `<= cursor` on the next call. Asserted for
+    /// every possible split rather than one, because "off by one" here
+    /// silently drops a release.
+    #[test]
+    fn stopping_short_parks_below_the_last_id_considered() {
+        let ids = [900, 880, 870, 860, 850];
+        for examined in 1..ids.len() {
+            let next = corr_next_cursor(&ids, examined, 5, 800).unwrap();
+            assert_eq!(
+                next,
+                ids[examined - 1] - 1,
+                "examined {examined} must park below ids[{}]",
+                examined - 1
+            );
+            // The property that matters, stated as the property: no id
+            // this call skipped is now out of reach.
+            for skipped in &ids[examined..] {
+                assert!(
+                    *skipped <= next,
+                    "id {skipped} was never examined and must still be selectable"
+                );
+            }
+        }
+    }
+
+    /// Examining nothing must move nothing. A cursor nudged here would
+    /// step over the entire stride for a call that did no work.
+    #[test]
+    fn examining_nothing_leaves_the_cursor_alone() {
+        assert_eq!(corr_next_cursor(&[900, 880], 0, 5, 800), None);
+        assert_eq!(corr_next_cursor(&[], 0, 5, 800), None);
+    }
+
+    /// The two pre-existing cases, unchanged by the bound: a FILLED row
+    /// budget parks below the lowest id seen (more may remain in the
+    /// stride), an unfilled one parks at the stride floor (exhausted).
+    #[test]
+    fn a_full_walk_keeps_the_original_parking_rule() {
+        assert_eq!(corr_next_cursor(&[900, 880, 850], 3, 3, 800), Some(849));
+        assert_eq!(corr_next_cursor(&[900, 880, 850], 3, 400, 800), Some(800));
     }
 }

@@ -308,6 +308,25 @@ unsafe fn fold_avx2(nl: &[[u8; 16]; 4], nh: &[[u8; 16]; 4], dst: &mut [u8], src:
 
 /// GFNI with AVX2: the eight table shuffles replaced by four
 /// `gf2p8affineqb` bit-matrix products, no nibble extraction.
+//
+// THE WORKSPACE'S DECLARED MSRV (1.87) IS FALSE FOR x86_64 BECAUSE OF
+// THIS FUNCTION. `_mm256_gf2p8affine_epi64_epi8` is stable since 1.89,
+// and this fold is gated on `target_arch = "x86_64"` alone - no feature
+// - so an x86_64 host has not been able to build the crate on 1.87
+// since it landed. The lint below is RIGHT; it is waived rather than
+// answered because answering it means moving `rust-version`, which is a
+// published-crate promise and is the fork owner's call, and because
+// clippy gates 27 further `as_chunks` suggestions across the codec on
+// that same number - they unlock the moment it moves.
+//
+// Nothing here saw this until 9 Sep 2026, when the first per-push CI run
+// on Linux found it in 33 seconds: the lint only fires on x86 code, and
+// every box carrying this fork is aarch64 macOS.
+//
+// Fix by setting `rust-version = "1.89"` in the workspace manifest,
+// deleting this allow, and answering the 27 that follow. Do not fix it
+// by widening this cfg or by deleting the fold.
+#[allow(clippy::incompatible_msrv)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "gfni,avx2")]
 unsafe fn fold_gfni(affine: &[u64; 4], dst: &mut [u8], src: &[u8]) -> usize {
@@ -382,7 +401,7 @@ mod tests {
                     d[1] ^= (product >> 8) as u8;
                 }
                 let done = fold_simd(&tables, &mut actual, &source);
-                assert!(done <= len && done % 32 == 0, "c {c:#x} len {len}: done {done}");
+                assert!(done <= len && done.is_multiple_of(32), "c {c:#x} len {len}: done {done}");
                 for (d, s) in actual[done..]
                     .chunks_exact_mut(2)
                     .zip(source[done..].chunks_exact(2))

@@ -318,8 +318,20 @@ pub fn restore_job_settings(
     }
     // §96.3 give-up breaker: the threshold, the *arr instances it may
     // act on, and the counters a previous run accumulated.
+    // EVERY setting restored here re-applies its setter's clamp, and
+    // that is not belt-and-braces: this path reads settings.json
+    // DIRECTLY, so a hand-edited file (or one written by an older build
+    // with a wider range) never passes through the setter at all and the
+    // value stands for the daemon's whole life. The four that were bare
+    // - `alt_hold_count`, `heal_auto_interval_h`, `heal_auto_max_jobs`
+    // and this one - each had a clamp its setter documents as
+    // load-bearing: a give-up threshold above `MAX_STEMS` is a condition
+    // that can never become true, spelt as a number the user believes
+    // will fire.
     if let Some(n) = saved.get("arr_giveup_threshold").and_then(Value::as_u64) {
-        daemon.arr_giveup_threshold.store(n, Ordering::Relaxed);
+        daemon
+            .arr_giveup_threshold
+            .store(n.min(crate::giveup::MAX_STEMS as u64), Ordering::Relaxed);
     }
     if let Some(v) = saved.get("arr_instances") {
         match serde_json::from_value::<Vec<giveup::ArrInstance>>(v.clone()) {
@@ -370,7 +382,28 @@ pub fn restore_job_settings(
 /// leaves the daemon's own default alone.
 pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::Map<String, Value>) {
     if let Some(v) = saved.get("ui_locale").and_then(Value::as_str) {
-        *daemon.ui_locale.lock_ok() = v.to_string();
+        // The SAME membership test `set_ui_locale` applies, and it is
+        // not cosmetic here: this value is stamped into the served HTML
+        // as `const DAEMON_LOCALE='<value>'` inside the page's single
+        // `<script>` block, UNESCAPED. A saved string carrying a quote,
+        // a backslash or a newline therefore made that whole block a
+        // syntax error, and the dashboard and the wall both rendered
+        // BLANK on every load - recoverable only by hand-editing
+        // settings.json, which is where the value came from.
+        //
+        // An unknown tag is dropped with a line rather than substituted:
+        // the daemon's own default is "auto", and auto is what the user
+        // gets, which is the behaviour of a fresh install.
+        let t = v.trim().to_ascii_lowercase();
+        if t.is_empty() || crate::uilocales::UI_LOCALES.contains(&t.as_str()) {
+            *daemon.ui_locale.lock_ok() = t;
+        } else {
+            warn!(
+                target: "settings",
+                "ignoring saved ui_locale {v:?}: not one of the {} shipped locales - using auto",
+                crate::uilocales::UI_LOCALES.len()
+            );
+        }
     }
     // §141: absent leaves the `*` default in place; an explicitly saved
     // empty string is a deliberate "send no Access-Control header" and
@@ -404,7 +437,13 @@ pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::M
     // missing here works until the daemon restarts and then quietly
     // reverts, with nothing logged either way.
     if let Some(v) = saved.get("alt_hold_count").and_then(Value::as_u64) {
-        daemon.alt.hold_count.store(v as u32, Ordering::Relaxed);
+        // The setter's own ceiling, applied here too - see the note at
+        // `arr_giveup_threshold` below for why every one of these is
+        // repeated rather than trusted.
+        daemon
+            .alt
+            .hold_count
+            .store((v as u32).min(10), Ordering::Relaxed);
     }
     if let Some(v) = saved.get("alt_auto_switch").and_then(Value::as_bool) {
         daemon.alt.auto_switch.store(v, Ordering::Relaxed);
@@ -426,10 +465,16 @@ pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::M
         daemon.heal_auto.enabled.store(v, Ordering::Relaxed);
     }
     if let Some(v) = saved.get("heal_auto_interval_h").and_then(Value::as_u64) {
-        daemon.heal_auto.interval_h.store(v, Ordering::Relaxed);
+        daemon
+            .heal_auto
+            .interval_h
+            .store(v.clamp(1, 8760), Ordering::Relaxed);
     }
     if let Some(v) = saved.get("heal_auto_max_jobs").and_then(Value::as_u64) {
-        daemon.heal_auto.max_jobs.store(v as u32, Ordering::Relaxed);
+        daemon.heal_auto.max_jobs.store(
+            (v as u32).min(crate::heal::MAX_HEAL_JOBS as u32),
+            Ordering::Relaxed,
+        );
     }
     if let Some(v) = saved.get("heal_auto_max_bytes").and_then(Value::as_u64) {
         daemon.heal_auto.max_bytes.store(v, Ordering::Relaxed);
@@ -1259,7 +1304,11 @@ pub fn seed_auto_retry_secs(_settings_path: &Path, auto_retry_mins: u64) -> Atom
         std::env::var("NZBFAST_AUTO_RETRY_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(auto_retry_mins * 60),
+            // Saturating: `set_auto_retry_mins` saturates the LIVE
+            // value but persists the raw `m`, so a figure the API
+            // accepted is read back here at the next start (through
+            // `bootstrap` and `startup`) and overflowed this product.
+            .unwrap_or(auto_retry_mins.saturating_mul(60)),
     )
 }
 
@@ -1659,5 +1708,61 @@ pub fn seeded_scoreboard(settings_path: &std::path::Path) -> crate::daemon::Scor
         running: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "indexer")]
         status: Mutex::new(String::new()),
+    }
+}
+
+/// `ui_locale` is stamped into the served HTML as
+/// `const DAEMON_LOCALE='<value>'` inside the page's single `<script>`
+/// block, UNESCAPED - so it has to pass the same membership test on the
+/// RESTORE path that `set_ui_locale` applies on the API path. It did
+/// not, and this path reads settings.json directly: a value carrying a
+/// quote, a backslash or a newline made that whole block a syntax error
+/// and the dashboard AND the wall rendered blank on every load,
+/// recoverable only by hand-editing the file the value came from.
+///
+/// NEGATIVE CONTROL, run: restore the bare `v.to_string()` and the
+/// injection cases fail, holding the quote.
+#[cfg(test)]
+mod ui_locale_restore_tests {
+    use super::*;
+
+    fn restored(saved: serde_json::Value) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-restore-locale-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = crate::testutil::test_daemon(&dir);
+        let map = saved.as_object().unwrap().clone();
+        restore_ui_and_index_settings(&d, &map);
+        let out = d.ui_locale.lock_ok().clone();
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    #[test]
+    fn a_saved_locale_must_be_one_we_ship() {
+        // A shipped tag survives, and is normalised exactly as the
+        // setter normalises it.
+        assert_eq!(restored(serde_json::json!({"ui_locale": "de"})), "de");
+        assert_eq!(restored(serde_json::json!({"ui_locale": " DE "})), "de");
+        // Empty is "auto", which is a real setting and not an absence.
+        assert_eq!(restored(serde_json::json!({"ui_locale": ""})), "");
+        // Anything else is dropped back to auto rather than stamped.
+        for bad in [
+            "xx",
+            "en';alert(1);//",
+            "en\\",
+            "en\nconst x=1",
+            "en'+location+'",
+        ] {
+            let got = restored(serde_json::json!({ "ui_locale": bad }));
+            assert_eq!(
+                got, "",
+                "{bad:?} must not survive into the page's script block"
+            );
+        }
     }
 }

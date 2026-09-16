@@ -11,14 +11,7 @@
 //! leaves. It drives `parfast::run_with` in-process; every run sets the
 //! global explicitly, so the order of runs does not matter.
 
-use std::path::{Path, PathBuf};
-
-fn scratch(tag: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(tag);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
-}
+use crate::scratch::scratch;
 
 fn arg(s: &str) -> String {
     s.to_string()
@@ -104,5 +97,4 @@ fn the_default_tier_and_slow_answer_alike_on_an_honest_set() {
         let (code_again, _, _) = run(&v);
         assert_eq!(code_again, 0, "{label}: the repaired file verifies clean");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }

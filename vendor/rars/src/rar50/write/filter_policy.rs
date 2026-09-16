@@ -122,7 +122,7 @@ pub(super) fn encode_member_with_filter_specs_candidates_and_progress(
 /// empty list and resolves the member exactly as `None`, the pooled
 /// unfiltered encoder, same bytes and same CPU.
 ///
-/// This is the ratio lab's `regions::select` (review, 7 Sep 2026,
+/// This is the ratio lab's `regions::select` (Codex, 7 Sep 2026,
 /// `research/rar5-ratio-lab`) in production shape: the lab's 64 KiB and
 /// 256 KiB spans became the codec's own chunk, its full-strength probe
 /// options became a cheap parser (a 16 KiB probe has no use for a 32 MiB
@@ -228,7 +228,7 @@ fn select_region_filter(region: &[u8], probe_options: EncodeOptions) -> Option<F
     let unfiltered = probe(None);
     let ceiling = unfiltered.saturating_mul(1000 - SAMPLED_FILTER_MARGIN_PER_MILLE) / 1000;
     let mut best: Option<(usize, FilterKind)> = None;
-    let mut vote = |kind: FilterKind, best: &mut Option<(usize, FilterKind)>| {
+    let vote = |kind: FilterKind, best: &mut Option<(usize, FilterKind)>| {
         let cost = probe(Some(kind));
         if cost <= ceiling && best.is_none_or(|(best_cost, _)| cost < best_cost) {
             *best = Some((cost, kind));
@@ -641,11 +641,15 @@ fn resolve_solid_members_with_rule(
         groups.push((group_start, group_end));
         group_start = group_end;
     }
+    // The packed bytes of every member of one solid group: each
+    // member's fresh arm, and its continued arm on a live index (the
+    // first member of a set has no continued arm, hence the `Option`).
+    type GroupArms = Vec<(Vec<u8>, Option<Vec<u8>>)>;
     // One group: its window, its fresh arms, and its continued arms on a
     // live index seeded once from the dictionary before it. Returns the
     // fresh and continued packed bytes of every member in the group (the
     // first member of the set has no continued arm).
-    let resolve_group = |&(group_start, group_end): &(usize, usize)| -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>> {
+    let resolve_group = |&(group_start, group_end): &(usize, usize)| -> Result<GroupArms> {
         let scratch = EncoderScratchPool::new();
         let history = solid_history(members, 0, group_start, dictionary);
         let mut window: Vec<u8> = Vec::with_capacity(
@@ -680,7 +684,7 @@ fn resolve_solid_members_with_rule(
         Ok(out)
     };
     #[cfg(feature = "parallel")]
-    let resolved_groups: Vec<Vec<(Vec<u8>, Option<Vec<u8>>)>> = {
+    let resolved_groups: Vec<GroupArms> = {
         // As many groups at once as the pool has threads, for the memory
         // bound; the next chunk of groups starts when this one is done.
         let at_once = rayon::current_num_threads().max(1);
@@ -695,8 +699,10 @@ fn resolve_solid_members_with_rule(
         resolved
     };
     #[cfg(not(feature = "parallel"))]
-    let resolved_groups: Vec<Vec<(Vec<u8>, Option<Vec<u8>>)>> =
-        groups.iter().map(resolve_group).collect::<Result<Vec<_>>>()?;
+    let resolved_groups: Vec<GroupArms> = groups
+        .iter()
+        .map(resolve_group)
+        .collect::<Result<Vec<_>>>()?;
     let mut fresh_arms: Vec<Option<Vec<u8>>> = Vec::with_capacity(members.len());
     let mut continued_arms: Vec<Option<Vec<u8>>> = Vec::with_capacity(members.len());
     for group in resolved_groups {
@@ -955,6 +961,49 @@ pub(super) fn working_memory_for(options: WriterOptions) -> Option<usize> {
     options
         .write_policy
         .map(|policy| usize::try_from(policy.working_memory_limit).unwrap_or(usize::MAX))
+}
+
+/// How many members of a set may encode side by side under a write policy.
+///
+/// Each member encoded behind the tree match finder holds its own tree,
+/// sized by the dictionary alone (ten bytes a byte, the charge
+/// [`crate::Rar50WritePolicy`] admits a dictionary by), and nothing in the
+/// block wave, the hints or the member window counts it. The writers
+/// resolve independent members on the pool at once, so without this a
+/// policy's quarter for the tree bought one tree and the pool held one per
+/// thread: postfast under a 1 GiB budget at `--dictionary 32m` (4 MiB
+/// admitted) peaked 778 MiB over its stored control against a 256 MiB
+/// allowance, on 18 threads (research/RARFAST-BENCH-2026-09-14.md section
+/// 10). So under a policy the trees in flight share the tree quarter;
+/// at the dictionary the policy admits that is ONE member at a time.
+///
+/// Unbounded with no policy (the host defaults stand) and when the tree
+/// does not arm - no candidates, or a dictionary under
+/// [`crate::codec::rar50::TREE_MIN_DICTIONARY`]. The tree never indexes
+/// more than 64 MiB, so a wider dictionary is charged more than it holds,
+/// which can only narrow. Byte-neutral: members are independent, and their
+/// output order does not follow the width. The minimum over `candidates`,
+/// which share one dictionary and one allowance. (nzbfast-local change,
+/// 15 Sep 2026; see VENDORING.md.)
+pub(super) fn members_in_flight_for(candidates: &[EncodeOptions]) -> usize {
+    candidates
+        .iter()
+        .map(|options| {
+            let Some(working) = options.working_memory else {
+                return usize::MAX;
+            };
+            if options.max_match_candidates == 0
+                || options.max_match_distance < crate::codec::rar50::TREE_MIN_DICTIONARY
+            {
+                return usize::MAX;
+            }
+            let tree = (options.max_match_distance as u64)
+                .saturating_mul(crate::Rar50WritePolicy::TREE_BYTES_PER_DICTIONARY_BYTE);
+            let width = (working as u64 / 4 / tree.max(1)).max(1);
+            usize::try_from(width).unwrap_or(usize::MAX)
+        })
+        .min()
+        .unwrap_or(usize::MAX)
 }
 
 /// [`dictionary_size_for_options`] fitted to a compressed set's payload.
@@ -1687,6 +1736,11 @@ mod tests {
         let tiny_slices: Vec<&[u8]> = tiny.iter().map(Vec::as_slice).collect();
         let grown: Vec<Vec<u8>> = (0..24u64).map(|i| text(90_000 + (i as usize * 1_013) % 40_000, 500 + i)).collect();
         let grown_slices: Vec<&[u8]> = grown.iter().map(Vec::as_slice).collect();
+        // The rule table's element type is the table's whole point:
+        // a named arm and the predicate it stands for, so the loop
+        // below reads as "under this rule". Aliasing it would move the
+        // one interesting line out of the reader's way.
+        #[allow(clippy::type_complexity)]
         let rules: [(&str, fn(usize, usize) -> bool); 2] = [
             ("smaller wins", |fresh, continued| fresh < continued),
             ("fresh wins ties and more", |fresh, continued| fresh <= continued + 4),

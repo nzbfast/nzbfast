@@ -195,7 +195,31 @@ pub(crate) fn extract_obfuscated_rar(
     let mut parsed: Vec<(Option<u64>, PathBuf, rars::Archive)> = Vec::new();
     for path in candidates {
         match parse.read_path(path) {
-            Ok(archive) => parsed.push((archive_volume_number(&archive), path.clone(), archive)),
+            Ok(archive) => {
+                // VOLUME NUMBER 0 IS A HEAD, not a continuation. The
+                // RAR5 spec makes the number field optional on the first
+                // volume ("present for all volumes except first"), and
+                // this partition was written to that: a head is the
+                // volume with NO number. But the field is only optional,
+                // not forbidden, and an archiver that writes it anyway -
+                // this repo's own `Rar50VolumeWriter` does, on every
+                // volume - stamps 0 there. Such a head took the numbered
+                // door, where it looked for an open set already holding
+                // 0 volumes, found none (no set is ever empty), started
+                // a set of its own that the None arm never adds to
+                // `open`, and then nothing could attach to it: an
+                // ORDINARY obfuscated split set came apart into one
+                // singleton per volume and the job failed with every
+                // byte present. Found 16 Sep 2026 while reproducing the
+                // boundary-between-members split below, against the real
+                // writer rather than a fixture.
+                //
+                // Normalising here rather than in
+                // `archive_volume_number` keeps that function a faithful
+                // reading of the header.
+                let number = archive_volume_number(&archive).filter(|&n| n > 0);
+                parsed.push((number, path.clone(), archive));
+            }
             // A Rar!-magic file that will not parse is not a usable volume;
             // skip it rather than abort the whole set.
             Err(e) => warn!(target: "extract", "skipping {}: {e}", path.display()),
@@ -223,11 +247,12 @@ pub(crate) fn extract_obfuscated_rar(
         (first, last)
     };
 
-    // Partition. Sets start at volumes with no volume number (a RAR5 set's
-    // first volume, or a standalone archive); numbered volumes attach to
-    // the open set whose tail's split-after member name matches their
-    // split-before head - or, when the boundary member is not split, to
-    // the only open set awaiting that number.
+    // Partition. Sets start at HEAD volumes - a standalone archive, or a
+    // RAR5 set's first volume, which either carries no volume number or
+    // numbers itself 0 (both spellings are legal; see the read above).
+    // Numbered volumes attach to the open set whose tail's split-after
+    // member name matches their split-before head - or, when the boundary
+    // member is not split, to the only open set awaiting that number.
     let mut sets: Vec<Vec<(PathBuf, rars::Archive)>> = Vec::new();
     // Per set, parallel to `sets`: is this a MID-SET FRAGMENT - a set
     // whose HEAD volume begins inside a member that started in a volume
@@ -242,13 +267,45 @@ pub(crate) fn extract_obfuscated_rar(
             .as_ref()
             .is_some_and(|(_, split_before)| *split_before)
     };
+    // Is this volume unfinished - does the set continue past it?
+    //
+    // TWO signals, and the second is the whole of bug-sweep item 51
+    // (16 Sep 2026). A member cut ACROSS the boundary is the obvious one
+    // and was the only one: the volume's last member is `is_split_after`,
+    // so something has to come next. But a RAR5 archiver ends a volume on
+    // a WHOLE member whenever the next file header will not fit in what
+    // is left, and on that boundary no member is split at all - so the
+    // set was closed at volume N, volume N+1 found no open set expecting
+    // it, and started an orphan nothing could ever attach to. If that
+    // orphan's own last member then spilled into volume N+2, `rars`
+    // refused it with "RAR 5 split entry is incomplete" and the job
+    // failed with every byte of the set on disk.
+    //
+    // The container does carry the answer across such a boundary: the
+    // end-of-archive record's "another volume follows" flag, which every
+    // archiver stamps on every non-final volume. It is a fact read out of
+    // the BYTES, not an inference from a name - the distinction this
+    // module exists to keep.
+    //
+    // ONLY EVER WIDENS `open`. `next_volume_follows()` says `Some(false)`
+    // for a volume that declares itself last and `None` for one with no
+    // readable END record (truncated, still arriving), and neither closes
+    // a set the split flag would have kept open - a volume can only be
+    // offered to MORE candidate sets than before, never fewer. Which set
+    // it actually joins is unchanged, and still refuses to guess when
+    // several await the same number.
+    let unfinished = |archive: &rars::Archive, last: &Option<(Vec<u8>, bool)>| -> bool {
+        last.as_ref().is_some_and(|&(_, split_after)| split_after)
+            || archive.next_volume_follows().unwrap_or(false)
+    };
     let mut open: Vec<usize> = Vec::new(); // indexes of sets still growing
     for (number, path, archive) in parsed {
         if number.is_none() {
             let (first, last) = boundary(&archive);
-            // A first volume whose last member is not split-after is a
-            // complete single-volume archive.
-            let closed = !last.is_some_and(|(_, split_after)| split_after);
+            // A first volume that neither cuts a member at its end nor
+            // says another volume follows is a complete single-volume
+            // archive.
+            let closed = !unfinished(&archive, &last);
             // Reachable here, not just on the invented arm below: RAR4
             // carries no volume number (`archive_volume_number` is
             // RAR5-only), so every volume of an obfuscated RAR4 set comes
@@ -317,8 +374,9 @@ pub(crate) fn extract_obfuscated_rar(
         };
         match chosen {
             Some(si) => {
+                let still_open = unfinished(&archive, &last);
                 sets[si].push((path, archive));
-                if !last.is_some_and(|(_, split_after)| split_after) {
+                if !still_open {
                     open.retain(|&s| s != si);
                 }
             }
@@ -529,7 +587,16 @@ pub(crate) fn sweep_spent_obfuscated(
         return;
     };
     let published: std::collections::HashSet<PathBuf> = after.difference(before).cloned().collect();
-    if published.is_empty() {
+    // A RESUMED member is proof too, and the diff CANNOT see it: its path
+    // was already in `before`, because the forfeited chase put the file
+    // there and this pass appended the rest in place. See
+    // [`crate::resumeout::finished_any`], and the identical clause in the
+    // named-set closure in `rarfix.rs` - that one was fixed for this and
+    // the obfuscated arm was not, so a compressed obfuscated set larger
+    // than the holds slice (the 144-volume, 57 GB shape `resumeout`'s own
+    // doc names) finished Completed with its whole volume set still
+    // beside the payload.
+    if published.is_empty() && !crate::resumeout::finished_any() {
         return;
     }
     // Trash-aware, unlike the nested-intermediate sweep above: these
@@ -568,5 +635,117 @@ pub(crate) fn sweep_spent_obfuscated(
                 path.display()
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod resumed_sweep_tests {
+    use super::*;
+
+    fn tdir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "nzbfast-obfsweep-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn touch(p: &std::path::Path, len: u64) {
+        std::fs::File::create(p).unwrap().set_len(len).unwrap();
+    }
+
+    /// The shape this module exists for: a compressed obfuscated set too
+    /// big for the holds slice. The in-stream chase writes a prefix and
+    /// FORFEITS, the volumes materialize, and the disk pass appends the
+    /// rest to the file the chase already published - IN PLACE.
+    ///
+    /// So the before/after directory diff is empty, and the sweep read
+    /// that as "the extraction published nothing, so these volumes are
+    /// not spent" and kept the whole set beside the finished payload -
+    /// the 144-volume / 57 GB shape - on a job reporting Completed. The
+    /// named-set closure in `rarfix.rs` was fixed for exactly this with
+    /// `resumeout::finished_any()`; this arm was not.
+    ///
+    /// NEGATIVE CONTROL, run: drop `&& !crate::resumeout::finished_any()`
+    /// and the first case fails, naming the volumes still on disk.
+    #[test]
+    fn a_resumed_member_is_proof_the_volumes_are_spent() {
+        let dir = tdir("resumed");
+        let payload = dir.join("film.mkv");
+        touch(&payload, 1_000);
+        let vols: Vec<PathBuf> = (1..=3)
+            .map(|n| {
+                let p = dir.join(format!("abc123.{n:02}"));
+                touch(&p, 100);
+                p
+            })
+            .collect();
+
+        // Snapshot AFTER the chase published its prefix, which is what
+        // the real caller does - the prefix is already in `before`.
+        let before = snapshot_recursive(&dir).unwrap();
+
+        // The disk pass appends in place: same path, no new name.
+        touch(&payload, 5_000);
+
+        let outputs = [nzbkit::extract::ResumeOutput {
+            member: "film.mkv".to_string(),
+            path: payload.clone(),
+            len: 1_000,
+            crc32: 0,
+        }];
+        let _arm = crate::resumeout::ResumeArm::new(&outputs);
+        crate::resumeout::keep(std::slice::from_ref(&payload));
+        assert!(
+            crate::resumeout::finished_any(),
+            "the fixture must arm what the sweep is meant to read"
+        );
+
+        sweep_spent_obfuscated(&dir, &vols, true, Some(&before));
+        for v in &vols {
+            assert!(
+                !v.exists(),
+                "a resumed member is proof the set was read: {} is still here",
+                v.display()
+            );
+        }
+        assert!(payload.exists(), "the payload is never swept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The control arm: nothing resumed and nothing published either, so
+    /// there is no proof these volumes were read and they must stay. The
+    /// clause above must not have turned the sweep into an unconditional
+    /// delete.
+    #[test]
+    fn with_nothing_resumed_and_nothing_published_the_volumes_stay() {
+        let dir = tdir("noproof");
+        let vols: Vec<PathBuf> = (1..=2)
+            .map(|n| {
+                let p = dir.join(format!("abc123.{n:02}"));
+                touch(&p, 100);
+                p
+            })
+            .collect();
+        let before = snapshot_recursive(&dir).unwrap();
+
+        // An armed ledger that finished NOTHING.
+        let outputs = [nzbkit::extract::ResumeOutput {
+            member: "film.mkv".to_string(),
+            path: dir.join("film.mkv"),
+            len: 0,
+            crc32: 0,
+        }];
+        let _arm = crate::resumeout::ResumeArm::new(&outputs);
+        assert!(!crate::resumeout::finished_any());
+
+        sweep_spent_obfuscated(&dir, &vols, true, Some(&before));
+        for v in &vols {
+            assert!(v.exists(), "no proof, no delete: {}", v.display());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

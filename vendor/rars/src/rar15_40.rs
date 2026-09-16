@@ -45,13 +45,13 @@ const PROTECT_HEAD: u8 = 0x78;
 const NEWSUB_HEAD: u8 = 0x7a;
 const ENDARC_HEAD: u8 = 0x7b;
 
-/// Sub type of a RAR 2.x unix-owner sub-block (unrar's `UO_HEAD`), stored at
+/// Sub type `0x0101` of a RAR 2.x sub-block, the unix owner record, stored at
 /// `+11` of a `SUB_HEAD` block.
-const UO_HEAD: u16 = 0x0101;
+const SUBBLOCK_UNIX_OWNER: u16 = 0x0101;
 /// Fixed part of a unix-owner sub-block: the 7-byte short header, the 4-byte
 /// data size (`SUB_HEAD` always carries `LONG_BLOCK`), sub type, level, and
-/// the two name sizes (unrar's `SIZEOF_UOWNERHEAD`).
-const SIZEOF_UOWNERHEAD: usize = 18;
+/// the two name sizes.
+const UNIX_OWNER_FIXED_SIZE: usize = 18;
 
 const LONG_BLOCK: u16 = 0x8000;
 /// A block a reader may skip whole when it does not know the type. Set
@@ -1298,7 +1298,8 @@ impl Archive {
             return Err(Error::InvalidHeader("RAR 1.5 marker block is invalid"));
         }
 
-        let main_block = read_block_header_at(file, file_len, sfx_offset, marker.head_size as usize)?;
+        let main_block =
+            read_block_header_at(file, file_len, sfx_offset, marker.head_size as usize)?;
         if main_block.head_type != MAIN_HEAD {
             return Err(Error::InvalidHeader("RAR 1.5 main header is missing"));
         }
@@ -1463,7 +1464,10 @@ impl Archive {
             dest.set_len(source_len as u64)?;
         }
 
-        repair_protect_sectors(self, &plan, &recovery, dest, budget)
+        // ONE handle for the whole repair, not one per window read - see
+        // `RepairRangeSource`. Non-file shapes are unchanged.
+        let src = crate::source::RepairRangeSource::new(&self.source, source_len as u64);
+        repair_protect_sectors(&src, &plan, &recovery, dest, budget)
     }
 
     /// Streams extracted entries to caller-provided writers.
@@ -1544,8 +1548,7 @@ impl Archive {
         let budget = Arc::new((Mutex::new((0u64, false)), Condvar::new()));
         let (work_tx, work_rx) = mpsc::sync_channel::<usize>(workers * 2);
         let work_rx = Arc::new(Mutex::new(work_rx));
-        let (result_tx, result_rx) =
-            mpsc::channel::<(usize, Result<ParallelExtractedEntry>)>();
+        let (result_tx, result_rx) = mpsc::channel::<(usize, Result<ParallelExtractedEntry>)>();
 
         let outcome = std::thread::scope(|scope| {
             {
@@ -1556,13 +1559,24 @@ impl Archive {
                         let size = file.unp_size;
                         let (lock, cvar) = &*budget;
                         let mut state = lock.lock().expect("pool budget lock");
-                        while !state.1 && state.0 > 0 && state.0 + size > INFLIGHT_BUDGET {
+                        // nzbfast: saturating on both, as the rar50
+                        // twin's feeder is checked. `size` is a
+                        // header-declared unpacked size and a FHD_LARGE
+                        // header may put it near u64::MAX, so the plain
+                        // arithmetic panicked under overflow checks and
+                        // wrapped in release - a wrap here reads as
+                        // "budget free" and admits the member the budget
+                        // exists to hold back.
+                        while !state.1
+                            && state.0 > 0
+                            && state.0.saturating_add(size) > INFLIGHT_BUDGET
+                        {
                             state = cvar.wait(state).expect("pool budget wait");
                         }
                         if state.1 {
                             return;
                         }
-                        state.0 += size;
+                        state.0 = state.0.saturating_add(size);
                         drop(state);
                         if work_tx.send(index).is_err() {
                             return;
@@ -1669,6 +1683,19 @@ impl Archive {
         else {
             return Ok(None);
         };
+        // nzbfast: the decode buffers the packed record and grows its
+        // output to the DECLARED unpacked size, so a small parseable
+        // archive whose comment claims gigabytes aborts the process -
+        // the same shape `newsub_protect_plan` budgets against, in the
+        // words of its own comment ("a small hostile header aborts the
+        // process"). The archive's own length is the ceiling: a comment
+        // cannot honestly decode to more than the file it lives in.
+        let budget = self.source.len()? as u64;
+        if u64::from(comment.file.pack_size).saturating_add(u64::from(comment.file.unp_size))
+            > budget
+        {
+            return Err(Error::LegacyRepairTooLarge);
+        }
         let data = comment.file.unpacked_data(self)?;
         comment.file.verify_crc32(&data)?;
         Ok(Some(data))
@@ -2072,6 +2099,20 @@ fn newsub_recovery_data(archive: &Archive, recovery: &NewSubHeader) -> Result<Ve
         }
         return recovery.file.stored_data(archive);
     }
+    // nzbfast: the decode buffers the packed record and grows its output
+    // to the DECLARED unpacked size, so both must fit a budget BEFORE
+    // the allocation happens or a small hostile header aborts the
+    // process. `newsub_protect_plan` says exactly this and budgets for
+    // it; the BUFFERED twin here did not, and RR repair is what runs
+    // after an extraction failure, so it is reached automatically.
+    //
+    // The archive's own length is the ceiling: a recovery record cannot
+    // honestly decode to more than the file it protects.
+    let budget = archive.source.len()? as u64;
+    if u64::from(recovery.file.pack_size).saturating_add(u64::from(recovery.file.unp_size)) > budget
+    {
+        return Err(Error::LegacyRepairTooLarge);
+    }
     let mut session = DecoderSession::new(false);
     session.decode_file_data(archive, &recovery.file)
 }
@@ -2105,15 +2146,12 @@ struct ProtectPlan {
 /// RAR 3.x NEWSUB record live in the archive itself and are read by range;
 /// only a compressed NEWSUB record has to be materialized, and that decode
 /// is budgeted before it happens.
-enum ProtectRecoveryBytes<'a> {
-    InArchive {
-        archive: &'a Archive,
-        range: Range<usize>,
-    },
+enum ProtectRecoveryBytes {
+    InArchive { range: Range<usize> },
     Decoded(Vec<u8>),
 }
 
-impl ProtectRecoveryBytes<'_> {
+impl ProtectRecoveryBytes {
     fn resident_len(&self) -> u64 {
         match self {
             Self::InArchive { .. } => 0,
@@ -2121,16 +2159,25 @@ impl ProtectRecoveryBytes<'_> {
         }
     }
 
-    fn read_into(&self, offset: usize, buf: &mut [u8]) -> Result<()> {
+    /// `src` is the archive's own bytes, held on ONE handle for the whole
+    /// repair - see [`crate::source::RepairRangeSource`]. This used to read
+    /// through `archive.source.read_range_into`, which opens the path again
+    /// on every call, and both this and [`read_sector_window`] are called
+    /// once per 256 KiB window of a volume traversed twice.
+    fn read_into(
+        &self,
+        src: &crate::source::RepairRangeSource<'_>,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        use crate::recovery::stream::RangeSource as _;
         match self {
-            Self::InArchive { archive, range } => {
+            Self::InArchive { range } => {
                 let end = offset.checked_add(buf.len()).ok_or(Error::TooShort)?;
                 if end > range.len() {
                     return Err(Error::TooShort);
                 }
-                archive
-                    .source
-                    .read_range_into((range.start + offset) as u64, buf)
+                src.read_at((range.start + offset) as u64, buf)
             }
             Self::Decoded(data) => {
                 let end = offset.checked_add(buf.len()).ok_or(Error::TooShort)?;
@@ -2140,20 +2187,24 @@ impl ProtectRecoveryBytes<'_> {
         }
     }
 
-    fn read_tag(&self, index: usize) -> Result<u16> {
+    fn read_tag(
+        &self,
+        src: &crate::source::RepairRangeSource<'_>,
+        index: usize,
+    ) -> Result<u16> {
         let mut tag = [0u8; 2];
-        self.read_into(index * 2, &mut tag)?;
+        self.read_into(src, index * 2, &mut tag)?;
         Ok(u16::from_le_bytes(tag))
     }
 }
 
 /// Resolves a RAR 2.x PROTECT_HEAD record into a [`ProtectPlan`], with the
 /// same validation and messages as [`repair_protect_head_bytes`].
-fn protect_head_plan<'a>(
-    archive: &'a Archive,
+fn protect_head_plan(
+    archive: &Archive,
     protect: &ProtectHeader,
     source_len: usize,
-) -> Result<(ProtectPlan, ProtectRecoveryBytes<'a>)> {
+) -> Result<(ProtectPlan, ProtectRecoveryBytes)> {
     if protect.rec_sectors == 0 {
         return Err(Error::InvalidHeader(
             "RAR 2.x recovery record has no parity sectors",
@@ -2215,7 +2266,6 @@ fn protect_head_plan<'a>(
                 "RAR 2.x recovery cannot repair multiple sectors in the same parity group",
         },
         ProtectRecoveryBytes::InArchive {
-            archive,
             range: protect.data_range.clone(),
         },
     ))
@@ -2225,12 +2275,12 @@ fn protect_head_plan<'a>(
 /// the same validation and messages as [`repair_newsub_recovery_bytes`]. A
 /// stored record stays in the archive and is read by range; a compressed
 /// one is decoded, counted against `budget` first.
-fn newsub_protect_plan<'a>(
-    archive: &'a Archive,
+fn newsub_protect_plan(
+    archive: &Archive,
     recovery: &NewSubHeader,
     source_len: usize,
     budget: u64,
-) -> Result<(ProtectPlan, ProtectRecoveryBytes<'a>)> {
+) -> Result<(ProtectPlan, ProtectRecoveryBytes)> {
     if recovery.file.is_encrypted() {
         return Err(Error::UnsupportedFeature {
             version: ArchiveVersion::Rar30,
@@ -2254,7 +2304,7 @@ fn newsub_protect_plan<'a>(
                 "RAR 3.x recovery data size does not match unpacked size",
             ));
         }
-        ProtectRecoveryBytes::InArchive { archive, range }
+        ProtectRecoveryBytes::InArchive { range }
     } else {
         // The decode buffers the packed record and grows its output to the
         // declared unpacked size; both must fit the budget BEFORE the
@@ -2328,19 +2378,18 @@ fn newsub_protect_plan<'a>(
 /// by range and zero-padding a partial final sector - the streaming
 /// equivalent of [`protected_sector`]. Returns the filled window.
 fn read_sector_window<'b>(
-    archive: &Archive,
+    src: &crate::source::RepairRangeSource<'_>,
     plan: &ProtectPlan,
     first: usize,
     count: usize,
     buf: &'b mut [u8],
 ) -> Result<&'b [u8]> {
+    use crate::recovery::stream::RangeSource as _;
     let window = &mut buf[..count * 512];
     let start = first * 512;
     let end = (start + count * 512).min(plan.protected_len);
     let take = end.saturating_sub(start);
-    archive
-        .source
-        .read_range_into((plan.protected_start + start) as u64, &mut window[..take])?;
+    src.read_at((plan.protected_start + start) as u64, &mut window[..take])?;
     window[take..].fill(0);
     Ok(window)
 }
@@ -2352,9 +2401,9 @@ fn read_sector_window<'b>(
 /// damaged sector (plus the decoded record when it was compressed), never
 /// the volume.
 fn repair_protect_sectors(
-    archive: &Archive,
+    src: &crate::source::RepairRangeSource<'_>,
     plan: &ProtectPlan,
-    recovery: &ProtectRecoveryBytes<'_>,
+    recovery: &ProtectRecoveryBytes,
     dest: &mut File,
     budget: u64,
 ) -> Result<Vec<usize>> {
@@ -2368,8 +2417,8 @@ fn repair_protect_sectors(
     let mut index = 0usize;
     while index < plan.sectors {
         let count = PROTECT_WINDOW_SECTORS.min(plan.sectors - index);
-        let window = read_sector_window(archive, plan, index, count, &mut window_buf)?;
-        recovery.read_into(index * 2, &mut tag_buf[..count * 2])?;
+        let window = read_sector_window(src, plan, index, count, &mut window_buf)?;
+        recovery.read_into(src, index * 2, &mut tag_buf[..count * 2])?;
         for s in 0..count {
             let sector = &window[s * 512..s * 512 + 512];
             let actual = (!crc32(sector) & 0xffff) as u16;
@@ -2422,7 +2471,7 @@ fn repair_protect_sectors(
     for &missing in &damaged {
         let slot = missing % plan.parity_sectors;
         let mut acc = [0u8; 512];
-        recovery.read_into(plan.parity_offset + slot * 512, &mut acc)?;
+        recovery.read_into(src, plan.parity_offset + slot * 512, &mut acc)?;
         accumulators.push(acc);
     }
     let by_slot: std::collections::HashMap<usize, usize> = damaged
@@ -2439,7 +2488,7 @@ fn repair_protect_sectors(
     index = 0;
     while index < plan.sectors {
         let count = PROTECT_WINDOW_SECTORS.min(plan.sectors - index);
-        let window = read_sector_window(archive, plan, index, count, &mut window_buf)?;
+        let window = read_sector_window(src, plan, index, count, &mut window_buf)?;
         for s in 0..count {
             let sector_index = index + s;
             if let Some(&n) = by_slot.get(&(sector_index % plan.parity_sectors)) {
@@ -2458,7 +2507,7 @@ fn repair_protect_sectors(
     for (n, &missing) in damaged.iter().enumerate() {
         let sector = &accumulators[n];
         let actual = (!crc32(sector) & 0xffff) as u16;
-        let expected = recovery.read_tag(missing)?;
+        let expected = recovery.read_tag(src, missing)?;
         if actual != expected {
             return Err(Error::CrcMismatch { expected, actual });
         }
@@ -2984,7 +3033,8 @@ fn decode_file_name(raw: &[u8], flags: u16) -> Vec<u8> {
     let mut dst_pos = 0usize;
     let mut units = Vec::new();
 
-    // WinRAR's decoder stops at `MaxDecSize` (NM). Without that ceiling a
+    // Real RAR 4 names are far shorter than this, so decoding stops at
+    // MAX_NAME_UNITS output units. Without that ceiling a
     // mode-3 run emits up to 129 output units per encoded byte, so a single
     // u16-bounded header (~65 KB) decodes to ~6.7 MB of retained String -
     // ~100x amplification from attacker-supplied archive bytes. A real RAR4
@@ -3203,17 +3253,15 @@ fn header_crc_end(
 /// How many bytes PAST `head_size` the `HEAD_CRC` of a RAR 2.x unix-owner
 /// sub-block covers, or `None` when the block is not one.
 ///
-/// `UO_HEAD` (`0x77` sub type `0x0101`) declares an owner and a group name
+/// `SUBBLOCK_UNIX_OWNER` (`0x77` sub type `0x0101`) declares an owner and a group name
 /// size in its fixed part but stores the names themselves in the block's data
-/// area, past `head_size`. unrar reads both names into the same raw header
-/// buffer before checksumming it (`Raw.Read(OwnerNameSize)` /
-/// `Raw.Read(GroupNameSize)`, then `Raw.GetCRC15(false)` over the whole
-/// buffer), so the CRC WinRAR stamped covers them too. Checksumming only
-/// `head_size` rejects archives `rar`, `unrar` and `7z` all read - it is what
+/// area, past `head_size`, and the CRC WinRAR stamps covers them too.
+/// `rar`, `unrar` and `7z` all read such archives, and checksumming only
+/// `head_size` rejects them - it is what
 /// made `rar2-unix-owner.rar` fail with `expected 0x1fc3, got 0x974d`.
 ///
 /// The extension is deliberately keyed on the sub type, not on the block's
-/// data size: other sub-block flavours (`EA_HEAD`, `NTACL_HEAD`, `STREAM_HEAD`)
+/// data size: other sub-block flavours (extended attributes, NT ACLs, NTFS streams)
 /// carry a payload their header CRC does not cover, and this fixture cannot
 /// tell the two rules apart because its names happen to fill the data area
 /// exactly.
@@ -3226,12 +3274,12 @@ fn unix_owner_crc_extra(
 ) -> Result<Option<usize>> {
     if head_type != SUB_HEAD
         || flags & LONG_BLOCK == 0
-        || (head_size as usize) < SIZEOF_UOWNERHEAD
-        || input.len() < offset + SIZEOF_UOWNERHEAD
+        || (head_size as usize) < UNIX_OWNER_FIXED_SIZE
+        || input.len() < offset + UNIX_OWNER_FIXED_SIZE
     {
         return Ok(None);
     }
-    if read_u16(input, offset + 11)? != UO_HEAD {
+    if read_u16(input, offset + 11)? != SUBBLOCK_UNIX_OWNER {
         return Ok(None);
     }
     let owner_name_size = read_u16(input, offset + 14)? as usize;

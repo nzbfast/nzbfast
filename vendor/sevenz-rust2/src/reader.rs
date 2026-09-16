@@ -275,6 +275,21 @@ impl Archive {
         if nid == K_FILES_INFO {
             Self::read_files_info(header, archive, limit)?;
             nid = header.read_u8()?;
+        } else {
+            // nzbfast: kFilesInfo is OPTIONAL, and `calculate_stream_map`
+            // ran only inside `read_files_info`. A header carrying
+            // kMainStreamsInfo blocks and no kFilesInfo therefore parsed
+            // Ok with an EMPTY stream map, and `build_decode_stack` then
+            // indexed `block_first_pack_stream_index[block_index]` on a
+            // zero-length Vec: an index-out-of-bounds panic, raised on
+            // the 7z chase thread, which carries no catch_unwind. One
+            // crafted archive.
+            //
+            // The map is derivable without any files - its block and
+            // pack vectors come from `blocks` and `pack_sizes` alone,
+            // and the file loop simply does not run - so the answer is
+            // to calculate it anyway rather than to guard every reader.
+            Self::calculate_stream_map(archive)?;
         }
         if nid != K_END {
             return Err(Error::BadTerminatedHeader(nid));
@@ -1349,12 +1364,24 @@ impl<R: Read + Seek> ArchiveReader<R> {
         if block.total_input_streams > block.total_output_streams {
             return Self::build_decode_stack2(source, archive, block_index, password, thread_count);
         }
-        let first_pack_stream_index = archive.stream_map.block_first_pack_stream_index[block_index];
+        // nzbfast: `.get()` rather than `[]` on both, so a stream map
+        // that does not describe this block is an error and never a
+        // panic on a chase thread. `read_header` now populates the map
+        // even for a header with no kFilesInfo, which is how it came to
+        // be empty here; this is the floor under that.
+        let first_pack_stream_index = *archive
+            .stream_map
+            .block_first_pack_stream_index
+            .get(block_index)
+            .ok_or_else(|| Error::other("block is not described by the stream map"))?;
+        let pack_offset = *archive
+            .stream_map
+            .pack_stream_offsets
+            .get(first_pack_stream_index)
+            .ok_or_else(|| Error::other("block names a pack stream the archive does not have"))?;
         let block_offset = SIGNATURE_HEADER_SIZE
             .checked_add(archive.pack_pos)
-            .and_then(|v| {
-                v.checked_add(archive.stream_map.pack_stream_offsets[first_pack_stream_index])
-            })
+            .and_then(|v| v.checked_add(pack_offset))
             .ok_or_else(|| Error::other("block offset out of range"))?;
 
         let (mut has_crc, mut crc) = (block.has_crc, block.crc);
@@ -1427,15 +1454,30 @@ impl<R: Read + Seek> ArchiveReader<R> {
 
         assert!(block.total_input_streams > block.total_output_streams);
         let shared_source = Rc::new(RefCell::new(source));
-        let first_pack_stream_index = archive.stream_map.block_first_pack_stream_index[block_index];
+        // nzbfast: `.get()` for the same reason as in
+        // `build_decode_stack` - an undescribed block is an error, not
+        // an index panic on a chase thread. The slice below is bounded
+        // the same way: `calculate_stream_map` already refuses a block
+        // whose span runs past the pack streams, but a map that never
+        // ran had no span to refuse.
+        let first_pack_stream_index = *archive
+            .stream_map
+            .block_first_pack_stream_index
+            .get(block_index)
+            .ok_or_else(|| Error::other("block is not described by the stream map"))?;
         let start_pos = SIGNATURE_HEADER_SIZE
             .checked_add(archive.pack_pos)
             .ok_or_else(|| Error::other("pack position out of range"))?;
-        let offsets = &archive.stream_map.pack_stream_offsets[first_pack_stream_index..];
+        let offsets = archive
+            .stream_map
+            .pack_stream_offsets
+            .get(first_pack_stream_index..)
+            .and_then(|o| o.get(..block.packed_streams.len()))
+            .ok_or_else(|| Error::other("block names pack streams the archive does not have"))?;
 
         let mut sources = Vec::with_capacity(block.packed_streams.len());
 
-        for (i, offset) in offsets[..block.packed_streams.len()].iter().enumerate() {
+        for (i, offset) in offsets.iter().enumerate() {
             let pack_pos = start_pos
                 .checked_add(*offset)
                 .ok_or_else(|| Error::other("pack stream offset out of range"))?;
@@ -1830,9 +1872,25 @@ impl<'a, R: Read + Seek> BlockDecoder<'a, R> {
     ///
     /// The entries are returned in the order they appear in the block.
     pub fn entries(&self) -> &[ArchiveEntry] {
-        let start = self.archive.stream_map.block_first_file_index[self.block_index];
+        // nzbfast: EMPTY rather than a panic when the stream map does
+        // not describe this block, or the block declares more
+        // sub-streams than the archive has files - the shape a header
+        // with kMainStreamsInfo and no kFilesInfo parses to. This
+        // returns a borrow and so cannot report an error; the decoding
+        // paths that CAN (`for_each_entries`, `build_decode_stack`) do.
+        let Some(&start) = self
+            .archive
+            .stream_map
+            .block_first_file_index
+            .get(self.block_index)
+        else {
+            return &[];
+        };
         let file_count = self.archive.blocks[self.block_index].num_unpack_sub_streams;
-        &self.archive.files[start..(file_count + start)]
+        self.archive
+            .files
+            .get(start..start.saturating_add(file_count))
+            .unwrap_or(&[])
     }
 
     /// Returns the number of entries contained in this block.
@@ -1864,9 +1922,23 @@ impl<'a, R: Read + Seek> BlockDecoder<'a, R> {
             password,
             thread_count,
         )?;
-        let start = archive.stream_map.block_first_file_index[block_index];
+        // nzbfast: see `build_decode_stack` - a map that does not
+        // describe this block is an error, not a panic.
+        let start = *archive
+            .stream_map
+            .block_first_file_index
+            .get(block_index)
+            .ok_or_else(|| Error::other("block is not described by the stream map"))?;
         let file_count = archive.blocks[block_index].num_unpack_sub_streams;
 
+        // nzbfast: and the files this block names must EXIST. A header
+        // with no kFilesInfo parses with zero files while its blocks
+        // still declare sub-streams, so this range indexed an empty Vec.
+        if start.saturating_add(file_count) > archive.files.len() {
+            return Err(Error::other(
+                "block declares more sub-streams than the archive has files",
+            ));
+        }
         for file_index in start..(file_count + start) {
             let file = &archive.files[file_index];
             if file.has_stream && file.size > 0 {

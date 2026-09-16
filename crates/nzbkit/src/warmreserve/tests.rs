@@ -384,6 +384,57 @@ async fn the_reserve_stands_down_while_the_pool_is_released() {
     );
 }
 
+/// The other half of the stand-down, and the one the test above cannot
+/// see because it reaches the timeout with `rewind_activity` AFTER the
+/// fill: the reserve's own refills must not push the timeout away.
+///
+/// `fill` parks through `WarmPool::give_spare` rather than `give` for
+/// exactly this. A park that restarted the pool-wide activity clock made
+/// the stand-down unreachable whenever refills recurred faster than the
+/// timeout - which the reserve guarantees they do, since its floor is
+/// MAINTAINED and `max_idle` evicts every parked session 600 s after it
+/// was parked no matter how many keepalives answered. That is the
+/// sweep's item 25 (16 Sep 2026), and the semantics it settles are on
+/// `WarmPool::give_spare`: an account with a reserve releases on exactly
+/// the clock it would have with no reserve at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reserve_refill_does_not_push_its_own_stand_down_away() {
+    let mock = provider().await;
+    let sc = cfg(&mock, 8, 2);
+    let warm = pool();
+    let budget = ConnBudget::new();
+    let reserve = WarmReserve::new(warm.clone(), budget.clone());
+    reserve.set_servers(std::slice::from_ref(&sc));
+    warm.set_release_policies(std::slice::from_ref(&sc));
+    let after = sc.idle_release_policy().after.expect("a derived timeout");
+
+    // The pool is one second short of its release timeout, so the
+    // reserve is still entitled to dial - and does.
+    warm.rewind_activity(after - Duration::from_secs(1));
+    reserve.tick().await;
+    assert_eq!(warm.parked_for(&sc).await, 2, "it dials inside the window");
+    let dialled = reserve.counts().0;
+    assert!(
+        warm.idle_for() >= after - Duration::from_secs(2),
+        "the refill restarted the clock its own stand-down reads, so the reserve \
+         would trade sockets with the release for as long as the daemon ran"
+    );
+
+    // One more second of nothing downloading, and the timeout is reached
+    // on the clock a reserveless pool would have had.
+    warm.rewind_activity(Duration::from_secs(2));
+    reserve.tick().await;
+
+    let st = reserve.status_for(&sc).expect("reported");
+    assert_eq!(st.note, ReserveNote::Released);
+    assert_eq!(st.effective, 0);
+    assert_eq!(
+        reserve.counts().0,
+        dialled,
+        "and it stood down rather than redialling through the release"
+    );
+}
+
 /// A closed pool (the daemon going offline) is not a shortfall to be
 /// dialled through. `set_accepting(false)` is how "give the account
 /// back" is said, and a reserve that kept dialling would be the one

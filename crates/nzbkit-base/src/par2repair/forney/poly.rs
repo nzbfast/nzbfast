@@ -32,8 +32,10 @@
 //!   evaluation answers every column at once and is then a lookup.
 //!
 //! Both are armed by [`super::joint_gate`] - the default on aarch64
-//! since 11 Sep 2026, `--fast` or `NZBFAST_FORNEY_JOINT=1` on x86. When
-//! that gate says no neither runs and the constructor is the coefficient
+//! since 11 Sep 2026 and on every x86 kernel class since 12 Sep 2026,
+//! with `--fast` or `NZBFAST_FORNEY_JOINT=1` to force it and
+//! `NZBFAST_FORNEY_JOINT=0` to take the shipped solve instead. When that
+//! gate says no neither runs and the constructor is the coefficient
 //! chain it has always been.
 use crate::gf16;
 

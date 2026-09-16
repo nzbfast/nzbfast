@@ -1043,10 +1043,38 @@ pub async fn index_gapfill_pass(
                     let chunk_hi = at.saturating_add(CHUNK.min(budget) - 1).min(hi);
                     match conn.over(at, chunk_hi).await {
                         Ok(entries) => {
-                            // blocking_db: an inline ingest transaction on
-                            // an async worker starves the runtime (see
-                            // persist::blocking_db).
-                            let _ = crate::persist::blocking_db(|| ix.ingest(&grp, &entries, now));
+                            // The wire request size and the ingest batch
+                            // size are separate decisions (see
+                            // `nzbkit::index::INGEST_BATCH`): the OVER
+                            // above ran at `CHUNK`, the ingest runs at
+                            // `INGEST_BATCH`, one `blocking_db` hop PER
+                            // sub-batch so the write lock is genuinely
+                            // dropped between them. This was a no-op
+                            // when it landed - both constants were
+                            // 20,000, so it was one sub-batch - and it
+                            // is what let `INGEST_BATCH` go to 10,000
+                            // on 16 Sep 2026 without also changing what
+                            // this leg asks the server for. Two
+                            // sub-batches per window now.
+                            //
+                            // Nothing here is tied to a batch boundary:
+                            // this leg touches no marks at all (the
+                            // doc comment above says so - gapfill is
+                            // out-of-band coverage), `budget` is counted
+                            // from the article range below rather than
+                            // from the rows, and completeness is read
+                            // once the whole window is done.
+                            for sub in entries.chunks(nzbkit::index::INGEST_BATCH) {
+                                // blocking_db: an inline ingest transaction on
+                                // an async worker starves the runtime (see
+                                // persist::blocking_db).
+                                let _hold = crate::holdstat::Timer::start(
+                                    "gapfill_ingest",
+                                    file!(),
+                                    line!(),
+                                );
+                                let _ = crate::persist::blocking_db(|| ix.ingest(&grp, sub, now));
+                            }
                         }
                         Err(_) => break,
                     }
@@ -1436,6 +1464,14 @@ pub(crate) async fn collect_scan_pass(
                     // this is the deepen pass's main ingest, three of
                     // which ran concurrently in the measured 38 s runner
                     // starvation.
+                    //
+                    // Timed, because the pass's own `done:` line reports
+                    // headers/s for the WHOLE pass and nothing said what
+                    // share of it was this: the accumulated `total_us`
+                    // divided by the pass wall is that share, which is
+                    // the question `INGEST_BATCH`'s doc comment asks to
+                    // answer before the constant moves.
+                    let _hold = crate::holdstat::Timer::start("deepen_ingest", file!(), line!());
                     completed += crate::persist::blocking_db(|| ix.ingest(group, sub, now))?;
                 }
                 n_entries += entries.len() as u64;
@@ -2226,7 +2262,18 @@ mod scan_pass_tests {
     /// it moves across four whole idle windows with NOTHING delivered,
     /// which under the old rule was four abandons; the pass must survive
     /// all of them and then complete on the chunk that finally lands.
-    #[tokio::test]
+    ///
+    /// This drives a PAUSED virtual clock rather than racing a real one:
+    /// `collect_scan_pass`'s deadline is entirely `tokio::time::timeout`,
+    /// never a `std::time::Instant` comparison, so pausing tokio's clock
+    /// makes it drivable. Under `start_paused = true` a current-thread
+    /// runtime auto-advances the virtual clock to the next pending
+    /// timer whenever every task is blocked on one, so the feeder's
+    /// `idle / 2` ticks and the collector's `idle` timeout fire in exact
+    /// virtual-time order with no real scheduling margin to lose - the
+    /// four-tick, one-shot form is not a race, it is a queue of timers
+    /// with 25ms < 50ms relations built in from the durations alone.
+    #[tokio::test(start_paused = true)]
     async fn a_slow_but_live_over_stream_is_not_abandoned_mid_transfer() {
         let (dir, mut ix) = tmp_index("slowwire");
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -2282,7 +2329,13 @@ mod scan_pass_tests {
     /// still abandoned on time. Without this, "re-arm on progress" could
     /// be satisfied by never abandoning at all, which is the freeze the
     /// deadline exists to prevent.
-    #[tokio::test]
+    ///
+    /// Paused-clock for the same reason as its sibling above: the
+    /// collector's deadline is pure `tokio::time::timeout`, so pausing
+    /// tokio's clock makes abandonment fire on the virtual 50ms mark
+    /// with no real time elapsing at all, rather than trusting a real
+    /// clock to abandon inside a generous but still finite margin.
+    #[tokio::test(start_paused = true)]
     async fn a_silent_wire_is_still_abandoned_on_the_deadline() {
         let (dir, mut ix) = tmp_index("deadwire");
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -2293,7 +2346,7 @@ mod scan_pass_tests {
         // what it last SAW, not against zero.
         let wire = Arc::new(AtomicU64::new(9_000_000));
 
-        let t0 = Instant::now();
+        let t0 = tokio::time::Instant::now();
         let pass = tokio::time::timeout(
             Duration::from_secs(10),
             collect_scan_pass(
@@ -2320,8 +2373,8 @@ mod scan_pass_tests {
         assert!(!pass.complete, "an abandoned pass must not report complete");
         assert!(
             t0.elapsed() < Duration::from_secs(5),
-            "abandoning took {:?} - a static counter must not re-arm the \
-             deadline",
+            "abandoning took {:?} of virtual time - a static counter must \
+             not re-arm the deadline",
             t0.elapsed()
         );
         assert_eq!(ix.high_water("alt.test", "srv1"), 199);

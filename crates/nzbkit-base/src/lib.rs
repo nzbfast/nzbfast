@@ -20,6 +20,17 @@
 pub mod audiotag;
 pub mod categories;
 pub mod config;
+/// The validated digest cache: a per-user record of a large file's
+/// whole-file MD5 beside its BLAKE3, consumed by a repeat create or
+/// whole-file verify only after BLAKE3 re-proves the content. Behind the
+/// `digest-cache` feature; without it, an inert stub with the same
+/// crate-internal surface, so the create and verify paths never branch
+/// on the feature themselves.
+#[cfg(feature = "digest-cache")]
+pub mod digest_cache;
+#[cfg(not(feature = "digest-cache"))]
+#[path = "digest_cache_off.rs"]
+pub mod digest_cache;
 pub mod disk;
 /// PLAN M31 stage 1: borrow a lost segment's bytes from a duplicate
 /// posting, proved block by block against the target's own PAR2 set.
@@ -54,6 +65,14 @@ pub mod md5fast;
 pub mod media;
 pub mod mem;
 pub mod memgauge;
+/// Fast `memset` / `memcpy` / `memmove` / `memcmp` / `bcmp` for the static
+/// musl downloads, whose zig-linked `compiler_rt` serves byte loops. x86_64
+/// and AArch64 have their own shapes; armv7 has none (see the module docs).
+/// Not part of the real API: public only so the bins can reach it through
+/// [`crate::fast_mem_ops`], which is what actually defines the symbols.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[doc(hidden)]
+pub mod memops;
 pub mod mkv;
 /// In-process mock NNTP server. Not part of the real API: public only for
 /// tests and examples in other crates (nzbfast's suites, mockserv).

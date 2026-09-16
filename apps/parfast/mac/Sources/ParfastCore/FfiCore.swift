@@ -142,6 +142,13 @@ public final class FfiCore: CoreClient {
         return Int(loaded)
     }
 
+    @discardableResult
+    public func clearDigestCache() throws -> Int {
+        let removed = pf_digest_cache_clear(session)
+        guard removed >= 0 else { throw lastErrorOrUnknown(removed) }
+        return Int(removed)
+    }
+
     public func planPreview(_ spec: CreateSpec) throws -> PlanPreview {
         // The core takes either the whole job spec or the bare create object;
         // the bare one is what this pane has.

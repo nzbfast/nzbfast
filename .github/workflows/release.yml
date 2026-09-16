@@ -66,6 +66,13 @@ jobs:
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
       - name: Build
         # --locked: build the committed dependency graph, or fail.
+        # MACOSX_DEPLOYMENT_TARGET is read only by apple targets, so the
+        # linux legs ignore it. Unset, cc-rs compiles the mac engine's C
+        # for the runner's own macOS while the header says 11.0
+        # (research/MAC-DEPLOYMENT-TARGET-2026-09-15.md); 11.0 is the mac
+        # CLI floor. No cache in this workflow, so no key to bump.
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: cargo build --release --locked -p nzbfast --target ${{ matrix.target }}
       # A plain `tar czf` records the BUILDING ACCOUNT's uid/gid and user
       # and group names in every member header - `runner`/`runner` on these

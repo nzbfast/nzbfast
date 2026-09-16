@@ -911,6 +911,26 @@ impl FlatPlan {
         fill
     }
 
+    /// The kernel the plan's MEDIAN leaf is admitted to - the one
+    /// summary of a plan's leaf structure the create's stripe width is
+    /// keyed on (`par2repair::fastpar::default_stripe_words`).
+    ///
+    /// The median rather than any leaf or every leaf, because the leaves
+    /// of one plan straddle the additive gate: the i5 ladder of 16 Sep
+    /// 2026 measured a plan of 97 paired / 31 additive leaves behaving
+    /// like the paired regime and one of 32 paired / 96 additive like
+    /// the additive one, so the majority is what the width follows.
+    /// `leaf_fill().median` is element `leaves / 2` of the ascending
+    /// count list and the additive leaves are the fullest, so this is
+    /// exactly "more than half the leaves are additive" - stated as a
+    /// kernel because that is the quantity that carries the meaning.
+    ///
+    /// Off every hot path, like [`Self::leaf_fill`] it walks: called once
+    /// per transform, against a plan build that is already O(65535).
+    pub fn median_leaf_kernel(&self) -> LeafKernel {
+        self.leaf_kernel(self.leaf_fill().median)
+    }
+
     /// The kernel [`eval`] admits a leaf of `count` sources to, modulo
     /// the width-dependent paired refusals documented on
     /// [`Self::leaf_fill`].
@@ -1306,6 +1326,60 @@ mod tests {
         }
     }
 
+    /// The four cells the 16 Sep 2026 i5 ladder straddled the additive
+    /// gate with, pinned to the kernel each was measured as running - and
+    /// with them the MEDIAN the create's stripe width now keys on
+    /// (`par2repair::fastpar::default_stripe_words`).
+    ///
+    /// This is the bridge between the measurement and the rule. The
+    /// ladder's whole result is that `w512` against `w1024` goes from
+    /// +3.3% at 16,128 slices to -19.8% at 16,512, and a rule keyed on
+    /// the median leaf only reproduces that if those two slice counts
+    /// really do sit either side of the median's gate. If the planner's
+    /// leaf structure ever moves, this fails HERE - loudly, on every
+    /// push, naming the cell - rather than in a silent 20% on one arm
+    /// that nothing measures again for a month.
+    ///
+    /// The gate is `additive::MIN_SOURCES`, which is arch-independent, so
+    /// this test is too; the WIDTH the kernel then selects is the arm's
+    /// and is pinned in `par2repair::inline_tests`.
+    #[test]
+    fn the_ladder_s_cells_sit_where_the_create_width_rule_reads_them() {
+        if std::env::var_os("NZBFAST_NTT_ADDITIVE_MIN").is_some() {
+            return;
+        }
+        // (slices, leaves additive, median kernel) as the ladder's
+        // pre-flight fill probe read them and its leg lines confirmed.
+        for &(n, additive, median) in &[
+            (16_128usize, 0usize, LeafKernel::Paired),
+            (16_256, 31, LeafKernel::Paired),
+            (16_384, 96, LeafKernel::Additive),
+            (16_512, 128, LeafKernel::Additive),
+        ] {
+            let logs = crate::par2repair::input_base_logs(n).unwrap();
+            let present: Vec<(u32, SrcId)> = logs
+                .iter()
+                .enumerate()
+                .map(|(i, &l)| (l, i as SrcId))
+                .collect();
+            let plan = FlatPlan::build(&present, n / 10).unwrap();
+            let fill = plan.leaf_fill();
+            assert_eq!(fill.leaves, 128, "n={n}: {fill}");
+            assert_eq!(fill.additive, additive, "n={n}: {fill}");
+            // On a box with no paired leaf (every GFNI arm) the
+            // below-gate leaves are DENSE, not paired - the difference
+            // the GFNI round insists is not carried across. The width
+            // rule asks only whether the median is ADDITIVE, so that is
+            // what is pinned on both.
+            let want = if median == LeafKernel::Paired && plan.paired.is_none() {
+                LeafKernel::Dense
+            } else {
+                median
+            };
+            assert_eq!(plan.median_leaf_kernel(), want, "n={n}: {fill}");
+        }
+    }
+
     #[test]
     fn a_range_plan_reports_the_same_leaf_fill_as_a_prefix_plan() {
         // `build_range` reaches the leaves through `build_node_range`,
@@ -1527,9 +1601,13 @@ mod tests {
             (173usize, &[1usize, 9, 64, 129, 256][..]),
             (512, &[1usize, 127, 256][..]),
             // 1,024 is the x86 production stripe at blocks of 1 MiB and
-            // up (`default_stripe_words`); a FULL leaf there (256 + x0)
-            // must be taken by the paired kernel - `assert!(handled)`
-            // below is what a scratch sized for 512 words fails.
+            // up, below the additive gate (`default_stripe_words`, which
+            // narrowed to 512 above that gate on 16 Sep 2026); a FULL
+            // leaf there (256 + x0) must be taken by the paired kernel -
+            // `assert!(handled)` below is what a scratch sized for 512
+            // words fails. The pairing is rarer in production since the
+            // clause landed and is not gone: the width follows the
+            // MEDIAN leaf, so a skewed plan still reaches it.
             (1024, &[129usize, 256][..]),
         ] {
             for &n in ns {

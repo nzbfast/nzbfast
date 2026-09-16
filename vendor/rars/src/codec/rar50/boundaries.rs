@@ -238,6 +238,10 @@ fn filter_record_bits(filter: EncodeFilter, position: usize) -> Result<usize> {
 }
 
 /// The payload bits of `filters` as `tokens` will carry them.
+///
+/// Its only caller is in this module's own `mod tests`, so the non-test
+/// build sees no use of it.
+#[allow(dead_code)]
 fn filter_payload_bits(tokens: &[EncodeToken], filters: &[EncodeFilter]) -> Result<usize> {
     filter_token_indices(tokens, filters)
         .iter()
@@ -496,6 +500,10 @@ fn refine(
             let prior = cost(left, old)? + cost(old, right)?;
             let mut smallest = prior;
             let mut best = old;
+            // The candidate is a BOUNDARY INDEX, passed to `cost()` as
+            // much as it is used to index `points`; iterating the slice
+            // would need the `left + 1` offset added back at every use.
+            #[allow(clippy::needless_range_loop)]
             for candidate in left + 1..right {
                 if points[candidate].byte.abs_diff(center) > REFINE_WINDOW_BYTES {
                     continue;

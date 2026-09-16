@@ -897,12 +897,22 @@ where
 
 /// serde hook: obfuscate on the way out, for any writer that serializes a
 /// `ServerConfig` rather than building JSON by hand.
+///
+/// [`obfuscate_input`] and NOT [`obfuscate`], because the value here is
+/// RAW: its `de_secret` twin above deobfuscates on the way in, so what a
+/// `ServerConfig` holds in memory is the plaintext a user typed - and a
+/// password is free to start with `obf1:`. The prefix-GUESSING
+/// `obfuscate` wrote such a password to disk verbatim, `deobfuscate`
+/// then decoded the "hex" into four different bytes, and AUTHINFO PASS
+/// failed forever with the config looking correct. That is the F16
+/// defect of 12 Aug 2026, which survived here on the two serde writers
+/// until 16 Sep.
 fn ser_secret<S>(v: &Option<String>, s: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
     match v {
-        Some(p) => s.serialize_some(&obfuscate(p)),
+        Some(p) => s.serialize_some(&obfuscate_input(p)),
         None => s.serialize_none(),
     }
 }
@@ -2005,10 +2015,21 @@ x = y
         assert_eq!((s[1].port, s[1].tls), (119, false));
     }
 
+    // THE PID IN THESE FOUR NAMES IS LOAD-BEARING, and it was missing
+    // until 16 Sep 2026. `ScratchDir::attach` opens by REMOVING the
+    // path, and `temp_dir()` is one directory shared by every worktree
+    // on the box - so a fixed name here means two lanes running the
+    // documented `cargo test -p nzbkit-base --lib` at once delete each
+    // other's scratch mid-test. The same defect in parfast's suite
+    // (a fixed name under `CARGO_TARGET_TMPDIR`) was read as an engine
+    // fault and cost a chip; `crates/parfast/tests/integration/scratch.rs`
+    // carries that record. The four names stay distinct from each other
+    // so one process's parallel tests do not collide either.
     #[test]
     fn ini_extension_routes_to_sab_parser() {
-        let dir =
-            crate::testscratch::ScratchDir::attach(&std::env::temp_dir().join("nzbfast-cfg-test"));
+        let dir = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join(format!("nzbfast-cfg-test-{}", std::process::id())),
+        );
         let p = dir.join("sabnzbd.ini");
         std::fs::write(&p, SAB_INI).unwrap();
         let cfg = Config::load(&p).unwrap();
@@ -2022,7 +2043,7 @@ x = y
     #[test]
     fn sab_ini_next_to_config_is_discovered() {
         let dir = crate::testscratch::ScratchDir::attach(
-            &std::env::temp_dir().join("nzbfast-cfg-test-near"),
+            &std::env::temp_dir().join(format!("nzbfast-cfg-test-near-{}", std::process::id())),
         );
         std::fs::write(dir.join("sabnzbd.ini"), SAB_INI).unwrap();
         let found = sabnzbd_ini_path(&[&*dir]).expect("extra dir searched");
@@ -2045,7 +2066,7 @@ x = y
     #[test]
     fn load_no_fallback_does_not_search_for_sabnzbd_ini() {
         let dir = crate::testscratch::ScratchDir::attach(
-            &std::env::temp_dir().join("nzbfast-cfg-test-strict"),
+            &std::env::temp_dir().join(format!("nzbfast-cfg-test-strict-{}", std::process::id())),
         );
         std::fs::write(dir.join("sabnzbd.ini"), SAB_INI).unwrap();
         let missing = dir.join("config.local.json");
@@ -2088,9 +2109,10 @@ x = y
         // failed on the first assertion. `attach` clears on entry, which
         // is that guarantee, and removes on drop, which the hand-rolled
         // version never did.
-        let dir = crate::testscratch::ScratchDir::attach(
-            &std::env::temp_dir().join("nzbfast-cfg-test-fallback-policy"),
-        );
+        let dir = crate::testscratch::ScratchDir::attach(&std::env::temp_dir().join(format!(
+            "nzbfast-cfg-test-fallback-policy-{}",
+            std::process::id()
+        )));
         std::fs::write(dir.join("sabnzbd.ini"), SAB_INI).unwrap();
         let sab = dir.join("sabnzbd.ini");
         let find = || Some(sab.clone());
@@ -2228,6 +2250,39 @@ mod obf_tests {
         let once = obfuscate_input("secret");
         assert_eq!(obfuscate(&once), once);
         assert_eq!(deobfuscate(&once), "secret");
+    }
+
+    /// The same defect on the SERDE writer, which is where it survived
+    /// the 12 Aug fix: `ser_secret` still called the prefix-guessing
+    /// `obfuscate`, so any writer that serializes a `ServerConfig`
+    /// (rather than building the JSON by hand) wrote such a password
+    /// verbatim. `de_secret` deobfuscates on the way in, so what the
+    /// struct holds is always the RAW password and the guess has nothing
+    /// to be right about.
+    ///
+    /// NEGATIVE CONTROL, run: put `obfuscate` back in `ser_secret` and
+    /// the first case fails, with the password sitting in the JSON in
+    /// clear.
+    #[test]
+    fn the_serde_writer_encodes_a_literal_obf_prefixed_password_too() {
+        for pw in ["obf1:0000", "obf1:abcdef01", "obf1:", "ordinary"] {
+            // Built through serde so every other field takes its own
+            // default; only the password is under test.
+            let mut sc: ServerConfig =
+                serde_json::from_str(r#"{"host":"news.example.net"}"#).expect("minimal config");
+            sc.password = Some(pw.to_string());
+            let json = serde_json::to_string(&sc).expect("serialize");
+            assert!(
+                !json.contains(&format!("\"{pw}\"")),
+                "{pw:?} was written in clear: {json}"
+            );
+            let back: ServerConfig = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                back.password.as_deref(),
+                Some(pw),
+                "{pw:?} did not survive a serde round trip"
+            );
+        }
     }
 
     #[test]

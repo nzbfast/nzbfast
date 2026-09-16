@@ -94,6 +94,35 @@ impl RepairPhase {
     }
 }
 
+/// Which repair route is reporting - see `nzbfast_core::repairprog::band`.
+///
+/// The two drivers earn their proof of a member's bytes at different
+/// points in the call: the disk driver hashes from disk BEFORE the fold
+/// (`RepairPhase::Verify`), the mapped in-stream driver has no such pass
+/// - its present-block ledger was earned off the wire - so its only
+/// proof is the self-prove AFTER the patch, reported under the same
+/// `RepairPhase::Verify` code because it is the same kind of claim ("these
+/// bytes check out"), just made at the opposite end of the call. A band
+/// table that draws one bar has to know which end it is, or a mapped
+/// self-prove publishes a per-mille sized for a phase that runs first and
+/// a monotone bar discards it - see the `self_prove_set` call in
+/// `super::repair_mapped_inner` for the incident this answers.
+///
+/// Announced from the driver thread ONCE, before any phase begins - the
+/// same contract as [`ProgressSink::slab`]. DEFAULTED to [`Disk`](Self::Disk):
+/// a sink that is never told otherwise - every disk-driver call site,
+/// and every sink written before this existed - keeps exactly the
+/// reading it always had.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RepairRoute {
+    /// The disk driver: a pre-fold `Verify`, then `Fold`, `Solve`, `Write`.
+    #[default]
+    Disk,
+    /// The mapped in-stream driver: `Fold`, `Solve`, `Write`, then a
+    /// post-patch `Verify` - the self-prove.
+    Mapped,
+}
+
 /// Where a repair's progress goes.
 ///
 /// `Send + Sync` and `&self`, because it is called from worker threads -
@@ -112,9 +141,48 @@ impl RepairPhase {
 /// with the same phase.
 pub trait ProgressSink: Send + Sync {
     fn progress(&self, phase: RepairPhase, done: u64, total: u64);
+
+    /// WHICH ROUTE IS REPORTING - see [`RepairRoute`].
+    ///
+    /// DEFAULTED, for the same reason [`slab`](Self::slab) is: a sink
+    /// that draws one bar per phase and does not place `Verify`
+    /// differently by route (`parfast`'s `Meter`, every test sink here)
+    /// is correct ignoring it. Implement it only if a band table needs
+    /// to tell a pre-fold `Verify` from a post-patch one.
+    fn route(&self, _route: RepairRoute) {}
+
+    /// WHICH SWEEP OF THE PAYLOAD IS STARTING, `index` of `of`.
+    ///
+    /// A solve whose window does not fit the memory budget is cut along
+    /// the block's byte axis and the payload is swept once per slab
+    /// (`reconstruct::plan_slabs`), so Fold and Solve are each entered
+    /// `of` times. Announced from the DRIVER thread at the top of each
+    /// sweep, before that sweep's [`RepairPhase::Fold`] `progress`, and
+    /// never concurrently with one. A repair that does not slab
+    /// announces `(0, 1)` once; one with no blocks to rebuild announces
+    /// nothing, and `(0, 1)` is the right reading of that too.
+    ///
+    /// DEFAULTED, so this is not a break: a sink that draws one bar per
+    /// phase (`parfast`'s `Meter`) or that records calls (every test
+    /// sink here) is correct ignoring it. Implement it only if a slab is
+    /// something your bar has to be able to say.
+    ///
+    /// # Why a caller that weighs the phases NEEDS this
+    ///
+    /// It cannot be inferred. A sink can count re-entries and so knows
+    /// the INDEX, but not `of` - and a weighted bar has to reserve the
+    /// headroom for sweeps 2..N before sweep 1 has used it up, or it
+    /// must take the bar backwards to make room, which is the fall this
+    /// whole channel's callers refuse. Until 16 Sep 2026 the daemon's
+    /// bar froze at the literal pair `("solve", 950)` for 41.5% to 70.3%
+    /// of a slabbed repair's wall for exactly that reason
+    /// (`research/REPAIR-SLABBED-BAR-2026-09-16.md`).
+    fn slab(&self, _index: usize, _of: usize) {}
 }
 
 /// A `Fn` is a sink, so a caller that only wants a closure stays one.
+/// It hears `progress` and takes the default `slab`, which is the whole
+/// point of that method being defaulted.
 impl<F: Fn(RepairPhase, u64, u64) + Send + Sync> ProgressSink for F {
     fn progress(&self, phase: RepairPhase, done: u64, total: u64) {
         self(phase, done, total)
@@ -387,6 +455,25 @@ impl RepairControl {
         Ok(())
     }
 
+    /// This control's CANCEL and nothing else: the same gate, no sink,
+    /// and meters of its own, so a stretch that polls it can never move
+    /// the host's bar or park.
+    ///
+    /// For the syndrome pass - the fold worker's folds and the NTT's
+    /// stripes - which must stop when the repair is called off but is
+    /// not a phase anybody watches. Until 15 Sep 2026 that pass took no
+    /// control at all, so a cancel that landed after the feed's last
+    /// check waited out the whole transform with the driver parked on
+    /// its join: 53 s of a 54 s run locally, and a `parfast` cancel test
+    /// killed at CI's 600 s ceiling (`research/CLAIMS.jsonl`,
+    /// `single-file-followups-linux-tests-cancel-wedge`). A pass it cuts
+    /// short leaves syndromes nobody may act on, which is legal for the
+    /// same reason the dense back-substitution's is: the check before
+    /// the patch refuses first.
+    pub(crate) fn cancel_only(&self) -> RepairControl {
+        RepairControl::new(None, self.gate.clone())
+    }
+
     /// Park while paused; `Err(Cancelled)` once cancelled.
     ///
     /// See [`PauseGate`] for the rule about where this may be called
@@ -436,6 +523,30 @@ impl RepairControl {
         *reported = 0;
         if let Some(s) = self.sink.as_ref() {
             s.progress(phase, 0, total);
+        }
+    }
+
+    /// Announce the sweep that is about to start - see
+    /// [`ProgressSink::slab`].
+    ///
+    /// Driver thread only, once per slab, before that slab's
+    /// [`Self::begin`]. No meter of its own: a slab is not a phase and
+    /// has no `(done, total)`; it is the frame the phases that follow
+    /// are read in.
+    pub(crate) fn slab(&self, index: usize, of: usize) {
+        if let Some(s) = self.sink.as_ref() {
+            s.slab(index, of.max(1));
+        }
+    }
+
+    /// Announce which route is reporting - see [`RepairRoute`].
+    ///
+    /// Driver thread only, once, before that driver's first phase
+    /// begins. A no-op on a control with no sink, exactly like every
+    /// other hook here.
+    pub(crate) fn route(&self, route: RepairRoute) {
+        if let Some(s) = self.sink.as_ref() {
+            s.route(route);
         }
     }
 

@@ -733,6 +733,51 @@ fn m_index_scan_now(
     })
 }
 
+/// TODO 166 / 16 Sep 2026: read back how long the index write paths
+/// actually held their lock, per call site.
+///
+/// Not a debug hook - no `NZBFAST_DEBUG_HOOKS` gate - because the thing
+/// it reports is the daemon's own worst latency source and is worth
+/// having on a user's daemon rather than only in a rig. The tip
+/// walker's ingest runs inside `with_index_mut`, which every in-process
+/// reader waits out; two rigs priced the batch-size trade against the
+/// SQLite write lock the deepen pass takes instead, and both said in
+/// their own limits that nothing had measured this one on a running
+/// daemon. `crate::holdstat` is the accumulator and carries the design.
+///
+/// `reset=1` zeroes the counters, which is what an A/B needs between
+/// arms - they are lifetime figures otherwise.
+fn m_index_holds(
+    _d: &Arc<Daemon>,
+    _req: &mut tiny_http::Request,
+    params: &std::collections::HashMap<String, String>,
+    _ctx: &ApiCtx<'_>,
+    _api_body: &mut Option<Vec<u8>>,
+) -> Option<Value> {
+    Some({
+        let sites: Vec<Value> = nzbfast_core::holdstat::snapshot()
+            .into_iter()
+            .map(|h| {
+                json!({
+                    "site": h.site,
+                    "count": h.count,
+                    "total_us": h.total_us,
+                    "max_us": h.max_us,
+                    "p50_us": h.p50_us,
+                    "p90_us": h.p90_us,
+                    "p99_us": h.p99_us,
+                    "window": h.window,
+                })
+            })
+            .collect();
+        let reset = params.get("reset").is_some_and(|v| v == "1" || v == "true");
+        if reset {
+            nzbfast_core::holdstat::reset();
+        }
+        json!({"status": true, "reset": reset, "sites": sites})
+    })
+}
+
 fn m_debug_hold_index(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -949,6 +994,11 @@ fn m_index_compact(
         // the same trap c69eb45a closed for the idle loop.
         if d.index_jobs_active.load(Ordering::Acquire) > 0 || !d.scan_progress.lock_ok().is_empty()
         {
+            // KEYED for i18n: this exact sentence is an `err.` key in
+            // web/i18n/extract.js and all 27 catalogues (census 16 Sep 2026,
+            // research/API-ERROR-KEY-CENSUS-2026-09-16.md). tErr() matches the
+            // WHOLE string, so rewording it here silently un-translates 27
+            // locales with every gate green. Change both sides together.
             json!({"status": false,
                                "error": "busy - retry when no download or scan is running"})
         } else {
@@ -2282,6 +2332,11 @@ pub(crate) fn dispatch(
         // interval (full key). value=<n> deep-backfills the last n
         // headers per group even where already scanned.
         "index_scan_now" => return m_index_scan_now(d, _req, params, ctx, _api_body),
+        // How long the index write paths held their lock, per call
+        // site, with `reset=1` to zero them between A/B arms. Ships
+        // ON: this is the daemon's worst latency source and the one
+        // two rigs could not measure. See `m_index_holds`.
+        "index_holds" => return m_index_holds(d, _req, params, ctx, _api_body),
         // Test hook, present only with NZBFAST_DEBUG_HOOKS=1 in
         // the environment: hold the shared index connection for
         // value seconds, standing in for a long catch-up ingest

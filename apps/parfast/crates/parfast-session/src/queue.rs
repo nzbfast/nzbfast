@@ -11,6 +11,16 @@
 //! user with two spindles asked for it, and the Settings pane says what
 //! it costs.
 //!
+//! # The exception: two large single-file creates
+//!
+//! One create over one large file is NOT parallel inside where it counts:
+//! it is bound by a serial whole-file MD5 chain, and the fold beside it
+//! is paced down to a few workers. So a second such create is started
+//! beside a running one, at any concurrency, when [`crate::pairing`]'s
+//! rule says the machine has the cores and the memory for both - and a
+//! create that fails the rule stays queued. It makes no job faster; it
+//! makes a queue of them finish sooner.
+//!
 //! # The post-queue action is REPORTED, never performed
 //!
 //! Sleeping or shutting down a machine is a platform call and a
@@ -36,6 +46,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::job::{JobKind, JobSnapshot, JobSpec, JobState};
+use crate::pairing::{self, PairShape};
 use crate::runner::{self, Control, Job, KnobLock, Publisher};
 use crate::settings::{PostQueueAction, Settings};
 
@@ -46,6 +57,14 @@ struct Entry {
     publisher: Arc<Publisher>,
     /// Live while a worker holds this job.
     running: bool,
+    /// The pairing shape this job was STARTED with, when it could pair
+    /// ([`pairing::shape_of`]); such a job holds the knob lock shared, and
+    /// a second create is judged against this. `None` while queued and for
+    /// every job that cannot pair.
+    pair: Option<PairShape>,
+    /// Why pairing last left this job queued, as far as its log has been
+    /// told ([`PairWait`]). Reset when the job starts.
+    pair_wait: PairWait,
     /// Section 5.5's "Run now": take this job before anything else
     /// queued, whatever its id. Cleared when it starts.
     ///
@@ -57,6 +76,102 @@ struct Entry {
     /// reach it next - starts everything queued ahead of it too, which
     /// is a different thing from running one job now.
     run_next: bool,
+}
+
+/// Why a create with a pairing shape was left queued beside a running
+/// one, kept on its entry so the log hears each reason ONCE.
+///
+/// The scheduler comes round at least every 100 ms and asks the rule
+/// again each time, so a line per refusal is a log that fills with the
+/// same sentence. A line is written when the reason CHANGES: a different
+/// running job, or a different clause of [`pairing::Refusal`]. The numbers
+/// inside a clause are not part of the comparison, because the pacer's
+/// width moves by a worker or two while it settles (20 to 22 on the
+/// rotational Synology, research/PARFAST-SINGLE-FILE-MD5-HEADROOM-2026-09-13.md
+/// addendum 7), and a line per wobble is the per-tick log again.
+///
+/// `NotSettled` IS NOT LOGGED WHEN IT IS SEEN. It is the normal state for
+/// the first moments of every create - the pacer has not published a
+/// width yet - so a line for it would stand on nearly every job that later
+/// pairs. It is logged only if it is STILL the reason when the running
+/// create finishes: that is the case where it was never transient (a
+/// running create that never paces, such as a file under the fused
+/// route's size floor, keeps it for its whole run), and without the line
+/// that wait would carry no reason at all. And only if nothing else was
+/// said beside that job: a paced create drops its published width before
+/// its worker returns (the cap is released when the hashing ends, and the
+/// volumes are still being written), so an unsettled pacer is the last
+/// thing seen before almost every finish, and a line for it after a
+/// "needs N cores" line would contradict the true one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PairWait {
+    /// The refusal the log was last told, and the running job it named.
+    said: Option<(i64, pairing::Refusal)>,
+    /// The running job the latest attempt found unsettled, when that was
+    /// the latest attempt's reason.
+    unsettled_beside: Option<i64>,
+}
+
+impl PairWait {
+    /// A pair attempt beside `first` was refused: the line to log, when
+    /// this is a reason the log has not been told.
+    fn refused(&mut self, first: i64, why: pairing::Refusal) -> Option<String> {
+        if let pairing::Refusal::NotSettled { .. } = why {
+            self.unsettled_beside = Some(first);
+            return None;
+        }
+        self.unsettled_beside = None;
+        let same = |(id, said): (i64, pairing::Refusal)| {
+            id == first && std::mem::discriminant(&said) == std::mem::discriminant(&why)
+        };
+        if self.said.is_some_and(same) {
+            return None;
+        }
+        self.said = Some((first, why));
+        Some(refusal_line(first, why))
+    }
+
+    /// Job `first` finished: the line to log, when the latest attempt beside
+    /// it was refused for want of a settled pacer.
+    fn beside_finished(&mut self, first: i64) -> Option<String> {
+        if self.unsettled_beside != Some(first) {
+            return None;
+        }
+        self.unsettled_beside = None;
+        if self.said.is_some_and(|(id, _)| id == first) {
+            return None;
+        }
+        Some(refusal_line(
+            first,
+            pairing::Refusal::NotSettled { paced_creates: 0 },
+        ))
+    }
+}
+
+/// The log line for one refusal, in the "Started beside" line's voice.
+/// Hard-coded English like that line: the log tail is not catalogued.
+fn refusal_line(first: i64, why: pairing::Refusal) -> String {
+    use pairing::Refusal;
+    let reason = match why {
+        Refusal::Knobs => "the two jobs set different threads, memory or solver settings, \
+                           and the engine has one of each"
+            .to_string(),
+        Refusal::Floor { cores } => format!(
+            "this computer has {cores} cores, too few to give two large single-file creates \
+             room each"
+        ),
+        Refusal::NotSettled { .. } => format!(
+            "job {first} finished without settling on how many cores it needed, so there \
+             was nothing to judge a second create against"
+        ),
+        Refusal::Cores { need, have } => {
+            format!("two creates at once would need {need} cores and this computer has {have}")
+        }
+        Refusal::Route => "the memory left beside it is too little for this create to run \
+                           the way two at once need"
+            .to_string(),
+    };
+    format!("Not started beside job {first}: {reason}. It runs when a slot is free.")
 }
 
 /// What `pf_queue_snapshot` answers.
@@ -197,6 +312,8 @@ impl Session {
                     control: Control::new(),
                     publisher,
                     running: false,
+                    pair: None,
+                    pair_wait: PairWait::default(),
                     run_next: false,
                 },
             );
@@ -374,6 +491,21 @@ impl Session {
         self.inner.ring();
     }
 
+    /// "Clear remembered checksums": delete every record in the per-user
+    /// digest store (`nzbkit::digest_cache`) that creates and full checks
+    /// consult while `performance.digest_cache` is on, and answer how many
+    /// files went. The store the runner opens is the one at the default
+    /// location, so that is the one cleared. A platform that names no
+    /// per-user cache folder, and a store never created, both answer 0.
+    ///
+    /// Safe beside a running job, which is why it is not refused while
+    /// one runs: a record removed after a lookup read it changes nothing,
+    /// one removed before is a miss, and a writer whose temp file went has
+    /// its rename fail, which the store counts and the job does not see.
+    pub fn clear_digest_cache(&self) -> Result<usize, String> {
+        clear_digest_store(nzbkit::digest_cache::DigestCache::at_default_location())
+    }
+
     /// Persist the table to `path` from now on, and load whatever is
     /// already there. A file that cannot be parsed is REPORTED and not
     /// deleted: a host that silently dropped a queue it could not read
@@ -413,6 +545,8 @@ impl Session {
                     control: Control::new(),
                     publisher,
                     running: false,
+                    pair: None,
+                    pair_wait: PairWait::default(),
                     run_next: false,
                 },
             );
@@ -525,50 +659,108 @@ fn start_due(inner: &Arc<Inner>) -> bool {
     if inner.paused.load(Ordering::SeqCst) || inner.stopping.load(Ordering::SeqCst) {
         return false;
     }
-    let limit = inner
+    let settings = inner
         .settings
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .concurrency
-        .max(1) as usize;
+        .clone();
+    let limit = settings.concurrency.max(1) as usize;
+    // The pick's pairing shape reads the filesystem (its one source's
+    // length), and a stat on a network volume can take seconds - which,
+    // under the table lock, is seconds of a host's polls hanging. So it is
+    // read with NO lock held, between two looks at the table, and the
+    // second look starts over if the pick moved in between.
+    let candidate = {
+        let jobs = inner.jobs.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(id) = pick(&jobs) else {
+            return false;
+        };
+        let spec = &jobs.get(&id).expect("the id just picked").spec;
+        (settings.performance.pair_large_creates && spec.kind() == JobKind::Create)
+            .then(|| (id, spec.clone()))
+    };
+    let shape = candidate
+        .as_ref()
+        .and_then(|(_, spec)| pairing::shape_of(spec, &settings));
     let mut jobs = inner.jobs.lock().unwrap_or_else(|p| p.into_inner());
-    let running = jobs.values().filter(|e| e.running).count();
-    if running >= limit {
+    let Some(id) = pick(&jobs) else {
         return false;
+    };
+    if candidate
+        .as_ref()
+        .is_some_and(|(read_for, _)| *read_for != id)
+    {
+        return true;
     }
-    // First queued, in submission order - the table is a BTreeMap on
-    // the id, so iteration IS submission order and there is no second
-    // ordering rule to keep in step with the display. A job marked
-    // `run_next` jumps that order and nothing else does; among several
-    // marked ones, submission order again.
-    let ready = |e: &Entry| !e.running && e.publisher.get().state == JobState::Queued;
-    let pick = jobs
+    let running: Vec<(i64, Option<&PairShape>)> = jobs
         .iter()
-        .find(|(_, e)| ready(e) && e.run_next)
-        .map(|(k, _)| *k)
-        .or_else(|| jobs.iter().find(|(_, e)| ready(e)).map(|(k, _)| *k));
-    let Some(id) = pick else {
-        return false;
+        .filter(|(_, e)| e.running)
+        .map(|(k, e)| (*k, e.pair.as_ref()))
+        .collect();
+    let beside_shared = running.iter().any(|(_, p)| p.is_some());
+    // A create that could pair, beside a create that was started able to:
+    // the pairing rule decides, and the concurrency does not - a pass
+    // starts it however low the limit, a refusal leaves it QUEUED however
+    // high (rather than started only to wait on the knob lock). Everything
+    // else is the limit, as it always was.
+    let paired_with = match (&shape, beside_shared) {
+        (Some(next), true) => {
+            let [(first_id, Some(first))] = running.as_slice() else {
+                return false;
+            };
+            let paces = nzbkit::par2gen::single_file_create_paces(
+                next.length,
+                next.block_size,
+                next.recovery_blocks,
+            );
+            match pairing::admit_second(pairing::Machine::now(), first, next, paces) {
+                Ok(()) => Ok(Some(*first_id)),
+                Err(why) => Err((*first_id, why)),
+            }
+        }
+        _ => {
+            if running.len() >= limit {
+                return false;
+            }
+            Ok(None)
+        }
     };
     let entry = jobs
         .get_mut(&id)
         .expect("the id just selected is in the table");
+    let paired_with = match paired_with {
+        Ok(p) => p,
+        Err((first, why)) => {
+            if let Some(line) = entry.pair_wait.refused(first, why) {
+                entry.publisher.update(|s| s.log_tail.push(line));
+            }
+            return false;
+        }
+    };
+    entry.pair_wait = PairWait::default();
     entry.run_next = false;
     if entry.control.is_cancelled() {
         entry.publisher.update(|s| s.state = JobState::Cancelled);
         return true;
     }
     entry.running = true;
+    entry.pair = shape;
+    if let Some(first) = paired_with {
+        entry.publisher.update(|s| {
+            s.log_tail.push(format!(
+                "Started beside job {first}: this machine has the cores and memory for two \
+                 large single-file creates at once. Neither runs faster than it would alone; \
+                 the queue finishes sooner."
+            ))
+        });
+    }
     let job = Job {
         spec: entry.spec.clone(),
         control: Arc::clone(&entry.control),
         publisher: Arc::clone(&entry.publisher),
         knobs: Arc::clone(&inner.knobs),
-        settings: inner
-            .settings
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone(),
+        settings,
+        shared: entry.pair.is_some(),
     };
     drop(jobs);
     let back = Arc::clone(inner);
@@ -579,6 +771,12 @@ fn start_due(inner: &Arc<Inner>) -> bool {
             let mut jobs = back.jobs.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(e) = jobs.get_mut(&id) {
                 e.running = false;
+                e.pair = None;
+            }
+            for e in jobs.values_mut() {
+                if let Some(line) = e.pair_wait.beside_finished(id) {
+                    e.publisher.update(|s| s.log_tail.push(line));
+                }
             }
             drop(jobs);
             back.persist();
@@ -587,6 +785,19 @@ fn start_due(inner: &Arc<Inner>) -> bool {
         })
         .expect("a job worker thread");
     true
+}
+
+/// The job the scheduler would start next: the first queued, in
+/// submission order - the table is a BTreeMap on the id, so iteration IS
+/// submission order and there is no second ordering rule to keep in step
+/// with the display. A job marked `run_next` jumps that order and nothing
+/// else does; among several marked ones, submission order again.
+fn pick(jobs: &BTreeMap<i64, Entry>) -> Option<i64> {
+    let ready = |e: &Entry| !e.running && e.publisher.get().state == JobState::Queued;
+    jobs.iter()
+        .find(|(_, e)| ready(e) && e.run_next)
+        .map(|(k, _)| *k)
+        .or_else(|| jobs.iter().find(|(_, e)| ready(e)).map(|(k, _)| *k))
 }
 
 /// Has the queue drained with an action waiting? Set the flag ONCE, so
@@ -656,6 +867,17 @@ pub fn kind_label(kind: JobKind) -> &'static str {
     runner::kind_label(kind)
 }
 
+/// [`Session::clear_digest_cache`] with the store handed in, so a test can
+/// point it at a scratch folder rather than at the user's real cache.
+fn clear_digest_store(store: Option<nzbkit::digest_cache::DigestCache>) -> Result<usize, String> {
+    let Some(store) = store else {
+        return Ok(0);
+    };
+    store
+        .clear()
+        .map_err(|e| format!("{}: {e}", store.dir().display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +893,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).expect("temp dir");
         p
+    }
+
+    /// The clear removes records and a crashed writer's temp file, and
+    /// nothing else in the folder; a missing store and no store at all
+    /// are both a clear store. Never the default location: that is the
+    /// user's real cache.
+    #[test]
+    fn clearing_the_digest_store_removes_records_and_temp_files_only() {
+        use nzbkit::digest_cache::DigestCache;
+        let dir = tmp("digest-clear");
+        let store = dir.join("digests");
+        std::fs::create_dir_all(&store).expect("store dir");
+        for name in ["a.pfd", "b.pfd", ".a.pfd.1.0.tmp", "keep.txt"] {
+            std::fs::write(store.join(name), b"x").expect("fixture");
+        }
+        assert_eq!(clear_digest_store(Some(DigestCache::new(&store))), Ok(3));
+        let left: Vec<_> = std::fs::read_dir(&store)
+            .expect("store still there")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("keep.txt")]);
+        assert_eq!(clear_digest_store(Some(DigestCache::new(&store))), Ok(0));
+        let never = dir.join("never-created");
+        assert_eq!(clear_digest_store(Some(DigestCache::new(&never))), Ok(0));
+        assert_eq!(clear_digest_store(None), Ok(0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Wait for a predicate, or fail saying what it saw. No bare
@@ -1410,6 +1658,195 @@ mod tests {
             "the strip lost the misnamed run: {:?}",
             m.block_runs
         );
+    }
+
+    fn one_file_create(dir: &Path, stem: &str) -> JobSpec {
+        use crate::job::{
+            BlockSpec, CreateSpec, PathMode, RecoverySpec, UnicodePolicy, VolumeSpec,
+        };
+        let src = dir.join(format!("{stem}.bin"));
+        std::fs::write(&src, vec![9u8; 50_000]).expect("member");
+        JobSpec::Create {
+            create: CreateSpec {
+                sources: vec![Source {
+                    path: src,
+                    recursive: false,
+                }],
+                path_mode: PathMode::Basename,
+                base_path: None,
+                block: Some(BlockSpec::Size { size: 4_096 }),
+                recovery: Some(RecoverySpec::Percent { percent: 10.0 }),
+                output: dir.join(format!("{stem}.par2")),
+                volumes: VolumeSpec::Pow2,
+                first_recovery_block: 0,
+                comment: String::new(),
+                overwrite: false,
+                std_naming: false,
+                unicode: UnicodePolicy::Auto,
+                perf: Default::default(),
+            },
+        }
+    }
+
+    /// A second one-file create beside a running one waits for
+    /// `pairing`'s rule, and it waits at a concurrency that would otherwise
+    /// start it at once.
+    ///
+    /// Deterministic the way `run_next_is_the_job_the_scheduler_picks` is:
+    /// the first create is paused before the queue is let go, so it is
+    /// RUNNING (a worker holds it, parked at its first gate) and has
+    /// published no paced fold width - a refusal by name, whatever this
+    /// machine's cores - for as long as the test looks. The control arm
+    /// turns pairing off, and the same second job then starts under the
+    /// concurrency of 2, which proves the wait was the rule's and not the
+    /// limit's.
+    #[test]
+    fn a_second_single_file_create_waits_for_the_pairing_rule_not_the_limit() {
+        for pairing_on in [true, false] {
+            let d = tmp(if pairing_on { "qpair-on" } else { "qpair-off" });
+            let settings = Settings {
+                concurrency: 2,
+                performance: crate::settings::Performance {
+                    pair_large_creates: pairing_on,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let s = Session::new(Some(settings));
+            s.set_queue_paused(true);
+            let first = s.submit(one_file_create(&d, "a"));
+            let second = s.submit(one_file_create(&d, "b"));
+            assert!(s.set_job_paused(first, true));
+            assert!(s.set_job_paused(second, true));
+            s.set_queue_paused(false);
+            until(&s, "the first create to start", |q| {
+                q.jobs[0].state == JobState::Paused
+            });
+            if pairing_on {
+                // More than one scheduler tick (100 ms) of refusals, so a
+                // line per tick would show below.
+                for _ in 0..60 {
+                    assert_eq!(
+                        s.job(second).expect("the second job").state,
+                        JobState::Queued,
+                        "a second create started beside one with no settled pacer"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            } else {
+                until(&s, "the second create to start under the limit", |q| {
+                    q.jobs[1].state == JobState::Paused
+                });
+            }
+            assert!(s.set_job_paused(first, false));
+            assert!(s.set_job_paused(second, false));
+            let q = until(&s, "both creates to finish", |q| {
+                q.jobs.iter().all(|j| j.state.finished())
+            });
+            for j in &q.jobs {
+                assert_eq!(j.state, JobState::Done, "pairing {pairing_on}: {j:?}");
+            }
+            // The wait said why, once, however many ticks it lasted. The
+            // first create never paces, so alone it is the unsettled line,
+            // logged when the first finished; the pacer counter is
+            // process-global, though, and another test's create can make it
+            // a cores line instead - never both. With pairing off nothing
+            // waited.
+            let said: Vec<&String> = q.jobs[1]
+                .log_tail
+                .iter()
+                .filter(|l| l.starts_with("Not started beside"))
+                .collect();
+            assert_eq!(said.len(), usize::from(pairing_on), "{said:?}");
+            if pairing_on {
+                assert!(
+                    said[0].starts_with(&format!("Not started beside job {first}: ")),
+                    "{said:?}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// The log hears each reason for a wait once, however many ticks ask
+    /// the rule again, and again only when the reason changes.
+    #[test]
+    fn a_pairing_refusal_is_logged_once_per_change_of_reason() {
+        use pairing::Refusal;
+        let mut w = PairWait::default();
+        let cores = |need| Refusal::Cores { need, have: 12 };
+        let first = w.refused(3, cores(20)).expect("the first refusal is said");
+        assert_eq!(
+            first,
+            "Not started beside job 3: two creates at once would need 20 cores and this \
+             computer has 12. It runs when a slot is free."
+        );
+        // Every tick after, and the pacer's width wobbling inside the clause.
+        for need in [20, 22, 21, 20, 22] {
+            assert_eq!(w.refused(3, cores(need)), None, "need {need}");
+        }
+        // A different clause is a new reason.
+        let route = w.refused(3, Refusal::Route).expect("a changed reason");
+        assert!(route.contains("memory left"), "{route}");
+        assert_eq!(w.refused(3, Refusal::Route), None);
+        // So is the same clause beside a different running job.
+        assert!(w.refused(4, Refusal::Route).is_some());
+        assert_eq!(w.refused(4, Refusal::Route), None);
+
+        // An unsettled pacer is silent while it is seen...
+        let mut w = PairWait::default();
+        for _ in 0..5 {
+            assert_eq!(w.refused(7, Refusal::NotSettled { paced_creates: 0 }), None);
+        }
+        // ...not said when another job finishes...
+        assert_eq!(w.beside_finished(6), None);
+        // ...and said once when the job it waited on finishes with it still
+        // the reason.
+        let line = w.beside_finished(7).expect("still unsettled at the end");
+        assert!(
+            line.starts_with("Not started beside job 7: job 7 finished"),
+            "{line}"
+        );
+        assert_eq!(w.beside_finished(7), None);
+
+        // The usual case: unsettled for a moment, then a real reason. The
+        // finish then says nothing more, because the unsettled moment was
+        // transient and the real reason is already in the log.
+        let mut w = PairWait::default();
+        assert_eq!(w.refused(7, Refusal::NotSettled { paced_creates: 0 }), None);
+        assert!(w.refused(7, cores(20)).is_some());
+        assert_eq!(w.beside_finished(7), None);
+
+        // The END of a paced create: its width is released before its
+        // worker returns, so the last ticks see an unsettled pacer after a
+        // real reason was said. The finish must not contradict that line.
+        let mut w = PairWait::default();
+        assert!(w.refused(7, cores(20)).is_some());
+        assert_eq!(w.refused(7, Refusal::NotSettled { paced_creates: 0 }), None);
+        assert_eq!(w.beside_finished(7), None);
+    }
+
+    /// Every refusal's line obeys the copy rules the log tail is shown
+    /// under in both apps.
+    #[test]
+    fn every_refusal_line_keeps_the_copy_rules() {
+        use pairing::Refusal;
+        for why in [
+            Refusal::Knobs,
+            Refusal::Floor { cores: 4 },
+            Refusal::NotSettled { paced_creates: 0 },
+            Refusal::Cores { need: 22, have: 12 },
+            Refusal::Route,
+        ] {
+            let line = refusal_line(2, why);
+            assert!(line.starts_with("Not started beside job 2: "), "{line}");
+            assert!(
+                !line.contains('\u{2014}') && !line.contains('\u{2013}'),
+                "{line}"
+            );
+            assert!(!line.to_lowercase().contains("streaming"), "{line}");
+            assert!(!line.to_lowercase().contains("faster"), "{line}");
+        }
     }
 
     #[test]

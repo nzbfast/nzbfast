@@ -805,3 +805,84 @@ fn the_depth_census_reads_back_nested_and_reports_keys_it_does_not_know() {
     );
     teardown(&dir, ix);
 }
+
+/// The drop counter ACCUMULATES across ingests, and keeps accumulating
+/// on an index that has already counted.
+///
+/// This pins the half of `DropCensus::record` that a single-window test
+/// cannot see. `record` reads the current `kv` value and writes back
+/// `cur + add`, and it stamps `DROP_SINCE_KEY` under a guard that fires
+/// only on an index where NO counter key exists - so a latch anywhere on
+/// that path (a stamp that short-circuits the write, a first-write-wins
+/// insert, a guard that widens to the counters themselves) would leave
+/// `ingest_drop_gen_depth` frozen at whatever the first counting window
+/// put there. `a_flood_inside_one_window_...` above drives ONE window
+/// and would pass against every one of those bugs.
+///
+/// It is written as three floods on three distinct (poster, stem) slots
+/// rather than a repeat of one, because a repeat also walks the sibling
+/// cap and would be testing two things at once. The assertion is the
+/// running TOTAL after each, not "drops were counted".
+///
+/// Why it exists: `research/GEN-DEPTH-CENSUS-SATURATION-2026-09-16.md`.
+/// The rig in `crates/nzbkit/examples/indexscan_bench.rs` reads the same
+/// gen-depth total at 200,000, 400,000 and 600,000 headers, which looks
+/// exactly like a latched counter and is not one - it is the rig's
+/// corpus reaching a floor it cannot drop below. That investigation
+/// cleared this path by experiment; this test keeps it cleared.
+#[test]
+fn the_gen_depth_drop_total_keeps_rising_on_an_index_that_already_counted() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-gendepth-acc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut ix = Index::open(&dir.join("index.db")).unwrap();
+
+    let total = |ix: &Index| -> u64 {
+        ix.kv_get("ingest_drop_gen_depth")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    };
+    // Depth per flood, all past MAX_GEN_PASSES so each drops
+    // `depth - MAX_GEN_PASSES`. Deliberately different from each other,
+    // so a test that accidentally asserted a constant would fail.
+    const DEPTHS: [usize; 3] = [12, 7, 20];
+
+    let mut want = 0u64;
+    let mut seen_rise = 0;
+    for (flood, depth) in DEPTHS.iter().enumerate() {
+        let batch: Vec<_> = (0..*depth)
+            .map(|i| {
+                entry(
+                    // A fresh (poster, stem) per flood: this leg is
+                    // about the counter, not the sibling cap.
+                    &format!("\"Acc{flood}.S01E01.mkv\" yEnc (1/1)"),
+                    &format!("bot{flood}@flood"),
+                    &format!("acc-{flood}-{i}"),
+                    1000,
+                )
+            })
+            .collect();
+        let before = total(&ix);
+        ix.ingest("alt.test", &batch, 1000 + flood as i64).unwrap();
+        want += (*depth - MAX_GEN_PASSES as usize) as u64;
+        let after = total(&ix);
+        assert_eq!(
+            after, want,
+            "flood {flood} (depth {depth}): running gen-depth total is {after}, expected {want}"
+        );
+        assert!(
+            after > before,
+            "flood {flood} did not move the counter at all ({before} -> {after}) - \
+             the census stopped recording after an earlier window"
+        );
+        seen_rise += 1;
+    }
+    // The point of the leg: the counter rose on the SECOND and THIRD
+    // ingest, not only the first.
+    assert_eq!(seen_rise, DEPTHS.len(), "not every flood was driven");
+    assert!(
+        total(&ix) > (DEPTHS[0] - MAX_GEN_PASSES as usize) as u64,
+        "the total never got past the first window's contribution"
+    );
+    teardown(&dir, ix);
+}

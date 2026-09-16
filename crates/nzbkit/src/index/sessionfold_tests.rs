@@ -164,26 +164,40 @@ fn a_ragged_volume_size_fails_the_uniformity_screen() {
 #[test]
 fn a_wrong_part_cover_fails_the_proof_even_when_complete() {
     let (dir, mut ix) = fixture("cover");
-    for stem in &STEMS[..4] {
+    for stem in &STEMS {
         sess_file(&mut ix, "a.b.tv", "sess3@h.tld", stem, 5_000_000);
     }
-    // The fifth member claims 3 parts and holds THREE parts numbered
-    // 2..4: nsegs >= total so `complete=1`, and the cover is wrong.
-    // That is exactly the row the proof exists to refuse - and one bad
-    // member refuses the WHOLE candidate, because a session missing a
-    // provable member is not a session, it is a guess.
-    for p in 2..=4u32 {
-        sess_article(
-            &mut ix,
-            "a.b.tv",
-            "sess3@h.tld",
-            "v2wf7ppq5qq96rr7ss86",
-            p,
-            3,
-            50_000_000,
-            5_000_000,
-        );
-    }
+    // The fifth member is made to hold THREE parts numbered 2..4 under
+    // its own claimed total of 3: nsegs >= total so `complete=1`, and
+    // the cover is wrong. That is exactly the row the proof exists to
+    // refuse - and one bad member refuses the WHOLE candidate, because
+    // a session missing a provable member is not a session, it is a
+    // guess.
+    //
+    // THE ROW IS WRITTEN IN SQL, and that is the point rather than a
+    // shortcut: since ingest refuses a `(4/3)` article outright
+    // (`a_part_over_its_own_total_is_refused_and_never_reads_complete`),
+    // nothing on the live ingest path can mint this shape any more, so
+    // the proof now stands as a floor under rows OLDER VERSIONS wrote -
+    // and an index carrying those rows is the population it still has
+    // to refuse. Writing it here is the only way to keep testing that.
+    let rid: i64 = ix
+        .db
+        .query_row("SELECT id FROM releases WHERE stem=?1", [STEMS[4]], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let segs: Vec<segcodec::Seg> = (2..=4u32)
+        .map(|p| (p, format!("<{}-{p}@sess>", STEMS[4]), 50_000_000u64))
+        .collect();
+    let n = ix
+        .db
+        .execute(
+            "UPDATE files SET segments=?2, nsegs=3 WHERE release_id=?1",
+            rusqlite::params![rid, segcodec::encode(&segs)],
+        )
+        .unwrap();
+    assert_eq!(n, 1, "the fifth member's one file row was not rewritten");
     let all_complete: i64 = ix
         .db
         .query_row("SELECT COUNT(*) FROM releases WHERE complete=1", [], |r| {
@@ -193,6 +207,76 @@ fn a_wrong_part_cover_fails_the_proof_even_when_complete() {
     assert_eq!(all_complete, 5, "the bad member really reads complete");
     let (sessions, folded, done) = ix.session_fold(6_000_000, WALK).unwrap();
     assert_eq!((sessions, folded, done), (0, 0, true));
+    teardown(&dir, ix);
+}
+
+#[test]
+fn a_part_over_its_own_total_is_refused_and_never_reads_complete() {
+    let (dir, mut ix) = fixture("overtotal");
+    for stem in &STEMS[..4] {
+        sess_file(&mut ix, "a.b.tv", "sess9@h.tld", stem, 5_000_000);
+    }
+    // The fifth member is posted as parts 1, 2 and (4/3) - a garbled or
+    // hostile counter claiming a part number past its own total. Before
+    // the `part > total` guard the three merged to nsegs=3 >= 3 and the
+    // row read COMPLETE with part 3 missing.
+    let bad = "v2wf7ppq5qq96rr7ss86";
+    for p in [1u32, 2, 4] {
+        sess_article(
+            &mut ix,
+            "a.b.tv",
+            "sess9@h.tld",
+            bad,
+            p,
+            3,
+            50_000_000,
+            5_000_000,
+        );
+    }
+    let (nsegs, total): (i64, i64) = ix
+        .db
+        .query_row(
+            "SELECT f.nsegs, f.total_parts FROM files f
+               JOIN releases r ON r.id=f.release_id WHERE r.stem=?1",
+            [bad],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (nsegs, total),
+        (2, 3),
+        "the (4/3) article was stored instead of dropped"
+    );
+    let complete: i64 = ix
+        .db
+        .query_row("SELECT complete FROM releases WHERE stem=?1", [bad], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(complete, 0, "2 of 3 parts read as a complete release");
+    assert_eq!(
+        ix.kv_get("ingest_drop_unparseable").as_deref(),
+        Some("1"),
+        "the refusal was not counted in the drop census"
+    );
+    // And the consequence for the fold, which is the half this item was
+    // held on: the liar drops out of the fold's `complete=1` population
+    // and the four PROVABLE members fold without it. That is the
+    // under-merge the module header already licenses ("under-merging,
+    // never garbage-union") - the folded release's size and file count
+    // are true for the four rows in it, and the incomplete fifth stays
+    // its own row, which is what it is.
+    let (sessions, folded, done) = ix.session_fold(6_000_000, WALK).unwrap();
+    assert_eq!((sessions, folded, done), (1, 3, true));
+    let left: i64 = ix
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM releases WHERE stem=?1 AND complete=0",
+            [bad],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 1, "the unprovable member was folded in anyway");
     teardown(&dir, ix);
 }
 

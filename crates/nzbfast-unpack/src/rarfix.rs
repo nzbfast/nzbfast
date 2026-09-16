@@ -748,6 +748,29 @@ pub fn try_rar_rr_repair_why(
     try_rar_rr_repair_hinted_why(dir, password, None)
 }
 
+/// Why one `.rev` file was set aside, carried back from the scan pool so
+/// the complaint is logged on the main thread in sorted-path order.
+///
+/// The four arms are the four `continue`s the inline loop had, kept apart
+/// rather than flattened to one string: each names a different fault and
+/// the operator reading the log is deciding a different thing about each.
+enum RevOpen {
+    /// The file could not be opened at all.
+    Unreadable(rars::Error),
+    /// Opened, but the REV header does not parse.
+    Unusable(rars::Error),
+    /// Parsed, and the payload fails the checksum the header carries.
+    BadChecksum,
+    /// Parsed, and the payload could not be read to check it.
+    UnreadablePayload(rars::Error),
+}
+
+impl From<rars::Error> for RevOpen {
+    fn from(e: rars::Error) -> Self {
+        RevOpen::Unreadable(e)
+    }
+}
+
 /// Rebuild missing or destroyed RAR5 volumes from `.rev` recovery volumes
 /// (WinRAR `rar rv`). Present volumes map onto the REV metadata's slots by
 /// (size, crc32); every unmatched slot is reconstructed via Reed-Solomon
@@ -756,7 +779,9 @@ pub fn try_rar_rr_repair_why(
 pub(crate) fn try_rev_reconstruct(dir: &std::path::Path) -> bool {
     use rars::recovery::stream::FileSource;
 
-    let budget = nzbkit::mem::process_budget().repair_cap();
+    let budget = nzbkit::mem::process_budget()
+        .repair_cap()
+        .min(rev_fold_window());
     sweep_stale_rev_temps(dir);
 
     // Gather .rev files: metadata from a bounded header read, payload
@@ -774,39 +799,51 @@ pub(crate) fn try_rev_reconstruct(dir: &std::path::Path) -> bool {
         .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("rev")))
         .collect();
     rev_paths.sort();
-    for path in &rev_paths {
+    // Each `.rev` is opened, parsed and payload-verified independently of
+    // every other, and the verify streams the whole payload - 48 MiB over
+    // three files on the shape the profile note measures, 4.1 ms of a 63 ms
+    // repair, and linear in the set. The three steps run on the bounded pool
+    // (`scan_in_order`); the WARNINGS and the pushes below do not, so a run
+    // still logs its complaints in sorted-path order and still builds
+    // `rev_sources`/`rev_meta` in that order - which is what makes the
+    // grouping below deterministic, as its own comment promises.
+    let opened = scan_in_order(
+        &rev_paths,
+        rev_scan_width(dir, rev_paths.len()),
+        |path: &std::path::PathBuf| {
+            let source = FileSource::open(path)?;
+            let meta = rars::rar50::read_rev5_meta(&source).map_err(RevOpen::Unusable)?;
+            match rars::rar50::verify_rev5_payload(&source, &meta) {
+                Ok(true) => Ok((source, meta)),
+                Ok(false) => Err(RevOpen::BadChecksum),
+                Err(e) => Err(RevOpen::UnreadablePayload(e)),
+            }
+        },
+    );
+    for (path, outcome) in rev_paths.iter().zip(opened) {
         let name = path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let source = match FileSource::open(path) {
-            Ok(source) => source,
-            Err(e) => {
+        match outcome {
+            Ok((source, meta)) => {
+                rev_sources.push(source);
+                rev_meta.push(meta);
+            }
+            Err(RevOpen::Unreadable(e)) => {
                 warn!(target: "repair", "{name}: unreadable .rev ({e})");
-                continue;
             }
-        };
-        let meta = match rars::rar50::read_rev5_meta(&source) {
-            Ok(meta) => meta,
-            Err(e) => {
+            Err(RevOpen::Unusable(e)) => {
                 warn!(target: "repair", "{name}: unusable .rev ({e})");
-                continue;
             }
-        };
-        match rars::rar50::verify_rev5_payload(&source, &meta) {
-            Ok(true) => {}
-            Ok(false) => {
+            Err(RevOpen::BadChecksum) => {
                 warn!(target: "repair", "{name}: .rev payload fails its own checksum");
-                continue;
             }
-            Err(e) => {
+            Err(RevOpen::UnreadablePayload(e)) => {
                 warn!(target: "repair", "{name}: unreadable .rev payload ({e})");
-                continue;
             }
         }
-        rev_sources.push(source);
-        rev_meta.push(meta);
     }
     // Group the verified .rev files by the SET each describes, and try every
     // group.
@@ -959,6 +996,242 @@ pub(crate) fn derive_part_name(known: &str, known_slot: usize, slot: usize) -> O
     ))
 }
 
+/// How many of the `.rev` repair path's per-file scans may run at once
+/// under `dir`, given `items` of them to do.
+///
+/// Concurrent reads of DIFFERENT files are a win where seeking is cheap and
+/// were expected to be a loss where it is not, so this was written as a
+/// stand-down on [`nzbkit::disk::Storage::Rotational`] and then MEASURED,
+/// because the fleet has a rotational box. The measurement does not support
+/// the stand-down and it was removed - section 4 of
+/// `research/NZBFAST-REPAIR-SCAN-THREADING-2026-09-16.md`. On a twelve-disk
+/// RAID6 btrfs array, 272 MiB over 17 files, cold per leg
+/// (`posix_fadvise(DONTNEED)`, residency re-checked with `mincore`), five
+/// reps at each width and the whole ladder re-run in REVERSED width order,
+/// every threaded width beat the serial scan and the two orderings agreed to
+/// within 5%:
+///
+/// | width | 1 | 2 | 4 | 8 | 12 | 16 |
+/// |---|---|---|---|---|---|---|
+/// | forward | 1.000 | 0.900 | **0.339** | 0.591 | 0.471 | 0.397 |
+/// | reversed | 1.000 | 0.864 | **0.360** | 0.597 | 0.464 | 0.412 |
+///
+/// A single reader cannot keep twelve spindles busy, which is why the array
+/// wants concurrency at all; the dip at width 8 is reproducible in both
+/// orderings and is presumably the stripe geometry, not noise.
+///
+/// **So rotational storage is not stood down - it is given the width that
+/// measured BEST for it**, 4, which is also the most conservative reading of
+/// the one gap this could not close: the fleet has no SINGLE-SPINDLE disk,
+/// and one head serving sixteen interleaved streams is the case that could
+/// still lose. Four bounds that to a depth where per-file readahead still
+/// dominates, and costs the array nothing - 4 is its fastest rung.
+///
+/// The probe is asked for every class, but note what it can SEE: macOS
+/// cannot answer the rotational question at all (`DKIOCISSOLIDSTATE` is
+/// root-only) and reports `Unknown` for every local disk, so this gate
+/// physically cannot fire there. That is the second reason the stand-down
+/// had to go: it could only ever have fired on Linux, where the measurement
+/// above says concurrency wins, while never reaching the macOS external
+/// spinner it was imagined to protect. A gate that fires exactly where it is
+/// wrong and never where it might be right is worse than no gate.
+fn rev_scan_width(dir: &std::path::Path, items: usize) -> usize {
+    if items <= 1 {
+        return 1;
+    }
+    let cap = match nzbkit::disk::device_class(dir) {
+        nzbkit::disk::Storage::Rotational => REV_SCAN_MAX_ROTATIONAL,
+        _ => REV_SCAN_MAX,
+    };
+    items.min(nzbkit::mem::cpu_workers()).clamp(1, cap)
+}
+
+/// [`rev_scan_width`]'s ceiling on storage that PROBES as rotational - the
+/// measured optimum for the one such array the fleet has, and the bound on
+/// the single spindle it does not have. See [`rev_scan_width`].
+const REV_SCAN_MAX_ROTATIONAL: usize = 4;
+
+/// Ceiling on [`rev_scan_width`], on top of the machine's own
+/// [`nzbkit::mem::cpu_workers`] and the number of files there are to read.
+///
+/// **16 because a ladder said so, not because it is a round number.** The
+/// scan-only arm of section 3 of
+/// `research/NZBFAST-REPAIR-SCAN-THREADING-2026-09-16.md` walks the width
+/// on an 18-thread M5 Max, scan time as a fraction of the serial scan:
+///
+/// | width | 17 x 16 MiB | 40 x 8 MiB |
+/// |---|---|---|
+/// | 1 | 1.001 | - |
+/// | 4 | 0.331 | 0.297 |
+/// | 8 | 0.237 | 0.201 |
+/// | 12 | 0.200 | 0.174 |
+/// | 16 | - | **0.165** |
+/// | 18 | 0.185 | 0.165 |
+///
+/// The knee is at 12 to 16 and both shapes are FLAT from 16 to 18, so 16
+/// takes essentially all of the measured win. What the constant is really
+/// for is the shape nobody on this fleet can measure: a 400-volume set on a
+/// 128-thread host, where `cpu_workers()` alone would spawn 128 readers
+/// three times per repair. The ladder's own limit is that it is WARM CACHE
+/// - the note says so - so the high rungs are read as a knee rather than as
+/// a licence to take the whole box.
+///
+/// The width-1 rung is the control that matters: the threaded build held to
+/// one worker measures 1.001 of the unthreaded one, so the pool's own
+/// machinery costs nothing detectable and every other rung is the
+/// concurrency rather than the rewrite.
+const REV_SCAN_MAX: usize = 16;
+
+/// The `.rev` fold's OWN window ceiling, applied on top of
+/// [`nzbkit::mem::MemBudget::repair_cap`] at [`try_rev_reconstruct`].
+///
+/// **Why the fold has a ceiling of its own rather than a smaller shared
+/// cap.** `repair_cap()` has two production consumers in this file: this
+/// one, and the embedded recovery-record repair at the bottom, whose budget
+/// bounds a STREAMED volume repair and is what keeps an 8-20 GB volume from
+/// going resident. Lowering the shared cap would re-tune that path, which
+/// nobody has measured, and would gate the rars fold TEAM off everywhere as
+/// a side effect. Capping here touches the fold and nothing else.
+///
+/// **8 MiB BECAUSE A SWEEP SAID SO, and because it is the only rung that is
+/// safe on both architectures the fleet can measure.** Section 10 of
+/// `research/NZBFAST-REPAIR-SCAN-THREADING-2026-09-16.md` walks the window
+/// against the SHIPPED 512 MiB one and then against 8 MiB itself. The
+/// headline, cold, against 512 MiB: a `.rev` repair is 11 to 13% faster on
+/// an M1 Ultra and 6 to 15% on a Xeon D-1531 (a spinning array, so the cold
+/// figures there are wide), for 40 to 49% less CPU, at 16, 32, 64 and 128
+/// MiB volumes. Warm, where the disk is out of the measurement, it is 13 to
+/// 14% on the M1 and 15 to 25% on the Xeon.
+///
+/// Then the ladder BELOW that, cold, base 8 MiB, median of the rounds
+/// (under 1.000 means the smaller window is faster):
+///
+/// | window | 17 x 16 MiB | 8 x 32 MiB | 5 x 64 MiB | 4 x 128 MiB |
+/// |---|---|---|---|---|
+/// | 6144 KiB | 0.991 | 0.985 | 0.979 | 0.978 |
+/// | 4096 KiB | 0.999 | 0.997 | 0.996 | 0.995 |
+/// | 1024 KiB | 1.004 | - | 0.987 | 0.992 |
+/// | 256 KiB | 1.030 | - | 1.034 | 1.056 |
+/// | 128 KiB | 1.073 | - | 1.116 | 1.127 |
+///
+/// **So 8 MiB is the top of a PLATEAU, not a point on a slope** - section
+/// 8.4 read its own last step as "still falling" and section 10 found it was
+/// the step onto the flat. Everything from 8 MiB to 1 MiB is inside 2%;
+/// below that per-window overhead climbs hard and gives the whole win back.
+///
+/// **The two parts disagree about every rung under 8 MiB and agree about
+/// 8 MiB, which is what decides it.** aarch64 carries a reproducible 2%
+/// cold / 3.8% warm dip at exactly 6144 KiB (four volume sizes, twelve
+/// rounds, A/A floor 0.3%) that Broadwell does not have at all; Broadwell's
+/// own best rung is 4096 KiB, which aarch64 reads as nil; and Broadwell has
+/// no turn under a mebibyte where aarch64 has a steep one. A constant below
+/// a mebibyte would buy x86 nothing measurable and cost Apple silicon up to
+/// 13%. **Do not move this to a rung that wins on one part**; section 10.8
+/// says what a lane wanting to move it has to beat.
+///
+/// It also frees the fold from `repair_cap()`'s 512 MiB: the peak working
+/// buffer is 8 MiB on every host now, which the phone and slim targets get
+/// for free.
+const REV_FOLD_WINDOW: u64 = 8 << 20;
+
+/// [`REV_FOLD_WINDOW`], or an operator override in whole KiB.
+///
+/// KiB rather than MiB because the sweep that sized the constant had to
+/// reach BELOW a mebibyte to find the turn, and a knob that cannot reach
+/// the rungs its own constant was chosen from cannot re-run them.
+fn rev_fold_window() -> u64 {
+    rev_fold_window_from(std::env::var("NZBFAST_REV_FOLD_WINDOW_KIB").ok().as_deref())
+}
+
+/// [`rev_fold_window`]'s whole decision, with the environment read out of
+/// it so it can be pinned by a test without a process-global write. A unit
+/// test that sets an environment variable is visible to every other test
+/// sharing the process, which is precisely the class `cargo test --lib`
+/// exists to catch and would then be causing.
+fn rev_fold_window_from(raw: Option<&str>) -> u64 {
+    let Some(v) = raw else {
+        return REV_FOLD_WINDOW;
+    };
+    match v.trim().parse::<u64>() {
+        Ok(kib) if kib > 0 => kib.saturating_mul(1 << 10),
+        _ => {
+            // Loud, never silent. A bare `.parse().ok()` here would run the
+            // built-in window with no sign anything was wrong, which is the
+            // fault `NZBFAST_REPAIR_SOLVE_BUDGET` was written up for after it
+            // swallowed a `16GiB` and cost a measurement its own disproof.
+            warn!(
+                target: "repair",
+                "NZBFAST_REV_FOLD_WINDOW_KIB={v:?} is not a positive whole number of KiB - \
+                 using the built-in fold window rather than silently misreading it"
+            );
+            REV_FOLD_WINDOW
+        }
+    }
+}
+
+/// Run `f` over `items` on a bounded pool of scoped threads, returning the
+/// answers in INPUT ORDER.
+///
+/// Three of the `.rev` repair's four phases checksum files that have
+/// nothing to do with one another, one at a time, on the same thread that
+/// will later fold them: `.rev` payload verification, the survivor scan
+/// that matches volumes to slots, and the verify-before-publish pass over
+/// the rebuilds. Profiled on an M5 Max over 17 x 16 MiB volumes plus 3
+/// `.rev` (`research/NZBFAST-REPAIR-PROFILE-2026-09-16.md` section 2.1),
+/// the survivor scan ALONE is 21.1 ms of a 63 ms repair - 12.4 ms of
+/// `read` and 8.75 ms of CRC, timed apart in its section 6.2 - and the
+/// three phases together are 33.8 ms of it. None of that work overlaps
+/// anything: the fold's own worker pool lives inside phase 3, and these
+/// three phases bracket it.
+///
+/// **ORDER IS LOAD BEARING, and is why this returns a vector rather than
+/// letting a caller act as answers arrive.** The survivor scan matches a
+/// volume to a slot FIRST MATCH WINS over `collect_rar_volumes` order, so
+/// two volumes of identical size and CRC - a real shape, a part duplicated
+/// beside the set under another name - must still land in the slots they
+/// land in today. Concurrency is confined to PRODUCING the per-file
+/// answers; every decision made from them, and every log line, stays
+/// serial and in the original order.
+///
+/// A panic in `f` is resumed on the caller's thread rather than swallowed:
+/// a lost answer is not a missing file, it is a volume silently demoted to
+/// "does not match its slot", which turns a repairable set into an
+/// unrepairable one without a word.
+fn scan_in_order<T, R>(items: &[T], width: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+{
+    if width <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..width)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(i) else { break };
+                        mine.push((i, f(item)));
+                    }
+                    mine
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| match w.join() {
+                Ok(mine) => mine,
+                Err(panic) => std::panic::resume_unwind(panic),
+            })
+            .collect()
+    });
+    done.sort_by_key(|&(i, _)| i);
+    done.into_iter().map(|(_, r)| r).collect()
+}
+
 /// Rebuild what one coherent .rev set can. `keep` indexes the members of a
 /// single set within `rev_sources`/`rev_meta`; returns true when at least one
 /// volume was rebuilt.
@@ -986,8 +1259,21 @@ pub(crate) fn try_rev_group(
     let volumes = collect_rar_volumes(dir).unwrap_or_default();
     let mut slot_path: Vec<Option<std::path::PathBuf>> = vec![None; slots.len()];
     let mut slot_name: Vec<Option<String>> = vec![None; slots.len()];
-    for path in &volumes {
-        let Ok((crc, len)) = rars::recovery::stream::crc32_of(path) else {
+    // The CHECKSUMS are computed concurrently; the MATCHING below is not.
+    // `crc32_of` opens its own handle per call and shares nothing, so the
+    // volumes are independent work - but a slot is claimed first-match-wins
+    // over `collect_rar_volumes` order, and that order decides which of two
+    // byte-identical volumes lands in a slot. Answers therefore come back in
+    // input order and the loop that consumes them is the one that was here
+    // before. A volume whose checksum could not be taken still `continue`s,
+    // exactly as it did when the read was inline.
+    let sums = scan_in_order(
+        &volumes,
+        rev_scan_width(dir, volumes.len()),
+        |path: &std::path::PathBuf| rars::recovery::stream::crc32_of(path),
+    );
+    for (path, sum) in volumes.iter().zip(sums) {
+        let Ok((crc, len)) = sum else {
             continue;
         };
         for (i, meta) in slots.iter().enumerate() {
@@ -1128,18 +1414,36 @@ pub(crate) fn try_rev_group(
     // Verify every rebuild against the metadata's own checksum BEFORE any of
     // them is published. A rebuild that does not match is not a volume, and
     // publishing one would replace a known-bad file with an unknown-bad one.
-    for (slot, &index) in missing.iter().enumerate() {
-        let (path, file) = &mut temps[slot];
-        if let Err(e) = file.sync_all() {
-            warn!(
-                target: "repair",
-                "✘ could not flush the rebuild for slot {} ({e})",
-                index + 1
-            );
-            cleanup_temps(&temps);
-            return false;
-        }
-        match rars::recovery::stream::crc32_of(path) {
+    //
+    // The rebuilds are independent files, so the flush-and-checksum of each
+    // runs on the same bounded pool as the survivor scan - this phase carries
+    // an `fsync` per rebuild on top of its read, and a set missing several
+    // volumes pays all of them in a row. What does NOT move is the VERDICT:
+    // the answers come back in `missing` order and are judged in that order
+    // below, so the slot reported is the same slot reported today, and
+    // nothing is published until every one of them has been judged.
+    let checks = scan_in_order(
+        &temps,
+        rev_scan_width(dir, temps.len()),
+        |(path, file): &(std::path::PathBuf, std::fs::File)| {
+            file.sync_all()
+                .map(|()| rars::recovery::stream::crc32_of(path))
+        },
+    );
+    for (&index, check) in missing.iter().zip(checks) {
+        let sum = match check {
+            Ok(sum) => sum,
+            Err(e) => {
+                warn!(
+                    target: "repair",
+                    "✘ could not flush the rebuild for slot {} ({e})",
+                    index + 1
+                );
+                cleanup_temps(&temps);
+                return false;
+            }
+        };
+        match sum {
             Ok((crc, len)) if crc == slots[index].crc32 && len == slots[index].file_size => {}
             Ok(_) => {
                 warn!(
@@ -1165,6 +1469,29 @@ pub(crate) fn try_rev_group(
         let name =
             derive_name(index).unwrap_or_else(|| format!("rebuilt.part{:02}.rar", index + 1));
         let target = dir.join(&name);
+        // Never over a volume that MATCHED ANOTHER SLOT. The name is
+        // DERIVED from a matched neighbour's `.partNN` pattern and a
+        // rename replaces whatever is at it, so an intact volume whose
+        // own name carries the wrong ordinal - it matched slot N by
+        // CRC while sitting at slot M's derived name - was destroyed by
+        // the rebuild of slot M.
+        //
+        // Deliberately narrower than "the target exists": a DAMAGED
+        // volume of THIS slot is present at this name and failing its
+        // CRC is precisely why the slot is in `missing`. Replacing that
+        // one is the whole point of the pass.
+        if slot_path
+            .iter()
+            .enumerate()
+            .any(|(other, p)| other != index && p.as_deref() == Some(target.as_path()))
+        {
+            warn!(
+                target: "repair",
+                "✘ {name} - not published: that file matched another slot by \
+                 CRC, so its name is wrong and its bytes are not"
+            );
+            continue;
+        }
         match std::fs::rename(&temps[slot].0, &target) {
             Ok(()) => {
                 info!(target: "repair", "✔ {name} - rebuilt from .rev");
@@ -1362,7 +1689,15 @@ pub(crate) fn rr_repair_volume_in(
                 cleanup(&tmp);
                 return Err(e.into());
             }
-            std::fs::rename(&tmp, path)?;
+            // `cleanup` before the `?`, like every other failure arm in
+            // this function: a failed rename left a FULL-SIZE
+            // `<stem>.rrtmpN` beside the set, carrying `Rar!` magic, so
+            // the next pass over that directory sees an extra volume-ish
+            // file nobody put there.
+            if let Err(e) = std::fs::rename(&tmp, path) {
+                cleanup(&tmp);
+                return Err(e.into());
+            }
             Ok(RrRepair::Rebuilt)
         }
         Err(e) => {
@@ -2355,5 +2690,73 @@ mod extract_budget_tests {
     #[test]
     fn an_unreadable_volume_is_unguarded_and_unreserved() {
         assert_eq!(split(None), (u64::MAX, 0));
+    }
+}
+
+#[cfg(test)]
+mod rev_fold_window_tests {
+    use super::{REV_FOLD_WINDOW, rev_fold_window_from as parse};
+
+    /// No override means the measured constant, which is the only case a
+    /// shipped binary ever takes.
+    #[test]
+    fn an_absent_override_is_the_built_in_window() {
+        assert_eq!(parse(None), REV_FOLD_WINDOW);
+    }
+
+    /// KiB, and whitespace-tolerant because a value threaded through a
+    /// shell round arrives padded often enough to be worth handling.
+    #[test]
+    fn a_whole_number_is_read_as_kib() {
+        assert_eq!(parse(Some("8192")), 8 << 20);
+        assert_eq!(parse(Some("6144")), 6 << 20);
+        assert_eq!(parse(Some("1")), 1 << 10);
+        assert_eq!(parse(Some("  4096  ")), 4 << 20);
+    }
+
+    /// EVERY REJECTED SPELLING FALLS BACK TO THE CONSTANT, never to zero
+    /// and never to a partial read. A window of zero would be a repair that
+    /// makes no progress, and `"16MiB"` parsing as 16 KiB would be a 512x
+    /// misreading that looks like a successful run - the exact shape
+    /// `NZBFAST_REPAIR_SOLVE_BUDGET` was written up for. The warning at the
+    /// site is what makes these loud rather than silent.
+    #[test]
+    fn a_value_that_is_not_a_positive_whole_number_is_refused() {
+        for bad in ["0", "-1", "8192KiB", "8MiB", "6.5", "", "  ", "lots"] {
+            assert_eq!(parse(Some(bad)), REV_FOLD_WINDOW, "{bad:?} was not refused");
+        }
+    }
+
+    /// A value past `u64::MAX / 1024` saturates rather than wrapping to a
+    /// tiny window - the one arithmetic way this knob could make a repair
+    /// slower than the default it is overriding.
+    #[test]
+    fn an_absurd_value_saturates_rather_than_wrapping() {
+        assert_eq!(parse(Some(&u64::MAX.to_string())), u64::MAX);
+    }
+
+    /// The constant is only ever a CEILING: the call site `min`s it with
+    /// `repair_cap()`, so whichever is smaller wins and the fold can never
+    /// ask for more than the process budget allows.
+    ///
+    /// **TODAY THE CEILING BINDS ON EVERY HOST**, and that is worth stating
+    /// rather than leaving to be re-derived: `repair_cap()` is
+    /// `(total / 4).clamp(8 MiB, 512 MiB)`, so it is never below 8 MiB
+    /// anywhere, a memory-limited container included, and the `min` resolves
+    /// to exactly `REV_FOLD_WINDOW` in every production configuration that
+    /// exists. The smaller-budget arm below is therefore a guard on a future
+    /// move of either number - the clamp floor dropping, or a lane raising
+    /// the constant - and not a case any host takes now. It is pinned
+    /// because it is one word at the call site and easy to invert in an
+    /// edit, and inverting it would let the fold outspend the budget.
+    #[test]
+    fn the_window_is_a_ceiling_and_never_a_floor() {
+        let below_todays_clamp_floor: u64 = 4 << 20;
+        assert_eq!(
+            below_todays_clamp_floor.min(parse(None)),
+            below_todays_clamp_floor
+        );
+        let every_real_host: u64 = 512 << 20;
+        assert_eq!(every_real_host.min(parse(None)), REV_FOLD_WINDOW);
     }
 }

@@ -1110,8 +1110,18 @@ impl Index {
         // and still 16x better at `since=0`, where the range matches
         // everything and the forced plan is at its worst. The index has
         // been there since M28 (see `open`); nothing but the hint was
-        // missing. It is created unconditionally, so this cannot fail
-        // for want of it.
+        // missing.
+        //
+        // It is created by a NON-FATAL `let _ = db.execute_batch(..)`
+        // (`schema::arrival_counter_and_indexes`) and is the LAST
+        // statement of that batch, which stops at its first error - so
+        // "created unconditionally", as this used to say, is not quite
+        // the guarantee it sounds like. On a database where that batch
+        // has never got to the end, `INDEXED BY idx_rel_arrival` fails
+        // to PREPARE and both statements below return an error rather
+        // than falling back to a plan. That is the right direction (a
+        // 76-second poll is worse than a reported failure) but it is an
+        // error the caller can see, not an impossibility.
         const VISIBLE: &str = "arrival_seq > ?1 AND first_posted > ?2
              AND junk < 50 AND title_key <> ''
              AND title_key NOT IN (SELECT key FROM wall_hidden)";

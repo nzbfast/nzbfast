@@ -59,6 +59,11 @@ pub mod failkind;
 // by the crate-split prep so the stream hub can hold one.
 pub mod fileslot;
 pub mod health;
+// How long the index write paths actually hold their lock, per
+// call site. The instrument behind section 8 of
+// `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md`, which is the
+// first measurement of the daemon index mutex on a running daemon.
+pub mod holdstat;
 pub mod identify;
 pub mod identity;
 pub mod import_sab;

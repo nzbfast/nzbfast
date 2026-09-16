@@ -2006,6 +2006,52 @@ jobs:
         id: archive
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.nextest.outcome == 'success' }}
         run: cargo nextest archive --locked --archive-file nextest-archive.tar.zst
+      # A gap a private handoff (not shipped here) named GAP 2: cargo-
+      # nextest does not run doctests, every CI test job (this one's
+      # four shards below, `daemon`, `windows-unit`) is nextest, and
+      # tools/preflight.py's sweep is a nextest run too - so before this
+      # step nothing in CI or in the documented local commands ever ran
+      # `cargo test --doc`, in either direction, forever. Two doctests
+      # were already broken by the time anyone looked by hand (an indented
+      # measurement table in a doc comment parses as a Markdown code
+      # block, which rustdoc treats as Rust unless fenced ```text; fixed
+      # at the site in df28d6b10, prose untouched).
+      #
+      # PLACEMENT: here, not a new job. A doctest needs a real `cargo
+      # test` build - rustdoc links each example against the crate's
+      # compiled rlib - and this job already paid for exactly that
+      # dependency graph twice over (the clippy step above, then the
+      # archive build just above this comment); running it here is a
+      # cache hit. A dedicated job would be a third cold compile of the
+      # same workspace for 13 doctests, which is not a fair trade -
+      # nightly is where that cost would go if this job ever stopped
+      # being a place to hang it.
+      #
+      # NO PACKAGE SELECTION, matching the archive step immediately
+      # above and for the same reason (its own comment): default-members
+      # in the root Cargo.toml already excludes nzbfast-ffi and already
+      # includes the three vendored crates (rars, tiny_http,
+      # lzma-rust2), so naming a list here would just be a second copy of
+      # that manifest line to keep in sync. Measured on this tree: 13
+      # runnable doctests (4 in lzma-rust2, 9 in tiny_http, 0 elsewhere
+      # among the vendored crates) plus 2 `ignore`d ones (nzbkit,
+      # nzbkit-base), all green - so the vendored crates are IN, on the
+      # same terms `unit-one-process` gave their unit tests on 8 Sep 2026
+      # once that gate started asking the root manifest for workspace
+      # MEMBERSHIP rather than a `crates/` path prefix. None of the three
+      # carries a doctest worth excluding by name, and excluding them
+      # preemptively would just be one more list nobody remembers to
+      # widen when that changes.
+      #
+      # `--no-fail-fast`: this is the one shape that finds every broken
+      # example in a single run rather than the first one alphabetically -
+      # the workspace sweep in CLAUDE.md's build section carries the same
+      # flag for the same reason. `--locked` for the reason given at the
+      # clippy and archive steps: this must fail on the committed
+      # Cargo.lock, not a re-resolved one nobody else's checkout has.
+      - name: doctests
+        if: ${{ !cancelled() && steps.archive.outcome == 'success' }}
+        run: cargo test --doc --locked --no-fail-fast
       # `always()`, and immediately after the build - see the restore
       # note above. A failed suite must not cost the next run its
       # dependency artifacts.
@@ -2097,10 +2143,19 @@ jobs:
       # PAID FOUR TIMES (once per shard) to run 29 tests once - only one
       # shard's partition draws them. Accepted rather than moved to a
       # fifth job or into `unit-one-process`: the restore is a cache hit
-      # after the first job to build it, the filter itself measured
-      # under a second, and `unit-one-process` selects `lib`/`bin` roots
-      # only - these four modules are `tests` (integration) targets, so
-      # it does not build them at all.
+      # after the first job to build it, and the filter itself measured
+      # under a second. The clause that used to end this sentence -
+      # "`unit-one-process` selects `lib`/`bin` roots only - these four
+      # modules are `tests` (integration) targets, so it does not build
+      # them at all" - went FALSE on 16 Sep 2026, when that job's
+      # selection stopped filtering by kind and these four modules
+      # started running there too (which is why that job grew a
+      # `$GITHUB_PATH` prepend of its own in the same change). The
+      # decision stands on the first half alone; the second half is kept
+      # here struck through rather than deleted because it is the reason
+      # the decision was taken, and because a sentence that was true when
+      # written and quietly stopped being so is this file's most repeated
+      # defect.
       #
       # NOT `apt-get install -y par2`: see the long form at PAR2REF_TAG
       # above (Ubuntu's 0.8.1 cannot verify a set describing a 0-byte
@@ -2431,6 +2486,57 @@ jobs:
   # run is what caught the incident above. If a leak is ever found that
   # the parallel run missed, the flag is the lever, not the job.
   #
+  # THE INTEGRATION TARGETS RIDE THIS JOB TOO, since 16 Sep 2026 and
+  # claim `one-process-covers-integration-targets`. The selection step
+  # dropped `kind: test` until then, with a comment giving the reason;
+  # the reason was false, and the note on the filter itself has the full
+  # correction. In one line: the shards are nextest, which gives every
+  # test its own PROCESS, so an integration target got no one-process
+  # exposure anywhere in this repo - and the two MERGED integration
+  # binaries are the largest one-process surfaces it has.
+  #
+  # WHAT THE ADMISSION COSTS, all nine binaries bare and green, measured
+  # on the dev Mac (M5 Max, debug) and then ON THIS RUNNER rather than
+  # extrapolated to it - run 35045580565, a workflow_dispatch of these
+  # exact job bodies:
+  #
+  #                                tests     dev Mac     runner
+  #     nzbfast::integration         346       32.9 s     168.9 s
+  #     parfast::integration          22       31.1 s     134.4 s
+  #     nzbkit::integration          159        8.1 s      38.8 s
+  #     tiny_http::nzbfast_framing    23        6.0 s       7.1 s
+  #     nzbkit::rate_floor             1        3.5 s       3.5 s
+  #     rars::integration              2        0.7 s       0.0 s
+  #     three one-test binaries        3       ~0.1 s      ~0.0 s
+  #     ------------------------------------------------------------
+  #     added to this job            556      ~82 s       352.7 s
+  #
+  # So 5m53s onto a job that ran 22m10s with them and would have run
+  # ~16m17s without. The ratio is NOT uniform and that is worth keeping:
+  # nzbkit is 4.8x the Mac and parfast::integration 4.3x, but parfast is
+  # the second most expensive row here off 22 tests, because its subject
+  # is whole PAR2 creates and repairs against the pinned reference.
+  #
+  # PER-PUSH RATHER THAN NIGHTLY, and the arithmetic is why. The archive
+  # already HOLDS these binaries - `linux-tests` shards run every one of
+  # them - so this costs no build and no second artifact download, only
+  # the run itself, against a job whose nzbkit lib leg alone is 731 s.
+  # A nightly-only home would buy a verdict a day and a thousand commits
+  # behind tip, which is the case `heavy-build` was created to end for
+  # e2e. The `timeout-minutes` below is deliberately NOT raised for it:
+  # see the measurement against the cap in the note beside that number.
+  #
+  # WHAT IS *NOT* DONE HERE, said out loud rather than left to be
+  # rediscovered: nightly's `one-process-loaded` still campaigns over
+  # `lib`/`bin` legs only, so shape (c) - a test carrying a hidden
+  # wall-clock budget - is still unhunted UNDER LOAD for these binaries.
+  # That is a second, separately-budgeted job (each leg is a timed
+  # campaign of tens of iterations), not a filter widening, and it is
+  # left as its own item. The gap this commit closes is that they ran in
+  # one process NOWHERE; they now run once per push, which reaches
+  # shapes (a) and (b). `tools/one-process-roster.py` holds that matrix
+  # to the manifests and its header says the same thing.
+  #
   # DELIBERATELY NOT in `suites-ran` at the foot of this file: this job
   # skips on exactly the condition `linux-tests` skips on (`check`'s
   # archive), so the Linux row there already reports the silence.
@@ -2484,6 +2590,55 @@ jobs:
     # below load-bearing in a second way: it is no longer only the
     # budget this job is allowed, it is the threshold a hang is detected
     # at. Raising it to get a green now buys silence as well as time.
+    #
+    # UNCHANGED BY THE 16 Sep 2026 WIDENING, which is a measurement and
+    # not an omission. Admitting the integration targets adds 5m53s to
+    # this job (the table in the note above has the per-binary rows),
+    # taking a measured run from ~16m17s to 22m10s - so the margin under
+    # this cap is still over twenty minutes, and the cap keeps meaning
+    # "something hung" rather than "the suite grew". If that ever stops
+    # holding the answer is to move a leg, not to move this number.
+    #
+    # IT STOPPED HOLDING THE SAME DAY, AND A LEG WAS MOVED. Both figures
+    # in the paragraph above are FAST-class runners. GitHub's
+    # ubuntu-latest fleet is bimodal here by about 3-5x on this repo's
+    # GF(2^16) work, and on the slow class the widened job wanted about
+    # 50 minutes: three of the five runs on main between 06:11Z and
+    # 09:22Z on 16 Sep were cap kills at 45m16s / 45m19s / 45m21s, with
+    # the other two green at 21m11s and 22m14s and nothing in between. A
+    # cap kill carries NO TEST VERDICT, so roughly every other push got
+    # no one-process result at all - the one-process class's own failure
+    # mode wearing CI's clothes, which is the thing the block above this
+    # one exists to refuse. Written up as GAP 4 of the 16 Sep 2026
+    # one-process coverage note, which is in the private tree, so it is
+    # not named here - this file is published verbatim.
+    #
+    # THE NUMBER DID NOT MOVE. Two legs did, and the larger one was not
+    # in that write-up's table at all, because the table accounted for
+    # the run loop and the job is more than the run loop:
+    #
+    #   * `the dense solve arm, forced` is now its own job
+    #     (`dense-solve-arm`, below). It was 14m55s on the slow class
+    #     and 3m51s on the fast one - a third of this job - while its
+    #     own comment quoted "3.0 s" off an idle dev Mac. It shares no
+    #     state with the run loop and reads one binary by name, so it
+    #     moves cleanly; it costs one more archive restore, which the
+    #     `par2-conformance` note prices at a cache hit.
+    #   * parfast's two `cancel` siblings had their WINDOW-FREE creates
+    #     cut (`crates/parfast/tests/integration/cancel.rs`): the
+    #     second, verifying create in `..._a_create_leaves_no_recovery
+    #     _set` from -r50 to -r5, and the set-up create in `..._the
+    #     _verify_pass_leaves_the_directory_untouched` from -r10 to -r2.
+    #     Neither `-r` is in a window - the first belongs to a create
+    #     that is never interrupted, the second to a create that runs
+    #     before the pass under test - which is the order the handoff
+    #     prescribes: shrink `-r` before ever touching a payload.
+    #
+    # So this cap still means "something hung", and it is still also the
+    # threshold ci-verdict detects a hang at. Measure on the SLOW class
+    # or not at all: a ~22 minute green proves nothing about the case
+    # that was failing, and naming a calibrator in the run is how the
+    # class is established (the handoff's table gives four).
     timeout-minutes: 45
     concurrency:
       group: ci-unit-one-process-${{ github.ref }}
@@ -2565,27 +2720,43 @@ jobs:
       # the guard's own skip arm into a failure, which covers the case
       # where the binary is there and stops answering `-V`.
       #
-      # NZBFAST_PAR2_BIN rather than a PATH prepend: it is explicit in
-      # the log, it cannot be defeated by a later step installing the
-      # distro package, and it is the spelling `parfast`'s
-      # creator-packet interop test already uses - one mechanism, not a
-      # second one. `$GITHUB_ENV` rather than a step-level `env:`
-      # because `~` and `$HOME` are not expanded in a workflow env
-      # value, and the cache path is `~/par2ref` by the action's own
-      # tilde handling.
+      # `$GITHUB_ENV` rather than a step-level `env:` because `~` and
+      # `$HOME` are not expanded in a workflow env value, and the cache
+      # path is `~/par2ref` by the action's own tilde handling.
       #
-      # Both variables are read by NOTHING ELSE this job runs: every
-      # other reader in the tree is an integration (`kind: test`)
-      # target, and the selection below takes `lib`/`bin` only.
-      - name: point the catalog conformance guard at the pinned reference
+      # AND A PATH PREPEND AS WELL, SINCE 16 Sep 2026, which is a
+      # correction rather than an addition. This block used to say
+      # "NZBFAST_PAR2_BIN rather than a PATH prepend ... it cannot be
+      # defeated by a later step installing the distro package", and
+      # ended "both variables are read by NOTHING ELSE this job runs:
+      # every other reader in the tree is an integration (`kind: test`)
+      # target, and the selection below takes `lib`/`bin` only". The
+      # selection below no longer does (see the note on the filter), so
+      # the second sentence is false and the first is now a hazard: SIX
+      # integration modules in the newly admitted binaries call
+      # `Command::new("par2")` directly rather than reading the env
+      # pointer - nzbkit's `par2repair_parity`, `par2repair_namepath`,
+      # `par2repair_dir` and `par2gen_interop`, and nzbfast's
+      # `stream_repair` - so with NZBFAST_REQUIRE_PAR2 set and no `par2`
+      # resolvable, every one of them would ASSERT rather than skip.
+      # `$GITHUB_PATH` is what `linux-tests` already does for those same
+      # four modules, for that same reason, and it is the recipe copied
+      # here rather than a second invention. Nothing in this job installs
+      # par2 after this step, and a prepend wins over a later install
+      # anyway, so the old paragraph's worry costs nothing to retire.
+      # NZBFAST_PAR2_BIN stays: postfast's catalog guard and parfast's
+      # `creator_packet` interop test read it in preference to PATH.
+      - name: point the par2 readers at the pinned reference
         shell: bash
         run: |
           set -euo pipefail
           if ! "$HOME/par2ref/par2" -V; then
             echo "::error::the pinned par2cmdline reference is not at ~/par2ref/par2."
-            echo "::error::postfast's catalog conformance guard would skip, which reads as a pass."
+            echo "::error::postfast's catalog conformance guard would skip, which reads as a pass,"
+            echo "::error::and the six par2 integration modules would FAIL on NZBFAST_REQUIRE_PAR2."
             exit 1
           fi
+          echo "$HOME/par2ref" >> "$GITHUB_PATH"
           echo "NZBFAST_PAR2_BIN=$HOME/par2ref/par2" >> "$GITHUB_ENV"
           echo "NZBFAST_REQUIRE_PAR2=1" >> "$GITHUB_ENV"
       - name: install cargo-nextest
@@ -2670,13 +2841,47 @@ jobs:
           by_realpath = {os.path.realpath(m): m for m in members}
 
           inventory = json.load(open("unit-binaries.json"))["rust-binaries"]
-          rows, strangers, vendored = [], [], 0
+          rows, strangers, vendored, integration = [], [], 0, 0
           for binary_id, binary in sorted(inventory.items()):
-              # `lib`/`bin` are the unit-test binaries; `test` is an
-              # integration target, which gets no process-global
-              # exposure the shards do not already give it.
-              if binary.get("kind") not in ("lib", "bin"):
-                  continue
+              # EVERY TEST BINARY, `test` INCLUDED, since 16 Sep 2026.
+              # This read `kind not in ("lib", "bin") -> skip`, on the
+              # stated ground that "`test` is an integration target,
+              # which gets no process-global exposure the shards do not
+              # already give it". That premise was TRUE when it was
+              # written and is false now, and the way it went false is
+              # the thing to keep: the shards are nextest, which gives
+              # every test its OWN PROCESS, so the exposure they give an
+              # integration target is precisely ZERO - what the sentence
+              # was really relying on is that each integration target
+              # used to be a one-module executable, so "one process"
+              # meant one module and there was nothing to share. Then
+              # the targets were MERGED: `crates/nzbfast/tests/
+              # integration/main.rs` folded 28 executables into one on
+              # 17 Aug 2026 and `crates/nzbkit/tests/integration/main.rs`
+              # folded 27 on 20 Aug, which built the two largest
+              # one-process surfaces in the repo and left them running
+              # in that shape NOWHERE - not here, not in nightly's
+              # `one-process-loaded`, only under a human typing `cargo
+              # test -p nzbkit --test integration`.
+              #
+              # THE COUNTEREXAMPLE IS MEASURED, not argued: `09e2331c8`
+              # (15 Sep 2026) fixed three tests in nzbkit's merged binary
+              # that were red in 5 of 5 whole-binary runs on main while
+              # every CI job was green - `par2gen_create_ntt` held the
+              # create-arm pins under a module-PRIVATE mutex and
+              # `par2gen_cancel` ran creates over the same process
+              # globals under no lock, a shape (b) race. Each of those
+              # tests passes alone, passes under `--test-threads=1`, and
+              # passes under nextest.
+              #
+              # Nothing is filtered by kind now, which is deliberate: the
+              # accept set is "a binary in this archive whose package is
+              # a workspace member", and the next target kind cargo
+              # invents enrols itself the same way a new member does.
+              # The archive is built without `heavy-tests`, so the
+              # elapsed-time and allocator-instrumented targets
+              # (`conn_tuner`, `delivery_cost`, the two RSS suites,
+              # `par2gen_large_set`) are not in it to be picked up.
               # A package id is a path URL: `path+file:///abs/dir#version`.
               package_id = binary.get("package-id", "")
               directory = package_id.split("#", 1)[0]
@@ -2698,6 +2903,8 @@ jobs:
                   continue
               if not member.startswith("crates/"):
                   vendored += 1
+              if binary.get("kind") == "test":
+                  integration += 1
               rows.append((binary_id, binary["binary-path"]))
 
           # FAILING TO FIND IS FAILING, both ways round. A unit binary
@@ -2723,6 +2930,25 @@ jobs:
                        "in ONE process. If a vendored crate was genuinely dropped "
                        "from the workspace, drop this arm in the same commit and "
                        "say so - do not leave it passing over nothing.")
+          # And the same arm for the INTEGRATION targets, for the same
+          # reason and with one of its own. The two merged binaries
+          # (`nzbfast::integration`, `nzbkit::integration`) are the
+          # largest one-process surfaces in the repo and this job is the
+          # only place either runs in that shape; a `kind` spelling that
+          # moved under this parse, or a merge undone back into
+          # per-module targets, would drop them SILENTLY and leave a
+          # green tick where the coverage used to be. That is not
+          # hypothetical either - the filter this replaced was itself a
+          # correct sentence that went stale when the targets merged,
+          # and nothing said so for a month.
+          if not integration:
+              sys.exit("::error::no integration (`kind: test`) binary was selected. The "
+                       "merged crates/nzbkit and crates/nzbfast integration targets are "
+                       "the largest one-process surfaces in this repo and NO other job "
+                       "runs them in one process - the shards are nextest, which gives "
+                       "every test its own process. If those targets were genuinely "
+                       "dropped or re-split, drop this arm in the same commit and say "
+                       "so - do not leave it passing over nothing.")
           for row in rows:
               print(*row, sep="\t")
           PY
@@ -2767,6 +2993,168 @@ jobs:
             echo "::error::libtest exits 0 on a filter that matches nothing, so this step checks."
             exit 1
           fi
+      - name: run each workspace test binary in ONE process
+        shell: bash
+        run: |
+          # A job that selected nothing and exited 0 would be a green
+          # tick over zero coverage, which is the failure mode the whole
+          # note above this job exists to remove. Refuse it.
+          if [ ! -s unit-binaries.tsv ]; then
+            echo "::error::no workspace test binary was selected out of the archive."
+            echo "::error::Either the archive is not what it was, or the selection above stopped matching."
+            exit 1
+          fi
+          rc=0
+          while IFS=$'\t' read -r id path; do
+            if [ ! -x "$path" ]; then
+              echo "::error::$id: '$path' is not executable on this runner."
+              rc=1
+              continue
+            fi
+            echo "::group::$id"
+            if "$path"; then
+              echo "$id: ok"
+            else
+              rc=1
+              # The id stays OUT of `title=`: a binary id contains
+              # `::` (`nzbfast::bin/nzbfast`), and GitHub ends the
+              # annotation's properties at the first `::` it finds, so
+              # an id in the title truncates it and swallows the
+              # message. In the message body a `::` is just text.
+              echo "::error title=A test binary failed with its tests sharing one process::$id failed when every one of its tests ran in a single process. If linux-tests is green on this same commit then no individual test is broken IN ISOLATION - but there are THREE shapes here and only ONE of them has a polluter, so do not reach for the bisect first. (a) POLLUTION: an earlier test left process-global state that this one read; visible even serially. (b) A CONCURRENT RACE on a process-global: two tests on different THREADS raced a counter - this job invokes the binary bare, so libtest is PARALLEL and can see it, and '-- --test-threads=1' structurally CANNOT reproduce it. (c) NO POLLUTER AT ALL: the test depends on a wall-clock duration it never sets - a window that rolls, a token that expires - and slow setup on a loaded box overran it. THE TELL, and it costs one run: re-run the failing test ALONE with the box busy. If it STILL fails there is no neighbour to find - that is (c), so read the test for a duration it depends on but never sets, and fix the TEST, never the production constant. If it passes alone and fails only in company it is (a) or (b). Reproduce with 'cargo test' - never nextest - on that target: 'cargo test -p <crate> --lib' for a lib/bin id, 'cargo test -p <crate> --test <name>' for an integration one (the id's second half names it). libtest names the VICTIM and never the polluter: 'tools/pollution-bisect.py -p <crate> <the failing test>' names the polluter for (a) in minutes, but do NOT hand it a FLAKY victim - it refuses one that fails alone, and otherwise converges on an innocent neighbour and prints it with the confidence of a real answer. Never add '--test-threads=1' to make a red go away; that deletes the (b) coverage. nightly.yml's 'one-process-loaded' runs this same binary tens of times under load and reports a RATE, which is where (c) shows up on its own."
+            fi
+            echo "::endgroup::"
+          done < unit-binaries.tsv
+          exit "$rc"
+
+
+  # ===================================================================
+  # THE DENSE PAR2 SOLVE ARM, IN A JOB OF ITS OWN SINCE 16 Sep 2026.
+  #
+  # IT WAS A STEP OF `unit-one-process` UNTIL THIS COMMIT, and the move
+  # is a measurement rather than a tidy-up. The 16 Sep widening
+  # (`a54f456f8`) admitted the integration targets to that job on a
+  # margin computed from FAST-class runners only; on the slow half of
+  # GitHub's ubuntu-latest fleet the widened job wanted about 50 minutes
+  # against a 45 minute cap, and three of the five runs on main between
+  # 06:11Z and 09:22Z were cap kills - which carry NO TEST VERDICT at
+  # all, so roughly every other push got no one-process result. That
+  # job's own comment refuses the obvious answer ("the answer is to move
+  # a leg, not to move this number", and the number is also the
+  # threshold `tools/ci-verdict.py` detects a hang at). This is the leg.
+  #
+  # WHY THIS ONE, and it is not the leg the write-up expected. The
+  # per-binary table in the 16 Sep 2026 one-process coverage note (in
+  # the private tree, so not named here) accounted for the RUN LOOP
+  # only, and the step it left out is
+  # a third of the job: measured on the two reference runs, `the dense
+  # solve arm, forced` was 3m51s on the fast class (run 35067267597) and
+  # **14m55s** on the slow one (35072623508) - against the "224 tests,
+  # 3.0 s" its own comment quotes from an idle dev Mac. It is 299 tests
+  # now, run twice, and the tests it runs are the GF(2^16) Forney work
+  # that is exactly what the slow class is worst at.
+  #
+  # AND IT IS A CLEAN SEAM, which is why it is the leg to move rather
+  # than the biggest number. This step is not a one-process test: it
+  # proves the DENSE solve arm still works, which is an armv7 concern
+  # that lives here only because the archive does. It reads one binary
+  # by name, shares no state with the run loop, and needs none of that
+  # job's par2 preamble - `nzbkit-base` names neither NZBFAST_PAR2_BIN
+  # nor a bare `par2` anywhere in its sources, so the reference that
+  # job pins for postfast's catalog guard was never doing anything for
+  # this step.
+  #
+  # THE COST IS ONE MORE ARCHIVE RESTORE, which is the trade the
+  # `par2-conformance` note above already prices at "a cache hit after
+  # the first job to build it". Measured on the two runs above, the
+  # whole preamble - checkout, nextest install, download, extract and
+  # inventory - is 40-45 s, against the 14m55s this job now runs in
+  # parallel with instead of in series.
+  #
+  # MEASURED AFTER THE MOVE: see the GAP 4 table in that same note,
+  # which this change extends rather than replaces.
+  # ===================================================================
+  dense-solve-arm:
+    # Same form and same reason as `unit-one-process` above: the REAL
+    # precondition is the archive, not `check`'s conclusion.
+    if: ${{ !cancelled() && github.repository != 'nzbfast/nzbfast' && needs.check.outputs.archive == 'success' }}
+    needs: check
+    runs-on: ubuntu-latest
+    # 45, the same number its parent job carries, and deliberately NOT
+    # tightened to the ~16 minutes this is measured at. The cap's job
+    # here is what it is there - to mean "something hung", and to be the
+    # threshold `tools/ci-verdict.py` reads out of this file for its
+    # cap-kill arm - and this work is drawn from the same archive on the
+    # same fleet, so a second, tighter number would be a second thing to
+    # recalibrate every time the fleet's slow class moves. Measured
+    # slow-class cost of everything below: 14m55s of dense arm plus
+    # ~40 s of preamble. Tighten it deliberately, with a measurement,
+    # or not at all - do not tighten it to make this line look neat.
+    timeout-minutes: 45
+    concurrency:
+      group: ci-dense-solve-arm-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      # The checkout is not decoration: `nextest list` refuses a
+      # `--workspace-remap` directory with no workspace root manifest in
+      # it, and refuses it AFTER extracting. Same reason as the parent
+      # job's, and the fixture-backed half of that reason applies here
+      # too - the par2repair tests read files from the tree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: install cargo-nextest
+        run: |
+          curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 20 -o cargo-nextest.tar.gz \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NT_VERSION}/cargo-nextest-${NT_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${NT_SHA_LINUX}  cargo-nextest.tar.gz" | sha256sum -c -
+          tar -xzf cargo-nextest.tar.gz
+          sudo mv cargo-nextest /usr/local/bin/
+          rm cargo-nextest.tar.gz
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nextest-archive-linux
+      # The same guard the parent job carries, for the same two reasons:
+      # `env!("CARGO_BIN_EXE_*")` is baked at build time, and the
+      # `binary-path` nextest reports is the path the binary was BUILT
+      # at, not the path it was just extracted to.
+      - name: assert this runner's workspace matches the build's
+        shell: bash
+        env:
+          WANT: ${{ needs.check.outputs.workspace }}
+          GOT: ${{ github.workspace }}
+        run: |
+          if [ "$WANT" != "$GOT" ]; then
+            echo "::error::this runner's workspace is '$GOT' but the archive was built in '$WANT'."
+            echo "::error::The archived binaries' paths and their baked CARGO_BIN_EXE_* would both be wrong."
+            exit 1
+          fi
+          echo "workspace matches the build job: $GOT"
+      - name: extract the archive and inventory its binaries
+        run: |
+          cargo-nextest nextest list \
+            --archive-file nextest-archive.tar.zst \
+            --extract-to "$GITHUB_WORKSPACE" --extract-overwrite \
+            --workspace-remap "$GITHUB_WORKSPACE" \
+            --list-type binaries-only --message-format json > unit-binaries.json
+      # NO MEMBER SELECTION HERE, and that is the difference from the
+      # parent job rather than an omission. `unit-one-process` asks the
+      # root manifest which packages are workspace MEMBERS because its
+      # subject is "every member, covered"; this job's subject is ONE
+      # binary it names, so the whole accept-set argument - and the
+      # vendored and integration refusals that guard it - belong there
+      # and would be a second copy here. What this job needs is an id to
+      # path map, and the step below refuses by name if its row is
+      # missing, which is the same "failing to find is failing" the
+      # selection makes in its own terms.
+      - name: map every archived binary id to its path
+        run: |
+          python3 - <<'PY' > unit-binaries.tsv
+          import json
+          inventory = json.load(open("unit-binaries.json"))["rust-binaries"]
+          for binary_id, binary in sorted(inventory.items()):
+              print(binary_id, binary["binary-path"], sep="\t")
+          PY
+          cat unit-binaries.tsv
       # THE DENSE SOLVE ARM, WHICH NO OTHER PER-PUSH JOB REACHES.
       #
       # `backsub_gate` sends a repair to the Forney arm wherever a fused
@@ -2788,16 +3176,132 @@ jobs:
       #
       # `NZBFAST_BACKSUB` is the gate's own documented escape hatch, in
       # both directions, so forcing `dense` runs the identical tests down
-      # the arm armv7 takes, on this x86 runner, in seconds. Measured on
-      # the dev Mac: 224 tests, 3.0 s.
+      # the arm armv7 takes, on this x86 runner. Measured on the dev Mac
+      # when this landed: 224 tests, 3.0 s.
+      #
+      # THAT FIGURE IS AN IDLE 18-CORE MAC AND IT MISLED A WRITE-UP, so
+      # the runner's own numbers sit beside it now. It was 299 tests
+      # here, run TWICE (once on the runner's arm, once forced) until
+      # 16 Sep 2026, on a two core box, and the tests under the
+      # `par2repair` filter are the GF(2^16) Forney work that the
+      # fleet's slow class is worst at: **3m51s on the fast class**
+      # (run 35067267597) and **14m55s on the slow one** (35072623508).
+      # Reading "3.0 s" as the cost of this
+      # step is what left a third of `unit-one-process` out of the
+      # per-binary table in the 16 Sep 2026 one-process coverage note
+      # (private tree, not named here), and it is why that job was cap-killed on every
+      # slow-class push until this step moved out of it. A dev-Mac
+      # figure is not a runner figure; quote both or neither.
+      #
+      # THE FREE RUN IS GONE, 16 Sep 2026, under claim
+      # `dense-arm-free-run-duplication-16sep`. Until that day this step
+      # ran the filter twice: once bare (`free`) and once forced. The
+      # bare half was the CONTROL ARM - it is what let the error below
+      # say "passed on this runner's own arm and failed with dense" -
+      # and it was also duplicated work, because the `nzbkit-base` row
+      # of `unit-one-process`'s run loop already runs the whole binary
+      # bare, those 300 included. Measured on the dev Mac at the time of
+      # the decision the two arms cost the SAME (127.3 s free, 123.5 s
+      # forced, 300 passed either way), so the bare half was half the
+      # step: about 1m55s of fast-class and **7m25s of slow-class**
+      # runner on EVERY push, for a second opinion about a failure this
+      # step has never yet reported.
+      #
+      # WHAT REPLACES IT, and it has to be named in the error or the
+      # deletion is a silent one: the `nzbkit-base` row of
+      # `unit-one-process`, on the same commit, out of the SAME archive,
+      # so it is the same binary bytes running the same tests bare, and
+      # it is a superset (all 1,560 in one process, not this filter's
+      # 300). It is a different RUNNER, which the runner class can make
+      # a different CPU, and that is the whole of what was given up:
+      # `backsub_gate` picks the arm off the fused GF16 kernel, so a
+      # control on another box is a control on another kernel. The
+      # error below says so, says what a missing verdict there means,
+      # and gives the local repro for both arms. Do not re-derive this;
+      # if it is ever put back, put back the count invariant it carried
+      # too and say why the `--list` form below was not enough.
+      #
+      # HOW MUCH OF THIS FILTER THE FORCING ACTUALLY CHANGES, measured
+      # 16 Sep 2026 under claim
+      # `dense-arm-no-proof-any-test-took-it-16sep`, because nothing
+      # anywhere had established it. Forcing `dense` only changes what a
+      # test does if that test asks the gate at an m the DEFAULT rule
+      # would have sent to Forney, and the default rule is
+      # `multi_fold_width() > 0 && m >= backsub_min_missing()` - 1,280 on
+      # every x86 arm. A test below that threshold is on the dense
+      # product either way and this step runs it identically to every
+      # other job. So the question is a census, and the census was taken
+      # by tracing every `backsub_gate` call over the whole filter
+      # (throwaway instrumentation, deliberately not landed): 305 tests,
+      # 4,589 gate calls, and exactly FOUR tests that ask it at or above
+      # 1,280 -
+      # `inline_tests::plan_slabs_never_refuses_and_takes_the_fewest_passes`,
+      # `inline_tests::the_repair_dimension_guard_is_per_arm_at_every_boundary`,
+      # `inline_tests::the_unstructured_arm_is_bounded_by_its_own_memory_not_by_a_dimension`
+      # and
+      # `reconstruct::solve_budget_tests::an_over_large_budget_is_clamped_rather_than_refused_or_unbounded`.
+      # On aarch64, whose constant is 704, it is six: those four plus
+      # `forney::tests::gate_defaults_to_the_measured_constant` and
+      # `unit_tests::an_in_place_repair_of_an_unstructured_set_is_not_refused_for_memory`.
+      # Four is narrow, and narrow is not nothing: this step is not a
+      # rubber stamp, and the number is written here so the next lane
+      # reads it rather than re-deriving it.
+      #
+      # AND IT EXPLAINS THE "BOTH ARMS COST THE SAME" ABOVE, which was
+      # measured and never accounted for. All four are dimension and
+      # memory GUARD tests: each one plans, asks whether a shape fits a
+      # budget, and returns. Timed individually on both arms they are
+      # under 10 ms either way, and no test in this filter runs GF
+      # arithmetic at an m over the constant. The arm therefore cannot
+      # move this step's wall clock, and a future measurement showing it
+      # does is a finding rather than noise.
+      #
+      # THAT IS ALSO THE RIGHT CLASS OF COVERAGE, not a consolation. The
+      # 10 Sep 2026 incident at the top of this block was a stale
+      # `MAX_REPAIR_DIM` refusal inside one of those four
+      # (`the_repair_dimension_guard_is_per_arm_at_every_boundary`),
+      # whose dense-only block is written `if !backsub_gate(over_dim)`
+      # and so still runs ONLY where the arm is dense: on this fleet,
+      # only under this step.
+      #
+      # AND THE FOURTH TEST IN THAT LIST USED TO PASS HERE BY DOING
+      # NOTHING. `gate_defaults_to_the_measured_constant` opened with an
+      # early return whenever `NZBFAST_BACKSUB` was set, for a good
+      # reason (the variable is process-wide and this binary runs every
+      # other test beside it), so the one test that pins the gate's
+      # threshold was a green tick over nothing in exactly the run that
+      # sets it - and no count-based invariant can see that, because a
+      # self-returning test reports as `passed`. It now asserts the
+      # OVERRIDE arm instead of returning: under `dense` the gate must be
+      # false at every m, under `forney` true at every m. That is the
+      # property a refactor quietly making `NZBFAST_BACKSUB` a no-op
+      # would break, so such a refactor now reds this job by name rather
+      # than leaving it green over the arm it was already running.
       #
       # NO BASELINE COUNT, deliberately - a number here would go stale
       # the first time a test is added and would then be a floor nobody
-      # rechecks. The invariant is asked of the run instead: forcing the
-      # arm changes WHICH CODE the tests take, never WHICH TESTS run, so
-      # the two counts must agree. That also catches the trap this file
-      # has been bitten by before, and the reason `libtest` is the wrong
-      # tool to trust here: a filter that matches nothing exits 0.
+      # rechecks. The invariant is asked of the RUN instead, and since
+      # the free arm went it is asked of `--list`, which is strictly
+      # more than the two-arm comparison it replaces. That comparison
+      # was very nearly unfalsifiable: libtest gives a test no way to
+      # skip itself at run time, so two arms that both PASS necessarily
+      # report the same passed count, and an arm that does not pass has
+      # already exited nonzero above. `--list` enumerates what the
+      # binary HAS under the filter without running anything, so the
+      # arithmetic below cross-checks the enumerated set against the
+      # executed one - which catches the case the two-arm form never
+      # could, an `#[ignore]` added to a par2repair test, because both
+      # arms would have ignored it equally and agreed. It also still
+      # catches the trap this file has been bitten by before, and the
+      # reason `libtest` is the wrong tool to trust here: a filter that
+      # matches nothing exits 0.
+      #
+      # `--list` COUNTS IGNORED TESTS AND THE RUN SUMMARY DOES NOT,
+      # which is why `ignored` is added rather than assumed zero:
+      # measured 16 Sep 2026, the filter lists 301 and the run reports
+      # 300 passed and 1 ignored
+      # (`par2repair::inline_tests::backsub_transform_at_scale`). An
+      # equality that ignored that row would have reddened on landing.
       - name: the dense solve arm, forced
         shell: bash
         run: |
@@ -2808,60 +3312,37 @@ jobs:
             echo "::error::The dense solve arm would go unrun, and this step would read as a pass."
             exit 1
           fi
-          count_of() { sed -n 's/^test result: .*[^0-9]\([0-9][0-9]*\) passed.*/\1/p' <<<"$1" | tail -1; }
-          free=$("$bin" par2repair 2>&1) || { echo "$free"; exit 1; }
-          forced=$(NZBFAST_BACKSUB=dense "$bin" par2repair 2>&1) || {
-            echo "$forced"
-            echo "::error title=The dense PAR2 solve arm failed::par2repair passed on this runner's own arm and failed with NZBFAST_BACKSUB=dense. That is the arm armv7 takes and the ONLY per-push job that reaches it is this step. Reproduce locally with: NZBFAST_BACKSUB=dense cargo test -p nzbkit-base --lib --features test-support par2repair - it needs no cross-toolchain and no emulator. Fix the arm or the assertion; do NOT drop this step."
-            exit 1
-          }
-          nfree=$(count_of "$free"); nforced=$(count_of "$forced")
-          echo "par2repair: $nfree test(s) on this runner's arm, $nforced forced dense"
-          if [ -z "$nfree" ] || [ "$nfree" -eq 0 ]; then
+          # What the binary HAS under this filter, asked without running
+          # a test. Same environment as the run below, so there is one
+          # environment in play and not two.
+          listed=$(NZBFAST_BACKSUB=dense "$bin" par2repair --list \
+            | sed -n 's/^\([0-9][0-9]*\) tests\{0,1\},.*/\1/p' | tail -1)
+          if [ -z "$listed" ] || [ "$listed" -eq 0 ]; then
             echo "::error::the 'par2repair' filter matched no test. libtest exits 0 on a filter"
             echo "::error::that matches nothing, so this step checks rather than trusting it."
             exit 1
           fi
-          if [ "$nfree" != "$nforced" ]; then
-            echo "::error::forcing the arm changed the test COUNT ($nfree -> $nforced), which it"
-            echo "::error::cannot do: NZBFAST_BACKSUB selects which code a test takes, not which"
-            echo "::error::tests run. A test is gating itself on the arm - read it, do not adjust this."
+          forced=$(NZBFAST_BACKSUB=dense "$bin" par2repair 2>&1) || {
+            echo "$forced"
+            echo "::error title=The dense PAR2 solve arm failed::par2repair failed with NZBFAST_BACKSUB=dense. That is the arm armv7 takes and the ONLY per-push job that reaches it is this step. THE CONTROL ARM IS NOT IN THIS JOB, by a decision recorded in the comment above: read the 'nzbkit-base' row of 'unit-one-process' on this same commit, which runs these same tests bare out of the same archive. GREEN there means the tests are fine and the DENSE arm is broken. RED there means they are broken on both arms and this step is the messenger. NO VERDICT there (cancelled, or cap-killed) means you have no control at all and must get one locally - and note that row is a different runner, so its CPU may pick a different fused GF16 kernel than this one did. Reproduce with: cargo test -p nzbkit-base --lib --features test-support par2repair, then the same line again with NZBFAST_BACKSUB=dense in front - it needs no cross-toolchain and no emulator. Fix the arm or the assertion; do NOT drop this step."
+            exit 1
+          }
+          field_of() { sed -n "s/^test result: .*[^0-9]\([0-9][0-9]*\) $1.*/\1/p" <<<"$forced" | tail -1; }
+          npassed=$(field_of passed); nignored=$(field_of ignored)
+          if [ -z "$npassed" ] || [ -z "$nignored" ]; then
+            echo "::error::no 'test result:' summary in the forced run's output, so this step"
+            echo "::error::cannot tell how much of the filter actually ran. libtest changed its"
+            echo "::error::summary line, or the binary printed nothing - read the log above."
             exit 1
           fi
-      - name: run each workspace unit binary in ONE process
-        shell: bash
-        run: |
-          # A job that selected nothing and exited 0 would be a green
-          # tick over zero coverage, which is the failure mode the whole
-          # note above this job exists to remove. Refuse it.
-          if [ ! -s unit-binaries.tsv ]; then
-            echo "::error::no workspace unit binary was selected out of the archive."
-            echo "::error::Either the archive is not what it was, or the selection above stopped matching."
+          echo "par2repair, forced dense: $npassed passed, $nignored ignored, $listed listed"
+          if [ "$((npassed + nignored))" -ne "$listed" ]; then
+            echo "::error::the forced run accounted for $((npassed + nignored)) of the $listed test(s)"
+            echo "::error::the 'par2repair' filter names. A test this binary HAS neither ran nor"
+            echo "::error::reported as ignored, so the dense arm's coverage is smaller than the"
+            echo "::error::green tick reads. Read the test - do not adjust this arithmetic."
             exit 1
           fi
-          rc=0
-          while IFS=$'\t' read -r id path; do
-            if [ ! -x "$path" ]; then
-              echo "::error::$id: '$path' is not executable on this runner."
-              rc=1
-              continue
-            fi
-            echo "::group::$id"
-            if "$path"; then
-              echo "$id: ok"
-            else
-              rc=1
-              # The id stays OUT of `title=`: a binary id contains
-              # `::` (`nzbfast::bin/nzbfast`), and GitHub ends the
-              # annotation's properties at the first `::` it finds, so
-              # an id in the title truncates it and swallows the
-              # message. In the message body a `::` is just text.
-              echo "::error title=A unit binary failed with its tests sharing one process::$id failed when every one of its tests ran in a single process. If linux-tests is green on this same commit then no individual test is broken IN ISOLATION - but there are THREE shapes here and only ONE of them has a polluter, so do not reach for the bisect first. (a) POLLUTION: an earlier test left process-global state that this one read; visible even serially. (b) A CONCURRENT RACE on a process-global: two tests on different THREADS raced a counter - this job invokes the binary bare, so libtest is PARALLEL and can see it, and '-- --test-threads=1' structurally CANNOT reproduce it. (c) NO POLLUTER AT ALL: the test depends on a wall-clock duration it never sets - a window that rolls, a token that expires - and slow setup on a loaded box overran it. THE TELL, and it costs one run: re-run the failing test ALONE with the box busy. If it STILL fails there is no neighbour to find - that is (c), so read the test for a duration it depends on but never sets, and fix the TEST, never the production constant. If it passes alone and fails only in company it is (a) or (b). Reproduce with 'cargo test' - never nextest - on that target. libtest names the VICTIM and never the polluter: 'tools/pollution-bisect.py -p <crate> <the failing test>' names the polluter for (a) in minutes, but do NOT hand it a FLAKY victim - it refuses one that fails alone, and otherwise converges on an innocent neighbour and prints it with the confidence of a real answer. Never add '--test-threads=1' to make a red go away; that deletes the (b) coverage. nightly.yml's 'one-process-loaded' runs this same binary tens of times under load and reports a RATE, which is where (c) shows up on its own."
-            fi
-            echo "::endgroup::"
-          done < unit-binaries.tsv
-          exit "$rc"
-
   # ===================================================================
   # THE TWO HEAVY SUITES THAT RUN ON EVERY PUSH: the fast e2e subset,
   # sharded four ways, and the whole daemon suite, sharded six, both

@@ -34,6 +34,12 @@
 # superseded, and its verdict sits behind ~18 minutes of toolchain and unit
 # suites. An 18 second shell selftest does not belong behind that.
 #
+# The same argument covers the third job added 16 Sep 2026, `plib-selftest`,
+# over the PowerShell harness - with one addition specific to it: that library
+# is Windows-only, so EVERY line in the documented gate suite is blind to it,
+# and its own header records that a parse error there does not degrade a round,
+# it kills every Windows round at dot-source time.
+#
 # So: a dedicated workflow, on every branch, with a NATIVE path filter. The
 # cost objection to the every-branch placement evaporates once the trigger is
 # scoped - this spends macOS runner minutes only on a push that touched a file
@@ -114,6 +120,12 @@ on:
       - 'tools/rig-selftest-gate.py'
       - '**/nic-media-flip.sh'
       - '**/box-state.sh'
+      # The PowerShell harness and its selftest. Basename globs for the same
+      # reason as every pattern above: the directory they live in is private
+      # vocabulary this file may not spell, and this file ships to the public
+      # repo verbatim.
+      - '**/plib.ps1'
+      - '**/plib_selftest.ps1'
       - '.github/workflows/rig-selftest.yml'
   workflow_dispatch:
 
@@ -185,3 +197,61 @@ jobs:
       # run that reached none of them exits 0.
       - name: nic media flip selftest
         run: tools/rig-selftest-gate.py --selftest && tools/rig-selftest-gate.py --run-nic
+
+  plib-selftest:
+    # The PowerShell harness for the parfast publication rounds, and the ONLY
+    # place in this repo's CI that reads a line of it. It is Windows-only code:
+    # no Mac on this fleet runs the Windows drivers, there is no pwsh on the
+    # dev box at all, and every other job here is host-target - so until 16 Sep
+    # 2026 a parse error in that library could be discovered only by a Windows
+    # box, at dot-source time, as "every round on this machine dies three
+    # seconds in". That is the same class its own header warns about in
+    # capitals, and the cheapest possible check for it is `pwsh -File` on a
+    # runner that already has pwsh.
+    #
+    # macOS rather than ubuntu, even though pwsh exists on both, for one
+    # reason: this workflow is already the macOS shell-selftest workflow, and
+    # `on: push: paths:` is per WORKFLOW rather than per job, so the trigger
+    # that brings this job also brings the two above. A ubuntu job here would
+    # spend a second runner's minutes on every push that touches either of
+    # them, to run the same hermetic script.
+    #
+    # THE SELFTEST IS HERMETIC AND STUBBED - the CPU counter, the process list
+    # and the sleeps - and it repoints $env:USERPROFILE at a temp directory, so
+    # it needs no Windows, no quiet box, and it cannot contend for a real rig
+    # lock. Seconds, not minutes.
+    #
+    # Through the wrapper, not by naming the script: the directory that library
+    # lives in is private vocabulary the leak check refuses in any file that
+    # ships publicly, and this file ships verbatim. The wrapper also floors the
+    # cases and refuses a run with no closing line, for a reason specific to
+    # this one: the selftest DOT-SOURCES its subject, so a fault in the library
+    # ends the run rather than failing a case, and a run that stopped early has
+    # `ok` lines, no FAIL line, and exits nonzero with nothing that reads as a
+    # verdict.
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    concurrency:
+      group: plib-selftest-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Recorded so a future failure can be read against a runner image bump
+      # rather than against the diff, exactly as the zsh job above records its
+      # shell. The wrapper REFUSES rather than skipping when pwsh is absent, so
+      # a runner image that dropped it reddens here instead of going quiet.
+      - name: pwsh version
+        run: pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+
+      # `--paths` HERE AS WELL AS IN size-gate.yml, and it is not redundant.
+      # That workflow's filter is a union over `**/*.rs`, `**/*.py`, `**/*.sh`
+      # and `*.md` - it does not name `.ps1` at all - so a push that touches
+      # only the PowerShell library runs the `--paths` arm NOWHERE, and that
+      # arm now carries the scan which refuses a new status line emitted as a
+      # bare string. This job's filter is the one that fires on such a push.
+      # The scan is portable text and needs no pwsh, so it runs before the
+      # selftest and reddens on its own.
+      - name: plib selftest
+        run: tools/rig-selftest-gate.py --selftest && tools/rig-selftest-gate.py --paths && tools/rig-selftest-gate.py --run-plib

@@ -49,7 +49,9 @@ fn the_naming_population_requires_semantic_obfuscation() {
             [],
         )
         .unwrap();
-    let (examined, suggested, applied) = ix.predb_corr_backlog(100, 0, true, 5000).unwrap();
+    let (examined, suggested, applied) = ix
+        .predb_corr_backlog(100, 0, true, 5000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!(
         (examined, suggested, applied),
         (1, 0, 0),
@@ -146,7 +148,9 @@ fn the_naming_population_excludes_byte_probe_nameable_shapes() {
     )
     .unwrap();
     // Suggest-only, the shipped posture.
-    let (examined, suggested, applied) = ix.predb_corr_backlog(100, 0, false, t(3) + 400).unwrap();
+    let (examined, suggested, applied) = ix
+        .predb_corr_backlog(100, 0, false, t(3) + 400, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!(examined, 4, "all four rows are junk>=70 and walked");
     assert_eq!(
         (suggested, applied),
@@ -579,7 +583,12 @@ fn a_replacement_pairing_starts_unchecked() {
     )
     .unwrap();
     let rid = ix.search("", 10).unwrap()[0].id;
-    assert_eq!(ix.predb_corr_backlog(100, 0, false, 5_000).unwrap().1, 1);
+    assert_eq!(
+        ix.predb_corr_backlog(100, 0, false, 5_000, std::time::Duration::MAX)
+            .unwrap()
+            .1,
+        1
+    );
     let picks = ix.corr_confirm_pick(10).unwrap();
     assert_eq!(picks[0].1, OLD);
     ix.corr_confirm_stamp(rid, picks[0].3, 5_010).unwrap();

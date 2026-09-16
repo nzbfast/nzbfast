@@ -494,7 +494,14 @@ const RECENT_CAP: usize = 8;
 /// job's record would keep it alive, and [`LIVE`] prunes by
 /// `strong_count`, so a job that ended without unregistering would
 /// still read as running. A [`PeakAttribution`] is `Copy` - two `u64`s
-/// and a 12-entry [`MemGauges`] - so the whole ring is under 2 KB.
+/// and a [`MemGauges`], which is TWO [`SUB_COUNT`]-entry arrays (`cur`
+/// and `peak`), so 2 + 2 x 15 u64s = 256 bytes today - and each
+/// [`JobPeak`] adds its label `String` on top. The ring is a few KB.
+///
+/// The count is written as `SUB_COUNT` rather than a number because it
+/// moves: this said "a 12-entry `MemGauges`" while `SUB_COUNT` was 15
+/// and the struct held two arrays of it, having drifted three variants
+/// behind (`HoldsReserve`, `RarsWork`, `WriteStage`).
 ///
 /// Only a job that sampled at least once is kept: a record with no
 /// attribution reports nothing, so keeping it would spend a slot to say

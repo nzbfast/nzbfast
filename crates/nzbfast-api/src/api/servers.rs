@@ -1595,6 +1595,11 @@ fn m_server_carry(
         // to report - it makes BOTH readings wrong, on probes whose
         // entire job is dividing a rate by a socket count.
         let Some(_permit) = crate::daemon::LadderPermit::try_take(d) else {
+            // KEYED for i18n: this exact sentence is an `err.` key in
+            // web/i18n/extract.js and all 27 catalogues (census 16 Sep 2026,
+            // research/API-ERROR-KEY-CENSUS-2026-09-16.md). tErr() matches the
+            // WHOLE string, so rewording it here silently un-translates 27
+            // locales with every gate green. Change both sides together.
             return Some(json!({"status": false,
                 "error": "a connection test is already running - wait for it \
                           to finish, then try again"}));
@@ -1715,7 +1720,15 @@ fn m_server_carry(
             // above cannot come to disagree about it.
             d.add_usage(&[(srv.account_key(), bill.owed())]);
             if interrupted {
-                return json!({"status": false,
+                // `downloading: true` so the panel keys on the REFUSAL
+                // rather than the prose - the same contract
+                // `downloading_refusal` states, and the same flag the
+                // ladder's twin of this arm already sends. Without it
+                // this one sentence fell through to tErr() and showed
+                // English on 27 locales while its sibling did not
+                // (census 16 Sep 2026,
+                // research/API-ERROR-KEY-CENSUS-2026-09-16.md).
+                return json!({"status": false, "downloading": true,
                     "error": "a download started while the test was running, and \
                               the reading would have measured it - try again \
                               when the queue is idle"});
@@ -1855,8 +1868,13 @@ fn m_connladder(
                 // would then pass the !cancelled gate and record a knee
                 // from wherever the user lost patience.
                 let Some(_permit) = crate::daemon::LadderPermit::try_take(d) else {
+                    // KEYED for i18n: this exact sentence is an `err.` key in
+                    // web/i18n/extract.js and all 27 catalogues (census 16 Sep 2026,
+                    // research/API-ERROR-KEY-CENSUS-2026-09-16.md). tErr() matches the
+                    // WHOLE string, so rewording it here silently un-translates 27
+                    // locales with every gate green. Change both sides together.
                     return Some(json!({"status": false,
-                            "error": "a connection test is already running -                                       wait for it to finish, then try again"}));
+                            "error": "a connection test is already running - wait for it to finish, then try again"}));
                 };
                 d.ladder_cancel.store(false, Ordering::Release);
                 tokio::runtime::Handle::current().block_on(async {

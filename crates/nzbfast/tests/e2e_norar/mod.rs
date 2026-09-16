@@ -1238,10 +1238,14 @@ async fn a_dedupe_fanout_past_the_cap_refuses_the_remainder() {
 /// `NZBFAST_CPU_WORKERS` is not that lever - `mem::cpu_workers` latches
 /// in a process-wide `OnceLock`, so under `cargo test`, where the whole
 /// crate shares one process, whoever calls first decides for everyone.
-/// The tier's unconditional coverage is in
-/// `two_damaged_identical_head_twins_are_never_crossed` instead, where
-/// neither slot can claim by whole-file MD5 and there is no race to
-/// lose.
+/// `two_damaged_identical_head_twins_are_never_crossed` is the row that
+/// covers the tier's evidence ARM instead: neither slot there can claim
+/// by whole-file MD5, so the arm has to run for the first slot to
+/// settle. What that row does NOT do is escape this race, and saying it
+/// did was wrong on CI twice - whole-file MD5 is not the only way to
+/// lose a claim. The twin that settles SECOND finds its rival already
+/// claimed and is taken by the md5-16k SOLE-CANDIDATE tier without ever
+/// reaching the twin tier. See that row's own note for the measurement.
 ///
 /// The payloads are `payloads::unique_payload` and not `payload`, and
 /// that half is what the row was ACTUALLY losing its first attempt on.
@@ -1341,10 +1345,12 @@ async fn a_damaged_identical_head_twin_is_repaired_in_place_in_either_settle_ord
         // assertion is on the tier's own correctness where it ran and
         // never on it having run - see the doc comment's flake note for
         // the measurement and for what would have to exist to assert it.
-        // The twin tier's unconditional coverage lives in
+        // The twin tier's evidence ARM is covered by
         // `two_damaged_identical_head_twins_are_never_crossed`, where
-        // neither slot can claim by whole-file MD5 and no race is
-        // possible.
+        // neither slot can claim by whole-file MD5 so the arm must run.
+        // That row does not escape this race either, and it asserts the
+        // tier's correctness rather than its having run for both slots,
+        // for the same reason this one does.
         if log.contains("is a damaged member of a 2 identical-head group") {
             assert!(
                 log.contains("Dmg.Alpha.vob's own PAR2 block checksums"),
@@ -1446,12 +1452,62 @@ async fn two_damaged_identical_head_twins_are_never_crossed() {
     }
     // Each twin paired with its OWN descriptor, which is the row's name
     // said in the log rather than only in the output bytes.
-    for name in ["Both.Alpha.vob", "Both.Beta.vob"] {
-        assert!(
-            log.contains(&format!("{name}'s own PAR2 block checksums")),
-            "{name} was not paired on its own per-block evidence\n{log}"
-        );
+    //
+    // WHICH twins reach the twin tier is a SETTLE-ORDER RACE, and the
+    // production code says so in two places rather than one. Settle
+    // CONCURRENTLY and both slots still see two unclaimed descriptors,
+    // both ask `ifsc_pairing`, and both log. Settle in SEQUENCE and the
+    // first claims its descriptor, which leaves the second a SOLE
+    // unclaimed candidate that `try_match`'s md5-16k tier takes
+    // silently: `twintier.rs`'s `try_match_whole` says "A SOLE CANDIDATE
+    // IS NOT A GAP HERE ... the twin that settles SECOND never reaches
+    // this line", and `slotstate.rs`'s md5-16k fallback says "the twin
+    // that settles SECOND finds a sole unclaimed candidate and is
+    // claimed HERE, never reaching the twin tier at all". Both routes
+    // publish the right bytes under the right name, and the second is
+    // sound precisely BECAUSE the rival was claimed on evidence of its
+    // own - the elimination `try_match_whole` permits and `ifsc_pairing`
+    // forbids. The byte assertions above are what catch a crossing.
+    //
+    // So demanding BOTH lines asserted the outcome of that race, and it
+    // lost twice on CI with the bytes correct both times: nightly run
+    // 35024269426 on `1a1932c82` (both tries) and e2e shard 2/4 on
+    // `d9929fef`. MEASURED 15 Sep 2026, 64 legs 16-way on an M3 at load
+    // average 43: 6 legs logged ONE tier line rather than two, EVERY
+    // line correctly slot-bound, zero declines and zero crossings.
+    // `d9929fef` is an ANCESTOR of the build the second red was bisected
+    // against, so there was never a regression range to find.
+    //
+    // What replaces it is stronger where it matters. The old assertion
+    // only asked whether a name appeared SOMEWHERE in the log, so a tier
+    // that paired slot 0 with Beta's descriptor and slot 1 with Alpha's
+    // satisfied it - the exact crossing this row is named for. This
+    // binds each line to its slot, and the slots are posting order.
+    let tier_lines: Vec<&str> = log
+        .lines()
+        .filter(|l| {
+            l.contains("is a damaged member of a") && l.contains("own PAR2 block checksums")
+        })
+        .collect();
+    for (slot, name) in ["Both.Alpha.vob", "Both.Beta.vob"].iter().enumerate() {
+        for line in &tier_lines {
+            if line.contains(&format!("{name}'s own PAR2 block checksums")) {
+                assert!(
+                    line.contains(&format!("slot {slot} is a damaged member")),
+                    "the twin tier paired {name}'s block checksums with the \
+                     wrong slot - a crossed pairing:\n{line}\n{log}"
+                );
+            }
+        }
     }
+    // The first slot to settle always has two unclaimed candidates and
+    // no whole-file MD5 that can name either, so the evidence arm must
+    // run for it. Zero lines means the arm did not fire at all.
+    assert!(
+        !tier_lines.is_empty(),
+        "neither twin was paired on its own per-block evidence - the twin \
+         tier's evidence arm never fired\n{log}"
+    );
 }
 
 /// The refusal the rule above is priced against, and the shape that

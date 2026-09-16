@@ -85,6 +85,11 @@ public sealed record PerformanceSettings
     [JsonPropertyName("memory_mb")] public int? MemoryMb { get; init; }
     [JsonPropertyName("fast_solver")] public bool FastSolver { get; init; }
     [JsonPropertyName("low_priority")] public bool LowPriority { get; init; }
+    // "Remember checksums of large files", the CLI's --digest-cache. Off.
+    [JsonPropertyName("digest_cache")] public bool DigestCache { get; init; }
+    // Pair two large single-file creates when the machine has room
+    // (parfast_session::pairing). ON, as the core has it.
+    [JsonPropertyName("pair_large_creates")] public bool PairLargeCreates { get; init; } = true;
 }
 
 public sealed record IntegrationSettings

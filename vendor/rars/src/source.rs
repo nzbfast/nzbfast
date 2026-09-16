@@ -451,6 +451,72 @@ impl ArchiveSource {
     }
 }
 
+/// A [`crate::recovery::stream::RangeSource`] over an archive's backing
+/// store that holds ONE file handle for the whole repair.
+///
+/// The repair paths are the only readers in this crate that address a
+/// source by RANGE in a loop: a volume is traversed one scan window at a
+/// time, twice over, and every one of those reads goes through
+/// [`ArchiveSource::read_range_into`], whose `File` arm opens the path
+/// afresh each call. Counted on a 17-volume set carrying a 20% recovery
+/// record, that is 12,291 `open`s a pass - 723 a volume, rising linearly
+/// with volume size - against 51 for the whole of extraction, which reads
+/// through the per-call and cached entry points instead and pays a flat
+/// three a volume. `__open` measured 40-43% of the process's CPU, all of
+/// it kernel time, and removing it took the pass to 0.72-0.79 of its cost
+/// across five volume sizes.
+///
+/// Only the `File` arm has anything to save: `Memory` and `Stream` open
+/// nothing per read to begin with, so they keep the by-range read they
+/// already had and behave exactly as before.
+///
+/// This does NOT reopen the descriptor-exhaustion question
+/// [`RangeReaderCache`] settles for extraction. That cache exists because
+/// `ArchiveSource::File` stores only a path, and holding a handle per
+/// PARSED VOLUME across a large set would exhaust the limit; this holds
+/// one descriptor for the duration of one repair of one volume, and drops
+/// it on the way out.
+pub(crate) enum RepairRangeSource<'a> {
+    /// A file-backed archive, opened once.
+    Handle(crate::recovery::stream::FileSource, u64),
+    /// Every other shape, read by range exactly as before.
+    ByRange(&'a ArchiveSource, u64),
+}
+
+impl<'a> RepairRangeSource<'a> {
+    pub(crate) fn new(source: &'a ArchiveSource, len: u64) -> Self {
+        if let ArchiveSource::File(path) = source {
+            // An open that fails here would have failed on the first read
+            // of the by-range shape too, so fall back rather than move
+            // where the error surfaces.
+            if let Ok(file) = crate::recovery::stream::FileSource::open(path.as_ref()) {
+                return Self::Handle(file, len);
+            }
+        }
+        Self::ByRange(source, len)
+    }
+}
+
+impl crate::recovery::stream::RangeSource for RepairRangeSource<'_> {
+    /// The archive's own declared length, not the handle's - a repair is
+    /// bounded by what the parse resolved, which is what the by-range
+    /// shape reported.
+    fn len(&self) -> u64 {
+        match self {
+            Self::Handle(_, len) | Self::ByRange(_, len) => *len,
+        }
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        match self {
+            Self::Handle(file, _) => {
+                crate::recovery::stream::RangeSource::read_at(file, offset, buf)
+            }
+            Self::ByRange(source, _) => source.read_range_into(offset, buf),
+        }
+    }
+}
+
 /// Sequential `Read` over one range of a source, owning whatever handle it
 /// needs - see [`ArchiveSource::owned_range_reader`]. A file-backed reader
 /// holds exactly one descriptor and the caller drops it before opening the

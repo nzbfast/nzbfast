@@ -724,6 +724,28 @@ pub unsafe extern "C" fn pf_settings_set(s: *mut pf_session, settings_json: *con
     }
 }
 
+/// "Clear remembered checksums": delete every record in the per-user
+/// digest store that `performance.digest_cache` fills. Answers how many
+/// files went (0 where there is no store), or `PF_ERR_REFUSED` with the
+/// folder and the reason in [`pf_last_error`]. Safe while a job runs.
+///
+/// # Safety
+/// `s` is a live session.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pf_digest_cache_clear(s: *mut pf_session) -> i32 {
+    // SAFETY: the caller's obligation above.
+    let Some(h) = (unsafe { borrow(s) }) else {
+        return PF_ERR_ARG;
+    };
+    match h.session.clear_digest_cache() {
+        Ok(n) => i32::try_from(n).unwrap_or(i32::MAX),
+        Err(e) => {
+            h.fail("refused", e);
+            PF_ERR_REFUSED
+        }
+    }
+}
+
 /// `{"code":"...","message":"..."}` for the last failure on this
 /// session, or `{}`. Reading it does not clear it; the next failure
 /// replaces it.

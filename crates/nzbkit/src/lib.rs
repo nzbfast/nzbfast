@@ -66,8 +66,18 @@ pub use nzbkit_base::lossdoubt;
 pub use nzbkit_base::md5fast;
 pub use nzbkit_base::media;
 pub mod mediaprobe;
+pub use nzbkit_base::digest_cache;
 pub use nzbkit_base::mem;
 pub use nzbkit_base::memgauge;
+// The static musl downloads' fast mem ops. TWO names: `memops` is the
+// module with the algorithms, and `fast_mem_ops` is the `#[macro_export]`ed
+// macro that stamps the symbols into a bin - which lands at nzbkit_base's
+// ROOT, not inside the module, so it needs its own re-export. Both are here
+// because the bins depend on the facade and not on the base crate.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub use nzbkit_base::fast_mem_ops;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub use nzbkit_base::memops;
 pub use nzbkit_base::mkv;
 /// In-process mock NNTP server. Not part of the real API: public only for
 /// tests and examples in other crates (nzbfast's suites, mockserv).

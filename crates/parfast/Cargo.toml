@@ -1,6 +1,6 @@
 [package]
 name = "parfast"
-version = "1.5.0-beta.3"
+version = "1.5.0-beta.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -30,7 +30,9 @@ path = "src/main.rs"
 #
 # `default-features = false` because base's default turns `indexer` on
 # and a PAR2 command-line tool has no business linking sqlite.
-nzbkit = { path = "../nzbkit", default-features = false }
+# `digest-cache` is `--digest-cache`'s store (BLAKE3); the daemon's own
+# graph leaves it off.
+nzbkit = { path = "../nzbkit", default-features = false, features = ["digest-cache"] }
 
 # ONLY to give `NZBFAST_REPAIR_TIMING` somewhere to land. The engine
 # emits its phase lines as tracing EVENTS, so a binary with no subscriber
@@ -46,6 +48,11 @@ nzbkit = { path = "../nzbkit", default-features = false }
 # so no regex - and nothing is installed at runtime unless the variable
 # is set (`lib.rs`).
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt"] }
+# The macro side of the same thing: the ONE phase line this crate emits
+# itself (`join_backups`), because the wait for the damaged-original
+# copies happens HERE and not in the engine, and until 16 Sep 2026 its
+# seconds were charged to the engine's `patch` phase.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 # Ctrl-C. The engine's cancel is a gate its loops poll
 # (`par2repair::control`, 12 Sep 2026); this crate's job is to flip it

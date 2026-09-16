@@ -2105,6 +2105,54 @@ jobs:
   # Even so this is a nightly, not a per-push job.
   # The eight heavy targets are excluded exactly as ci-private excludes
   # them; `heavy-tests` is not passed, so they are not even built.
+  #
+  # RE-TAKEN AND DECLINED, 16 Sep 2026 (claim
+  # `armv7-cross-chronic-red-16sep`, research/MEMOPS-ARMV7-NO-RIG-2026-09-16.md).
+  # This job is chronically red - 15 of the last 24 runs sampled that
+  # day failed at job level (62.5%, widening the 7/10 the item started
+  # from), grouped into 8 distinct incidents rather than raw run counts
+  # (a persisting compile break reds every night until someone fixes
+  # it, which is 3 rows for 1 incident). Of those 8: 3 were compile-time
+  # (an `arithmetic_overflow` const-fold, twice, plus a missing libc
+  # constant), 4 were runtime-only (a wrong test expectation only a
+  # 32-bit or small-RAM box can reach - see memory topic
+  # `nzbfast-armv7-red-is-usually-the-expectation`), 1 was this job's
+  # own zig-cc plumbing.
+  #
+  # So a per-push BUILD-ONLY probe would have caught at most 3 of 8, and
+  # even that is optimistic: the actual overflow instance found
+  # (`4096 * MIB` in vendor/rars/src/codec/rar50.rs, commit 4c1f4869f)
+  # sits inside an `assert_eq!` in a `#[test]`, so only `--tests` (not a
+  # plain release build) would have reached it. Measured 16 Sep 2026 on
+  # the dev Mac: `cargo zigbuild --release --locked -p nzbfast --target
+  # armv7-unknown-linux-musleabihf` alone - no test targets, the CHEAPER
+  # of the two - is 14m53s cold. A `--tests` sweep across the ~40
+  # targets this job's own qemu step builds would cost more than that,
+  # not less, and was not measured separately because the number already
+  # does not clear the bar: it needs the SAME zig/musl cross-toolchain
+  # setup as this job (`cargo check`/`clippy --target` still runs every
+  # C/C++ build script - aws-lc-sys, rapidyenc, rars - so there is no
+  # windows-arm64-style shortcut of checking without a cross compiler),
+  # so it cannot ride `check`'s existing 30-minute budget and would need
+  # its own job and its own dependency cache key on a repo already at
+  # 11.85 GB against GitHub's 10 GB per-repo cache cap (ci-private.yml,
+  # memory topic `nzbfast-ci-disk-exhaustion`) - a real risk of evicting
+  # this job's own nightly cache or another job's, not a hypothetical
+  # one.
+  #
+  # Declined: the class a build probe reaches is exactly the LOUDEST
+  # one - a hard compile error naming its own file and line, fixed
+  # same-day every time it has happened here - while the class that
+  # actually matters (a silent width/size bug that only shows up at
+  # runtime) is the majority of the incidents above and no build-only
+  # probe touches it at all. armv7 ships as a BETA asset and this job
+  # is not a merge gate, so a night of latency on the loud half is an
+  # acceptable trade against a new per-push job on a 90-second push
+  # cadence. Re-open this only if the incident mix shifts toward the
+  # compile-time class, or if `check`'s own budget grows enough to
+  # absorb a `--tests`-scoped `cargo check --target
+  # armv7-unknown-linux-musleabihf` (never a plain build - it would
+  # miss the one instance that motivated this).
   armv7-cross:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -2597,13 +2645,19 @@ jobs:
         run: |
           set -euo pipefail
           # `test-support` because that is the feature the archive builds
-          # this lib with (CLAUDE.md's per-crate line says why). The two
-          # modules are the population: everything aarch64-gated in
-          # nzbkit-base lives in gf16.rs, and par2repair is what consumes
-          # it - the joint solve's `scale_available` admission included.
+          # this lib with (CLAUDE.md's per-crate line says why). The three
+          # modules are the population: the aarch64-gated code in
+          # nzbkit-base is gf16.rs and memops.rs, and par2repair is what
+          # consumes gf16 - the joint solve's `scale_available` admission
+          # included. memops joined the list on 16 Sep 2026 and THIS IS THE
+          # ONLY PLACE ITS AARCH64 ARM RUNS IN CI: its tests are shared
+          # between the two architectures but the bodies are not, the
+          # x86_64 bodies ride the ubuntu `linux-tests` shards, and no
+          # other job anywhere builds an ARM target's test binary. A new
+          # aarch64-gated module needs adding here by hand.
           cargo nextest run --profile qemu -p nzbkit-base --lib --features test-support \
             --no-fail-fast --target aarch64-unknown-linux-musl \
-            -E 'test(/^gf16::/) | test(/^par2repair::/)'
+            -E 'test(/^gf16::/) | test(/^par2repair::/) | test(/^memops::/)'
 
   # Full cargo-deny pass (advisories, licenses, bans, sources) against
   # deny.toml at the repo root. ci-private runs the same check on every

@@ -150,6 +150,9 @@ fn the_sieve_keeps_command_lines_wherever_they_appear_and_is_bounded() {
 
 #[test]
 fn every_option_is_exported_under_both_of_nzbgets_spellings() {
+    // win-portability-gate: this `Command` is never spawned - it is an env
+    // bag, built only so `get_envs()` can be read back below, so the program
+    // name is never resolved on any platform.
     let mut cmd = std::process::Command::new("true");
     set_env_special(&mut cmd, "NZBOP", "ControlIP", "127.0.0.1");
     set_env_special(&mut cmd, "NZBPR", "drone", "abc-123");

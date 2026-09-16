@@ -165,6 +165,31 @@ BASELINE_FNS = {
     # and planner-statistics refresh (retention_and_statistics), and the
     # size-cap eviction (evict_pass_and_republish). 316 lines now - under
     # the ceiling, so its entry is GONE.
+    #
+    # The two entries below were not grown, they were UNCOVERED, 15 Sep
+    # 2026: both take an array type in their signature (`Option<[u8; 16]>`,
+    # `&mut [u32; 4]`), and functions() used to read the `;` inside it as
+    # "no body" and score neither. They are baselined at their measured
+    # size the day the scan could see them, so fixing the gate's blindness
+    # did not redden main; the splits are their own lanes.
+    #
+    # repair_dir_set_inner is the whole of one PAR2 repair attempt: verify
+    # pass and its resume snapshot, the forecast, adoption and the in-set
+    # and donor-parity harvests, the shortfall verdict, solve pricing, and
+    # the write path between the first and last pause points. Each stretch
+    # is already fenced by its own block comment, and the verify half left
+    # this file whole on 10 Sep for the file ceiling. The seam is those
+    # stages as sibling fns over one attempt-state struct, harvests first
+    # (they read the catalog and return slices, and write nothing).
+    "crates/nzbkit-base/src/par2repair.rs::repair_dir_set_inner": 1428,
+    # compress is the Windows x86_64 MD5 block function, and nearly every
+    # one of its lines is one string operand of a single `asm!` - the 64
+    # steps, four rounds, written out. It cannot be cut into sibling fns
+    # without a call per round in the hottest loop the hasher has. The seam
+    # is the ROUNDS as operand fragments built at compile time (a macro per
+    # round expanding to its string operands) so the body shrinks and the
+    # emitted code does not change - verify the disassembly is identical.
+    "crates/nzbkit-base/src/md5fast.rs::compress": 707,
 }
 
 
@@ -357,8 +382,27 @@ def functions(clean_lines):
     for m in FN_START.finditer(text):
         # Scan from the signature to the first `{` or `;`. A `;` first means
         # a trait method declaration or extern item - no body, no entry.
+        #
+        # But only a `;` at bracket depth 0. An ARRAY TYPE in the signature
+        # carries one - `denied: &HashSet<[u8; 16]>`, `-> [u32; 4]` - and
+        # this scan used to stop there, read "no body", and drop the fn from
+        # the gate, the report and --headroom alike, with nothing saying so.
+        # Found 15 Sep 2026 when a new helper in get/latesets.rs vanished;
+        # the first census on the fixed scan found 244 production fns it
+        # was hiding, two of them over the ceiling. Depth counts `[`/`(`
+        # ONLY: `<`/`>` cannot be counted, because the `>` of `->` in any
+        # return type unbalances it (a census draft that counted them
+        # reported zero hidden fns).
         j = m.end()
-        while j < len(text) and text[j] not in "{;":
+        nest = 0
+        while j < len(text):
+            ch = text[j]
+            if ch in "[(":
+                nest += 1
+            elif ch in "])":
+                nest = max(0, nest - 1)
+            elif ch == "{" or (ch == ";" and nest == 0):
+                break
             j += 1
         if j >= len(text) or text[j] == ";":
             continue
@@ -696,6 +740,24 @@ SELFTEST_NOISE = [
         "...and inside a byte string, which is a second copy of the same loop",
         'fn f() {\n    let s = b"aaa \\\n         bbb";\n    let _ = 1;\n}\nfn g() {\n    let z = 1;\n}\n',
         {"f": 5, "g": 3},
+    ),
+    # The array-type blind spot, 15 Sep 2026: a `;` inside `[T; N]` in a
+    # signature ended the body scan, so each of these fns silently had no
+    # body. The trait and extern declarations must STILL be skipped - a
+    # `;` at depth 0 is what "no body" means, brackets or none before it.
+    (
+        "a `;` inside an array type in a param, a nested generic or a return type does not end the signature",
+        "fn p(buf: &mut [u8; 64]) {\n    let x = 1;\n}\n"
+        "fn late_set_tiers(denied: &std::collections::HashSet<[u8; 16]>) -> Vec<u8> {\n    Vec::new()\n}\n"
+        "fn r() -> [u32; 4] {\n    [0; 4]\n}\n",
+        {"p": 3, "late_set_tiers": 3, "r": 3},
+    ),
+    (
+        "...while a trait method or extern declaration whose signature holds one is still bodiless",
+        "trait T {\n    fn decl(&self, k: [u8; 16]);\n    fn decl_ret(&self) -> [u8; 4];\n}\n"
+        'extern "C" {\n    fn ext(p: *const [u8; 8]);\n}\n'
+        "fn after() {\n    let z = 1;\n}\n",
+        {"after": 3},
     ),
 ]
 

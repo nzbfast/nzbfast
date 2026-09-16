@@ -329,7 +329,16 @@ impl DevMemo {
 
     fn get(&self, key: u64) -> Option<Storage> {
         let w = self.0.load(Ordering::Relaxed);
-        (w != MEMO_EMPTY && (w >> 3) == key + 1).then(|| decode(w & 7))
+        // `saturating_add`, not `+`: `dev_key` returns `u64::MAX` as
+        // its documented "do not memoise" sentinel (a path that cannot
+        // be stat'd on unix; a non-UTF-8 or shorter-than-3-character
+        // path on Windows), so a sentinel key overflowed this addition
+        // once the memo held any entry - a panic under overflow checks,
+        // a silent wrap in release. Saturating is CORRECT and not just
+        // safe: `pack` refuses any key at or above `1 << 60`, so
+        // `u64::MAX` is never a key this memo holds and the comparison
+        // must simply miss.
+        (w != MEMO_EMPTY && (w >> 3) == key.saturating_add(1)).then(|| decode(w & 7))
     }
 
     fn put(&self, key: u64, class: Storage) {
@@ -551,6 +560,7 @@ pub fn open_for_scan(path: &Path) -> std::io::Result<File> {
 /// Best effort; a filesystem that refuses keeps its default readahead.
 #[cfg(not(windows))]
 fn advise_sequential(f: &File) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use std::os::unix::io::AsRawFd;
     #[cfg(target_os = "linux")]
     // SAFETY: posix_fadvise takes the raw fd plus integers; the borrow

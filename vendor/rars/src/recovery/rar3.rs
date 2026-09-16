@@ -225,6 +225,41 @@ impl RSCoder8 {
 /// in cache while every source volume streams past it.
 const RECONSTRUCT_CHUNK: usize = 64 * 1024;
 
+/// Fold work - bytes of one rebuilt volume times the surviving volumes
+/// folded into it - below which that volume is rebuilt on the calling
+/// thread, for a host of `threads` threads.
+///
+/// Like the RAR 5 repair folds this is work PER THREAD (see
+/// `recovery/rar5.rs`: a flat byte gate derived on a 20-thread box was a
+/// LOSS on a 32-thread one), but the constant is an order smaller, because
+/// this kernel is slower per byte - a table load per byte against the RAR 5
+/// fold's SIMD shuffle - so the same bytes buy far more work to amortise a
+/// dispatch against. Measured 15 Sep 2026 with the fork's fold (whole
+/// sources four to a pass), serial build against parallel, cold process and
+/// warm pool. On an M1 Ultra (20 threads): 1 MiB of work 1.01-1.61x the
+/// serial time, 2 MiB 0.63-0.98x, 3 MiB 0.49-0.78x, 8 MiB 0.31-0.46x. On an
+/// M3 Ultra (32 threads): 2 MiB 1.12x cold, 3 MiB 0.49-0.82x, 4 MiB
+/// 0.40-0.69x. 128 KiB a thread wins on both (2.5 MiB at 20 threads, 4 MiB
+/// at 32), floored at the 2 MiB the 20-thread box measured. nzbfast's
+/// vendored copy folds one byte at a time here, which costs more per byte
+/// still, so the team pays at least as early there. See the host repo's
+/// `research/RARFAST-BENCH-2026-09-14.md` section 14 (nzbfast-local change,
+/// 15 Sep 2026; see VENDORING.md).
+#[cfg(feature = "parallel")]
+fn reconstruct_team_min_work_for(threads: usize) -> usize {
+    const FLOOR: usize = 2 << 20;
+    const PER_THREAD: usize = 128 << 10;
+    FLOOR.max(threads.saturating_mul(PER_THREAD))
+}
+
+/// Whether rebuilding `volume_len` bytes from `sources` live tables is
+/// enough work to repay a rayon team on this host.
+#[cfg(feature = "parallel")]
+fn reconstruct_on_team(volume_len: usize, sources: usize) -> bool {
+    volume_len.saturating_mul(sources)
+        >= reconstruct_team_min_work_for(crate::recovery::rar5::fold_team_threads())
+}
+
 /// Derive the erasure-correction coefficients once for a fixed erasure set.
 ///
 /// `correct_erasures` is linear in the codeword, and everything it derives
@@ -406,7 +441,7 @@ pub fn reconstruct_data_volumes(
         // to the copy above, so this accumulates the correction in place.
         // Chunks touch disjoint output and only read shared input.
         #[cfg(feature = "parallel")]
-        {
+        if reconstruct_on_team(out[target].len(), tables[row].iter().flatten().count()) {
             use rayon::prelude::*;
             out[target]
                 .par_chunks_mut(RECONSTRUCT_CHUNK)
@@ -414,8 +449,8 @@ pub fn reconstruct_data_volumes(
                 .for_each(|(index, destination)| {
                     fold_chunk(destination, row, index * RECONSTRUCT_CHUNK);
                 });
+            continue;
         }
-        #[cfg(not(feature = "parallel"))]
         for (index, destination) in out[target].chunks_mut(RECONSTRUCT_CHUNK).enumerate() {
             fold_chunk(destination, row, index * RECONSTRUCT_CHUNK);
         }
@@ -547,7 +582,7 @@ mod tests {
 
         // The floor of one parity sector: a caller that asked for a
         // record gets one rather than a header describing nothing.
-        assert_eq!(plan_newsub_recovery(200_059, 0).is_err(), true);
+        assert!(plan_newsub_recovery(200_059, 0).is_err());
         assert_eq!(
             plan_newsub_recovery(200_059, 100).unwrap().parity_sectors,
             391
@@ -1005,6 +1040,49 @@ mod tests {
             coder.correct_erasures(&mut codeword, &[0, 1, 2]),
             Err(Error::TooManyErasures)
         );
+    }
+
+    /// The rebuild's team gate sits where 15 Sep 2026 measured the crossover
+    /// (VENDORING.md), and a set just under it and one at it rebuild the same
+    /// bytes as the volumes they lost.
+    #[test]
+    fn rev3_rebuild_starts_a_team_only_from_the_measured_crossover() {
+        #[cfg(feature = "parallel")]
+        {
+            for (threads, work) in [(1usize, 2 << 20), (16, 2 << 20), (20, 2560 << 10), (32, 4 << 20), (64, 8 << 20)] {
+                assert_eq!(
+                    super::reconstruct_team_min_work_for(threads),
+                    work,
+                    "RAR 3 gate at {threads} threads"
+                );
+            }
+            crate::recovery::rar5::with_fold_team_threads(32, || {
+                assert!(!super::reconstruct_on_team(128 << 10, 16));
+                assert!(!super::reconstruct_on_team((4 << 20) - 1, 1));
+                assert!(super::reconstruct_on_team(256 << 10, 16));
+                assert!(super::reconstruct_on_team(usize::MAX, 2));
+            });
+            crate::recovery::rar5::with_fold_team_threads(2, || {
+                assert!(!super::reconstruct_on_team(64 << 10, 16));
+                assert!(super::reconstruct_on_team(128 << 10, 16));
+            });
+        }
+        // 16 volumes, one lost: 15 survivors plus one recovery volume fold
+        // into the rebuilt one.
+        for shard in [64 << 10, 128 << 10] {
+            let volumes: Vec<Vec<u8>> = (0..16)
+                .map(|index| pseudorandom(shard, 0x7E3 + index as u64))
+                .collect();
+            let parity = encode_columns(&volumes, 3, shard);
+            let mut present: Vec<Option<&[u8]>> = volumes
+                .iter()
+                .map(|volume| Some(volume.as_slice()))
+                .collect();
+            present[9] = None;
+            let rebuilt =
+                reconstruct_data_volumes(&present, 3, &[(1, parity[1].as_slice())]).unwrap();
+            assert!(rebuilt[9] == volumes[9], "rebuild of {shard}-byte volumes");
+        }
     }
 
     #[test]

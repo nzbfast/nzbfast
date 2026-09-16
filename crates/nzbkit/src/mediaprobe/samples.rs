@@ -1022,8 +1022,17 @@ impl MkvSampleIter {
                 return Err(bad("mkv", "lace sizes exceed the block"));
             }
             let step = u64::from(per_dur.unwrap_or(0)) * i as u64;
+            // Saturating: `per_dur` comes from the file's own
+            // DefaultDuration/BlockDuration and `i` is the lace index
+            // (up to 255), so a hostile duration overflowed this product
+            // - a panic under overflow checks (the tests and the
+            // `remux` fuzz target) and a wrapped, wrong `dts_ns` in
+            // release.
             let step_ns = per_dur.map_or(0, |d| {
-                u64::from(d) * i as u64 * 1_000_000_000 / mkv_out_timescale(self.scale_ns).max(1)
+                u64::from(d)
+                    .saturating_mul(i as u64)
+                    .saturating_mul(1_000_000_000)
+                    / mkv_out_timescale(self.scale_ns).max(1)
             });
             self.queue.push_back(Sample {
                 track,

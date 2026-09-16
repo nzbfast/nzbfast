@@ -574,7 +574,11 @@ pub struct EncodeOptions {
     /// budget for ([`crate::Rar50WritePolicy`]). Set, the allowance is
     /// split between the two - half to the block wave, a quarter to the
     /// hints - and each is still floored at one block, so a budget smaller
-    /// than one block in flight encodes serially rather than failing.
+    /// than one block in flight encodes serially rather than failing. Each
+    /// share is also CEILINGED at its default: an allowance is a limit, and
+    /// until 15 Sep 2026 a large one widened the hint wave past the default
+    /// and raised peak RSS (rarfast `-mm4g` on Silesia: 7.2 GiB against 6.9
+    /// with no allowance at all).
     ///
     /// It is a MEMORY decision and never a ratio one: both budgets choose
     /// how many blocks are in flight, and the same bytes come out at any
@@ -815,6 +819,14 @@ fn encode_filter_data(
 /// block. That window holds the FILTERED chunks, which is what the decoder
 /// keeps, so the caller can assign it straight onto the encoder history.
 /// Its trim rule must stay identical to `Unpack50Encoder::remember`.
+// Reached only from `Unpack50Encoder::encode_member_with_filters_chunked`
+// below, whose callers all live in `codec::rar50::ratio`, behind the
+// `ratio-lab` feature. So in a plain `cfg(test)` build with that feature
+// off - which is what `--all-targets` compiles - the whole chain is
+// unreferenced. Kept rather than gated to `ratio-lab` alone because the
+// pair is the documented control the joint filter/tree encoder is tested
+// against, and `test` is where a reader looks for it.
+#[allow(dead_code)]
 #[cfg(any(test, feature = "ratio-lab"))]
 fn filtered_lz_blocks(
     data: &[u8],
@@ -1042,13 +1054,19 @@ fn encode_lz_member_inner_pooled(
 // per-block estimate below is what the workers actually hold and 1 GiB
 // buys few of them.
 const ENCODE_WAVE_MEMORY_BUDGET_PER_THREAD: usize = 128 << 20;
+#[cfg(feature = "parallel")]
 const ENCODE_WAVE_MEMORY_BUDGET_MIN: usize = 1 << 30;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "parallel"))]
 fn encode_block_wave_width(dictionary: usize) -> usize {
     encode_block_wave_width_for_history(dictionary, true)
 }
-
+// Both callers left are `cfg(all(test, feature = "parallel"))` -
+// `encode_block_wave_width` above and
+// one assertion in the wave tests - so the non-test build sees no use.
+// Kept as the named two-argument form the tests read against; the
+// production path calls `encode_block_wave_width_for_budget` directly.
+#[allow(dead_code)]
 fn encode_block_wave_width_for_history(dictionary: usize, incoming_history: bool) -> usize {
     encode_block_wave_width_for_budget(dictionary, incoming_history, None)
 }
@@ -1077,15 +1095,14 @@ pub(crate) fn encode_block_wave_width_for_budget(
         };
         let per_block = (72usize << 20).saturating_add(copied_history);
         let threads = rayon::current_num_threads();
-        // A caller-set allowance replaces the host-sized default outright
-        // rather than capping it: the default's floor is a gibibyte, which
-        // is larger than the whole budget of the targets that set this.
-        // Half of the allowance goes here and a quarter to the tree hints.
-        let budget = match working_memory {
-            Some(bytes) => bytes / 2,
-            None => (ENCODE_WAVE_MEMORY_BUDGET_PER_THREAD.saturating_mul(threads))
-                .max(ENCODE_WAVE_MEMORY_BUDGET_MIN),
-        };
+        // A caller-set allowance is not floored at the default's gibibyte,
+        // which is larger than the whole budget of the targets that set
+        // this; but it is capped by the default, because an allowance is a
+        // limit and never a request for a wider wave than the host would
+        // run. Half of the allowance goes here and a quarter to the hints.
+        let host = (ENCODE_WAVE_MEMORY_BUDGET_PER_THREAD.saturating_mul(threads))
+            .max(ENCODE_WAVE_MEMORY_BUDGET_MIN);
+        let budget = working_memory.map_or(host, |bytes| (bytes / 2).min(host));
         let by_memory = (budget / per_block).max(1);
         threads.clamp(1, by_memory)
     }
@@ -1235,7 +1252,7 @@ fn encode_member_block_borrowed(
 }
 
 /// The tokenizer horizon the SHORT arm of the per-region choice encodes
-/// at: a quarter of the 4 MiB region, which is the arm the review's lab
+/// at: a quarter of the 4 MiB region, which is the arm Codex's lab
 /// measured as `opt-horizon-balanced` (`research/rar5-ratio-lab/balanced`).
 /// Narrower arms (256 KiB, and the seven-way power-of-two screen down to
 /// 64 KiB) buy a further 0.03 to 0.07% for two to five times this arm's
@@ -1531,11 +1548,7 @@ pub(crate) fn encode_lz_member_window(
             "RAR 5 member window holds no block to encode",
         ));
     }
-    let wave_width = encode_block_wave_width_for_budget(
-        options.max_match_distance,
-        false,
-        options.working_memory,
-    );
+    let wave_width = member_window_wave_width(options);
     encode_lz_member_blocks_in_waves(
         span,
         &[],
@@ -1551,13 +1564,109 @@ pub(crate) fn encode_lz_member_window(
     )
 }
 
-/// How many blocks a streamed member's window should carry so the block
-/// pool stays fed: the pool's width, and never under eight (32 MiB).
-pub(crate) fn member_window_blocks(options: EncodeOptions) -> usize {
-    encode_block_wave_width_for_budget(options.max_match_distance, false, options.working_memory)
-        .max(8)
+/// How many windows of one member the streamed writer encodes at once: it
+/// reads the next window while the one before it encodes, and one more
+/// buffer is the window being filled. (nzbfast-local change, 15 Sep 2026;
+/// see VENDORING.md.)
+pub(crate) const STREAMED_WINDOWS_IN_FLIGHT: usize = 2;
+
+/// The wave one streamed window encodes at: the pool's wave width, shared
+/// between the [`STREAMED_WINDOWS_IN_FLIGHT`] windows when a working-memory
+/// allowance is set.
+///
+/// Every window in flight walks its own tree finder over its wave and holds
+/// the finder's answers for the whole wave before any of its blocks encode:
+/// four bytes a slot a position, 64 MiB a block at the cost-based parse's
+/// stride. The windows share ONE pool, so a wave as wide as the pool in each
+/// of them held twice the hints the pool could use at once. Measured 15 Sep
+/// 2026 with a heap-tracking allocator on rarfast `-m5` over a 64 MiB text
+/// member at a 32 MiB dictionary under an allowance: at four pool threads
+/// 1,528 MiB of live heap, 512 MiB of it the two windows' hints; a further
+/// thread cost about 157 MiB, 128 of them hints, which is the gap between
+/// the wave's 72 MiB a block and the ~175 MiB a cost-parsed block was seen
+/// to hold. Shared, the peak is 1,335 MiB at four threads (from 1,528) and
+/// 1,529 at eight (from 2,141), and Silesia at four threads 1,571 (from
+/// 1,857), the same archive at every width. Byte-neutral: the width of a
+/// wave moves no byte, and the pool still runs as many blocks at once, from
+/// two windows instead of one. With no allowance nothing moves: an uncapped
+/// wide box is held by the hint budget already, and what a narrower wave
+/// would cost the pool's feed there is unmeasured.
+fn member_window_wave_width(options: EncodeOptions) -> usize {
+    let width = encode_block_wave_width_for_budget(
+        options.max_match_distance,
+        false,
+        options.working_memory,
+    );
+    if options.working_memory.is_some() {
+        width.div_ceil(STREAMED_WINDOWS_IN_FLIGHT)
+    } else {
+        width
+    }
 }
 
+/// How many blocks a streamed member's window should carry so the block
+/// pool stays fed: the pool's width, and never under eight (32 MiB) -
+/// unless a working-memory allowance is set.
+///
+/// The window is also how many small members the streamed writer encodes
+/// at once, each on a thread of its own with its own match-finder tree and
+/// block scratch, OUTSIDE the pool. So the floor of eight let eight member
+/// encodes run beside a pool an allowance had narrowed to two: rarfast's
+/// `-m5 -mm2g` over Silesia peaked at 2.2 GiB with its pool at two
+/// threads. Under an allowance the window is the wave width and nothing
+/// wider. Byte-neutral: a member that now takes the windowed route instead
+/// of the whole-member one gets the same sampled verdict and the same
+/// blocks (the streamed-matches-in-memory tests hold both routes to the
+/// in-memory writer). (nzbfast-local change, 15 Sep 2026.)
+///
+/// It is the ADMISSION width only: a large member's window takes
+/// [`member_window_segment_blocks`], which keeps the floor.
+pub(crate) fn member_window_blocks(options: EncodeOptions) -> usize {
+    let width = encode_block_wave_width_for_budget(
+        options.max_match_distance,
+        false,
+        options.working_memory,
+    );
+    if options.working_memory.is_some() {
+        width
+    } else {
+        width.max(8)
+    }
+}
+
+/// How many blocks a streamed member's window encodes behind its history:
+/// the pool's width and never under eight (32 MiB), with an allowance or
+/// without one.
+///
+/// [`member_window_blocks`] lost its floor under an allowance because it is
+/// also the small-member admission width, and until this the window lost it
+/// too: at one pool thread a member was encoded one 4 MiB block at a time
+/// behind 32 MiB of history, and every window builds a fresh tree finder
+/// over its whole span before it encodes, so about nine bytes were walked
+/// for each byte encoded. Measured 15 Sep 2026 on rarfast `-m5 -mm64g`
+/// over a 64 MiB text member at a 32 MiB dictionary, one pool thread, the
+/// same archive in every run: 142 s of user CPU and 1,328 MiB peak RSS
+/// before, 32 s and 1,050 MiB after, against 30 s and 1,053 MiB with no
+/// allowance. The window's size moves no byte (the windowed-walk cells hold
+/// every shape), and the finder's tree is sized by the dictionary, not the
+/// span, so what the floor costs is the streamed writer's three window
+/// buffers of history plus window: at an 8 MiB dictionary and one thread
+/// the peak ROSE from 495 to 584 MiB, the one measured cell where it did.
+/// (nzbfast-local change, 15 Sep 2026; see VENDORING.md.)
+pub(crate) fn member_window_segment_blocks(options: EncodeOptions) -> usize {
+    encode_block_wave_width_for_budget(
+        options.max_match_distance,
+        false,
+        options.working_memory,
+    )
+    .max(8)
+}
+
+// Every argument names a different thing the encoder needs and no two
+// of them travel together, so a parameter struct here would be a bag
+// with one field per argument and a second name for each. The lint's
+// ceiling is 7; these are 8 and 10.
+#[allow(clippy::too_many_arguments)]
 fn encode_lz_member_blocks_in_waves(
     data: &[u8],
     history: &[u8],
@@ -1674,7 +1783,7 @@ fn encode_lz_member_blocks_in_waves_filtered(
 /// finder to run: below it the ring index's newest-`depth` reach already
 /// covers most of the window, and the tree's eight bytes per window byte
 /// buy little. (nzbfast-local change, 7 Sep 2026; see VENDORING.md.)
-const TREE_MIN_DICTIONARY: usize = MAX_COMPRESSED_BLOCK_OUTPUT;
+pub(crate) const TREE_MIN_DICTIONARY: usize = MAX_COMPRESSED_BLOCK_OUTPUT;
 
 /// Whether this member's blocks run behind the tree match finder.
 ///
@@ -1710,6 +1819,7 @@ fn tree_match_finder_applies(options: EncodeOptions, data: &[u8], history_tail: 
 ///
 /// Four is where the wall is most of the way down and the CPU has barely
 /// moved.
+#[cfg(feature = "parallel")]
 const TREE_WALKER_CAP: usize = 4;
 
 /// How many candidate slots the finder records per position for this
@@ -1758,9 +1868,12 @@ const TREE_HINT_BUDGET_BYTES: usize = 512 << 20;
 fn tree_wave_width(width: usize, stride: usize, working_memory: Option<usize>) -> usize {
     let slot = std::mem::size_of::<std::sync::atomic::AtomicU32>();
     let per_block = MAX_COMPRESSED_BLOCK_OUTPUT * stride.max(1) * slot;
-    // A quarter of a caller-set allowance; see the const's own note for why
-    // the default is a flat half-gigabyte.
-    let budget = working_memory.map_or(TREE_HINT_BUDGET_BYTES, |bytes| bytes / 4);
+    // A quarter of a caller-set allowance, and never more than the default
+    // (see the const's own note for why that is a flat half-gigabyte): an
+    // allowance only ever narrows. (nzbfast-local change, 15 Sep 2026.)
+    let budget = working_memory.map_or(TREE_HINT_BUDGET_BYTES, |bytes| {
+        (bytes / 4).min(TREE_HINT_BUDGET_BYTES)
+    });
     (budget / per_block.max(1)).clamp(1, width.max(1))
 }
 
@@ -1934,6 +2047,11 @@ fn encode_blocks_with_tree(
 /// An error in one block stops the workers taking new ones; the first error
 /// in block order is the one returned, as the serial walk would have.
 #[cfg(feature = "parallel")]
+// Every argument names a different thing the encoder needs and no two
+// of them travel together, so a parameter struct here would be a bag
+// with one field per argument and a second name for each. The lint's
+// ceiling is 7; these are 8 and 10.
+#[allow(clippy::too_many_arguments)]
 fn encode_blocks_pooled(
     data: &[u8],
     history_tail: &[u8],
@@ -2125,6 +2243,10 @@ fn encode_blocks_pooled(
     Ok(out)
 }
 
+// Live from `codec::rar50::ratio` (the `ratio-lab` feature) and from
+// `filtered_lz_blocks`; with the feature off the chain above it is
+// unreferenced and this falls out with it.
+#[allow(dead_code)]
 fn encode_lz_block(
     data: &[u8],
     history: &[u8],
@@ -2653,6 +2775,9 @@ impl Unpack50Encoder {
     /// 2026: one-filter-chunk blocks, walked serially, with no tree hints.
     /// Kept as the exact control the ratio lab's joint filter/tree
     /// encoder is tested against.
+    // See `filtered_lz_blocks`: the callers are `ratio-lab`-only, so
+    // this is unreferenced in a plain test build.
+    #[allow(dead_code)]
     #[cfg(any(test, feature = "ratio-lab"))]
     pub(crate) fn encode_member_with_filters_chunked(
         &mut self,
@@ -2717,7 +2842,7 @@ impl Unpack50Encoder {
 // A zero distance denotes a literal run in the current block input.
 // Match lengths and literal-run lengths share the same field.
 #[derive(Debug, Clone, Copy)]
-struct EncodeToken {
+pub(super) struct EncodeToken {
     length: usize,
     distance: usize,
 }
@@ -2743,7 +2868,7 @@ impl EncodeToken {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct EncodeFilter {
+pub(super) struct EncodeFilter {
     offset: usize,
     length: usize,
     filter_type: FilterType,
@@ -3047,7 +3172,7 @@ fn encode_tokens_indexed_in_span<P: MatchPosition>(
     // The stride is carried in the slice's own shape rather than in a
     // parameter through five call layers: the finder writes `stride` slots
     // per position of `input` and nothing else shares the buffer.
-    debug_assert!(tree.is_empty() || tree.len() % input.len().max(1) == 0);
+    debug_assert!(tree.is_empty() || tree.len().is_multiple_of(input.len().max(1)));
     let stride = if tree.is_empty() || input.is_empty() {
         0
     } else {
@@ -3394,7 +3519,9 @@ struct TreeMatches<'a> {
 }
 
 impl TreeMatches<'_> {
-    /// No finder: every probe returns nothing.
+    /// No finder: every probe returns nothing. Only called from
+    /// `cfg(test)`, so the non-test build sees no use.
+    #[allow(dead_code)]
     fn none() -> Self {
         Self::default()
     }
@@ -5346,6 +5473,11 @@ impl<P: MatchPosition> MatchIndex<P> {
     }
 
     /// A slot's position, without its tag.
+    ///
+    /// The read half of `slot_value` above, which IS used: kept as the
+    /// statement of how a slot is packed, so the two halves of that
+    /// encoding stay next to each other. No caller today.
+    #[allow(dead_code)]
     #[inline]
     fn slot_position(&self, slot: P) -> usize {
         slot.position() & ((1usize << self.pos_bits) - 1)
@@ -5614,6 +5746,11 @@ impl<P: MatchPosition> MatchIndex<P> {
     }
 
     /// The bucket's inserted positions, newest first, at most `depth` of them.
+    ///
+    /// The untagged view of `candidates_tagged` below, which IS what the
+    /// walkers call. No caller today; kept as the plain reading of a
+    /// bucket, next to the tagged one it is defined from.
+    #[allow(dead_code)]
     #[inline]
     fn candidates(&self, input: &[u8], pos: usize) -> impl Iterator<Item = usize> + '_ {
         self.candidates_tagged(input, pos)
@@ -5740,7 +5877,9 @@ pub struct Unpack50Decoder {
     // Test-only override forcing the parallel flat-apply path on regardless of
     // member size, so the dedicated flat differential tests exercise it on the
     // large multi-block shapes; never set on the production gate (see 2.2).
-    #[cfg(test)]
+    // Read only from `use_flat_mode`, which lives in the `parallel`-gated
+    // impl block, so a non-parallel test build never reads it.
+    #[cfg(all(test, feature = "parallel"))]
     test_force_flat: bool,
 }
 
@@ -5784,7 +5923,7 @@ impl Unpack50Decoder {
             history_compactions: 0,
             window_limit: usize::MAX,
             mt_workers_cap: usize::MAX,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "parallel"))]
             test_force_flat: false,
         }
     }
@@ -6063,6 +6202,14 @@ impl Unpack50Decoder {
                         let distance_slot = tables.distance.decode(&mut bits)?;
                         #[cfg(not(feature = "parallel"))]
                         let distance_bit_count = distance_slot_bit_count(distance_slot)?;
+                        // The `as u8` casts below are a NO-OP under `parallel`, where
+                        // `decode_distance_hot` already answers in `u8`, and LOAD-BEARING
+                        // without it, where `distance_slot_bit_count` answers in `usize`.
+                        // `unnecessary_cast` only ever sees one of the two configurations, and
+                        // taking its advice broke the other (9 Sep 2026: the workspace lint runs
+                        // with `parallel` on, and the fuzz crate - which builds `rars` with
+                        // default features - stopped compiling).
+                        #[allow(clippy::unnecessary_cast)]
                         let distance_extra = if distance_bit_count >= 4 && tables.align_mode {
                             let high = bits.read_bits((distance_bit_count - 4) as u8)?;
                             let low = tables.align.decode(&mut bits)? as u32;
@@ -6129,6 +6276,11 @@ impl Unpack50Decoder {
 
     // `Send` bound: the flat-apply path scans on a scoped thread. Every real
     // caller already hands in a Send reader (extract.rs pipelines are Send).
+    // Every argument names a different thing the encoder needs and no two
+    // of them travel together, so a parameter struct here would be a bag
+    // with one field per argument and a second name for each. The lint's
+    // ceiling is 7; these are 8 and 10.
+    #[allow(clippy::too_many_arguments)]
     pub fn decode_member_from_reader_with_dictionary_to_sink<E>(
         &mut self,
         input: &mut (impl Read + Send),
@@ -6287,6 +6439,11 @@ impl Unpack50Decoder {
     /// starts at a non-solid (first-of-archive) member. Parallel-only: the
     /// serial build keeps the per-member path.
     #[cfg(feature = "parallel")]
+    // Every argument names a different thing the encoder needs and no two
+    // of them travel together, so a parameter struct here would be a bag
+    // with one field per argument and a second name for each. The lint's
+    // ceiling is 7; these are 8 and 10.
+    #[allow(clippy::too_many_arguments)]
     pub fn decode_solid_chain_to_sink<'a, E>(
         &mut self,
         next_input: &mut (dyn FnMut() -> Option<Box<dyn Read + Send + 'a>> + Send),
@@ -6684,7 +6841,8 @@ impl StreamingOutput {
     /// Declare the member boundaries of a chained group (group-relative
     /// cumulative ends). Only filter origins depend on them, and only a
     /// chain has more than one member, so a single-member ring leaves them
-    /// empty.
+    /// empty. Only `decode_solid_chain_to_sink` (parallel-only) calls this.
+    #[cfg(feature = "parallel")]
     fn with_member_ends(mut self, member_ends: Vec<usize>) -> Self {
         self.member_ends = member_ends;
         self
@@ -7372,6 +7530,14 @@ fn decode_block_serial<E>(
                 let distance_slot = tables.distance.decode(bits)?;
                 #[cfg(not(feature = "parallel"))]
                 let distance_bit_count = distance_slot_bit_count(distance_slot)?;
+                // The `as u8` casts below are a NO-OP under `parallel`, where
+                // `decode_distance_hot` already answers in `u8`, and LOAD-BEARING
+                // without it, where `distance_slot_bit_count` answers in `usize`.
+                // `unnecessary_cast` only ever sees one of the two configurations, and
+                // taking its advice broke the other (9 Sep 2026: the workspace lint runs
+                // with `parallel` on, and the fuzz crate - which builds `rars` with
+                // default features - stopped compiling).
+                #[allow(clippy::unnecessary_cast)]
                 let distance_extra = if distance_bit_count >= 4 && tables.align_mode {
                     let high = bits.read_bits((distance_bit_count - 4) as u8)?;
                     let low = tables.align.decode(bits)? as u32;
@@ -8962,15 +9128,78 @@ const FLAT_EMIT_THRESHOLD: usize = 1 << 20;
 #[cfg(feature = "parallel")]
 const LITERAL_INLINE_MAX: usize = 15;
 
-/// Least slack past the retained window in a SLIDING flat buffer, so the
-/// memmove that slides the window to the front runs at most once per this
-/// many output bytes (and once per dictionary of output when the dictionary
-/// is larger, which bounds the cost at one byte moved per byte emitted).
-/// Tests shrink it so the differential suite crosses slides constantly.
+/// MOST slack past the retained window in a SLIDING flat buffer: the plan
+/// never reaches further than this past the window, so the memmove that
+/// slides the window to the front runs at least once per this many output
+/// bytes. Tests shrink it so the differential suite crosses slides
+/// constantly.
+///
+/// This was the LEAST slack - the name is the old one - until 16 Sep 2026,
+/// when `flat_slack` below made the slack a function of the member and the
+/// dictionary and left this as its ceiling. The bound the old floor carried
+/// (slack at least the dictionary, so at most one byte moved per byte
+/// emitted) is now the rule's own lower clamp and did not move.
 #[cfg(not(test))]
 const FLAT_SLACK_MIN: usize = 64 << 20;
 #[cfg(test)]
 const FLAT_SLACK_MIN: usize = 4096;
+
+/// Smallest slack the sliding buffer runs with at all, whatever the two
+/// terms below say: a slide has to leave room for the longest single match
+/// or literal run the walk can append. This is the value test builds have
+/// always used for `FLAT_SLACK_MIN`, so it is the one that is proven by the
+/// differential suite. (nzbfast-local change, 16 Sep 2026; see VENDORING.md.)
+const FLAT_SLACK_FLOOR: usize = 4096;
+
+/// Slack to plan past the retained window, which is a trade between two
+/// costs that move in opposite directions with it:
+///
+/// * every page of the plan takes a first-touch zero-fill fault the first
+///   time the decoder writes it, so the fault bill is linear in the WINDOW;
+/// * `make_room` slides the retained window to the front once per `slack`
+///   bytes of output, moving `history_limit` bytes each time, so the slide
+///   bill is `output_size * history_limit / slack`.
+///
+/// Minimising `a * (history + slack) + b * output * history / slack` gives
+/// `slack = sqrt(output * history * b / a)`, and a grid over eight member
+/// sizes and seven dictionaries on an M3 Ultra fits `a / b = 2.8` - a fault
+/// costs 54.3 us/MiB of plan, a slide 19.4 us/MiB moved (`research/
+/// RARFAST-BENCH-2026-09-14.md` section 19, `research/rarbench-2026-09-16/`).
+/// Three is that ratio rounded; the optimum is flat enough either side that
+/// the exact value does not matter, which the same grid shows.
+///
+/// Clamped both ways, and the UPPER clamp is what makes this safe to change:
+/// the result is never more than `FLAT_SLACK_MIN` past the window (so no
+/// member ever plans MORE than it did before this rule, and no memory gate,
+/// admission estimate or `-mm<size>` cap can be loosened by it), and never
+/// less than `history_limit` (the old bound of one byte moved per byte
+/// emitted) nor less than `FLAT_SLACK_FLOOR`. Under `cfg(test)` the two
+/// clamps meet, so test builds plan exactly what they always did.
+///
+/// What it buys: a 32 to 128 MiB member with a dictionary of 8 MiB or less
+/// planned 64 MiB of slack it could not use and paid the faults for it -
+/// measured 2.4% to 8.5% of `rarfast t` wall across that class, and inside
+/// the noise everywhere else. (nzbfast-local change, 16 Sep 2026; see
+/// VENDORING.md.)
+fn flat_slack(output_size: usize, history_limit: usize) -> usize {
+    flat_slack_with(output_size, history_limit, FLAT_SLACK_MIN)
+}
+
+/// `flat_slack` with the ceiling named, so a test can ask what a PRODUCTION
+/// build plans: `FLAT_SLACK_MIN` is a sixteen-thousandth of its shipped value
+/// under `cfg(test)`, which would otherwise leave the rule untested at every
+/// size it was fitted on.
+fn flat_slack_with(output_size: usize, history_limit: usize, slack_min: usize) -> usize {
+    // Today's slack, and the ceiling: this rule only ever plans less.
+    let ceiling = history_limit.max(slack_min);
+    // `u128::isqrt` is not stable on the pinned toolchain, and the product
+    // reaches 2^77, so the root is taken in f64: a 53-bit mantissa is worth
+    // about one part in 2^24 of it, far inside the flat region around the
+    // optimum. A non-finite product would saturate to zero, which the
+    // clamps below then lift to the old floor.
+    let ideal = ((output_size as f64) * (history_limit as f64) / 3.0).sqrt() as usize;
+    ideal.max(history_limit).max(FLAT_SLACK_FLOOR).min(ceiling)
+}
 
 /// Bytes a flat plan allocates for a member of `output_size` (plus a
 /// carried `seed`) with a reachable window of `history_limit`: the whole
@@ -8983,7 +9212,7 @@ const FLAT_SLACK_MIN: usize = 4096;
 /// (research/RAR-PERF-AUDIT-2026-09-02.md, round 3). Not feature-gated:
 /// the admission gate in rar50/extract.rs prices the plan in every build.
 pub(crate) fn flat_plan_bytes(seed: usize, output_size: usize, history_limit: usize) -> usize {
-    let window = history_limit.saturating_add(history_limit.max(FLAT_SLACK_MIN));
+    let window = history_limit.saturating_add(flat_slack(output_size, history_limit));
     seed.saturating_add(output_size.min(window))
 }
 
@@ -10275,7 +10504,7 @@ impl HuffmanTable {
                     }
                 }
             }
-            return Err(Error::InvalidData("RAR 5 invalid Huffman code"));
+            Err(Error::InvalidData("RAR 5 invalid Huffman code"))
         }
     }
 
@@ -10448,7 +10677,7 @@ impl<'a> BitReader<'a> {
     }
 }
 
-// nzbfast-local change, 5 Sep 2026 - batch literal Huffman codes (the review's
+// nzbfast-local change, 5 Sep 2026 - batch literal Huffman codes (Codex's
 // `rar5-emit` pass); see VENDORING.md. Each canonical code is at most 15 bits:
 // pairs fit 30 bits and groups of four fit 60, which the bit writer below
 // takes as two spills. No staging buffer; every starting bit offset and the
@@ -11149,7 +11378,7 @@ mod tests {
             let mut emit = |writer: &mut BitWriter, value: usize, count: usize| {
                 writer.write_bits(value, count);
                 for shift in (0..count).rev() {
-                    if pos % 8 == 0 {
+                    if pos.is_multiple_of(8) {
                         reference.push(0);
                     }
                     *reference.last_mut().unwrap() |=
@@ -11643,7 +11872,7 @@ mod tests {
     fn byte_bit_writer_matches_bitwise_reference_at_all_widths_and_offsets() {
         fn reference(bytes: &mut Vec<u8>, pos: &mut usize, value: usize, count: usize) {
             for shift in (0..count).rev() {
-                if *pos % 8 == 0 {
+                if (*pos).is_multiple_of(8) {
                     bytes.push(0);
                 }
                 let last = bytes.len() - 1;
@@ -11834,6 +12063,10 @@ mod tests {
         Err(Error::InvalidData("RAR 5 match distance is too large"))
     }
 
+    // The differential reference for the match finder, written to take
+    // the finder's own inputs one for one so the two can be read side by
+    // side. Bundling them would break exactly that correspondence.
+    #[allow(clippy::too_many_arguments)]
     fn reference_best_match(
         input: &[u8],
         pos: usize,
@@ -12055,6 +12288,13 @@ mod tests {
     #[cfg(feature = "parallel")]
     #[test]
     fn worker_slot_tables_match_the_shared_slot_functions() {
+        // The loop variable is the SLOT NUMBER, which is what both
+        // tables are keyed on and what every assertion below passes to
+        // the slot functions. `enumerate()` over one of the two tables
+        // would name the same number after the value it happens to sit
+        // beside, which is the wrong way round for a test that exists
+        // to prove the two agree slot by slot.
+        #[allow(clippy::needless_range_loop)]
         for slot in 0..LENGTH_TABLE_SIZE {
             assert_eq!(
                 LENGTH_SLOT_EXTRA_BITS[slot],
@@ -13422,6 +13662,11 @@ mod tests {
         assert!(output.copy_match(over, 16, &mut sink).is_err());
 
         output.finish(&mut sink).unwrap();
+        // `sink` holds the only mutable borrow of `decoded`; dropping it
+        // is what lets the assertions below read the buffer. It has no
+        // `Drop` impl - ending the BORROW is the point, not running a
+        // destructor.
+        #[allow(clippy::drop_non_drop)]
         drop(sink);
         assert_eq!(decoded.len(), expected.len());
         assert!(
@@ -13498,6 +13743,11 @@ mod tests {
         second.copy_match(deep, 2048, &mut sink).unwrap();
         reference_extend(&mut expected, deep, 2048);
         second.finish(&mut sink).unwrap();
+        // `sink` holds the only mutable borrow of `decoded`; dropping it
+        // is what lets the assertions below read the buffer. It has no
+        // `Drop` impl - ending the BORROW is the point, not running a
+        // destructor.
+        #[allow(clippy::drop_non_drop)]
         drop(sink);
         assert!(
             decoded.as_slice() == &expected[start..],
@@ -14040,6 +14290,40 @@ mod tests {
         member_windows_match_the_whole_walk(2 * MAX_COMPRESSED_BLOCK_OUTPUT, true);
     }
 
+    /// Under a working-memory allowance a streamed window encodes at the
+    /// pool's wave shared between the windows in flight
+    /// ([`member_window_wave_width`]), and that moves no byte: a window of
+    /// three blocks on a four-thread pool, at a wave of two against a wave
+    /// of four, is the member encoded whole. The width asserts are the
+    /// control - on a pool where both widths agreed the equality would
+    /// prove nothing. (nzbfast-local change, 15 Sep 2026.)
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn a_streamed_window_under_an_allowance_shares_its_wave_without_moving_a_byte() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let uniform = member_window_material();
+            let options =
+                EncodeOptions::new(16).with_max_match_distance(MAX_COMPRESSED_BLOCK_OUTPUT);
+            let bounded = options.with_working_memory(Some(usize::MAX));
+            assert_eq!(member_window_wave_width(options), 4);
+            assert_eq!(member_window_wave_width(bounded), 2);
+            let whole = encode_lz_member_with_options(&uniform, 0, options).unwrap();
+            let scratch = EncoderScratchPool::new();
+            for arm in [options, bounded] {
+                assert_eq!(
+                    encode_lz_member_window(&uniform, 0, 0, arm, true, &scratch).unwrap(),
+                    whole,
+                    "allowance {:?}",
+                    arm.working_memory,
+                );
+            }
+        });
+    }
+
     /// The windowed walk also makes the same per-region horizon CHOICES as
     /// the whole-member walk, over material whose regions do not all want
     /// the same horizon. The choice is made per region from that region's
@@ -14270,11 +14554,7 @@ mod tests {
                     _ => 7,
                 }
             };
-            loop {
-                let header = match read_compressed_block_into(&mut input, &mut payload_buf) {
-                    Ok(header) => header,
-                    Err(_) => break,
-                };
+            while let Ok(header) = read_compressed_block_into(&mut input, &mut payload_buf) {
                 blocks += 1;
                 header_bits += 8 * (2 + 1 + header.payload_size.div_ceil(256).min(3)) as u64;
                 let payload = payload_buf.as_slice();
@@ -15105,7 +15385,7 @@ mod tests {
                 match chunk {
                     DecodedChunk::Bytes(bytes) => out.extend_from_slice(bytes),
                     DecodedChunk::Repeated { byte, len } => {
-                        out.extend(std::iter::repeat(byte).take(len))
+                        out.extend(std::iter::repeat_n(byte, len))
                     }
                 }
                 Ok(())
@@ -15150,7 +15430,7 @@ mod tests {
         for chunk in 0..(big / (64 << 10)) {
             match chunk % 4 {
                 0 => mixed.extend_from_slice(&random[..64 << 10]),
-                1 => mixed.extend(std::iter::repeat(0u8).take(64 << 10)),
+                1 => mixed.extend(std::iter::repeat_n(0u8, 64 << 10)),
                 2 => mixed.extend_from_slice(&text[..64 << 10]),
                 _ => mixed.extend(b"xyzxyzx".iter().cycle().take(64 << 10)),
             }
@@ -15415,7 +15695,7 @@ mod tests {
                             match chunk {
                                 DecodedChunk::Bytes(bytes) => chain_out.extend_from_slice(bytes),
                                 DecodedChunk::Repeated { byte, len } => {
-                                    chain_out.extend(std::iter::repeat(byte).take(len))
+                                    chain_out.extend(std::iter::repeat_n(byte, len))
                                 }
                             }
                             Ok(())
@@ -15530,7 +15810,7 @@ mod tests {
                             match chunk {
                                 DecodedChunk::Bytes(bytes) => chain_out.extend_from_slice(bytes),
                                 DecodedChunk::Repeated { byte, len } => {
-                                    chain_out.extend(std::iter::repeat(byte).take(len))
+                                    chain_out.extend(std::iter::repeat_n(byte, len))
                                 }
                             }
                             Ok(())
@@ -15730,7 +16010,7 @@ mod tests {
                 match chunk {
                     DecodedChunk::Bytes(bytes) => out.extend_from_slice(bytes),
                     DecodedChunk::Repeated { byte, len } => {
-                        out.extend(std::iter::repeat(byte).take(len))
+                        out.extend(std::iter::repeat_n(byte, len))
                     }
                 }
                 Ok(())
@@ -15941,13 +16221,80 @@ mod tests {
                 match chunk {
                     DecodedChunk::Bytes(bytes) => out.extend_from_slice(bytes),
                     DecodedChunk::Repeated { byte, len } => {
-                        out.extend(std::iter::repeat(byte).take(len))
+                        out.extend(std::iter::repeat_n(byte, len))
                     }
                 }
                 Ok(())
             },
         )?;
         Ok(out)
+    }
+
+    /// The flat plan's slack rule at the SHIPPED ceiling (`cfg(test)`
+    /// shrinks the real constant to 4 KiB, so nothing else here exercises
+    /// the sizes it was fitted on). Three claims, in order: it never plans
+    /// more slack than the old `history + max(history, 64 MiB)` did; it
+    /// never plans less than the dictionary; and a member small enough to
+    /// have no use for 64 MiB of slack gets the square-root rule instead -
+    /// which is the 2.4% to 8.5% of `rarfast t` wall that motivated it
+    /// (research/RARFAST-BENCH-2026-09-14.md section 19).
+    #[test]
+    fn flat_slack_only_ever_plans_less_than_the_old_floor() {
+        const MIB: usize = 1 << 20;
+        const SHIPPED: usize = 64 << 20;
+        let slack = |member: usize, dict: usize| flat_slack_with(member, dict, SHIPPED) / MIB;
+
+        // Large members keep the old slack exactly: the rule is capped by it.
+        assert_eq!(slack(1024 * MIB, 32 * MIB), 64);
+        // 4096 MiB is exactly `u32::MAX + 1`, so this member does not exist
+        // on a 32-bit target and the cell is compiled only where its input
+        // is representable - `arithmetic_overflow` is deny-by-default and
+        // const-folds it, so on armv7 this did not fail, it refused to
+        // COMPILE (nightly 35078185142). The cap itself stays covered
+        // everywhere by the 1024 MiB cell above and by the grid below.
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(slack(4096 * MIB, 64 * MIB), 64);
+        // ...and a member that is only just large enough plans just under
+        // it: sqrt(256 * 32 / 3) is 52, a cell the grid measured as a tie
+        // with the 64 it replaces on both payload families.
+        assert_eq!(slack(256 * MIB, 32 * MIB), 52);
+
+        // Small members with a small dictionary plan the root instead.
+        assert_eq!(slack(64 * MIB, 4 * MIB), 9); // sqrt(64 * 4 / 3)
+        assert_eq!(slack(32 * MIB, 4 * MIB), 6);
+        assert_eq!(slack(128 * MIB, 8 * MIB), 18);
+
+        // Never below the dictionary, whatever the root says.
+        assert_eq!(slack(MIB, 32 * MIB), 32);
+        assert_eq!(slack(8 * MIB, 16 * MIB), 16);
+
+        // And never above what the old rule planned, at any shape. The
+        // 8192 MiB column is 64-bit-only for the same reason as the cell
+        // above, and here it would have been a RUNTIME overflow panic
+        // rather than a compile error: this job builds with
+        // `overflow-checks = true` precisely to catch arch-width bugs, so
+        // the multiply below traps instead of wrapping. The dictionary
+        // column tops out at 1024 MiB and is representable on both.
+        #[cfg(target_pointer_width = "64")]
+        const MEMBERS_MIB: [usize; 7] = [1, 4, 17, 64, 256, 1024, 8192];
+        #[cfg(not(target_pointer_width = "64"))]
+        const MEMBERS_MIB: [usize; 6] = [1, 4, 17, 64, 256, 1024];
+        for member in MEMBERS_MIB {
+            for dict in [1usize, 4, 16, 32, 64, 128, 1024] {
+                let (m, d) = (member * MIB, dict * MIB);
+                assert!(
+                    flat_slack_with(m, d, SHIPPED) <= d.max(SHIPPED),
+                    "member {member} MiB dict {dict} MiB plans more slack than the old floor"
+                );
+                assert!(
+                    flat_slack_with(m, d, SHIPPED) >= d,
+                    "slack below the dictionary"
+                );
+            }
+        }
+
+        // A zero-length member is still a legal plan, not a panic.
+        assert_eq!(flat_slack_with(0, 0, SHIPPED), FLAT_SLACK_FLOOR);
     }
 
     /// A member 24x its dictionary: matches at 32 KiB reach back within a
@@ -16107,7 +16454,7 @@ mod tests {
                     match chunk {
                         DecodedChunk::Bytes(bytes) => chunks.push(bytes.to_vec()),
                         DecodedChunk::Repeated { byte, len } => {
-                            chunks.push(std::iter::repeat(byte).take(len).collect())
+                            chunks.push(std::iter::repeat_n(byte, len).collect())
                         }
                     }
                     Ok::<_, std::convert::Infallible>(())
@@ -16596,6 +16943,41 @@ mod tests {
         // A stride of one is the lazy parser's, and the budget does not
         // reach it at any width the pool can ask for.
         assert_eq!(tree_wave_width(20, 1, None), 20);
+        // An allowance narrows and never widens: a huge one is the default,
+        // a quarter-gigabyte one holds four blocks of hints. "Huge" is
+        // `usize::MAX`, never a GiB-scale literal: on 32-bit `64 << 30` is
+        // not flagged (the shift is under the width) and silently wraps to
+        // an allowance of 0, which the armv7-cross RUN caught (left 1, right
+        // 8). (nzbfast-local change, 15 Sep 2026; see VENDORING.md.)
+        assert_eq!(tree_wave_width(16, TREE_CANDIDATE_SLOTS, Some(usize::MAX)), 8);
+        assert_eq!(tree_wave_width(16, TREE_CANDIDATE_SLOTS, Some(1 << 30)), 4);
+        // `usize::MAX`, not `1 << 40`: the allowance is a `usize`, and on a
+        // 32-bit target that shift is a deny-by-default overflow that stops
+        // the whole lib test from building (armv7-cross). (nzbfast-local
+        // change, 15 Sep 2026; see VENDORING.md.)
+        assert_eq!(
+            encode_block_wave_width_for_budget(32 << 20, false, Some(usize::MAX)),
+            encode_block_wave_width_for_budget(32 << 20, false, None),
+        );
+        // And under an allowance the streamed member window is the wave, with
+        // no floor of eight to run members beside a narrowed pool.
+        let streamed = EncodeOptions::new(16).with_max_match_distance(32 << 20);
+        assert!(member_window_blocks(streamed) >= 8);
+        assert_eq!(
+            member_window_blocks(streamed.with_working_memory(Some(1))),
+            1
+        );
+        // But the window a large member is encoded from keeps the floor, so
+        // a one-thread pool does not rebuild its tree over the whole
+        // dictionary for every block it encodes.
+        assert_eq!(
+            member_window_segment_blocks(streamed.with_working_memory(Some(1))),
+            8
+        );
+        assert_eq!(
+            member_window_segment_blocks(streamed),
+            member_window_blocks(streamed)
+        );
         let block = MAX_COMPRESSED_BLOCK_OUTPUT;
         let data = optimal_parse_fixture(3 * block + 4_096);
         let options = EncodeOptions::new(16)

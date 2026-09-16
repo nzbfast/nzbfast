@@ -42,6 +42,32 @@
 //!
 //! `NZBFAST_CREATE_STRIPE_FIRST=0` keeps the batched path (the A/B arm);
 //! `NZBFAST_CREATE_STAGE_OVERLAP=0` flushes in series from one buffer.
+//!
+//! # Bands: the same one pass over COPIES (TODO 345 C, 15 Sep 2026)
+//!
+//! A create whose payload would not stay resident as a mapping
+//! (`mapped_payload_fits_memory`) reads through copies, and until this
+//! arm that meant the batched path's copied WINDOWS: a whole plan's leaf
+//! and combine work per window, per batch. On a 32 GB Core Ultra 9 laptop
+//! that was 72 s of a 102 s create, one 45 GiB member at 32,768 slices
+//! and 5%, all sixteen threads beside the whole-file MD5 chain the create
+//! waits on anyway; at 15% it was three batches of windows
+//! (research/PARFAST-OVER-RAM-CREATE-2026-09-15.md). The same member on
+//! the M3 Ultra under `-m8192`, copies forced: seven windows transformed
+//! in 17.6 s where the mapped single plan took 9.8, the create 540 user
+//! CPU-seconds against 318.
+//!
+//! The transform never needs a whole source, only one column of every
+//! slice per stripe, so the copy is cut along STRIPES instead of blocks:
+//! per chunk, bytes `[c0 * 2W, c1 * 2W)` of every slice land in one arena
+//! ([`read_band`]), the workers run THE plan over all the sources on those
+//! stripes, and the flush below is the mapped arm's. One plan and one pass
+//! over the payload whatever the batch count, read in sequential band
+//! sweeps, the arena bounded by the copied windows' own corpus budget.
+//! The probe row is folded per band. One batch is admitted too when the
+//! corpus does not fit one window, because the copied windows' "single
+//! pass" is then still several plans. `NZBFAST_CREATE_STRIPE_BANDS=0`
+//! keeps the copied windows (the A/B arm).
 
 use super::{
     CreateControl, CreatePhase, CreateTrail, CriticalIndex, CriticalPatch, MappedPlan,
@@ -140,9 +166,34 @@ pub(super) fn batches(layout: &[(usize, usize)], per_batch: usize) -> usize {
     n
 }
 
-/// Whether this create takes the one-pass route: several batches, no
-/// fused scan, mapped members, and the transform admissible for every
-/// row at once. Names its verdict on the timing channel either way.
+/// The band route over copies (module doc); off, the copied windows.
+fn bands_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NZBFAST_CREATE_STRIPE_BANDS").as_deref() != Ok("0"))
+}
+
+/// Where the one pass reads its sources from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Corpus {
+    /// Every full block straight out of the members' mappings.
+    Mapped,
+    /// Stripe bands copied out of the members into an arena of at most
+    /// `bytes` per chunk (module doc, "Bands").
+    Bands { bytes: usize },
+}
+
+/// Stripes per chunk on the band route: as many as one arena of `bytes`
+/// holds across every one of `n_slices` sources, at least one, at most
+/// all of them.
+fn band_stripes(bytes: usize, n_slices: usize, w: usize, stripes: usize) -> usize {
+    (bytes / n_slices.max(1).saturating_mul(w * 2).max(1)).clamp(1, stripes.max(1))
+}
+
+/// Whether this create takes the one-pass route, and over which corpus:
+/// no fused scan, the transform admissible for every row at once, and
+/// either mapped members over several batches or copied members whose
+/// corpus would otherwise take more than one plan. Names its verdict on
+/// the timing channel either way.
 ///
 /// # Every refusal reports, which three of them did not
 ///
@@ -164,33 +215,169 @@ pub(super) fn admissible(
     n_slices: usize,
     first: usize,
     rows: usize,
-) -> bool {
+) -> Option<Corpus> {
+    let window = || super::ntt_range::create_ntt_window(bs, n_slices, first, rows);
+    let mut corpus = None;
+    // The mapped arm's cheap gates still come before its window is priced;
+    // the band arm has to price the window to know whether one plan would
+    // have held the corpus anyway.
     let why = if !enabled() {
         Some("the knob is off (NZBFAST_CREATE_STRIPE_FIRST=0)")
-    } else if batches < 2 {
-        Some("one batch - the batched path already makes a single pass")
     } else if fused {
         Some("the scan is fused into the fold")
-    } else if !super::map_inputs_enabled() {
-        Some("the members are not mapped")
-    } else if super::ntt_range::create_ntt_window(bs, n_slices, first, rows).is_none() {
-        Some("the transform is not admitted for all rows at once")
+    // NO HEADROOM TERM HERE, and that is measured rather than an oversight.
+    // `mapped_payload_fits_memory` takes one since 16 Sep 2026 (its own
+    // docstring), but this call is not the fold's map-or-copy decision - it
+    // picks the CORPUS SHAPE, and a refusal here falls to the BANDS arm below
+    // rather than to the copied windows the gate itself falls to. Feeding the
+    // term in was measured that day on an 8-core x86_64 Linux box, one 2 GiB
+    // member at 5% in a 2,150 MiB cgroup: it diverted a ONE-BATCH create out of the main
+    // path's copied windows (5.5 s, three reps) and into bands (8.6-9.2 s),
+    // -56%, because the bands arm's own single-batch refusal is narrower than
+    // the mapped arm's. Narrowing THIS question is a claim about the bands
+    // arm and wants that arm's evidence, so the gate got stricter and this
+    // prediction did not; what is left is that a MULTI-batch create in the
+    // band between the two answers can still take `Corpus::Mapped` where the
+    // fold's own gate would refuse - unchanged from before the term, and
+    // stated as owed in research/PAR2GEN-GATE-CGROUP-BLIND-2026-09-16.md.
+    } else if super::map_inputs_enabled()
+        && super::mapped_payload_fits_memory(n_slices as u64 * bs as u64, 0)
+    {
+        if batches < 2 {
+            Some("one batch - the batched path already makes a single pass")
+        } else if window().is_none() {
+            Some("the transform is not admitted for all rows at once")
+        } else {
+            corpus = Some(Corpus::Mapped);
+            None
+        }
+    } else if !bands_enabled() {
+        Some(
+            "the members are read through copies (not mapped, or the payload would not stay \
+             resident - see mapped_payload_fits_memory) and bands are off \
+             (NZBFAST_CREATE_STRIPE_BANDS=0)",
+        )
     } else {
-        None
+        match window() {
+            None => Some("the transform is not admitted for all rows at once"),
+            Some(window) => {
+                let bytes = super::ntt_range::band_corpus_bytes(window.saturating_mul(bs));
+                // THIS REFUSAL IS DELIBERATELY NARROWER THAN THE MAPPED ARM'S,
+                // and it stays that way: it declines a one-batch create only
+                // when one window would have held the WHOLE corpus, so the
+                // copied transform really is one plan. A one-batch create whose
+                // corpus takes SEVERAL windows is admitted, and that case is
+                // the band route's headline win rather than an oversight -
+                // 45 GiB at 5% is `batches=1` on both the boxes TODO 345 C was
+                // accepted on. Core Ultra 9 laptop, 31.4 GB, the payload
+                // genuinely over memory: 60.2 s / 265 CPU-s / 105.9 GB read in
+                // 6 band sweeps against the copied windows' 91.0 s / 829 CPU-s
+                // / 113.7 GB in 6 windows, one set digest across both arms
+                // (research/PARFAST-OVER-RAM-BAND-ROUTE-2026-09-15.md section
+                // 5). M3 Ultra, same shape: transform 11.4 s against 18.9,
+                // create CPU 312 against 546 (section 4). Matching the mapped
+                // arm's refusal here gives all of that back.
+                //
+                // The contrary reading in section 8.4 of
+                // research/PAR2GEN-GATE-CGROUP-BLIND-2026-09-16.md - bands at
+                // 8.6-9.2 s where the copied windows do 5.5 - is real and is
+                // NOT about the batch count. Re-read off that round's own legs
+                // (research/par2gen-map-headroom-2026-09-16/legs-r1.jsonl,
+                // cg2150m): its losing cell is a 2 GiB payload that FITS
+                // memory, reached only through `NZBFAST_PAR2GEN_MAP=0`, where
+                // the copied windows are served from the page cache and the
+                // band read is pure addition - 10.85 s of a 13.08 s transform,
+                // against the windows' whole 5.10 s. Every `def` leg in that
+                // round refuses stripe-first ABOVE, at the mapped arm's strict
+                // one-batch line, and never asks this question: in production
+                // `map_inputs_enabled()` is only off by knob, so this arm is
+                // reached exactly when the payload is genuinely over memory -
+                // which is the regime the two wins above were measured in.
+                //
+                // The axis that separates them is the band READ against the
+                // plans it saves, `(sweeps - 1) * per-plan transform` against
+                // the read: 5 x 0.85 s against 10.85 s on the losing cell, 5 x
+                // ~10 s against 41.2 s on the laptop. Its shape-side proxy is
+                // the contiguous run each sweep takes from a slice, written
+                // `bs / sweeps` when it was first derived (12 KiB of a 64 KiB
+                // block losing, 241 KiB of a 1.44 MiB block winning). WRITE IT
+                // THE OTHER WAY: `band_corpus_bytes / n_slices` with the
+                // window `budget / bs`, and the block size CANCELS -
+                //
+                //     run = budget / n_slices
+                //
+                // the memory budget per slice, and nothing else. The two forms
+                // are the same identity and do not suggest the same
+                // experiment, which is why `band_run_floor_tests` below pins
+                // this one. It also has a FLOOR: `create_ntt_window` refuses a
+                // window under NTT_WINDOW_MIN = 1,024 slices and
+                // MAX_INPUT_SLICES is 32,768, so `run >= bs / 32` for every
+                // create that reaches this arm at all. Asking for less budget
+                // does not sweep harder, it stops the arm being reached.
+                // 15 one-batch cells on the M3 Ultra over that proxy (4 KiB to
+                // 247 KiB of run, 2 to 16 sweeps, 8 and 32 threads, 3 reps,
+                // one set digest per block size across both arms) put bands
+                // ahead on CPU in every one, by 1.4% at 2 sweeps to 39% at 16;
+                // they cannot see the read side, because 512 GB of RAM holds
+                // the corpus. THE READ SIDE IS PRICED on an 8-core x86_64
+                // Linux box with a SLOW disk (0.5-0.7 GB/s), 36 legs over
+                // both arms, the fixture dropped from the page cache before
+                // every leg and one set digest per shape across both arms: an
+                // 8 GiB corpus in a 2,560 MiB cgroup for the short runs, a
+                // 32 GiB corpus bare on 31 GB of RAM for the long ones. It
+                // SPLITS THE TWO COLUMNS, which no cell before it could.
+                // BANDS WIN CPU IN EVERY CELL, 1.37x to 2.33x. BANDS LOSE
+                // WALL AT A SHORT RUN: 2.4x at 9 KiB of run, 1.5x at
+                // 13-17 KiB, level by 34 KiB, level again at 62-128 KiB.
+                // The mechanism is in the cgroup's own counters rather than
+                // inferred: at 9 KiB the band arm refaults 4.40M file pages
+                // against the windows' 1.79M and reads 25.5 GB off the device
+                // against their 15.4 GB, for an 8 GiB payload, and both
+                // converge as the run grows. A strided sweep pays the
+                // device's readahead granularity per run, and at 9 KiB most
+                // of what is faulted in is discarded before it is used.
+                // SO THE 1.5x WALL WIN ABOVE IS A FAST-DISK RESULT - that
+                // laptop read 105.9 GB at 1.76 GB/s - and the CPU win is not.
+                // The regime this arm is actually REACHED in is the over-RAM
+                // one, where the slice cap forces a long run and bands are
+                // level on wall and 2.2x on CPU, so the rule is right there.
+                // Round, ladder and verdict:
+                // research/STRIPE-FIRST-BANDS-OVERRAM-LADDER-2026-09-16.md.
+                // NO THRESHOLD ON THE RUN IS SET HERE, and that is still
+                // deliberate: the three rungs that differ ONLY in the run
+                // never cross, and the 34 KiB parity point moves the block
+                // count and the redundancy too, so the pair straddling the
+                // crossing differs in more than the axis. Two points and a
+                // gap, and this repo's rule is that an interpolated crossing
+                // is not a thing to set a constant from.
+                if batches < 2 && bytes >= n_slices.saturating_mul(bs) {
+                    Some(
+                        "one batch in one resident window - the copied transform is one plan already",
+                    )
+                } else {
+                    corpus = Some(Corpus::Bands { bytes });
+                    None
+                }
+            }
+        }
     };
     if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
-        match why {
-            Some(why) => tracing::info!(
+        match (why, corpus) {
+            (Some(why), _) => tracing::info!(
                 target: "repair-timing",
                 "create stripe-first refused: {why} ({batches} batch(es), {rows} rows, n={n_slices}, fused={fused})"
             ),
-            None => tracing::info!(
+            (None, Some(Corpus::Bands { bytes })) => tracing::info!(
+                target: "repair-timing",
+                "create stripe-first admitted: {batches} batch(es), {rows} rows, n={n_slices}, bands of up to {bytes} B over copies"
+            ),
+            (None, _) => tracing::info!(
                 target: "repair-timing",
                 "create stripe-first admitted: {batches} batches, {rows} rows, n={n_slices}"
             ),
         }
     }
-    why.is_none()
+    corpus
 }
 
 pub(super) struct Args<'a> {
@@ -216,6 +403,8 @@ pub(super) struct Args<'a> {
     pub cidx: Option<&'a CriticalIndex>,
     /// The accumulator budget in bytes: the staging buffer's ceiling.
     pub accum: u64,
+    /// Where the sources are read from ([`admissible`]'s verdict).
+    pub corpus: Corpus,
 }
 
 /// The batch loop's one call: admission, then [`run`].
@@ -238,10 +427,12 @@ pub(super) fn try_run(
     ready_critical: Option<&Vec<u8>>,
     critical_shape: &[u8],
 ) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2GenError> {
-    if !admissible(batches(layout, per_batch), fused, bs, n_slices, first, rows) {
+    let Some(corpus) = admissible(batches(layout, per_batch), fused, bs, n_slices, first, rows)
+    else {
         return Ok(None);
-    }
+    };
     run(&Args {
+        corpus,
         control,
         trail,
         scanned,
@@ -258,6 +449,134 @@ pub(super) fn try_run(
         cidx,
         accum: per_batch as u64 * bs as u64,
     })
+}
+
+/// Bytes `[b0, b0 + slot)` of every source slice into `arena`, slice `i`'s
+/// at `i * slot`: the band of stripes the next chunk transforms (module
+/// doc, "Bands"). A slice whose data ends inside or before the band - a
+/// member's tail block - is zero-padded from there, which is the padding
+/// the mapped arm gives its tails. Positional reads over `readers`
+/// contiguous runs of the plan, sharing one handle per member:
+/// `disk::read_exact_at` takes its offset per call on every platform (see
+/// `scan::scan_parallel_positional`).
+#[allow(clippy::too_many_arguments)]
+fn read_band(
+    control: &CreateControl,
+    files: &[std::fs::File],
+    scanned: &[(PathBuf, u64)],
+    plan: &[(usize, u64, usize)],
+    b0: usize,
+    slot: usize,
+    arena: &mut [u8],
+    readers: usize,
+) -> Result<(), Par2GenError> {
+    let per = plan.len().div_ceil(readers.max(1)).max(1);
+    let mut results: Vec<Result<(), Par2GenError>> = Vec::new();
+    std::thread::scope(|sc| {
+        let handles: Vec<_> = plan
+            .chunks(per)
+            .zip(arena.chunks_mut(per * slot))
+            .map(|(jobs, slots)| {
+                sc.spawn(move || -> Result<(), Par2GenError> {
+                    for (k, &(mi, off, want)) in jobs.iter().enumerate() {
+                        // Cancel only: a reader owns its run of slots and
+                        // nothing else, and the driver parks between chunks.
+                        if control.cancelled() {
+                            return Err(Par2GenError::Cancelled);
+                        }
+                        let dst = &mut slots[k * slot..(k + 1) * slot];
+                        let have = want.saturating_sub(b0).min(slot);
+                        if have > 0 {
+                            crate::disk::read_exact_at(
+                                &files[mi],
+                                &mut dst[..have],
+                                off + b0 as u64,
+                            )
+                            .map_err(io(&scanned[mi].0))?;
+                        }
+                        dst[have..].fill(0);
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        results = handles
+            .into_iter()
+            .map(|h| h.join().expect("stripe-first band reader panicked"))
+            .collect();
+    });
+    super::ntt_range::note_band_sweep();
+    results
+        .into_iter()
+        .find_map(|r| r.err())
+        .map_or(Ok(()), Err)
+}
+
+/// Row `first` by the fold over `srcs`, `words` columns of it: the check
+/// the transform's rows are compared against. The fold is linear column
+/// by column, so over a band's sources this is exactly that band's
+/// columns of the whole row.
+fn probe_row(srcs: &[&[u8]], logs: &[u32], first: usize, words: usize) -> Vec<u16> {
+    let mut probe = vec![vec![0u16; words]];
+    // `None`: no honest creator `Sub` - see `fold_parallel`.
+    crate::par2repair::linalg::fold_parallel(
+        &mut probe,
+        srcs,
+        &|_, i| crate::gf16::pow2(logs[i] as u64 * first as u64 % crate::gf16::ORDER as u64),
+        None,
+    );
+    probe.pop().expect("one probe row")
+}
+
+/// One chunk's band: its stripes of every slice read into the arena, and
+/// the probe row's columns folded over them, both while the workers are
+/// parked at the start gate. `None` on the mapped corpus, which reads its
+/// sources through the mapping and folds one probe for the whole run.
+///
+/// Split out of [`run`]'s chunk loop for the size gate's 500-line function
+/// ceiling, which that loop's band arm left three lines clear of.
+#[allow(clippy::too_many_arguments)]
+fn band_chunk(
+    a: &Args,
+    mapped: bool,
+    band: *mut u8,
+    slot: usize,
+    plan: &[(usize, u64, usize)],
+    logs: &[u32],
+    sources: &[std::fs::File],
+    readers: usize,
+    c0: usize,
+    w: usize,
+    chunk_words: usize,
+    t_read: &mut std::time::Duration,
+    t_probe: &mut std::time::Duration,
+) -> Result<Option<Vec<u16>>, Par2GenError> {
+    if mapped {
+        return Ok(None);
+    }
+    let t_band = std::time::Instant::now();
+    // SAFETY: the workers are parked at the start gate, so the arena is
+    // the driver's alone until the chunk is posted.
+    let arena = unsafe { std::slice::from_raw_parts_mut(band, a.n_slices * slot) };
+    read_band(
+        a.control,
+        sources,
+        a.scanned,
+        plan,
+        c0 * w * 2,
+        slot,
+        arena,
+        readers,
+    )?;
+    *t_read += t_band.elapsed();
+    let t0 = std::time::Instant::now();
+    let srcs: Vec<&[u8]> = arena
+        .chunks_exact(slot)
+        .map(|s| &s[..chunk_words * 2])
+        .collect();
+    let probe = probe_row(&srcs, logs, a.first, chunk_words);
+    *t_probe += t0.elapsed();
+    Ok(Some(probe))
 }
 
 /// `Ok(Some(volumes))` with every volume written and sealed;
@@ -290,23 +609,30 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
             off += want as u64;
         }
     }
-    let Some(maps) = MappedPlan::open(a.scanned, &plan, bs, window.saturating_mul(bs)) else {
-        return Ok(None);
+    // Mapped: the sources, and the independent check - row `first` by the
+    // fold over the same sources, compared chunk by chunk below - up
+    // front. Bands: one read handle per member now, the check per band.
+    let (maps, sources) = match a.corpus {
+        Corpus::Mapped => {
+            let Some(maps) = MappedPlan::open(a.scanned, &plan, bs, window.saturating_mul(bs))
+            else {
+                return Ok(None);
+            };
+            (Some(maps), Vec::new())
+        }
+        Corpus::Bands { .. } => {
+            let sources = a
+                .scanned
+                .iter()
+                .map(|(path, _)| std::fs::File::open(path).map_err(io(path)))
+                .collect::<Result<Vec<_>, _>>()?;
+            (None, sources)
+        }
     };
-    // The independent check: row `first` by the fold over the same
-    // sources, compared chunk by chunk below.
-    let mut probe = vec![vec![0u16; words]];
-    {
+    let probe: Vec<u16> = maps.as_ref().map_or_else(Vec::new, |maps| {
         let srcs: Vec<&[u8]> = (0..a.n_slices).map(|i| maps.block(i, bs)).collect();
-        // `None`: no honest creator `Sub` - see `fold_parallel`.
-        crate::par2repair::linalg::fold_parallel(
-            &mut probe,
-            &srcs,
-            &|_, i| crate::gf16::pow2(logs[i] as u64 * a.first as u64 % crate::gf16::ORDER as u64),
-            None,
-        );
-    }
-    let probe = &probe[0];
+        probe_row(&srcs, &logs, a.first, words)
+    });
 
     // Volumes laid out up front, exactly as the batched writer lays them
     // (its shape is what the backfill patches): the head layout puts the
@@ -411,13 +737,20 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
         })
         .collect();
 
-    let (w, threads) = crate::par2repair::ntt_stripe_geometry(bs);
+    let (w, threads) =
+        crate::par2repair::ntt_create_stripe_geometry(bs, Some(ntt.median_leaf_kernel()));
     let stripes = words.div_ceil(w);
     ntt_range::note_stripes(stripes);
     let stripe_bytes = a.rows * w * 2;
-    let natural = (STAGING_BYTES / stripe_bytes)
-        .max(threads * 2)
-        .clamp(1, stripes);
+    let natural = match a.corpus {
+        Corpus::Mapped => (STAGING_BYTES / stripe_bytes)
+            .max(threads * 2)
+            .clamp(1, stripes),
+        // A band chunk is a sweep over the whole payload, which costs far
+        // more than the flush's per-write overhead the mapped chunk is
+        // sized against: as many stripes as the arena holds.
+        Corpus::Bands { bytes } => band_stripes(bytes, a.n_slices, w, stripes),
+    };
     // Two buffers when a pair of natural-sized chunks fits the budget;
     // otherwise one, cut to the budget. Never two half-sized ones: the
     // flush is per-write overhead, so halving the chunk to afford the
@@ -445,6 +778,21 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
     unsafe impl Send for Rows {}
     // SAFETY: as above.
     unsafe impl Sync for Rows {}
+    // The band arena: slice `i`'s stripes from the chunk's first at
+    // `i * slot`. The driver refills it through `band` while the workers
+    // are parked at the start gate; they only read it once it is posted.
+    let slot = per_chunk * w * 2;
+    let mut band_arena = vec![0u8; if maps.is_some() { 0 } else { a.n_slices * slot }];
+    struct Band(*mut u8);
+    // SAFETY: the workers only read the arena, between the gates, and the
+    // driver writes it only outside them.
+    unsafe impl Send for Band {}
+    // SAFETY: as above.
+    unsafe impl Sync for Band {}
+    let band = Band(band_arena.as_mut_ptr());
+    let readers = super::create_readers(false);
+    let mut t_band_read = std::time::Duration::ZERO;
+    let mut t_band_probe = std::time::Duration::ZERO;
     // Workers live for the whole run - their transform scratch (~15 MB
     // each at the production stripe) and output rows are allocated once,
     // not once per chunk (the review's read of the first landing: 49 chunks
@@ -466,7 +814,8 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
         for _ in 0..threads {
             let ntt = &ntt;
             let rows = &rows;
-            let table = &maps;
+            let table = maps.as_ref();
+            let band = &band;
             let (next, end, chunk_start, stop) = (&next, &end, &chunk_start, &stop);
             let buf_base = &buf_base;
             let (start_gate, end_gate) = (&start_gate, &end_gate);
@@ -487,11 +836,20 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
                             break;
                         }
                         let len = w.min(words - c * w);
-                        // SAFETY: every table entry is readable for `bs`
-                        // bytes and c*w*2 + 2*len <= bs - the transform's
-                        // src_of contract.
+                        // SAFETY: the transform's src_of contract, 2*len
+                        // readable bytes from the pointer. Mapped: every
+                        // table entry is readable for `bs` bytes and
+                        // c*w*2 + 2*len <= bs. Bands: slot `id` holds
+                        // `slot` bytes starting at stripe c0, and
+                        // (c - c0)*w*2 + 2*len <= slot because c < c1 <=
+                        // c0 + per_chunk.
                         let src_of = |id: crate::par2ntt::SrcId| unsafe {
-                            table.table[id as usize].add(c * w * 2)
+                            match table {
+                                Some(t) => t.table[id as usize].add(c * w * 2),
+                                None => {
+                                    band.0.add(id as usize * slot + (c - c0) * w * 2) as *const u8
+                                }
+                            }
                         };
                         ntt.transform(&src_of, len, &mut scratch, &mut out);
                         for j in 0..a.rows {
@@ -564,6 +922,31 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
             let c1 = (c0 + per_chunk).min(stripes);
             let chunk_words = (c1 - c0 - 1) * w + w.min(words - (c1 - 1) * w);
             let base = (chunks % bufs) * buf_words;
+            // Bands: this chunk's stripes of every slice into the arena,
+            // and the probe row's columns over them, before the chunk is
+            // posted.
+            let band_probe = match band_chunk(
+                a,
+                maps.is_some(),
+                band.0,
+                slot,
+                &plan,
+                &logs,
+                &sources,
+                readers,
+                c0,
+                w,
+                chunk_words,
+                &mut t_band_read,
+                &mut t_band_probe,
+            ) {
+                Ok(probe) => probe,
+                Err(e) => {
+                    verdict = Some(Err(e));
+                    release(&stop);
+                    return;
+                }
+            };
             chunk_start.store(c0, std::sync::atomic::Ordering::Release);
             end.store(c1, std::sync::atomic::Ordering::Release);
             next.store(c0, std::sync::atomic::Ordering::Release);
@@ -595,7 +978,10 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
             let staging: &[u16] =
                 unsafe { std::slice::from_raw_parts(rows.0.add(base), buf_words) };
             // Row `first` is staging row 0: the fold's answer or nothing.
-            if staging[..chunk_words] != probe[c0 * w..c0 * w + chunk_words] {
+            let expect = band_probe
+                .as_deref()
+                .unwrap_or_else(|| &probe[c0 * w..c0 * w + chunk_words]);
+            if staging[..chunk_words] != expect[..chunk_words] {
                 tracing::warn!(
                     target: "repair-timing",
                     "create stripe-first: probe row DISAGREES with the fold at stripe {c0} - recomputing every row by the batched path"
@@ -652,7 +1038,18 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
         Some(Err(e)) => return Err(e),
         None => unreachable!("the chunk loop always sets a verdict"),
     }
+    let corpus = match &maps {
+        Some(_) => "mapped".to_string(),
+        None => format!(
+            "bands of {} B over copies, read {:.2?}, probe {:.2?}, {readers} reader(s)",
+            band_arena.len(),
+            t_band_read,
+            t_band_probe
+        ),
+    };
     drop(maps);
+    drop(band_arena);
+    drop(sources);
     a.control.finish(CreatePhase::Fold);
     for (r, m) in seals.into_iter().enumerate() {
         let digest: [u8; 16] = m.finalize().into();
@@ -666,11 +1063,111 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
     if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
         tracing::info!(
             target: "repair-timing",
-            "create stripe-first: {} rows in {chunks} chunk(s) of {per_chunk} stripes (n={}, mapped, W={w}, threads={threads}, probe ok): {:.2?}",
+            "create stripe-first: {} rows in {chunks} chunk(s) of {per_chunk} stripes (n={}, {corpus}, W={w}, threads={threads}, probe ok): {:.2?}",
             a.rows,
             a.n_slices,
             t0.elapsed()
         );
     }
     Ok(Some(names.into_iter().zip(patches).collect()))
+}
+
+/// The BAND RUN'S FLOOR, which is what bounds the shape the bands arm can
+/// ever be asked about (claim `stripe-first-bands-sweep-ladder-overram`,
+/// 16 Sep 2026). Pinned against the two constants it falls out of rather
+/// than against a measured number, so a change to either is a test
+/// failure and not a silent change of regime.
+#[cfg(test)]
+mod band_run_floor_tests {
+    use super::super::ntt_range::{NTT_WINDOW_MIN, create_ntt_window_with_budget};
+    use crate::par2repair::MAX_INPUT_SLICES;
+
+    /// `run = band_corpus_bytes / n_slices` - the contiguous stretch each
+    /// sweep takes from one slice, and the proxy section 3 of
+    /// research/STRIPE-FIRST-BANDS-ONE-BATCH-2026-09-16.md derives as the
+    /// axis separating the band route's win from its loss.
+    ///
+    /// IT CANNOT GO BELOW `bs / 32`, and that is arithmetic rather than a
+    /// measurement: `create_ntt_window_with_budget` admits only a window
+    /// of at least `NTT_WINDOW_MIN` slices, the arena is `window * bs`, and
+    /// `n_slices` cannot exceed `MAX_INPUT_SLICES`, so
+    /// `run >= NTT_WINDOW_MIN * bs / MAX_INPUT_SLICES = bs / 32`. A budget
+    /// below `NTT_WINDOW_MIN * bs` does not give a SHORTER run - it gives
+    /// no transform at all, and both arms fall to the fold, which is the
+    /// other half of this test.
+    ///
+    /// WHY IT MATTERS. Section 6 of that write-up named the unmeasured
+    /// risk as "a small-memory box creating a very large set", worked as
+    /// 384 MiB of band over 45 GiB - 120 sweeps and a 12 KiB run, the
+    /// losing cell's geometry at a winning cell's size. That cell does not
+    /// exist. A 45 GiB corpus at the slice cap is 1.44 MiB blocks, so
+    /// 384 MiB of budget buys 266 slices, the window is refused, and the
+    /// shortest run that shape can reach is 46 KiB - four times the losing
+    /// cell's 12 KiB and a fifth of the winning cell's 241 KiB. A 12 KiB
+    /// run needs a block of 384 KiB or less, i.e. a corpus of at most
+    /// 12 GiB at the cap: the short-run geometry is reachable only where
+    /// the whole corpus is small, so "over RAM" and "short run" are
+    /// available together only on a genuinely small-memory box.
+    #[test]
+    fn the_band_run_cannot_fall_below_a_thirty_second_of_the_block() {
+        // An ordinary create's row count, comfortably over the row gate
+        // `shape_possible` applies: the question here is the WINDOW, and a
+        // shape refused for its rows would not exercise it.
+        const ROWS: usize = 1638; // 5% of the slice cap
+        for &bs in &[64 << 10, 256 << 10, 1 << 20, 4 << 20] {
+            for &n_slices in &[1024usize, 4096, 16384, MAX_INPUT_SLICES] {
+                let mut admitted = 0;
+                // Walk the budget from under the floor to the whole corpus.
+                for step in 1..=64usize {
+                    let budget = step * NTT_WINDOW_MIN * bs / 8;
+                    let Some(window) =
+                        create_ntt_window_with_budget(bs, n_slices, ROWS, ROWS, budget)
+                    else {
+                        continue;
+                    };
+                    admitted += 1;
+                    assert!(
+                        window >= NTT_WINDOW_MIN.min(n_slices),
+                        "bs={bs} n={n_slices} budget={budget}: window {window} under the floor"
+                    );
+                    let run = window.saturating_mul(bs) / n_slices;
+                    assert!(
+                        run >= bs / 32,
+                        "bs={bs} n={n_slices} budget={budget}: run {run} under bs/32 ({})",
+                        bs / 32
+                    );
+                }
+                assert!(
+                    admitted > 0,
+                    "bs={bs} n={n_slices}: no budget in the walk admitted a window - \
+                     the walk has stopped exercising the rule it pins"
+                );
+            }
+        }
+    }
+
+    /// The other half: below `NTT_WINDOW_MIN * bs` of budget the window is
+    /// REFUSED outright. This is why a short run cannot be bought by
+    /// shrinking the band budget - the arm simply stops being reached, and
+    /// a round that asks for such a rung measures the fold in both arms.
+    #[test]
+    fn a_budget_under_the_window_floor_is_refused_rather_than_swept_harder() {
+        let bs = 1_474_560; // a 45 GiB corpus at the slice cap: 1.44 MiB.
+        let n = MAX_INPUT_SLICES;
+        let rows = 1638;
+        assert_eq!(
+            create_ntt_window_with_budget(bs, n, rows, rows, 384 << 20),
+            None,
+            "384 MiB over 45 GiB buys {} slices, under the {NTT_WINDOW_MIN}-slice floor, \
+             so section 6's 120-sweep cell cannot be reached",
+            (384 << 20) / bs
+        );
+        // And the smallest budget that IS admitted gives a run far above
+        // the 12 KiB the losing cell measured.
+        let window = create_ntt_window_with_budget(bs, n, rows, rows, NTT_WINDOW_MIN * bs)
+            .expect("the floor itself admits");
+        assert_eq!(window, NTT_WINDOW_MIN);
+        assert_eq!(window * bs / n, bs / 32);
+        assert!((44 << 10..48 << 10).contains(&(window * bs / n)));
+    }
 }

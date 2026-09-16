@@ -172,6 +172,27 @@ where
         .iter()
         .find(|h: &&Header| h.field.equiv("Transfer-Encoding"))
         .map(|h| h.value.clone());
+    // nzbfast: and it must actually BE chunked. Upstream decoded ANY
+    // Transfer-Encoding value as chunked - `identity`, `gzip`,
+    // `xchunked`, or `chunked, gzip` where chunked is not last - while
+    // RFC 7230 3.3.3 requires that a request whose final transfer coding
+    // is not `chunked` be rejected, because its length cannot be
+    // determined. That disagreement with whatever sits in front is the
+    // TE.TE half of the smuggling class patches 6 and 7 close, and it
+    // was the half still open.
+    //
+    // Only the final coding is checked, and only for equality: a request
+    // declaring `gzip, chunked` is well formed by the RFC and this
+    // server does not implement the gzip layer, so it is refused rather
+    // than mis-decoded. Refusing is the safe direction either way - a
+    // browser or an *arr sends `chunked` alone.
+    if let Some(te) = transfer_encoding.as_ref() {
+        let te = te.as_str();
+        let final_coding = te.rsplit(',').next().unwrap_or("").trim();
+        if !final_coding.eq_ignore_ascii_case("chunked") || te.split(',').count() != 1 {
+            return Err(RequestCreationError::BadFraming);
+        }
+    }
 
     // finding the content-length header
     let content_length = if transfer_encoding.is_some() {
@@ -221,8 +242,17 @@ where
                 // is that text; we see two requests and run the second on a
                 // keyless origin, behind whatever path policy the proxy
                 // believed it was enforcing.
-                let len: usize = match FromStr::from_str(h.value.as_str()) {
-                    Ok(len) if len <= MAX_CONTENT_LENGTH => len,
+                // nzbfast: 1*DIGIT and nothing else. RFC 7230 3.3.2
+                // defines Content-Length that way, but `usize::from_str`
+                // also accepts a leading '+', so `Content-Length: +44`
+                // parsed as 44 here while a standards-framing proxy in
+                // front reads it as invalid or absent - and the two then
+                // disagree about where the body ends, which is the whole
+                // desync class the surrounding patches close.
+                let raw = h.value.as_str();
+                let digits_only = !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit());
+                let len: usize = match FromStr::from_str(raw) {
+                    Ok(len) if digits_only && len <= MAX_CONTENT_LENGTH => len,
                     _ => return Err(RequestCreationError::BadFraming),
                 };
                 // nzbfast patch 6 (addendum): the SAME desync reached

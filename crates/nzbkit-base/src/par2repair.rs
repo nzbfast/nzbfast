@@ -292,6 +292,10 @@ pub struct Reconstructor {
     /// Pending present slices, packed into the next batch's arena.
     batch: FeedBatch,
     batch_capacity: usize,
+    /// How the feed pipeline is sized for this construction - see
+    /// `reconstruct::FeedShape`. The drivers split its batch across
+    /// their readers with [`Reconstructor::per_reader_batch`].
+    feed: reconstruct::FeedShape,
     /// Recycled batch arenas, shared with every [`Feeder`] and the fold
     /// worker (see [`linalg::ArenaPool`]).
     pool: std::sync::Arc<linalg::ArenaPool>,
@@ -300,6 +304,10 @@ pub struct Reconstructor {
     /// The dispatcher selected NTT retention at construction (the
     /// mid-flight budget/plan fallbacks can still land on the fold).
     ntt_selected: bool,
+    /// The stripe cap the dispatcher admitted the transform at
+    /// (`fastpar::NttAdmission::stripe_cap`; `usize::MAX` when nothing
+    /// was narrowed or the fold was selected).
+    ntt_stripe_cap: usize,
     /// Memory-floor gauge charge for the syndrome rows (recovery blocks
     /// x block_size, live from construction to back-substitution).
     /// Released explicitly where finish drops the rows; the RAII drop
@@ -402,18 +410,23 @@ pub use fastpar::{
     FAST_PAR_DEFAULT, NttDivergence, fast_par_tripped, set_fast_par_enabled, take_ntt_divergences,
 };
 use fastpar::{NttProbe, resolve_syndrome_path, run_with_ntt_fallback};
-// The creator reads the same shape gates and stripe geometry the repair
-// dispatcher prices, so the two engines admit the NTT on one rule.
+// The creator reads the same shape gates the repair dispatcher prices, so
+// the two engines admit the NTT on one rule; the stripe WIDTH is per pass
+// (`ntt_create_stripe_geometry`), measured apart since 15 Sep 2026.
 pub(crate) use fastpar::{
-    ntt_budget_within_published, ntt_min_missing, ntt_stripe_geometry, ntt_worker_arenas,
+    ntt_budget_within_published, ntt_create_stripe_geometry, ntt_min_missing, ntt_worker_arenas,
 };
 // Pinned by `inline_tests` (a descendant, so `use super::*` names them)
 // and by nothing else in this module - importing them unconditionally
 // would be an unused import at `-D warnings` in every non-test build.
 #[cfg(test)]
 use fastpar::{
-    FAST_PAR_TRIPPED, NTT_MIN_MISSING, NTT_MIN_PRESENT, NTT_MIN_WINDOW_PRESENT, NTT_MIN_WORK,
-    NTT_MIN_WORK_PER_ROW, exponent_span, ntt_budget_env, ntt_default_budget, ntt_gates_pass,
+    FAST_PAR_TRIPPED, NTT_MIN_MISSING, NTT_MIN_MISSING_GFNI256_LARGE_BLOCK, NTT_MIN_MISSING_NEON,
+    NTT_MIN_MISSING_NIBBLE, NTT_MIN_PRESENT, NTT_MIN_WINDOW_PRESENT, NTT_MIN_WORK_PER_ROW,
+    NTT_STRIPE_W_FLOOR, NTT_WINDOW_COMBINE_NEON, NTT_WINDOW_COMBINE_X86, NttAdmission,
+    exponent_span, ntt_admit_within, ntt_budget_env, ntt_default_budget, ntt_gates_pass,
+    ntt_min_missing_for, ntt_min_work, ntt_stripe_geometry, ntt_window_combine, ntt_window_row_ask,
+    ntt_window_row_gate, ntt_worker_arenas_capped,
 };
 
 // `impl Reconstructor` lives in par2repair/reconstruct.rs (TODO 106
@@ -616,13 +629,85 @@ pub fn repair_mapped_catalog_resumed(
     full_verify: bool,
     prefixes: &[Option<Md5Resume>],
 ) -> Result<usize, RepairError> {
+    repair_mapped_catalog_resumed_controlled(
+        files,
+        block_size,
+        cat,
+        set_id,
+        io,
+        full_verify,
+        prefixes,
+        &control::RepairControl::default(),
+    )
+}
+
+/// [`repair_mapped_catalog_resumed`] under a
+/// [`RepairControl`](control::RepairControl) - progress out of the
+/// repair, a cancel its loops poll - for the MAPPED in-stream driver's
+/// daemon caller (`nzbfast-unpack`'s `repair::try_mapped_repair`),
+/// which was the last daemon repair path handing this engine a default
+/// control.
+///
+/// # What the mapped driver reports, and why `Verify` runs LAST here
+///
+/// All four of the disk driver's phases arrive, in the same units, so
+/// one sink can weigh them the same way - but not in the disk driver's
+/// order:
+///
+/// - `Fold` is the syndrome feed, in bytes read off disk.
+/// - `Solve` comes from [`Reconstructor::new_controlled`] and its
+///   back-substitution, exactly as on the disk driver.
+/// - `Write` is the patch, in bytes written back.
+/// - `Verify` is the SELF-PROVE, AFTER the patch rather than before it.
+///   This driver has no pre-fold verify pass - its present-block ledger
+///   was earned off the WIRE during the download - so its only proof is
+///   this reread, and it is the last thing the call does.
+///
+/// [`control::RepairRoute::Mapped`], announced once before the first
+/// phase, is what lets a band table place this `Verify` at the tail
+/// instead of the head: published at the disk driver's `[0.0, 0.45)` it
+/// would arrive behind a `Write` that already reached 1,000, and a
+/// monotone bar (`fetch_max`) would simply discard it - the argument is
+/// at the `self_prove_set` call below. The disk driver's own post-write
+/// whole-file MD5 is silent in exactly the same way and for the same
+/// reason, and stays that way: see that call for why generalising this
+/// fix to the disk route is a separate trade.
+///
+/// [`control::ProgressSink::slab`] is announced once per sweep, before
+/// that sweep's phases, for the same reason the disk driver announces
+/// it: a caller weighing four phases into one bar cannot infer the
+/// sweep COUNT from the re-entries.
+///
+/// Everything else is [`repair_mapped_catalog_resumed`] BY
+/// CONSTRUCTION - both are one call to `repair_mapped_inner` differing
+/// in the control argument alone - and a default control is the
+/// uncontrolled call exactly, branch for branch.
+#[expect(clippy::too_many_arguments)]
+pub fn repair_mapped_catalog_resumed_controlled(
+    files: &[(Par2File, Vec<bool>)],
+    block_size: usize,
+    cat: &mut PacketCatalog,
+    set_id: &[u8; 16],
+    io: &dyn VolumeIo,
+    full_verify: bool,
+    prefixes: &[Option<Md5Resume>],
+    control: &control::RepairControl,
+) -> Result<usize, RepairError> {
     let policy = SelfProvePolicy {
         full_verify,
         prefixes,
     };
     run_with_ntt_fallback(SyndromePath::Auto, |path, probe| {
+        // BEFORE THE CATALOG LOAD, not after: `load_mapped_recovery`
+        // preads and re-proves one block per missing slice, which on a
+        // big set is itself seconds of work, and the NTT fallback runs
+        // this closure a second time. A cancel that landed during the
+        // first attempt must not buy the corpus again.
+        control.check()?;
         let recovery = catalog::load_mapped_recovery(cat, set_id, files, block_size)?;
-        repair_mapped_inner(files, block_size, &recovery, io, policy, path, probe)
+        repair_mapped_inner(
+            files, block_size, &recovery, io, policy, path, probe, control,
+        )
     })
 }
 
@@ -650,7 +735,16 @@ pub fn repair_mapped_prefixed(
         prefixes,
     };
     run_with_ntt_fallback(SyndromePath::Auto, |path, probe| {
-        repair_mapped_inner(files, block_size, recovery, io, policy, path, probe)
+        repair_mapped_inner(
+            files,
+            block_size,
+            recovery,
+            io,
+            policy,
+            path,
+            probe,
+            &control::RepairControl::default(),
+        )
     })
 }
 
@@ -668,10 +762,20 @@ pub fn repair_mapped_with_path(
         prefixes: &[],
     };
     run_with_ntt_fallback(path, |path, probe| {
-        repair_mapped_inner(files, block_size, recovery, io, policy, path, probe)
+        repair_mapped_inner(
+            files,
+            block_size,
+            recovery,
+            io,
+            policy,
+            path,
+            probe,
+            &control::RepairControl::default(),
+        )
     })
 }
 
+#[expect(clippy::too_many_arguments)]
 fn repair_mapped_inner(
     files: &[(Par2File, Vec<bool>)],
     block_size: usize,
@@ -680,6 +784,10 @@ fn repair_mapped_inner(
     policy: SelfProvePolicy<'_>,
     path: SyndromePath,
     probe: &mut NttProbe,
+    // The caller's channel, or an inert control for every entry of this
+    // driver that reports nothing - see
+    // [`repair_mapped_catalog_resumed_controlled`].
+    control: &control::RepairControl,
 ) -> Result<usize, RepairError> {
     if block_size == 0 || !block_size.is_multiple_of(2) {
         return Err(RepairError::Malformed(format!(
@@ -740,9 +848,7 @@ fn repair_mapped_inner(
             need: missing.len(),
         });
     }
-    let mut exps: Vec<u32> = by_exp.keys().copied().collect();
-    exps.sort_unstable();
-    let exps = catalog::select_consecutive_run(&exps, missing.len());
+    let exps = catalog::selected_exponents(&by_exp, missing.len());
     // Borrowed payloads, not clones: the caller's corpus outlives the
     // whole attempt (it is pinned across the NTT-fallback retry), and
     // `Reconstructor::new_with_path` widens these into its own u16
@@ -768,7 +874,13 @@ fn repair_mapped_inner(
     // the argument and the incident. `slabs == 1` is the ordinary case
     // and reproduces the pre-slab code exactly: one construction, one
     // pass over the payload, one write per missing block.
-    let plan = reconstruct::plan_slabs_for(missing.len(), block_size);
+    // Priced AFTER selection: an unstructured selection is the dense arm
+    // whatever the gate says (`reconstruct::solve_buffers`, TODO 348 C).
+    let plan = reconstruct::plan_slabs_for(
+        missing.len(),
+        block_size,
+        reconstruct::selection_structured(n_inputs, &missing, &exps),
+    );
     if plan.slabs > 1 {
         info!(
             target: "repair-timing",
@@ -779,28 +891,41 @@ fn repair_mapped_inner(
             plan.width
         );
     }
+    // WHICH ROUTE THIS IS, before anything reports. Once: this driver
+    // never falls back to the disk route mid-call, so there is no later
+    // boundary to re-announce it at the way `slab` re-announces per
+    // sweep. See `control::RepairRoute` for why the band table needs it.
+    control.route(control::RepairRoute::Mapped);
     for si in 0..plan.slabs {
+        // WHICH SWEEP THIS IS, before anything in it reports. The disk
+        // driver says the same thing in the same place and for the same
+        // reason: a caller weighing the phases into ONE bar cannot infer
+        // the sweep COUNT from the re-entries, so it has to be told
+        // before sweep 1 spends the room. See
+        // `control::ProgressSink::slab`.
+        control.slab(si, plan.slabs);
+        // A SLAB BOUNDARY IS A UNIT BOUNDARY: the previous slab's thread
+        // scopes have joined and the next one's have not been opened, so
+        // this is where a slabbed mapped repair honours a pause, and the
+        // one place in this driver where a park is legal. See
+        // `control::PauseGate`.
+        control.gate()?;
         let span = plan.range(si, block_size);
         let (c0, w) = (span.start, span.len());
         // Borrowed again per slab, never copied: each recovery payload is
         // the caller's, and a slab is a sub-slice of it.
         let chosen_slab: Vec<(u32, &[u8])> =
             chosen.iter().map(|&(e, d)| (e, &d[c0..c0 + w])).collect();
-        let rec = Reconstructor::new_with_path(w, n_inputs, &missing, &chosen_slab, path)?;
-        if si == 0 {
-            probe.selected = rec.ntt_selected();
-            probe.m = missing.len();
-            probe.block_size = block_size;
-            probe.max_exp = chosen.last().map_or(0, |&(e, _)| e);
-            probe.context = files
-                .first()
-                .map(|(f, _)| f.name.clone())
-                .unwrap_or_default();
-        }
         // Every present slice's contribution to THIS slab: the same work
         // list, shifted into the slab and clipped to it. A block whose
         // file ends before the slab starts contributes nothing and is
         // dropped here rather than read as a zero-length request.
+        //
+        // BUILT BEFORE THE RECONSTRUCTOR SINCE 16 Sep 2026, and only so
+        // the fold's total can be announced ahead of a construction that
+        // is itself a reported phase (the Gauss-Jordan inverse reports
+        // Solve). Nothing in it reads `rec`; the disk driver sizes its
+        // fold in the same place for the same reason.
         let work: Vec<(usize, usize, u64, usize)> = files
             .iter()
             .enumerate()
@@ -818,6 +943,25 @@ fn repair_mapped_inner(
                     })
             })
             .collect();
+        // THE FOLD'S OWN PHASE, in bytes read off disk. Unlike the disk
+        // driver there is no retained corpus to add: this driver feeds
+        // nothing it did not read here, so the work list IS the total.
+        control.begin(
+            control::RepairPhase::Fold,
+            work.iter().map(|&(_, _, _, take)| take as u64).sum(),
+        );
+        let rec =
+            Reconstructor::new_controlled(w, n_inputs, &missing, &chosen_slab, path, control)?;
+        if si == 0 {
+            probe.selected = rec.ntt_selected();
+            probe.m = missing.len();
+            probe.block_size = block_size;
+            probe.max_exp = chosen.last().map_or(0, |&(e, _)| e);
+            probe.context = files
+                .first()
+                .map(|(f, _)| f.name.clone())
+                .unwrap_or_default();
+        }
         // A par-only / whole-set-missing rebuild has NO present slices to
         // stream: every input's contribution to the syndromes is zero, so
         // the recovery slices already ARE the syndromes and the solve runs
@@ -827,7 +971,7 @@ fn repair_mapped_inner(
             let readers = feed_readers().min(work.len()).max(1);
             // Split the shared batch budget across handles so total in-flight
             // memory matches the old single-feeder design.
-            let per_reader_batch = (BATCH_BYTES / readers).max(1 << 20);
+            let per_reader_batch = rec.per_reader_batch(readers);
             let chunk = work.len().div_ceil(readers);
             let mut read_results: Vec<Result<(), RepairError>> =
                 (0..readers).map(|_| Ok(())).collect();
@@ -837,7 +981,16 @@ fn repair_mapped_inner(
                     s.spawn(move || {
                         *res = (|| {
                             for &(g, fi, off, take) in wchunk {
+                                // Per BLOCK, which is where a cancelled
+                                // mapped repair actually stops: this is
+                                // the driver's longest stretch on an
+                                // ordinary set and every reader is
+                                // inside it. `gate_if_held` is one
+                                // relaxed load unless somebody is
+                                // holding the repair.
+                                control.gate_if_held()?;
                                 feeder.feed_with(g, take, |buf| io.read(fi, off, buf))?;
+                                control.step(control::RepairPhase::Fold, take as u64);
                             }
                             Ok(())
                         })();
@@ -849,12 +1002,18 @@ fn repair_mapped_inner(
                 r?;
             }
         }
+        control.finish(control::RepairPhase::Fold);
         if timing {
             info!(
                 target: "repair-timing",
                 "slab {}/{}: feed reads queued in {:.2?}", si + 1, plan.slabs, t0.elapsed()
             );
         }
+        // BEFORE THE SOLVE, the other multi-minute stretch and the one a
+        // cancelled repair must not sit through - the same check the
+        // disk driver takes at this boundary. On a par-only rebuild the
+        // feed above is empty and this is where the cancel first lands.
+        control.check()?;
         let (rebuilt, syn_report) = rec.finish_owned_reported();
         if si == 0 {
             probe.used = syn_report.ntt_used;
@@ -877,6 +1036,24 @@ fn repair_mapped_inner(
         let rebuilt = &rebuilt;
         let owner = &owner;
         let first_slice = &first_slice;
+        // THE PATCH, in bytes written back, sized over exactly the
+        // clipped spans the loop below writes. This driver patches
+        // MISSING blocks only - it never rewrites a member whole the
+        // way the disk driver's temp-staged arm does - so the two
+        // measure the same unit over different work, which is what a
+        // caller weighing one bar needs them to.
+        control.begin(
+            control::RepairPhase::Write,
+            missing
+                .iter()
+                .map(|&g| {
+                    let fi = owner[g];
+                    let off = (g - first_slice[fi]) as u64 * bs;
+                    let whole = (files[fi].0.length - off).min(bs) as usize;
+                    whole.saturating_sub(c0).min(w) as u64
+                })
+                .sum(),
+        );
         std::thread::scope(|s| {
             for (wi, (mchunk, res)) in missing.chunks(chunk).zip(results.iter_mut()).enumerate() {
                 s.spawn(move || {
@@ -890,6 +1067,7 @@ fn repair_mapped_inner(
                             let take = whole.saturating_sub(c0).min(w);
                             if take > 0 {
                                 io.write(fi, off + c0 as u64, &rebuilt[mi][..take])?;
+                                control.step(control::RepairPhase::Write, take as u64);
                             }
                         }
                         Ok(())
@@ -900,6 +1078,19 @@ fn repair_mapped_inner(
         for r in results {
             r?;
         }
+        control.finish(control::RepairPhase::Write);
+        // NO CANCEL POLL INSIDE THE PATCH LOOP, deliberately, and this
+        // is the one place in this driver where that is a decision
+        // rather than an omission. A mapped write goes through
+        // `VolumeIo` into a LIVE extractor slot - a chase buffer or an
+        // in-place volume span - and a half-applied slab has no
+        // caller-visible rollback the way the disk driver's temp-staged
+        // rename does. The patch is also the shortest of the four
+        // phases by a wide margin (`forney`'s measurements: seconds
+        // against minutes), so stopping inside it buys nothing a check
+        // at the next slab boundary does not. The checks that matter -
+        // before the fold, before the solve, between slabs - are all
+        // ahead of it.
     }
     if timing {
         info!(target: "repair-timing", "patch done at {:.2?}", t0.elapsed());
@@ -918,7 +1109,42 @@ fn repair_mapped_inner(
         let off = (g - first_slice[fi]) as u64 * bs;
         first_hole[fi] = first_hole[fi].min(off);
     }
-    self_prove_set(files, block_size, io, &rebuilt_files, &first_hole, policy)?;
+    // THE SELF-PROVE REPORTS, as `RepairPhase::Verify` - the same code
+    // the disk driver's pre-fold hash uses, because it is the same kind
+    // of claim ("these bytes check out"), made at the opposite end of
+    // the call. Until 16 Sep 2026 this was silent by decision rather
+    // than omission: the first cut of this work published it as Verify
+    // straight into `nzbfast_core::repairprog::band`'s disk-shaped
+    // `[0.0, 0.45)`, which arrives at ~400 per-mille behind a Write that
+    // has already reached 1,000 - and the queue row's bar is monotone by
+    // `fetch_max`, so the reading was simply discarded and the row sat
+    // at `write, 100%` for the whole of a full-set reread. That is the
+    // "Repairing, 100%, timeleft 0:00:00" stall this entire mechanism
+    // exists to remove, reintroduced on the route a downloading job
+    // actually takes (research/REPAIR-SLABBED-BAR-2026-09-16.md is the
+    // measured record of the same shape at a slab boundary).
+    //
+    // `control.route(RepairRoute::Mapped)`, announced above, is what
+    // fixes that: the band table places THIS route's `Verify` after
+    // `Write` instead of before `Fold` (`nzbfast_core::repairprog::band`),
+    // so the self-prove's rising fraction lands where it is actually
+    // read - the tail of the bar, not underneath a phase that already
+    // finished. The disk driver's own post-write whole-file MD5 is
+    // silent in exactly the same way and for the same reason, and stays
+    // that way here: wiring it would move the DISK route's own bands and
+    // risk exactly the regression `a_daemon_repair_moves_a_bar_through_
+    // four_phases` pins against, for a driver that already has an honest
+    // pre-fold Verify. Left for a change that prices that trade on its
+    // own.
+    self_prove_set(
+        files,
+        block_size,
+        io,
+        &rebuilt_files,
+        &first_hole,
+        policy,
+        control,
+    )?;
     if timing {
         info!(target: "repair-timing", "patch+verify done at {:.2?}", t0.elapsed());
     }
@@ -972,6 +1198,7 @@ fn self_prove_set(
     rebuilt_files: &HashSet<usize>,
     first_hole: &[u64],
     policy: SelfProvePolicy<'_>,
+    control: &control::RepairControl,
 ) -> Result<(), RepairError> {
     let bs = block_size as u64;
     // Sorted, because the results below are collected in this order and
@@ -986,6 +1213,19 @@ fn self_prove_set(
     let chunk = touched.len().div_ceil(threads);
     let mut results: Vec<Option<Result<(), RepairError>>> =
         (0..touched.len()).map(|_| None).collect();
+    // ONE STEP PER FILE, not per block: this pass has no natural batch
+    // unit the way the fold does (`control::ProgressSink`'s cost
+    // argument is about a hot loop, and a whole-file MD5 chain is
+    // already the coarsest thing here), and `total` is every touched
+    // file's declared length - the same reading the disk driver's own
+    // Verify total uses. A file whose actual work was cheaper (an IFSC
+    // close, or a prefix-shortened MD5) still counts its full length
+    // when it lands, exactly as the disk driver's retained-block Verify
+    // does: the total is what the pass COULD have read, not what it did.
+    control.begin(
+        control::RepairPhase::Verify,
+        touched.iter().map(|&fi| files[fi].0.length).sum(),
+    );
     let timing = std::env::var_os("NZBFAST_REPAIR_TIMING").is_some();
     let crc_bytes = std::sync::atomic::AtomicU64::new(0);
     let md5_bytes = std::sync::atomic::AtomicU64::new(0);
@@ -1057,6 +1297,9 @@ fn self_prove_set(
                         }
                         out
                     };
+                    if one.is_ok() {
+                        control.step(control::RepairPhase::Verify, f.length);
+                    }
                     *r = Some(one);
                 }
             });
@@ -1065,6 +1308,7 @@ fn self_prove_set(
     for r in results {
         r.expect("verify worker filled every slot")?;
     }
+    control.finish(control::RepairPhase::Verify);
     let mut carried = carried.into_inner().unwrap_or_else(|e| e.into_inner());
     carried.sort();
     if timing {
@@ -1471,7 +1715,7 @@ pub use survey::{
 // Its own module for the same reason `survey` is: one subject, and the
 // argument about where a pause may park is long enough to need room.
 pub mod control;
-pub use control::{PauseGate, ProgressSink, RepairControl, RepairPhase};
+pub use control::{PauseGate, ProgressSink, RepairControl, RepairPhase, RepairRoute};
 /// Every recovery-set id the PAR2 packets in `dir` carry, in
 /// first-seen (sorted packet-file) order. Finding F12's door: a set
 /// can LAND on disk through another set's naming (par2-of-par2 - the
@@ -2386,22 +2630,58 @@ fn repair_dir_set_inner(
     // cuts the solve along the block's byte axis instead and sweeps the
     // payload once per slab. `reconstruct::plan_solve` carries the
     // argument, the tiers and the incident.
-    let solve = if shortfall.is_none() && needed > 0 {
-        reconstruct::plan_solve_for(needed, bs)
+    //
+    // PRICED AFTER SELECTION (TODO 348 C): whether the selected exponents
+    // have structure decides the arm, and the arm decides the window - an
+    // unstructured set is Gauss-Jordan's two buffers and matrix, never the
+    // joint arm's one. `reconstruct::solve_buffers` carries the incident.
+    let structured = reconstruct::selection_structured(
+        n_inputs,
+        &missing,
+        &catalog::selected_exponents(&by_exp, needed),
+    );
+    let mut solve = if shortfall.is_none() && needed > 0 {
+        reconstruct::plan_solve_for(needed, bs, structured)
     } else {
-        reconstruct::plan_solve_for(0, bs)
+        reconstruct::plan_solve_for(0, bs, true)
     };
-    if solve.slabs.slabs > 1 {
-        info!(
-            "solve window over budget: {needed} block(s) at {bs} B in {} slab(s) of {} B,              output {:?} - the payload is swept once per slab",
-            solve.slabs.slabs, solve.slabs.width, solve.staging
-        );
-    }
     // Only the FIRST slab's bytes of each recovery slice: at one slab
     // that is the whole slice and this is the pre-slab load exactly.
     let recovery = if shortfall.is_none() && needed > 0 {
-        let span = solve.slabs.range(0, bs);
-        match load_selected_recovery_span(&pool, &mut by_exp, needed, bs, span, !fresh)? {
+        let mut loaded = load_selected_recovery_span(
+            &pool,
+            &mut by_exp,
+            needed,
+            bs,
+            solve.slabs.range(0, bs),
+            !fresh,
+        )?;
+        // The load re-proves each slice and RE-SELECTS past one that no
+        // longer proves, so the selection planned above can lose its
+        // structure here. Priced again at its real arm, and loaded again
+        // when that moves the slab.
+        if let Some(rec) = &loaded
+            && structured
+        {
+            let exps: Vec<u32> = rec.iter().map(|(e, _)| *e).collect();
+            let replanned = reconstruct::plan_solve_for(
+                needed,
+                bs,
+                reconstruct::selection_structured(n_inputs, &missing, &exps),
+            );
+            if replanned != solve {
+                solve = replanned;
+                loaded = load_selected_recovery_span(
+                    &pool,
+                    &mut by_exp,
+                    needed,
+                    bs,
+                    solve.slabs.range(0, bs),
+                    !fresh,
+                )?;
+            }
+        }
+        match loaded {
             Some(loaded) => loaded,
             // Re-proof at pread dropped enough mutated packets to fall
             // short - the same verdict a fresh scan of the changed file
@@ -2414,6 +2694,13 @@ fn repair_dir_set_inner(
     } else {
         Vec::new()
     };
+    if solve.slabs.slabs > 1 {
+        info!(
+            "solve window over budget: {needed} block(s) at {bs} B in {} slab(s) of {} B,              output {:?} - the payload is swept once per slab",
+            solve.slabs.slabs, solve.slabs.width, solve.staging
+        );
+    }
+    let solve = solve;
     mark("load recovery");
 
     // --- syndrome pass: stream every present slice once ---
@@ -2439,6 +2726,15 @@ fn repair_dir_set_inner(
         let pinned: Vec<u32> = recovery.iter().map(|(e, _)| *e).collect();
         let mut recovery = recovery;
         for si in 0..plan.slabs {
+            // WHICH SWEEP THIS IS, before anything in it reports.
+            // Fold and Solve are entered once per slab, and a caller
+            // that weighs the four phases into ONE bar cannot infer the
+            // COUNT from the re-entries - it has to reserve the room
+            // for sweeps 2..N before sweep 1 spends it. Said here, on
+            // the driver thread, rather than left to be guessed:
+            // `control::ProgressSink::slab` carries the argument and
+            // the incident.
+            control.slab(si, plan.slabs);
             // A SLAB BOUNDARY IS A UNIT BOUNDARY: the previous slab's
             // scope has joined and the next one's has not been opened,
             // so this is where a slabbed repair honours a pause. See
@@ -2503,16 +2799,27 @@ fn repair_dir_set_inner(
             // go before the output is allocated - the same reason the
             // pre-slab driver dropped them here.
             let feed_from = std::mem::take(&mut recovery);
-            let mut rec =
-                Reconstructor::new_controlled(w, n_inputs, &missing, &feed_from, path, &control)?;
+            let max_exp = feed_from.last().map_or(0, |&(e, _)| e);
+            let mut rec = if reconstruct::in_place_output() {
+                // A window priced at one buffer cannot afford the
+                // borrowed door's two (`new_controlled_owned`).
+                Reconstructor::new_controlled_owned(
+                    w, n_inputs, &missing, feed_from, path, &control,
+                )?
+            } else {
+                let rec = Reconstructor::new_controlled(
+                    w, n_inputs, &missing, &feed_from, path, &control,
+                )?;
+                drop(feed_from);
+                rec
+            };
             if si == 0 {
                 probe.selected = rec.ntt_selected();
                 probe.m = missing.len();
                 probe.block_size = bs;
-                probe.max_exp = feed_from.last().map_or(0, |&(e, _)| e);
+                probe.max_exp = max_exp;
                 probe.context = dir.display().to_string();
             }
-            drop(feed_from);
             // What the verify pass held goes to the fold worker first,
             // from memory; only the present blocks it did not hold are
             // read below. A SLABBED solve cannot use it - those batches
@@ -2594,7 +2901,7 @@ fn repair_dir_set_inner(
                 .collect();
             if !work.is_empty() {
                 let readers = feed_readers().min(work.len()).max(1);
-                let per_reader_batch = (BATCH_BYTES / readers).max(1 << 20);
+                let per_reader_batch = rec.per_reader_batch(readers);
                 let chunk = work.len().div_ceil(readers);
                 let targets_ref = &targets;
                 // By reference into every reader: `RepairControl` is
@@ -2957,6 +3264,14 @@ fn repair_dir_set_inner(
             });
         }
     }
+    // The patch's THREE passes are marked separately, because on the
+    // single-large-member shape the phase as a whole is the largest
+    // fixed cost on x86 and a single `patch` mark cannot say which pass
+    // holds it: 3.07 s of a 5.94 s one-block repair on a Core Ultra 9
+    // against 9 ms on an M5 Max, and LOWER at m=100 than at m=1, which
+    // is the shape a per-block write cannot make
+    // (research/PARFAST-SINGLE-MEMBER-REPAIR-FIXED-COST-2026-09-16.md).
+    mark("patch: destinations opened");
     // Pass two: every target's blocks, across threads.
     // Sized from the JOBS and not from the set: a temp-staged member is
     // rewritten whole and an in-place one only where it was damaged, so
@@ -2999,6 +3314,7 @@ fn repair_dir_set_inner(
             .map(|r| r.expect("patch worker filled every slot"))
             .collect()
     };
+    mark("patch: blocks written");
     // Pass three: outcomes in `damaged` order. Handles close here, before
     // anything re-reads or renames what they wrote.
     for (job, res) in jobs.into_iter().zip(write_results) {

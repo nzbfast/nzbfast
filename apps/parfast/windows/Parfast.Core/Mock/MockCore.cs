@@ -268,6 +268,9 @@ public sealed class MockCore : ICoreClient
         return 0;
     }
 
+    /// <summary>The mock has no store, so there is nothing to clear.</summary>
+    public int ClearDigestCache() => 0;
+
     /// <summary>The path the host last asked the queue to persist to. Read by the tests.</summary>
     public string? LastQueueStorePath { get; private set; }
 

@@ -916,6 +916,14 @@ public struct CoreSettings: Codable, Hashable {
         public var memory_mb: Int?
         public var fast_solver = true
         public var low_priority = false
+        /// "Remember checksums of large files" (the CLI's --digest-cache).
+        /// Off: the core only uses a stored checksum after re-checking the
+        /// file's contents, and only when this is on.
+        public var digest_cache = false
+        /// Start a second large single-file create beside a running one when
+        /// the machine has room (`parfast_session::pairing`). ON, as the core
+        /// has it: a queue of them finishes sooner, no single job is faster.
+        public var pair_large_creates = true
         public init() {}
     }
 

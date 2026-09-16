@@ -855,10 +855,13 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for DeflateTransport<T> {
 /// tokio's: same shape, plus `unread`, which is what lets a body read
 /// go straight into the caller's `Vec` and hand back only the overrun
 /// (2 Sep 2026 audit, one-pass lane finding 5 - see the module and
-/// [`MultilineSource`]). That direct read is OFF by default: it
-/// measured as +8% client CPU on macOS, the sys term eating the saved
-/// memcpy (`wirebuf::direct_read_cap`, `NZBFAST_WIRE_DIRECT` for the
-/// Linux A/B). TLS never reads direct: rustls hands plaintext out of
+/// [`MultilineSource`]). Whether that direct read runs is
+/// PLATFORM-DEPENDENT: ON at 256 KiB on Linux, where it measured -27%
+/// user CPU with system time unmoved, and off on macOS, where the same
+/// change measured +8% client CPU with the sys term eating the saved
+/// memcpy. `NZBFAST_WIRE_DIRECT` overrides either arm;
+/// `wirebuf::direct_read_cap` and `wirebuf::DIRECT_READ_DEFAULT` carry
+/// the two measurements. TLS never reads direct: rustls hands plaintext out of
 /// its own buffer, `poll_read` and `fill_buf` alike, so a direct read
 /// there is the same one copy under another name.
 ///

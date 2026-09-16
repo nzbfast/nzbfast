@@ -56,7 +56,7 @@
 //! that does nothing, and `pf_capabilities.pause` is what a host reads
 //! to decide whether to show one at all.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use nzbkit::par2repair;
@@ -186,17 +186,25 @@ impl Publisher {
 /// each set their own thread count and then both ran would be running
 /// under whichever set it last, which is worse than running under one
 /// of them on purpose.
-pub struct KnobLock(pub Mutex<()>);
+///
+/// A READ-WRITE lock since 15 Sep 2026, and a job takes the write side
+/// unless the queue started it [`Job::shared`]. Before that it was a
+/// mutex held for the whole job, which also meant a concurrency above 1
+/// started a second job only for it to wait here. The read side is for
+/// exactly one case, [`crate::pairing`]'s: two large single-file creates
+/// the queue has checked set the SAME knobs, so both writing them is one
+/// value written twice.
+pub struct KnobLock(pub RwLock<()>);
 
 impl KnobLock {
     pub fn new() -> Arc<KnobLock> {
-        Arc::new(KnobLock(Mutex::new(())))
+        Arc::new(KnobLock(RwLock::new(())))
     }
 }
 
 impl Default for KnobLock {
     fn default() -> KnobLock {
-        KnobLock(Mutex::new(()))
+        KnobLock(RwLock::new(()))
     }
 }
 
@@ -204,7 +212,12 @@ impl Default for KnobLock {
 /// engine has no way to hand the previous values back, so there is
 /// nothing to restore and a caller that believed otherwise would be
 /// wrong.
-fn apply_knobs(threads: Option<usize>, memory_mb: Option<u64>, fast_solver: Option<bool>) {
+fn apply_knobs(
+    threads: Option<usize>,
+    memory_mb: Option<u64>,
+    fast_solver: Option<bool>,
+    digest_cache: bool,
+) {
     if let Some(t) = threads.filter(|&t| t > 0) {
         nzbkit::mem::set_cpu_workers(t);
     }
@@ -219,6 +232,15 @@ fn apply_knobs(threads: Option<usize>, memory_mb: Option<u64>, fast_solver: Opti
         nzbkit::par2repair::set_joint_arm(on);
         nzbkit::par2repair::reset_joint_reach();
     }
+    // The Settings pane's "Remember checksums of large files", published
+    // in BOTH directions for the CLI's reason (`parfast::run_with`): a job
+    // must never inherit the last one's store. Always the per-user store;
+    // an account with no cache folder simply runs without one.
+    nzbkit::digest_cache::publish(if digest_cache {
+        nzbkit::digest_cache::DigestCache::at_default_location()
+    } else {
+        None
+    });
 }
 
 /// [`Control::gate`], with the job's STATE kept in step.
@@ -254,6 +276,10 @@ pub struct Job {
     pub publisher: Arc<Publisher>,
     pub knobs: Arc<KnobLock>,
     pub settings: Settings,
+    /// Take the [`KnobLock`]'s READ side rather than its write side. Set by
+    /// the queue for a create [`crate::pairing`] may start a second create
+    /// beside, and for nothing else.
+    pub shared: bool,
 }
 
 /// Run one job to completion on the calling thread.
@@ -267,7 +293,17 @@ pub fn run(job: &Job) {
     let outcome = if !gated(job) {
         Outcome::cancelled()
     } else {
-        let _held = job.knobs.0.lock().unwrap_or_else(|p| p.into_inner());
+        let _held = if job.shared {
+            (
+                Some(job.knobs.0.read().unwrap_or_else(|p| p.into_inner())),
+                None,
+            )
+        } else {
+            (
+                None,
+                Some(job.knobs.0.write().unwrap_or_else(|p| p.into_inner())),
+            )
+        };
         match &job.spec {
             JobSpec::Create { create } => run_create(job, create, started),
             JobSpec::Verify { verify } => run_verify(job, verify, started),
@@ -433,6 +469,7 @@ fn run_verify(job: &Job, spec: &VerifySpec, started: Instant) -> Outcome {
         spec.options
             .fast_solver
             .or(Some(job.settings.performance.fast_solver)),
+        job.settings.performance.digest_cache,
     );
     let mut sink = sink_for(job);
     job.publisher.update(|s| {
@@ -517,6 +554,7 @@ fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
         spec.options
             .fast_solver
             .or(Some(job.settings.performance.fast_solver)),
+        job.settings.performance.digest_cache,
     );
     let mut sink = sink_for(job);
     job.publisher.update(|s| {
@@ -650,6 +688,7 @@ fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
         spec.perf.threads.or(job.settings.performance.threads),
         spec.perf.memory_mb.or(job.settings.performance.memory_mb),
         Some(job.settings.performance.fast_solver),
+        job.settings.performance.digest_cache,
     );
     if !spec.overwrite && spec.output.exists() {
         return Outcome::failed(
@@ -1304,6 +1343,7 @@ mod tests {
                 false,
             )),
             knobs: KnobLock::new(),
+            shared: false,
             settings: Settings::default(),
         };
         job.control.cancel();
@@ -1389,6 +1429,7 @@ mod tests {
                 false,
             )),
             knobs: KnobLock::new(),
+            shared: false,
             settings: Settings::default(),
         };
         // Uncancelled: the engine runs to the end and seals the set.

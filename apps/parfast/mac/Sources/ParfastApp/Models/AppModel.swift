@@ -385,6 +385,18 @@ final class AppModel: ObservableObject {
         do { try core.settingsSet(newValue) } catch { report(error) }
     }
 
+    /// "Clear remembered checksums". True when the store is clear; a failure
+    /// is reported the way every other core failure is.
+    func clearDigestCache() -> Bool {
+        do {
+            try core.clearDigestCache()
+            return true
+        } catch {
+            report(error)
+            return false
+        }
+    }
+
     func copyToPasteboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)

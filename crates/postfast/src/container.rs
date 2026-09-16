@@ -369,7 +369,8 @@ pub struct Packing {
     /// and the RAR 4, 7z and zip arms have nothing here to select.
     pub optimal_parse: bool,
     /// The RAR 5 dictionary to ask for, in bytes; `None` is the writer's
-    /// default (32 MiB since 7 Sep 2026, rar's own). What the archive
+    /// default (2 MiB since 8 Sep 2026, just under the 4 MiB the tree match
+    /// finder arms at; 32 MiB, rar's own, for the day before). What the archive
     /// declares is fitted to the largest member either way, so a post of
     /// small files never asks an extractor for a window it cannot use;
     /// the knob is for the one shape where more pays - a single large

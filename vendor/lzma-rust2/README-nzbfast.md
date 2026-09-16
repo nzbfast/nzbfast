@@ -7,8 +7,12 @@ zip method 14, so it is on the hot path of every compressed 7z member we
 unpack.
 
 **This file is the whole list of what differs from upstream.** Re-apply
-each item on the next bump, or drop it if upstream took it. To see the
-diff for yourself:
+each item on the next bump, or drop it if upstream took it. That claim
+is only as good as the last person to add a change: items 7 and 8 were
+added on 16 Sep 2026, item 7 for a `work_queue.rs` fix that had been
+vendored and unlisted since `aca8dbade`. Adding the entry is part of
+making the change, not a tidy-up afterwards. To see the diff for
+yourself:
 
 ```sh
 diff -ru ~/.cargo/registry/src/*/lzma-rust2-0.20.0/src vendor/lzma-rust2/src
@@ -160,3 +164,38 @@ never against a stored digest, because the failure a scheduling change
 invites is reassembly in the wrong order. Corrupt and truncated streams
 are asked of both readers and must reach the same outcome. All 32 pass
 under AddressSanitizer.
+
+## 7. `src/work_queue.rs` - `close()` racing a parking worker
+
+Upstream stored `closed` and notified the condvar while holding NOTHING,
+which left the two unordered against `steal()`, whose `closed` check and
+`condvar.wait()` are both under the queue mutex. A worker could read
+`closed` as false, `close()` could then run in full against no registered
+waiter, and the worker would park with nobody alive to wake it.
+`Lzma2ReaderMt::drop` detaches its workers rather than joining them, so
+that lost wakeup leaked a thread - and its decode buffer - for the life
+of the process, once per reader that hit the window.
+
+The store now happens under the queue mutex; the notify stays outside it
+so a woken worker does not immediately block on the closer. Regression
+test `work_queue::tests::a_close_racing_a_parking_worker_is_never_lost`,
+which reproduces on its first round without the change (`aca8dbade`).
+
+## 8. `src/lzma2_reader_mt.rs` - two bounds on what a work unit may cost
+
+Both from a 16 Sep 2026 adversarial read of the untrusted-input parsers.
+
+- **The worker's preallocation is capped** (`prealloc_for`, 64 MiB). It
+  was `Vec::with_capacity(decoded_len)`, and `decoded_len` is summed from
+  chunk headers INSIDE the packed payload that no header-level gate can
+  see; a compressed chunk costs six input bytes and may declare 2 MiB, so
+  ~1 MiB of crafted payload declares ~350 GB, and a reservation that
+  cannot be met calls `handle_alloc_error` - an abort. The decode is also
+  held to what the headers declared, where `read_to_end` took no bound.
+- **The worker COUNT follows the dictionary size**
+  (`workers_for_dict`, a 512 MiB total budget). Every worker builds its
+  own `Lzma2Reader` and so its own window, while the gates above charge
+  the declared dictionary once.
+- **An empty pack stream no longer wedges.** With nothing dispatched,
+  `saturating_sub(1)` named a unit nobody sent and the reader waited
+  forever on a channel whose sender it owns.

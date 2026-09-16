@@ -21,12 +21,24 @@ use super::*;
 #[cfg(feature = "indexer")]
 pub fn sweep_orphan_spool_nzbs(d: &Arc<Daemon>) -> usize {
     const GRACE_SECS: u64 = 3600;
-    let referenced: std::collections::HashSet<PathBuf> = d
+    // Keyed by FILE NAME, not by whole path. The names here are ours
+    // and unique (`SABnzbd_nzo_nzbfast<id>.nzb`), while the PATH a job
+    // persisted is only equal to `spool.join(name)` when the daemon is
+    // started with the config path spelled exactly as it was last time -
+    // a trailing slash, a symlinked home, a relative `-c ./nzbfast.json`
+    // all spell a different `.spool`. Compared that way, a restart under
+    // any of those read EVERY queue and history NZB as an orphan and
+    // deleted it after the one-hour grace.
+    //
+    // A name that matches some OTHER directory's file counts as
+    // referenced and the spool copy is kept. That is the safe direction,
+    // and with these names it is not a shape that occurs.
+    let referenced: std::collections::HashSet<std::ffi::OsString> = d
         .queue
         .lock_ok()
         .iter()
         .chain(d.history.lock_ok().iter())
-        .map(|j| j.lock_ok().nzb_path.clone())
+        .filter_map(|j| j.lock_ok().nzb_path.file_name().map(|n| n.to_os_string()))
         .collect();
     let Ok(rd) = std::fs::read_dir(&d.spool) else {
         return 0;
@@ -44,7 +56,7 @@ pub fn sweep_orphan_spool_nzbs(d: &Arc<Daemon>) -> usize {
         if !stem.starts_with("SABnzbd_nzo_nzbfast") {
             continue; // not one of ours: leave it entirely alone
         }
-        if referenced.contains(&path) {
+        if path.file_name().is_some_and(|n| referenced.contains(n)) {
             continue;
         }
         let old = e

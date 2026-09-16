@@ -385,8 +385,38 @@ pub fn verify_file_md5_path(path: &Path, file: &Par2File) -> std::io::Result<boo
     // for. `ScanReader` declares the pattern and gives back the pages
     // this read brought in, so a 23 GB digest stops evicting the rest
     // of the box (disk::readpolicy's `DROP_BEHIND_DEFAULT`).
+    // The digest cache (`crate::digest_cache`): a record whose BLAKE3
+    // matches the bytes on disk answers the whole question - equal to the
+    // FileDesc's MD5 or not - with no chain at all, which is `-O`'s walk
+    // over same-sized candidates. With no record, a matching read enrols.
+    let cache = crate::digest_cache::active();
+    let mut digest = crate::digest_cache::MemberDigest::begin(
+        cache.as_ref(),
+        &src,
+        path,
+        disk_len,
+        crate::digest_cache::FLAG_VERIFY,
+    );
+    if let Some(md5) = digest.validated_md5() {
+        if let Ok((_, Some(pending))) = digest.resolve(None) {
+            pending.commit();
+        }
+        return Ok(md5 == file.md5);
+    }
     let mut scan = crate::disk::ScanReader::adopt(src, path, disk_len);
-    verify_md5_sized(file, &mut scan, buffer_len)
+    let matched = verify_md5_sized(file, &mut scan, buffer_len)?;
+    if matched {
+        if let Ok((_, Some(pending))) = digest.resolve(Some(file.md5)) {
+            pending.commit();
+        }
+    } else {
+        // Nothing to record - this door only ever learns the FileDesc's
+        // own MD5, so a member that is not that file leaves the store
+        // alone. Said out loud for the same reason the verify pass does:
+        // otherwise only the enrolled case prints a line.
+        digest.unresolved("the bytes are not the member the FileDesc names");
+    }
+    Ok(matched)
 }
 
 /// Streaming verification for a reader that can rewind.
@@ -1099,6 +1129,88 @@ const VERIFY_POOL_BYTES: usize = 64 << 20;
 /// malformed or accidental request into a thread-exhaustion panic.
 #[doc(hidden)]
 pub const VERIFY_MAX_WORKERS: usize = 64;
+/// How many inner hash lanes each OUTER verify worker gets, given the
+/// members it will claim biggest-first.
+///
+/// THE DEFECT THIS EXISTS TO FIX (entry 1 of
+/// `research/SERIAL-BOUND-SURVEY-2026-09-16.md`). Every directory-level
+/// verify driver used to divide the machine ONCE, uniformly, before the
+/// first member was claimed: `inner = machine / workers`. On any set
+/// holding at least as many members as the box has cores that is `1` for
+/// every member INCLUDING THE LARGEST, and it stays 1 after every other
+/// lane has gone idle. Measured on an 18-core box, the same 4 GiB
+/// verified in 0.45 s as one member and 3.87 s as twenty-one, because one
+/// of the twenty-one held three quarters of the bytes; user CPU was flat
+/// at ~5 s across the whole table, so the 8.6x was pure loss of
+/// concurrency - 1.28 threads' worth of work on 18 cores.
+///
+/// The rule the measurements produced: once the member count reaches the
+/// core count, **any member holding more than 1/cores of the set's bytes
+/// sets the wall by itself**. So lanes are handed out in PROPORTION to
+/// the bytes each worker's first member carries, which makes the members
+/// finish together instead of leaving one chain running alone:
+///
+/// ```text
+/// lanes(w)  ~=  machine * size(w) / total
+/// ```
+///
+/// with a floor of one lane and the whole budget spent. The returned
+/// vector's length is the number of outer workers to run - fewer than the
+/// member count when a dominant member deserves most of the machine - and
+/// `lanes[w]` is worker `w`'s inner width for every member it claims.
+/// The sum never exceeds `machine`, which is the "one global lane budget
+/// for both levels" the drivers already intended, so a set where every
+/// member is damaged at once still cannot multiply two full-width pools.
+///
+/// `max_workers` is a caller's own outer-width ceiling (`parfast -T`); the
+/// lane budget bounds the width too, so asking for more workers than
+/// there are lanes gets the lanes.
+///
+/// Equal-size sets are unchanged by construction: every member's
+/// proportional share floors to one, so a 21-volume release still gets 18
+/// workers of one lane on an 18-core box, and a single-member set still
+/// gets one worker holding the whole machine.
+#[doc(hidden)]
+pub fn lane_plan(sizes_biggest_first: &[u64], machine: usize, max_workers: usize) -> Vec<usize> {
+    let machine = machine.clamp(1, VERIFY_MAX_WORKERS);
+    let members = sizes_biggest_first.len();
+    if members == 0 {
+        return Vec::new();
+    }
+    let cap = max_workers.clamp(1, members);
+    let total: u128 = sizes_biggest_first.iter().copied().map(u128::from).sum();
+    let mut lanes: Vec<usize> = Vec::with_capacity(cap.min(machine));
+    let mut budget = machine;
+    for &size in sizes_biggest_first {
+        if lanes.len() == cap || budget == 0 {
+            break;
+        }
+        // A zero-byte set (every member empty) has no proportion to take;
+        // one lane each is the only meaningful answer, and the floor gives
+        // it without a division by zero.
+        let want = (machine as u128 * u128::from(size))
+            .checked_div(total)
+            .unwrap_or(1) as usize;
+        let take = want.clamp(1, budget);
+        budget -= take;
+        lanes.push(take);
+    }
+    // Flooring every share leaves a remainder, and so does running out of
+    // members before running out of budget (`-T1` over a skewed set is the
+    // extreme: one worker, the whole machine). Spend it from the front, so
+    // it lands on the biggest members - the ones that set the wall.
+    let started = lanes.len();
+    let mut w = 0usize;
+    while budget > 0 {
+        lanes[w % started] += 1;
+        budget -= 1;
+        w += 1;
+    }
+    debug_assert!(lanes.iter().sum::<usize>() <= machine);
+    debug_assert!(lanes.iter().all(|&n| n >= 1));
+    lanes
+}
+
 #[cfg(not(any(test, fuzzing)))]
 const VERIFY_PAR_MIN_BYTES: u64 = 8 << 20;
 // Exercise the production branch cheaply in unit tests. The threshold only
@@ -1562,10 +1674,15 @@ fn verify_file_streaming_sized<R: Read>(
                 let proven = check.is_proven();
                 // Whole slice resident in this read: the CRC gates the MD5
                 // for free. THIS is the arm a normal multi-member set takes
-                // - `verify_dir` gives each outer worker `machine/workers`
-                // inner lanes, so a 21-volume release arrives here with one
-                // lane and this streamer, not the pipeline above. A block
-                // split across reads keeps the interleaved feed below.
+                // - `lane_plan` gives a member its PROPORTIONAL share of the
+                // machine, and on an equal-volume release that share is one
+                // lane, so a 21-volume set still arrives here with this
+                // streamer rather than the pipeline above. A set with one
+                // dominant member no longer does: since 16 Sep 2026 that
+                // member gets most of the lanes and takes the pipeline,
+                // which is the whole of entry 1 of
+                // research/SERIAL-BOUND-SURVEY-2026-09-16.md. A block split
+                // across reads keeps the interleaved feed below.
                 if filled == 0 && seg == bs {
                     blocks.push(
                         proven
@@ -1654,6 +1771,91 @@ mod worker_bound_tests {
             4,
             "an interior placeholder cannot move a later check's offset"
         );
+    }
+
+    /// The equal-size shapes must come out of the plan bit-identical to
+    /// the `machine / workers` division it replaces, or "unchanged within
+    /// noise" on `one`/`mid`/`many` is a claim about a schedule that did
+    /// in fact move.
+    #[test]
+    fn equal_members_get_exactly_the_old_uniform_division() {
+        for members in 1..=64usize {
+            for machine in 1..=18usize {
+                let sizes = vec![200u64 << 20; members];
+                let plan = lane_plan(&sizes, machine, members);
+                let workers = machine.min(members).max(1);
+                assert_eq!(plan.len(), workers, "{members} members on {machine} cores");
+                let uniform = (machine / workers).max(1);
+                // Flooring an equal split can leave a remainder the old
+                // rule threw away; the plan spends it from the front, so
+                // every lane is the old width and the first few may be one
+                // wider. Never narrower, and never over budget.
+                assert!(plan.iter().all(|&n| n >= uniform));
+                assert!(plan.iter().sum::<usize>() <= machine);
+            }
+        }
+    }
+
+    /// The defect itself: a member holding three quarters of the bytes
+    /// used to get one lane of eighteen. It must now get most of them.
+    #[test]
+    fn a_dominant_member_takes_a_proportional_share_not_one_lane() {
+        let mut sizes = vec![3u64 << 30];
+        sizes.extend(std::iter::repeat_n(50u64 << 20, 20));
+        let plan = lane_plan(&sizes, 18, sizes.len());
+        assert_eq!((18 * (3u64 << 30)) / sizes.iter().sum::<u64>(), 13);
+        assert_eq!(plan[0], 13, "the 3 GiB member's proportional share");
+        assert!(plan[1..].iter().all(|&n| n == 1));
+        assert_eq!(plan.iter().sum::<usize>(), 18, "the budget is spent");
+        assert!(
+            plan.len() < sizes.len(),
+            "fewer outer workers than members is the point - the rest of \
+             the machine is inside the big member"
+        );
+    }
+
+    /// `parfast -T1` hands the whole machine to one member at a time, and
+    /// that is the schedule that measured 0.36 s on the skewed corpus.
+    /// The cap must not cost the lanes the members it excluded were
+    /// holding.
+    #[test]
+    fn an_outer_width_cap_keeps_the_whole_budget() {
+        let mut sizes = vec![3u64 << 30];
+        sizes.extend(std::iter::repeat_n(50u64 << 20, 20));
+        assert_eq!(lane_plan(&sizes, 18, 1), vec![18]);
+        let two = lane_plan(&sizes, 18, 2);
+        assert_eq!(two.len(), 2);
+        assert_eq!(two.iter().sum::<usize>(), 18);
+        assert!(two[0] > two[1], "the biggest member still leads");
+    }
+
+    /// Hostile and degenerate inputs, because `machine` reaches here from
+    /// a launcher override and the sizes from the wire.
+    #[test]
+    fn the_plan_is_bounded_at_every_extreme() {
+        assert!(lane_plan(&[], 18, 18).is_empty());
+        // Three empty members and four lanes: no proportion exists, so
+        // every member gets the floor and the spare lane goes to the
+        // front rather than being thrown away.
+        assert_eq!(lane_plan(&[0, 0, 0], 4, 4), vec![2, 1, 1]);
+        assert_eq!(lane_plan(&[1 << 40], 0, 0), vec![1]);
+        let huge = lane_plan(&[u64::MAX, u64::MAX], usize::MAX, usize::MAX);
+        assert_eq!(huge.iter().sum::<usize>(), VERIFY_MAX_WORKERS);
+        for machine in 1..=40usize {
+            for tail in 0..=40usize {
+                let mut sizes = vec![4u64 << 30];
+                sizes.extend(std::iter::repeat_n(1u64 << 20, tail));
+                let plan = lane_plan(&sizes, machine, usize::MAX);
+                assert!(!plan.is_empty());
+                assert!(plan.iter().all(|&n| n >= 1));
+                assert_eq!(
+                    plan.iter().sum::<usize>(),
+                    machine.min(VERIFY_MAX_WORKERS),
+                    "the global lane budget is spent exactly"
+                );
+                assert!(plan.len() <= sizes.len());
+            }
+        }
     }
 
     #[test]

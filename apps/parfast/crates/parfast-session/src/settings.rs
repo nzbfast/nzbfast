@@ -196,7 +196,7 @@ impl Default for CreateDefaults {
 /// process-GLOBAL knob in the engine, which is why the pane says so and
 /// why the queue takes its lock before setting them - see
 /// [`crate::runner`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Performance {
     /// `None` is `nzbkit::mem::cpu_workers()`, the one place this
@@ -206,6 +206,39 @@ pub struct Performance {
     /// The EXPERIMENTAL joint solve (`--fast`). Off, as the CLI has it.
     pub fast_solver: bool,
     pub low_priority: bool,
+    /// "Remember checksums of large files": the CLI's `--digest-cache`,
+    /// the per-user store of validated whole-file digests
+    /// (`nzbkit::digest_cache`). OFF, and opt-in only: a repeat create or
+    /// full check of an unchanged large file re-proves its content with
+    /// BLAKE3 and then skips the one-core MD5 pass. Published per job by
+    /// [`crate::runner`], in both directions.
+    pub digest_cache: bool,
+    /// Start a second large single-file create beside a running one when
+    /// the machine has the cores and the memory for both, whatever
+    /// `concurrency` says - see [`crate::pairing`] for the rule. ON: such a
+    /// create is bound by one serial MD5 chain and leaves most of a big
+    /// machine idle, so a queue of them finishes in about half the time.
+    /// It makes no single create faster, and from a spinning disk it buys
+    /// nothing: with the source disk's reads capped at 200 and 120 MB/s the
+    /// pair tied the serial queue (0.98-1.00x of its wall, addendum 8 of
+    /// `research/PARFAST-SINGLE-FILE-MD5-HEADROOM-2026-09-13.md`), because
+    /// the two creates split one disk's speed. Head seek, which that
+    /// read cap could not model, can only make it worse, which is what
+    /// turning it off is for.
+    pub pair_large_creates: bool,
+}
+
+impl Default for Performance {
+    fn default() -> Performance {
+        Performance {
+            threads: None,
+            memory_mb: None,
+            fast_solver: false,
+            low_priority: false,
+            digest_cache: false,
+            pair_large_creates: true,
+        }
+    }
 }
 
 /// Section 5.6's Integration group. Nothing in this crate ACTS on any

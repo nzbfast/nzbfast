@@ -276,8 +276,20 @@ final class CopyRuleTests: XCTestCase {
     /// Every string constant the generator emitted, by reflection over the
     /// catalogue it also writes - which is the one list that cannot go stale
     /// against `S` because the same run produced both.
+    ///
+    /// Read from the SOURCE tree by `#filePath`, not out of the built resource
+    /// bundle. SwiftPM 6.3 copies the catalogue into the bundle verbatim, but
+    /// SwiftPM 6.4 compiles it to `en.lproj/Localizable.strings` and ships no
+    /// `.xcstrings` at all, so a `Bundle.module` lookup found nothing and all
+    /// three tests failed on that toolchain while passing on CI's. The source
+    /// file is exactly what `Tools/generate.py` writes, on every toolchain. A
+    /// missing file still throws: failing to find is failing.
     private func catalogueValues() throws -> [String: String] {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "Localizable", withExtension: "xcstrings"))
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // ParfastAppTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // mac
+            .appendingPathComponent("Sources/ParfastApp/Resources/Localizable.xcstrings")
         let root = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         let strings = try XCTUnwrap(root["strings"] as? [String: Any])

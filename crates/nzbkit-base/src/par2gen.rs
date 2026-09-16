@@ -57,6 +57,10 @@ use std::path::{Path, PathBuf};
 
 use crate::md5fast::{Digest, Md5};
 
+use map_fit::{
+    create_map_headroom, map_inputs_enabled, map_scan_and_fold_enabled, mapped_payload_fits_memory,
+};
+
 use crate::par2::{
     MAX_BLOCK_SIZE, TYPE_COMMASCI, TYPE_COMMUNI, TYPE_FILEDESC, TYPE_IFSC, TYPE_MAIN, TYPE_RECVSLIC,
 };
@@ -66,6 +70,9 @@ use crate::par2::{
 /// this side. Added 12 Sep 2026 (claim `par2gen-create-control`).
 pub mod control;
 mod duplicates;
+/// Which reads go through a mapping, and whether a mapped corpus stays
+/// resident - split out on 16 Sep 2026 for the 4,000-line file ceiling.
+mod map_fit;
 /// The two transform arms of `recovery_slices` - split out on 9 Sep
 /// 2026 for the 500-line function ceiling.
 mod ntt;
@@ -79,6 +86,9 @@ mod stripe_first;
 /// The batch volume writer and the critical-block backfill - split out
 /// on 9 Sep 2026 for the 500-line function ceiling.
 mod volwrite;
+// The validated digest cache through real creates, on every scan arm.
+#[cfg(all(test, feature = "digest-cache"))]
+mod digest_cache_tests;
 
 /// Census door onto [`duplicates::enabled`] (see `par2seams`).
 pub(crate) fn seam_duplicates(bs: usize, rows: usize, sources: usize) -> bool {
@@ -117,7 +127,18 @@ const MAX_FILES: usize = 32768;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Par2GenError {
-    #[error("I/O reading {path}: {source}")]
+    /// "on", not "reading", and the word is load-bearing. Every I/O
+    /// failure in this module arrives here through one `io(path)`
+    /// helper, and most of its 33 sites are WRITES - the `File::create`
+    /// of a volume (`volwrite::write_batch`) and the open-for-write of
+    /// the critical backfill among them. Saying "reading" of those cost
+    /// a lane a day on 16 Sep 2026: a create that failed because its
+    /// output directory had been deleted under it reported
+    /// `I/O reading ./set.vol000+01.par2`, which was then read as the
+    /// engine leaving a partial set behind a cancel that the next create
+    /// could not read back. It had left nothing; nothing was read.
+    /// `crates/parfast/tests/integration/scratch.rs` carries that record.
+    #[error("I/O on {path}: {source}")]
     Io {
         path: PathBuf,
         #[source]
@@ -322,6 +343,45 @@ fn create_fold_pacing_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("NZBFAST_CREATE_FOLD_PACING").is_none_or(|v| v != "0"))
 }
 
+/// The BATCHED create's fold-width rule, ON by default since 16 Sep 2026
+/// (it was off for part of that day - see below);
+/// `NZBFAST_CREATE_BATCH_FOLD_PACING=0` is the A/B arm. Separate from the
+/// knob above, which governs the FUSED window pacer, because the two
+/// were measured apart and reach their widths by different means.
+///
+/// # Two feedback pacers were built here and both LOST
+///
+/// On an 8-vCPU Zen 4 VM, 8.86 GB single file at 5%, `-m200` (three
+/// batches), three mirrored reps per arm, one binary per arm: a pacer
+/// that narrowed at batch boundaries from the chain's measured rate read
+/// 14.40 s median against 13.60 s with it inert, and a corrected target
+/// (the fold's whole remaining wall rather than one batch's) 14.30 s.
+/// Both walked all the way down to [`PACED_WIDTH_FLOOR`] (`8 -> 2` and
+/// `8 -> 4 -> 2`), and the fold, not the chain, became the pole.
+/// The loop is unstable for a reason its arithmetic cannot see. The
+/// chain's remaining wall was extrapolated from a chain rate measured
+/// WHILE the fold competed with that same chain; the rate is the starved
+/// one, so the remaining wall is over-stated, so the width sheds too
+/// many workers, so the chain speeds up and the next estimate is wrong
+/// the same way. And the first batch - 3.1-3.8 s of a ~13.6 s create,
+/// 27% - runs at full width whatever the loop learns afterwards, which
+/// is precisely why `-t4` wins: it is narrow from the start. **Nobody
+/// should re-derive the feedback loop.**
+///
+/// # What is here instead
+///
+/// [`apriori_fold_width`] picks ONE width before the first batch, from
+/// the recovery rows and the member lengths the planner already has, and
+/// nothing measured at run time moves it again. The only thing that
+/// moves the cap afterwards is the chain FINISHING, which is an event
+/// and not an estimate. research/PARFAST-BATCHED-CREATE-FOLD-PACER-2026-09-15.md.
+fn create_batch_fold_pacing_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("NZBFAST_CREATE_BATCH_FOLD_PACING").is_none_or(|v| v != "0")
+    })
+}
+
 /// The fold width the next window should run at, given that this window
 /// folded in `fold` on `width` workers while the chain took `chain`.
 ///
@@ -332,8 +392,9 @@ fn create_fold_pacing_enabled() -> bool {
 /// workers reach four in one or two windows, and a fold that has crept
 /// within 90% of the chain snaps back to the full width at once - the
 /// asymmetry is deliberate: over-shedding costs wall, under-shedding
-/// costs only the gain. Floor of 2 so the fold never becomes the pole
-/// on a two-core box by this hand; ceiling `max`, the published width.
+/// costs only the gain. Floor of [`PACED_WIDTH_FLOOR`] so the fold never
+/// becomes the pole on a two-core box by this hand; ceiling `max`, the
+/// published width.
 fn paced_width(
     width: usize,
     max: usize,
@@ -357,7 +418,358 @@ fn paced_width(
     // Under 70%: the fold has slack. Aim it at 80% of the chain -
     // ceil(width * fold / (0.8 * chain)).
     let want = (width as u128 * fold * 10).div_ceil(chain * 8) as usize;
-    want.clamp(2.min(max), max).min(width)
+    want.clamp(PACED_WIDTH_FLOOR.min(max), max).min(width)
+}
+
+/// The fewest fold workers [`paced_width`] ever narrows a create to. Public
+/// because a queue deciding whether a box has the cores for a second create
+/// (apps/parfast `parfast-session`'s `pairing`) needs the same floor rather
+/// than a second literal of it.
+pub const PACED_WIDTH_FLOOR: usize = 2;
+
+/// Recovery rows ONE fold worker keeps up with while the whole-file MD5
+/// chain makes ONE pass over the same bytes - the only machine constant
+/// the a-priori width needs, and `None` on a fold kernel whose rate
+/// against MD5 nobody here has measured.
+///
+/// # Where the number comes from, and why it is a ratio
+///
+/// A batched create's fold work is `rows * payload` bytes of GF
+/// multiply-accumulate; its chain's is one MD5 pass over the payload. So
+/// the width at which the fold still lands inside the chain is
+/// `rows / (fold rate per worker / MD5 rate)` - **the payload cancels**,
+/// and the whole a-priori decision reduces to the recovery row count
+/// over this one dimensionless ratio. It therefore carries from the
+/// shape it was measured on to any payload size on the same kernel,
+/// which is the reason for stating it this way round rather than as two
+/// byte rates.
+///
+/// Measured on an 8-vCPU Zen 4 VM (EPYC 9354P, the 512-bit GFNI fold),
+/// 8,858,370,048 bytes, 100 recovery rows, `-m200 -t4`: the three batch
+/// walls were 3.49 / 2.59 / 3.05 s on four workers, so one worker folds
+/// `100 * 8.858e9 / (9.13 * 4)` = 24.3 GB/s; the same box's chain runs
+/// 8.858e9 bytes in 11.37-11.71 s on the fused route, uncontended, so
+/// 0.767 GB/s. The ratio is **31.6 rows per worker per chain pass**, and
+/// the constant is that at the same 80% target [`paced_width`] aims at:
+/// `0.8 * 31.6` = 25. On the measured shape it returns exactly the width
+/// `-t4` reaches by hand.
+///
+/// # Why a kernel gets `None`, and what a new arm must show
+///
+/// MD5's single-core rate is within about 1.3x everywhere (a serial
+/// 64-byte dependency chain), but the GF16 fold's is not, so a constant
+/// calibrated on one kernel applied to a slower one asks for a fold too
+/// narrow to keep up and the FOLD becomes the pole - the exact
+/// regression the feedback pacers shipped. **That was an argument when
+/// written and is a measurement now**: on a Xeon D-1531 (AVX2, no GFNI)
+/// this GFNI constant's `ceil(100 / 25)` = 4 workers reads **39.43 s
+/// against the unnarrowed box's 28.63** on the same fixture, a 38%
+/// regression (16 Sep 2026).
+///
+/// **A ratio is not enough to write an arm: the per-worker fold rate
+/// must also be FLAT across the band the rule picks from**, which is
+/// what makes "rows per worker" a property of the worker rather than of
+/// how many you started. It is free, being the same `-t` sweep the two
+/// rates need anyway. NEON passes inside 5%. The nibble kernel
+/// fails by 2.7x: 8.04 GB/s per worker at two workers falling to 3.03 at
+/// twelve, because that fold is bandwidth-saturated at about six (its
+/// AGGREGATE is flat at 35-37 GB/s from six up). The ratio you measure
+/// is then a function of the width you measured at (11.8 at four
+/// workers, 16.9 at two), so any constant is applied where it is false.
+/// **The nibble kernel is measured and REFUSES one**, not unvisited; its
+/// arm would have LOOKED harmless too, `0.8 * 11.8` = 9 giving the whole
+/// box until the row count halved. The GATE has to decline, not the
+/// arithmetic.
+///
+/// **256-bit GFNI is UNREACHED**, not estimated and not inferred from
+/// the 512-bit arm: the fleet's one GFNI-without-AVX-512 part had its
+/// rig lock held all day (16 Sep 2026). A forced arm
+/// (`NZBFAST_GF16_FORCE`, `NZBFAST_GF16_AVX512=0`) on a faster part is a
+/// ratio between two settings of one kernel, not that part's rate, so it
+/// cannot stand in - `gf16.rs` says so at the knob.
+///
+/// # NEON (aarch64), measured 16 Sep 2026
+///
+/// Same method and the same fixture byte for byte, on an Apple M1 Ultra
+/// (16 P + 4 E cores, 64 GB): `-m200 -t4` over three reps folds
+/// `100 * 8.858e9 / (9.660 * 4)` = **22.9 GB/s** per worker, and three
+/// fused legs put the chain at 13.61-13.65 s over the same bytes, so
+/// **0.650 GB/s**. The ratio is **35.3 rows per worker per chain pass** -
+/// HIGHER than the 512-bit GFNI box's 31.6, because this part's MD5 is
+/// the slower of the two (0.650 against 0.767) while its fold is nearly
+/// as fast. At the same 80% target, `0.8 * 35.3` = 28. Flatness there
+/// reads 23.5 / 23.0 / 22.9 / 22.5 / 22.3 GB/s per worker at widths 2 to
+/// 6, falling away only past the P-core count.
+///
+/// **Accepted on 12 mirrored pairs**, one binary with this knob the only
+/// difference: `ceil(100 / 28)` = 4 of 20 published a priori on every
+/// leg, the rule wins **9 of 12**, median **13.945 s against 14.18**
+/// (-1.7%), fused control unchanged. Thinner than the GFNI arm's -3.9%
+/// because a 20-core box has less contention to recover, the fold
+/// already sitting well inside the chain at full width. It is also far
+/// TIGHTER than the width it replaces (13.91-13.96 against 13.74-14.71);
+/// the three pairs it loses are the three legs where the unnarrowed fold
+/// landed in its fast mode.
+///
+/// Measured on ONE Apple generation (the two later parts on hand were
+/// build machines above load 40 all round), so whether the ratio belongs
+/// to the KERNEL or the PART is open on aarch64, and the error is safe
+/// only if a later part's ratio is HIGHER - which nothing establishes.
+/// research/PARFAST-BATCHED-CREATE-FOLD-PACER-2026-09-15.md.
+fn fold_rows_per_worker_per_chain_pass() -> Option<u64> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::gf16::avx512_gfni_available() {
+            return Some(25);
+        }
+        // The 256-bit GFNI and nibble kernels are NOT this and are not
+        // guessed from it: one is unreached, the other measured and
+        // refusing a constant. See the doc above.
+        None
+    }
+    // NEON is baseline on aarch64 and the fold has no runtime dispatch
+    // there, so the arch IS the kernel: `gf16::xor_mul_multi` has one
+    // arm on this target, which every Apple, Graviton and Snapdragon
+    // part takes.
+    #[cfg(target_arch = "aarch64")]
+    {
+        Some(28)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        None
+    }
+}
+
+/// The bytes of ONE whole-file MD5 chain pass a batched create actually
+/// waits on.
+///
+/// NOT the sum of the member lengths on a many-member set: `scan_all`
+/// runs one chain per MEMBER on `outer` file-level workers, so those
+/// chains run BESIDE each other and the wall is the makespan of that
+/// schedule. `max(largest member, total / outer)` is the standard lower
+/// bound on it, and a lower bound is the conservative reading here -
+/// under-stating the chain asks for a WIDER fold, which costs the gain
+/// and never the wall. For the single-member set this rule was measured
+/// on, both terms are the whole payload and this is an identity.
+fn chain_pass_bytes(lengths: &[u64], outer: usize) -> u64 {
+    let total = lengths.iter().copied().fold(0u64, u64::saturating_add);
+    let largest = lengths.iter().copied().max().unwrap_or(0);
+    largest.max(total / (outer.max(1) as u64))
+}
+
+/// The fold width a batched (memory-capped) create runs at, decided
+/// BEFORE the first batch and never moved by anything it then measures.
+///
+/// `recovery_rows` rows folded over `payload_bytes`, against a chain of
+/// `chain_bytes` ([`chain_pass_bytes`]), on a box offering `max`
+/// workers. See [`fold_rows_per_worker_per_chain_pass`] for the
+/// derivation and for the kernels this declines to narrow on, and
+/// [`create_batch_fold_pacing_enabled`] for why there is no feedback
+/// term. `max` (no narrowing) whenever an input is missing or zero: an
+/// unknown is never an argument for shedding workers.
+fn apriori_fold_width(
+    recovery_rows: u64,
+    payload_bytes: u64,
+    chain_bytes: u64,
+    max: usize,
+) -> usize {
+    apriori_fold_width_from(
+        fold_rows_per_worker_per_chain_pass(),
+        recovery_rows,
+        payload_bytes,
+        chain_bytes,
+        max,
+    )
+}
+
+/// [`apriori_fold_width`] with the KERNEL VERDICT handed in - split out
+/// for the same reason [`apriori_fold_width_for`] is, and for one more:
+/// `None` (a kernel nobody measured) must read as the whole box, and
+/// until this split that claim could only be asserted on a box that
+/// happened to BE such a part: on a measured kernel the test silently
+/// exercised the other branch, where a mistake would do the damage.
+fn apriori_fold_width_from(
+    rows_per_worker: Option<u64>,
+    recovery_rows: u64,
+    payload_bytes: u64,
+    chain_bytes: u64,
+    max: usize,
+) -> usize {
+    match rows_per_worker {
+        Some(rows_per_worker) => apriori_fold_width_for(
+            recovery_rows,
+            payload_bytes,
+            chain_bytes,
+            rows_per_worker,
+            max,
+        ),
+        None => max.max(1),
+    }
+}
+
+/// [`apriori_fold_width`]'s arithmetic with the machine constant handed
+/// in - split out so the RULE can be pinned by a test on every box in
+/// the fleet, and not only on one that dispatches to the kernel the
+/// constant was measured on.
+fn apriori_fold_width_for(
+    recovery_rows: u64,
+    payload_bytes: u64,
+    chain_bytes: u64,
+    rows_per_worker: u64,
+    max: usize,
+) -> usize {
+    let max = max.max(1);
+    if recovery_rows == 0 || payload_bytes == 0 || chain_bytes == 0 || rows_per_worker == 0 {
+        return max;
+    }
+    // W >= rows * (payload / chain) / rows_per_worker, in integers so a
+    // set whose fold is a hair over a worker's keep-up gets that worker.
+    let want = (u128::from(recovery_rows) * u128::from(payload_bytes))
+        .div_ceil(u128::from(chain_bytes) * u128::from(rows_per_worker));
+    let want = want.min(max as u128) as usize;
+    // The floor bounds the damage of a constant that is wrong for this
+    // box in the dangerous direction, exactly as it does for the fused
+    // pacer: the fold never becomes the pole by this hand.
+    want.clamp(PACED_WIDTH_FLOOR.min(max), max)
+}
+
+/// The batched (memory-capped) create path's fold-width rule, split out
+/// of [`create_body`] for the 500-line function ceiling - not because it
+/// is reused anywhere else.
+///
+/// `fused_scan.is_none()` means the whole-file MD5 chain runs on its own
+/// thread in `scan_all`, beside these batches' folds, and the fused
+/// window loop's own pacer (`paced_width`, `mem::FoldWidthCap`) never
+/// reaches it - there is no per-window chain join to time there. This
+/// narrows the SAME cap, once, from [`apriori_fold_width`], published
+/// before the first batch so that batch is paced too. **There is no
+/// feedback term and there must not be one**: two were built here and
+/// both walked to the floor and lost, for reasons
+/// [`create_batch_fold_pacing_enabled`] records.
+///
+/// The one thing that moves the cap after that is the chain FINISHING,
+/// which is an event and not an estimate: there is then nothing left to
+/// pace against, so the remaining batches get the whole box back.
+///
+/// Inert (`cap` is `None`) when pacing is off, when no independent scan
+/// thread is running, or when the a-priori width IS the ceiling - every
+/// method is then a cheap no-op, so a caller never has to branch on
+/// whether pacing is active.
+struct BatchFoldPacer {
+    cap: Option<crate::mem::FoldWidthCap>,
+    /// The block-digest lanes' a-priori width, handed to `scan_all` -
+    /// `None` where the rule declines to narrow. It is decided HERE,
+    /// in the same breath as the fold's and FROM the fold's, because
+    /// the two widths are one decision about one box: see
+    /// `scan::apriori_scan_lane_width_for`. Nothing moves it again
+    /// either, and it has no restore: the lanes are spawned once.
+    lanes: Option<usize>,
+    /// Whether the RULE ran, which is not the same as whether it
+    /// narrowed: a rule that chose the whole box publishes no cap and
+    /// still has a reading worth printing.
+    active: bool,
+    max: usize,
+    width: usize,
+    moves: usize,
+}
+
+impl BatchFoldPacer {
+    /// `chain_beside` is the caller's one fact - an independent
+    /// whole-file chain is running in `scan_all`, so there is something
+    /// to pace against and cores handed back reach it. Both widths are
+    /// this module's, from [`apriori_fold_width`] over what the planner
+    /// already knows and from `scan::apriori_scan_lane_width` over that
+    /// answer. The two knobs are read here rather than by the caller so
+    /// each rule can be switched off without the other: the lane rule's
+    /// A/B arm has to be able to leave the fold rule exactly as it ships.
+    fn new(
+        chain_beside: bool,
+        recovery_rows: u64,
+        lengths: &[u64],
+        scan_outer: usize,
+    ) -> BatchFoldPacer {
+        let max = crate::mem::cpu_workers().max(1);
+        let payload = lengths.iter().copied().fold(0u64, u64::saturating_add);
+        let active =
+            chain_beside && create_fold_pacing_enabled() && create_batch_fold_pacing_enabled();
+        let width = if active {
+            apriori_fold_width(
+                recovery_rows,
+                payload,
+                chain_pass_bytes(lengths, scan_outer),
+                max,
+            )
+        } else {
+            max
+        };
+        BatchFoldPacer {
+            // From the fold width, so the lanes are what the box has
+            // left once the fold is paid - never a second narrowing
+            // that thinks it is the only one.
+            lanes: chain_beside
+                .then(|| scan::apriori_scan_lane_width(width, scan_outer, max))
+                .flatten(),
+            // Nothing to publish when the rule asks for the whole box:
+            // an unnarrowed cap is a cap that only costs a thread-local
+            // write and a line of log saying nothing happened.
+            cap: (active && width < max).then(|| crate::mem::FoldWidthCap::publish(width)),
+            active,
+            max,
+            width,
+            moves: 0,
+        }
+    }
+
+    /// Before a batch's fold: the only thing that can still move the cap
+    /// is the chain having finished. A no-op when inert.
+    fn before_batch(&mut self, control: &CreateControl, total: u64) {
+        let Some(cap) = self.cap.as_ref() else { return };
+        // The CHAIN's own counter, not `CreatePhase::Verify`. Verify is
+        // stepped by the block-digest lanes, which run `threads`-way
+        // parallel over the member and saturate it inside the first
+        // batch or two while the sequential chain still has most of its
+        // wall left - which read here as "the chain has finished"
+        // (`CreateControl::chain`, and the 16 Sep round in
+        // research/PARFAST-BATCHED-CREATE-FOLD-PACER-2026-09-15.md).
+        if total == 0 || control.chain_done() < total || self.width == self.max {
+            return;
+        }
+        self.width = self.max;
+        self.moves += 1;
+        cap.set(self.max);
+    }
+
+    /// The per-batch timing line's suffix - empty when inert.
+    fn batch_timing_suffix(&self) -> String {
+        if self.active {
+            format!(" (fold width {} of {})", self.width, self.max)
+        } else {
+            String::new()
+        }
+    }
+
+    /// The whole-create timing line's suffix - empty when inert.
+    fn summary_timing_suffix(&self) -> String {
+        let lanes = match self.lanes {
+            Some(n) => format!("; scan lanes {n} of {} a priori", self.max),
+            None => String::new(),
+        };
+        if self.active {
+            format!(
+                "; batch fold width {} of {} a priori ({} restore(s)){lanes}",
+                self.width, self.max, self.moves
+            )
+        } else {
+            lanes
+        }
+    }
+
+    /// The width `scan_all`'s block-digest lanes run at, or `None` for
+    /// the geometry's own.
+    fn scan_lane_cap(&self) -> Option<usize> {
+        self.lanes
+    }
 }
 
 /// Blocks in the FIRST read-ahead window: the fold cannot start until it
@@ -448,6 +860,108 @@ pub fn accum_budget_bytes() -> u64 {
 #[doc(hidden)]
 pub fn scan_pool_budget_bytes() -> u64 {
     scan_pool_budget(crate::mem::process_budget().total)
+}
+
+/// The accumulator bytes a create starting NOW would be handed: the
+/// process budget less what the creates already live have claimed, through
+/// the same [`scan::admission_plan`] `CreateAdmission::acquire` runs. A
+/// scheduler's reading - the next create's own acquire is what binds.
+pub fn accum_bytes_for_next_create() -> u64 {
+    let ceiling = crate::mem::process_budget().total;
+    let outstanding = scan::CREATE_ADMITTED.load(std::sync::atomic::Ordering::Acquire);
+    scan::admission_plan(ceiling.saturating_sub(outstanding)).1
+}
+
+/// Would a create of ONE regular file of `length` bytes, at `block_size`
+/// with `n_recovery` recovery blocks from exponent 0, started now, take the
+/// fused single-member route with its fold paced to the whole-file MD5
+/// chain (`fold_windows`, `paced_width`)?
+///
+/// For a queue deciding whether a second create fits beside a running one
+/// (apps/parfast `parfast-session`'s `pairing`): such a create is bound by
+/// one serial chain, and a create that is NOT - several batches because
+/// its rows outgrew what the budget has left, the transform, a small set
+/// on the two-pass scan - is not the shape two-at-once was measured on. It
+/// asks the create's own gates ([`fusion_arms`], the batch size
+/// [`accum_bytes_for_next_create`] allows, the read window, and the pacing
+/// and overlap knobs) rather than restating any of them. Two things it
+/// cannot see: a source that is not a regular file (`FusedScan::open_all`
+/// falls back for a pipe or a device - a caller planning over paths already
+/// has files), and a waiting `digest_cache` record for the file, which the
+/// create asks last and which sends it to the split scan with no chain to
+/// pace (`a_digest_record_is_waiting`); such a create reads its file with
+/// BLAKE3 instead and is short, so a second create admitted beside it costs
+/// the queue little.
+pub fn single_file_create_paces(length: u64, block_size: u64, n_recovery: u64) -> bool {
+    if block_size == 0 || n_recovery == 0 {
+        return false;
+    }
+    let Ok(n_recovery) = usize::try_from(n_recovery) else {
+        return false;
+    };
+    let n_slices = length.div_ceil(block_size) as usize;
+    let per_batch = (accum_bytes_for_next_create() / block_size).max(1) as usize;
+    let fused =
+        fusion_arms(1, length, block_size, n_slices, n_recovery, per_batch, true).fuse_admitted;
+    // `recovery_slices`' window for the one batch the fused route folds, and
+    // the read-ahead loop's own condition for entering the paced arm.
+    let read_budget = create_read_budget_for(n_recovery as u64 * block_size);
+    let per_read = ((read_budget / block_size).max(1) as usize).min(n_slices);
+    fused && create_fold_pacing_enabled() && create_overlap_enabled() && n_slices > per_read
+}
+
+/// Which of the create's three routes a set of this shape is admitted to.
+/// One copy of the gates for both callers: `create_into`, which acts on
+/// it, and [`single_file_create_paces`], which a scheduler asks.
+struct FusionArms {
+    eligible_shape: bool,
+    create_ntt_admitted: bool,
+    fuse_admitted: bool,
+}
+
+/// See [`FusionArms`]. `from_exponent_zero` is the plan's first exponent
+/// being 0.
+fn fusion_arms(
+    member_count: usize,
+    total: u64,
+    block_size: u64,
+    n_slices: usize,
+    n_recovery: usize,
+    per_batch: usize,
+    from_exponent_zero: bool,
+) -> FusionArms {
+    let fuse = std::env::var("NZBFAST_PAR2GEN_FUSE").ok();
+    let forced = matches!(fuse.as_deref(), Some("1") | Some("on")) || fusion_forced_for_tests();
+    let eligible_shape = source_fusion_shape_admitted(member_count, n_recovery, per_batch, block_size)
+        && !matches!(fuse.as_deref(), Some("0") | Some("off"))
+        // The fused arm is written for the whole set in ONE batch
+        // starting at exponent 0, and it asserts both. A `-f` set starts
+        // somewhere else, so it takes the ordinary overlapped scan - a
+        // complementary create is a rare hand-run command and not a
+        // shape worth teaching the fast path.
+        && from_exponent_zero
+        && (forced
+            || (total >= FUSED_SOURCE_MIN_BYTES && block_size >= FUSED_SOURCE_MIN_BLOCK_BYTES));
+    // Ask the transform's exact dispatcher rather than approximating it with
+    // an input-count threshold, and do not even price the NTT for shapes
+    // fusion cannot capture - that keeps the multi-member, multi-batch and
+    // non-unix paths literally unchanged. An NTT-eligible shape stays
+    // byte-for-byte on the established overlapped scan.
+    let create_ntt_admitted = eligible_shape
+        && ntt_range::create_ntt_window(block_size as usize, n_slices, 0, n_recovery).is_some();
+    // Keep high-row folds on their established scan lane even when a tight
+    // NTT retention budget refuses the transform. At 8,193 x 1 MiB and 328
+    // rows, lane B measured broad fusion saving the extra read and 7.7% RSS
+    // for only 1.1% of wall while adding 3.0% of cycles; the low-row band
+    // below the crossover is the conservative win.
+    let fuse_admitted = eligible_shape
+        && !create_ntt_admitted
+        && source_fusion_rows_admitted(block_size as usize, n_slices, n_recovery);
+    FusionArms {
+        eligible_shape,
+        create_ntt_admitted,
+        fuse_admitted,
+    }
 }
 
 static ACCUM_OVERRIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -804,6 +1318,7 @@ pub fn plan_files_with_comment(
             md5_16k: [0u8; 16],
             length: *length,
             blocks: vec![([0u8; 16], 0u32); length.div_ceil(block_size) as usize],
+            digest: None,
         })
         .collect();
     let (_set_id, critical) = critical_packets(&placeholder, block_size, comment);
@@ -1287,7 +1802,7 @@ fn create_into_inner(
     comment: Option<&str>,
     control: &CreateControl,
 ) -> Result<Vec<String>, Par2GenError> {
-    let control = control.or_env_arm();
+    let control = control.or_env_arm().with_active_digest_cache();
     let trail = CreateTrail::default();
     let r = create_body(
         dir,
@@ -1425,7 +1940,16 @@ fn create_body(
     // resulting file ids, and write the finished index once.
     if n_recovery == 0 {
         control.begin(CreatePhase::Verify, total);
-        let mut scanned = scan_all(members, &lengths, block_size, admission.scan_pool, control)?;
+        // No recovery packets, so no fold beside this scan and no cores
+        // for a narrowed lane to hand back: the geometry's own width.
+        let mut scanned = scan_all(
+            members,
+            &lengths,
+            block_size,
+            admission.scan_pool,
+            None,
+            control,
+        )?;
         control.finish(CreatePhase::Verify);
         scanned.sort_by_key(|s| id_order(&s.file_id));
         let (_, critical) = critical_packets(&scanned, block_size, comment);
@@ -1439,6 +1963,7 @@ fn create_body(
         // it. `remove_file` on a name that is not there is a no-op.
         trail.note(&index);
         std::fs::write(dir.join(&index), &critical).map_err(io(&dir.join(&index)))?;
+        commit_digests(&mut scanned);
         if timing {
             tracing::info!(target: "repair-timing", "create index-only scan: {:.2?}", t0.elapsed());
         }
@@ -1477,6 +2002,7 @@ fn create_body(
             md5_16k,
             length,
             blocks: vec![([0u8; 16], 0u32); length.div_ceil(block_size) as usize],
+            digest: None,
         })
         .collect();
     let (set_id, critical_shape) = critical_packets(&placeholder, block_size, comment);
@@ -1498,73 +2024,20 @@ fn create_body(
         .max_blocks_per_volume
         .map_or(per_batch, |l| per_batch.min(l.max(1)));
     let layout = volume_layout(n_recovery, per_vol, plan.volumes, plan.first_exponent);
-    // One large regular member whose recovery rows fit ONE fold batch, below
-    // the NTT crossover, can take its checksums straight off the arenas the
-    // fold is already reading, which removes the create's remaining second
-    // pass over the payload. Everything else - several members, several
-    // batches, the transform, small sets, non-unix - keeps the established
-    // overlapped scan. Lane B's own multi-member prototype was decisively
-    // slower (0.7-1.0 s to about 1.9 s), which is why the gate is exactly one
-    // member even under its research override.
-    let fuse = std::env::var("NZBFAST_PAR2GEN_FUSE").ok();
-    let forced = matches!(fuse.as_deref(), Some("1") | Some("on"));
-    let eligible_shape = source_fusion_shape_admitted(members.len(), n_recovery, per_batch, block_size)
-        && !matches!(fuse.as_deref(), Some("0") | Some("off"))
-        // The fused arm is written for the whole set in ONE batch
-        // starting at exponent 0, and it asserts both. A `-f` set starts
-        // somewhere else, so it takes the ordinary overlapped scan - a
-        // complementary create is a rare hand-run command and not a
-        // shape worth teaching the fast path.
-        && plan.first_exponent == 0
-        && (forced
-            || (total >= FUSED_SOURCE_MIN_BYTES && block_size >= FUSED_SOURCE_MIN_BLOCK_BYTES));
-    // Ask the transform's exact dispatcher rather than approximating it with
-    // an input-count threshold, and do not even price the NTT for shapes
-    // fusion cannot capture - that keeps the multi-member, multi-batch and
-    // non-unix paths literally unchanged. An NTT-eligible shape stays
-    // byte-for-byte on the established overlapped scan.
-    let create_ntt_admitted = eligible_shape
-        && ntt_range::create_ntt_window(block_size as usize, n_slices, 0, n_recovery).is_some();
-    // Keep high-row folds on their established scan lane even when a tight
-    // NTT retention budget refuses the transform. At 8,193 x 1 MiB and 328
-    // rows, lane B measured broad fusion saving the extra read and 7.7% RSS
-    // for only 1.1% of wall while adding 3.0% of cycles; the low-row band
-    // below the crossover is the conservative win.
-    let fuse_admitted =
-        eligible_shape && !create_ntt_admitted && source_fusion_rows_admitted(n_slices, n_recovery);
-    let mut fused_scan = if fuse_admitted {
-        FusedScan::open_all(&heads, members, block_size)?
-    } else {
-        None
-    };
-    // THE ARM, named rather than inferred. Fusion decides which of the
-    // create's three routes runs and it used to leave no mark of its
-    // own: a reader had to work back from whether the TRANSFORM ran
-    // (`ntt_admitted` in `recovery_slices` is `fused_scan.is_none() &&
-    // ..`), which is an inference through code that is not about
-    // fusion. Two wrong mechanisms were proposed for one measured
-    // create on 12 Sep 2026 partly on the strength of it. One line, at
-    // the decision, under the timing knob every other create marker is
-    // already behind.
-    //
-    // It names the FUSION decision and the two gates that made it, and
-    // deliberately does not claim anything about the transform.
-    // `create_ntt_admitted` is not "the NTT runs": it is "this shape is
-    // one the transform would take, so fusion stands down for it", and
-    // it is false on every multi-member unix create - including the
-    // 36-member one that then took the transform in `recovery_slices`
-    // off its own, WIDER gate. Reported under the name it earns, so a
-    // reader cannot make this line say the thing the old inference
-    // wrongly said. Whether the transform ran is the `create ntt rows`
-    // line's to answer, and it prints only when it did.
-    if timing {
-        tracing::info!(
-            target: "repair-timing",
-            "create arms: n={n_slices} rows={n_recovery} batches={} fused={} (fusable shape={eligible_shape}, fusion displaced by the transform={create_ntt_admitted})",
-            stripe_first::batches(&layout, per_batch),
-            fused_scan.is_some()
-        );
-    }
+    let mut fused_scan = create_route(
+        members,
+        &lengths,
+        &heads,
+        total,
+        block_size,
+        n_slices,
+        n_recovery,
+        per_batch,
+        plan.first_exponent == 0,
+        &layout,
+        control,
+        timing,
+    )?;
     let mut fused_res: Option<Result<Vec<Scanned>, Par2GenError>> = None;
     let mut scan_res: Result<Vec<Scanned>, Par2GenError> = Ok(Vec::new());
     // The two phases that span the WHOLE create, sized once here.
@@ -1579,6 +2052,12 @@ fn create_body(
     if fused_scan.is_none() {
         control.begin(CreatePhase::Verify, total);
     }
+    // The chain counter has no `begin` of its own (it is not a phase -
+    // see `CreateControl::chain`), so its reset is here, beside the one
+    // phase it shares a total with, and unconditional: a control reused
+    // across two creates would otherwise start the second one with the
+    // first's chain already "finished".
+    control.chain_reset();
     control.begin(CreatePhase::Write, n_recovery as u64 * block_size);
     // Early FileDesc/IFSC metadata into the recovery volumes, ON by default
     // since 5 Sep 2026 (the review's lead): i5-10600KF 1 MiB create 1.34 -> 1.27 s
@@ -1587,11 +2066,43 @@ fn create_body(
     // is the placeholder backfill, the A/B arm.
     let early_metadata = std::env::var("NZBFAST_CREATE_EARLY_METADATA").as_deref() != Ok("0");
     let mut ready_critical: Option<Vec<u8>> = None;
+    // The batched (memory-capped) path's own fold-width rule (15 Sep 2026,
+    // claim `single-file-followups-batched-create-pacer`) - see
+    // `BatchFoldPacer` for what it is for and how. `fused_scan.is_none()`
+    // is the same test the scan thread below uses: an independent
+    // whole-file chain is running, so there is something to pace
+    // against. `scan_outer` is how many of those chains will run beside
+    // each other - the geometry `scan_all` itself resolves, asked here
+    // for the same lengths and budget so the two cannot disagree. The
+    // width is chosen ONCE, from this, before the first batch; the knob
+    // of its own (`NZBFAST_CREATE_BATCH_FOLD_PACING=0`) is the A/B arm,
+    // and the fused window pacer's knob still governs it too, so
+    // `NZBFAST_CREATE_FOLD_PACING=0` remains one switch for every fold
+    // pacer in a create.
+    let (scan_outer, _) = scan_pool_geometry(
+        &lengths,
+        block_size,
+        crate::mem::cpu_workers().max(1),
+        admission.scan_pool,
+    );
+    let mut pacer = BatchFoldPacer::new(
+        fused_scan.is_none(),
+        n_recovery as u64,
+        &lengths,
+        scan_outer,
+    );
+    let scan_lanes = pacer.scan_lane_cap();
     let batches: Result<(), Par2GenError> = std::thread::scope(|sc| {
         let mut h = if fused_scan.is_none() {
             Some(sc.spawn(|| {
-                let mut scanned =
-                    scan_all(members, &lengths, block_size, admission.scan_pool, control)?;
+                let mut scanned = scan_all(
+                    members,
+                    &lengths,
+                    block_size,
+                    admission.scan_pool,
+                    scan_lanes,
+                    control,
+                )?;
                 if !heads_match_scanned(&heads, &scanned) {
                     return Err(Par2GenError::Other(
                         "member identity changed between the head scan and the hash scan - a \
@@ -1647,6 +2158,7 @@ fn create_body(
                     vj += 1;
                 }
                 let first = layout[vi].0;
+                pacer.before_batch(control, total);
                 let t_batch = std::time::Instant::now();
                 let slices = if let Some(scan) = fused_scan.as_mut() {
                     debug_assert_eq!(first, 0);
@@ -1676,12 +2188,14 @@ fn create_body(
                         control,
                     )?
                 };
+                let batch_elapsed = t_batch.elapsed();
                 if timing {
                     tracing::info!(
                         target: "repair-timing",
-                        "create recovery batch {first}+{held}: {:.2?} (total {:.2?})",
-                        t_batch.elapsed(),
-                        t0.elapsed()
+                        "create recovery batch {first}+{held}: {:.2?} (total {:.2?}){}",
+                        batch_elapsed,
+                        t0.elapsed(),
+                        pacer.batch_timing_suffix()
                     );
                 }
                 // Both routes can already have final hashes: the independent
@@ -1748,8 +2262,14 @@ fn create_body(
     control.finish(CreatePhase::Write);
     scanned.sort_by_key(|s| id_order(&s.file_id));
     if timing {
-        tracing::info!(target: "repair-timing", "create scan + fold: {:.2?}", t0.elapsed());
+        tracing::info!(
+            target: "repair-timing",
+            "create scan + fold: {:.2?}{}",
+            t0.elapsed(),
+            pacer.summary_timing_suffix()
+        );
     }
+    drop(pacer);
     let (real_set_id, critical) = match ready_critical {
         Some(critical) => (set_id, critical),
         None => critical_packets(&scanned, block_size, comment),
@@ -1775,7 +2295,89 @@ fn create_body(
     // on disk is not a set.
     control.check()?;
     volwrite::backfill_critical(dir, &out, &critical, cidx.as_ref())?;
+    commit_digests(&mut scanned);
     Ok(out.into_iter().map(|(name, _)| name).collect())
+}
+
+/// [`create_body`]'s route decision: which of the create's three routes
+/// this set takes, the fused scan opened if it is the fused one, and the
+/// `create arms` timing line that names the choice. Moved out of
+/// `create_body` unchanged on 15 Sep 2026, when that function stood at
+/// 486 of its 500-line ceiling; it is one self-contained block whose only
+/// product the body reads afterwards is the scan.
+#[allow(clippy::too_many_arguments)]
+fn create_route(
+    members: &[Member],
+    lengths: &[u64],
+    heads: &[(usize, u64, [u8; 16], [u8; 16])],
+    total: u64,
+    block_size: u64,
+    n_slices: usize,
+    n_recovery: usize,
+    per_batch: usize,
+    from_exponent_zero: bool,
+    layout: &[(usize, usize)],
+    control: &CreateControl,
+    timing: bool,
+) -> Result<Option<FusedScan>, Par2GenError> {
+    // One large regular member whose recovery rows fit ONE fold batch, below
+    // the NTT crossover, can take its checksums straight off the arenas the
+    // fold is already reading, which removes the create's remaining second
+    // pass over the payload. Everything else - several members, several
+    // batches, the transform, small sets, non-unix - keeps the established
+    // overlapped scan. Lane B's own multi-member prototype was decisively
+    // slower (0.7-1.0 s to about 1.9 s), which is why the gate is exactly one
+    // member even under its research override.
+    let FusionArms {
+        eligible_shape,
+        create_ntt_admitted,
+        fuse_admitted,
+    } = fusion_arms(
+        members.len(),
+        total,
+        block_size,
+        n_slices,
+        n_recovery,
+        per_batch,
+        from_exponent_zero,
+    );
+    // The digest store is asked LAST, outside the shared gates: it opens
+    // the store, and no shape the gates above refused should ever do that.
+    let fuse_admitted = fuse_admitted && !a_digest_record_is_waiting(control, members, lengths);
+    let fused_scan = if fuse_admitted {
+        FusedScan::open_all(heads, members, block_size)?
+    } else {
+        None
+    };
+    // THE ARM, named rather than inferred. Fusion decides which of the
+    // create's three routes runs and it used to leave no mark of its
+    // own: a reader had to work back from whether the TRANSFORM ran
+    // (`ntt_admitted` in `recovery_slices` is `fused_scan.is_none() &&
+    // ..`), which is an inference through code that is not about
+    // fusion. Two wrong mechanisms were proposed for one measured
+    // create on 12 Sep 2026 partly on the strength of it. One line, at
+    // the decision, under the timing knob every other create marker is
+    // already behind.
+    //
+    // It names the FUSION decision and the two gates that made it, and
+    // deliberately does not claim anything about the transform.
+    // `create_ntt_admitted` is not "the NTT runs": it is "this shape is
+    // one the transform would take, so fusion stands down for it", and
+    // it is false on every multi-member unix create - including the
+    // 36-member one that then took the transform in `recovery_slices`
+    // off its own, WIDER gate. Reported under the name it earns, so a
+    // reader cannot make this line say the thing the old inference
+    // wrongly said. Whether the transform ran is the `create ntt rows`
+    // line's to answer, and it prints only when it did.
+    if timing {
+        tracing::info!(
+            target: "repair-timing",
+            "create arms: n={n_slices} rows={n_recovery} batches={} fused={} (fusable shape={eligible_shape}, fusion displaced by the transform={create_ntt_admitted})",
+            stripe_first::batches(layout, per_batch),
+            fused_scan.is_some()
+        );
+    }
+    Ok(fused_scan)
 }
 
 /// The Main / FileDesc / IFSC / Creator block that every file in the set
@@ -1991,11 +2593,22 @@ impl MappedMember {
     /// this on the path it guards; the transform map does not.
     #[cfg(unix)]
     pub(crate) fn open(path: &Path, len: u64) -> std::io::Result<Option<MappedMember>> {
+        if len == 0 {
+            return Ok(None);
+        }
+        Self::from_file(std::fs::File::open(path)?, len)
+    }
+
+    /// [`Self::open`] over a handle the caller already holds, so the
+    /// mapping is of THAT file and not of whatever its path names by now -
+    /// the digest cache maps the create's own pinned handle
+    /// (`crate::digest_cache`). `len` is re-stat'd for `open`'s reason.
+    #[cfg(unix)]
+    pub(crate) fn from_file(f: std::fs::File, len: u64) -> std::io::Result<Option<MappedMember>> {
         use std::os::unix::io::AsRawFd;
         if len == 0 {
             return Ok(None);
         }
-        let f = std::fs::File::open(path)?;
         if f.metadata()?.len() != len {
             return Err(std::io::Error::other("stale member length"));
         }
@@ -2027,6 +2640,15 @@ impl MappedMember {
     /// See the `unix` arm above for why `len` is re-stat'd here.
     #[cfg(windows)]
     pub(crate) fn open(path: &Path, len: u64) -> std::io::Result<Option<MappedMember>> {
+        if len == 0 {
+            return Ok(None);
+        }
+        Self::from_file(std::fs::File::open(path)?, len)
+    }
+
+    /// See the `unix` arm of [`Self::from_file`].
+    #[cfg(windows)]
+    pub(crate) fn from_file(f: std::fs::File, len: u64) -> std::io::Result<Option<MappedMember>> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::Memory::{
             CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY,
@@ -2034,7 +2656,6 @@ impl MappedMember {
         if len == 0 {
             return Ok(None);
         }
-        let f = std::fs::File::open(path)?;
         if f.metadata()?.len() != len {
             return Err(std::io::Error::other("stale member length"));
         }
@@ -2145,49 +2766,6 @@ unsafe impl Send for MappedMember {}
 // SAFETY: as above - shared read-only access.
 unsafe impl Sync for MappedMember {}
 
-/// Which payload reads go through a mapping. `NZBFAST_PAR2GEN_MAP=0`:
-/// none, every read on the copied paths. Unset: the TRANSFORM reads its
-/// corpus mapped (unix since 2 Sep 2026, Windows since 5 Sep) and the
-/// scan and the direct fold keep their reads. `all`: the scan and the
-/// direct fold read the mapping too.
-///
-/// `all` is the measured negative that shaped the default (the
-/// mapped-inputs handoff, rounds L-M, i5-10600KF and M3 Ultra, 5 Sep
-/// 2026): on the 1 MiB create it takes 0.5-1.0 s of kernel time OUT of
-/// the process and still costs 0.05-0.10 s of WALL, on both boxes, with
-/// or without the populate hint - soft faults taken inside twelve scan
-/// lanes and six fold workers serialise where a read's copy did not.
-/// The transform's stripe-wise walk does not pay that: 64 KiB create
-/// 3.47-3.69 s mapped against 3.53-3.71 copied on the i5, 0.3 s less
-/// kernel time.
-fn map_inputs_enabled() -> bool {
-    !ntt_range::map_off_pinned() && map_mode() != MapMode::Off
-}
-
-/// Whether the scan and the direct fold read mapped members (see
-/// [`map_inputs_enabled`]): only under `NZBFAST_PAR2GEN_MAP=all`.
-fn map_scan_and_fold_enabled() -> bool {
-    map_mode() == MapMode::All
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MapMode {
-    Off,
-    Transform,
-    All,
-}
-
-fn map_mode() -> MapMode {
-    static MODE: std::sync::OnceLock<MapMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(
-        || match std::env::var("NZBFAST_PAR2GEN_MAP").ok().as_deref() {
-            Some("0") => MapMode::Off,
-            Some("all") => MapMode::All,
-            _ => MapMode::Transform,
-        },
-    )
-}
-
 /// Every member of a plan mapped, with each block addressable: full
 /// blocks point into the mappings, tail blocks are copied zero-padded
 /// into `pad`. None when a member cannot be mapped (the caller keeps
@@ -2294,7 +2872,7 @@ fn scan_fused_window(
     digests: Vec<([u8; 16], u32)>,
 ) {
     debug_assert_eq!(digests.len(), window.len());
-    let lengths: Vec<u64> = state.iter().map(|st| st.stamp.length).collect();
+    let lengths: Vec<u64> = state.iter().map(|st| st.stamp.length()).collect();
     let mut row: [&[u8]; 8] = [&[]; 8];
     let mut row_last: [Option<usize>; 8] = [None; 8];
     let mut row_has = false;
@@ -2313,7 +2891,12 @@ fn scan_fused_window(
         }
         st.blocks.push(digest);
         let Some(l) = lanes.as_mut() else {
-            st.whole.update(&block[..want]);
+            // Off the lanes, a validated digest record stops this chain
+            // (`crate::digest_cache`); eight lockstep chains finish.
+            st.chain_skipped = st.chain_skipped || st.digest.chain_abandoned();
+            if !st.chain_skipped {
+                st.whole.update(&block[..want]);
+            }
             continue;
         };
         let lane = lane_of[k] as usize;
@@ -2604,7 +3187,14 @@ fn recovery_slices(
         ntt_window,
         per_read,
     };
-    if ntt_admitted && map_inputs_enabled() && ntt::mapped_attempt(&arms, &mut acc, &mut arena)? {
+    if ntt_admitted
+        && map_inputs_enabled()
+        && mapped_payload_fits_memory(
+            n_slices as u64 * bs as u64,
+            create_map_headroom(bs, first, count),
+        )
+        && ntt::mapped_attempt(&arms, &mut acc, &mut arena)?
+    {
         control.finish(CreatePhase::Fold);
         return Ok(acc);
     }
@@ -2873,6 +3463,19 @@ fn fold_windows(w: FoldWindows<'_>) -> Result<(), Par2GenError> {
                     None => (None, None),
                 }
             });
+            // A digest record that validated stopped the chain this pacer
+            // was measuring (`crate::digest_cache`). `paced_width` holds
+            // the width when a chain costs nothing, so a fold narrowed
+            // before that would stay narrow with no chain left to yield
+            // cores to: the full width comes back at once.
+            if let (Some(cap), Some((state, _))) = (pace_cap.as_ref(), fused_state.as_ref())
+                && pace_width != pace_max
+                && state.iter().all(|s| s.chain_skipped)
+            {
+                pace_width = pace_max;
+                pace_moves += 1;
+                cap.set(pace_max);
+            }
             t_fold += t0.elapsed();
             windows += 1;
             control.step(CreatePhase::Fold, (w1 - w0) as u64 * bs as u64);
@@ -3066,5 +3669,234 @@ mod fold_pacing_tests {
         assert_eq!(paced_width(6, 8, Duration::ZERO, ms(100)), 6);
         assert_eq!(paced_width(6, 8, ms(50), Duration::ZERO), 6);
         assert_eq!(paced_width(6, 0, ms(50), ms(100)), 1);
+    }
+}
+
+#[cfg(test)]
+mod apriori_fold_width_tests {
+    use super::{
+        PACED_WIDTH_FLOOR, apriori_fold_width, apriori_fold_width_for, apriori_fold_width_from,
+        chain_pass_bytes, fold_rows_per_worker_per_chain_pass,
+    };
+
+    /// The measured shape, and the whole point of the round: 100
+    /// recovery rows over 8,858,370,048 bytes on eight workers, with the
+    /// chain one pass over the same bytes. `-t4` reaches 12.41 s on this
+    /// by hand against 13.60 s at the default width, and the rule has to
+    /// reach the same four WITHOUT being told - from the row count and
+    /// the member length alone, before the first batch runs.
+    #[test]
+    fn the_measured_shape_reaches_the_width_t4_reaches_by_hand() {
+        let payload = 8_858_370_048u64;
+        assert_eq!(apriori_fold_width_for(100, payload, payload, 25, 8), 4);
+        // And the NEON constant on the box IT was measured on: 28 rows
+        // per worker on an M1 Ultra's twenty. The rule published exactly
+        // this four on every acceptance leg, and won 9 of 12 mirrored
+        // pairs at -1.7% median (16 Sep 2026).
+        assert_eq!(apriori_fold_width_for(100, payload, payload, 28, 20), 4);
+    }
+
+    /// **The payload cancels, and that is the reason the rule is stated
+    /// as a row count over a dimensionless ratio.** The fold's work and
+    /// the chain's both scale with the bytes, so a 1 GB set and a 100 GB
+    /// set at the same redundancy want the same width - which is what
+    /// carries this from the one shape it was measured on to every other
+    /// size on the same kernel. A test that only pinned the arithmetic
+    /// would not say this.
+    #[test]
+    fn the_payload_cancels_so_only_the_row_count_decides() {
+        for payload in [1u64 << 30, 8_858_370_048, 100u64 << 30] {
+            assert_eq!(
+                apriori_fold_width_for(100, payload, payload, 25, 8),
+                4,
+                "payload {payload} moved a width it has no business moving"
+            );
+        }
+    }
+
+    /// More redundancy is more fold work per chain pass, so it wants
+    /// more workers - and the box's own width is still the ceiling. A
+    /// 10% set on this kernel is not chain-bound at all and gets
+    /// everything.
+    #[test]
+    fn rows_drive_the_width_and_the_box_is_the_ceiling() {
+        let bytes = 8_858_370_048u64;
+        assert_eq!(apriori_fold_width_for(50, bytes, bytes, 25, 8), 2);
+        assert_eq!(apriori_fold_width_for(100, bytes, bytes, 25, 8), 4);
+        assert_eq!(apriori_fold_width_for(200, bytes, bytes, 25, 8), 8);
+        assert_eq!(apriori_fold_width_for(2_000, bytes, bytes, 25, 8), 8);
+    }
+
+    /// The floor bounds the damage of a constant that is wrong for this
+    /// box in the dangerous direction: however little fold work there
+    /// is, the create does not end up poled by a one-worker fold that
+    /// this hand chose.
+    #[test]
+    fn the_floor_holds_however_little_fold_work_there_is() {
+        let bytes = 8_858_370_048u64;
+        assert_eq!(
+            apriori_fold_width_for(1, bytes, bytes, 25, 8),
+            PACED_WIDTH_FLOOR
+        );
+        // ...and a box narrower than the floor is not widened to it.
+        assert_eq!(apriori_fold_width_for(1, bytes, bytes, 25, 1), 1);
+    }
+
+    /// An unknown is never an argument for shedding workers. Every
+    /// missing input reads as the whole box.
+    #[test]
+    fn nothing_known_is_never_an_argument_for_shedding() {
+        let bytes = 8_858_370_048u64;
+        assert_eq!(apriori_fold_width_for(0, bytes, bytes, 25, 8), 8);
+        assert_eq!(apriori_fold_width_for(100, 0, bytes, 25, 8), 8);
+        assert_eq!(apriori_fold_width_for(100, bytes, 0, 25, 8), 8);
+        assert_eq!(apriori_fold_width_for(100, bytes, bytes, 0, 8), 8);
+    }
+
+    /// **A fold kernel whose rate against MD5 nobody measured never
+    /// narrows** - asserted on EVERY box, not only on one that happens
+    /// to be such a part. This is the gate that keeps a constant
+    /// measured on one kernel off the kernels it was not.
+    #[test]
+    fn an_unmeasured_fold_kernel_declines_to_narrow() {
+        let bytes = 8_858_370_048u64;
+        // However chain-bound the shape looks, an unmeasured kernel is
+        // handed the whole box. Two shapes, so this cannot pass by the
+        // clamp alone.
+        assert_eq!(apriori_fold_width_from(None, 1, bytes, bytes, 8), 8);
+        assert_eq!(apriori_fold_width_from(None, 100, bytes, bytes, 8), 8);
+        assert_eq!(apriori_fold_width_from(None, 100, bytes, bytes, 20), 20);
+    }
+
+    /// ...and the other half, in whichever direction THIS box is. The
+    /// expected width is computed FROM the constant rather than written
+    /// down, so a third measured kernel with a different constant cannot
+    /// falsify a test about the rule.
+    #[test]
+    fn this_boxs_own_kernel_agrees_with_the_rule() {
+        let bytes = 8_858_370_048u64;
+        match fold_rows_per_worker_per_chain_pass() {
+            Some(rows) => {
+                assert!(
+                    rows > 0,
+                    "a measured ratio of zero rows is not a measurement"
+                );
+                let want = (100u64.div_ceil(rows) as usize).clamp(PACED_WIDTH_FLOOR, 8);
+                assert_eq!(apriori_fold_width(100, bytes, bytes, 8), want);
+            }
+            None => assert_eq!(apriori_fold_width(1, bytes, bytes, 8), 8),
+        }
+    }
+
+    /// Chains that run BESIDE each other are not summed. `scan_all`
+    /// gives each member to a file-level worker, so a four-member set on
+    /// four workers waits on one member's chain, not on four - and a
+    /// rule that summed them would see four times the slack it has and
+    /// shed four times the workers it should.
+    #[test]
+    fn many_members_chains_are_a_makespan_and_not_a_sum() {
+        let four = [1_000u64; 4];
+        assert_eq!(chain_pass_bytes(&four, 4), 1_000);
+        assert_eq!(chain_pass_bytes(&four, 2), 2_000);
+        assert_eq!(chain_pass_bytes(&four, 1), 4_000);
+        // One big member and three small ones: the big one is the wall
+        // whatever the worker count says.
+        assert_eq!(chain_pass_bytes(&[9_000, 100, 100, 100], 4), 9_000);
+        // The single-member set this was measured on: an identity.
+        assert_eq!(chain_pass_bytes(&[8_858_370_048], 1), 8_858_370_048);
+        assert_eq!(chain_pass_bytes(&[], 4), 0);
+    }
+}
+
+#[cfg(test)]
+mod batch_fold_pacer_tests {
+    use super::{BatchFoldPacer, CreateControl, CreatePhase, apriori_fold_width};
+    use crate::par2repair::PauseGate;
+
+    /// A control whose meters exist (a gate is enough - see
+    /// `CreateControl::new`), so both counters are real.
+    fn watched() -> CreateControl {
+        CreateControl::new(None, Some(PauseGate::new()))
+    }
+
+    const MEMBER: u64 = 8_858_370_048;
+
+    /// The width is the RULE's, and it is in force before the first
+    /// batch rather than after the first measurement.
+    #[test]
+    fn the_width_is_published_before_any_batch_has_run() {
+        let max = crate::mem::cpu_workers().max(1);
+        let pacer = BatchFoldPacer::new(true, 100, &[MEMBER], 1);
+        assert_eq!(pacer.width, apriori_fold_width(100, MEMBER, MEMBER, max));
+        // Published exactly when it narrows: an uncapped fold registers
+        // no cap for a scheduler to read.
+        assert_eq!(pacer.cap.is_some(), pacer.width < max);
+        assert_eq!(pacer.moves, 0);
+    }
+
+    /// **THE REGRESSION TEST FOR THIS ROUND: there is no feedback term.**
+    ///
+    /// Two pacers that narrowed at batch boundaries from the chain's
+    /// measured rate were built here and both walked to the floor and
+    /// LOST - 14.40 s and 14.30 s against 13.60 s inert, because the
+    /// rate is measured while the fold is starving the very chain it is
+    /// extrapolating. This sets up the state those pacers moved on - the
+    /// block-digest phase FULL and the sequential chain at 10%, which is
+    /// what a mapped scan of one large member reads within its first
+    /// second - and asserts the width does NOT move, batch after batch.
+    #[test]
+    fn a_running_chain_never_moves_the_width_again() {
+        let control = watched();
+        control.begin(CreatePhase::Verify, MEMBER);
+        control.step(CreatePhase::Verify, MEMBER);
+        control.chain_step(MEMBER / 10);
+
+        let mut pacer = BatchFoldPacer::new(true, 100, &[MEMBER], 1);
+        let chosen = pacer.width;
+        for _ in 0..4 {
+            pacer.before_batch(&control, MEMBER);
+            assert_eq!(
+                pacer.width, chosen,
+                "the width moved at a batch boundary - a feedback term is back"
+            );
+        }
+        assert_eq!(pacer.moves, 0);
+    }
+
+    /// The one event that DOES move it, and the one counter that can see
+    /// that event: once the CHAIN itself is done there is nothing left
+    /// to pace against, so the remaining batches get the whole box back.
+    /// The block-digest phase is deliberately left at nothing here - a
+    /// pacer reading `CreatePhase::Verify` for this would restore the
+    /// ceiling in the test above instead, which is the defect the chain
+    /// counter exists to stop.
+    #[test]
+    fn a_finished_chain_restores_the_ceiling() {
+        let control = watched();
+        control.begin(CreatePhase::Verify, MEMBER);
+        control.chain_step(MEMBER);
+
+        let mut pacer = BatchFoldPacer::new(true, 100, &[MEMBER], 1);
+        let narrowed = pacer.width < pacer.max;
+        pacer.before_batch(&control, MEMBER);
+        assert_eq!(pacer.width, pacer.max);
+        // A rule that never narrowed on this box has nothing to restore.
+        assert_eq!(pacer.moves, usize::from(narrowed));
+    }
+
+    /// An inert pacer (pacing off, or a fused create) touches nothing
+    /// and says nothing, whatever the counters read.
+    #[test]
+    fn an_inactive_pacer_is_a_no_op() {
+        let control = watched();
+        control.begin(CreatePhase::Verify, MEMBER);
+        control.chain_step(1);
+        let mut pacer = BatchFoldPacer::new(false, 100, &[MEMBER], 1);
+        assert_eq!(pacer.width, pacer.max);
+        assert!(pacer.cap.is_none());
+        pacer.before_batch(&control, MEMBER);
+        assert_eq!(pacer.moves, 0);
+        assert_eq!(pacer.batch_timing_suffix(), "");
+        assert_eq!(pacer.summary_timing_suffix(), "");
     }
 }

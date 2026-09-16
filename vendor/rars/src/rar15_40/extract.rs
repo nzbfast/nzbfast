@@ -153,7 +153,7 @@ impl CodecState {
     ///
     /// A split member's expected CRC is its LAST fragment's - every
     /// earlier fragment carries the CRC of its own PACKED bytes instead
-    /// (see [`FileHeader::split_fragment_packed_crc`]), measured on the
+    /// (see [`FileHeader::nonfinal_fragment_crc`]), measured on the
     /// RAR 3.00 multivolume fixtures - and the incremental split path
     /// drives the decode from the FIRST fragment's shape, which is all
     /// that is needed (name, method, unpack version and unpacked size
@@ -315,11 +315,11 @@ impl FileHeader {
     /// there) with the CRC of that fragment's stored bytes - the raw
     /// ciphertext for encrypted members - while the FINAL fragment
     /// carries the whole member's unpacked CRC. unrar checks it at every
-    /// volume boundary (UIERROR_CHECKSUMPACKED), which is what localizes
+    /// volume boundary and reports the checksum error there, which is what localizes
     /// damage to one volume instead of failing the member at its end;
     /// both split walks do the same. Measured on the RAR 1.54 and 3.00
     /// multivolume fixtures.
-    fn split_fragment_packed_crc(&self) -> Option<u32> {
+    fn nonfinal_fragment_crc(&self) -> Option<u32> {
         (self.is_split_after() && self.unp_ver >= 20 && self.file_crc != 0xffff_ffff)
             .then_some(self.file_crc)
     }
@@ -820,7 +820,7 @@ struct GrowingChainedReader<'a, P, C> {
     /// fragment is fully read even when no read ever drained the cursor.
     frag_len: u64,
     /// Running CRC of the fragment's packed bytes, checked against
-    /// [`FileHeader::split_fragment_packed_crc`] when the fragment reads
+    /// [`FileHeader::nonfinal_fragment_crc`] when the fragment reads
     /// out - the check that localizes damage to one volume.
     frag_crc: Crc32,
     frag_expected_crc: Option<u32>,
@@ -992,7 +992,7 @@ where
         self.frag_pos = 0;
         self.frag_len = (range.end - range.start) as u64;
         self.frag_crc = Crc32::new();
-        self.frag_expected_crc = file.split_fragment_packed_crc();
+        self.frag_expected_crc = file.nonfinal_fragment_crc();
         self.cursor = Some(archive.owned_range_reader(range)?);
         Ok(())
     }
@@ -1147,7 +1147,7 @@ type SharedFragmentError = Arc<Mutex<Option<Error>>>;
 
 /// One split fragment's packed bytes, verified against the CRC the
 /// fragment's OWN header carries as the chain reads it out - see
-/// [`FileHeader::split_fragment_packed_crc`]. This is what fails a
+/// [`FileHeader::nonfinal_fragment_crc`]. This is what fails a
 /// damaged set at the first bad volume, naming it, instead of decoding
 /// the whole member and failing on the final unpacked CRC.
 struct FragmentCrcReader<'a> {
@@ -1265,9 +1265,8 @@ impl PendingSplitRefs {
         // no buffered filter retry), so the consumption watermark is safe
         // on either. Re-boxed so the fresh trait object's lifetime can
         // shrink to the volumes borrow.
-        let spent = spent.map(|f| {
-            Box::new(move |volume: usize| f(volume)) as Box<dyn FnMut(usize) + Send + '_>
-        });
+        let spent = spent
+            .map(|f| Box::new(move |volume: usize| f(volume)) as Box<dyn FnMut(usize) + Send + '_>);
         let fragment_error: SharedFragmentError = Arc::default();
         let mut reader = self.fragment_reader(volumes, password, spent, &fragment_error)?;
 
@@ -1277,14 +1276,13 @@ impl PendingSplitRefs {
                     Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize")
                 })?;
                 let actual_len = self.packed_size(volumes)?;
-                let expected_packed_len =
-                    if self.encrypted && self.unp_ver >= 20 {
-                        expected_len.checked_add(15).map(|len| len & !15).ok_or(
-                            Error::InvalidHeader("RAR 2.x encrypted split stored size overflows"),
-                        )?
-                    } else {
-                        expected_len
-                    };
+                let expected_packed_len = if self.encrypted && self.unp_ver >= 20 {
+                    expected_len.checked_add(15).map(|len| len & !15).ok_or(
+                        Error::InvalidHeader("RAR 2.x encrypted split stored size overflows"),
+                    )?
+                } else {
+                    expected_len
+                };
                 if actual_len != expected_packed_len {
                     return Err(Error::InvalidHeader(
                         "RAR 1.5 split stored file has wrong reassembled size",
@@ -1296,8 +1294,7 @@ impl PendingSplitRefs {
                     inner: &mut writer,
                     crc: &mut crc,
                 };
-                let copied =
-                    std::io::copy(&mut reader.take(expected_len as u64), &mut crc_writer)?;
+                let copied = std::io::copy(&mut reader.take(expected_len as u64), &mut crc_writer)?;
                 if copied != expected_len as u64 {
                     return Err(Error::InvalidHeader(
                         "RAR 1.5 split stored file ended before unpacked size",
@@ -1368,7 +1365,7 @@ impl PendingSplitRefs {
                 .nth(file_index)
                 .ok_or(Error::InvalidHeader("RAR 1.5 split entry is missing"))?;
             let range = file.packed_range.clone();
-            let expected_crc = file.split_fragment_packed_crc();
+            let expected_crc = file.nonfinal_fragment_crc();
             let slot = Arc::clone(fragment_error);
             openers.push(Box::new(move || {
                 let reader = archive.range_reader(range).map_err(std::io::Error::other)?;
@@ -1675,22 +1672,22 @@ mod tests {
     /// final fragment's CRC is the member's unpacked one - never a
     /// packed-bytes expectation.
     #[test]
-    fn split_fragment_packed_crc_applies_to_nonfinal_modern_fragments_only() {
+    fn nonfinal_fragment_crc_applies_to_modern_fragments_only() {
         let mut middle = file(b"a", FHD_SPLIT_BEFORE | FHD_SPLIT_AFTER);
         middle.file_crc = 0x1234_5678;
-        assert_eq!(middle.split_fragment_packed_crc(), Some(0x1234_5678));
+        assert_eq!(middle.nonfinal_fragment_crc(), Some(0x1234_5678));
 
         let mut last = middle.clone();
         last.block.flags = FHD_SPLIT_BEFORE;
-        assert_eq!(last.split_fragment_packed_crc(), None);
+        assert_eq!(last.nonfinal_fragment_crc(), None);
 
         let mut old = middle.clone();
         old.unp_ver = 15;
-        assert_eq!(old.split_fragment_packed_crc(), None);
+        assert_eq!(old.nonfinal_fragment_crc(), None);
 
         let mut unstamped = middle.clone();
         unstamped.file_crc = 0xffff_ffff;
-        assert_eq!(unstamped.split_fragment_packed_crc(), None);
+        assert_eq!(unstamped.nonfinal_fragment_crc(), None);
     }
 
     #[test]
@@ -1853,17 +1850,11 @@ mod tests {
         let second = file(b"a.txt", FHD_SPLIT_BEFORE);
         let mut pending = PendingSplitRefs::new(&first, 0, 0);
         assert!(
-            matches!(
-                pending.append(&second, 0, 1),
-                Err(Error::InvalidHeader(_))
-            ),
+            matches!(pending.append(&second, 0, 1), Err(Error::InvalidHeader(_))),
             "a second fragment inside the same volume must be refused"
         );
         assert!(
-            matches!(
-                pending.append(&second, 1, 0),
-                Ok(())
-            ),
+            matches!(pending.append(&second, 1, 0), Ok(())),
             "the ordinary next-volume fragment must still be accepted"
         );
     }
@@ -1896,14 +1887,9 @@ mod tests {
 
         let mut got = Vec::new();
         let mut buf = [0u8; 16];
-        loop {
-            match chain.read(&mut buf) {
-                Ok(count) => {
-                    assert_ne!(count, 0, "the mismatch must error, never read as clean EOF");
-                    got.extend_from_slice(&buf[..count]);
-                }
-                Err(_) => break,
-            }
+        while let Ok(count) = chain.read(&mut buf) {
+            assert_ne!(count, 0, "the mismatch must error, never read as clean EOF");
+            got.extend_from_slice(&buf[..count]);
         }
         assert_eq!(got, data);
 
@@ -2293,7 +2279,9 @@ mod tests {
         ];
 
         let slot: SharedFragmentError = Arc::default();
-        let mut reader = pending.fragment_reader(&volumes, None, None, &slot).unwrap();
+        let mut reader = pending
+            .fragment_reader(&volumes, None, None, &slot)
+            .unwrap();
         let mut out = Vec::new();
         let error = reader.read_to_end(&mut out).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::Other);

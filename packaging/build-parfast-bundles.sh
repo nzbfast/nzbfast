@@ -136,7 +136,9 @@ for arch in $ARCHES; do
     macos-universal)
         for t in aarch64-apple-darwin x86_64-apple-darwin; do
             rustup target add "$t" >/dev/null 2>&1 || true
-            cargo build --release --locked -p parfast --target "$t"
+            # 11.0: the mac CLI floor. Unset, cc-rs compiles the C for
+            # this Mac's own macOS (research/MAC-DEPLOYMENT-TARGET-2026-09-15.md).
+            MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --locked -p parfast --target "$t"
         done
         lipo -create -output "$inner/parfast" \
             target/aarch64-apple-darwin/release/parfast \

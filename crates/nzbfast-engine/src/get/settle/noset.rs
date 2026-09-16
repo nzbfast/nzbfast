@@ -35,6 +35,19 @@ use crate::get::{latesets, sfvname, yencname};
 /// caller used to spell out - so the three pieces of state it owns come in and
 /// go back out unchanged in that case. Split out of `settle_without_set`
 /// (TODO 106), body verbatim.
+///
+/// The FIFTH return is the names a set here VERIFIED or REBUILT on disk
+/// (`healed`, the same list the uncovered-hole scan's `covered` is built
+/// from), carried out to [`SettleVerdict::repaired_names`] because one
+/// caller further up needs it: the census spared its metadata names
+/// BEFORE this pass ran, on the premise that nothing could rebuild them,
+/// and this is the pass that falsifies it. See the prune in
+/// `super::super::tail` and sweep item 34 (16 Sep 2026).
+///
+/// Empty when no set verified, and that is the right answer rather than a
+/// missing one: `healed` is evidence a set REPORTED, and an
+/// `Unrepairable` set deliberately contributes none - crediting it would
+/// let a member it could not rebuild read as proven whole.
 #[expect(clippy::too_many_arguments)]
 async fn disk_par2_fallback(
     out_dir: &Path,
@@ -47,14 +60,29 @@ async fn disk_par2_fallback(
     mut repaired: bool,
     mut uncovered_after_par2: Vec<String>,
     mut repair_shortfall: Option<crate::repair::RepairShortfall>,
+    // The owner's recovery-work handle, or None on a CLI run. Both
+    // halves of every set's control come off it: the progress the queue
+    // row draws, and the cancel the fold polls - see
+    // [`nzbkit::par2repair::control`] and
+    // [`crate::repair::SideCancel::repair_control`]. `None` builds an
+    // INERT control, which is the call this function made before
+    // 16 Sep 2026, branch for branch.
+    cancel: Option<&crate::repair::SideCancel>,
 ) -> (
     bool,
     bool,
     Vec<String>,
     Option<crate::repair::RepairShortfall>,
+    Vec<String>,
 ) {
     if !dir_has_par2(out_dir).unwrap_or(false) {
-        return (all_good, repaired, uncovered_after_par2, repair_shortfall);
+        return (
+            all_good,
+            repaired,
+            uncovered_after_par2,
+            repair_shortfall,
+            Vec::new(),
+        );
     }
     use nzbkit::par2repair::{PacketCatalog, RepairStatus};
     let t0 = Instant::now();
@@ -97,9 +125,34 @@ async fn disk_par2_fallback(
             None
         }
     };
+    // THE CONTROLLED DOOR, since 16 Sep 2026 (claim
+    // `repair-control-two-censused-sites-16sep`). Same catalog
+    // semantics as the uncontrolled
+    // `PacketCatalog::repair_present_or_renamed_sets` this replaced -
+    // the renamed fallback, the same caller label, the same walk - plus
+    // a channel: the engine's verify/fold/solve/write phases report
+    // into the queue row, and their loops poll this job's cancel. It
+    // also makes each of these repairs ATTENDED, which is what lifted
+    // the unattended unstructured ceiling `serve/mod.rs` used to set.
+    //
+    // `_run` is the DIRECTORY's reporting window, and `per_set` the
+    // per-SET one the engine opens at each set's start: this arm
+    // repairs every qualifying set in the directory in turn, and a
+    // monotone bar left running across the boundary would read 100%
+    // for every set after the first - the "Repairing, 100%" stall this
+    // whole mechanism exists to remove, on a repair that is genuinely
+    // running. Same shape as `unpack::nested_par2_repair`'s.
+    let _run = cancel.map(|c| c.repair_progress().enter());
+    let per_set = || match cancel {
+        Some(c) => {
+            c.repair_progress().restart();
+            c.repair_control()
+        }
+        None => nzbkit::par2repair::RepairControl::default(),
+    };
     let results = match cat
         .as_mut()
-        .map(PacketCatalog::repair_present_or_renamed_sets)
+        .map(|c| c.repair_present_or_renamed_sets_controlled(&per_set))
     {
         Some(Ok(r)) => r,
         Some(Err(e)) => {
@@ -185,6 +238,25 @@ async fn disk_par2_fallback(
                 repair_shortfall = crate::repair::blocks_over_set(needed, have, r.set_id, multi);
                 every_set_ok = false;
                 any_set_failed = true;
+            }
+            // THE USER'S CANCEL IS NOT AN UNREADABLE SET, and this arm
+            // sits ahead of the one below for the same reason
+            // `unpack::nested_par2_repair`'s does and `latesets` breaks
+            // on its set edge: the arm below would report a set that is
+            // perfectly fine as a repair error, over a job that is
+            // being deleted. `every_set_ok` still goes false - nothing
+            // here is PROVEN, and a cancelled job must not settle as
+            // complete - but `any_set_failed` does not, because that
+            // flag is what fails an otherwise-finished job and this is
+            // not a failure of the post. The engine stops the walk on
+            // this edge, so it is the last outcome in the vec.
+            Err(nzbkit::par2repair::RepairError::Cancelled) => {
+                info!(
+                    target: "par2",
+                    "repair stopped - the job was cancelled (nothing was renamed in, and \
+                     any block already patched is one that was missing)"
+                );
+                every_set_ok = false;
             }
             Err(e) => {
                 warn!(target: "par2", "repair error - {e}");
@@ -412,7 +484,13 @@ async fn disk_par2_fallback(
         every_set_ok,
         uncovered_after_par2.is_empty(),
     );
-    (all_good, repaired, uncovered_after_par2, repair_shortfall)
+    (
+        all_good,
+        repaired,
+        uncovered_after_par2,
+        repair_shortfall,
+        healed,
+    )
 }
 
 /// Does the set-less disk PAR2 fallback leave the job green?
@@ -604,6 +682,11 @@ pub(super) async fn settle_without_set(
     // too: neither repair can certify a file no recovery set ever
     // named.
     let mut uncovered_after_par2: Vec<String> = Vec::new();
+    // Sweep item 34 (16 Sep 2026): the names the disk-side pass below
+    // proves whole on disk. See [`SettleVerdict::repaired_names`] - this
+    // is the only settle path that can produce any, because it is the
+    // only one whose repair runs off a set the census never saw.
+    let mut repaired_names: Vec<String> = Vec::new();
     // Finding F11's second half: "every article arrived" is not "the
     // post is done" when NZB-classified volumes sit unread - they never
     // get a slot at all, are normally fetched on demand by repair
@@ -689,7 +772,13 @@ pub(super) async fn settle_without_set(
                 }
             }
         }
-        (all_good, repaired, uncovered_after_par2, repair_shortfall) = disk_par2_fallback(
+        (
+            all_good,
+            repaired,
+            uncovered_after_par2,
+            repair_shortfall,
+            repaired_names,
+        ) = disk_par2_fallback(
             out_dir,
             slots,
             extractor,
@@ -700,6 +789,7 @@ pub(super) async fn settle_without_set(
             repaired,
             uncovered_after_par2,
             repair_shortfall,
+            cancel,
         )
         .await;
     }
@@ -862,6 +952,7 @@ pub(super) async fn settle_without_set(
         // bought - see `repair/volpayload.rs`.
         rescue_left: Vec::new(),
         repaired,
+        repaired_names,
     })
 }
 
@@ -1116,5 +1207,96 @@ mod verdict_tests {
     fn no_set_qualifying_is_not_a_verdict_either_way() {
         assert!(disk_fallback_verdict(true, false, false, true));
         assert!(!disk_fallback_verdict(false, false, false, true));
+    }
+}
+
+/// THE WIRE, pinned by reading the source (16 Sep 2026, claim
+/// `repair-control-two-censused-sites-16sep`).
+///
+/// Source-scanning because the alternative is not available here.
+/// [`disk_par2_fallback`] is private, async, eleven arguments wide, and
+/// reached only through [`settle_without_set`] with a live extractor,
+/// a slot table and a server list behind it - so there is no unit seam
+/// that drives this arm to an actual solve, and every existing rig in
+/// this crate stops at a gate before one. What a behavioural test CAN
+/// reach is the door itself, and that is pinned where it lives
+/// (`nzbkit_base::par2repair::unit_tests::control_tests::
+/// the_present_or_renamed_sets_door_asks_for_a_control_once_per_set`
+/// and `a_cancelled_no_set_walk_stops_on_its_set_and_is_not_a_run_of_
+/// broken_ones`, which drive the real engine over a real damaged set).
+///
+/// What is left is the half those cannot see: that THIS arm reaches
+/// that door, with the job's own handle. Both halves matter separately
+/// and each fails silently on its own - reverting to the uncontrolled
+/// entry compiles and repairs exactly as well, and a
+/// `RepairControl::default()` supplier satisfies the signature while
+/// honouring nothing. The house precedent for this shape is
+/// `latesets::shape_tests`, and the reason is the same: a second,
+/// silent, uncontrolled call is invisible to every byte comparison a
+/// fixture could make.
+#[cfg(test)]
+mod control_wire_tests {
+    const NOSET: &str = include_str!("noset.rs");
+
+    /// The arm reaches the CONTROLLED door and no longer names the
+    /// uncontrolled one.
+    #[test]
+    fn the_no_set_arm_repairs_through_the_controlled_door() {
+        assert!(
+            NOSET.contains("repair_present_or_renamed_sets_controlled(&per_set)"),
+            "the no-set arm must call the controlled door with a per-set supplier - the \
+             uncontrolled entry compiles, repairs identically and reports nothing, which \
+             is the state this arm was in until 16 Sep 2026"
+        );
+        // The uncontrolled name must not survive as a CALL. Two things
+        // force the needle to be assembled at runtime rather than
+        // written out: the name appears in the prose of this file (and
+        // in this very test's own message), and a literal spelling of
+        // it here would be a hit on itself - which is the trap the
+        // first cut of this test fell into. Same device, and the same
+        // reason, as the lock-gate note in `par2repair::unit_tests::
+        // control_tests`.
+        let uncontrolled = format!("PacketCatalog::repair_present{}", "_or_renamed_sets)");
+        assert!(
+            !NOSET.contains(&uncontrolled),
+            "the method-reference form of the uncontrolled door is back - that is the \
+             exact spelling this arm used, and it hands the engine a default control"
+        );
+    }
+
+    /// The supplier is built from the JOB'S OWN handle, and it opens
+    /// the per-set window. A supplier returning a default control is
+    /// the uncontrolled call exactly, branch for branch, so this is
+    /// not a restatement of the test above.
+    #[test]
+    fn the_supplier_is_built_from_the_jobs_own_side_cancel() {
+        assert!(
+            NOSET.contains("c.repair_control()"),
+            "the control must come off the job's `SideCancel` - that handle is the one \
+             wire between the delete path and the fold"
+        );
+        assert!(
+            NOSET.contains("c.repair_progress().restart()"),
+            "each SET must put the bar back: this arm walks every qualifying set in the \
+             directory, and a monotone bar left running reads 100% for every set after \
+             the first"
+        );
+        assert!(
+            NOSET.contains("c.repair_progress().enter()"),
+            "the directory's reporting window must be opened, or the row goes on naming \
+             a phase after the pass returns"
+        );
+    }
+
+    /// A cancelled set is matched as a CANCEL. Without the arm it falls
+    /// into the error arm below it, which warns that a set nobody could
+    /// read was found - over a job the user simply deleted - and sets
+    /// the flag that FAILS an otherwise-finished job.
+    #[test]
+    fn a_cancelled_set_is_not_reported_as_a_broken_one() {
+        assert!(
+            NOSET.contains("Err(nzbkit::par2repair::RepairError::Cancelled) => {"),
+            "the cancel arm is gone: a user's Cancel would be logged as a repair error"
+        );
     }
 }

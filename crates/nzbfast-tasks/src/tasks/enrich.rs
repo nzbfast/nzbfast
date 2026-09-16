@@ -1166,9 +1166,60 @@ pub fn spawn_predb_feed(daemon: &Arc<Daemon>) {
                     // Sized against the population, not caution: the
                     // obfuscated backlog measured 27.5M rows on the
                     // first live run, and 50/tick walks that in months.
-                    // 400 evals cost well under a second inside the
-                    // tick and still stand down for any download.
+                    // 400 evals still stand down for any download.
+                    //
+                    // The rate is per TICK, not per hold, since 16 Sep
+                    // 2026. This comment used to read "400 evals cost
+                    // well under a second inside the tick"; that was
+                    // measured on the development index and it is wrong
+                    // by a factor of five on a real one. On a live
+                    // 125 GB index on a 32-core workstation,
+                    // `mode=index_holds` filed 505 holds of this one
+                    // call site over 2.8 h at
+                    // **p50 4,691 ms, p90 5,355 ms, max 7,428 ms** -
+                    // 1,831 s of the 3,428 s of index-mutex hold time
+                    // the whole daemon spent, 53% of it at one line, at
+                    // a median hold PAST the 5 s `HTTP_INDEX_WAIT` a
+                    // dashboard write waits. The fixed cost of the call
+                    // is ~1.5 ms (the floor and selection queries, timed
+                    // read-only against that index), so the hold is
+                    // essentially linear in rows: ~11.7 ms a row at the
+                    // median, ~13.4 at p90. Section 10a of
+                    // `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md`
+                    // carries the reading, how the fixed cost was
+                    // separated from the per-row cost, and the box load
+                    // it was taken at.
+                    //
+                    // So the row budget is unchanged - the population
+                    // argument above is untouched, and trading
+                    // correlation throughput for latency was never
+                    // priced - and it is spent in SLICES instead, the
+                    // same "more CALLS, never a longer hold" shape the
+                    // shatter fold uses (`passes.rs` FOLD_SLICES_PER_LAP).
+                    // At ~1.5 ms of fixed cost against a 1.25 s slice
+                    // that costs 0.1% to release the mutex four times.
                     const CORR_BACKLOG_BUDGET: u32 = 400;
+                    // The latency half, and the thing this leg had none
+                    // of - `WALK_BUDGET` above is the same idea, and
+                    // `split_merge` and `par2_sidecar_fold` have had it
+                    // since 5 Aug 2026 for the same reason; only the
+                    // correlation legs were left with a row count.
+                    // Bound each HOLD at a quarter of the waiter's own
+                    // bound, DERIVED from it rather than copied (which
+                    // is why `HTTP_INDEX_WAIT` is `pub`): with a ~12 ms
+                    // unit the overrun past the budget is one row, so a
+                    // slice lands near 1.25 s, and per-row cost would
+                    // have to grow 4x on a future index before one
+                    // slice could refuse an HTTP write.
+                    const CORR_BACKLOG_HOLD: std::time::Duration =
+                        Daemon::HTTP_INDEX_WAIT.checked_div(4).unwrap();
+                    // Enough slices to spend the row budget at the
+                    // measured cost with room to spare, and a cap so a
+                    // pathologically cheap stride cannot spin: 400 rows
+                    // at ~12 ms is four slices, and a stride whose rows
+                    // all fall out at the settled/population gate
+                    // finishes its 400 in one.
+                    const CORR_BACKLOG_SLICES: u32 = 8;
                     // How far back the corr backlog bothers: generous
                     // enough to cover a full seed import window.
                     const CORR_WINDOW: i64 = 366 * 86_400;
@@ -1181,16 +1232,45 @@ pub fn spawn_predb_feed(daemon: &Arc<Daemon>) {
                     {
                         info!(target: "predb", "correlation (live): {s} suggestion(s), {a} auto-applied");
                     }
-                    if daemon2.indexing_pause_reason().is_none()
-                        && let Some((_, s, a)) = daemon2.with_index_mut(|ix| {
-                            ix.predb_corr_backlog(CORR_BACKLOG_BUDGET, CORR_WINDOW, auto, now)
-                                .ok()
-                        })
-                        && s + a > 0
-                    {
+                    // One tick's row budget, spent in bounded slices:
+                    // the mutex is released between them, so a queued
+                    // HTTP worker (or `index_write_checked`'s bounded
+                    // waiter) gets its window instead of queueing behind
+                    // a single 4.7 s hold. `waiting()` has no equivalent
+                    // here, so the download stand-down is re-checked per
+                    // slice exactly as it was per tick.
+                    let (mut rows, mut sug, mut app) = (0u32, 0usize, 0usize);
+                    for _ in 0..CORR_BACKLOG_SLICES {
+                        if rows >= CORR_BACKLOG_BUDGET || daemon2.indexing_pause_reason().is_some()
+                        {
+                            break;
+                        }
+                        let Some((n, s, a)) = daemon2.with_index_mut(|ix| {
+                            ix.predb_corr_backlog(
+                                CORR_BACKLOG_BUDGET - rows,
+                                CORR_WINDOW,
+                                auto,
+                                now,
+                                CORR_BACKLOG_HOLD,
+                            )
+                            .ok()
+                        }) else {
+                            break;
+                        };
+                        // Nothing examined means the walk is parked (or
+                        // the clock beat the first row); another slice
+                        // would re-run the same selection for nothing.
+                        if n == 0 {
+                            break;
+                        }
+                        rows += n as u32;
+                        sug += s;
+                        app += a;
+                    }
+                    if sug + app > 0 {
                         info!(
                             target: "predb",
-                            "correlation (backlog): {s} suggestion(s), {a} auto-applied"
+                            "correlation (backlog): {sug} suggestion(s), {app} auto-applied from {rows} row(s)"
                         );
                     }
                     // The catch-up pass: one walk over every sized pre

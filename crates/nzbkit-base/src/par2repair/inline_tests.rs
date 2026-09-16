@@ -304,10 +304,10 @@ fn ntt_gates_route_field_shapes_correctly() {
     assert!(!ntt_gates_pass(65536, 16381, 3, 2, budget, false));
     assert!(!ntt_gates_pass(65536, 16283, 101, 100, budget, false));
     // Just under the row gate: fold; at it: transform. The gate is the
-    // arch's re-measured constant (`ntt_min_missing`: 192 on aarch64
-    // since the paired leaf moved the M3's crossover to ~160, 320 on the
-    // x86 arms until their sweep lands), so pin it relative to that.
-    let gate = ntt_min_missing();
+    // arch's re-measured value for this block size (`ntt_min_missing`: 192
+    // on aarch64, 256 on the x86 nibble arms, 320 on the GFNI arms at
+    // 64 KiB), so pin it relative to that.
+    let gate = ntt_min_missing(65536);
     assert!(!ntt_gates_pass(
         65536,
         16384 - gate + 1,
@@ -335,7 +335,7 @@ fn ntt_gates_route_field_shapes_correctly() {
     // What still folds, stated against the constants rather than a
     // literal so a re-sweep moves the shape with the gate. Under the
     // present floor: fold, however deep the damage.
-    let (min_p, min_w, min_m) = (NTT_MIN_PRESENT, NTT_MIN_WORK, ntt_min_missing());
+    let (min_p, min_w, min_m) = (NTT_MIN_PRESENT, ntt_min_work(), ntt_min_missing(655360));
     assert!(!ntt_gates_pass(
         655360,
         min_p - 1,
@@ -412,23 +412,47 @@ fn ntt_gates_route_field_shapes_correctly() {
     // Corpus over the memory budget with windows off: fold (amendment 2).
     assert!(!ntt_gates_pass(65536, 14884, 1500, 1499, gib / 2, false));
     // ...and with them on it is admitted, because half a gibibyte holds
-    // 8,192 of that set's 64 KiB blocks - well past the window floor.
-    // The corpus clause is a floor on ONE window now, not on the whole
-    // corpus; the budget, and so the peak resident set, is untouched.
+    // 8,192 of that set's 64 KiB blocks, a window the curve admits 1,500
+    // rows over on every class. The corpus clause is a gate on ONE window
+    // now, not on the whole corpus; the budget, and so the peak resident
+    // set, is untouched.
     assert!(ntt_gates_pass(65536, 14884, 1500, 1499, gib / 2, true));
-    // A budget too small to hold a window worth transforming folds
-    // even with windows on: the shape clauses pass, the retention one
-    // does not.
-    let thin = (NTT_MIN_WINDOW_PRESENT - 1) * 65536;
-    assert!(!ntt_gates_pass(65536, 14884, 1500, 1499, thin, true));
+    // The window gate is a CURVE in the window's size since 14 Sep 2026,
+    // stated against the functions so a re-measured constant moves the
+    // shape with it: at the rows the curve asks of a 2,048-source window,
+    // admitted; one row under, fold - and that row is over the row gate,
+    // so it is the window clause refusing and not the shape clauses.
+    let (gate, k) = (ntt_min_missing(65536), ntt_window_combine());
+    let window = 2048usize;
+    let rows = ntt_window_row_gate(window, gate, k).expect("a 2,048-source window has a crossover");
+    assert!(
+        rows > gate,
+        "a window pays its combine, so it asks more rows than one window does"
+    );
     assert!(ntt_gates_pass(
         65536,
         14884,
-        1500,
-        1499,
-        NTT_MIN_WINDOW_PRESENT * 65536,
+        rows,
+        rows - 1,
+        window * 65536,
         true
     ));
+    assert!(!ntt_gates_pass(
+        65536,
+        14884,
+        rows - 1,
+        rows - 2,
+        window * 65536,
+        true
+    ));
+    // Under the sanity floor, fold however deep the damage. (On x86 the
+    // curve refuses this window on its own; on NEON the floor is what
+    // refuses it.)
+    let thin = (NTT_MIN_WINDOW_PRESENT - 1) * 65536;
+    assert!(!ntt_gates_pass(65536, 14884, 4096, 4095, thin, true));
+    // A window at or under the class's combine ratio has no crossover.
+    assert_eq!(ntt_window_row_gate(k, gate, k), None);
+    assert!(ntt_window_row_gate(k + 1, gate, k).is_some());
     // The shape gates still decide first: a window-sized budget cannot
     // buy the transform for a 101-block repair.
     assert!(!ntt_gates_pass(
@@ -436,9 +460,309 @@ fn ntt_gates_route_field_shapes_correctly() {
         16283,
         101,
         100,
-        NTT_MIN_WINDOW_PRESENT * 65536,
+        window * 65536,
         true
     ));
+}
+
+/// The x86 row gate's block-size clause, pinned on every fan-in rather
+/// than this host's kernel: only GFNI-256 (fan-in 6) rises, only from
+/// 1 MiB blocks, and only to the measured value. The `-m128` windowed
+/// curve cannot see it - a 1 MiB block under a 128 MiB budget is far
+/// under the window floor - so the one windowed shape the 15 Sep rounds
+/// validated at small budgets is unchanged by construction.
+#[test]
+fn ntt_row_gate_rises_with_the_block_size_on_gfni256_only() {
+    let mib = 1usize << 20;
+    for bs in [4096, 65536, 262_144, mib - 1] {
+        assert_eq!(
+            ntt_min_missing_for(6, bs),
+            NTT_MIN_MISSING,
+            "GFNI-256 at {bs}"
+        );
+    }
+    assert_eq!(
+        ntt_min_missing_for(6, mib),
+        NTT_MIN_MISSING_GFNI256_LARGE_BLOCK
+    );
+    assert_eq!(
+        ntt_min_missing_for(6, 4 * mib),
+        NTT_MIN_MISSING_GFNI256_LARGE_BLOCK
+    );
+    for bs in [65536, mib, 4 * mib] {
+        assert_eq!(
+            ntt_min_missing_for(12, bs),
+            NTT_MIN_MISSING,
+            "AVX-512 at {bs}"
+        );
+        assert_eq!(
+            ntt_min_missing_for(4, bs),
+            NTT_MIN_MISSING_NIBBLE,
+            "nibble at {bs}"
+        );
+        assert_eq!(
+            ntt_min_missing_for(0, bs),
+            NTT_MIN_MISSING,
+            "single-source at {bs}"
+        );
+    }
+    assert!(NTT_MIN_MISSING_GFNI256_LARGE_BLOCK > NTT_MIN_MISSING);
+    // Past any window the slab plan builds at that size, and no window at all
+    // for a 1 MiB block on a 128 MiB budget.
+    assert!(128 * mib / mib < NTT_MIN_WINDOW_PRESENT);
+    assert_eq!(ntt_window_row_ask(mib, 128 * mib), None);
+    // The host's own gate agrees with the pure function for its kernel.
+    if !cfg!(target_arch = "aarch64") {
+        let fan_in = crate::gf16::multi_fold_width();
+        for bs in [65536, mib] {
+            assert_eq!(ntt_min_missing(bs), ntt_min_missing_for(fan_in, bs));
+        }
+    } else {
+        assert_eq!(ntt_min_missing(mib), NTT_MIN_MISSING_NEON);
+    }
+}
+
+/// The windowed row gate as arithmetic, on both classes' constants
+/// rather than this host's: a curve in the window's size that leaves a
+/// big window exactly the row gate, charges a small one more, and never
+/// charges a window the slab plan can produce more than `k / 2` rows.
+///
+/// The flat-margin reading is the one this pins against. The chip that
+/// asked for the curve warned that a flat `k / 2` would refuse the
+/// transform at m = 192..272 on every big-window shape where it wins;
+/// the 16,128-source row below is that shape (the whole 1 GiB / 64 KiB
+/// corpus in one window, where the transform won from m = 192).
+#[test]
+fn ntt_window_row_gate_is_a_curve_in_the_window_not_a_flat_margin() {
+    let neon = (NTT_MIN_MISSING_NEON, NTT_WINDOW_COMBINE_NEON);
+    let x86 = (NTT_MIN_MISSING_NIBBLE, NTT_WINDOW_COMBINE_X86);
+    let (gate, k) = neon;
+    // A big window keeps the row gate exactly, and the excess comes in
+    // whole rows only.
+    assert_eq!(ntt_window_row_gate(31_460, gate, k), Some(gate));
+    assert_eq!(ntt_window_row_gate(31_459, gate, k), Some(gate + 1));
+    assert!(ntt_window_row_gate(16_128, gate, k).unwrap() <= gate + 2);
+    assert_eq!(ntt_window_row_gate(2048, gate, k), Some(gate + 16));
+    // The measured 512 MB shape (128 MiB, 64 KiB, arenas paid): ~1,630
+    // sources a window at m = 256, where the forced transform beat the
+    // fold by 18%, and ~1,666 at m = 192, where the two tied.
+    let at_256 = ntt_window_row_gate(1630, gate, k).unwrap();
+    assert!(
+        at_256 <= 256,
+        "m = 256 on 1,630 sources won and must be admitted"
+    );
+    assert!(ntt_window_row_gate(1666, gate, k).unwrap() > 192);
+    for (gate, k) in [neon, x86] {
+        // Monotone: a bigger window never asks for more rows.
+        let mut last = usize::MAX;
+        for s in (k + 1)..40_000 {
+            let r = ntt_window_row_gate(s, gate, k).unwrap();
+            assert!(r <= last && r >= gate, "S={s} asked {r} after {last}");
+            last = r;
+        }
+        // S >= 2m, the slab plan's invariant, bounds the excess at k / 2:
+        // the first m a window of 2m sources admits is within one row of
+        // gate + k / 2.
+        let first = (gate..65_536)
+            .find(|&m| ntt_window_row_gate(2 * m, gate, k).is_some_and(|r| m >= r))
+            .expect("some depth is admitted at S = 2m");
+        assert!(
+            first <= gate + k / 2 + 1,
+            "at S = 2m the curve asked {first} rows, past gate {gate} + k/2 {}",
+            k / 2
+        );
+    }
+}
+
+/// The dispatcher narrows the transform's stripe before it refuses a
+/// shape on its arenas, and never narrows a corpus that fits one window.
+///
+/// The shape is the measured one: a 16 KiB slab at m = 4,096, where four
+/// workers' arenas at 512 words were 161 MB against a 128 MiB budget and
+/// the dispatcher folded (32.95 s) a repair the transform finished in
+/// 5.17 s at 128 words. Stated as RELATIONS on this host's geometry, so
+/// the core count does not decide the assertions.
+#[test]
+fn ntt_admission_narrows_the_stripe_before_it_refuses() {
+    if ntt_env_knob_set() {
+        return; // W and THREADS both move the geometry
+    }
+    let (bs, needed) = (16384usize, 4096usize);
+    let arenas = |cap: usize| ntt_worker_arenas_capped(bs, needed, cap);
+    // A budget the default width's arenas overrun, and a corpus twice
+    // what it holds - both derived from this host's arenas, which scale
+    // with its worker count (16 workers here is 644 MB, so a fixed
+    // 12,288-block corpus FIT the budget on a 32-thread box).
+    let budget = arenas(usize::MAX) * 4 / 5;
+    let n_present = 2 * budget / bs + 1;
+    assert!(
+        n_present * bs > budget,
+        "the corpus does not fit one window"
+    );
+    let asked = std::cell::RefCell::new(Vec::new());
+    let window_gate = |cap: usize| {
+        asked.borrow_mut().push(cap);
+        let corpus = budget.saturating_sub(arenas(cap));
+        (corpus / bs >= 2048).then_some(NttAdmission {
+            budget: corpus,
+            stripe_cap: cap,
+        })
+    };
+    let got = ntt_admit_within(bs, needed, n_present, budget, window_gate)
+        .expect("a narrower stripe fits where the default does not");
+    assert!(
+        got.stripe_cap != usize::MAX && got.stripe_cap >= NTT_STRIPE_W_FLOOR,
+        "narrowed, and not past the floor: {got:?}"
+    );
+    assert!(
+        got.stripe_cap.is_power_of_two(),
+        "a narrowed stripe stays on the kernel granule"
+    );
+    assert!(
+        arenas(got.stripe_cap) <= budget - arenas(got.stripe_cap),
+        "narrowed until the arenas no longer outweigh the corpus they leave"
+    );
+    assert_eq!(got.budget, budget - arenas(got.stripe_cap));
+    assert!(
+        !asked.borrow().contains(&usize::MAX),
+        "the default width is never gated against a budget its arenas overrun"
+    );
+
+    // A refusal at the width the arenas settled on, of a window big
+    // enough for the curve to price, folds THERE: the width that fits the
+    // arenas is the only one asked. Narrowing further would buy a bigger
+    // window at a stripe nothing priced (the row-refused case is pinned on
+    // its own in `ntt_admission_folds_a_window_refused_on_its_rows`).
+    asked.borrow_mut().clear();
+    assert!(
+        ntt_window_row_ask(bs, budget - arenas(got.stripe_cap)).is_some(),
+        "the settled window is one the curve prices"
+    );
+    assert!(
+        ntt_admit_within(bs, needed, n_present, budget, |cap| {
+            asked.borrow_mut().push(cap);
+            None
+        })
+        .is_none()
+    );
+    assert_eq!(*asked.borrow(), vec![got.stripe_cap]);
+
+    // A refusal on the ARENAS keeps narrowing: a 16 MiB block whose
+    // window stays under the curve's sanity floor at every width - the
+    // budget is sized off this host's arenas, so it holds a few hundred
+    // megabytes at most - is asked at every width down to the floor, by
+    // strictly narrowing powers of two, and then folds.
+    let (big_bs, shallow) = (16usize << 20, 1usize);
+    let big_arenas = |cap: usize| ntt_worker_arenas_capped(big_bs, shallow, cap);
+    let starved_budget = big_arenas(usize::MAX) * 4 / 5;
+    assert!(
+        ntt_window_row_ask(big_bs, starved_budget).is_none(),
+        "no width's window is big enough for any row count"
+    );
+    asked.borrow_mut().clear();
+    assert!(
+        ntt_admit_within(
+            big_bs,
+            shallow,
+            2 * starved_budget / big_bs + 1,
+            starved_budget,
+            |cap| {
+                asked.borrow_mut().push(cap);
+                None
+            }
+        )
+        .is_none()
+    );
+    let tried = asked.borrow().clone();
+    assert_eq!(tried.last(), Some(&NTT_STRIPE_W_FLOOR));
+    assert!(tried.windows(2).all(|p| p[1] < p[0]), "{tried:?}");
+
+    // A corpus that fits one window at the default width is gated THERE,
+    // however tight - narrowing could buy it nothing but a slower stripe.
+    let fits = arenas(usize::MAX) + 8 * bs;
+    let kept = ntt_admit_within(bs, needed, 8, fits, |cap| {
+        Some(NttAdmission {
+            budget: fits - arenas(cap),
+            stripe_cap: cap,
+        })
+    })
+    .unwrap();
+    assert_eq!(kept.stripe_cap, usize::MAX);
+}
+
+/// A window the curve refuses on its ROWS at the width the arenas settle
+/// on folds there, even though a narrower stripe's smaller arenas would
+/// hand it a bigger window the curve admits.
+///
+/// The measured shape: `-t4 -m128`, 1 GiB / 64 KiB, m = 384 on the Core
+/// Ultra 9 386H (GFNI-256). Refused at W = 512 on its rows, the old rule
+/// narrowed to W = 128, where eight bigger windows cleared the curve, and
+/// the repair cost 14.16 CPU-s against the fold's 10.50 and the
+/// full-width forced arm's 10.28
+/// (`research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md`,
+/// sections 6 and 8). The depth is found by search on this host's
+/// geometry, so neither the core count nor the target's constants decide
+/// the assertions.
+#[test]
+fn ntt_admission_folds_a_window_refused_on_its_rows() {
+    if ntt_env_knob_set() {
+        return; // W, THREADS and STREAM all move the answer
+    }
+    let bs = 65536usize;
+    let arenas = |needed: usize, cap: usize| ntt_worker_arenas_capped(bs, needed, cap);
+    // The dispatcher's windowed retention arm, priced at a stripe cap.
+    let window_gate = |m: usize, budget: usize, cap: usize| {
+        let corpus = budget.saturating_sub(arenas(m, cap));
+        ntt_window_row_ask(bs, corpus)
+            .is_some_and(|rows| m >= rows)
+            .then_some(NttAdmission {
+                budget: corpus,
+                stripe_cap: cap,
+            })
+    };
+    // A budget that leaves the default width a window at least as big as
+    // its arenas, so step 3 never narrows, and never under the smallest
+    // window the curve prices; and a depth whose default-width window the
+    // curve prices and refuses while the floor width's bigger window
+    // would be admitted.
+    //
+    // The floor is what makes the search host-independent. It was
+    // `2 * arenas` alone until 15 Sep 2026, and on one or two workers the
+    // arenas are under `NTT_MIN_WINDOW_PRESENT` blocks at every depth the
+    // curve refuses, so no window was priced before the depth had already
+    // cleared the ask and the search found nothing (nightly aarch64-cross
+    // red on edce9281, a qemu leg on a small runner; reproduced natively
+    // with `NZBFAST_CPU_WORKERS=1` and `=2`, not with 3 or more). The
+    // SMALLEST priced window is the one to take: the ask falls fastest
+    // near its asymptote, so it opens the widest band between the two
+    // widths. Where the arenas already exceed the floor the budget is the
+    // old one.
+    let (m, budget) = (ntt_min_missing(bs)..4096)
+        .map(|m| {
+            let full = arenas(m, usize::MAX);
+            (m, full + full.max(NTT_MIN_WINDOW_PRESENT * bs))
+        })
+        .find(|&(m, budget)| {
+            ntt_window_row_ask(bs, budget - arenas(m, usize::MAX)).is_some()
+                && window_gate(m, budget, usize::MAX).is_none()
+                && window_gate(m, budget, NTT_STRIPE_W_FLOOR).is_some()
+        })
+        .expect("a depth between the full-width window's row ask and the floor width's");
+    let n_present = 2 * budget / bs + 1;
+    let asked = std::cell::RefCell::new(Vec::new());
+    let got = ntt_admit_within(bs, m, n_present, budget, |cap| {
+        asked.borrow_mut().push(cap);
+        window_gate(m, budget, cap)
+    });
+    assert_eq!(
+        got, None,
+        "m = {m} under {budget} B is refused on its rows at the default width, so it folds"
+    );
+    assert_eq!(
+        *asked.borrow(),
+        vec![usize::MAX],
+        "only the default width is asked; a narrower stripe is never priced into admitting it"
+    );
 }
 
 /// Stage 2 gate (merged NTT plan): the experimental NTT syndrome
@@ -509,10 +833,11 @@ fn ntt_syndrome_path_matches_fold_path() {
 /// being minimal when a gate moves stops testing the gate's boundary,
 /// and both the present floor and the work floor moved on 7 Sep 2026.
 /// A function and not a `const` because [`ntt_min_missing`] is
-/// per-arch, and the present count the work floor asks for follows it.
+/// per-arch, and the present count the work floor asks for follows it
+/// - as does the work floor itself since 15 Sep 2026 ([`ntt_min_work`]).
 fn minimal_ntt_shape() -> (usize, usize, usize) {
-    let m = NTT_MIN_MISSING.max(ntt_min_missing());
-    let present = NTT_MIN_PRESENT.max(NTT_MIN_WORK.div_ceil(m));
+    let m = NTT_MIN_MISSING.max(ntt_min_missing(1024));
+    let present = NTT_MIN_PRESENT.max(ntt_min_work().div_ceil(m));
     (1024, present + m, m)
 }
 
@@ -558,12 +883,19 @@ fn ntt_auto_retention_budget_excludes_the_worker_arenas() {
     assert!(arenas > 0, "the arenas are never free");
     assert_eq!(
         resolve_syndrome_path(SyndromePath::Auto, bs, n_inputs, m, &exps),
-        Some(ntt_budget_env().saturating_sub(arenas)),
-        "Auto must hand back the corpus budget, not the whole budget"
+        Some(NttAdmission {
+            budget: ntt_budget_env().saturating_sub(arenas),
+            stripe_cap: usize::MAX,
+        }),
+        "Auto must hand back the corpus budget, not the whole budget - and a \
+         corpus that fits keeps the default stripe"
     );
     assert_eq!(
         resolve_syndrome_path(SyndromePath::NttForce(3 * bs), bs, n_inputs, m, &exps),
-        Some(3 * bs),
+        Some(NttAdmission {
+            budget: 3 * bs,
+            stripe_cap: usize::MAX,
+        }),
         "the force arms pass the caller's budget through untouched"
     );
     // Additionally pin the published benchmark leg (64 KiB blocks,
@@ -575,7 +907,7 @@ fn ntt_auto_retention_budget_excludes_the_worker_arenas() {
     let heavy_corpus = ntt_budget_env().saturating_sub(ntt_worker_arenas(65536, 1500));
     if heavy_corpus >= (16384 - 1500) * 65536 {
         assert_eq!(
-            resolve_syndrome_path(SyndromePath::Auto, 65536, 16384, 1500, &heavy),
+            resolve_syndrome_path(SyndromePath::Auto, 65536, 16384, 1500, &heavy).map(|a| a.budget),
             Some(heavy_corpus),
             "the benchmark leg still dispatches to the NTT where it fits"
         );
@@ -606,21 +938,28 @@ fn ntt_auto_admits_a_corpus_bigger_than_the_budget() {
     // whatever its RAM or cgroup limit, so the shape is decided by the
     // clause under test and not by the machine.
     let bs = 1024usize;
-    let m = ntt_min_missing();
+    let m = ntt_min_missing(bs);
     let exps: Vec<u32> = (0..m as u32).collect();
     let corpus_budget = ntt_budget_env().saturating_sub(ntt_worker_arenas(bs, m));
+    let sources = corpus_budget / bs;
     assert!(
-        corpus_budget / bs >= NTT_MIN_WINDOW_PRESENT,
-        "a 1 KiB block's window clears the floor on any host this builds for"
+        sources >= NTT_MIN_WINDOW_PRESENT
+            && ntt_window_row_gate(sources, m, ntt_window_combine()) == Some(m),
+        "a 1 KiB block's window is big enough on any host this builds for that the \
+         window curve asks no row past the row gate ({sources} sources)"
     );
     // Twice what the budget can retain, so the whole-corpus clause
     // cannot be what admits it.
-    let n_present = (corpus_budget / bs).saturating_mul(2);
+    let n_present = sources.saturating_mul(2);
     assert!(n_present.saturating_mul(bs) > corpus_budget);
     assert_eq!(
         resolve_syndrome_path(SyndromePath::Auto, bs, n_present + m, m, &exps),
-        Some(corpus_budget),
-        "an over-budget corpus takes the transform one window at a time"
+        Some(NttAdmission {
+            budget: corpus_budget,
+            stripe_cap: usize::MAX,
+        }),
+        "an over-budget corpus takes the transform one window at a time, at the \
+         default stripe when its arenas are a sliver of the budget"
     );
     // ...and the retained-only arm (`NZBFAST_NTT_STREAM=0`) refuses
     // exactly this shape, which is what makes the assertion above about
@@ -658,24 +997,64 @@ fn ntt_worker_arenas_price_every_worker() {
     );
 }
 
-/// The default stripe width keys on the block size only on the x86
-/// nibble arms: everywhere else it is 512 at every block size, and on
-/// those arms it steps to 1,024 exactly at 1 MiB (the measured class,
-/// see `default_stripe_words`).
+/// The CREATE's default stripe width keys on the block size AND the
+/// plan's median leaf kernel, and only on the x86 nibble arms: everywhere
+/// else it is 512 at every block size and every fill. On those arms it
+/// steps to 1,024 exactly at 1 MiB, and drops back to 512 there when the
+/// median leaf is admitted to the ADDITIVE kernel - the 16 Sep 2026 step
+/// at that kernel's 128-source gate, where the i5 measured 1,024 costing
+/// up to a fifth of the transform (see `default_stripe_words`). A plan
+/// the caller cannot name resolves to the block-size rule, not to 512.
+///
+/// The REPAIR's is its own rule (`repair_stripe_words`, measured apart on
+/// 15 Sep 2026): 512 at every block size, every arm and every fill, and
+/// the fill clause must never reach it. Each pass's geometry takes its
+/// own - a create site that reached for the repair's geometry, or the
+/// reverse, is the drift this pins.
 #[test]
-fn default_stripe_words_keys_on_block_size_only_on_the_nibble_arms() {
+fn stripe_width_is_per_pass_and_the_create_keys_on_block_size_and_leaf_kernel_on_the_nibble_arms() {
+    use crate::par2ntt::LeafKernel;
     let nibble = cfg!(target_arch = "x86_64") && crate::gf16::multi_fold_width() == 4;
-    assert_eq!(super::fastpar::default_stripe_words(65536), 512);
-    assert_eq!(super::fastpar::default_stripe_words((1 << 20) - 2), 512);
-    let big = super::fastpar::default_stripe_words(1 << 20);
-    assert_eq!(big, if nibble { 1024 } else { 512 });
-    assert_eq!(super::fastpar::default_stripe_words(4 << 20), big);
-    if !ntt_env_knob_set() {
+    let dsw = super::fastpar::default_stripe_words;
+    // Below 1 MiB there is no 1,024 for the fill clause to narrow, on any
+    // arm and at any kernel.
+    for leaf in [
+        None,
+        Some(LeafKernel::Dense),
+        Some(LeafKernel::Paired),
+        Some(LeafKernel::Additive),
+    ] {
+        assert_eq!(dsw(65536, leaf), 512, "{leaf:?} at 64 KiB");
+        assert_eq!(dsw((1 << 20) - 2, leaf), 512, "{leaf:?} just under 1 MiB");
+    }
+    // At 1 MiB and up the nibble arm takes 1,024 below the additive gate
+    // and 512 above it; every other arm is 512 throughout.
+    let wide = if nibble { 1024 } else { 512 };
+    for bs in [1 << 20, 4 << 20] {
+        assert_eq!(dsw(bs, None), wide, "no plan keeps the block-size rule");
+        assert_eq!(dsw(bs, Some(LeafKernel::Paired)), wide);
+        assert_eq!(dsw(bs, Some(LeafKernel::Dense)), wide);
         assert_eq!(
-            ntt_stripe_geometry(4 << 20).0,
-            big,
-            "the geometry takes the rule"
+            dsw(bs, Some(LeafKernel::Additive)),
+            512,
+            "the additive median narrows the create's stripe at {bs}"
         );
+    }
+    if !ntt_env_knob_set() {
+        for bs in [65536, 1 << 20, 4 << 20] {
+            for leaf in [None, Some(LeafKernel::Paired), Some(LeafKernel::Additive)] {
+                assert_eq!(
+                    ntt_create_stripe_geometry(bs, leaf).0,
+                    dsw(bs, leaf),
+                    "the create's geometry takes the create's rule at {bs} / {leaf:?}"
+                );
+            }
+            assert_eq!(
+                ntt_stripe_geometry(bs).0,
+                super::fastpar::repair_stripe_words(),
+                "the repair's geometry takes the repair's rule at {bs}"
+            );
+        }
     }
 }
 
@@ -2074,7 +2453,7 @@ fn plan_slabs_never_refuses_and_takes_the_fewest_passes() {
 
     // 1. THE ORDINARY CASE IS ONE SLAB, and one slab must be the
     //    untouched fast path - every driver below branches on this.
-    let p = plan_slabs(101, 1 << 20, gib(2));
+    let p = plan_slabs(101, 1 << 20, gib(2), true);
     assert_eq!(p.slabs, 1, "a repair well inside the budget must not slab");
     assert_eq!(p.width, 1 << 20, "one slab is the whole block");
 
@@ -2084,7 +2463,7 @@ fn plan_slabs_never_refuses_and_takes_the_fewest_passes() {
     //    128 GiB machine derives. It used to be `SolveBudget` and a
     //    repair of nothing.
     let (m, bs) = (8_064, 2_130_944);
-    let p = plan_slabs(m, bs, gib(32));
+    let p = plan_slabs(m, bs, gib(32), true);
     assert_eq!(
         p.slabs, 2,
         "it misses by 0.024%, so it costs ONE extra pass"
@@ -2100,7 +2479,44 @@ fn plan_slabs_never_refuses_and_takes_the_fewest_passes() {
 
     // 3. The same set on a 256 GiB box (64 GiB budget) is ONE slab, so
     //    the machine that has the memory pays nothing for this feature.
-    assert_eq!(plan_slabs(m, bs, gib(64)).slabs, 1);
+    assert_eq!(plan_slabs(m, bs, gib(64), true).slabs, 1);
+
+    // 3b. THE FORNEY STRIPE'S ARENAS DO NOT MOVE THE SLAB COUNT (14 Sep
+    //     2026). m = 2,048 at 64 KiB under 128 MiB is two 32 KiB slabs
+    //     whose window is exactly the budget, so the solve's stripe sees
+    //     no headroom. Reserving the 512-word arenas for four workers out
+    //     of it would make it THREE slabs - a full extra sweep of the
+    //     payload - so they are not reserved, and the stripe takes a
+    //     bounded overspend instead (`forney::STRIPE_TARGET_BUDGET_SHARE`,
+    //     whose own test holds the other half at this shape).
+    //
+    //     A FORNEY shape, so the Forney arm is named rather than read off
+    //     the host: `plan_slabs` there follows `backsub_gate`, and under
+    //     ci-private's forced-dense step the 16 MiB matrix at this m is
+    //     charged off the top and the same call is three slabs.
+    use super::reconstruct::plan_slabs_with;
+    let p = plan_slabs_with(2048, 65536, 128 << 20, 2, false);
+    assert_eq!((p.slabs, p.width), (2, 32768));
+    assert_eq!(
+        2 * 2048 * p.width as u64,
+        128 << 20,
+        "the window is the budget"
+    );
+    let stripe_arenas = (2048usize.div_ceil(128) as u64 + 3) * 255 * 512 * 2 * 4;
+    assert_eq!(
+        plan_slabs_with(2048, 65536, (128 << 20) - stripe_arenas, 2, false).slabs,
+        3,
+        "the reservation the plan does not make would have cost a slab here"
+    );
+    // ...and the dense arm at the same shape pays its matrix first:
+    // 4 * 2,048^2 = 16 MiB leaves 112 MiB, whose widest slab is 28,672
+    // bytes, so three balanced slabs.
+    let p = plan_slabs_with(2048, 65536, 128 << 20, 2, true);
+    assert_eq!(
+        (p.slabs, p.width),
+        (3, 21846),
+        "the dense arm's matrix is charged before the width is chosen"
+    );
 
     // 4. Every plan fits the budget it was given, covers the block
     //    exactly, and has an even width - the solve works in u16 words,
@@ -2113,7 +2529,7 @@ fn plan_slabs_never_refuses_and_takes_the_fewest_passes() {
             (948, 5_376_000),
             (10_240, 1 << 20),
         ] {
-            let p = plan_slabs(m, bs, budget);
+            let p = plan_slabs(m, bs, budget, true);
             assert!(p.width.is_multiple_of(2), "slab width must be whole words");
             assert!(p.slabs >= 1 && p.width >= 2);
             assert!(
@@ -2143,13 +2559,60 @@ fn plan_slabs_never_refuses_and_takes_the_fewest_passes() {
     //    budget far below anything a real box would derive: 32,768
     //    inputs is the most PAR2 permits, and even a 16 MiB budget
     //    plans rather than failing.
-    let p = plan_slabs(MAX_INPUT_SLICES, 4 << 20, 16 << 20);
+    let p = plan_slabs(MAX_INPUT_SLICES, 4 << 20, 16 << 20, true);
     assert!(p.slabs > 1 && p.width >= 2);
     assert!(p.slabs * p.width >= (4 << 20));
 
     // 6. Degenerate shapes do not panic and do not divide by zero.
-    assert_eq!(plan_slabs(0, 1 << 20, gib(1)).slabs, 1);
-    assert_eq!(plan_slabs(0, 0, gib(1)).slabs, 1);
+    assert_eq!(plan_slabs(0, 1 << 20, gib(1), true).slabs, 1);
+    assert_eq!(plan_slabs(0, 0, gib(1), true).slabs, 1);
+}
+
+/// `NZBFAST_REPAIR_OUTPUT=inplace` prices ONE buffer, and at the same
+/// budget that is half the slabs - the 512 MB box's ladder from
+/// research/PARFAST-SOLVE-WINDOW-HALVING-2026-09-15.md, held here so the
+/// arithmetic the note tabulates cannot drift from the planner.
+#[test]
+fn an_in_place_window_halves_the_slab_count_at_the_same_budget() {
+    use super::reconstruct::{plan_slabs_with, solve_buffers};
+    let budget = 128u64 << 20;
+    // (m, shipped slabs, in-place slabs) at 64 KiB under 128 MiB, on the
+    // JOINT FORNEY arm - the only arm that holds one buffer, and the arm
+    // the note's ladder is. Named, not read off `backsub_gate`: x86 takes
+    // the dense arm below m = 1,280, so reading it made the m = 1,024 row
+    // red on every x86 runner and green on NEON (15 Sep 2026).
+    for (m, whole, in_place) in [
+        (1_024usize, 1usize, 1usize),
+        (1_536, 2, 1),
+        (2_048, 2, 1),
+        (3_072, 4, 2),
+        (4_096, 4, 2),
+        (8_192, 8, 4),
+        (16_384, 16, 8),
+    ] {
+        let w2 = plan_slabs_with(m, 65536, budget, 2, false);
+        let w1 = plan_slabs_with(m, 65536, budget, 1, false);
+        assert_eq!((w2.slabs, w1.slabs), (whole, in_place), "m = {m}");
+        // Each plan fits the budget at its own buffer count, and not a
+        // byte of the in-place one would fit priced whole unless it is
+        // the same plan.
+        assert!(2 * m as u64 * w2.width as u64 <= budget);
+        assert!(m as u64 * w1.width as u64 <= budget);
+        assert!(w1.slabs == w2.slabs || 2 * m as u64 * w1.width as u64 > budget);
+    }
+    // Off by default: nothing in this process set the switch, so the
+    // production planner prices two.
+    assert_eq!(solve_buffers(4_096, true), 2);
+    // And an unstructured selection is two under either setting.
+    assert_eq!(solve_buffers(4_096, false), 2);
+    // And a zero buffer count is not a division by zero.
+    assert_eq!(plan_slabs_with(4_096, 65536, budget, 0, false).slabs, 2);
+    // The dense arm at the row that went red: its 4 MiB matrix leaves
+    // 124 MiB, under the 128 MiB a whole two-buffer window needs, so it
+    // is two slabs where Forney is one - and one buffer still fits whole.
+    let d2 = plan_slabs_with(1_024, 65536, budget, 2, true);
+    let d1 = plan_slabs_with(1_024, 65536, budget, 1, true);
+    assert_eq!((d2.slabs, d1.slabs), (2, 1));
 }
 
 /// The UNATTENDED ceiling: a policy about who is watching, not about
@@ -2591,4 +3054,194 @@ fn l2_probe_answers_a_plausible_per_core_size() {
          a plausible per-core L2 cannot sit outside that, so this is a \
          decode or OID fault rather than an unusual part"
     );
+}
+
+/// With no budget published the feed pipeline is the four constants it
+/// was before `FeedShape` existed, at every reader count the override
+/// admits - the big-box path must not move by a byte.
+#[test]
+fn feed_shape_unpublished_is_the_old_constants() {
+    for readers in 1..=64 {
+        let shape = reconstruct::feed_shape_for(None, readers);
+        assert_eq!(shape, reconstruct::FeedShape::UNBUDGETED);
+        assert_eq!(shape.batch_bytes, BATCH_BYTES);
+        assert_eq!(shape.channel_depth, 8);
+        assert_eq!(shape.merge_bytes, None);
+        assert_eq!(shape.pool_cap, 16);
+        assert_eq!(
+            shape.per_reader_batch(readers),
+            (BATCH_BYTES / readers).max(1 << 20),
+            "the drivers' old split, at {readers} reader(s)"
+        );
+    }
+}
+
+/// The budget the feed is sized from with nothing published: no cgroup
+/// is no budget, so every box outside a container keeps the unbudgeted
+/// constants; a cgroup limit is a quarter of itself; and a published
+/// budget wins over any limit, which is what keeps the nzbfast CLI and
+/// daemon (which always publish) where they were. Under a 512 MiB limit
+/// the shape is exactly the one `parfast r -m128` runs, the shape
+/// research/PARFAST-512MB-CGROUP-REPAIR-2026-09-15.md measured safe on 56
+/// of 56 legs inside that limit.
+#[test]
+fn feed_budget_falls_back_to_a_quarter_of_the_cgroup_limit() {
+    use reconstruct::FeedBudgetSource::{CgroupQuarter, Published};
+    assert_eq!(reconstruct::feed_budget_for(None, None), None);
+    assert_eq!(
+        reconstruct::feed_budget_for(None, Some(512 << 20)),
+        Some((128 << 20, CgroupQuarter))
+    );
+    assert_eq!(
+        reconstruct::feed_budget_for(Some(16 << 30), Some(512 << 20)),
+        Some((16 << 30, Published))
+    );
+    assert_eq!(
+        reconstruct::feed_budget_for(Some(64 << 20), None),
+        Some((64 << 20, Published))
+    );
+    // What `parfast -m128` publishes (`crates/parfast/src/lib.rs`).
+    let m128 = crate::mem::MemBudget::with_total(128u64.saturating_mul(1 << 20)).total;
+    for readers in 1..=16 {
+        let shape_for = |published, cgroup| {
+            reconstruct::feed_shape_for(
+                reconstruct::feed_budget_for(published, cgroup).map(|(total, _)| total),
+                readers,
+            )
+        };
+        assert_eq!(
+            shape_for(None, None),
+            reconstruct::FeedShape::UNBUDGETED,
+            "no cgroup, {readers} reader(s)"
+        );
+        let in_512m = shape_for(None, Some(512 << 20));
+        assert_eq!(
+            in_512m,
+            shape_for(Some(m128), None),
+            "512 MiB cgroup against -m128, {readers} reader(s)"
+        );
+        assert!(in_512m.merge_bytes.is_some());
+        // A daemon's auto budget inside the same limit is its own figure,
+        // not the quarter.
+        assert_eq!(
+            shape_for(Some(256 << 20), Some(512 << 20)),
+            reconstruct::feed_shape_for(Some(256 << 20), readers)
+        );
+        // A limit the constants already fit keeps them.
+        assert_eq!(
+            shape_for(None, Some(64 << 30)),
+            reconstruct::FeedShape::UNBUDGETED
+        );
+    }
+}
+
+/// Under a published budget the worst case in flight - every reader's
+/// assembly batch, a full channel and a merged call that stopped one
+/// batch past its cap - stays under half the budget at every reader
+/// count a box derives (up to 16; the 1..=64 override can exceed it
+/// only through the 1 MiB per-reader floor, which is a stated limit).
+/// One reader was the worst shape before: ~1.1 GiB at any `-m`.
+#[test]
+fn feed_shape_published_holds_in_flight_under_half_the_budget() {
+    for budget_mib in [128u64, 256, 512, 1024, 2048, 4096, 65536] {
+        let budget = budget_mib << 20;
+        for readers in 1..=16usize {
+            let shape = reconstruct::feed_shape_for(Some(budget), readers);
+            let per = shape.per_reader_batch(readers) as u64;
+            assert!(shape.batch_bytes <= BATCH_BYTES);
+            assert!((1..=8).contains(&shape.channel_depth));
+            assert!(shape.pool_cap <= 16);
+            let in_flight = match shape.merge_bytes {
+                Some(cap) => {
+                    readers as u64 * per + shape.channel_depth as u64 * per + cap as u64 + per
+                }
+                // The old constants, kept only where their own worst
+                // case (readers + a full channel + a merge that drained
+                // the channel and every sender it freed) already fits.
+                None => {
+                    assert_eq!(shape, reconstruct::FeedShape::UNBUDGETED);
+                    per * (2 * readers as u64 + 16)
+                }
+            };
+            assert!(
+                in_flight <= budget / 2,
+                "{budget_mib} MiB budget, {readers} reader(s): {in_flight} bytes in flight"
+            );
+        }
+    }
+    // The two ends the rule exists for: a 512 MB box's derived 128 MiB is
+    // shaped at every reader count, and a daemon's auto budget on a large
+    // box (16 GiB) is the unbudgeted path exactly.
+    for readers in 1..=16 {
+        assert!(
+            reconstruct::feed_shape_for(Some(128 << 20), readers)
+                .merge_bytes
+                .is_some()
+        );
+        assert_eq!(
+            reconstruct::feed_shape_for(Some(16 << 30), readers),
+            reconstruct::FeedShape::UNBUDGETED
+        );
+    }
+    // Clamped at both ends: never wider than the unbudgeted batch, never
+    // narrower than the Feeder's own floor.
+    assert_eq!(
+        reconstruct::feed_shape_for(Some(1 << 40), 4).batch_bytes,
+        BATCH_BYTES
+    );
+    assert_eq!(
+        reconstruct::feed_shape_for(Some(1 << 20), 4).batch_bytes,
+        1 << 20
+    );
+}
+
+/// A capped merge folds the same bytes in more, smaller calls, and XOR
+/// accumulation does not care: four producers through a one-deep channel
+/// with a 1 MiB merge cap reconstruct exactly what the unbudgeted shape
+/// does, and exactly the lost slices.
+#[test]
+fn a_capped_feed_shape_reconstructs_identically() {
+    let (n, bs) = (4400usize, 512usize);
+    let slices = demo_slices(n, bs);
+    let missing: Vec<usize> = {
+        let mut v: Vec<usize> = (0..24).map(|i| (i * 131 + 7) % n).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let recovery: Vec<(u32, Vec<u8>)> = (0..missing.len() as u32)
+        .map(|e| (e, generate_recovery(&slices, bs, e)))
+        .collect();
+    let run = |shape| {
+        let _forced = reconstruct::ForcedFeedShape::set(shape);
+        let rec =
+            Reconstructor::new_with_path(bs, n, &missing, &recovery, SyndromePath::Fold).unwrap();
+        let present: Vec<usize> = (0..n).filter(|i| !missing.contains(i)).collect();
+        std::thread::scope(|s| {
+            for part in present.chunks(present.len().div_ceil(4)) {
+                let mut feeder = rec.feeder(shape.per_reader_batch(4));
+                let slices = &slices;
+                s.spawn(move || {
+                    for &i in part {
+                        feeder.feed(i, &slices[i]);
+                    }
+                });
+            }
+        });
+        rec.finish()
+    };
+    let capped = reconstruct::FeedShape {
+        batch_bytes: 1 << 20,
+        channel_depth: 1,
+        merge_bytes: Some(1 << 20),
+        pool_cap: 3,
+    };
+    let out = run(capped);
+    assert_eq!(out, run(reconstruct::FeedShape::UNBUDGETED));
+    for (c, &j) in missing.iter().enumerate() {
+        assert_eq!(
+            out[c], slices[j],
+            "missing slice {j} wrong under a capped merge"
+        );
+    }
 }

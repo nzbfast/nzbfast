@@ -387,7 +387,11 @@ pub(super) fn write_compressed_volume_set_impl(
         #[cfg(feature = "parallel")]
         {
             if entries.len() > 1 {
-                crate::parallel::map_collect((0..entries.len()).collect(), resolve)?
+                crate::parallel::map_collect_bounded(
+                    (0..entries.len()).collect(),
+                    super::filter_policy::members_in_flight_for(&[encode_options]),
+                    resolve,
+                )?
             } else {
                 (0..entries.len()).map(resolve).collect::<Result<Vec<_>>>()?
             }
@@ -782,7 +786,11 @@ pub(super) fn write_encrypted_compressed_volume_set_impl(
         #[cfg(feature = "parallel")]
         {
             if entries.len() > 1 {
-                crate::parallel::map_collect((0..entries.len()).collect(), resolve)?
+                crate::parallel::map_collect_bounded(
+                    (0..entries.len()).collect(),
+                    super::filter_policy::members_in_flight_for(&[encode_options]),
+                    resolve,
+                )?
             } else {
                 (0..entries.len()).map(resolve).collect::<Result<Vec<_>>>()?
             }
@@ -945,7 +953,7 @@ struct VolumeSetWriter<'a> {
     recovery_percent: Option<u64>,
     volumes: Vec<Vec<u8>>,
     /// A full volume's body and number, held until the writer knows
-    /// whether another volume follows it (see `ENDARC_NEXT_VOLUME`).
+    /// whether another volume follows it (see `END_OF_ARCHIVE_NOT_LAST_VOLUME`).
     pending: Option<(Vec<u8>, u64)>,
     current_body: Option<Vec<u8>>,
     current_payload_len: usize,
@@ -1235,11 +1243,11 @@ pub(super) fn write_volume_head(
     if let Some(offset) = recovery_offset {
         write_locator_record(&mut main_extra, None, Some(offset));
     }
-    let main_flags = MHFL_VOLUME
-        | MHFL_VOLUME_NUMBER
-        | if solid { MHFL_SOLID } else { 0 }
+    let main_flags = ARCHIVE_IS_VOLUME
+        | ARCHIVE_HAS_VOLUME_NUMBER
+        | if solid { ARCHIVE_IS_SOLID } else { 0 }
         | if recovery_offset.is_some() {
-            MHFL_RECOVERY
+            ARCHIVE_HAS_RECOVERY_RECORD
         } else {
             0
         };
@@ -1257,8 +1265,8 @@ pub(super) fn write_volume_head(
     Ok(())
 }
 
-/// The END header's "another volume follows" flag (unrar's
-/// `ENDARC_NEXT_VOLUME`). Every volume of a set but the last carries it.
+/// The END header's "archive is a volume and not the last in the set" flag
+/// (end of archive flags, bit 0x0001). Every volume of a set but the last carries it.
 /// The writers wrote 0 on every volume until 7 Sep 2026, which native
 /// unrar reads as "last volume" the moment a member ENDS exactly at a
 /// volume's end: the file header's split flags are what carry it across
@@ -1270,7 +1278,7 @@ pub(super) fn write_volume_head(
 /// volume is sealed only once the writer KNOWS whether another follows:
 /// when the next one opens, or at finish. (nzbfast-local change, 7 Sep
 /// 2026; see VENDORING.md.)
-const ENDARC_NEXT_VOLUME: u64 = 0x0001;
+const END_OF_ARCHIVE_NOT_LAST_VOLUME: u64 = 0x0001;
 
 /// A volume's end header, plain or header-encrypted; `next_volume` is
 /// whether another volume of the set follows this one.
@@ -1279,11 +1287,11 @@ pub(super) fn write_volume_end(
     header_keys: Option<&HeaderEncryptionKeys>,
     next_volume: bool,
 ) -> Result<()> {
-    let end_flags = if next_volume { ENDARC_NEXT_VOLUME } else { 0 };
+    let end_flags = if next_volume { END_OF_ARCHIVE_NOT_LAST_VOLUME } else { 0 };
     if let Some(header_keys) = header_keys {
         out.extend_from_slice(&encrypted_header_block(
             &header_keys.keys,
-            HEAD_END,
+            BLOCK_TYPE_END_OF_ARCHIVE,
             0,
             None,
             &end_header_specific(end_flags),

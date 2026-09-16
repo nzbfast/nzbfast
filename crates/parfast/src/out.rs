@@ -139,7 +139,18 @@ impl Sink {
                 o.push_str(line);
                 o.push('\n');
             }
-            None => println!("{line}"),
+            // `writeln!` and a DROPPED error, not `println!`: Rust's
+            // runtime ignores SIGPIPE, so once the reader of a pipe has
+            // gone (`parfast v ... | head`), `println!` panics with
+            // "failed printing to stdout: Broken pipe" and the process
+            // exits 101 - outside the par2cmdline exit dialect this
+            // crate exists to keep. There is nothing to report to: the
+            // write simply stops landing, and every later line stops
+            // the same way.
+            None => {
+                use std::io::Write;
+                let _ = writeln!(std::io::stdout().lock(), "{line}");
+            }
         }
     }
 
@@ -156,7 +167,12 @@ impl Sink {
                 e.push_str(line);
                 e.push('\n');
             }
-            None => eprintln!("{line}"),
+            // Same reason as `out` above: a closed stderr must not
+            // turn a diagnosis into a panic.
+            None => {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "{line}");
+            }
         }
     }
 

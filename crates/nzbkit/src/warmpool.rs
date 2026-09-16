@@ -57,13 +57,14 @@
 //!   clients also draw on, so they are evicted after `max_idle`. The
 //!   keepalive tick doubles as the reaper.
 //!
-//! - **An idle POOL is released, not just an idle connection.** `max_idle`
-//!   ages out each session from its own park time; the release policy
-//!   below acts on the pool as a whole once no job has touched it for a
-//!   while, and trims every server down to a floor. The distinction
-//!   matters to a provider that caps CONCURRENT DISTINCT SOURCE IPS per
-//!   account rather than connections - see
-//!   [`WarmPool::set_release_policies`].
+//! - **An idle ACCOUNT is released, not just an idle connection.**
+//!   `max_idle` ages out each session from its own park time; the
+//!   release policy below acts on a whole server once no job has touched
+//!   THAT server for a while, and trims it down to its own floor. Per
+//!   account in both halves, clock and timeout: a provider that caps
+//!   CONCURRENT DISTINCT SOURCE IPS per account counts only its own
+//!   account, so traffic on a second provider must not hold the first
+//!   one's slots - see [`WarmPool::set_release_policies`].
 
 use crate::sync::MutexExt;
 use std::collections::HashMap;
@@ -228,15 +229,68 @@ pub struct WarmPool {
     /// async would have forced those to spawn a task just to store two
     /// numbers.
     release: std::sync::Mutex<HashMap<String, crate::config::ReleasePolicy>>,
-    /// Last time a job touched the pool, in either direction. A checkout
-    /// and a park are both "a job is using this account", and idleness
-    /// has to mean neither has happened - measuring only checkouts would
-    /// call a pool idle in the middle of the job that just filled it.
+    /// Last time a job touched each ACCOUNT, in either direction. A
+    /// checkout and a park are both "a job is using this account", and
+    /// idleness has to mean neither has happened - measuring only
+    /// checkouts would call a pool idle in the middle of the job that
+    /// just filled it.
     ///
-    /// A std mutex on an `Instant`: never held across an await, and the
-    /// tick reads it before taking the map lock.
-    last_activity: std::sync::Mutex<Instant>,
+    /// "A JOB" is load-bearing in that sentence, and `give_spare` is
+    /// what holds it: a background dialler's park is not a job, so the
+    /// standing reserve's refills leave this alone.
+    ///
+    /// ONE std mutex over the whole thing, not a second lock beside the
+    /// map: never held across an await, and the tick clones it before
+    /// taking the map lock, exactly as it does `release`.
+    last_activity: std::sync::Mutex<Activity>,
     pub(crate) stats: WarmStats,
+}
+
+/// The idle-release clock, one reading per ACCOUNT.
+///
+/// Per key because the predicate it feeds is per key:
+/// [`WarmPool::release_if_idle`] applies each server's OWN `after`. A
+/// single pool-wide reading made the threshold per server and the clock
+/// global, so continuous traffic on a flatrate primary deferred a block
+/// account's release for as long as the daemon stayed busy - the exact
+/// lockout `idle_release_secs` exists to end, on the two-server config
+/// that function's own doc names as its worked example.
+#[derive(Clone)]
+struct Activity {
+    /// The reading for an account nothing has touched yet: when the pool
+    /// was built.
+    ///
+    /// Not "infinitely idle", which would release the fleet of an
+    /// account no job has reached yet and stand its reserve down before
+    /// it ever dialled; and not "now", which would hold such a fleet for
+    /// the life of the daemon. It is precisely what the single clock
+    /// said about an untouched account, since that one was stamped
+    /// `Instant::now()` at construction too - so this is the old
+    /// behaviour restricted to a key, not a new rule about unused
+    /// accounts.
+    born: Instant,
+    /// One stamp per account key, keyed exactly as `idle` is, created by
+    /// the first job checkout or job park on that key and pruned with
+    /// the key itself by `retain_servers`.
+    per_key: HashMap<String, Instant>,
+}
+
+impl Activity {
+    /// How long since a job touched THIS account.
+    fn idle_for(&self, k: &str) -> Duration {
+        self.per_key.get(k).unwrap_or(&self.born).elapsed()
+    }
+
+    /// How long since a job touched ANY account, which is the pool-wide
+    /// reading [`WarmPool::idle_for`] publishes: the most recent stamp
+    /// in the map, or the pool's birth if no job has used it at all.
+    fn idle_for_any(&self) -> Duration {
+        self.per_key
+            .values()
+            .map(Instant::elapsed)
+            .min()
+            .unwrap_or_else(|| self.born.elapsed())
+    }
 }
 
 /// Identity of a reusable session. Credentials are part of it: a
@@ -276,7 +330,10 @@ impl WarmPool {
             max_idle,
             per_server,
             release: std::sync::Mutex::new(HashMap::new()),
-            last_activity: std::sync::Mutex::new(Instant::now()),
+            last_activity: std::sync::Mutex::new(Activity {
+                born: Instant::now(),
+                per_key: HashMap::new(),
+            }),
             stats: WarmStats::default(),
         });
         let weak = Arc::downgrade(&pool);
@@ -356,8 +413,19 @@ impl WarmPool {
         self.accepting.load(Ordering::Acquire)
     }
 
-    fn touch(&self) {
-        *self.last_activity.lock_ok() = Instant::now();
+    /// Stamp ONE account's clock. The caller has the key already, and
+    /// that is the point: activity is attributed to the account it
+    /// happened on, so a busy server cannot hold another server's fleet
+    /// past its own timeout.
+    fn touch(&self, k: &str) {
+        let now = Instant::now();
+        let mut a = self.last_activity.lock_ok();
+        match a.per_key.get_mut(k) {
+            Some(t) => *t = now,
+            None => {
+                a.per_key.insert(k.to_owned(), now);
+            }
+        }
     }
 
     /// A live, validated session for `server`, or None to connect fresh.
@@ -368,9 +436,13 @@ impl WarmPool {
     pub async fn take(&self, server: &ServerConfig) -> Option<Connection> {
         // Before the early `?` returns: a checkout that MISSES is still a
         // job reaching for this account, and the release policy must not
-        // treat a pool that is being hammered with misses as idle.
-        self.touch();
+        // treat an account that is being hammered with misses as idle.
+        // The key is computed first only because the clock is per
+        // account now - `key` is pure, so nothing else about the
+        // ordering above changed, and a miss still counts exactly as it
+        // always did, for the account it missed on.
         let k = key(server);
+        self.touch(&k);
         loop {
             let mut candidate = {
                 let mut idle = self.idle.lock().await;
@@ -426,11 +498,63 @@ impl WarmPool {
     }
 
     /// Park a connection that has NO unread responses on its socket.
-    /// Anything else must be closed instead - see the module docs.
+    ///
+    /// Anything else must be closed instead - see the module docs. This
+    /// is the JOB's park, and it restarts the idle-release clock; a
+    /// background dialler's park is [`WarmPool::give_spare`].
     pub async fn give(&self, server: &ServerConfig, conn: Connection) {
+        self.park(server, conn, true).await;
+    }
+
+    /// Park a connection NO JOB ASKED FOR - `crate::warmreserve`'s
+    /// standing floor refilling itself - which is `give` in every respect
+    /// except that it does NOT restart the idle-release clock.
+    ///
+    /// # What the idle clock measures, and why a refill is not it
+    ///
+    /// `last_activity` is time since a JOB carried traffic on this
+    /// account, not time since anything last touched a slot (see its own
+    /// field doc). The two readings diverge exactly here, and only the
+    /// first is what the trim is for: `idle_release_secs` is the
+    /// operator saying "hang up when I am not downloading", so a clock
+    /// a background dialler can restart answers a different question
+    /// than the one they asked.
+    ///
+    /// Routing the reserve's park through `give` made that inversion
+    /// total rather than partial, because the reserve's floor is
+    /// MAINTAINED: `tick` redials whenever `parked < effective`, so every
+    /// session the pool lost - to the provider, or to `max_idle`, which
+    /// is stamped from `parked_at` and so evicts at 600 s no matter how
+    /// many keepalives answered - came back inside 15 s and touched. With
+    /// `idle_release_secs` above `max_idle` (a supported setting: the
+    /// floor is 60 s and there is no ceiling) that loop is deterministic
+    /// on a perfectly healthy provider, and `last_activity` is
+    /// POOL-WIDE while the policies are per key, so one reserved
+    /// server's refills deferred the release of every OTHER server's
+    /// parked fleet too. Both stand-down predicates read this one clock:
+    /// `release_if_idle` here, and `warmreserve`'s own `Released` arm.
+    ///
+    /// # This cannot trim a spare the moment it is parked
+    ///
+    /// The other horn of that dilemma is closed by a guard that already
+    /// exists rather than by anything here: the reserve stands DOWN once
+    /// `idle_for >= after`, so it only ever dials inside the window where
+    /// the trim is not due. The net semantics are the cleanest available
+    /// statement of what a standing reserve is allowed to cost - an
+    /// account with a reserve releases on EXACTLY the same clock as one
+    /// without, neither later nor sooner. The reserve may not extend the
+    /// hold, and it is not punished for existing either.
+    pub(crate) async fn give_spare(&self, server: &ServerConfig, conn: Connection) {
+        self.park(server, conn, false).await;
+    }
+
+    /// `give` and `give_spare`'s shared body. `counts_as_use` is the one
+    /// word between them.
+    async fn park(&self, server: &ServerConfig, conn: Connection, counts_as_use: bool) {
+        let k = key(server);
         // Checked before `touch`: a park the pool is refusing is not a
-        // job using this account, so it must not restart the
-        // idle-release clock for whatever else is still parked.
+        // job using this account, so it must not restart that account's
+        // idle-release clock for whatever else of ITS OWN is parked.
         //
         // QUIT rather than drop, like the `per_server == 0` branch
         // below: a socket closed without a goodbye leaves a provider
@@ -440,12 +564,13 @@ impl WarmPool {
             conn.quit().await;
             return;
         }
-        self.touch();
+        if counts_as_use {
+            self.touch(&k);
+        }
         if self.per_server == 0 {
             conn.quit().await;
             return;
         }
-        let k = key(server);
         let mut idle = self.idle.lock().await;
         // Again, now under the map lock. This is what makes the gate
         // airtight rather than merely likely: a park that passed the
@@ -519,6 +644,16 @@ impl WarmPool {
             // Published under the map lock so a `give` serialized behind
             // us sees the new set before it can re-create a removed key.
             *self.retained.lock_ok() = Some(keep.clone());
+            // The clocks go with the keys. An identity that comes back
+            // later reads the pool's birth instant until a job touches
+            // it, which is the same reading a key this pool had never
+            // seen gets - never "busy", so nothing is held past its
+            // timeout on the strength of a stamp made under credentials
+            // this config no longer has.
+            self.last_activity
+                .lock_ok()
+                .per_key
+                .retain(|k, _| keep.contains(k));
             // Also invalidates DATE calls currently outside the map. It is
             // safe to drop a valid ping crossing a job boundary; it is not
             // safe to let a removed identity reappear after this returns.
@@ -567,9 +702,28 @@ impl WarmPool {
         self.idle.lock().await.get(&key(server)).map_or(0, Vec::len)
     }
 
-    /// How long since a job last used the pool.
+    /// How long since a job last used the pool, on ANY account.
+    ///
+    /// The pool-wide reading, kept for callers that ask about the pool
+    /// rather than about an account. Anything applying a SERVER's
+    /// `idle_release_secs` wants [`Self::idle_for_server`] instead: this
+    /// one goes to zero whenever any account is busy, which is how a
+    /// flatrate primary used to defer a block account's release.
     pub fn idle_for(&self) -> Duration {
-        self.last_activity.lock_ok().elapsed()
+        self.last_activity.lock_ok().idle_for_any()
+    }
+
+    /// How long since a job last used THIS account, in either direction.
+    ///
+    /// The reading every per-server idle decision takes: the release
+    /// trim here, and `crate::warmreserve`'s stand-down, which is per
+    /// server for the same reason the policy is - a server is an
+    /// account, and one provider's traffic says nothing about another's.
+    ///
+    /// An account no job has touched reads as idle since the pool was
+    /// built, never as infinitely idle - see `Activity::born`.
+    pub fn idle_for_server(&self, server: &ServerConfig) -> Duration {
+        self.last_activity.lock_ok().idle_for(&key(server))
     }
 
     /// Rewind the activity clock, so a test can reach the release
@@ -581,10 +735,15 @@ impl WarmPool {
     /// reachable from another module.
     #[cfg(test)]
     pub(crate) fn rewind_activity(&self, d: Duration) {
-        let mut t = self.last_activity.lock_ok();
-        *t = t
-            .checked_sub(d)
-            .expect("monotonic clock older than the rewind");
+        let mut a = self.last_activity.lock_ok();
+        let back = |t: &Instant| {
+            t.checked_sub(d)
+                .expect("monotonic clock older than the rewind")
+        };
+        a.born = back(&a.born);
+        for t in a.per_key.values_mut() {
+            *t = back(t);
+        }
     }
 
     /// Trim each server down to ITS OWN floor once the pool has gone
@@ -592,11 +751,15 @@ impl WarmPool {
     /// connection slots (and, for an address-capped provider, the
     /// account itself) back to the operator's other machines.
     ///
-    /// Per server throughout: a server is an account, and one provider's
-    /// limit says nothing about another's. A mixed config - a flatrate
-    /// primary that does not care, plus a block account at a provider
-    /// allowing two addresses - correctly releases the second on its own
-    /// short timeout while the first keeps its fleet warm.
+    /// Per server throughout - the CLOCK as well as the threshold, which
+    /// is what makes the worked example below hold rather than merely
+    /// sound right. A server is an account, and one provider's limit
+    /// says nothing about another's. A mixed config - a flatrate primary
+    /// that does not care, plus a block account at a provider allowing
+    /// two addresses - releases the second on its own short timeout
+    /// while the first keeps its fleet warm, AND goes on doing so while
+    /// the primary is downloading, because the primary's checkouts stamp
+    /// only the primary's clock.
     ///
     /// Runs BEFORE the keepalive pings in `tick`, so a session about to
     /// be released does not first spend a round-trip being kept alive.
@@ -606,11 +769,16 @@ impl WarmPool {
     /// is well inside the tolerance of a setting whose whole purpose is
     /// "a few minutes", and it costs no second timer.
     async fn release_if_idle(&self) {
-        let idle_for = self.idle_for();
         let policies = self.release.lock_ok().clone();
         if policies.is_empty() {
             return;
         }
+        // Cloned before the map lock, for the reason the policies are:
+        // one std mutex, taken and dropped here, never held across the
+        // await below. Adding the per-account clocks added no lock and
+        // no ordering - they live under the mutex that held the single
+        // `Instant`.
+        let activity = self.last_activity.lock_ok().clone();
         let surplus: Vec<Parked> = {
             let mut idle = self.idle.lock().await;
             let mut out = Vec::new();
@@ -619,7 +787,13 @@ impl WarmPool {
                 // installed one for; leave it to `retain_servers`.
                 let Some(p) = policies.get(k) else { continue };
                 let Some(after) = p.after else { continue };
-                if idle_for < after {
+                // THIS account's own clock against THIS account's own
+                // timeout. Both halves per key or the predicate means
+                // nothing: with one clock for the pool, a primary being
+                // downloaded from continuously held every other
+                // account's fleet open for as long as the daemon was
+                // busy.
+                if activity.idle_for(k) < after {
                     continue;
                 }
                 let keep = p.keep;
@@ -898,10 +1072,7 @@ mod tests {
     /// `Instant`, which no test clock moves, so this is the only way to
     /// reach a multi-minute timeout without waiting out minutes.
     fn go_idle_for(pool: &WarmPool, d: Duration) {
-        let mut t = pool.last_activity.lock().unwrap();
-        *t = t
-            .checked_sub(d)
-            .expect("monotonic clock older than the rewind");
+        pool.rewind_activity(d);
     }
 
     /// The headline: an idle pool must hand the SOCKETS back, not merely
@@ -1075,6 +1246,132 @@ mod tests {
              them spends the cold-start cost on links that never had the problem"
         );
         assert_eq!(pool.idle_count().await, 3);
+        assert_eq!(pool.stats.released.load(Ordering::Relaxed), 3);
+    }
+
+    /// The half `a_strict_server_releases_while_a_lax_one_keeps_its_fleet`
+    /// above cannot see: per-account ACTIVITY.
+    ///
+    /// That test drives the whole pool idle with one `go_idle_for`, so
+    /// it pins the per-key `after` and `keep` and is silent on whose
+    /// traffic the timeout is measured against. This one moves traffic
+    /// on ONE key and leaves the other alone, which is the config
+    /// `release_if_idle`'s doc uses as its worked example, in the state
+    /// it is actually in most of the time: the flatrate primary is
+    /// DOWNLOADING.
+    ///
+    /// With one clock for the pool, the primary's checkouts restarted
+    /// the clock the block account's 120 s was measured against, so the
+    /// capped account was handed back only while the daemon had nothing
+    /// to do at all - which is not the promise, and not the shape the
+    /// setting was written for. The user's laptop stayed locked out of
+    /// their own second account for as long as the box was busy.
+    ///
+    /// On the SOCKETS, for the reason the headline release test gives.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn traffic_on_one_server_does_not_defer_another_servers_release() {
+        let (primary_addr, primary_live) = counting_provider();
+        let (capped_addr, capped_live) = counting_provider();
+        // The flatrate primary does not care for an hour; the block
+        // account at an address-capped provider is due after two minutes
+        // and keeps nothing.
+        let primary = policy_config(primary_addr, Some(3600), 4);
+        let capped = policy_config(capped_addr, Some(120), 0);
+
+        let pool = WarmPool::new(DEFAULT_MAX_IDLE, 8);
+        pool.set_release_policies(&[primary.clone(), capped.clone()]);
+        for sc in [&primary, &capped] {
+            for _ in 0..3 {
+                let (conn, _) = Connection::connect(sc).await.unwrap();
+                pool.give(sc, conn).await;
+            }
+        }
+        assert_eq!(live_settles(&primary_live, 3).await, 3);
+        assert_eq!(live_settles(&capped_live, 3).await, 3);
+
+        // Five minutes on: both accounts are well past the capped one's
+        // timeout, and nowhere near the primary's.
+        go_idle_for(&pool, Duration::from_secs(300));
+
+        // And the primary is still working - a checkout and the park
+        // that ends it, which is a job using THAT account and nothing
+        // else. It stamps the primary's clock and must not touch the
+        // clock the capped account's release is measured against.
+        let conn = pool.take(&primary).await.expect("a warm primary session");
+        pool.give(&primary, conn).await;
+        assert!(
+            pool.idle_for_server(&primary) < Duration::from_secs(10),
+            "the account a job just used is not idle"
+        );
+        assert!(
+            pool.idle_for_server(&capped) >= Duration::from_secs(300),
+            "and the account that job never reached is exactly as idle as it was"
+        );
+
+        pool.tick().await;
+
+        assert_eq!(
+            live_settles(&capped_live, 0).await,
+            0,
+            "the address-capped account must be handed back on its own timeout \
+             while the primary is downloading: a busy account deferring every \
+             other account's release is the lockout the setting exists to end"
+        );
+        assert_eq!(
+            primary_live.load(Ordering::SeqCst),
+            3,
+            "and the account that is busy keeps its own fleet warm"
+        );
+        assert_eq!(pool.stats.released.load(Ordering::Relaxed), 3);
+    }
+
+    /// The same rule with the policies held IDENTICAL, so activity is
+    /// the only difference between the two accounts - and the control
+    /// arm for the test above, which cannot distinguish "the capped
+    /// account released because its own clock ran" from "it released
+    /// because it has the shorter timeout".
+    ///
+    /// Both directions in one run: the busy account keeps its fleet
+    /// through a timeout it would otherwise have reached, and the quiet
+    /// one hands its sockets back through traffic that was never its
+    /// own. A per-key clock that got either half wrong would trade this
+    /// defect for its mirror - releasing a session a busy account is
+    /// about to want, and redialling on a provider that counts it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_servers_on_one_timeout_release_on_their_own_traffic() {
+        let (busy_addr, busy_live) = counting_provider();
+        let (quiet_addr, quiet_live) = counting_provider();
+        let busy = policy_config(busy_addr, Some(120), 0);
+        let quiet = policy_config(quiet_addr, Some(120), 0);
+
+        let pool = WarmPool::new(DEFAULT_MAX_IDLE, 8);
+        pool.set_release_policies(&[busy.clone(), quiet.clone()]);
+        for sc in [&busy, &quiet] {
+            for _ in 0..3 {
+                let (conn, _) = Connection::connect(sc).await.unwrap();
+                pool.give(sc, conn).await;
+            }
+        }
+        assert_eq!(live_settles(&busy_live, 3).await, 3);
+        assert_eq!(live_settles(&quiet_live, 3).await, 3);
+
+        go_idle_for(&pool, Duration::from_secs(300));
+        let conn = pool.take(&busy).await.expect("a warm session");
+        pool.give(&busy, conn).await;
+        pool.tick().await;
+
+        assert_eq!(
+            live_settles(&quiet_live, 0).await,
+            0,
+            "the account nothing has touched for five minutes is released"
+        );
+        assert_eq!(
+            live_settles(&busy_live, 3).await,
+            3,
+            "and the account a job was using a moment ago keeps every socket: \
+             handing back a session that account is about to want again is the \
+             mirror of the defect, not a fix for it"
+        );
         assert_eq!(pool.stats.released.load(Ordering::Relaxed), 3);
     }
 
@@ -1868,5 +2165,105 @@ mod tests {
             1,
             "pooling must survive a config reload"
         );
+    }
+
+    /// A background dialler's park must NOT restart the idle-release
+    /// clock - the semantics decided for TODO 313 item 8's standing
+    /// reserve, and the sharpest statement of what that clock measures:
+    /// time since a JOB carried traffic on this account, never time
+    /// since anything last touched a slot.
+    ///
+    /// The scenario is the deterministic one, which needs no provider
+    /// misbehaviour: `max_idle` is stamped from `parked_at` and no
+    /// keepalive refreshes it, so an `idle_release_secs` set above it
+    /// (supported - the floor is 60 s and there is no ceiling) evicts the
+    /// reserve's sessions before the trim is ever due, the reserve
+    /// redials inside 15 s, and if that park touched, the operator's
+    /// "hang up when I am not downloading" could never fire once for the
+    /// life of the daemon. `last_activity` is POOL-WIDE while the
+    /// policies are per key, so it would defer every OTHER server's
+    /// release too.
+    ///
+    /// Pinned on the SOCKETS for the reason the headline release test
+    /// gives: internal state is not what an address-capped provider
+    /// counts. `a_job_park_does_restart_the_idle_release_clock` is this
+    /// test's control arm - the two readings must stay different.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_spare_park_does_not_restart_the_idle_release_clock() {
+        let (addr, live) = counting_provider();
+        let sc = policy_config(addr, Some(300), 0);
+        let pool = WarmPool::new(DEFAULT_MAX_IDLE, 8);
+        pool.set_release_policies(std::slice::from_ref(&sc));
+
+        // A job parked one and left, nearly five minutes ago.
+        let (conn, _) = Connection::connect(&sc).await.unwrap();
+        pool.give(&sc, conn).await;
+        go_idle_for(&pool, Duration::from_secs(299));
+
+        // The reserve refills its floor inside the window - which is the
+        // only window it dials in, since it stands down on this same
+        // reading once the timeout is reached.
+        let (conn, _) = Connection::connect(&sc).await.unwrap();
+        pool.give_spare(&sc, conn).await;
+        assert_eq!(
+            pool.idle_count().await,
+            2,
+            "the spare is parked, not closed"
+        );
+        assert!(
+            pool.idle_for() >= Duration::from_secs(299),
+            "a park no job asked for is not a job using this account, so it must \
+             not restart the idle-release clock for the whole pool"
+        );
+
+        // Two more seconds, and the pool is past its timeout - on the
+        // clock it would have had with no reserve at all.
+        go_idle_for(&pool, Duration::from_secs(2));
+        pool.tick().await;
+
+        assert_eq!(pool.idle_count().await, 0);
+        assert_eq!(pool.stats.released.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            live_settles(&live, 0).await,
+            0,
+            "a reserve refilling itself deferred the release forever: the account \
+             is still locked to this host's IP, which is what the trim exists to end"
+        );
+    }
+
+    /// The control arm for the test above, and the half that must not be
+    /// "fixed" by making every park non-touching: a JOB's park DOES
+    /// restart the clock. Measuring only checkouts would call a pool idle
+    /// in the middle of the job that just filled it, and releasing a
+    /// session a provider counts and then redialling it is worse than
+    /// holding it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_job_park_does_restart_the_idle_release_clock() {
+        let (addr, live) = counting_provider();
+        let sc = policy_config(addr, Some(300), 0);
+        let pool = WarmPool::new(DEFAULT_MAX_IDLE, 8);
+        pool.set_release_policies(std::slice::from_ref(&sc));
+
+        let (conn, _) = Connection::connect(&sc).await.unwrap();
+        pool.give(&sc, conn).await;
+        go_idle_for(&pool, Duration::from_secs(299));
+
+        let (conn, _) = Connection::connect(&sc).await.unwrap();
+        pool.give(&sc, conn).await;
+        assert!(
+            pool.idle_for() < Duration::from_secs(10),
+            "a job parking a drained session IS the job using this account"
+        );
+
+        go_idle_for(&pool, Duration::from_secs(2));
+        pool.tick().await;
+
+        assert_eq!(
+            pool.idle_count().await,
+            2,
+            "a pool a job was using two seconds ago is not idle"
+        );
+        assert_eq!(pool.stats.released.load(Ordering::Relaxed), 0);
+        assert_eq!(live_settles(&live, 2).await, 2);
     }
 }

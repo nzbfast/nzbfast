@@ -1239,7 +1239,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Jobs you start appear here, and run one at a time unless you raise the limit in Settings."
+            "value": "Jobs you start appear here, and run one at a time unless you raise the limit in Settings. When this computer has room for both, two large single-file creates can run side by side."
           }
         }
       }
@@ -2179,6 +2179,61 @@
         }
       }
     },
+    "settings.digest_cache": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remember checksums of large files"
+          }
+        }
+      }
+    },
+    "settings.digest_cache_clear": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear remembered checksums"
+          }
+        }
+      }
+    },
+    "settings.digest_cache_clear_confirm": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forget every remembered checksum? The next create or full check of each large file takes the usual time again."
+          }
+        }
+      }
+    },
+    "settings.digest_cache_cleared": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remembered checksums cleared"
+          }
+        }
+      }
+    },
+    "settings.digest_cache_note": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A repeat create or full check of an unchanged file over 256 MB skips its slowest step. parfast keeps a small checksum record for each such file in your user cache folder, and re-checks the file's contents before trusting it."
+          }
+        }
+      }
+    },
     "settings.fast_solver": {
       "extractionState": "manual",
       "localizations": {
@@ -2384,6 +2439,28 @@
           "stringUnit": {
             "state": "translated",
             "value": "Verify it"
+          }
+        }
+      }
+    },
+    "settings.pair_large_creates": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run two large single-file creates at once, so a queue of large files finishes sooner"
+          }
+        }
+      }
+    },
+    "settings.pair_large_creates_note": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No single job gets faster. A second create starts beside a running one only when this computer has the cores and memory for both. On a spinning disk it gains nothing, because the two creates share the disk's speed, so you can turn it off there."
           }
         }
       }

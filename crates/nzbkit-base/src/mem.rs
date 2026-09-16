@@ -38,6 +38,186 @@ pub fn physical_ram() -> Option<u64> {
         }
     }
     #[cfg(windows)]
+    {
+        if let Some((total, _)) = global_memory_status() {
+            return Some(total);
+        }
+    }
+    None
+}
+
+/// Physical memory the OS could hand out right now, in bytes: free pages
+/// plus the file cache it would reclaim first (Windows `ullAvailPhys`,
+/// which counts the standby list; Linux `MemAvailable`; macOS free,
+/// file-backed and purgeable pages, and only when opted in - see that arm).
+/// `None` where the OS offers no such figure (or macOS has not opted in),
+/// so a caller gating on it keeps its old behaviour there.
+///
+/// It moves from one call to the next, which is the point for its caller:
+/// whether a MAPPING of a large payload can stay resident
+/// (`par2gen::mapped_payload_fits_memory`, TODO 345) is a question about
+/// the cache at this moment, not about the machine.
+#[cfg(windows)]
+pub fn available_ram() -> Option<u64> {
+    global_memory_status().map(|(_, avail)| avail)
+}
+
+/// See the Windows arm.
+#[cfg(target_os = "linux")]
+pub fn available_ram() -> Option<u64> {
+    meminfo_available(&std::fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+/// See the Windows arm: [`vm_available_ram`], always.
+///
+/// THE DEFAULT SINCE 16 SEP 2026, when the knee was measured on a Mac whose
+/// RAM is smaller than the member, which is the only box that can show it
+/// (TODO 345 D, research/PARFAST-OVER-RAM-CREATE-2026-09-15.md section
+/// 6.5). A 48 GiB member on a 32 GiB MacBook Air, no pin anywhere: the
+/// mapped route took 316 s and 353 s against 124 s on the copied windows,
+/// with 8.5 M hard faults a leg and ~245 GB paged in for a 51.5 GB member,
+/// while all three legs over this reading refused at the figure it returned
+/// and walled with the copied windows. A 13 GiB control on the same box
+/// never refused and walled with the mapped route, so the reading does not
+/// cost a member that fits. One set digest per member, both rounds.
+///
+/// It was OPT-IN until then, behind `NZBFAST_MACOS_AVAILABLE_RAM=1`,
+/// because this function's one caller REFUSES a mapping on the strength of
+/// it and the collapse was unmeasured on a Mac: the 512 GiB M3 Ultra could
+/// not be pinned down to a small machine's memory without starving every
+/// other program on it (sections 6.2 and 6.3). That variable is GONE - the
+/// override that maps regardless is `NZBFAST_PAR2GEN_MAP_FIT=off`, on every
+/// platform, and it is what an A/B arm should set now.
+#[cfg(target_os = "macos")]
+pub fn available_ram() -> Option<u64> {
+    vm_available_ram()
+}
+
+/// macOS memory the OS could hand out now: `host_statistics64(HOST_VM_INFO64)`,
+/// summed as [`vm_available_bytes`] says. For `examples/memprobe.rs` and
+/// the knee round; the gate reads [`available_ram`], which since 16 Sep
+/// 2026 is this same reading.
+#[cfg(target_os = "macos")]
+pub fn vm_available_ram() -> Option<u64> {
+    // vm_statistics64 (mach/vm_statistics.h) through
+    // `total_uncompressed_pages_in_compressor`, the HOST_VM_INFO64 layout
+    // every supported macOS returns in full; newer kernels append fields
+    // and copy only as many as `count` asks for. Four natural_t then nine
+    // u64 then two natural_t then four u64 then four natural_t then one
+    // u64: no padding under the header's `pack(4)` or under repr(C).
+    #[repr(C)]
+    struct VmStatistics64 {
+        free_count: u32,
+        _active_count: u32,
+        _inactive_count: u32,
+        _wire_count: u32,
+        _counters: [u64; 9],
+        purgeable_count: u32,
+        speculative_count: u32,
+        _compressor_counters: [u64; 4],
+        _compressor_page_count: u32,
+        _throttled_count: u32,
+        external_page_count: u32,
+        _internal_page_count: u32,
+        _total_uncompressed_pages_in_compressor: u64,
+    }
+    const HOST_VM_INFO64: i32 = 4;
+    // SAFETY: signatures match mach/mach_host.h and mach/mach_port.h
+    // (`host_t`, `mach_port_t` and `ipc_space_t` are u32 ports,
+    // `host_info64_t` is `integer_t*`, `vm_size_t` is pointer-sized).
+    unsafe extern "C" {
+        fn mach_host_self() -> u32;
+        fn host_statistics64(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+        fn host_page_size(host: u32, size: *mut usize) -> i32;
+        fn mach_port_deallocate(task: u32, name: u32) -> i32;
+    }
+    // SAFETY: VmStatistics64 is #[repr(C)] matching the layout above,
+    // every field is a plain integer so zeroed() is a valid value, `count`
+    // is the struct size in integer_t units as host_statistics64 requires,
+    // and every out-pointer is a valid &mut. `mach_host_self` hands back a
+    // send right with a user reference added, which is released before
+    // returning so a long-lived process does not accumulate them.
+    unsafe {
+        let host = mach_host_self();
+        let mut stats: VmStatistics64 = std::mem::zeroed();
+        let mut count = (std::mem::size_of::<VmStatistics64>() / 4) as u32;
+        let mut page: usize = 0;
+        let ok = host_statistics64(host, HOST_VM_INFO64, (&raw mut stats).cast(), &mut count) == 0
+            && host_page_size(host, &mut page) == 0;
+        mach_port_deallocate(mach_task_self_, host);
+        if !ok {
+            return None;
+        }
+        vm_available_bytes(
+            stats.free_count,
+            stats.speculative_count,
+            stats.external_page_count,
+            stats.purgeable_count,
+            page as u64,
+        )
+    }
+}
+
+/// See the Windows arm: no figure here, so callers keep their old route.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub fn available_ram() -> Option<u64> {
+    None
+}
+
+/// macOS available memory from HOST_VM_INFO64 counts, in bytes: free
+/// pages that are not speculative, plus every file-backed page, plus
+/// purgeable pages. `None` for a zero page size.
+///
+/// Each term, and each page count left out, is argued from this Mac's own
+/// counters (TODO 345 D, research/PARFAST-OVER-RAM-CREATE-2026-09-15.md
+/// section 6):
+/// - `free_count` INCLUDES the speculative pages (`vm_stat` prints
+///   `free_count - speculative_count` as "Pages free"), and speculative
+///   pages are file read-ahead, already inside `external_page_count`:
+///   measured 15 Sep 2026 on an M3 Ultra, file-backed plus anonymous
+///   pages (6,177,925 + 7,919,264) equal active plus inactive plus
+///   speculative (6,956,479 + 6,811,680 + 329,030) exactly. Adding
+///   speculative again would count read-ahead twice.
+/// - `external_page_count` is the file cache, active and inactive alike:
+///   the pageout daemon evicts either without writing anything, the same
+///   pages Linux counts in `MemAvailable`.
+/// - `purgeable_count` is volatile memory the kernel drops on demand.
+/// - `inactive_count` is NOT a term, although a sum of free + inactive +
+///   speculative + purgeable is the common reading: inactive holds
+///   anonymous pages too, which the kernel can only reclaim by
+///   compressing or swapping them, and Windows' `ullAvailPhys` leaves the
+///   same class (the modified list) out.
+#[cfg(any(target_os = "macos", test))]
+fn vm_available_bytes(
+    free_count: u32,
+    speculative_count: u32,
+    external_page_count: u32,
+    purgeable_count: u32,
+    page_size: u64,
+) -> Option<u64> {
+    let pages = u64::from(free_count.saturating_sub(speculative_count))
+        + u64::from(external_page_count)
+        + u64::from(purgeable_count);
+    (page_size > 0).then(|| pages.saturating_mul(page_size))
+}
+
+/// `MemAvailable` out of a `/proc/meminfo` text, in bytes.
+#[cfg(any(target_os = "linux", test))]
+fn meminfo_available(meminfo: &str) -> Option<u64> {
+    meminfo.lines().find_map(|line| {
+        let kb = line.strip_prefix("MemAvailable:")?.trim();
+        kb.strip_suffix("kB")?
+            .trim()
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
+    })
+}
+
+/// `(ullTotalPhys, ullAvailPhys)` from GlobalMemoryStatusEx - the one FFI
+/// site both [`physical_ram`] and [`available_ram`] read.
+#[cfg(windows)]
+fn global_memory_status() -> Option<(u64, u64)> {
     // SAFETY: MemoryStatusEx is #[repr(C)] matching the documented
     // MEMORYSTATUSEX layout (comment below), every field is a plain integer
     // so zeroed() is a valid value, `length` is set to the struct size
@@ -66,10 +246,43 @@ pub fn physical_ram() -> Option<u64> {
         let mut st: MemoryStatusEx = std::mem::zeroed();
         st.length = std::mem::size_of::<MemoryStatusEx>() as u32;
         if GlobalMemoryStatusEx(&mut st) != 0 && st.total_phys > 0 {
-            return Some(st.total_phys);
+            return Some((st.total_phys, st.avail_phys));
         }
     }
     None
+}
+
+#[cfg(test)]
+mod available_ram_tests {
+    #[test]
+    fn meminfo_available_reads_the_kilobyte_line_and_nothing_else() {
+        let text = "MemTotal:       32768000 kB\nMemFree:  100 kB\nMemAvailable:   20480000 kB\nBuffers: 5 kB\n";
+        assert_eq!(super::meminfo_available(text), Some(20_480_000 * 1024));
+        assert_eq!(super::meminfo_available("MemTotal: 1 kB\n"), None);
+        assert_eq!(super::meminfo_available("MemAvailable: lots\n"), None);
+    }
+
+    /// The M3 Ultra's own counters from 15 Sep 2026 (vm_stat, 16 KiB
+    /// pages): speculative is inside `free_count` and inside the
+    /// file-backed count, so it is taken out once, and inactive is not a
+    /// term.
+    #[test]
+    fn vm_available_bytes_counts_speculative_once_and_leaves_inactive_out() {
+        let (free_shown, spec, file, purgeable) =
+            (18_468_700u32, 329_030u32, 6_177_925u32, 1_064_322u32);
+        let free_count = free_shown + spec;
+        assert_eq!(
+            super::vm_available_bytes(free_count, spec, file, purgeable, 16_384),
+            Some((18_468_700u64 + 6_177_925 + 1_064_322) * 16_384)
+        );
+        // A speculative count above free (a torn read between the two
+        // counters) must not wrap.
+        assert_eq!(
+            super::vm_available_bytes(5, 9, 10, 0, 4096),
+            Some(10 * 4096)
+        );
+        assert_eq!(super::vm_available_bytes(1, 0, 1, 1, 0), None);
+    }
 }
 
 /// This process's memory counters from kernel32, in bytes: (peak working
@@ -122,62 +335,183 @@ fn process_memory_counters() -> Option<(u64, u64)> {
     None
 }
 
-/// Cgroup memory limit on our own cgroup (Linux): tightest `memory.max`
-/// (v2) or `memory.limit_in_bytes` (v1 memory controller) walking from
-/// this process's cgroup up to the mount root, so both private-cgroupns
-/// containers (path `/`) and nested host paths (systemd slices, docker
-/// with host cgroupns) resolve. "max" / v1's page-rounded i64::MAX
-/// sentinel read as no limit.
-// `pub`, matching the `cfg(not(linux))` twin below: examples/memprobe.rs
-// consumes it from OUTSIDE the crate, so a `pub(crate)` here is E0603 on
-// Linux and invisible everywhere else (see the §103.6 note below).
+/// Every cgroup directory this process is charged to, with the ancestors
+/// each line walks up to its mount root, paired with whether that line is
+/// the v2 unified hierarchy. Both [`cgroup_mem_limit`] and
+/// [`cgroup_available_ram`] fold over this, so the "which directories count"
+/// rule has one copy: private-cgroupns containers (path `/`) and nested host
+/// paths (systemd slices, docker with host cgroupns) resolve the same way for
+/// both readings, and a reader who has checked one has checked the other.
 #[cfg(target_os = "linux")]
-pub fn cgroup_mem_limit() -> Option<u64> {
+fn cgroup_dirs() -> Vec<(std::path::PathBuf, bool)> {
     use std::path::Path;
-    fn read_limit(p: &Path) -> Option<u64> {
-        let v: u64 = std::fs::read_to_string(p).ok()?.trim().parse().ok()?;
-        (v < 1 << 48).then_some(v)
-    }
-    fn tightest(base: &Path, rel: &str, file: &str) -> Option<u64> {
-        let mut dir = base.join(rel.trim_start_matches('/'));
-        let mut best: Option<u64> = None;
-        loop {
-            if let Some(v) = read_limit(&dir.join(file)) {
-                best = Some(best.map_or(v, |b| b.min(v)));
-            }
-            if dir == *base || !dir.pop() {
-                return best;
-            }
-        }
-    }
     let cg = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-    let mut best: Option<u64> = None;
+    let mut out = Vec::new();
     for line in cg.lines() {
         let mut it = line.splitn(3, ':');
         let (Some(_), Some(ctrls), Some(rel)) = (it.next(), it.next(), it.next()) else {
             continue;
         };
-        let found = if ctrls.is_empty() {
-            tightest(Path::new("/sys/fs/cgroup"), rel, "memory.max")
+        let (base, v2) = if ctrls.is_empty() {
+            (Path::new("/sys/fs/cgroup"), true)
         } else if ctrls.split(',').any(|c| c == "memory") {
-            tightest(
-                Path::new("/sys/fs/cgroup/memory"),
-                rel,
-                "memory.limit_in_bytes",
-            )
+            (Path::new("/sys/fs/cgroup/memory"), false)
         } else {
-            None
+            continue;
         };
-        if let Some(v) = found {
-            best = Some(best.map_or(v, |b| b.min(v)));
+        let mut dir = base.join(rel.trim_start_matches('/'));
+        loop {
+            out.push((dir.clone(), v2));
+            if dir == *base || !dir.pop() {
+                break;
+            }
         }
     }
-    best
+    out
+}
+
+/// A cgroup byte counter, with v1's page-rounded `i64::MAX` and v2's "max"
+/// sentinel both read as absent.
+#[cfg(target_os = "linux")]
+fn cgroup_u64(p: &std::path::Path) -> Option<u64> {
+    let v: u64 = std::fs::read_to_string(p).ok()?.trim().parse().ok()?;
+    (v < 1 << 48).then_some(v)
+}
+
+/// One field out of a cgroup `memory.stat`.
+#[cfg(target_os = "linux")]
+fn cgroup_stat_field(p: &std::path::Path, key: &str) -> Option<u64> {
+    let text = std::fs::read_to_string(p).ok()?;
+    text.lines().find_map(|l| {
+        let mut it = l.split_whitespace();
+        (it.next()? == key).then(|| it.next()?.parse().ok())?
+    })
+}
+
+/// Cgroup memory limit on our own cgroup (Linux): tightest `memory.max`
+/// (v2) or `memory.limit_in_bytes` (v1 memory controller) over
+/// [`cgroup_dirs`]. "max" / v1's page-rounded i64::MAX sentinel read as no
+/// limit.
+// `pub`, matching the `cfg(not(linux))` twin below: examples/memprobe.rs
+// consumes it from OUTSIDE the crate, so a `pub(crate)` here is E0603 on
+// Linux and invisible everywhere else (see the §103.6 note below).
+#[cfg(target_os = "linux")]
+pub fn cgroup_mem_limit() -> Option<u64> {
+    cgroup_dirs()
+        .iter()
+        .filter_map(|(dir, v2)| {
+            cgroup_u64(&dir.join(if *v2 {
+                "memory.max"
+            } else {
+                "memory.limit_in_bytes"
+            }))
+        })
+        .min()
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn cgroup_mem_limit() -> Option<u64> {
     None
+}
+
+/// How much memory this process's cgroup could still hold, in bytes, or
+/// `None` outside a limited cgroup - the CONTAINER analogue of
+/// [`available_ram`], and the reading that function cannot give.
+///
+/// **`/proc/meminfo` is not namespaced.** Inside a memory-limited container
+/// `MemAvailable` reports the HOST's figure, so [`available_ram`]'s Linux
+/// arm answers for the machine and not for the cgroup the process actually
+/// lives in. Cgroup v2 charges page cache to the cgroup, so a mapping
+/// admitted on the host's figure is charged, reclaimed under the limit and
+/// refaulted - which is exactly the collapse
+/// `par2gen::mapped_payload_fits_memory` exists to prevent.
+///
+/// Measured 16 Sep 2026 on an 8-core 31 GB Linux box, one 2 GiB member at 5%
+/// (`-b32768`), every container reading `MemAvailable: 30926756 kB` whatever
+/// its limit, mapped against copied windows: at a 1 GiB limit the gate
+/// admitted the mapping and the create took 147-152 s with ~1.0 M major
+/// faults and 34.2-34.5 GB read off disk for a 2 GiB member, where the copied
+/// windows took 30.7-42.4 s; at 2 GiB, 38.7-50.8 s against 11.0-13.7. At
+/// 3 GiB the mapping FITS and wins as it is meant to, 4.1-4.2 s against
+/// 4.5-6.1, which is why the reading has to be a figure and not "refuse in a
+/// container". This composition refuses at 1 and 2 GiB and admits at 3.
+/// Round and per-leg counters:
+/// `research/PAR2GEN-GATE-CGROUP-BLIND-2026-09-16.md`, harness
+/// `research/harness/cgmap.py`.
+///
+/// **Its caller does not compare a payload against this figure directly**,
+/// and a reader of that gate should not expect it to: since 16 Sep 2026
+/// `par2gen::map_fit::mapped_payload_fits_memory` subtracts the create's own
+/// working set from THIS reading and not from [`available_ram`]'s, because
+/// `limit - (usage - cache)` is a hard limit less an unreclaimable charge
+/// while `MemAvailable` is an estimate with the kernel's reserve already
+/// deducted. That asymmetry is measured; the arms are in section 8 of the
+/// round below.
+///
+/// The composition is [`cgroup_available_from`]: a cgroup LIMIT is not an
+/// AVAILABLE figure and cannot be dropped in as one, because `memory.current`
+/// already holds whatever cache this cgroup has charged. It is NOT
+/// [`MemBudget::auto_total`]'s half-the-limit either - that is a budget
+/// heuristic for when a tier spills, and this is a question about what the
+/// page cache can hold.
+#[cfg(target_os = "linux")]
+pub fn cgroup_available_ram() -> Option<u64> {
+    cgroup_dirs()
+        .iter()
+        .filter_map(|(dir, v2)| {
+            let (limit, usage, cache) = if *v2 {
+                ("memory.max", "memory.current", "file")
+            } else {
+                (
+                    "memory.limit_in_bytes",
+                    "memory.usage_in_bytes",
+                    "total_cache",
+                )
+            };
+            Some(cgroup_available_from(
+                cgroup_u64(&dir.join(limit))?,
+                cgroup_u64(&dir.join(usage))?,
+                cgroup_stat_field(&dir.join("memory.stat"), cache)?,
+            ))
+        })
+        .min()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn cgroup_available_ram() -> Option<u64> {
+    None
+}
+
+/// Pure half of [`cgroup_available_ram`]: the limit less the charge that
+/// cannot be reclaimed to make room.
+///
+/// `usage` (v2 `memory.current`) counts this cgroup's whole charge, page
+/// cache included, so `limit - usage` UNDERSTATES what a mapping could have
+/// by every cached byte - on a cgroup that has just read its member that is
+/// most of the limit, and the gate would refuse a payload that fits. The
+/// cache is reclaimable to make room for the mapping, so the term that binds
+/// is `usage - cache`: anonymous memory, kernel memory and socket buffers,
+/// the charge the kernel can only move by swapping or OOM-killing.
+///
+/// `cache` is v2's `file` (v1's `total_cache`) whole, not `file` less
+/// `file_dirty`/`file_writeback`: dirty pages are reclaimable after a
+/// writeback this create is not waiting on, and both are transient next to a
+/// payload measured in GiB. Over-counting them by a few MiB moves no
+/// admission this round could see.
+#[cfg(any(target_os = "linux", test))]
+fn cgroup_available_from(limit: u64, usage: u64, cache: u64) -> u64 {
+    limit.saturating_sub(usage.saturating_sub(cache))
+}
+
+/// The tighter of two optional readings, either of which may be absent -
+/// [`available_ram`] (the machine) against [`cgroup_available_ram`] (the
+/// container). `None` only when neither OS offers a figure, which is what
+/// keeps a caller's old route on a platform that reports nothing.
+pub fn tightest_available(host: Option<u64>, cgroup: Option<u64>) -> Option<u64> {
+    match (host, cgroup) {
+        (Some(h), Some(c)) => Some(h.min(c)),
+        (h, c) => h.or(c),
+    }
 }
 
 /// `123`, `700M`, `2400M`, `2G` - DECIMAL suffixes, the same units
@@ -264,60 +598,123 @@ pub fn set_cpu_workers(n: usize) {
     CPU_WORKERS_PUBLISHED.store(n.clamp(1, 1024), std::sync::atomic::Ordering::Relaxed);
 }
 
-/// A ceiling on the WINDOW FOLD's worker count, published by a create
-/// that has measured its fold outrunning its whole-file MD5 chain, or 0
-/// when none is in force. Read by `linalg::fold_parallel` under
-/// [`cpu_workers`]; never above it.
-///
-/// Why a create would ask for FEWER fold workers: a single-file (or
-/// few-file) create is bound by the whole-file MD5 chain - one serial
-/// thread - and the fold overlaps it. On a box with cores to spare the
-/// fold's workers cost the chain nothing; on an 8-vCPU box every fold
-/// worker past what the fold needs to keep pace is a thread the OS
-/// schedules fairly AGAINST the one thread whose length is the wall.
-/// Measured 13 Sep 2026 on a Zen 4 VM, 8.86 GB one file at 5%: eight
-/// fold workers 13.26 s, seven 12.90, six 12.34, four 11.91 - the same
-/// binary, `-t` the only change (research/PARFAST-SINGLE-FILE-MD5-
-/// HEADROOM-2026-09-13.md). `par2gen::fold_windows` paces the width
-/// from what it measures window by window and clears it on exit.
-static FOLD_WIDTH_CAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    /// A ceiling on the WINDOW FOLD's worker count, published by a create
+    /// that has measured its fold outrunning its whole-file MD5 chain, or 0
+    /// when none is in force. Read by `linalg::fold_parallel` under
+    /// [`cpu_workers`]; never above it.
+    ///
+    /// Why a create would ask for FEWER fold workers: a single-file (or
+    /// few-file) create is bound by the whole-file MD5 chain - one serial
+    /// thread - and the fold overlaps it. On a box with cores to spare the
+    /// fold's workers cost the chain nothing; on an 8-vCPU box every fold
+    /// worker past what the fold needs to keep pace is a thread the OS
+    /// schedules fairly AGAINST the one thread whose length is the wall.
+    /// Measured 13 Sep 2026 on a Zen 4 VM, 8.86 GB one file at 5%: eight
+    /// fold workers 13.26 s, seven 12.90, six 12.34, four 11.91 - the same
+    /// binary, `-t` the only change (research/PARFAST-SINGLE-FILE-MD5-
+    /// HEADROOM-2026-09-13.md). `par2gen::fold_windows` paces the width
+    /// from what it measures window by window and clears it on exit.
+    ///
+    /// PER THREAD since 15 Sep 2026, and it was process-global until then.
+    /// The global was right while "the parfast queue runs one create at a
+    /// time" held, and the queue now admits a second large single-file
+    /// create beside the first (apps/parfast `parfast-session`'s
+    /// `pairing`): two creates writing one atomic is last-writer-wins, and
+    /// the first to finish zeroed it under the other, which then folded at
+    /// full width for the rest of its run. The fold reads its width on the
+    /// thread that calls `linalg::fold_parallel`, and the fused window loop
+    /// calls it on the same driver thread that holds the cap, so each
+    /// create's ceiling now binds its own fold and nobody else's - a repair
+    /// on another thread included.
+    static FOLD_WIDTH_CAP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Live [`FoldWidthCap`]s in this process, and the sum of their current
+/// widths - what [`paced_folds`] reports. Two atomics read without a
+/// lock, so every writer orders its two stores to err towards REFUSING
+/// a reader's admission (a count that is low only alongside a width sum
+/// that is high), never towards admitting one.
+static PACED_FOLDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PACED_WIDTH_SUM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The width the window fold may use right now: [`cpu_workers`] unless a
-/// create has published a lower ceiling through [`FoldWidthCap`].
+/// create on THIS thread has published a lower ceiling through
+/// [`FoldWidthCap`].
 pub fn fold_workers() -> usize {
     let cores = cpu_workers().max(1);
-    match FOLD_WIDTH_CAP.load(std::sync::atomic::Ordering::Relaxed) {
+    match FOLD_WIDTH_CAP.with(std::cell::Cell::get) {
         0 => cores,
         cap => cap.clamp(1, cores),
     }
 }
 
+/// What the paced creates live in this process are running at right now:
+/// how many hold a [`FoldWidthCap`], and their fold widths summed. Each of
+/// those creates also runs one whole-file MD5 chain thread beside its
+/// fold, which a caller budgeting cores adds itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacedFolds {
+    pub creates: usize,
+    pub fold_workers: usize,
+}
+
+/// See [`PacedFolds`]. A scheduler's reading, not a reservation: a pacer
+/// moves its width window by window, so the answer is as old as the last
+/// window of each create.
+pub fn paced_folds() -> PacedFolds {
+    PacedFolds {
+        creates: PACED_FOLDS.load(std::sync::atomic::Ordering::Acquire),
+        fold_workers: PACED_WIDTH_SUM.load(std::sync::atomic::Ordering::Acquire),
+    }
+}
+
 /// The published fold-width ceiling, held for exactly as long as the
 /// create that measured it: `Drop` clears it, so a create that returns
-/// early (an error, a cancel) cannot leave the process's next fold
-/// narrowed. Process-global by design, like [`set_cpu_workers`]: the
-/// fold is reached through a free function with no handle to thread a
-/// width through, and the parfast queue runs one create at a time.
-pub struct FoldWidthCap(());
+/// early (an error, a cancel) cannot leave its thread's next fold
+/// narrowed. Bound to the thread that published it (it is `!Send`), which
+/// is the thread whose fold it narrows - see `FOLD_WIDTH_CAP` for why it
+/// is not process-global any more. One cap per thread: a second publish
+/// on a thread that already holds one would overwrite it, and nothing
+/// nests creates that way.
+pub struct FoldWidthCap {
+    width: std::cell::Cell<usize>,
+    _thread_bound: std::marker::PhantomData<*const ()>,
+}
 
 impl FoldWidthCap {
     /// Publish `width` (clamped to `1..=cpu_workers()`) and hold it.
     pub fn publish(width: usize) -> FoldWidthCap {
-        let cap = FoldWidthCap(());
+        let cap = FoldWidthCap {
+            width: std::cell::Cell::new(0),
+            _thread_bound: std::marker::PhantomData,
+        };
         cap.set(width);
+        // Width first, count second: a reader between the two sees a width
+        // sum with no create to own it, which reads as busier, not freer.
+        PACED_FOLDS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         cap
     }
 
     /// Move the ceiling while held.
     pub fn set(&self, width: usize) {
         let cores = cpu_workers().max(1);
-        FOLD_WIDTH_CAP.store(width.clamp(1, cores), std::sync::atomic::Ordering::Relaxed);
+        let width = width.clamp(1, cores);
+        let old = self.width.replace(width);
+        // Add the new width before taking the old one away, for the same
+        // reason as `publish`.
+        PACED_WIDTH_SUM.fetch_add(width, std::sync::atomic::Ordering::AcqRel);
+        PACED_WIDTH_SUM.fetch_sub(old, std::sync::atomic::Ordering::AcqRel);
+        FOLD_WIDTH_CAP.with(|c| c.set(width));
     }
 }
 
 impl Drop for FoldWidthCap {
     fn drop(&mut self) {
-        FOLD_WIDTH_CAP.store(0, std::sync::atomic::Ordering::Relaxed);
+        FOLD_WIDTH_CAP.with(|c| c.set(0));
+        // Count first, width second: the mirror of `publish`.
+        PACED_FOLDS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        PACED_WIDTH_SUM.fetch_sub(self.width.get(), std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -487,6 +884,9 @@ impl MemBudget {
     /// can act on.
     pub fn from_user_limit(requested: u64, source: &str) -> MemBudget {
         let budget = Self::with_total(requested);
+        // The provenance [`published_user_limit`] reads: this is the one
+        // funnel every figure a person supplied passes through.
+        USER_LIMIT.store(budget.total, std::sync::atomic::Ordering::Relaxed);
         if let Some(actual) = Self::limit_clamp(requested) {
             let mib = |b: u64| b as f64 / (1u64 << 20) as f64;
             // Both clamps get their own sentence. "Below the floor" is
@@ -807,9 +1207,35 @@ fn physical_cores() -> Option<usize> {
 /// A downloader that would send such a set to PAR2 repair on the strength
 /// of a header byte, having already produced the right output, is doing
 /// the user no favours - see [`rars::Rar50SplitFragmentDigests`].
+/// Ceiling on the RAR 5 streaming decoder's WINDOW, derived from the
+/// process budget.
+///
+/// `StreamingOutput::new` reserves the ring at the declared dictionary's
+/// size up front whenever that dictionary is over 64 MiB and the
+/// declared output covers it - deliberately, because a member that
+/// reaches past a smaller initial cap would otherwise hold two rings
+/// resident across the growth copy. The number it reserves is a HEADER
+/// FIELD, though, and nothing here overrode the crate's own 1 GiB
+/// default, so a parseable archive drove a multi-hundred-megabyte
+/// allocation that `MemBudget` never saw - the same blind spot
+/// `LZMA_DICT_OUTSTANDING` was added for on the zip method-14 window.
+///
+/// A quarter of the budget, like [`MemBudget::rar_execution_policy`] and
+/// for the same reason (extraction runs while the rest of the pipeline
+/// is live), and capped at the crate's own default so no host that could
+/// already decode an archive stops being able to: only a host whose
+/// whole budget is smaller than 4 GiB is held tighter than today, which
+/// is exactly the host that cannot afford the reserve. Past it the
+/// decode fails with an error that names this knob rather than aborting
+/// the process on a failed allocation.
+fn rar_window_limit() -> u64 {
+    (process_budget().total / 4).clamp(64 << 20, 1 << 30)
+}
+
 pub fn rar_read_options(password: Option<&[u8]>) -> rars::ArchiveReadOptions<'_> {
     rars::ArchiveReadOptions::with_optional_password(password)
         .with_rar50_execution_policy(process_budget().rar_execution_policy())
+        .with_rar50_max_window(rar_window_limit())
         .with_rar50_split_hash_seeding(rars::Rar50SplitHashSeeding::FirstFragment)
         .with_rar50_split_fragment_digests(rars::Rar50SplitFragmentDigests::DeferForStoredMembers)
 }
@@ -850,6 +1276,37 @@ pub fn published_budget() -> Option<MemBudget> {
         0 => None,
         total => Some(MemBudget { total }),
     }
+}
+
+/// The last total [`MemBudget::from_user_limit`] produced; 0 until a
+/// person has supplied one.
+static USER_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The published budget when it is a figure a PERSON chose, `None` when
+/// nothing is published or what is published is not theirs.
+///
+/// [`published_budget`] cannot answer that, because the entry points that
+/// take a limit also publish [`MemBudget::auto`] when nobody gave one - the
+/// nzbfast CLI, the daemon after its saved settings, the embedded host. A
+/// consumer that may RAISE its own default to meet a published budget
+/// must not raise it to meet auto's: auto floors at 256 MiB and takes
+/// half of a cgroup limit, where the repair's solve window and transform
+/// budget are a quarter with no floor, so taking auto as a choice would
+/// move the automatic default on every small box and container
+/// (`par2repair::fastpar::clamp_to_published`, 15 Sep 2026).
+///
+/// Answered by VALUE against [`USER_LIMIT`], because that is where the
+/// provenance survives: the daemon resolves its budget into `ServeOpts`
+/// (from `--mem-limit` or the `mem_limit` setting) and republishes the
+/// bare `MemBudget` later, so a flag set at the publish call would be lost
+/// on the way. A republish of the same figure keeps the answer; a setting
+/// of 0 that republishes auto over a CLI limit does not, unless auto
+/// happens to be the same number - which is then a figure the person
+/// typed, so reading it as theirs is the stated limit and not a defect.
+pub fn published_user_limit() -> Option<MemBudget> {
+    let total = PROCESS_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+    (total != 0 && total == USER_LIMIT.load(std::sync::atomic::Ordering::Relaxed))
+        .then_some(MemBudget { total })
 }
 
 /// Outstanding LZMA decode-window bytes, process-wide. An LZMA (zip
@@ -1544,14 +2001,34 @@ mod tests {
         assert_eq!(b.holds_cap(), (1u64 << 30) as usize / 100 * 45);
     }
 
-    /// TODO 281 AN4: what a launcher is allowed to say with
-    /// `NZBFAST_CPU_WORKERS`.
-    ///
-    /// The reading of the variable is not tested here and cannot be:
-    /// [`cpu_workers`] latches its answer in a process-wide `OnceLock`,
-    /// so a test that set the variable would be testing whichever test
-    /// ran first. What IS testable is the rule the value is judged by,
-    /// which is where every way of getting this wrong lives.
+    /// A create's fold-width ceiling binds the thread that published it and
+    /// no other - two creates in one process each pace their own fold
+    /// (15 Sep 2026) - and `paced_folds` counts it for as long as it is
+    /// held. Every assertion is one another test running a create at the
+    /// same moment cannot disturb: the peer thread is fresh, and the
+    /// counters only ever include this cap on top of whatever else is live.
+    // test-global-gate: asserts only lower bounds on PACED_FOLDS and PACED_WIDTH_SUM, which any other live cap can only raise, and reads the cap itself thread-locally
+    #[test]
+    fn a_fold_width_cap_binds_only_the_thread_that_published_it() {
+        let cap = FoldWidthCap::publish(1);
+        assert_eq!(
+            fold_workers(),
+            1,
+            "the publishing thread's fold is narrowed"
+        );
+        let (peer, peer_cores) = std::thread::spawn(|| (fold_workers(), cpu_workers().max(1)))
+            .join()
+            .expect("peer thread");
+        assert_eq!(
+            peer, peer_cores,
+            "a cap on one thread narrowed another's fold"
+        );
+        let live = paced_folds();
+        assert!(live.creates >= 1 && live.fold_workers >= 1, "{live:?}");
+        drop(cap);
+        assert_eq!(fold_workers(), cpu_workers().max(1), "Drop clears the cap");
+    }
+
     #[test]
     fn cpu_workers_override_is_bounded_and_refuses_nonsense() {
         assert_eq!(cpu_workers_override("6"), Some(6));
@@ -1702,6 +2179,48 @@ mod tests {
             };
             assert_eq!(MemBudget::limit_clamp(r), want, "limit_clamp({r})");
         }
+    }
+
+    #[test]
+    fn cgroup_available_discounts_only_the_unreclaimable_charge() {
+        let gb = 1u64 << 30;
+        // A cgroup that has read its member: nearly all of `current` is page
+        // cache, which is reclaimable to make room for a mapping. Taking
+        // `limit - current` here would answer 64 MiB and refuse a payload
+        // that fits.
+        assert_eq!(
+            cgroup_available_from(4 * gb, 4 * gb - (64 << 20), 3 * gb),
+            3 * gb + (64 << 20)
+        );
+        // A fresh create's own charge is anonymous and does bind.
+        assert_eq!(cgroup_available_from(gb, 200 << 20, 0), gb - (200 << 20));
+        // The measured knee, asked as the gate asks it: a 2 GiB payload
+        // against the limits this round walked, with a create's ~50 MiB of
+        // anon charge and nothing cached yet. Refuse at 1 and 2 GiB (147 s
+        // and 36 s measured), admit at 3 (4.3 s).
+        let payload = 2 * gb;
+        let anon = 50 << 20;
+        for (limit, want) in [(gb, false), (2 * gb, false), (3 * gb, true)] {
+            let avail = cgroup_available_from(limit, anon, 0);
+            assert_eq!(payload <= avail, want, "limit {limit}");
+        }
+        // Saturating, never wrapping: a cgroup over its own limit (v1 can
+        // report usage above the limit briefly) answers zero, not u64::MAX.
+        assert_eq!(cgroup_available_from(gb, 2 * gb, 0), 0);
+    }
+
+    #[test]
+    fn tightest_available_takes_whichever_is_present() {
+        let gb = 1u64 << 30;
+        // The whole point: a 31 GB host reading and a 1 GiB cgroup reading.
+        assert_eq!(tightest_available(Some(31 * gb), Some(gb)), Some(gb));
+        assert_eq!(tightest_available(Some(gb), Some(31 * gb)), Some(gb));
+        // Uncontained Linux, and a platform with no host figure at all.
+        assert_eq!(tightest_available(Some(8 * gb), None), Some(8 * gb));
+        assert_eq!(tightest_available(None, Some(8 * gb)), Some(8 * gb));
+        // Neither: the caller keeps its old route, which is what the gate's
+        // `is_none_or` turns into "map it".
+        assert_eq!(tightest_available(None, None), None);
     }
 
     #[test]
@@ -1897,6 +2416,49 @@ mod tests {
         }
     }
 
+    /// The RAR 5 streaming decoder reserves its ring at the DECLARED
+    /// dictionary's size up front, and that number is a header field -
+    /// so the ceiling on it has to come from the process budget rather
+    /// than from the vendored crate's 1 GiB default, which nothing here
+    /// overrode.
+    ///
+    /// NEGATIVE CONTROL, run: drop the `.with_rar50_max_window` line and
+    /// `rar_read_options` leaves `rar50_max_window` as `None`, failing
+    /// the first assertion.
+    #[test]
+    fn the_rar_window_ceiling_follows_the_budget_and_never_exceeds_the_default() {
+        const CRATE_DEFAULT: u64 = 1 << 30;
+        assert!(
+            rar_read_options(None).rar50_max_window.is_some(),
+            "the window must be budgeted, not left to the crate default"
+        );
+        // A host with room keeps exactly the behaviour it had: the cap is
+        // the crate's own default, so nothing that could decode before
+        // stops being able to. A 32-bit host has no such room by
+        // construction - `with_total` clamps every input to the 1 GiB
+        // `ADDRESS_SPACE_CEIL` there, so a quarter of the budget is
+        // 256 MiB and the crate default is correctly NOT reached. The
+        // `at(1 << 30)` pair below is what pins that side, and it holds
+        // on every target.
+        #[cfg(not(target_pointer_width = "32"))]
+        assert_eq!(
+            (MemBudget::with_total(64 << 30).total / 4).clamp(64 << 20, CRATE_DEFAULT),
+            CRATE_DEFAULT
+        );
+        // A host that cannot afford the reserve is held tighter, and the
+        // rule is monotone in the budget.
+        let at =
+            |total: u64| (MemBudget::with_total(total).total / 4).clamp(64 << 20, CRATE_DEFAULT);
+        assert!(at(1 << 30) < CRATE_DEFAULT, "a 1 GiB host must be held");
+        assert!(at(1 << 30) >= (64 << 20), "never below the floor");
+        let mut previous = 0u64;
+        for shift in 28..37 {
+            let now = at(1u64 << shift);
+            assert!(now >= previous, "1 << {shift}: {now} under {previous}");
+            previous = now;
+        }
+    }
+
     /// Qualitative pins for the RAR execution policy, not exact numbers: a
     /// small host must stay on bounded modes, a big one must be allowed
     /// past rars' built-in 256 MiB flat cap, and more budget never yields a
@@ -1932,6 +2494,7 @@ mod tests {
         }
     }
 
+    // test-global-gate: touches no FoldWidthCap - its `drop(bufs)` is std's drop of a Vec, which the resolver matches by name to FoldWidthCap's Drop::drop in this unit
     #[test]
     fn trim_links_and_survives() {
         // Smoke: the platform symbol resolves and a burst of freed

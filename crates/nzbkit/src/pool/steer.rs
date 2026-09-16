@@ -621,6 +621,37 @@ impl Shared {
         level > 0 || self.block_bits & bit != 0
     }
 
+    /// TODO 343 item B: should THIS server's ladder fan-out dispatch ask
+    /// with STAT under `stat_probe_block`? Only when the picker is a
+    /// block account and some live, flat-rate server at or below its
+    /// level has not refused the article - that server may deliver it,
+    /// so a metered BODY here would be a copy bought per gigabyte.
+    ///
+    /// A higher-level server does not count: `required` holds it until
+    /// this block account has refused, so it cannot deliver in its
+    /// place. And once every eligible flat-rate server has refused, the
+    /// block account's body IS the delivery, so it stays a BODY - that
+    /// is TODO 96.4's one-holder row, where a probe bought nothing and
+    /// cost the whole extra hop.
+    pub(super) fn block_probe_duplicates(
+        &self,
+        bit: u32,
+        level: u32,
+        tried_430: u32,
+        now_ms: u64,
+    ) -> bool {
+        if !self.stat_probe_block || self.block_bits & bit == 0 {
+            return false;
+        }
+        let peers = self
+            .levels
+            .iter()
+            .enumerate()
+            .filter(|&(_, &l)| l <= level)
+            .fold(0, |m, (si, _)| m | server_bit(si));
+        self.live_mask_at(now_ms) & peers & !self.block_bits & !tried_430 != 0
+    }
+
     /// The hygiene cap check (design 5.2): dup losses against
     /// max(floor, pct% of delivered bytes). Delivered-so-far stands in
     /// for "job payload" - the pool never learns the NZB's total, the
@@ -1568,6 +1599,98 @@ mod tests {
         assert!(
             sh.pick_dup(0, 1, 1, 0, Pipeline::payload(0), 0).is_none(),
             "the ladder kept asking after a probe found a holder"
+        );
+    }
+
+    /// TODO 343 item B: three level-0 servers - a block account (0) and
+    /// two flat-rate backbones (1, 2) - with only the per-server probe
+    /// armed. The article is in flight on backbone 1 and refused there.
+    fn block_probe_shared(tried_430: u32) -> Arc<Shared> {
+        let cfg = |block| PoolConfig {
+            race_envelope: true,
+            hedge: true,
+            block_account: block,
+            stat_probe_block: true,
+            ..PoolConfig::default()
+        };
+        let servers = vec![
+            (server("a"), cfg(true)),
+            (server("b"), cfg(false)),
+            (server("c"), cfg(false)),
+        ];
+        let sh = Shared::new(fresh_n(100), &servers).0;
+        for a in &sh.alive {
+            a.store(1, Ordering::Relaxed);
+        }
+        sh.pending.store(4, Ordering::Release);
+        sh.inflight.lock_ok().insert(
+            "<laddered@x>".into(),
+            Inflight {
+                age_days: 0,
+                part: 0,
+                file: u32::MAX,
+                ord: 0,
+                server: 1,
+                dispatched: Instant::now(),
+                dups: 0,
+                tried_430,
+                dup_servers: 0,
+                tried_fail: 0,
+                suspect: false,
+                found: 0,
+            },
+        );
+        sh
+    }
+
+    /// The per-server probe asks with STAT exactly where the block
+    /// account's body would be a COPY: backbone 2 has not refused, so it
+    /// may deliver. The backbone's own fan-out dispatch is untouched -
+    /// it stays a BODY, which is what keeps every other config off the
+    /// extra hop.
+    #[test]
+    fn the_block_probe_asks_only_the_block_account_and_only_for_a_copy() {
+        let sh = block_probe_shared(server_bit(1));
+        let w = sh
+            .pick_dup(0, 1, 1, 0, Pipeline::payload(0), 0)
+            .expect("the block account still joins the ladder");
+        assert!(
+            w.ladder && w.probe,
+            "a backbone may still deliver, so the metered dispatch must be a STAT"
+        );
+        let sh = block_probe_shared(server_bit(1));
+        let w = sh
+            .pick_dup(2, 4, 4, 0, Pipeline::payload(0), 0)
+            .expect("the backbone joins the ladder");
+        assert!(
+            w.ladder && !w.probe,
+            "the per-server probe turned a FLAT-RATE server's dispatch into a STAT"
+        );
+    }
+
+    /// Once every flat-rate server has refused, the block account's body
+    /// is the delivery rather than a copy, so it stays a BODY - TODO
+    /// 96.4's one-holder row, where the probe saved nothing and cost the
+    /// whole extra hop. A dark backbone does not count as one that may
+    /// deliver either.
+    #[test]
+    fn the_block_probe_leaves_the_last_possible_holder_a_body() {
+        let sh = block_probe_shared(server_bit(1) | server_bit(2));
+        let w = sh
+            .pick_dup(0, 1, 1, 0, Pipeline::payload(0), 0)
+            .expect("the block account still joins the ladder");
+        assert!(
+            w.ladder && !w.probe,
+            "the only holder left was asked with STAT"
+        );
+        let sh = block_probe_shared(server_bit(1));
+        sh.alive[2].store(0, Ordering::Relaxed);
+        let w = sh
+            .pick_dup(0, 1, 1, 0, Pipeline::payload(0), 0)
+            .expect("the block account still joins the ladder");
+        assert!(
+            !w.probe,
+            "a backbone with no live worker was counted as one that may deliver"
         );
     }
 

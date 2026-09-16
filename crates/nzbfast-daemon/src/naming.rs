@@ -4,11 +4,14 @@
 //! `finalize_names`, which is where all of it is spent.
 //!
 //! Split off `crates/nzbfast-daemon/src/daemon.rs` (TODO 106) when that file regrew past
-//! its size-gate entry. A sibling module of `daemon`, declared in
-//! `serve/mod.rs`, so `super` is still `serve` and every `pub(super)`
-//! on the moved methods keeps the visibility it had - the trap the
-//! `daemon_index.rs` round hit (a child of `daemon` re-points `super`
-//! and takes 174 call sites with it).
+//! its size-gate entry. A sibling module of `daemon` rather than a
+//! child, which is what keeps every `pub(super)` on the moved methods
+//! at the visibility it had - the trap the `daemon_index.rs` round hit
+//! (a child of `daemon` re-points `super` and takes 174 call sites with
+//! it). It was declared in `serve/mod.rs` when that was written, so
+//! `super` was `serve`; since the 2 Sep 2026 crate split it is declared
+//! in this crate's `lib.rs` and `super` is the crate root. The rule is
+//! unchanged and the name it resolves to is not.
 
 use super::*;
 
@@ -548,9 +551,29 @@ pub fn finalize_names(d: &Daemon, out_dir: &std::path::Path, job: &FinalizeJob<'
     // lets a category rename its subfolder, and `base_out_dir` is
     // what placed the job. Rebuilding the parent from the raw name
     // here re-parented every folder-renaming arm into a directory
-    // the user never configured. `base_out_dir` with an empty stem
-    // gives exactly the parent it chose, sanitization included.
-    let parent = d.cat_dir(cat);
+    // the user never configured.
+    //
+    // Which is why the parent is read off `out_dir` ITSELF rather than
+    // recomputed: `out_dir` is the directory the job actually ran in,
+    // so its parent is the one that placed it, sanitization and §129 2b
+    // subfolder included. `cat_dir` is only the fallback for a root
+    // with no parent at all.
+    //
+    // A TODO 317 WRITE-THROUGH job is why recomputing is wrong rather
+    // than merely redundant: `daemon_enqueue` places it under
+    // `write_through_root(cat)` - the move DESTINATION's category
+    // folder - and its record says it owes no move, so `move_pending`
+    // is already false by the time anything could correct it. Rooting
+    // the rename on `cat_dir` renamed or Season-filed every such job
+    // back into the DOWNLOAD root (same volume: the payload is
+    // stranded there permanently, with the history row naming it
+    // there), or, cross volume - the case the feature exists for -
+    // left an empty correctly-named shell in the download root while
+    // the payload kept its posted name.
+    let parent = out_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| d.cat_dir(cat));
     // The container outranks the subject line: a "1080p" post over a
     // 720p stream gets the tag its bytes deserve. A measurement only
     // ever REPLACES a differing claim or ADDS an HD one - a name that

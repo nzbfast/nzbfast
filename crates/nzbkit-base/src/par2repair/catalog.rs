@@ -256,6 +256,119 @@ fn parallel_scan_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("NZBFAST_PAR2_CATALOG_PARALLEL").as_deref() != Ok("0"))
 }
 
+/// `NZBFAST_PAR2_CATALOG_WINDOWED=0` reads every volume under the slurp
+/// threshold whole again - the A/B arm of `par2::scan_file_windowed`.
+fn windowed_scan_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NZBFAST_PAR2_CATALOG_WINDOWED").as_deref() != Ok("0"))
+}
+
+/// The window `par2::scan_file_windowed` reads a volume through.
+///
+/// Measured 14 Sep 2026 (M3 Ultra, 1 GiB / 16-member set, m = 192,
+/// `parfast r -t4 -m128`, fold arm, two reps each), peak RSS against the
+/// whole read's 453-470 MB at 64 KiB blocks and 858-911 MB at 1 MiB:
+/// 4 MiB 200-201 / 372-377 MB, **8 MiB 237-239 / 361-385 MB**, 16 MiB
+/// 227-232 / 422-473 MB, 32 MiB 292-299 / 479-503 MB. Wider costs memory
+/// because up to eight volumes scan at once and each holds its window
+/// (four under that `-t4`; since 15 Sep 2026 the windows of one walk come
+/// from one [`WindowPool`], which the table above predates).
+/// Narrower costs WALL where blocks are large: a 4 MiB window holds under
+/// `PAR_SCAN_MIN` of 1 MiB packets, so its MD5s verify serially, and the
+/// scan phase went 0.31 s -> 0.56-0.57 s. Eight is the narrowest width
+/// with no cost on either block size.
+fn scan_window() -> usize {
+    8 << 20
+}
+
+/// The windows one [`PacketCatalog::scan_rest`] reads its volumes
+/// through, kept for the length of the walk so every file's reads land
+/// in a buffer that already exists.
+///
+/// A window per file, allocated and freed, left a freed region per
+/// DISTINCT size: a volume under the window gets a window its own size,
+/// and PAR2 volumes double, so the small ones never reuse each other's
+/// regions, and macOS libmalloc keeps every one of them dirty in the
+/// footprint. Every buffer here is reserved at the full width once and
+/// only ever truncated, so the regions are as many as the most files that
+/// were in flight at once, and each is one width.
+///
+/// A window is checked out for one file and handed back after it, and
+/// [`WindowPool::take`] NEVER WAITS: an empty pool hands out a new buffer.
+/// So there is no admission and nothing to block on - the pool is as large
+/// as the most workers that held a window at once, which the group loop
+/// already bounds - and none of the wait shapes `scan_rest`'s body rejects
+/// comes back.
+struct WindowPool {
+    width: usize,
+    bufs: std::sync::Mutex<Vec<Vec<u8>>>,
+}
+
+impl WindowPool {
+    fn new(width: usize) -> Self {
+        WindowPool {
+            width,
+            bufs: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take(&self) -> Vec<u8> {
+        self.bufs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(self.width))
+    }
+
+    /// A window a packet grew past the width is DROPPED rather than kept:
+    /// kept, one oversized packet would make every later file's window
+    /// that size for the rest of the walk.
+    fn give(&self, buf: Vec<u8>) {
+        if buf.capacity() <= self.width {
+            self.bufs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(buf);
+        }
+    }
+}
+
+/// One verified packet into a file's scan result - the per-packet half
+/// of [`PacketCatalog::scan_one`], shared by its windowed and whole-read
+/// arms so the two cannot classify a packet differently.
+fn note_packet(pkt: &par2::RawPacket<'_>, occ: &mut Vec<Occ>, crits: &mut Vec<([u8; 16], Crit)>) {
+    let kind = if pkt.ptype == *par2::TYPE_RECVSLIC && pkt.body.len() >= 4 {
+        Kind::RecvSlic {
+            exp: u32::from_le_bytes(pkt.body[0..4].try_into().unwrap()),
+            off: (pkt.body_offset + 4) as u64,
+            len: (pkt.body.len() - 4) as u32,
+        }
+    } else {
+        let crit = if pkt.ptype == *par2::TYPE_MAIN {
+            // The non-recovery ids are deliberately dropped here: repair lays
+            // files onto the global slice index space from the
+            // RECOVERY list and nothing else, so a verify-only
+            // member must never reach it (see `Par2Set::nonrecovery`).
+            par2::parse_main(pkt.body).map(|(bsz, ids, _)| Crit::Main(bsz, ids))
+        } else if pkt.ptype == *par2::TYPE_FILEDESC {
+            par2::parse_filedesc(pkt.body).map(|(fid, d)| Crit::FileDesc(fid, d))
+        } else if pkt.ptype == *par2::TYPE_IFSC {
+            par2::parse_ifsc(pkt.body).map(|(fid, b)| Crit::Ifsc(fid, b))
+        } else {
+            None
+        };
+        if let Some(c) = crit {
+            crits.push((pkt.md5, c));
+        }
+        Kind::Plain
+    };
+    occ.push(Occ {
+        md5: pkt.md5,
+        set_id: pkt.set_id,
+        kind,
+    });
+}
+
 impl PacketCatalog {
     /// Scan every packet file in `dir` now. The everyday entry point for
     /// a directory pass that will consult the catalog more than once.
@@ -628,8 +741,17 @@ impl PacketCatalog {
             .filter(|(_, f)| f.packets.is_none())
             .map(|(i, _)| i)
             .collect();
+        // One pool for the whole walk, groups and sequential arm alike -
+        // see `WindowPool`. `None` is the whole-read A/B arm.
+        let pool = windowed_scan_enabled().then(|| WindowPool::new(scan_window()));
+        let pool = pool.as_ref();
         if todo.len() < 2 || !parallel_scan_enabled() {
-            while self.scan_next()? {}
+            // `todo` is the unscanned files in index order, which is the
+            // order `scan_next` would take them in.
+            for i in todo {
+                let out = Self::scan_one_pooled(&self.files[i].path, pool)?;
+                self.apply_scan(i, out);
+            }
             return Ok(());
         }
         // The bound is on BYTES IN FLIGHT, and it holds BY CONSTRUCTION:
@@ -716,7 +838,17 @@ impl PacketCatalog {
                     for _ in 0..4.min(warm.len()) {
                         let (next, warm) = (&next, &warm);
                         sc.spawn(move || {
-                            let mut buf = vec![0u8; 16 << 20];
+                            // ONE MiB, and not the 16 MiB it was until
+                            // 15 Sep 2026: four freed 16 MiB buffers were
+                            // 64 MB of the ~100 MB of `Malloc Large
+                            // (empty)` a repair carried out of the scan on
+                            // macOS, twice the scan's own windows. The page
+                            // cache the warmer exists to fill does not care
+                            // how the bytes are copied out: 256 KiB to
+                            // 16 MiB read the same cold scan phase
+                            // (research/PARFAST-CATALOG-SCAN-RETENTION-2026-09-14.md,
+                            // section 6).
+                            let mut buf = vec![0u8; 1 << 20];
                             loop {
                                 let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 let Some(p) = warm.get(k) else { return };
@@ -735,7 +867,7 @@ impl PacketCatalog {
         for group in groups {
             if group.len() < 2 || workers < 2 {
                 for i in group {
-                    let out = Self::scan_one(&self.files[i].path)?;
+                    let out = Self::scan_one_pooled(&self.files[i].path, pool)?;
                     self.apply_scan(i, out);
                 }
                 continue;
@@ -755,7 +887,10 @@ impl PacketCatalog {
                             if k >= paths.len() {
                                 return;
                             }
-                            if tx.send((k, Self::scan_one(&paths[k]))).is_err() {
+                            if tx
+                                .send((k, Self::scan_one_pooled(&paths[k], pool)))
+                                .is_err()
+                            {
                                 return;
                             }
                         }
@@ -830,6 +965,34 @@ impl PacketCatalog {
     /// this function cannot see what an earlier file already claimed.
     /// [`Self::apply_scan`] does the claiming, in file order.
     fn scan_one(path: &Path) -> Result<ScanOut, RepairError> {
+        Self::scan_one_in(path, windowed_scan_enabled().then(scan_window))
+    }
+
+    /// [`Self::scan_one`] with the read window named: `None` reads a
+    /// volume under the slurp threshold whole, as it always was.
+    fn scan_one_in(path: &Path, window: Option<usize>) -> Result<ScanOut, RepairError> {
+        Self::scan_one_with(path, window, &mut Vec::new())
+    }
+
+    /// [`Self::scan_one`] reading through a window checked out of `pool`
+    /// and handed back after, or the whole read when there is no pool.
+    fn scan_one_pooled(path: &Path, pool: Option<&WindowPool>) -> Result<ScanOut, RepairError> {
+        let Some(pool) = pool else {
+            return Self::scan_one_in(path, None);
+        };
+        let mut buf = pool.take();
+        let out = Self::scan_one_with(path, Some(pool.width), &mut buf);
+        pool.give(buf);
+        out
+    }
+
+    /// [`Self::scan_one_in`] with the window's buffer supplied: only its
+    /// allocation is reused, never its contents.
+    fn scan_one_with(
+        path: &Path,
+        window: Option<usize>,
+        buf: &mut Vec<u8>,
+    ) -> Result<ScanOut, RepairError> {
         // Stamp before read: a write racing the read leaves the stored
         // stamp older than the bytes, so the next refresh re-scans -
         // the safe direction.
@@ -884,6 +1047,35 @@ impl PacketCatalog {
         if let Some(m) = &mapped {
             m.prefetch();
         }
+        let mut crits: Vec<([u8; 16], Crit)> = Vec::new();
+        let mut occ: Vec<Occ> = Vec::new();
+        // Anything not mapped - a volume at or under the slurp threshold,
+        // and a larger one whose mapping failed, which used to be read
+        // whole outside the in-flight bound - is READ THROUGH A WINDOW
+        // first, and read whole only if the window declines. See
+        // `par2::scan_file_windowed` for the retention it removes and why
+        // its yes is always the whole read's answer; on its no, whatever
+        // prefix it emitted is dropped and the historical path runs.
+        if let Some(window) = window.filter(|_| mapped.is_none() && flen > 0) {
+            let charged = window.min(flen as usize) as u64;
+            crate::memgauge::add(crate::memgauge::Sub::RepairScan, charged);
+            let _scan_gauge = ScanGaugeGuard(charged);
+            let done = File::open(path).ok().and_then(|f| {
+                par2::scan_file_windowed_in(&f, flen, window, buf, |pkt| {
+                    note_packet(&pkt, &mut occ, &mut crits)
+                })
+            });
+            if done.is_some() {
+                return Ok(ScanOut {
+                    occ,
+                    crits,
+                    scanned: flen,
+                    stamp,
+                });
+            }
+            occ.clear();
+            crits.clear();
+        }
         let owned;
         let bytes: &[u8] = match &mapped {
             Some(m) => m.bytes(),
@@ -906,42 +1098,7 @@ impl PacketCatalog {
         };
         crate::memgauge::add(crate::memgauge::Sub::RepairScan, charged);
         let _scan_gauge = ScanGaugeGuard(charged);
-        let mut crits: Vec<([u8; 16], Crit)> = Vec::new();
-        let mut occ: Vec<Occ> = Vec::new();
-        par2::scan_packets(bytes, |pkt| {
-            let kind = if pkt.ptype == *par2::TYPE_RECVSLIC && pkt.body.len() >= 4 {
-                Kind::RecvSlic {
-                    exp: u32::from_le_bytes(pkt.body[0..4].try_into().unwrap()),
-                    off: (pkt.body_offset + 4) as u64,
-                    len: (pkt.body.len() - 4) as u32,
-                }
-            } else {
-                {
-                    let crit = if pkt.ptype == *par2::TYPE_MAIN {
-                        // The non-recovery ids are deliberately dropped here: repair lays
-                        // files onto the global slice index space from the
-                        // RECOVERY list and nothing else, so a verify-only
-                        // member must never reach it (see `Par2Set::nonrecovery`).
-                        par2::parse_main(pkt.body).map(|(bsz, ids, _)| Crit::Main(bsz, ids))
-                    } else if pkt.ptype == *par2::TYPE_FILEDESC {
-                        par2::parse_filedesc(pkt.body).map(|(fid, d)| Crit::FileDesc(fid, d))
-                    } else if pkt.ptype == *par2::TYPE_IFSC {
-                        par2::parse_ifsc(pkt.body).map(|(fid, b)| Crit::Ifsc(fid, b))
-                    } else {
-                        None
-                    };
-                    if let Some(c) = crit {
-                        crits.push((pkt.md5, c));
-                    }
-                }
-                Kind::Plain
-            };
-            occ.push(Occ {
-                md5: pkt.md5,
-                set_id: pkt.set_id,
-                kind,
-            });
-        });
+        par2::scan_packets(bytes, |pkt| note_packet(&pkt, &mut occ, &mut crits));
         Ok(ScanOut {
             occ,
             crits,
@@ -1042,6 +1199,45 @@ impl PacketCatalog {
         self.refresh()?;
         super::repair_sets_catalog(self, true, super::RetentionCaller::default(), None)
     }
+
+    /// [`Self::repair_present_or_renamed_sets`] with a
+    /// [`RepairControl`](super::RepairControl) - progress out of each
+    /// set's repair, a cancel its loops poll - for the no-set
+    /// obfuscated arm (`nzbfast-engine`'s `get::settle::noset`), which
+    /// was one of the two daemon repair paths still handing the engine
+    /// a default control.
+    ///
+    /// A SUPPLIER and not a control, for the reason
+    /// [`super::repair_present_sets_controlled_as`] carries at length:
+    /// this walks EVERY qualifying set in the directory in turn, and a
+    /// caller whose bar is monotone would sit at 100% for every set
+    /// after the first. The supplier is asked once per set, at the
+    /// instant that set's repair starts, which is the set boundary and
+    /// the caller's to do what it likes with.
+    ///
+    /// Everything else is [`Self::repair_present_or_renamed_sets`] BY
+    /// CONSTRUCTION - one call to `repair_sets_catalog` differing in
+    /// the observer argument alone, so the renamed-fallback gate and
+    /// the caller label have no second copy to drift. A supplier
+    /// returning `RepairControl::default()` is the uncontrolled call
+    /// exactly, branch for branch.
+    ///
+    /// A cancelled set stops the walk on the set it was cancelled in -
+    /// see `repair_sets_catalog`, which breaks on that edge in BOTH of
+    /// its loops, the renamed fallback's included.
+    pub fn repair_present_or_renamed_sets_controlled(
+        &mut self,
+        control: &dyn Fn() -> super::RepairControl,
+    ) -> Result<Vec<super::SetOutcome>, RepairError> {
+        self.refresh()?;
+        let mut observe = super::entry::ControlledSets(control);
+        super::repair_sets_catalog(
+            self,
+            true,
+            super::RetentionCaller::default(),
+            Some(&mut observe),
+        )
+    }
 }
 
 /// One line per selection pass naming recovery slices refused for
@@ -1116,6 +1312,17 @@ pub(super) fn select_consecutive_run(sorted_exps: &[u32], needed: usize) -> Vec<
     out
 }
 
+/// The exponents a repair over `needed` blocks selects from `by_exp`:
+/// [`select_consecutive_run`] over its sorted keys. One copy, because a
+/// driver PLANS with this selection before the load below re-runs it
+/// (`reconstruct::selection_structured`), and two spellings of it could
+/// plan one system and load another.
+pub(super) fn selected_exponents<V>(by_exp: &HashMap<u32, V>, needed: usize) -> Vec<u32> {
+    let mut exps: Vec<u32> = by_exp.keys().copied().collect();
+    exps.sort_unstable();
+    select_consecutive_run(&exps, needed)
+}
+
 /// Load the selected exponents' payloads, one `block_size` buffer each -
 /// [`select_consecutive_run`] chooses which. With `revalidate`, every
 /// slice is re-proven against its packet MD5 as it is read; a slice that
@@ -1159,9 +1366,7 @@ pub(super) fn load_selected_recovery_span(
         if by_exp.len() < needed {
             return Ok(None);
         }
-        let mut exps: Vec<u32> = by_exp.keys().copied().collect();
-        exps.sort_unstable();
-        exps = select_consecutive_run(&exps, needed);
+        let exps = selected_exponents(by_exp, needed);
         // One reader per packet file, the slices of that file in exponent
         // order: the selection used to pread its slices one after another
         // on the caller, and on a Windows page cache that is a ~2.9 GB/s
@@ -1184,6 +1389,18 @@ pub(super) fn load_selected_recovery_span(
                     sc.spawn(move || -> Vec<Slot> {
                         let mut out: Vec<Slot> = Vec::with_capacity(group.len());
                         let mut file: Option<File> = None;
+                        // A slab's span is read through ONE full-slice
+                        // buffer per reader and copied out at its exact
+                        // size. Until 14 Sep 2026 every slice took a
+                        // fresh zeroed full-size allocation, a drain and
+                        // a shrinking realloc - 192 of each per slab at
+                        // 1 MiB blocks - and the footprint stepped up
+                        // 18-38 MB per slab while live work stayed flat
+                        // (research/PARFAST-CATALOG-SCAN-RETENTION-2026-09-14.md).
+                        // A whole-slice load keeps reading straight into
+                        // the buffer it returns: there is nothing to copy.
+                        let partial = span.start > 0 || span.end < bs;
+                        let mut scratch: Vec<u8> = Vec::new();
                         for &e in group {
                             let loc = by_exp[&e];
                             let f = match &file {
@@ -1196,11 +1413,22 @@ pub(super) fn load_selected_recovery_span(
                                     }
                                 },
                             };
-                            let mut data = vec![0u8; (loc.len as usize).max(bs)];
-                            let read = if loc.must_revalidate(revalidate) {
-                                pool.read_validated_slice(f, &loc, &mut data)
+                            let full = (loc.len as usize).max(bs);
+                            let mut owned = if partial {
+                                Vec::new()
                             } else {
-                                crate::disk::read_exact_at(f, &mut data, loc.off)
+                                vec![0u8; full]
+                            };
+                            let data: &mut Vec<u8> = if partial {
+                                scratch.resize(full, 0);
+                                &mut scratch
+                            } else {
+                                &mut owned
+                            };
+                            let read = if loc.must_revalidate(revalidate) {
+                                pool.read_validated_slice(f, &loc, data)
+                            } else {
+                                crate::disk::read_exact_at(f, data, loc.off)
                                     .map(|()| true)
                                     .map_err(RepairError::from)
                             };
@@ -1208,10 +1436,16 @@ pub(super) fn load_selected_recovery_span(
                                 Ok(true) => {
                                     // Whole slice validated above; only
                                     // the slab's bytes are kept.
-                                    data.truncate(span.end.min(bs));
-                                    data.drain(..span.start.min(data.len()));
-                                    data.shrink_to_fit();
-                                    out.push(Ok(Some((e, data))));
+                                    let end = span.end.min(bs);
+                                    let kept = if partial {
+                                        data[span.start.min(end)..end].to_vec()
+                                    } else {
+                                        let mut whole = std::mem::take(&mut owned);
+                                        whole.truncate(end);
+                                        whole.shrink_to_fit();
+                                        whole
+                                    };
+                                    out.push(Ok(Some((e, kept))));
                                 }
                                 Ok(false) => {
                                     warn!(
@@ -1441,9 +1675,23 @@ pub(super) struct SetReplay {
     /// routes the file to its whole-file MD5, which covers every byte.
     /// The latch is what stops a THIRD copy of either packet re-admitting
     /// one of the two readings and putting order back in charge.
+    ///
+    /// For FileDescs the latch is not the last word, and `descs_bound`
+    /// beside it is why: a descriptor that BINDS the id out-ranks the
+    /// unbound readings that annihilated rather than joining them, so a
+    /// contradicted FileDesc claim with no binder in it is still open.
+    /// A contradiction BETWEEN binders is closed, like the other two.
     main_contradicted: bool,
     descs_contradicted: HashSet<[u8; 16]>,
     ifscs_contradicted: HashSet<[u8; 16]>,
+    /// File ids some FileDesc packet BOUND (M4-38). The binding
+    /// descriptors for an id are weighed against each other and against
+    /// nothing else, so this is what separates "no binder yet, and an
+    /// unbound contradiction a binder could still out-rank" from "the
+    /// binders themselves annihilated, and nothing further can move
+    /// it" - the distinction `descs_contradicted` alone cannot make,
+    /// and the one `criticals_complete` has to make to stop scanning.
+    descs_bound: HashSet<[u8; 16]>,
 }
 
 impl SetReplay {
@@ -1458,6 +1706,7 @@ impl SetReplay {
             main_contradicted: false,
             descs_contradicted: HashSet::new(),
             ifscs_contradicted: HashSet::new(),
+            descs_bound: HashSet::new(),
         }
     }
 
@@ -1496,6 +1745,7 @@ impl SetReplay {
                     claim_desc_or_contradict(
                         &mut self.descs,
                         &mut self.descs_contradicted,
+                        &mut self.descs_bound,
                         *fid,
                         d,
                     );
@@ -1541,13 +1791,27 @@ impl SetReplay {
     /// what stops the scan reading more `.par2` files. Treating a
     /// contradiction as "still missing" would read every volume on disk
     /// looking for an answer that cannot arrive, and then fail anyway.
+    ///
+    /// One contradiction is NOT decided, and the exception is what
+    /// keeps this half's answer equal to the live half's: an unbound
+    /// FileDesc contradiction is still open to a descriptor that BINDS
+    /// the id, which out-ranks it (M4-38). Counting that as decided
+    /// would stop the scan at the volume the two forgeries sit in and
+    /// never reach the real descriptor in the next one, so the same
+    /// bytes would repair one way off disk and verify another way
+    /// live - which is the whole thing `SetReplay` exists to prevent.
+    /// The answer a binder cannot move is a contradiction BETWEEN
+    /// binders, and `descs_bound` is how that one still stops the scan.
+    /// The price is bounded and falls only on malformed sets: a set
+    /// carrying an unbound contradiction reads its remaining `.par2`
+    /// files before failing.
     pub(super) fn criticals_complete(&self) -> bool {
         if self.main_contradicted {
             return true;
         }
         self.main.as_ref().is_some_and(|(_, ids)| {
             ids.iter().all(|fid| {
-                (self.descs.contains_key(fid) || self.descs_contradicted.contains(fid))
+                (self.descs.contains_key(fid) || self.descs_bound.contains(fid))
                     && (self.ifscs.contains_key(fid) || self.ifscs_contradicted.contains(fid))
             })
         })
@@ -1585,27 +1849,40 @@ fn claim_or_contradict<T: Clone + PartialEq>(
 /// only: a descriptor that BINDS `fid` outranks one that merely carries
 /// a copy of it, so the two are not a contradiction at all and the
 /// honest member does not leave the set over a packet anyone can write.
-/// [`par2::Par2Set::parse`]'s `Claim::offer_desc` is the same rule on
-/// the live verification side, and carries the argument for it at
-/// length; the two are deliberately the same rule so one hostile set
-/// cannot be taken two ways by the two halves.
+/// [`par2::Par2Set::parse`]'s `DescClaim` is the same rule on the live
+/// verification side, and carries the argument for it at length; the
+/// two are deliberately the same rule so one hostile set cannot be
+/// taken two ways by the two halves.
+///
+/// The tiebreak is over the SET of descriptors offered for `fid`, not
+/// over the pair of (held, offered): the descriptors that bind the id
+/// are folded by W4-10 among themselves, those that do not are folded
+/// among themselves, and the binding class answers wherever it was
+/// non-empty. Read pairwise against whatever is held it is
+/// order-dependent as soon as three descriptors meet on one id, which
+/// is what it was until 16 Sep 2026 - see the live half's `DescClaim`
+/// for the shape of that race and why the set form removes it.
 fn claim_desc_or_contradict(
     held: &mut HashMap<[u8; 16], par2::Desc>,
     contradicted: &mut HashSet<[u8; 16]>,
+    bound: &mut HashSet<[u8; 16]>,
     fid: [u8; 16],
     offered: &par2::Desc,
 ) {
-    if !contradicted.contains(&fid)
-        && let Some(cur) = held.get(&fid)
-        && cur != offered
-    {
-        let new_binds = par2::filedesc_id(offered) == fid;
-        if new_binds != (par2::filedesc_id(cur) == fid) {
-            if new_binds {
-                held.insert(fid, offered.clone());
-            }
+    if par2::filedesc_id(offered) == fid {
+        if bound.insert(fid) {
+            // The first binder out-ranks the whole unbound class,
+            // including one that has already annihilated: those
+            // readings were never evidence about THIS id.
+            held.insert(fid, offered.clone());
+            contradicted.remove(&fid);
             return;
         }
+        // A later binder is evidence, and meets the one held under
+        // W4-10 below.
+    } else if bound.contains(&fid) {
+        // Out-ranked, whatever the binding class settled to.
+        return;
     }
     claim_or_contradict(held, contradicted, fid, offered);
 }
@@ -1617,6 +1894,161 @@ struct ScanGaugeGuard(u64);
 impl Drop for ScanGaugeGuard {
     fn drop(&mut self) {
         crate::memgauge::sub(crate::memgauge::Sub::RepairScan, self.0);
+    }
+}
+
+#[cfg(test)]
+mod desc_claim_tests {
+    use super::{SetReplay, claim_desc_or_contradict};
+    use crate::par2;
+    use std::collections::{HashMap, HashSet};
+
+    fn desc(name: &str, len: u64, md5: u8, md5_16k: u8) -> par2::Desc {
+        par2::Desc {
+            name: name.to_string(),
+            length: len,
+            md5: [md5; 16],
+            md5_16k: [md5_16k; 16],
+        }
+    }
+
+    /// The disk-repair half of W4-10 over M4-38, held to the same bar as
+    /// the live half's `three_descriptors_on_one_id_settle_the_same_in_every_order`:
+    /// the reading a file id settles to is a function of the SET of
+    /// descriptors offered, so every ordering answers the same. Read
+    /// pairwise against whatever was held, two unbound forgeries
+    /// annihilated the claim and the latch then refused the binding
+    /// descriptor that out-ranks them (bug sweep 16 Sep 2026, item 17).
+    ///
+    /// A unit over the fold rather than a repair off disk: the twin the
+    /// end-to-end `contradictory_filedescs_do_not_repair_differently_by_packet_order`
+    /// covers is the two-descriptor case, and six orderings of a
+    /// three-packet set cost six catalog builds there and six map
+    /// updates here.
+    #[test]
+    fn three_descriptors_on_one_id_settle_the_same_in_every_order() {
+        let honest = desc("real.bin", 8192, 0x11, 0x22);
+        let fid = par2::filedesc_id(&honest);
+        assert_eq!(par2::filedesc_id(&honest), fid, "the honest one binds");
+        // Two forgeries wearing that id, disagreeing with it and with
+        // each other; neither binds it.
+        let forged_a = desc("evil-a.bin", 64, 0xAB, 0xAC);
+        let forged_b = desc("evil-b.bin", 128, 0xCD, 0xCE);
+        assert_ne!(par2::filedesc_id(&forged_a), fid);
+        assert_ne!(par2::filedesc_id(&forged_b), fid);
+
+        let settle = |order: [&par2::Desc; 3]| -> Option<par2::Desc> {
+            let mut held = HashMap::new();
+            let mut contradicted = HashSet::new();
+            let mut bound = HashSet::new();
+            for d in order {
+                claim_desc_or_contradict(&mut held, &mut contradicted, &mut bound, fid, d);
+            }
+            held.remove(&fid)
+        };
+
+        for (i, order) in [
+            [&honest, &forged_a, &forged_b],
+            [&honest, &forged_b, &forged_a],
+            [&forged_a, &honest, &forged_b],
+            [&forged_b, &honest, &forged_a],
+            [&forged_a, &forged_b, &honest],
+            [&forged_b, &forged_a, &honest],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // `Desc` is deliberately not `Debug` (it carries a name), so
+            // this is a bare comparison rather than `assert_eq!`.
+            assert!(
+                settle(order).as_ref() == Some(&honest),
+                "permutation {i}: the binding descriptor answers for the id \
+                 however late it arrives"
+            );
+        }
+    }
+
+    /// Two descriptors can BOTH bind one id with no MD5 collision -
+    /// `filedesc_id` hashes the 16k hash, the length and the name, and
+    /// not the whole-file MD5 - so the binding class is folded by W4-10
+    /// like any other, in every order.
+    #[test]
+    fn two_binding_descriptors_annihilate_in_every_order() {
+        let honest = desc("real.bin", 8192, 0x11, 0x22);
+        let fid = par2::filedesc_id(&honest);
+        let rival = desc("real.bin", 8192, 0x99, 0x22);
+        assert_eq!(par2::filedesc_id(&rival), fid, "the rival binds it too");
+        let forged = desc("evil.bin", 64, 0xAB, 0xAC);
+
+        for (i, order) in [
+            [&honest, &rival, &forged],
+            [&forged, &honest, &rival],
+            [&rival, &forged, &honest],
+            [&forged, &rival, &honest],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut held = HashMap::new();
+            let mut contradicted = HashSet::new();
+            let mut bound = HashSet::new();
+            for d in order {
+                claim_desc_or_contradict(&mut held, &mut contradicted, &mut bound, fid, d);
+            }
+            assert!(
+                !held.contains_key(&fid),
+                "permutation {i}: two binding readings contradict, and no \
+                 unbound one fills the hole"
+            );
+            // And the scan may stop on it: no later packet can move a
+            // contradiction between binders.
+            let mut replay = SetReplay::new(None);
+            replay.main = Some((4096, vec![fid]));
+            replay.descs_bound = bound;
+            replay.ifscs.insert(fid, Vec::new());
+            assert!(replay.criticals_complete(), "permutation {i}");
+        }
+    }
+
+    /// The scan-termination side of the same rule: a FileDesc
+    /// contradiction with no binder in it is NOT decided, because a
+    /// binder in the next `.par2` file out-ranks it. Stopping there
+    /// would let the disk half answer from a prefix of the packets the
+    /// live half reads whole - the two-halves disagreement `SetReplay`
+    /// exists to prevent.
+    #[test]
+    fn an_unbound_desc_contradiction_does_not_stop_the_scan() {
+        let honest = desc("real.bin", 8192, 0x11, 0x22);
+        let fid = par2::filedesc_id(&honest);
+        let mut replay = SetReplay::new(None);
+        replay.main = Some((4096, vec![fid]));
+        replay.ifscs.insert(fid, Vec::new());
+
+        let offer = |replay: &mut SetReplay, d: &par2::Desc| {
+            claim_desc_or_contradict(
+                &mut replay.descs,
+                &mut replay.descs_contradicted,
+                &mut replay.descs_bound,
+                fid,
+                d,
+            );
+        };
+        // Two forgeries wearing the id, in the first volume read.
+        offer(&mut replay, &desc("evil-a.bin", 64, 0xAB, 0xAC));
+        offer(&mut replay, &desc("evil-b.bin", 128, 0xCD, 0xCE));
+        assert!(!replay.descs.contains_key(&fid), "they annihilated");
+        assert!(
+            !replay.criticals_complete(),
+            "a binder could still arrive, so the remaining volumes must be read"
+        );
+
+        // The real descriptor, in a volume the scan would have skipped.
+        offer(&mut replay, &honest);
+        assert!(replay.descs.get(&fid) == Some(&honest));
+        assert!(
+            replay.criticals_complete(),
+            "and the scan stops once the id is genuinely decided"
+        );
     }
 }
 
@@ -1656,6 +2088,249 @@ mod recovery_selection_tests {
         assert!(select_consecutive_run(&[], 3).is_empty());
         // A single block is trivially its own run - the 1-missing repair.
         assert_eq!(select_consecutive_run(&[9, 40, 41], 1), vec![9]);
+    }
+
+    /// The windowed read is a memory change and nothing else: on every
+    /// packet file of a real set, `scan_one_in` with a window - one
+    /// header wide (so every recovery packet grows it), one byte short of
+    /// a packet, and wider than the file - gives the same occurrences,
+    /// locators, parsed criticals and byte total as the whole read.
+    #[test]
+    fn windowed_scan_matches_the_whole_read() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-catalog-win-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for m in 0..3u8 {
+            let bytes: Vec<u8> = (0..70_000u32)
+                .map(|i| (i as u8).wrapping_mul(13).wrapping_add(m.wrapping_mul(59)))
+                .collect();
+            std::fs::write(dir.join(format!("w{m}.bin")), &bytes).unwrap();
+        }
+        let members: Vec<crate::par2gen::Member> = (0..3u8)
+            .map(|m| crate::par2gen::Member {
+                name: format!("w{m}.bin"),
+                path: dir.join(format!("w{m}.bin")),
+            })
+            .collect();
+        crate::par2gen::create_into(
+            &dir,
+            &members,
+            "win",
+            &crate::par2gen::Par2Spec {
+                redundancy_pct: 60,
+                block_size: Some(4096),
+            },
+        )
+        .expect("fixture");
+        let cat = PacketCatalog::build_lazy(&dir).unwrap();
+        assert!(
+            cat.files.len() > 2,
+            "fixture must have several packet files"
+        );
+        let mut windowed_recovery = 0usize;
+        for f in &cat.files {
+            let whole = PacketCatalog::scan_one_in(&f.path, None).unwrap();
+            for window in [64, 4096 + 67, 1 << 20] {
+                let win = PacketCatalog::scan_one_in(&f.path, Some(window)).unwrap();
+                let at = format!("{:?} at window {window}", f.path);
+                assert_eq!(whole.scanned, win.scanned, "bytes scanned, {at}");
+                assert_eq!(whole.occ.len(), win.occ.len(), "occurrences, {at}");
+                for (x, y) in whole.occ.iter().zip(&win.occ) {
+                    assert_eq!((x.md5, x.set_id), (y.md5, y.set_id), "occurrence, {at}");
+                    match (&x.kind, &y.kind) {
+                        (Kind::Plain, Kind::Plain) => {}
+                        (
+                            Kind::RecvSlic { exp, off, len },
+                            Kind::RecvSlic {
+                                exp: e2,
+                                off: o2,
+                                len: l2,
+                            },
+                        ) => {
+                            assert_eq!((exp, off, len), (e2, o2, l2), "locator, {at}");
+                            windowed_recovery += 1;
+                        }
+                        _ => panic!("packet kind differs, {at}"),
+                    }
+                }
+                assert_eq!(whole.crits.len(), win.crits.len(), "criticals, {at}");
+                for ((m1, c1), (m2, c2)) in whole.crits.iter().zip(&win.crits) {
+                    assert_eq!(m1, m2, "critical order, {at}");
+                    match (c1, c2) {
+                        (Crit::Main(b1, i1), Crit::Main(b2, i2)) => assert_eq!((b1, i1), (b2, i2)),
+                        (Crit::FileDesc(f1, d1), Crit::FileDesc(f2, d2)) => {
+                            assert_eq!(f1, f2);
+                            assert_eq!(
+                                (&d1.name, d1.length, d1.md5),
+                                (&d2.name, d2.length, d2.md5)
+                            );
+                        }
+                        (Crit::Ifsc(f1, b1), Crit::Ifsc(f2, b2)) => {
+                            assert_eq!(f1, f2);
+                            assert_eq!(b1.len(), b2.len());
+                        }
+                        _ => panic!("critical kind differs, {at}"),
+                    }
+                }
+            }
+        }
+        assert!(
+            windowed_recovery > 0,
+            "the fixture must carry recovery slices"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two scans of one file agree packet for packet: occurrences,
+    /// locators, parsed criticals in order, and bytes scanned.
+    fn same_scan(want: &super::ScanOut, got: &super::ScanOut, at: &str) {
+        assert_eq!(want.scanned, got.scanned, "bytes scanned, {at}");
+        same_occ(&want.occ, &got.occ, at);
+        assert_eq!(want.crits.len(), got.crits.len(), "criticals, {at}");
+        for ((m1, c1), (m2, c2)) in want.crits.iter().zip(&got.crits) {
+            assert_eq!(m1, m2, "critical order, {at}");
+            match (c1, c2) {
+                (Crit::Main(b1, i1), Crit::Main(b2, i2)) => assert_eq!((b1, i1), (b2, i2)),
+                (Crit::FileDesc(f1, d1), Crit::FileDesc(f2, d2)) => {
+                    assert_eq!(f1, f2);
+                    assert_eq!((&d1.name, d1.length, d1.md5), (&d2.name, d2.length, d2.md5));
+                }
+                (Crit::Ifsc(f1, b1), Crit::Ifsc(f2, b2)) => {
+                    assert_eq!(f1, f2);
+                    assert_eq!(b1.len(), b2.len());
+                }
+                _ => panic!("critical kind differs, {at}"),
+            }
+        }
+    }
+
+    /// Two occurrence lists agree: MD5, set id, kind and locator, in order.
+    fn same_occ(want: &[super::Occ], got: &[super::Occ], at: &str) {
+        assert_eq!(want.len(), got.len(), "occurrences, {at}");
+        for (x, y) in want.iter().zip(got) {
+            assert_eq!((x.md5, x.set_id), (y.md5, y.set_id), "occurrence, {at}");
+            match (&x.kind, &y.kind) {
+                (Kind::Plain, Kind::Plain) => {}
+                (
+                    Kind::RecvSlic { exp, off, len },
+                    Kind::RecvSlic {
+                        exp: e2,
+                        off: o2,
+                        len: l2,
+                    },
+                ) => assert_eq!((exp, off, len), (e2, o2, l2), "locator, {at}"),
+                _ => panic!("packet kind differs, {at}"),
+            }
+        }
+    }
+
+    /// A pooled window carries its ALLOCATION from file to file and
+    /// nothing else. One pool is walked over every packet file of a real
+    /// set twice, largest file first - so the reused buffer holds stale
+    /// bytes past the end of every shorter file after it - at a width
+    /// every packet grows (a grown window must not go back into the
+    /// pool), one byte short of a recovery packet, and wider than every
+    /// file (where the one buffer must be reused rather than replaced);
+    /// every scan must equal the whole read. Then through the catalog
+    /// itself: the pooled parallel walk, and a `refresh` that has ONE
+    /// changed file to rescan and so takes the pooled sequential arm.
+    #[test]
+    fn pooled_windows_give_the_same_catalog() {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-catalog-pool-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for m in 0..3u8 {
+            let bytes: Vec<u8> = (0..70_000u32)
+                .map(|i| (i as u8).wrapping_mul(29).wrapping_add(m.wrapping_mul(71)))
+                .collect();
+            std::fs::write(dir.join(format!("p{m}.bin")), &bytes).unwrap();
+        }
+        let members: Vec<crate::par2gen::Member> = (0..3u8)
+            .map(|m| crate::par2gen::Member {
+                name: format!("p{m}.bin"),
+                path: dir.join(format!("p{m}.bin")),
+            })
+            .collect();
+        crate::par2gen::create_into(
+            &dir,
+            &members,
+            "pool",
+            &crate::par2gen::Par2Spec {
+                redundancy_pct: 60,
+                block_size: Some(4096),
+            },
+        )
+        .expect("fixture");
+        let mut cat = PacketCatalog::build_lazy(&dir).unwrap();
+        assert!(
+            cat.files.len() > 2,
+            "fixture must have several packet files"
+        );
+        let truth: Vec<super::ScanOut> = cat
+            .files
+            .iter()
+            .map(|f| PacketCatalog::scan_one_in(&f.path, None).unwrap())
+            .collect();
+        let mut order: Vec<usize> = (0..cat.files.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(cat.files[i].stamp.len));
+        let widest = cat.files[order[0]].stamp.len as usize;
+        for width in [64, 4096 + 67, widest + 1] {
+            let pool = super::WindowPool::new(width);
+            for pass in 0..2 {
+                for &i in &order {
+                    let path = &cat.files[i].path;
+                    let at = format!("{path:?} width {width} pass {pass}");
+                    let got = PacketCatalog::scan_one_pooled(path, Some(&pool)).unwrap();
+                    same_scan(&truth[i], &got, &at);
+                    let held = pool.bufs.lock().unwrap();
+                    assert!(held.len() <= 1, "a sequential walk holds one window, {at}");
+                    assert!(
+                        held.iter().all(|b| b.capacity() <= width),
+                        "a window grown past the width went back into the pool, {at}"
+                    );
+                }
+            }
+            if width > widest {
+                assert_eq!(
+                    pool.bufs.lock().unwrap().len(),
+                    1,
+                    "a window no packet grew is kept for the next file"
+                );
+            }
+        }
+
+        cat.scan_rest().unwrap();
+        for (i, f) in cat.files.iter().enumerate() {
+            same_occ(
+                &truth[i].occ,
+                f.packets.as_ref().unwrap(),
+                &format!("catalog walk, {:?}", f.path),
+            );
+        }
+        // Sixty trailing bytes are under a header, which both walks
+        // ignore, and move the stamp, so the refresh rescans this file
+        // and nothing else.
+        let victim = cat.files[order[0]].path.clone();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&victim)
+            .unwrap()
+            .write_all(&[0u8; 60])
+            .unwrap();
+        cat.refresh().unwrap();
+        let want = PacketCatalog::scan_one_in(&victim, None).unwrap();
+        let f = cat.files.iter().find(|f| f.path == victim).unwrap();
+        same_occ(&want.occ, f.packets.as_ref().unwrap(), "refreshed file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The parallel scan must leave EXACTLY the catalog the sequential

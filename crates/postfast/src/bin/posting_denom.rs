@@ -35,42 +35,23 @@ use postfast::profile::Profile;
 use postfast::recovery;
 use postfast::rng::Rng;
 
-// getrusage(RUSAGE_SELF): process-wide user+sys CPU seconds across
-// every thread, without pulling in a crate for two fields. The trailing
-// buffer is sized well past the real `struct rusage` (16 longs plus two
-// timevals on Darwin) so the kernel never writes past what we own; we
-// never read past the two timevals we declared.
-#[repr(C)]
-struct Timeval {
-    tv_sec: i64,
-    tv_usec: i32,
-    _pad: i32,
-}
-#[repr(C)]
-struct RUsageHead {
-    ru_utime: Timeval,
-    ru_stime: Timeval,
-    _rest: [u8; 256],
-}
-unsafe extern "C" {
-    fn getrusage(who: i32, usage: *mut RUsageHead) -> i32;
-}
-const RUSAGE_SELF: i32 = 0;
-
+// Process-wide user+sys CPU seconds across every thread.
+//
+// `nzbkit::mem` and NOT a hand-declared `getrusage` extern: this bin
+// used to carry its own, with a Darwin-shaped `struct timeval`, and
+// there is no `getrusage` SYMBOL on Windows at all, so the public
+// repo's `cargo build --workspace` on windows-latest died at
+// `LNK2019: unresolved external symbol getrusage`. The private tree
+// could not see it - `cargo nextest archive` builds only the bin's
+// (empty) test harness, and rustc never codegens an uncalled `main` -
+// which is why it stood for days. `crates/nzbkit/examples/
+// par2_catalog_bench.rs` was fixed for the same class the same way.
+//
+// `None` from a platform that cannot answer is reported as zero CPU
+// rather than a panic: this bin MEASURES, and a missing column is a
+// worse outcome than no column.
 fn cpu_seconds() -> f64 {
-    // SAFETY: an all-zero `RUsageHead` (two all-zero `Timeval`s plus a
-    // zeroed trailing buffer) is a valid bit pattern for this repr(C)
-    // struct - every field is a plain integer, nothing here is a
-    // reference or has an invariant zero would violate.
-    let mut ru: RUsageHead = unsafe { std::mem::zeroed() };
-    // SAFETY: `ru` is a valid, uniquely-owned `RUsageHead` for the
-    // duration of this call and the buffer is sized well past the real
-    // Darwin `struct rusage`, so the kernel writes only within it.
-    let rc = unsafe { getrusage(RUSAGE_SELF, &mut ru as *mut _) };
-    assert_eq!(rc, 0, "getrusage failed");
-    let u = ru.ru_utime.tv_sec as f64 + ru.ru_utime.tv_usec as f64 / 1e6;
-    let s = ru.ru_stime.tv_sec as f64 + ru.ru_stime.tv_usec as f64 / 1e6;
-    u + s
+    nzbkit::mem::cpu_time_secs().unwrap_or(0.0)
 }
 
 struct Phase {

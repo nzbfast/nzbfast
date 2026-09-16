@@ -272,6 +272,52 @@ fn a_torn_journal_line_does_not_hide_the_records_after_it() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A record left WITHOUT its trailing newline - the shape a run killed
+/// mid-append (ENOSPC, power loss) leaves - must not swallow the next
+/// generation's `G` marker.
+///
+/// `Journal::open` appended `G <token>` with a bare `writeln!`, which
+/// glued the marker onto that torn record. The result parses as neither,
+/// so `remove` - which unlinks only while THIS generation's `G` is the
+/// last one - refused to unlink after a perfectly successful job, and
+/// the leftover journal made the next run resume against a file it had
+/// finished with.
+///
+/// NEGATIVE CONTROL, run: drop the newline top-up from `open` and the
+/// final assertion fails with the journal still on disk.
+#[test]
+fn a_torn_last_line_does_not_swallow_the_generation_marker() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-journal-tornG-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let nzb = b"<nzb>torng</nzb>";
+    let (j, _) = Journal::open(&dir, nzb).unwrap();
+    j.record("<a@x>");
+    drop(j);
+    let leaf = dir.join(".nzbfast.journal");
+    {
+        // The half-written record: no trailing newline, exactly as a
+        // kill mid-append leaves one.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&leaf)
+            .unwrap();
+        f.write_all(b"F 0 half-a-rec").unwrap();
+    }
+
+    let (j2, resume) = Journal::open(&dir, nzb).unwrap();
+    assert!(
+        resume.completed.contains("<a@x>"),
+        "the torn tail must not hide what came before it"
+    );
+    j2.remove();
+    assert!(
+        !leaf.exists(),
+        "a finished generation must be able to unlink its own journal"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn qdir(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("nzbfast-quarantine-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);

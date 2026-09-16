@@ -212,3 +212,50 @@ fn season_filing_outranks_it() {
         );
     });
 }
+
+/// TODO 317 write-through: the job's `out_dir` is deliberately under the
+/// move DESTINATION and its record says it owes no move, so the folder
+/// rename must land THERE and not in the download root.
+///
+/// `finalize_names` used to root every folder-renaming arm on
+/// `cat_dir(cat)`, which is unconditionally under `out_root`. Same
+/// volume - a destination folder on the same disk, which is what this
+/// test sets up - the rename SUCCEEDED into the download root, and
+/// because `job.rs` has already set `move_pending = !write_through` =
+/// false, `relocate_completed` was never asked and the finished movie
+/// stayed there permanently with the history row naming it there: the
+/// exact inverse of the setting. Cross volume it left an empty
+/// correctly-named shell in the download root instead.
+///
+/// NEGATIVE CONTROL, run: restore `let parent = d.cat_dir(cat);` and the
+/// first assertion fails, naming the download-root path it moved to.
+#[test]
+fn a_write_through_job_is_renamed_where_it_ran_not_into_the_download_root() {
+    with_daemon("writethrough", |d, out| {
+        // The destination side: a sibling of the download root, which is
+        // where `daemon_enqueue` places a write-through job.
+        let dest_cat = out.parent().unwrap().join("nas").join("movies");
+        std::fs::create_dir_all(&dest_cat).unwrap();
+        let dir = dest_cat.join(POSTED);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::File::create(dir.join(format!("{POSTED}.mkv")))
+            .unwrap()
+            .set_len(4_000_000)
+            .unwrap();
+
+        let done = run(d, &dir, "movies");
+        let moved = done.moved.expect("the movie renamer renames the folder");
+        assert_eq!(
+            moved.parent().unwrap(),
+            dest_cat,
+            "the rename must stay on the destination side, not move to {:?}",
+            out.join("movies")
+        );
+        assert_eq!(leaf(&moved), "Example Movie 2024 1080p");
+        assert!(
+            !out.join("movies").exists(),
+            "nothing may be created under the download root: {:?}",
+            entries(out)
+        );
+    });
+}

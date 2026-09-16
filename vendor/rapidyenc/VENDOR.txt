@@ -16,7 +16,7 @@ maximally permissive; no attribution or notice obligations.
 
 Third-party components inside this tree:
 - crcutil-1.0/ — Apache License 2.0 (see crcutil-1.0/LICENSE). NOTE: our
-  build (crates/nzbkit/build.rs) compiles with YENC_DISABLE_CRCUTIL=1, so
+  build (crates/nzbkit-base/build.rs) compiles with YENC_DISABLE_CRCUTIL=1, so
   crcutil is NOT compiled into nzbfast binaries. It is only used by upstream
   as the generic CRC32 fallback on x86; rapidyenc has its own generic
   slice-by-4 fallback when crcutil is disabled. Directory kept for
@@ -26,7 +26,7 @@ Third-party components inside this tree:
 
 Build notes
 -----------
-Built by crates/nzbkit/build.rs using the `cc` crate (cmake is not installed
+Built by crates/nzbkit-base/build.rs using the `cc` crate (cmake is not installed
 on this machine; the cc route replicates the per-file -march flags from
 upstream CMakeLists.txt). Encoder is excluded (RAPIDYENC_DISABLE_ENCODE=1 and
 encoder_*.cc not compiled) — we only need decode + CRC.

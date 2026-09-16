@@ -49,7 +49,8 @@ use crate::recovery::rar5::InlineRecoveryFolder;
 use super::*;
 use crate::codec::rar50::{
     encode_lz_member_pooled, encode_lz_member_window, encode_lz_member_with_options,
-    member_window_blocks, EncodeOptions, EncoderScratchPool, MAX_COMPRESSED_BLOCK_OUTPUT,
+    member_window_blocks, member_window_segment_blocks, EncodeOptions, EncoderScratchPool,
+    MAX_COMPRESSED_BLOCK_OUTPUT,
 };
 
 /// A stored member read from `source`: `size` bytes, whose CRC32 the
@@ -137,7 +138,7 @@ fn streamed_fragment_header<R: Read>(
     split_before: bool,
     split_after: bool,
 ) -> Result<Vec<u8>> {
-    let specific = stored_file_specific(
+    let (specific, time_extra) = stored_file_specific(
         entry.name,
         entry.size,
         (!split_after).then_some(entry.crc32),
@@ -145,14 +146,23 @@ fn streamed_fragment_header<R: Read>(
         entry.mtime,
         entry.host_os,
     )?;
-    let mut block_flags = HFL_DATA;
+    let mut block_flags = BLOCK_HAS_DATA_AREA;
     if split_before {
-        block_flags |= HFL_SPLIT_BEFORE;
+        block_flags |= BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME;
     }
     if split_after {
-        block_flags |= HFL_SPLIT_AFTER;
+        block_flags |= BLOCK_CONTINUES_IN_NEXT_VOLUME;
     }
-    block_header_image(HEAD_FILE, block_flags, Some(fragment_len), &specific, &[])
+    if !time_extra.is_empty() {
+        block_flags |= BLOCK_HAS_EXTRA_AREA;
+    }
+    block_header_image(
+        BLOCK_TYPE_FILE,
+        block_flags,
+        Some(fragment_len),
+        &specific,
+        &time_extra,
+    )
 }
 
 /// Copy exactly `len` bytes from `source` to `sink`.
@@ -224,7 +234,7 @@ pub fn write_stored_archive_streamed_with_recovery<R: Read, W: Write>(
         let mut head = Vec::new();
         head.extend_from_slice(RAR50_SIGNATURE);
         let extra = resolved_main_extra(None, None, offset)?;
-        let flags = if offset.is_some() { MHFL_RECOVERY } else { 0 };
+        let flags = if offset.is_some() { ARCHIVE_HAS_RECOVERY_RECORD } else { 0 };
         write_main_header(&mut head, flags, None, &extra)?;
         Ok(head)
     };
@@ -541,7 +551,7 @@ struct StreamedVolumeSet<W: Write, F: FnMut(u64) -> std::io::Result<W>> {
     /// The open volume and the bytes written to it.
     current: Option<(W, u64)>,
     /// A full volume and its bytes, held without its end header until
-    /// the next volume opens or the set finishes (`ENDARC_NEXT_VOLUME`).
+    /// the next volume opens or the set finishes (`END_OF_ARCHIVE_NOT_LAST_VOLUME`).
     closed: Option<(W, u64)>,
     payload_in_volume: u64,
 }
@@ -670,7 +680,7 @@ fn streamed_compression(
     options: WriterOptions,
     largest_payload: u64,
 ) -> Result<StreamedCompression> {
-    if options.compression_level == Some(5) {
+    if options.compression_level == Some(5) && options.level_five_fallbacks {
         return Err(Error::UnsupportedFeature {
             version: options.target,
             feature: "RAR 5 streamed level-5 encoding (every lower level, smallest kept)",
@@ -754,6 +764,97 @@ impl<'a, R: Read> StreamedStoredEntry<'a, R> {
     }
 }
 
+/// A directory entry in a streamed compressed archive: a file header with
+/// the directory flag, a zero size and no data.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamedDirectoryEntry<'a> {
+    pub name: &'a [u8],
+    pub mtime: Option<u32>,
+    pub attributes: u64,
+    pub host_os: u64,
+}
+
+/// One member of [`write_compressed_members_streamed`]: a file read from
+/// its source, or a directory.
+///
+/// The entry-slice writers take files only and refuse an EMPTY one. These
+/// take both shapes a directory tree has in it that those cannot carry, so
+/// `rar a -m3 -r dir` has a writer: a directory is a header, and an empty
+/// file is stored, as the in-memory writer stores it. (nzbfast-local
+/// addition, 14 Sep 2026; see VENDORING.md.)
+pub enum StreamedMember<'a, R: Read> {
+    File(StreamedStoredEntry<'a, R>),
+    Directory(StreamedDirectoryEntry<'a>),
+}
+
+/// What [`write_members_streamed`] walks: the entry slices, whose members
+/// are all files, and [`StreamedMember`] slices, which may hold directories.
+trait StreamedItem<'a, R: Read> {
+    /// Whether an empty file is refused, as the entry-slice writers always
+    /// have refused one.
+    const REFUSES_EMPTY: bool;
+    fn item(&mut self) -> ItemRef<'_, 'a, R>;
+    /// The file's size, `None` for a directory.
+    fn file_size(&self) -> Option<u64>;
+}
+
+enum ItemRef<'m, 'a, R: Read> {
+    File(&'m mut StreamedStoredEntry<'a, R>),
+    Directory(StreamedDirectoryEntry<'a>),
+}
+
+impl<'a, R: Read> StreamedItem<'a, R> for StreamedStoredEntry<'a, R> {
+    const REFUSES_EMPTY: bool = true;
+    fn item(&mut self) -> ItemRef<'_, 'a, R> {
+        ItemRef::File(self)
+    }
+    fn file_size(&self) -> Option<u64> {
+        Some(self.size)
+    }
+}
+
+impl<'a, R: Read> StreamedItem<'a, R> for StreamedMember<'a, R> {
+    const REFUSES_EMPTY: bool = false;
+    fn item(&mut self) -> ItemRef<'_, 'a, R> {
+        match self {
+            StreamedMember::File(entry) => ItemRef::File(entry),
+            StreamedMember::Directory(directory) => ItemRef::Directory(*directory),
+        }
+    }
+    fn file_size(&self) -> Option<u64> {
+        match self {
+            StreamedMember::File(entry) => Some(entry.size),
+            StreamedMember::Directory(_) => None,
+        }
+    }
+}
+
+/// The directory flag in a file header's flags.
+const FILE_IS_DIRECTORY: u64 = 0x0001;
+
+/// A directory's file header: the directory flag, sizes of zero, no data
+/// checksum, stored compression info, and an (empty) data area, the shape
+/// the reference writes for one.
+fn streamed_directory_header(directory: StreamedDirectoryEntry<'_>) -> Result<Vec<u8>> {
+    validate_file_entry(directory.name)?;
+    let mut file_flags = FILE_IS_DIRECTORY;
+    if directory.mtime.is_some() {
+        file_flags |= FILE_HAS_UNIX_MTIME;
+    }
+    let mut specific = Vec::new();
+    write_vint(&mut specific, file_flags);
+    write_vint(&mut specific, 0);
+    write_vint(&mut specific, directory.attributes);
+    if let Some(mtime) = directory.mtime {
+        specific.extend_from_slice(&mtime.to_le_bytes());
+    }
+    write_vint(&mut specific, 0);
+    write_vint(&mut specific, directory.host_os);
+    write_vint(&mut specific, directory.name.len() as u64);
+    specific.extend_from_slice(directory.name);
+    block_header_image(BLOCK_TYPE_FILE, BLOCK_HAS_DATA_AREA, Some(0), &specific, &[])
+}
+
 /// The file header of one fragment of a compressed member, as
 /// `write_compressed_entry_fragment` builds it.
 fn streamed_compressed_fragment_header(
@@ -769,7 +870,7 @@ fn streamed_compressed_fragment_header(
         compression.dictionary_size,
         false,
     )?;
-    let specific = file_specific(
+    let (specific, time_extra) = file_specific(
         entry.name,
         entry.size,
         (!split_after).then_some(entry.crc32),
@@ -778,14 +879,55 @@ fn streamed_compressed_fragment_header(
         compression_info,
         entry.host_os,
     )?;
-    let mut block_flags = HFL_DATA;
+    let mut block_flags = BLOCK_HAS_DATA_AREA;
     if split_before {
-        block_flags |= HFL_SPLIT_BEFORE;
+        block_flags |= BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME;
     }
     if split_after {
-        block_flags |= HFL_SPLIT_AFTER;
+        block_flags |= BLOCK_CONTINUES_IN_NEXT_VOLUME;
     }
-    block_header_image(HEAD_FILE, block_flags, Some(fragment_len), &specific, &[])
+    if !time_extra.is_empty() {
+        block_flags |= BLOCK_HAS_EXTRA_AREA;
+    }
+    block_header_image(
+        BLOCK_TYPE_FILE,
+        block_flags,
+        Some(fragment_len),
+        &specific,
+        &time_extra,
+    )
+}
+
+/// The two widths the streamed writer takes from the pool. They were one
+/// number until 15 Sep 2026, and under a working-memory allowance that
+/// number had to lose its floor of eight for the small members and took the
+/// large member's window down with it (see [`member_window_segment_blocks`]).
+/// (nzbfast-local change, 15 Sep 2026; see VENDORING.md.)
+#[derive(Clone, Copy, Debug)]
+struct StreamWindows {
+    /// How many small members encode at once, at most, holding at most twice
+    /// that many blocks, and the size under which a member is one of them.
+    members: usize,
+    /// How many blocks a large member's window encodes behind its history.
+    segment: usize,
+}
+
+impl StreamWindows {
+    fn for_options(options: EncodeOptions) -> Self {
+        Self {
+            members: member_window_blocks(options),
+            segment: member_window_segment_blocks(options),
+        }
+    }
+
+    /// One width for both, the shape every window was before the split.
+    #[cfg(test)]
+    fn uniform(blocks: usize) -> Self {
+        Self {
+            members: blocks,
+            segment: blocks,
+        }
+    }
 }
 
 /// Encode a member from its source, handing `emit` each window's packed
@@ -997,26 +1139,28 @@ trait MemberSink {
         bytes: Vec<u8>,
         last: bool,
     ) -> Result<WindowOutcome>;
+    /// A directory entry: a header and no data.
+    fn directory(&mut self, directory: StreamedDirectoryEntry<'_>) -> Result<()>;
 }
 
 /// The members of a streamed compressed archive, resolved and handed to
 /// `sink` IN ORDER.
 ///
-/// A member of up to one window is read whole and resolved on a thread
+/// A member of up to one admission width (`windows.members` blocks) is read
+/// whole and resolved on a thread
 /// of its own ([`resolve_member`], which runs the block pool inside it for
 /// a member of several blocks), several in flight at once - a set of small
 /// members has no other parallelism, and the in-memory writer resolves
 /// its members in parallel too (measured before this: 150 members of
 /// 2.7 MB took 15.8 s one at a time against 1.0 s in memory). In flight
-/// at once: at most `segment_blocks` members holding at most twice that
-/// many blocks of member data, so the working set stays near two windows.
-/// A member longer than a window is encoded from windows
-/// ([`encode_streamed_member`]) after the jobs before it have drained, so
+/// at once: at most `windows.members` members holding at most twice that
+/// many blocks of member data. A longer member is encoded from windows of
+/// `windows.segment` blocks ([`encode_streamed_member`]) after the jobs before it have drained, so
 /// its blocks have the pool to themselves.
-fn write_members_streamed<'a, R: Read + Seek, S: MemberSink>(
-    entries: &mut [StreamedStoredEntry<'a, R>],
+fn write_members_streamed<'a, R: Read + Seek, M: StreamedItem<'a, R>, S: MemberSink>(
+    entries: &mut [M],
     compression: StreamedCompression,
-    segment_blocks: usize,
+    windows: StreamWindows,
     sink: &mut S,
 ) -> Result<()> {
     /// A parked encoder worker: hand it a member's bytes, take back the bytes
@@ -1027,9 +1171,15 @@ fn write_members_streamed<'a, R: Read + Seek, S: MemberSink>(
         std::sync::mpsc::Receiver<(Vec<u8>, Result<MemberResult>)>,
     );
     let block = MAX_COMPRESSED_BLOCK_OUTPUT;
-    let segment_blocks = segment_blocks.max(1);
+    let segment_blocks = windows.members.max(1);
     let window_bytes = segment_blocks * block;
-    let infos: Vec<StreamedMemberInfo<'a>> = entries.iter().map(|entry| entry.info()).collect();
+    let infos: Vec<Option<StreamedMemberInfo<'a>>> = entries
+        .iter_mut()
+        .map(|member| match member.item() {
+            ItemRef::File(entry) => Some(entry.info()),
+            ItemRef::Directory(_) => None,
+        })
+        .collect();
     let mut buffer = vec![0u8; STREAM_COPY_BYTES];
     // One scratch pool for the whole archive: a windowed member's
     // workers hand their buffers on from window to window and member to
@@ -1053,14 +1203,34 @@ fn write_members_streamed<'a, R: Read + Seek, S: MemberSink>(
                 .recv()
                 .map_err(|_| Error::InvalidHeader("RAR 5 streamed member encoder panicked"))?;
             free_jobs.borrow_mut().push(job);
+            let info = infos[index].expect("only a file is queued for encoding");
             match result? {
-                MemberResult::Stored => sink.stored_slice(infos[index], &data),
-                MemberResult::Packed(packed) => sink.packed_slice(infos[index], &packed),
+                MemberResult::Stored => sink.stored_slice(info, &data),
+                MemberResult::Packed(packed) => sink.packed_slice(info, &packed),
             }
         };
-        for (index, entry) in entries.iter_mut().enumerate() {
-            let info = infos[index];
+        for (index, member) in entries.iter_mut().enumerate() {
+            let entry = match member.item() {
+                ItemRef::File(entry) => entry,
+                ItemRef::Directory(directory) => {
+                    while !queue.is_empty() {
+                        drain_one(&mut queue, &mut blocks_in_flight, sink)?;
+                    }
+                    sink.directory(directory)?;
+                    continue;
+                }
+            };
+            let info = entry.info();
             let size = streamed_member_len(info.size)?;
+            if size == 0 {
+                // Only a StreamedMember slice gets here: an empty file is
+                // stored, as the in-memory writer stores one.
+                while !queue.is_empty() {
+                    drain_one(&mut queue, &mut blocks_in_flight, sink)?;
+                }
+                sink.stored_slice(info, &[])?;
+                continue;
+            }
             if compression.compression_method == 0 {
                 while !queue.is_empty() {
                     drain_one(&mut queue, &mut blocks_in_flight, sink)?;
@@ -1071,8 +1241,15 @@ fn write_members_streamed<'a, R: Read + Seek, S: MemberSink>(
             if size <= window_bytes {
                 let scratch = &scratch;
                 let blocks = size.div_ceil(block).max(1);
+                // Each queued member holds its own match-finder tree beside
+                // its blocks, which the window does not count; under a
+                // policy the trees share its tree quarter
+                // (`members_in_flight_for`).
+                let members_at_once = segment_blocks.min(
+                    super::filter_policy::members_in_flight_for(&[compression.encode_options]),
+                );
                 while !queue.is_empty()
-                    && (queue.len() >= segment_blocks
+                    && (queue.len() >= members_at_once
                         || blocks_in_flight + blocks > 2 * segment_blocks)
                 {
                     drain_one(&mut queue, &mut blocks_in_flight, sink)?;
@@ -1125,7 +1302,7 @@ fn write_members_streamed<'a, R: Read + Seek, S: MemberSink>(
                 &mut entry.source,
                 info.size,
                 compression,
-                segment_blocks,
+                windows.segment,
                 &scratch,
                 |bytes, last| {
                     if let WindowOutcome::StoreInstead = sink.packed_window(info, bytes, last)? {
@@ -1154,7 +1331,7 @@ fn streamed_stored_header(
     split_before: bool,
     split_after: bool,
 ) -> Result<Vec<u8>> {
-    let specific = stored_file_specific(
+    let (specific, time_extra) = stored_file_specific(
         info.name,
         info.size,
         (!split_after).then_some(info.crc32),
@@ -1162,14 +1339,23 @@ fn streamed_stored_header(
         info.mtime,
         info.host_os,
     )?;
-    let mut block_flags = HFL_DATA;
+    let mut block_flags = BLOCK_HAS_DATA_AREA;
     if split_before {
-        block_flags |= HFL_SPLIT_BEFORE;
+        block_flags |= BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME;
     }
     if split_after {
-        block_flags |= HFL_SPLIT_AFTER;
+        block_flags |= BLOCK_CONTINUES_IN_NEXT_VOLUME;
     }
-    block_header_image(HEAD_FILE, block_flags, Some(fragment_len), &specific, &[])
+    if !time_extra.is_empty() {
+        block_flags |= BLOCK_HAS_EXTRA_AREA;
+    }
+    block_header_image(
+        BLOCK_TYPE_FILE,
+        block_flags,
+        Some(fragment_len),
+        &specific,
+        &time_extra,
+    )
 }
 
 /// The single archive: every member is one block of header and data.
@@ -1219,6 +1405,11 @@ impl<W: Write> MemberSink for ArchiveSink<'_, W> {
             false,
         )?;
         self.block(&header, packed)
+    }
+
+    fn directory(&mut self, directory: StreamedDirectoryEntry<'_>) -> Result<()> {
+        let header = streamed_directory_header(directory)?;
+        self.block(&header, &[])
     }
 
     fn packed_window(
@@ -1296,6 +1487,14 @@ impl<W: Write, F: FnMut(u64) -> std::io::Result<W>> VolumeSetSink<W, F> {
 impl<W: Write, F: FnMut(u64) -> std::io::Result<W>> MemberSink for VolumeSetSink<W, F> {
     fn stored_slice(&mut self, info: StreamedMemberInfo<'_>, data: &[u8]) -> Result<()> {
         self.split_before = false;
+        if data.is_empty() {
+            // An empty file has no fragment for `fragments` to cut, and
+            // would leave no header at all: it is one header, whole.
+            let header = streamed_stored_header(info, 0, false, false)?;
+            let (sink, _) = self.set.volume()?;
+            sink.write_all(&header)?;
+            return self.set.wrote(header.len() as u64, 0);
+        }
         self.fragments(info, false, data, true).map(|_| ())
     }
 
@@ -1324,6 +1523,13 @@ impl<W: Write, F: FnMut(u64) -> std::io::Result<W>> MemberSink for VolumeSetSink
         self.fragments(info, true, packed, true).map(|_| ())
     }
 
+    fn directory(&mut self, directory: StreamedDirectoryEntry<'_>) -> Result<()> {
+        let header = streamed_directory_header(directory)?;
+        let (sink, _) = self.set.volume()?;
+        sink.write_all(&header)?;
+        self.set.wrote(header.len() as u64, 0)
+    }
+
     fn packed_window(
         &mut self,
         info: StreamedMemberInfo<'_>,
@@ -1346,8 +1552,10 @@ impl<W: Write, F: FnMut(u64) -> std::io::Result<W>> MemberSink for VolumeSetSink
 /// and dictionary, written to `sink`; returns the bytes written.
 /// Byte-identical to `Rar50Writer::compressed_entries` over the same
 /// members (a member the sampler or the encode leaves stored is stored
-/// there too). A member of up to a window (at least 32 MiB) is read
-/// whole; a longer one is read for the sampler's windows (the caller has
+/// there too). A member of up to one admission width
+/// (`StreamWindows::members` blocks, from `member_window_blocks`: at least
+/// eight with no allowance, as few as one under one) is read whole; a
+/// longer one is read for the sampler's windows (the caller has
 /// already read it once for its CRC32, [`crc32_of_reader`]), once for the
 /// encode, and once more only when the encode did not shrink it. Holds
 /// the members in flight and one windowed member's packed bytes.
@@ -1360,27 +1568,31 @@ pub fn write_compressed_archive_streamed<R: Read + Seek, W: Write>(
         options,
         entries,
         sink,
-        member_window_blocks(
+        StreamWindows::for_options(
             streamed_compression(options, largest_streamed(entries))?.encode_options,
         ),
     )
 }
 
 /// The largest entry of a streamed set, for the dictionary fit.
-fn largest_streamed<R: Read>(entries: &[StreamedStoredEntry<'_, R>]) -> u64 {
-    entries.iter().map(|entry| entry.size).max().unwrap_or(0)
+fn largest_streamed<'a, R: Read, M: StreamedItem<'a, R>>(entries: &[M]) -> u64 {
+    entries
+        .iter()
+        .filter_map(|entry| entry.file_size())
+        .max()
+        .unwrap_or(0)
 }
 
-fn write_compressed_archive_streamed_with_windows<R: Read + Seek, W: Write>(
+fn write_compressed_archive_streamed_with_windows<'a, R: Read + Seek, M: StreamedItem<'a, R>, W: Write>(
     options: WriterOptions,
-    entries: &mut [StreamedStoredEntry<'_, R>],
+    entries: &mut [M],
     sink: &mut W,
-    segment_blocks: usize,
+    windows: StreamWindows,
 ) -> Result<u64> {
     let _entropy = EntropyScope::install(options.entropy);
     validate_streamed_options(options, validate_compressed_options)?;
     let compression = streamed_compression(options, largest_streamed(entries))?;
-    if entries.iter().any(|entry| entry.size == 0) {
+    if M::REFUSES_EMPTY && entries.iter().any(|entry| entry.file_size() == Some(0)) {
         return Err(Error::InvalidHeader(
             "RAR 5 compressed writer needs a non-empty payload",
         ));
@@ -1395,7 +1607,7 @@ fn write_compressed_archive_streamed_with_windows<R: Read + Seek, W: Write>(
         compression,
         pending: Vec::new(),
     };
-    write_members_streamed(entries, compression, segment_blocks, &mut archive)?;
+    write_members_streamed(entries, compression, windows, &mut archive)?;
     let mut end = Vec::new();
     write_end_header(&mut end, 0)?;
     archive.sink.write_all(&end)?;
@@ -1427,18 +1639,18 @@ where
         max_packed_per_volume,
         entries,
         open_volume,
-        member_window_blocks(
+        StreamWindows::for_options(
             streamed_compression(options, largest_streamed(entries))?.encode_options,
         ),
     )
 }
 
-fn write_compressed_volumes_streamed_with_windows<R: Read + Seek, W: Write, F>(
+fn write_compressed_volumes_streamed_with_windows<'a, R: Read + Seek, M: StreamedItem<'a, R>, W: Write, F>(
     options: WriterOptions,
     max_packed_per_volume: usize,
-    entries: &mut [StreamedStoredEntry<'_, R>],
+    entries: &mut [M],
     open_volume: F,
-    segment_blocks: usize,
+    windows: StreamWindows,
 ) -> Result<Vec<u64>>
 where
     F: FnMut(u64) -> std::io::Result<W>,
@@ -1456,7 +1668,7 @@ where
             "RAR 5 compressed volume writer needs at least one entry",
         ));
     }
-    if entries.iter().any(|entry| entry.size == 0) {
+    if M::REFUSES_EMPTY && entries.iter().any(|entry| entry.file_size() == Some(0)) {
         return Err(Error::InvalidHeader(
             "RAR 5 compressed volume writer needs a non-empty payload",
         ));
@@ -1467,8 +1679,50 @@ where
         pending: Vec::new(),
         split_before: false,
     };
-    write_members_streamed(entries, compression, segment_blocks, &mut volumes)?;
+    write_members_streamed(entries, compression, windows, &mut volumes)?;
     volumes.set.finish()
+}
+
+/// [`write_compressed_archive_streamed`] over members that may be
+/// DIRECTORIES or empty files, which a directory tree holds and the entry
+/// slice cannot. Files come out byte-identical to that writer's (a test
+/// holds it); a directory is a header with no data, and an empty file is
+/// stored. (nzbfast-local addition, 14 Sep 2026; see VENDORING.md.)
+pub fn write_compressed_members_streamed<R: Read + Seek, W: Write>(
+    options: WriterOptions,
+    members: &mut [StreamedMember<'_, R>],
+    sink: &mut W,
+) -> Result<u64> {
+    let windows = StreamWindows::for_options(
+        streamed_compression(options, largest_streamed(members))?.encode_options,
+    );
+    write_compressed_archive_streamed_with_windows(options, members, sink, windows)
+}
+
+/// [`write_compressed_volumes_streamed`] over members that may be
+/// directories or empty files; see [`write_compressed_members_streamed`].
+/// A directory takes no payload, so it never opens a volume on its own
+/// account unless the one before it filled. (nzbfast-local addition,
+/// 14 Sep 2026; see VENDORING.md.)
+pub fn write_compressed_member_volumes_streamed<R: Read + Seek, W: Write, F>(
+    options: WriterOptions,
+    max_packed_per_volume: usize,
+    members: &mut [StreamedMember<'_, R>],
+    open_volume: F,
+) -> Result<Vec<u64>>
+where
+    F: FnMut(u64) -> std::io::Result<W>,
+{
+    let windows = StreamWindows::for_options(
+        streamed_compression(options, largest_streamed(members))?.encode_options,
+    );
+    write_compressed_volumes_streamed_with_windows(
+        options,
+        max_packed_per_volume,
+        members,
+        open_volume,
+        windows,
+    )
 }
 
 /// One member's encryption, chunk by chunk: chained AES-CBC over the
@@ -1561,7 +1815,7 @@ fn streamed_encrypted_fragment_header<R: Read>(
         encrypted.iv,
         encrypted.check_value,
     );
-    let specific = stored_file_specific(
+    let (specific, time_extra) = stored_file_specific(
         entry.name,
         entry.size,
         (!split_after).then_some(encrypted.crc32_mac),
@@ -1569,12 +1823,13 @@ fn streamed_encrypted_fragment_header<R: Read>(
         entry.mtime,
         entry.host_os,
     )?;
-    let mut block_flags = HFL_EXTRA | HFL_DATA;
+    extra.extend_from_slice(&time_extra);
+    let mut block_flags = BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA;
     if split_before {
-        block_flags |= HFL_SPLIT_BEFORE;
+        block_flags |= BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME;
     }
     if split_after {
-        block_flags |= HFL_SPLIT_AFTER;
+        block_flags |= BLOCK_CONTINUES_IN_NEXT_VOLUME;
     }
     match header_keys {
         Some(header_keys) => {
@@ -1582,7 +1837,7 @@ fn streamed_encrypted_fragment_header<R: Read>(
             append_encrypted_header_block_with(
                 &mut header,
                 &header_keys.keys,
-                HEAD_FILE,
+                BLOCK_TYPE_FILE,
                 block_flags,
                 Some(fragment_len),
                 &specific,
@@ -1592,7 +1847,7 @@ fn streamed_encrypted_fragment_header<R: Read>(
             Ok(header)
         }
         None => block_header_image(
-            HEAD_FILE,
+            BLOCK_TYPE_FILE,
             block_flags,
             Some(fragment_len),
             &specific,
@@ -1703,7 +1958,7 @@ pub fn write_encrypted_stored_archive_streamed<R: Read, W: Write>(
     if let Some(header_keys) = &header_keys {
         end.extend_from_slice(&encrypted_header_block(
             &header_keys.keys,
-            HEAD_END,
+            BLOCK_TYPE_END_OF_ARCHIVE,
             0,
             None,
             &end_header_specific(0),
@@ -1769,7 +2024,7 @@ where
     let mut sizes = Vec::new();
     let mut current: Option<(W, u64)> = None;
     // A full volume held without its end header until the next opens
-    // (`ENDARC_NEXT_VOLUME` on) or the set ends on it (off).
+    // (`END_OF_ARCHIVE_NOT_LAST_VOLUME` on) or the set ends on it (off).
     let mut closed: Option<(W, u64)> = None;
     let mut payload_in_volume = 0u64;
     for (entry, encrypted) in entries.iter_mut().zip(&payloads) {
@@ -1950,8 +2205,10 @@ mod tests {
         // With a recovery record per volume (the cut list knows).
         let set = Collected::new();
         let mut entries = [streamed(b"a.bin", &a), streamed(b"b.bin", &b)];
-        let mut with_record = crate::FeatureSet::default();
-        with_record.recovery_record = true;
+        let with_record = crate::FeatureSet {
+            recovery_record: true,
+            ..crate::FeatureSet::default()
+        };
         let recovery =
             WriterOptions::new(crate::ArchiveVersion::Rar50, with_record).with_compression_level(0);
         write_stored_volumes_streamed_with_recovery(
@@ -1993,8 +2250,10 @@ mod tests {
 
         // Encrypted data (plain headers): the same, on the exact shape.
         let set = Collected::new();
-        let mut features = crate::FeatureSet::default();
-        features.file_encryption = true;
+        let features = crate::FeatureSet {
+            file_encryption: true,
+            ..crate::FeatureSet::default()
+        };
         let encrypted =
             WriterOptions::new(crate::ArchiveVersion::Rar50, features).with_compression_level(0);
         let mut entries = [streamed(b"a.bin", &a), streamed(b"b.bin", &b)];
@@ -2028,6 +2287,174 @@ mod tests {
             size,
             crc32: crc,
             source: Cursor::new(data),
+        }
+    }
+
+    /// A member's bytes collected out of an extraction.
+    struct Collect(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+    impl Write for Collect {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Every member of `archive` as (name, is a directory, bytes).
+    fn extract_all(archive: &[u8]) -> Vec<(Vec<u8>, bool, Vec<u8>)> {
+        let parsed = crate::rar50::Archive::parse(archive).unwrap();
+        let entries = std::cell::RefCell::new(Vec::new());
+        parsed
+            .extract_to(crate::ArchiveReadOptions::default(), |meta| {
+                let data = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                entries.borrow_mut().push((
+                    meta.name.clone(),
+                    meta.is_directory,
+                    std::rc::Rc::clone(&data),
+                ));
+                Ok(Box::new(Collect(data)))
+            })
+            .unwrap();
+        entries
+            .into_inner()
+            .into_iter()
+            .map(|(name, is_dir, data)| (name, is_dir, data.borrow().clone()))
+            .collect()
+    }
+
+    /// The member writer is the entry writer over files, the in-memory
+    /// writer over an empty file, and over a tree carries the directory
+    /// and the empty file the entry writer refuses - read back by the
+    /// crate's own extractor, one volume set included.
+    #[test]
+    fn streamed_members_carry_directories_and_empty_files() {
+        let text = b"a line of text that repeats. ".repeat(4_000);
+        let noise = payload(50_000, 3);
+        let compressed = WriterOptions::new(crate::ArchiveVersion::Rar50, crate::FeatureSet::default())
+            .with_compression_level(3);
+
+        let mut entries = [streamed(b"text.txt", &text), streamed(b"noise.bin", &noise)];
+        let mut expected = Vec::new();
+        write_compressed_archive_streamed(compressed, &mut entries, &mut expected).unwrap();
+        let mut members = [
+            StreamedMember::File(streamed(b"text.txt", &text)),
+            StreamedMember::File(streamed(b"noise.bin", &noise)),
+        ];
+        let mut out = Vec::new();
+        write_compressed_members_streamed(compressed, &mut members, &mut out).unwrap();
+        assert_eq!(out, expected, "files alone are the entry writer's bytes");
+
+        let expected = Rar50Writer::new(compressed)
+            .compressed_entries(&[
+                CompressedEntry {
+                    name: b"text.txt",
+                    data: &text,
+                    mtime: None,
+                    attributes: 0,
+                    host_os: 3,
+                },
+                CompressedEntry {
+                    name: b"empty.txt",
+                    data: b"",
+                    mtime: None,
+                    attributes: 0,
+                    host_os: 3,
+                },
+            ])
+            .finish()
+            .unwrap();
+        let mut members = [
+            StreamedMember::File(streamed(b"text.txt", &text)),
+            StreamedMember::File(streamed(b"empty.txt", b"")),
+        ];
+        let mut out = Vec::new();
+        write_compressed_members_streamed(compressed, &mut members, &mut out).unwrap();
+        assert_eq!(out, expected, "an empty file is stored as the in-memory writer stores it");
+
+        let dir = StreamedDirectoryEntry {
+            name: b"sub",
+            mtime: Some(1_000_000_000),
+            attributes: 0o040_755,
+            host_os: 1,
+        };
+        let mut members = [
+            StreamedMember::File(streamed(b"sub/text.txt", &text)),
+            StreamedMember::File(streamed(b"sub/empty.txt", b"")),
+            StreamedMember::Directory(dir),
+            StreamedMember::File(streamed(b"noise.bin", &noise)),
+        ];
+        let mut out = Vec::new();
+        write_compressed_members_streamed(compressed, &mut members, &mut out).unwrap();
+        let parsed = crate::rar50::Archive::parse(&out).unwrap();
+        let listed: Vec<(Vec<u8>, bool)> = parsed
+            .files()
+            .map(|file| (file.name_bytes().to_vec(), file.is_directory()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (b"sub/text.txt".to_vec(), false),
+                (b"sub/empty.txt".to_vec(), false),
+                (b"sub".to_vec(), true),
+                (b"noise.bin".to_vec(), false),
+            ]
+        );
+        for (name, is_dir, data) in extract_all(&out) {
+            match name.as_slice() {
+                b"sub/text.txt" => assert_eq!(data, text),
+                b"sub/empty.txt" => assert!(data.is_empty() && !is_dir),
+                b"sub" => assert!(is_dir && data.is_empty()),
+                b"noise.bin" => assert_eq!(data, noise),
+                other => panic!("unexpected member {:?}", String::from_utf8_lossy(other)),
+            }
+        }
+
+        // Incompressible, so the set really does span volumes: the text
+        // and the patterned payload above pack into a few kilobytes.
+        let random = |len: usize, seed: u32| -> Vec<u8> {
+            let mut x = seed;
+            (0..len)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    x as u8
+                })
+                .collect()
+        };
+        let (first, second) = (random(9_000, 7), random(6_000, 11));
+        let set = Collected::new();
+        let mut members = [
+            StreamedMember::File(streamed(b"sub/first.bin", &first)),
+            StreamedMember::File(streamed(b"sub/empty.txt", b"")),
+            StreamedMember::Directory(dir),
+            StreamedMember::File(streamed(b"second.bin", &second)),
+        ];
+        write_compressed_member_volumes_streamed(compressed, 4_000, &mut members, set.opener())
+            .unwrap();
+        let volumes = set.0.borrow();
+        assert!(volumes.len() >= 2, "{} volumes", volumes.len());
+        let flags: Vec<u8> = volumes.iter().map(|v| end_flags(v)).collect();
+        assert_eq!(flags.last(), Some(&0));
+        assert!(flags[..flags.len() - 1].iter().all(|&f| f == 1), "{flags:?}");
+        // Each header-only member lands in exactly one volume. The empty
+        // file is the one that went missing first: the volume sink cut
+        // members into fragments, and an empty one has none to cut.
+        for (name, is_dir) in [(&b"sub"[..], true), (&b"sub/empty.txt"[..], false)] {
+            let holding = volumes
+                .iter()
+                .filter(|v| {
+                    crate::rar50::Archive::parse(v)
+                        .map(|a| {
+                            a.files()
+                                .any(|f| f.is_directory() == is_dir && f.name_bytes() == name)
+                        })
+                        .unwrap_or(false)
+                })
+                .count();
+            assert_eq!(holding, 1, "{} lands in exactly one volume", String::from_utf8_lossy(name));
         }
     }
 
@@ -2202,7 +2629,7 @@ mod tests {
                 options,
                 &mut streamed,
                 &mut out,
-                8,
+                StreamWindows::uniform(8),
             )
         }));
         let _ = block;
@@ -2255,7 +2682,7 @@ mod tests {
     /// (nzbfast-local change, 11 Sep 2026.)
     fn streamed_compressed_matches_the_in_memory_writer(
         dictionary: u64,
-        segment_blocks: usize,
+        windows: StreamWindows,
         optimal_parse: bool,
     ) {
         let members = compressed_members();
@@ -2283,13 +2710,13 @@ mod tests {
             options,
             &mut streamed,
             &mut out,
-            segment_blocks,
+            windows,
         )
         .unwrap();
         assert_eq!(written, out.len() as u64);
         assert_eq!(
             out, expected,
-            "dictionary {dictionary}, window {segment_blocks}, optimal {optimal_parse}"
+            "dictionary {dictionary}, windows {windows:?}, optimal {optimal_parse}"
         );
         assert!(
             out.len() < members.iter().map(|(_, d)| d.len()).sum::<usize>(),
@@ -2306,34 +2733,55 @@ mod tests {
     // noise member through the seeking sampler.
     #[test]
     fn streamed_matches_the_in_memory_writer_at_a_sub_block_dictionary_lazily() {
-        streamed_compressed_matches_the_in_memory_writer(128 << 10, 1, false);
+        streamed_compressed_matches_the_in_memory_writer(128 << 10, StreamWindows::uniform(1), false);
     }
 
     #[test]
     fn streamed_matches_the_in_memory_writer_at_a_sub_block_dictionary_optimally() {
-        streamed_compressed_matches_the_in_memory_writer(128 << 10, 1, true);
+        streamed_compressed_matches_the_in_memory_writer(128 << 10, StreamWindows::uniform(1), true);
     }
 
     #[test]
     fn streamed_matches_the_in_memory_writer_at_a_two_block_dictionary_lazily() {
-        streamed_compressed_matches_the_in_memory_writer(two_block_dictionary(), 1, false);
+        streamed_compressed_matches_the_in_memory_writer(two_block_dictionary(), StreamWindows::uniform(1), false);
     }
 
     #[test]
     fn streamed_matches_the_in_memory_writer_at_a_two_block_dictionary_optimally() {
-        streamed_compressed_matches_the_in_memory_writer(two_block_dictionary(), 1, true);
+        streamed_compressed_matches_the_in_memory_writer(two_block_dictionary(), StreamWindows::uniform(1), true);
+    }
+
+    // One block of admission and windows of two, the split an allowance
+    // makes (`StreamWindows`): the text member goes through windows wider
+    // than the width that sent it there, behind two blocks of history.
+    #[test]
+    fn streamed_matches_the_in_memory_writer_in_windows_wider_than_admission_lazily() {
+        let windows = StreamWindows {
+            members: 1,
+            segment: 2,
+        };
+        streamed_compressed_matches_the_in_memory_writer(two_block_dictionary(), windows, false);
+    }
+
+    #[test]
+    fn streamed_matches_the_in_memory_writer_in_windows_wider_than_admission_optimally() {
+        let windows = StreamWindows {
+            members: 1,
+            segment: 2,
+        };
+        streamed_compressed_matches_the_in_memory_writer(two_block_dictionary(), windows, true);
     }
 
     // A window of eight: every member is a job held whole, the noise
     // member sampled in hand.
     #[test]
     fn streamed_matches_the_in_memory_writer_in_windows_of_eight_lazily() {
-        streamed_compressed_matches_the_in_memory_writer(128 << 10, 8, false);
+        streamed_compressed_matches_the_in_memory_writer(128 << 10, StreamWindows::uniform(8), false);
     }
 
     #[test]
     fn streamed_matches_the_in_memory_writer_in_windows_of_eight_optimally() {
-        streamed_compressed_matches_the_in_memory_writer(128 << 10, 8, true);
+        streamed_compressed_matches_the_in_memory_writer(128 << 10, StreamWindows::uniform(8), true);
     }
 
     /// The `optimal_parse` arm of the six identity cells above has to BE
@@ -2355,7 +2803,7 @@ mod tests {
                 .map(|(name, data)| self::streamed(name, data))
                 .collect();
             let mut out = Vec::new();
-            write_compressed_archive_streamed_with_windows(options, &mut streamed, &mut out, 1)
+            write_compressed_archive_streamed_with_windows(options, &mut streamed, &mut out, StreamWindows::uniform(1))
                 .unwrap();
             packed.push(out.len());
         }
@@ -2399,7 +2847,7 @@ mod tests {
                 .unwrap();
             let mut streamed = [self::streamed(b"mixed.bin", &data)];
             let mut out = Vec::new();
-            write_compressed_archive_streamed_with_windows(options, &mut streamed, &mut out, 1)
+            write_compressed_archive_streamed_with_windows(options, &mut streamed, &mut out, StreamWindows::uniform(1))
                 .unwrap();
             assert_eq!(out, expected, "horizon choice {horizon}");
             packed.push(out.len());
@@ -2456,7 +2904,7 @@ mod tests {
                 opened += 1;
                 Ok(VolumeSink(index as usize))
             },
-            segment_blocks,
+            StreamWindows::uniform(segment_blocks),
         )
         .unwrap();
         let volumes = VOLUMES.with(|v| std::mem::take(&mut *v.borrow_mut()));
@@ -2491,8 +2939,10 @@ mod tests {
     }
 
     fn recovery_options() -> WriterOptions {
-        let mut features = crate::FeatureSet::default();
-        features.recovery_record = true;
+        let features = crate::FeatureSet {
+            recovery_record: true,
+            ..crate::FeatureSet::default()
+        };
         WriterOptions::new(crate::ArchiveVersion::Rar50, features).with_compression_level(0)
     }
 
@@ -2635,9 +3085,11 @@ mod tests {
     }
 
     fn seeded(header_encryption: bool) -> WriterOptions {
-        let mut features = crate::FeatureSet::default();
-        features.file_encryption = true;
-        features.header_encryption = header_encryption;
+        let features = crate::FeatureSet {
+            file_encryption: true,
+            header_encryption,
+            ..crate::FeatureSet::default()
+        };
         WriterOptions::new(crate::ArchiveVersion::Rar50, features)
             .with_compression_level(0)
             .with_entropy(crate::Entropy::Seeded([7u8; 32]))
@@ -2755,8 +3207,10 @@ mod tests {
     #[test]
     fn features_the_first_cut_does_not_carry_are_refused_by_name() {
         let a = payload(100, 4);
-        let mut features = crate::FeatureSet::default();
-        features.recovery_record = true;
+        let features = crate::FeatureSet {
+            recovery_record: true,
+            ..crate::FeatureSet::default()
+        };
         let options =
             WriterOptions::new(crate::ArchiveVersion::Rar50, features).with_compression_level(3);
         let mut out = Vec::new();
@@ -2764,8 +3218,10 @@ mod tests {
         let err = write_compressed_archive_streamed(options, &mut [streamed(b"a", &a)], &mut out)
             .unwrap_err();
         assert!(matches!(err, Error::UnsupportedFeature { .. }), "{err:?}");
-        let mut features = crate::FeatureSet::default();
-        features.solid = true;
+        let features = crate::FeatureSet {
+            solid: true,
+            ..crate::FeatureSet::default()
+        };
         let options =
             WriterOptions::new(crate::ArchiveVersion::Rar50, features).with_compression_level(0);
         let err = write_stored_archive_streamed(options, &mut [streamed(b"a", &a)], &mut out)

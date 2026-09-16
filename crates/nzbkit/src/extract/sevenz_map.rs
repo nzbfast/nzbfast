@@ -561,6 +561,7 @@ impl Extractor {
             (slots.len(), numbered, total_entries)
         };
         inner.groups.get_mut(key).unwrap().resolve_stamp = Some(stamp);
+        self.hand_over_preclaims(inner, key);
         // `SH_7Z` is already latched at attach and `SH_ONE_PASS` by
         // `route_dest` on the first routed span, so the badge reads
         // exactly as it did before the map existed.

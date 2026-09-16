@@ -506,6 +506,17 @@ pub struct PoolConfig {
     /// idle - see the §96 item 4 write-up for the A/B that says so.
     /// `NZBFAST_STAT_PROBE=1` turns it on.
     pub stat_probe: bool,
+    /// TODO 343 item B: the same STAT probe, answered per SERVER - only
+    /// a BLOCK ACCOUNT's ladder fan-out dispatch asks with STAT, and
+    /// only while a flat-rate server at or below its level has not
+    /// refused the article, so the metered body it would buy is a copy
+    /// of one that server may deliver (`Shared::block_probe_duplicates`).
+    /// Where the block account is the last possible holder its BODY is
+    /// the delivery and stays a BODY, and no other server's dispatch
+    /// changes at all, so no other config pays the hop. OR-folded like
+    /// `stat_probe`; `stat_probe` on still probes every ladder dup.
+    /// `NZBFAST_STAT_PROBE_BLOCK=1` turns it on.
+    pub stat_probe_block: bool,
     /// Where to report that this pool is HOLDING an article's terminal
     /// verdict back (TODO 315's late re-ask, and §129's confirming
     /// repeat for a bare refusal that would otherwise be the last
@@ -619,6 +630,12 @@ impl Default for PoolConfig {
             // TODO 96.4. Default OFF; same "every pool honors the knob"
             // placement as the two above.
             stat_probe: std::env::var("NZBFAST_STAT_PROBE")
+                .ok()
+                .is_some_and(|v| v == "1"),
+            // TODO 343 item B, same placement. Default OFF: measured
+            // off 13 Sep 2026 on a shaped fleet, where it cost wall
+            // (research/PER-SERVER-STAT-PROBE-2026-09-13.md).
+            stat_probe_block: std::env::var("NZBFAST_STAT_PROBE_BLOCK")
                 .ok()
                 .is_some_and(|v| v == "1"),
             loss_doubt: None,

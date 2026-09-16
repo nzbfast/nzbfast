@@ -346,8 +346,8 @@ public static class Strings
     /// <summary>Drop files or folders here</summary>
     public const string EmptyCreateTitle = "Drop files or folders here";
 
-    /// <summary>Jobs you start appear here, and run one at a time unless you raise the limit in Settings.</summary>
-    public const string EmptyQueueBody = "Jobs you start appear here, and run one at a time unless you raise the limit in Settings.";
+    /// <summary>Jobs you start appear here, and run one at a time unless you raise the limit in Settings. When this computer has room for both, two large single-file creates can run side by side.</summary>
+    public const string EmptyQueueBody = "Jobs you start appear here, and run one at a time unless you raise the limit in Settings. When this computer has room for both, two large single-file creates can run side by side.";
 
     /// <summary>The queue is empty</summary>
     public const string EmptyQueueTitle = "The queue is empty";
@@ -612,6 +612,21 @@ public static class Strings
     /// <summary>Default volume scheme</summary>
     public const string SettingsDefaultScheme = "Default volume scheme";
 
+    /// <summary>Remember checksums of large files</summary>
+    public const string SettingsDigestCache = "Remember checksums of large files";
+
+    /// <summary>Clear remembered checksums</summary>
+    public const string SettingsDigestCacheClear = "Clear remembered checksums";
+
+    /// <summary>Forget every remembered checksum? The next create or full check of each large file takes the usual time again.</summary>
+    public const string SettingsDigestCacheClearConfirm = "Forget every remembered checksum? The next create or full check of each large file takes the usual time again.";
+
+    /// <summary>Remembered checksums cleared</summary>
+    public const string SettingsDigestCacheCleared = "Remembered checksums cleared";
+
+    /// <summary>A repeat create or full check of an unchanged file over 256 MB skips its slowest step. parfast keeps a small checksum record for each such file in your user cache folder, and re-checks the file&apos;s contents before trusting it.</summary>
+    public const string SettingsDigestCacheNote = "A repeat create or full check of an unchanged file over 256 MB skips its slowest step. parfast keeps a small checksum record for each such file in your user cache folder, and re-checks the file's contents before trusting it.";
+
     /// <summary>Fast solver</summary>
     public const string SettingsFastSolver = "Fast solver";
 
@@ -668,6 +683,12 @@ public static class Strings
 
     /// <summary>Verify it</summary>
     public const string SettingsOnOpenVerify = "Verify it";
+
+    /// <summary>Run two large single-file creates at once, so a queue of large files finishes sooner</summary>
+    public const string SettingsPairLargeCreates = "Run two large single-file creates at once, so a queue of large files finishes sooner";
+
+    /// <summary>No single job gets faster. A second create starts beside a running one only when this computer has the cores and memory for both. On a spinning disk it gains nothing, because the two creates share the disk&apos;s speed, so you can turn it off there.</summary>
+    public const string SettingsPairLargeCreatesNote = "No single job gets faster. A second create starts beside a running one only when this computer has the cores and memory for both. On a spinning disk it gains nothing, because the two creates share the disk's speed, so you can turn it off there.";
 
     /// <summary>Performance</summary>
     public const string SettingsPerformance = "Performance";
@@ -1036,7 +1057,7 @@ public static System.Collections.Generic.IReadOnlyDictionary<string, string> All
             ["empty.create.add_folder"] = "Add folder...",
             ["empty.create.body"] = "Choose what to protect and parfast works out the blocks, the recovery and the volumes.",
             ["empty.create.title"] = "Drop files or folders here",
-            ["empty.queue.body"] = "Jobs you start appear here, and run one at a time unless you raise the limit in Settings.",
+            ["empty.queue.body"] = "Jobs you start appear here, and run one at a time unless you raise the limit in Settings. When this computer has room for both, two large single-file creates can run side by side.",
             ["empty.queue.title"] = "The queue is empty",
             ["empty.verify.body"] = "Open a .par2 file to check the files beside it, and repair them if they are damaged.",
             ["empty.verify.open"] = "Open PAR2 file...",
@@ -1124,6 +1145,11 @@ public static System.Collections.Generic.IReadOnlyDictionary<string, string> All
             ["settings.capability_hidden"] = "The engine in this build does not offer this.",
             ["settings.create"] = "Create defaults",
             ["settings.default_scheme"] = "Default volume scheme",
+            ["settings.digest_cache"] = "Remember checksums of large files",
+            ["settings.digest_cache_clear"] = "Clear remembered checksums",
+            ["settings.digest_cache_clear_confirm"] = "Forget every remembered checksum? The next create or full check of each large file takes the usual time again.",
+            ["settings.digest_cache_cleared"] = "Remembered checksums cleared",
+            ["settings.digest_cache_note"] = "A repeat create or full check of an unchanged file over 256 MB skips its slowest step. parfast keeps a small checksum record for each such file in your user cache folder, and re-checks the file's contents before trusting it.",
             ["settings.fast_solver"] = "Fast solver",
             ["settings.general"] = "General",
             ["settings.integration"] = "Integration",
@@ -1143,6 +1169,8 @@ public static System.Collections.Generic.IReadOnlyDictionary<string, string> All
             ["settings.on_open"] = "Opening a PAR2 file",
             ["settings.on_open_repair"] = "Verify it, then repair if it can be repaired",
             ["settings.on_open_verify"] = "Verify it",
+            ["settings.pair_large_creates"] = "Run two large single-file creates at once, so a queue of large files finishes sooner",
+            ["settings.pair_large_creates_note"] = "No single job gets faster. A second create starts beside a running one only when this computer has the cores and memory for both. On a spinning disk it gains nothing, because the two creates share the disk's speed, so you can turn it off there.",
             ["settings.performance"] = "Performance",
             ["settings.purge_default"] = "Delete PAR2 files after a good repair",
             ["settings.quick_actions"] = "Show the parfast items in the File Explorer menu",

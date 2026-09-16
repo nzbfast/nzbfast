@@ -119,9 +119,9 @@ pub struct ArchiveReadOptions<'a> {
 ///
 /// A split member carries two kinds of digest record. The FINAL fragment's
 /// covers the whole member's unpacked bytes and is the verdict. Every
-/// NON-final fragment carries its own packed bytes' digest, which unrar
-/// checks at each volume boundary (UIERROR_CHECKSUMPACKED) so that damage
-/// is named against ONE volume instead of failing the member at its end.
+/// NON-final fragment carries its own packed bytes' digest, which the reference
+/// unrar checks at each volume boundary, reporting the checksum error against
+/// that volume, so that damage is named against ONE volume instead of failing the member at its end.
 ///
 /// For a STORED member the packed bytes ARE the unpacked bytes, so those
 /// two records cover the same bytes and the member is digested twice per
@@ -176,7 +176,7 @@ pub enum Rar50SplitFragmentDigests {
 /// BLAKE2sp record. That is exact for both writers whose split sets have
 /// been measured here: WinRAR 7.21 and rar 7.23 stamp EVERY fragment of a
 /// `-htb` set (the non-final ones with that fragment's own packed digest -
-/// see `FileHeader::split_fragment_packed_digests`) and stamp none without
+/// see `FileHeader::nonfinal_fragment_digests`) and stamp none without
 /// it, so the first fragment and the finish fragment always agree. It is
 /// not exact for the rars writer, which stamps only the finish fragment: on
 /// such a set the BLAKE2sp goes unchecked and the member is verified by its
@@ -230,8 +230,16 @@ impl Rar50ExecutionPolicy {
         Self {
             working_memory_limit,
             flat_output_limit: working_memory_limit / 2,
-            max_workers: if working_memory_limit < 256 << 20 { 2 } else { 8 },
-            max_tape_workers: if working_memory_limit < 256 << 20 { 2 } else { 8 },
+            max_workers: if working_memory_limit < 256 << 20 {
+                2
+            } else {
+                8
+            },
+            max_tape_workers: if working_memory_limit < 256 << 20 {
+                2
+            } else {
+                8
+            },
         }
     }
 }
@@ -354,10 +362,7 @@ impl<'a> ArchiveReadOptions<'a> {
 
     /// Whether a stored RAR 5 split member checks each fragment's own
     /// packed digest as it reads - see [`Rar50SplitFragmentDigests`].
-    pub fn with_rar50_split_fragment_digests(
-        mut self,
-        digests: Rar50SplitFragmentDigests,
-    ) -> Self {
+    pub fn with_rar50_split_fragment_digests(mut self, digests: Rar50SplitFragmentDigests) -> Self {
         self.rar50_split_fragment_digests = digests;
         self
     }
@@ -590,6 +595,28 @@ impl Archive {
             Self::Rar13(archive) => archive.sfx_offset,
             Self::Rar15To40(archive) => archive.sfx_offset,
             Self::Rar50Plus(archive) => archive.sfx_offset,
+        }
+    }
+
+    /// Does this volume's end-of-archive record say another volume of
+    /// the same set follows it?
+    ///
+    /// RAR5 only, and `None` on every other family and on any RAR5
+    /// volume with no readable END record (truncated, still arriving,
+    /// or malformed). `Some(false)` is a positive statement that this
+    /// is the last volume; `None` is the absence of one, and a caller
+    /// must not read the two as the same thing.
+    ///
+    /// The point of it: a volume's split-member flags only say "this set
+    /// continues" when a member is cut ACROSS the boundary. An archiver
+    /// that ended a volume on a whole file (because the next header
+    /// would not fit) leaves no split flag anywhere, and this record is
+    /// then the only thing that says the set is unfinished. See
+    /// `rar50::Archive::next_volume_follows`.
+    pub fn next_volume_follows(&self) -> Option<bool> {
+        match self {
+            Self::Rar50Plus(archive) => archive.next_volume_follows(),
+            _ => None,
         }
     }
 
@@ -3028,7 +3055,10 @@ mod tests {
     #[test]
     fn rar4_volume_numbering_sets_the_new_numbering_bit_on_every_volume() {
         fn newnumbering(part: &[u8]) -> bool {
-            rar15_40::Archive::parse(part).unwrap().main.uses_new_numbering()
+            rar15_40::Archive::parse(part)
+                .unwrap()
+                .main
+                .uses_new_numbering()
         }
 
         let one = b"numbering alpha alpha alpha alpha alpha alpha\n".repeat(200);
@@ -3089,6 +3119,10 @@ mod tests {
         let new_style = classic.with_volume_numbering(rar15_40::VolumeNumbering::NewStyle);
         let per_volume = 2048;
 
+        // A named case, its classic-numbering volumes and its
+        // new-style ones, side by side. The shape IS the table; naming
+        // it would only move the reader a hop away from the four rows.
+        #[allow(clippy::type_complexity)]
         let sets: [(&str, Vec<Vec<u8>>, Vec<Vec<u8>>); 4] = [
             (
                 "write_stored_volumes",
@@ -3227,9 +3261,7 @@ mod tests {
             .iter()
             .map(|part| rar15_40::Archive::parse_with_password(part, Some(password)).unwrap())
             .collect();
-        assert!(archives
-            .iter()
-            .all(|a| a.main.has_encrypted_headers()));
+        assert!(archives.iter().all(|a| a.main.has_encrypted_headers()));
         assert!(parts
             .iter()
             .all(|part| !part.windows(11).any(|w| w == b"hdr-one.txt")));
@@ -3275,9 +3307,7 @@ mod tests {
             .iter()
             .map(|part| rar15_40::Archive::parse_with_password(part, Some(password)).unwrap())
             .collect();
-        assert!(archives
-            .iter()
-            .all(|a| a.main.has_encrypted_headers()));
+        assert!(archives.iter().all(|a| a.main.has_encrypted_headers()));
         let extracted = collect_rar15_40_volumes(&archives, Some(password)).unwrap();
         assert_eq!(extracted[0].name, b"single-hdr.txt");
         assert_eq!(extracted[0].data, data);
@@ -3409,7 +3439,9 @@ mod tests {
         let mut seed = 0x2545f4914f6cdd1du64;
         let data: Vec<u8> = (0..48_000)
             .map(|_| {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (seed >> 33) as u8
             })
             .collect();
@@ -3504,7 +3536,9 @@ mod tests {
         let mut seed = 0x9e3779b97f4a7c15u64;
         let data: Vec<u8> = (0..96_000)
             .map(|_| {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (seed >> 33) as u8
             })
             .collect();
@@ -3573,11 +3607,16 @@ mod tests {
         assert_eq!(*streamed[0].1.borrow(), reference[0].data);
     }
 
+    /// What a sequence collect returns: every entry the engine opened,
+    /// as (name, bytes) in open() order, and every consumption report it
+    /// published, as (volume index, bytes), in order.
+    type SequenceCollected = (Vec<(Vec<u8>, Vec<u8>)>, Vec<(usize, u64)>);
+
     /// [`rar50_sequence_collect`] for the RAR 1.5-4.x twin.
     fn rar15_40_sequence_collect(
         parts: &[Vec<u8>],
         password: Option<&[u8]>,
-    ) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, Vec<(usize, u64)>)> {
+    ) -> Result<SequenceCollected> {
         let entries = RefCell::new(Vec::new());
         let reports = std::sync::Mutex::new(Vec::new());
         let mut feeders: Vec<std::thread::JoinHandle<()>> = Vec::new();
@@ -3705,7 +3744,10 @@ mod tests {
                 .files()
                 .next()
                 .expect("the volume carries the split fragment");
-            assert!(file.is_split_before() && file.is_split_after(), "middle fragment");
+            assert!(
+                file.is_split_before() && file.is_split_after(),
+                "middle fragment"
+            );
             (file.block.offset, file.block.head_size as usize)
         };
         // file_crc sits at +16..+20 of the file block (after head_crc,
@@ -3902,7 +3944,7 @@ mod tests {
     fn rar50_sequence_collect(
         parts: &[Vec<u8>],
         password: Option<&[u8]>,
-    ) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, Vec<(usize, u64)>)> {
+    ) -> Result<SequenceCollected> {
         let entries = RefCell::new(Vec::new());
         let reports = std::sync::Mutex::new(Vec::new());
         let mut feeders: Vec<std::thread::JoinHandle<()>> = Vec::new();
@@ -3985,7 +4027,11 @@ mod tests {
     fn rar50_volume_sequence_incremental_split_matches_the_whole_set_walk() {
         let shapes: [(&[&str], Option<&[u8]>); 5] = [
             (
-                &["multivol.part1.rar", "multivol.part2.rar", "multivol.part3.rar"],
+                &[
+                    "multivol.part1.rar",
+                    "multivol.part2.rar",
+                    "multivol.part3.rar",
+                ],
                 None,
             ),
             (
@@ -4065,8 +4111,9 @@ mod tests {
         ];
         for name in names {
             let part = std::fs::read(rar50_fixture(name)).unwrap();
-            let password: Option<&[u8]> =
-                name.starts_with("encrypted").then_some(b"password".as_slice());
+            let password: Option<&[u8]> = name
+                .starts_with("encrypted")
+                .then_some(b"password".as_slice());
             let full = std::sync::Arc::new(GrowableBuffer::with_total_len(part.len() as u64));
             full.append(&part);
             let blocking = rar50::Archive::parse_stream(
@@ -4150,7 +4197,7 @@ mod tests {
     /// last enumerated block's data end, which is at or past it - and
     /// the resumed walk must still converge on the blocking walk's
     /// blocks. A header-encrypted archive is in the list because the
-    /// HEAD_CRYPT block that carries the header keys' salt sits at
+    /// BLOCK_TYPE_ENCRYPTION block that carries the header keys' salt sits at
     /// offset 8, behind the trim: the resume has to have kept the keys.
     #[test]
     fn rar50_enumerate_rest_reads_nothing_behind_the_stop() {
@@ -4158,24 +4205,36 @@ mod tests {
         features.file_encryption = true;
         features.header_encryption = true;
         let payload: Vec<u8> = (0..6000u32).map(|i| (i * 7919 % 251) as u8).collect();
-        let header_encrypted = rar50::Rar50Writer::new(rar50_options_with_features(
-            ArchiveVersion::Rar50,
-            features,
-        ))
-        .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
-            name: b"secret.bin",
-            data: &payload,
-            mtime: None,
-            attributes: 0x20,
-            host_os: 3,
-            password: b"password",
-        }])
-        .finish()
-        .unwrap();
+        let header_encrypted =
+            rar50::Rar50Writer::new(rar50_options_with_features(ArchiveVersion::Rar50, features))
+                .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
+                    name: b"secret.bin",
+                    data: &payload,
+                    mtime: None,
+                    attributes: 0x20,
+                    host_os: 3,
+                    password: b"password",
+                }])
+                .finish()
+                .unwrap();
+        // Fixture name, its bytes, and its password if it has one.
+        #[allow(clippy::type_complexity)]
         let fixtures: Vec<(&str, Vec<u8>, Option<&[u8]>)> = vec![
-            ("multivol.part1.rar", std::fs::read(rar50_fixture("multivol.part1.rar")).unwrap(), None),
-            ("multivol.part2.rar", std::fs::read(rar50_fixture("multivol.part2.rar")).unwrap(), None),
-            ("multivol.part3.rar", std::fs::read(rar50_fixture("multivol.part3.rar")).unwrap(), None),
+            (
+                "multivol.part1.rar",
+                std::fs::read(rar50_fixture("multivol.part1.rar")).unwrap(),
+                None,
+            ),
+            (
+                "multivol.part2.rar",
+                std::fs::read(rar50_fixture("multivol.part2.rar")).unwrap(),
+                None,
+            ),
+            (
+                "multivol.part3.rar",
+                std::fs::read(rar50_fixture("multivol.part3.rar")).unwrap(),
+                None,
+            ),
             (
                 "solid_multivol.part01.rar",
                 std::fs::read(rar50_fixture("solid_multivol.part01.rar")).unwrap(),
@@ -4191,7 +4250,11 @@ mod tests {
                 std::fs::read(rar50_fixture("stored_multivol.part1.rar")).unwrap(),
                 None,
             ),
-            ("header_encrypted (writer)", header_encrypted, Some(b"password")),
+            (
+                "header_encrypted (writer)",
+                header_encrypted,
+                Some(b"password"),
+            ),
         ];
         for (name, part, password) in fixtures {
             let full = std::sync::Arc::new(GrowableBuffer::with_total_len(part.len() as u64));
@@ -4246,7 +4309,11 @@ mod tests {
     /// of hanging.
     #[test]
     fn rar50_incremental_parse_reports_a_volume_before_its_tail_arrives() {
-        let names = ["multivol.part1.rar", "multivol.part2.rar", "multivol.part3.rar"];
+        let names = [
+            "multivol.part1.rar",
+            "multivol.part2.rar",
+            "multivol.part3.rar",
+        ];
         let parts: Vec<Vec<u8>> = names
             .iter()
             .map(|name| std::fs::read(rar50_fixture(name)).unwrap())
@@ -4276,8 +4343,14 @@ mod tests {
                     let half = part.len() / 2;
                     feed.append(&part[..half]);
                     if index == 0 {
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                        while !reports.lock().unwrap().iter().any(|&(volume, _)| volume == 0) {
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(30);
+                        while !reports
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|&(volume, _)| volume == 0)
+                        {
                             if std::time::Instant::now() >= deadline {
                                 timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
                                 feed.abort("no watermark before the tail");
@@ -4352,7 +4425,10 @@ mod tests {
                 .files()
                 .next()
                 .expect("the volume carries the split fragment");
-            assert!(file.is_split_before() && file.is_split_after(), "middle fragment");
+            assert!(
+                file.is_split_before() && file.is_split_after(),
+                "middle fragment"
+            );
             let record = match &file.hash {
                 Some(hash) => hash.data.clone(),
                 None => file
@@ -4387,7 +4463,10 @@ mod tests {
                 .files()
                 .next()
                 .expect("the volume carries the split fragment");
-            assert!(file.is_split_before() && file.is_split_after(), "middle fragment");
+            assert!(
+                file.is_split_before() && file.is_split_after(),
+                "middle fragment"
+            );
             file.block.data_range.clone()
         };
         assert!(range.end > range.start, "the fragment carries packed bytes");
@@ -4418,9 +4497,8 @@ mod tests {
     }
 
     fn deferring_options() -> ArchiveReadOptions<'static> {
-        ArchiveReadOptions::new().with_rar50_split_fragment_digests(
-            Rar50SplitFragmentDigests::DeferForStoredMembers,
-        )
+        ArchiveReadOptions::new()
+            .with_rar50_split_fragment_digests(Rar50SplitFragmentDigests::DeferForStoredMembers)
     }
 
     /// Deferring the per-fragment digests may NOT cost a damaged set its
@@ -4441,8 +4519,8 @@ mod tests {
                 .map(|part| rar50::Archive::parse(part).unwrap())
                 .collect();
 
-            let error = collect_rar50_volumes_with_options(&archives, deferring_options())
-                .unwrap_err();
+            let error =
+                collect_rar50_volumes_with_options(&archives, deferring_options()).unwrap_err();
             if crc32_flavor {
                 assert!(
                     matches!(error, Error::SplitFragmentCrc32Mismatch { volume: 1, .. }),
@@ -4467,13 +4545,17 @@ mod tests {
     #[test]
     fn rar50_deferred_fragment_digests_accept_a_lying_record_over_sound_data() {
         let sound = collect_rar50_volumes(
-            &["stored_multivol.part1.rar", "stored_multivol.part2.rar", "stored_multivol.part3.rar"]
-                .iter()
-                .map(|name| std::fs::read(rar50_fixture(name)).unwrap())
-                .collect::<Vec<_>>()
-                .iter()
-                .map(|part| rar50::Archive::parse(part).unwrap())
-                .collect::<Vec<_>>(),
+            &[
+                "stored_multivol.part1.rar",
+                "stored_multivol.part2.rar",
+                "stored_multivol.part3.rar",
+            ]
+            .iter()
+            .map(|name| std::fs::read(rar50_fixture(name)).unwrap())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|part| rar50::Archive::parse(part).unwrap())
+            .collect::<Vec<_>>(),
             None,
         )
         .unwrap();
@@ -4493,7 +4575,9 @@ mod tests {
             let result = collect_rar50_volumes_with_options(&archives, deferring_options());
             if stored {
                 let entries = result.unwrap_or_else(|error| {
-                    panic!("{names:?}: a stored member with a sound payload must extract: {error:?}")
+                    panic!(
+                        "{names:?}: a stored member with a sound payload must extract: {error:?}"
+                    )
                 });
                 assert_eq!(entries.len(), sound.len(), "{names:?}");
                 for (got, want) in entries.iter().zip(&sound) {
@@ -4501,7 +4585,10 @@ mod tests {
                 }
             } else if crc32_flavor {
                 assert!(
-                    matches!(result, Err(Error::SplitFragmentCrc32Mismatch { volume: 1, .. })),
+                    matches!(
+                        result,
+                        Err(Error::SplitFragmentCrc32Mismatch { volume: 1, .. })
+                    ),
                     "{names:?}: {result:?}"
                 );
             } else {
@@ -4519,7 +4606,11 @@ mod tests {
     fn rar50_split_digest_shapes() -> [(&'static [&'static str], bool); 3] {
         [
             (
-                &["multivol.part1.rar", "multivol.part2.rar", "multivol.part3.rar"],
+                &[
+                    "multivol.part1.rar",
+                    "multivol.part2.rar",
+                    "multivol.part3.rar",
+                ],
                 false,
             ),
             (
@@ -4543,7 +4634,7 @@ mod tests {
         ]
     }
 
-    /// unrar parity (UIERROR_CHECKSUMPACKED): a damaged middle volume
+    /// unrar parity (unrar reports the checksum error at the damaged volume): a damaged middle volume
     /// fails the RAR 5 set at THAT fragment, naming it, instead of
     /// decoding the whole member and failing on the final unpacked
     /// digest. Exercised on the whole-set walk for both digest flavors
@@ -4736,9 +4827,9 @@ mod tests {
         ];
         let parts = rar50::Rar50VolumeWriter::new(rar50_options(ArchiveVersion::Rar50))
             .compressed_entries(&entries)
-        .max_payload_per_volume(9_000)
-        .finish()
-        .unwrap();
+            .max_payload_per_volume(9_000)
+            .finish()
+            .unwrap();
         assert!(parts.len() >= 3, "the set must split across volumes");
 
         let archives: Vec<_> = parts
@@ -5174,7 +5265,10 @@ mod tests {
             &archives,
             ArchiveReadOptions::new(),
             move |_meta| {
-                Ok(Box::new(CountingSink(std::sync::Arc::clone(&writer_written))) as Box<dyn Write>)
+                Ok(
+                    Box::new(CountingSink(std::sync::Arc::clone(&writer_written)))
+                        as Box<dyn Write>,
+                )
             },
             |index| {
                 consumed_at
@@ -5187,7 +5281,10 @@ mod tests {
 
         let consumed_at = consumed_at.into_inner().unwrap();
         assert_eq!(
-            consumed_at.iter().map(|&(index, _)| index).collect::<Vec<_>>(),
+            consumed_at
+                .iter()
+                .map(|&(index, _)| index)
+                .collect::<Vec<_>>(),
             (0..parts.len()).collect::<Vec<_>>(),
             "every volume exactly once, in order"
         );
@@ -5214,7 +5311,10 @@ mod tests {
         ];
         let error = rar50_sequence_collect(&renamed, None).unwrap_err();
         assert!(
-            matches!(error, Error::InvalidHeader("RAR 5 split entry name changed")),
+            matches!(
+                error,
+                Error::InvalidHeader("RAR 5 split entry name changed")
+            ),
             "{error:?}"
         );
 
@@ -5235,7 +5335,10 @@ mod tests {
             .collect();
         let walk = collect_rar50_volumes(&archives, None).unwrap_err();
         assert!(
-            matches!(walk, Error::InvalidHeader("RAR 5 split entry is incomplete")),
+            matches!(
+                walk,
+                Error::InvalidHeader("RAR 5 split entry is incomplete")
+            ),
             "{walk:?}"
         );
     }
@@ -6058,14 +6161,14 @@ mod tests {
     /// complete table plus one junk length-15 entry on the unused tail
     /// symbol 298, the shape old WinRAR 2.x encoders emitted for unused
     /// alphabet slots (seen in the wild on the 11 Aug 2026 soak set).
-    /// unrar never validates subscription and extracts it (verified with
-    /// UNRAR 7.21); rars used to refuse with "RAR 2.9 oversubscribed
+    /// unrar 7.21 extracts it without complaint; rars used to refuse with "RAR 2.9 oversubscribed
     /// Huffman table". The tolerant fallback must decode it CRC-clean.
     #[test]
     fn rar29_oversubscribed_huffman_table_extracts_like_unrar() {
-        let archive =
-            ArchiveReader::read_path(rar15_40_fixture("rars_generated/oversubscribed_main_tail.rar"))
-                .unwrap();
+        let archive = ArchiveReader::read_path(rar15_40_fixture(
+            "rars_generated/oversubscribed_main_tail.rar",
+        ))
+        .unwrap();
         let entries = collect_extract(&archive, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, b"big.dat");
@@ -6075,11 +6178,11 @@ mod tests {
         assert_eq!(crc32::crc32(&entries[0].data), 0x4974_dc39);
     }
 
-    /// A RAR 2.x unix-owner sub-block (`0x77`, sub type `UO_HEAD`) declares
+    /// A RAR 2.x unix-owner sub-block (`0x77`, sub type `0x0101`) declares
     /// an owner and a group name size but stores the names themselves in the
     /// block's DATA area, past `head_size` - and the `HEAD_CRC` WinRAR
-    /// stamped covers them, because unrar reads both into the same raw
-    /// header buffer before checksumming it. Checksumming only `head_size`
+    /// stamped covers them too, which is why `rar`, `unrar` and `7z` all accept the archive.
+    /// Checksumming only `head_size`
     /// refused the whole archive at parse time with "checksum mismatch:
     /// expected 0x1fc3, got 0x974d" (torture round 4 finding 4), where `rar`
     /// 7.23 extracts it.
@@ -8276,25 +8379,34 @@ mod tests {
     fn read_session_shares_key_derivations_across_archives() {
         let password: &[u8] = b"testpass";
         let mut session = ReadSession::new(ArchiveReadOptions::with_password(password));
-        let first = session.read_path(rar50_fixture("encrypted_solid.rar")).unwrap();
-        let second = session.read_path(rar50_fixture("encrypted_solid.rar")).unwrap();
+        let first = session
+            .read_path(rar50_fixture("encrypted_solid.rar"))
+            .unwrap();
+        let second = session
+            .read_path(rar50_fixture("encrypted_solid.rar"))
+            .unwrap();
         assert_eq!(session.derive_count(), 1, "shared salt must derive once");
         assert_eq!(collect_extract(&first, Some(password)).unwrap().len(), 6);
         assert_eq!(collect_extract(&second, Some(password)).unwrap().len(), 6);
 
         let mut fresh = ReadSession::new(ArchiveReadOptions::with_password(password));
-        fresh.read_path(rar50_fixture("encrypted_solid.rar")).unwrap();
+        fresh
+            .read_path(rar50_fixture("encrypted_solid.rar"))
+            .unwrap();
         assert_eq!(fresh.derive_count(), 1, "sessions do not share caches");
 
         let mut wrong = ReadSession::new(ArchiveReadOptions::with_password(b"nottheone"));
         assert!(
-            wrong.read_path(rar50_fixture("encrypted_solid.rar")).is_err(),
+            wrong
+                .read_path(rar50_fixture("encrypted_solid.rar"))
+                .is_err(),
             "wrong password must fail its own session"
         );
 
         // No password: parse succeeds (visible headers), nothing derives.
         let mut bare = ReadSession::new(ArchiveReadOptions::new());
-        bare.read_path(rar50_fixture("encrypted_solid.rar")).unwrap();
+        bare.read_path(rar50_fixture("encrypted_solid.rar"))
+            .unwrap();
         assert_eq!(bare.derive_count(), 0);
     }
 
@@ -8322,11 +8434,13 @@ mod tests {
         for limit in [512 * 1024u64, 512 * 1024 * 1024] {
             let got = collect_volumes_with_options(
                 &volumes,
-                ArchiveReadOptions::with_password(password)
-                    .with_rar50_buffered_decode_limit(limit),
+                ArchiveReadOptions::with_password(password).with_rar50_buffered_decode_limit(limit),
             )
             .unwrap();
-            assert_eq!(got, serial, "encrypted solid chain diverged at limit {limit}");
+            assert_eq!(
+                got, serial,
+                "encrypted solid chain diverged at limit {limit}"
+            );
         }
 
         // Corruption parity: a flipped payload byte must fail through the
@@ -8342,7 +8456,7 @@ mod tests {
         ) {
             let serial_result = collect_extract(&archive, Some(password));
             let chain_result = collect_volumes_with_options(
-                &vec![archive.clone()],
+                std::slice::from_ref(&archive),
                 ArchiveReadOptions::with_password(password)
                     .with_rar50_buffered_decode_limit(512 * 1024 * 1024),
             );
@@ -8355,10 +8469,9 @@ mod tests {
 
         // No password: parsing succeeds, extraction reports NeedPassword
         // (serial semantics) rather than a chain artifact.
-        let no_password =
-            ArchiveReader::read_path(rar50_fixture("encrypted_solid.rar")).unwrap();
+        let no_password = ArchiveReader::read_path(rar50_fixture("encrypted_solid.rar")).unwrap();
         let result = collect_volumes_with_options(
-            &vec![no_password],
+            &[no_password],
             ArchiveReadOptions::new().with_rar50_buffered_decode_limit(512 * 1024 * 1024),
         );
         assert!(result.is_err(), "missing password must fail");
@@ -8482,7 +8595,11 @@ mod tests {
             match (pooled, serial) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "outputs diverged at flip {pos}"),
                 (Err(a), Err(b)) => {
-                    assert_eq!(a.to_string(), b.to_string(), "errors diverged at flip {pos}");
+                    assert_eq!(
+                        a.to_string(),
+                        b.to_string(),
+                        "errors diverged at flip {pos}"
+                    );
                 }
                 (a, b) => panic!(
                     "outcome diverged at flip {pos}: pooled {:?} vs serial {:?}",
@@ -8674,7 +8791,10 @@ mod tests {
             Err(Error::NeedPassword)
         ));
         let extracted = collect_extract(&archive, Some(b"password")).unwrap();
-        assert_eq!(extracted[0].data, b"facade seeded rar30 encrypted payload\n");
+        assert_eq!(
+            extracted[0].data,
+            b"facade seeded rar30 encrypted payload\n"
+        );
     }
 
     #[test]

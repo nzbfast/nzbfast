@@ -380,9 +380,11 @@ pub type Arrivals<'a> = Option<&'a (dyn Fn(u64) + Sync)>;
 /// buffered pass it was copied but never consumed and is simply
 /// truncated away, on a direct pass it goes back to the source
 /// through [`MultilineSource::unread`]. Only that overrun - at most
-/// one read - is ever copied twice. (The direct path is off unless
-/// `NZBFAST_WIRE_DIRECT` turns it on: `wirebuf::direct_read_cap`
-/// carries the measurement.)
+/// one read - is ever copied twice. (Whether the direct path runs is
+/// platform-dependent - on by default on Linux, off elsewhere, and off
+/// on any TLS session either way - with `NZBFAST_WIRE_DIRECT`
+/// overriding: `wirebuf::direct_read_cap` and
+/// `wirebuf::DIRECT_READ_DEFAULT` carry the two measurements.)
 pub(crate) async fn read_multiline_paced_noting<'a, R>(
     reader: &mut R,
     out: &mut Vec<u8>,

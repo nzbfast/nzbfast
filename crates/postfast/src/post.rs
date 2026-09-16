@@ -108,7 +108,7 @@ pub struct Args {
     /// asked for - see [`crate::container::Packing`].
     pub optimal_parse: bool,
     /// `--dictionary <bytes>`: the RAR 5 dictionary to ask for. `None`
-    /// is the writer's default, 32 MiB fitted to the largest member; see
+    /// is the writer's default, 2 MiB fitted to the largest member; see
     /// [`crate::container::Packing::dictionary`].
     pub dictionary: Option<u64>,
     /// Connections the verify pool opens. The post itself is one

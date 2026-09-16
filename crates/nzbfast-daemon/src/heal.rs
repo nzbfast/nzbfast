@@ -509,6 +509,18 @@ pub(super) fn heal_one(
                 let mut g = job.lock_ok();
                 g.heal_dir = dir.to_path_buf();
                 g.paused = false;
+                // ...and the OTHER thing `-2` means to somebody else.
+                // `insurance_at_add` reads priority -2 as "the user
+                // deferred this download", which is true of the SAB verb
+                // in general and false of this call: the pause above is
+                // a two-statement race guard, released right here. With
+                // `insurance_cap_gb > 0` every heal job was persisted
+                // with `insurance: true` and handled as a retention
+                // row - picked only when nothing else is runnable,
+                // counted against the insurance cap - by every reader of
+                // the flag. A repair the user asked for by name is not
+                // insurance.
+                g.insurance = false;
                 true
             }
             None => false,

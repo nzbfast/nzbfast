@@ -93,6 +93,96 @@ fn par2_index_over(name: &str, data: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Every path the process `pid` holds open at or under `dir`.
+///
+/// GH #71: on NFS an unlink under a live descriptor silly-renames to
+/// `.nfs*`, so a finished job's folder the daemon still holds anything
+/// open in cannot be deleted by an *arr. Linux reads `/proc/<pid>/fd`
+/// (a deleted file reads back as `<path> (deleted)`, which still starts
+/// with the directory); macOS shells out to `lsof`, which reports the
+/// same.
+///
+/// Windows has neither, and until 16 Sep 2026 it got the `lsof` arm and
+/// panicked `program not found` - the two tests below were the whole of
+/// nightly's `windows-daemon` red on f5cdd402. It asks the question the
+/// other way instead, and the answer is stronger rather than weaker: it
+/// opens every file under `dir` with `share_mode(0)`, which Windows
+/// grants only when NO other handle to that file exists anywhere. That
+/// is not a stand-in for the descriptor census - it IS the property GH
+/// #71 is about, because a handle that fails this open is exactly a
+/// handle that makes the *arr's delete fail with "file in use". Under
+/// mandatory locking this arm is the one that matters most.
+///
+/// Two deliberate differences from the other arms, both in the safe
+/// direction. It ignores `pid`: a Win32 handle census needs
+/// `NtQuerySystemInformation`, and a holder that is not the daemon
+/// blocks the *arr just the same, so a wider answer can only fail a
+/// test that should pass - never pass one that should fail. And it sees
+/// only files that still have a name: a handle to an already-unlinked
+/// file is invisible here, which is the case NFS silly-rename made
+/// visible on unix and Windows cannot produce (it refuses the unlink
+/// outright).
+fn open_paths_under(pid: u32, dir: &std::path::Path) -> Vec<String> {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut out = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        for e in std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .expect("proc fd table")
+            .flatten()
+        {
+            if let Ok(t) = std::fs::read_link(e.path()) {
+                out.push(t.to_string_lossy().into_owned());
+            }
+        }
+    }
+    #[cfg(all(not(target_os = "linux"), not(windows)))]
+    {
+        let o = Command::new("lsof")
+            .args(["-n", "-P", "-Fn", "-p", &pid.to_string()])
+            .output()
+            .expect("lsof ran");
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            if let Some(p) = line.strip_prefix('n') {
+                out.push(p.to_string());
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _ = pid;
+        let mut stack = vec![dir.clone()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                // share_mode(0) asks for the file with no sharing at
+                // all, so it is refused (ERROR_SHARING_VIOLATION, os
+                // error 32) whenever any other handle to it is open.
+                if std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&p)
+                    .is_err()
+                {
+                    out.push(p.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    let dir = dir.to_string_lossy().into_owned();
+    let under = format!("{dir}{}", std::path::MAIN_SEPARATOR);
+    out.retain(|p| p.starts_with(&under) || *p == dir);
+    out
+}
+
 /// One completed job with the setting on leaves a manifest that
 /// convicts a flipped byte after the .par2 is gone; the same job with
 /// the setting at its default leaves nothing.
@@ -176,6 +266,7 @@ async fn a_settled_job_leaves_a_manifest_that_convicts_later_damage() {
     })
     .await;
     let port = d.port;
+    let pid = d.pid();
 
     let complete_root = dir.join("complete");
     tokio::task::spawn_blocking(move || {
@@ -250,6 +341,11 @@ async fn a_settled_job_leaves_a_manifest_that_convicts_later_damage() {
         let first = upload("Manifested.Job.nzb", &xml);
         wait_completed(&first);
         let jd = job_dir("Manifested");
+        let held = open_paths_under(pid, &jd);
+        assert!(
+            held.is_empty(),
+            "GH #71: a job the runner finished still holds descriptors in its folder: {held:?}"
+        );
         let mpath = jd.join(".nzbfast.manifest");
         assert!(
             mpath.is_file(),
@@ -324,6 +420,12 @@ async fn a_settled_job_leaves_a_manifest_that_convicts_later_damage() {
 /// still be downloading when B lands. Shaped on `daemon.rs`'s
 /// `idle_servers_prefetch_next_job`, which pins the same road without
 /// the recovery set.
+///
+/// It also pins GH #71's second road: the runner's tail hands every
+/// output descriptor back before cleanup, and `completion_tail` did not,
+/// so the junk sweep unlinked files the daemon still held open (a
+/// `.nfs*` silly-rename on NFS) and B's payload stayed open after the
+/// job was history. Failed on that tree with `payload.bin` held.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_prefetch_finished_job_leaves_a_manifest_too() {
     let dir = std::env::temp_dir().join(format!("nzbfast-pfmanifest-{}", std::process::id()));
@@ -429,6 +531,7 @@ async fn a_prefetch_finished_job_leaves_a_manifest_too() {
     })
     .await;
     let port = d.port;
+    let pid = d.pid();
 
     // NOTHING IS SET: this runs on the shipped `write_manifest` default,
     // the same way the arm above does, so it pins the default too.
@@ -492,6 +595,14 @@ async fn a_prefetch_finished_job_leaves_a_manifest_too() {
                         .is_some_and(|n| n.to_string_lossy().contains("Prefetched"))
             })
             .expect("no completed dir for the prefetched job");
+
+        // Scoped to B's folder: A is still downloading, and its writers
+        // are rightly open.
+        let held = open_paths_under(pid, &jd);
+        assert!(
+            held.is_empty(),
+            "GH #71: a job the prefetch finished still holds descriptors in its folder: {held:?}"
+        );
 
         assert!(
             jd.join(".nzbfast.manifest").is_file(),

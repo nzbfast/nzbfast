@@ -138,6 +138,26 @@ fn scan_packets_parallel<'a, F: FnMut(RawPacket<'a>)>(
     // The serial scan's hash budget exists to stop crafted overlapping-magic
     // quadratics; this walk hashes each span exactly once and never overlaps,
     // so total hashing is already bounded by the input length.
+    let ok = verify_spans_parallel(input, &spans, hashed);
+    if !ok {
+        return Err(f);
+    }
+    for &(start, end) in &spans {
+        f(RawPacket {
+            md5: input[start + 16..start + 32].try_into().unwrap(),
+            set_id: input[start + 32..start + 48].try_into().unwrap(),
+            ptype: input[start + 48..start + 64].try_into().unwrap(),
+            body: &input[start + 64..end],
+            body_offset: start + 64,
+        });
+    }
+    Ok(())
+}
+
+/// Every span's own MD5 checked across threads; `false` at the first
+/// that does not verify. The hashing half of [`scan_packets_parallel`],
+/// shared with [`scan_file_windowed`] so the two cannot drift.
+fn verify_spans_parallel(input: &[u8], spans: &[(usize, usize)], hashed: &mut u64) -> bool {
     let threads = crate::mem::cpu_workers().min(spans.len());
     let ok = std::sync::atomic::AtomicBool::new(true);
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -165,19 +185,151 @@ fn scan_packets_parallel<'a, F: FnMut(RawPacket<'a>)>(
         }
     });
     *hashed = hashed.saturating_add(bytes.into_inner() as u64);
-    if !ok.into_inner() {
-        return Err(f);
+    ok.into_inner()
+}
+
+/// [`scan_packets`] over a FILE, read through ONE WINDOW reused from its
+/// first byte to its last, so no allocation the size of the file is ever
+/// made. Emits exactly the packets `scan_packets` emits over the whole
+/// file's bytes, in the same order, with `body_offset` a FILE offset.
+///
+/// **Why it exists.** The PAR2 catalog read every volume under 1 GiB
+/// whole, scanned it and freed it, and macOS libmalloc keeps a freed
+/// large region dirty in the process footprint: a repair that had
+/// finished its scan still carried 335 MB of `Malloc Large (empty)` on a
+/// 1 GiB / 64 KiB set and ~590 MB at 1 MiB blocks, which was the whole of
+/// the 512 MB-class memory floor
+/// (research/PARFAST-REPAIR-RSS-FLOOR-2026-09-14.md). A window of fixed
+/// size lands in the same allocation for every read of a file.
+///
+/// **The I/O is the whole-read's I/O**: large sequential reads, one copy
+/// out of the page cache, no per-packet seek (a seek per packet is
+/// thousands of round trips on a network volume). The MD5s inside each
+/// window verify across threads exactly as [`scan_packets_parallel`] does
+/// once a window holds [`PAR_SCAN_MIN`] of packets.
+///
+/// **It only ever says yes to the case the parallel walk would have
+/// accepted unchanged**: the file a contiguous run of packets from byte
+/// 0, every declared length fitting the file, every MD5 verifying. Then
+/// its spans are exactly [`packet_spans`]'s and its output exactly the
+/// optimistic walk's. Anything else - a byte out of place, a length that
+/// does not fit, a bad MD5, a read that comes back short because the file
+/// shrank - returns `None`, and the caller reads the file whole and takes
+/// the resyncing walks, so a damaged or odd volume keeps the historical
+/// behaviour byte for byte. Trailing bytes too short to hold a header are
+/// ignored, as both in-memory walks ignore them. `emit` may by then have
+/// seen a PREFIX of the file's packets, which the caller must discard.
+///
+/// A packet larger than `window` grows the window to hold it - bounded
+/// by the file length, which every declared length was checked against.
+///
+/// Test-only since 15 Sep 2026: the catalog reads through
+/// [`scan_file_windowed_in`] with a pooled buffer, and this is the
+/// one-shot face the equivalence tests pin.
+#[cfg(test)]
+pub(crate) fn scan_file_windowed(
+    f: &std::fs::File,
+    file_len: u64,
+    window: usize,
+    emit: impl FnMut(RawPacket<'_>),
+) -> Option<()> {
+    scan_file_windowed_in(f, file_len, window, &mut Vec::new(), emit)
+}
+
+/// [`scan_file_windowed`] reading through a buffer the CALLER owns, so a
+/// scan of many files can land every file's reads in allocations that
+/// already exist. What `buf` held before is never read: the window is
+/// `buf[..filled]` and every byte of that came from the file in this call.
+/// On return `buf` may have GROWN past `window` (a packet that did not fit
+/// grows it), and a caller keeping it for later files should cap it.
+pub(crate) fn scan_file_windowed_in(
+    f: &std::fs::File,
+    file_len: u64,
+    window: usize,
+    buf: &mut Vec<u8>,
+    mut emit: impl FnMut(RawPacket<'_>),
+) -> Option<()> {
+    let hdr = HEADER_LEN as usize;
+    let total = usize::try_from(file_len).ok()?;
+    // Sized without zeroing what a previous file already touched: the
+    // stale bytes sit past `filled` and are overwritten before use.
+    let width = window.max(hdr).min(total);
+    if buf.len() >= width {
+        buf.truncate(width);
+    } else {
+        buf.resize(width, 0);
     }
-    for &(start, end) in &spans {
-        f(RawPacket {
-            md5: input[start + 16..start + 32].try_into().unwrap(),
-            set_id: input[start + 32..start + 48].try_into().unwrap(),
-            ptype: input[start + 48..start + 64].try_into().unwrap(),
-            body: &input[start + 64..end],
-            body_offset: start + 64,
-        });
+    // `buf[..filled]` holds the file's bytes from offset `base`.
+    let (mut base, mut filled) = (0usize, 0usize);
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    loop {
+        let want = (buf.len() - filled).min(total - base - filled);
+        crate::disk::read_exact_at(f, &mut buf[filled..filled + want], (base + filled) as u64)
+            .ok()?;
+        filled += want;
+        let at_eof = base + filled == total;
+        // Frame STRICTLY: a header exactly where the last packet ended.
+        // The in-memory walks resync by searching for the magic, which a
+        // window cannot do across its edge - so it declines instead.
+        spans.clear();
+        let mut off = 0usize;
+        let mut short_by = None;
+        while off + hdr <= filled {
+            if buf[off..off + 8] != *MAGIC {
+                return None;
+            }
+            let len = u64::from_le_bytes(buf[off + 8..off + 16].try_into().unwrap());
+            let fits = ((base + off) as u64)
+                .checked_add(len)
+                .is_some_and(|end| end <= file_len);
+            if len < HEADER_LEN || len % 4 != 0 || !fits {
+                return None;
+            }
+            let end = off + len as usize;
+            if end > filled {
+                short_by = Some(len as usize);
+                break;
+            }
+            spans.push((off, end));
+            off = end;
+        }
+        if !spans.is_empty() {
+            let mut hashed = 0u64;
+            let checked = &buf[..off];
+            let ok = if checked.len() >= PAR_SCAN_MIN {
+                verify_spans_parallel(checked, &spans, &mut hashed)
+            } else {
+                spans.iter().all(|&(s, e)| {
+                    Md5::digest(&checked[s + 32..e]).as_slice() == &checked[s + 16..s + 32]
+                })
+            };
+            if !ok {
+                return None;
+            }
+            for &(s, e) in &spans {
+                emit(RawPacket {
+                    md5: buf[s + 16..s + 32].try_into().unwrap(),
+                    set_id: buf[s + 32..s + 48].try_into().unwrap(),
+                    ptype: buf[s + 48..s + 64].try_into().unwrap(),
+                    body: &buf[s + 64..e],
+                    body_offset: base + s + 64,
+                });
+            }
+        }
+        // Every declared length was held to the file, so at EOF nothing
+        // can be short: what is left is under a header and is ignored.
+        if at_eof {
+            return Some(());
+        }
+        // Slide the unfinished tail to the front and read on. A packet
+        // that did not fit even from the front grows the window.
+        buf.copy_within(off..filled, 0);
+        base += off;
+        filled -= off;
+        if let Some(len) = short_by.filter(|&len| len > buf.len()) {
+            buf.resize(len, 0);
+        }
     }
-    Ok(())
 }
 
 /// [`scan_packets`] with the recovery packets DEFERRED: every packet

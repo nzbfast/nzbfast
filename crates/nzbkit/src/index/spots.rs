@@ -4,6 +4,32 @@
 
 use super::*;
 
+/// What a promoted spot's `files.segments` becomes: the parts the row
+/// ALREADY held, merged with the ones this spot's NZB names.
+///
+/// Out of line so the rule can be asserted directly; it is the same rule
+/// `ingest::merge_parts` applies one module over, and the reason it is
+/// needed here is that `promote_spot_locked` reaches an EXISTING release
+/// on two paths - a `prior` adopted in place (partial article overlap
+/// below the naming quorum) and an unkeyed row on an unconverged map.
+/// The scanner may hold parts the spot's NZB does not name, and the
+/// UPSERT used to REPLACE `segments` wholesale, dropping them from the
+/// manifest that every card and every grab reads for completeness.
+///
+/// The incoming copy wins the identity - it is the one whose message-ids
+/// are about to be keyed into the reverse map - and the LARGER byte
+/// count wins the size, exactly as `merge_parts` decides it. A fresh
+/// release passes `held` empty and the answer is the spot's own parts.
+fn merge_spot_parts(held: Vec<segcodec::Seg>, incoming: &[segcodec::Seg]) -> Vec<segcodec::Seg> {
+    let mut merged: std::collections::BTreeMap<u32, (String, u64)> =
+        held.into_iter().map(|(n, id, b)| (n, (id, b))).collect();
+    for (n, id, b) in incoming {
+        let bytes = merged.get(n).map_or(*b, |prev| prev.1.max(*b));
+        merged.insert(*n, (id.clone(), bytes));
+    }
+    merged.into_iter().map(|(n, (id, b))| (n, id, b)).collect()
+}
+
 impl Index {
     /// The one insert both the single and the batch entry point run.
     const SPOT_INSERT: &'static str =
@@ -744,8 +770,30 @@ impl Index {
             .prepare_cached("SELECT id FROM releases WHERE stem=?1 AND poster=?2 AND grp=?3")?
             .query_row(rusqlite::params![stem, poster_key, grp], |r| r.get(0))?;
         for f in &files {
-            let bytes: u64 = f.parts.iter().map(|(_, _, b)| *b).sum();
-            let seg_blob = segcodec::encode(&f.parts);
+            // MERGE with what the row already holds, never replace it.
+            //
+            // `promote_spot_locked` reaches this with an EXISTING release
+            // on two paths - a `prior` adopted in place (partial article
+            // overlap below the naming quorum), and an unkeyed row on an
+            // unconverged map - and the scanner may well hold parts this
+            // spot's NZB does not name. Replacing `segments` wholesale
+            // dropped them from the manifest, which is the completeness
+            // answer every card and every grab then reads. `ingest` does
+            // not replace either; `merge_parts` is the same rule one
+            // module over.
+            //
+            // A FRESH release has no row here, so the read finds nothing
+            // and this costs a prepared-statement lookup per file.
+            let held = self
+                .db
+                .prepare_cached("SELECT segments FROM files WHERE release_id=?1 AND filename=?2")?
+                .query_row(rusqlite::params![rid, f.fname], |r| r.get::<_, Vec<u8>>(0))
+                .optional()?
+                .and_then(|raw| segcodec::decode(&raw))
+                .unwrap_or_default();
+            let parts = merge_spot_parts(held, &f.parts);
+            let bytes: u64 = parts.iter().map(|(_, _, b)| *b).sum();
+            let seg_blob = segcodec::encode(&parts);
             self.db
                 .prepare_cached(
                     "INSERT INTO files(release_id, filename, total_parts, bytes, segments, nsegs)
@@ -760,7 +808,7 @@ impl Index {
                     f.total,
                     bytes as i64,
                     seg_blob,
-                    f.parts.len() as i64
+                    parts.len() as i64
                 ])?;
             // Key into the reverse message-id map exactly as ingest
             // does, so later spots (and the posted-NZB lane) can find
@@ -983,6 +1031,51 @@ pub enum SpotPromotion {
 mod tests {
     use super::testutil::{entry, teardown};
     use super::*;
+
+    /// A promoted spot must not DROP parts the row already held.
+    ///
+    /// `promote_spot_locked` reaches an existing release on two paths - a
+    /// `prior` adopted in place, and an unkeyed row on an unconverged map
+    /// - and the scanner may hold parts the spot's NZB does not name. The
+    /// files UPSERT replaced `segments` wholesale, so those parts left the
+    /// manifest every card and every grab reads for completeness.
+    ///
+    /// NEGATIVE CONTROL, run: make `merge_spot_parts` return `incoming`
+    /// and the first case fails, two parts short.
+    #[test]
+    fn a_promoted_spot_merges_with_the_parts_the_row_already_held() {
+        let seg = |n: u32, id: &str, b: u64| (n, id.to_string(), b);
+
+        // The scanner holds 1..=4; the spot's NZB names 2 and 3 only.
+        let held = vec![
+            seg(1, "<a1@h>", 100),
+            seg(2, "<a2@h>", 100),
+            seg(3, "<a3@h>", 100),
+            seg(4, "<a4@h>", 100),
+        ];
+        let incoming = vec![seg(2, "<n2@h>", 100), seg(3, "<n3@h>", 100)];
+        let out = merge_spot_parts(held, &incoming);
+        assert_eq!(
+            out.iter().map(|(n, _, _)| *n).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4],
+            "the scanner's parts 1 and 4 must survive the promotion"
+        );
+        // The incoming copy wins the identity: its message-ids are the
+        // ones keyed into the reverse map right after this.
+        assert_eq!(out[1].1, "<n2@h>");
+        assert_eq!(out[0].1, "<a1@h>", "an untouched part keeps its own");
+
+        // The LARGER byte count wins, exactly as `ingest::merge_parts`
+        // decides it - in both directions.
+        let out = merge_spot_parts(vec![seg(1, "<a@h>", 900)], &[seg(1, "<n@h>", 100)]);
+        assert_eq!(out[0].2, 900);
+        let out = merge_spot_parts(vec![seg(1, "<a@h>", 100)], &[seg(1, "<n@h>", 900)]);
+        assert_eq!(out[0].2, 900);
+
+        // A FRESH release holds nothing, so the answer is the spot's own
+        // parts and nothing is invented.
+        assert_eq!(merge_spot_parts(Vec::new(), &incoming), incoming);
+    }
 
     fn dir(tag: &str) -> std::path::PathBuf {
         let d =

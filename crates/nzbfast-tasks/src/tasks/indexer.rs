@@ -361,6 +361,36 @@ async fn chunked_compact(d: &Arc<Daemon>, db: &std::path::Path) {
     }
 }
 
+/// Slice one fetched OVER window into the sub-batches its ingest runs
+/// as, one lock hold each.
+///
+/// **Always yields at least one sub-batch, empty window included**, and
+/// that is the whole reason this is a function rather than a bare
+/// `chunks()` call at the site. `chunks()` on an empty slice yields
+/// NOTHING, and the empty window is the tip watch's STEADY STATE - a
+/// watcher that has caught up asks for one every tick. The hop it would
+/// skip is the one that stamps the high-water mark, so skipping it
+/// leaves the mark parked at the last window that happened to carry an
+/// article, and the next process start re-asks for every empty window
+/// since. The ingest in that hop writes nothing (every writer in
+/// `Index::ingest` is guarded on having a row), exactly as the
+/// single-batch shape this replaced already ran it.
+///
+/// The other two production ingest sites - the deepen pass and the
+/// gapfill leg in `nzbfast-meta::scan` - use a plain `chunks()`, because
+/// neither stamps a mark inside the ingest hold: the deepen pass
+/// advances its mark from the CONTIGUOUS prefix of completed fetches
+/// outside it, and gapfill is out-of-band coverage that touches no mark
+/// at all. Nothing is lost there by an empty window yielding nothing.
+#[cfg(feature = "indexer")]
+pub(crate) fn ingest_subbatches<T>(entries: &[T], batch: usize) -> impl Iterator<Item = &[T]> {
+    // `chunks` panics on 0; a batch of one is the nearest honest reading
+    // of a zero the constant can never actually hold.
+    entries
+        .chunks(batch.max(1))
+        .chain(entries.is_empty().then_some(entries))
+}
+
 /// §74: install (or clear) the arrival watch on an index handle. Kept
 /// beside `install_live_ingest_policy` and called from the same places
 /// for the same reason: the shared handle is republished after every
@@ -720,35 +750,97 @@ pub fn spawn_tip_watcher(
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_secs() as i64)
                             .unwrap_or(0);
-                        let gates = gates.clone();
-                        let cats = cats.clone();
-                        let matcher = matcher.clone();
-                        let done = daemon2.with_index_mut(|ix| {
-                            // Gates are a live setting, so they are
-                            // re-installed each time rather than once at
-                            // startup. No gates configured = a closure
-                            // that admits everything, which is what the
-                            // absence of a gate means anyway.
-                            install_live_ingest_policy(ix, gates, cats);
-                            // §74: same re-install discipline for the
-                            // arrival watch, and for the same reason - a
-                            // scan pass can hand the shared handle over
-                            // (and the hand-back clears the watch).
-                            install_instant_watch(ix, matcher);
-                            let n = ix.ingest(g, &entries, now).ok()?;
-                            // The mark moves only with the rows: an
-                            // ingest that failed must not claim the
-                            // range.
-                            ix.set_high_water(g, &pkey, hi).ok()?;
-                            // Drained inside the same lock hold: these are
-                            // this batch's arrivals, and leaving them for
-                            // later would mix them with the next one's.
-                            Some((n, ix.take_watch_hits()))
-                        });
-                        let Some((_, (hits, dropped))) = done else {
-                            break;
+                        // ONE hop: ingest `sub`, and stamp the mark at
+                        // `claim` when this sub-batch is the one that
+                        // completes the fetched range.
+                        //
+                        // The wire request size and the ingest batch size
+                        // are separate decisions that want opposite
+                        // answers, so they are separate constants: the
+                        // OVER above ran at `TIP_CHUNK`, the ingest runs
+                        // at `nzbkit::index::INGEST_BATCH`, one
+                        // `with_index_mut` hop PER sub-batch so the lock
+                        // is genuinely dropped between them. Worth more
+                        // here than at either other ingest site: this
+                        // hold is the DAEMON'S index mutex, which every
+                        // in-process reader waits out, and not merely the
+                        // SQLite write lock the deepen pass's
+                        // `open_scratch` connection takes. It was a
+                        // no-op when it landed - both constants were
+                        // 20,000, so it was one sub-batch - and it is
+                        // what let `INGEST_BATCH` go to 10,000 on
+                        // 16 Sep 2026 without also changing what the
+                        // tip walk asks the server for. Measured across
+                        // that step on a running daemon, this hold's
+                        // p90 fell 4,374 ms -> 2,085 ms over six
+                        // interleaved 480,000-article catch-ups;
+                        // section 8 of
+                        // `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md`.
+                        let hop = |sub: &[nzbkit::nntp::OverEntry], claim: Option<u64>| {
+                            // Cloned per HOP, not per fetch: the handle
+                            // can be handed over between two holds, so
+                            // every hold installs its own.
+                            let (gates, cats, matcher) =
+                                (gates.clone(), cats.clone(), matcher.clone());
+                            daemon2.with_index_mut(|ix| {
+                                // Gates are a live setting, so they are
+                                // re-installed each time rather than once at
+                                // startup. No gates configured = a closure
+                                // that admits everything, which is what the
+                                // absence of a gate means anyway.
+                                install_live_ingest_policy(ix, gates, cats);
+                                // §74: same re-install discipline for the
+                                // arrival watch, and for the same reason - a
+                                // scan pass can hand the shared handle over
+                                // (and the hand-back clears the watch).
+                                install_instant_watch(ix, matcher);
+                                let n = ix.ingest(g, sub, now).ok()?;
+                                // The mark moves only with the rows: an
+                                // ingest that failed must not claim the
+                                // range - and no sub-batch but the LAST
+                                // may claim it either, because `hi` names
+                                // the whole FETCHED range and that range
+                                // is only in the database once every
+                                // sub-batch of it has landed. Advancing
+                                // per sub-batch would mean deriving a
+                                // narrower claim from the article numbers
+                                // the sub-batch carries, which is only
+                                // sound if the server answers OVER in
+                                // ascending order; it would buy at most
+                                // one re-fetched OVER window on the
+                                // failure path, and `ingest` is
+                                // idempotent, so that window is the whole
+                                // cost of not doing it.
+                                if let Some(mark) = claim {
+                                    ix.set_high_water(g, &pkey, mark).ok()?;
+                                }
+                                // Drained inside the same lock hold: these are
+                                // this batch's arrivals, and leaving them for
+                                // later would mix them with the next one's.
+                                // The batch is the SUB-batch now, which is
+                                // the finer reading of the same rule - and
+                                // it is forced anyway, because
+                                // `take_watch_hits` reads the handle and a
+                                // re-install between two holds can clear
+                                // the journal.
+                                Some((n, ix.take_watch_hits()))
+                            })
                         };
-                        instant_arrivals(&daemon2, hits, dropped, now);
+                        let mut subs =
+                            ingest_subbatches(&entries, nzbkit::index::INGEST_BATCH).peekable();
+                        let mut stalled = false;
+                        while let Some(sub) = subs.next() {
+                            // Only the LAST sub-batch claims the range.
+                            let claim = subs.peek().is_none().then_some(hi);
+                            let Some((_, (hits, dropped))) = hop(sub, claim) else {
+                                stalled = true;
+                                break;
+                            };
+                            instant_arrivals(&daemon2, hits, dropped, now);
+                        }
+                        if stalled {
+                            break;
+                        }
                         fresh += (hi - lo + 1) as u32;
                         lo = hi.saturating_add(1);
                     }
@@ -2468,6 +2560,54 @@ mod tests {
     use super::*;
     // Only the tests still reach into the byte-probe lane for this one.
     use crate::rarprobe::rar_probe_volumes;
+
+    /// The tip walk ingests one fetched OVER window in
+    /// `INGEST_BATCH`-sized sub-batches, one lock hold each, and the
+    /// LAST hold is the one that stamps the high-water mark. Two
+    /// properties hold that shape together, and the first is the one a
+    /// bare `chunks()` silently breaks.
+    #[test]
+    fn an_empty_over_window_still_gets_one_hop_to_claim_its_range() {
+        // The tip watch's steady state. No hop here means no
+        // `set_high_water`, which means the next process start re-asks
+        // for every empty window since the last article.
+        let none: [u8; 0] = [];
+        assert_eq!(
+            ingest_subbatches(&none, 20_000).collect::<Vec<_>>(),
+            vec![&none[..]],
+            "an empty window must still yield exactly one (empty) hop"
+        );
+        assert_eq!(
+            none.chunks(20_000).count(),
+            0,
+            "the shape this guards against: `chunks()` alone yields nothing"
+        );
+    }
+
+    /// And on a non-empty window it is exactly `chunks()`: every entry
+    /// ingested once, in order, in sub-batches of at most `batch`. The
+    /// remainder case is the one that decides which hop claims the
+    /// range, since only the last one may.
+    #[test]
+    fn sub_batches_partition_the_window_exactly_once_in_order() {
+        let all: Vec<u8> = (0..25).collect();
+        for batch in [1usize, 5, 7, 25, 100] {
+            let subs: Vec<&[u8]> = ingest_subbatches(&all, batch).collect();
+            assert!(!subs.is_empty());
+            assert!(
+                subs.iter().all(|s| !s.is_empty() && s.len() <= batch),
+                "batch {batch}: a sub-batch is empty or oversized"
+            );
+            assert_eq!(
+                subs.concat(),
+                all,
+                "batch {batch}: the sub-batches must be the window, in order"
+            );
+        }
+        // A zero batch cannot come from the constant, but `chunks`
+        // panics on it - so it degrades rather than aborting the tick.
+        assert_eq!(ingest_subbatches(&all, 0).count(), all.len());
+    }
 
     /// The background recipe now sees RAR sets: a hash release whose
     /// data is `.partNN.rar` volumes gets the RarHead arm, a `.7z` one

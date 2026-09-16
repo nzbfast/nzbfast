@@ -26,6 +26,19 @@ fn main() {
     println!("target_pointer_width: {}", usize::BITS);
     println!("physical_ram: {:?} GB", nzbkit::mem::physical_ram().map(gb));
     println!(
+        "available_ram: {:?} GB ({:?} bytes)",
+        nzbkit::mem::available_ram().map(gb),
+        nzbkit::mem::available_ram()
+    );
+    // The same reading `available_ram` returns on a Mac since 16 Sep 2026,
+    // printed separately because it is macOS-only (TODO 345 D).
+    #[cfg(target_os = "macos")]
+    println!(
+        "vm_available_ram: {:?} GB ({:?} bytes)",
+        nzbkit::mem::vm_available_ram().map(gb),
+        nzbkit::mem::vm_available_ram()
+    );
+    println!(
         "cgroup_mem_limit: {:?} GB",
         nzbkit::mem::cgroup_mem_limit().map(gb)
     );

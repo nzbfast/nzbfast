@@ -48,6 +48,39 @@ async fn kill9_run1(
     rec: Option<&'static str>,
     extra_args: &[&str],
 ) -> u64 {
+    kill9_run1_until(
+        cfg,
+        nzb,
+        out,
+        served,
+        total_articles,
+        frac,
+        extra_args,
+        move |journal| {
+            rec.is_none_or(|rec| {
+                std::fs::read_to_string(journal)
+                    .is_ok_and(|s| s.lines().any(|line| line.starts_with(rec)))
+            })
+        },
+    )
+    .await
+}
+
+/// `kill9_run1` with the journal half of the wait stated as a predicate
+/// over the journal's path, for a test whose premise needs more of the
+/// journal than one line of a given shape (see
+/// `a_shortened_partial_output_says_its_articles_are_fetched_again`).
+/// The served fraction and the 30 s deadline are the same.
+async fn kill9_run1_until(
+    cfg: &Path,
+    nzb: &Path,
+    out: &Path,
+    served: &Arc<AtomicU64>,
+    total_articles: u64,
+    frac: (u64, u64),
+    extra_args: &[&str],
+    ready: impl Fn(&Path) -> bool + Send + 'static,
+) -> u64 {
     let (cfg, nzb, out, served2) = (
         cfg.to_path_buf(),
         nzb.to_path_buf(),
@@ -60,11 +93,7 @@ async fn kill9_run1(
         let run = run_get_spawn_sub(&cfg, &nzb, &out, &[], &extra, 2, 2);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let journal = out.join(".nzbfast.journal");
-        while served2.load(Ordering::Relaxed) < total_articles * frac.0 / frac.1
-            || rec.is_some_and(|rec| {
-                !std::fs::read_to_string(&journal)
-                    .is_ok_and(|s| s.lines().any(|line| line.starts_with(rec)))
-            })
+        while served2.load(Ordering::Relaxed) < total_articles * frac.0 / frac.1 || !ready(&journal)
         {
             if std::time::Instant::now() > deadline {
                 break;
@@ -1097,6 +1126,38 @@ fn placement_id(line: &str) -> Option<(char, &str)> {
     Some((letter, line.rsplit(' ').next()?))
 }
 
+/// Every span a journal's `R` records place into the file `name`, as
+/// `(file_off, len, message-id)`, resolving each fragment's file index
+/// through the `F` table as it stood at that line (a later `F` may
+/// redefine an index, as the grammar in `nzbkit::journal` allows).
+fn recorded_spans_in(journal_txt: &str, name: &str) -> Vec<(u64, u64, String)> {
+    let mut ftable: std::collections::HashMap<usize, &str> = Default::default();
+    let mut spans = Vec::new();
+    for line in journal_txt.lines() {
+        if let Some(rest) = line.strip_prefix("F ") {
+            if let Some((idx, file)) = rest.split_once(' ')
+                && let Ok(idx) = idx.parse::<usize>()
+            {
+                ftable.insert(idx, file);
+            }
+        } else if let Some(rest) = line.strip_prefix("R ") {
+            let mut it = rest.splitn(3, ' ');
+            let (Some(_slot), Some(list), Some(id)) = (it.next(), it.next(), it.next()) else {
+                continue;
+            };
+            for part in list.split(',') {
+                let n: Vec<u64> = part.split(':').filter_map(|x| x.parse().ok()).collect();
+                if let [fidx, file_off, _vol_off, len] = n[..]
+                    && ftable.get(&(fidx as usize)) == Some(&name)
+                {
+                    spans.push((file_off, len, id.to_string()));
+                }
+            }
+        }
+    }
+    spans
+}
+
 /// TODO 158 item 2, the belt-and-braces half (23 Aug 2026): §94 A's
 /// replay feeds run 1's restored spans back through the extractor and
 /// must RE-JOURNAL each article under the route run 2 actually took -
@@ -1574,6 +1635,13 @@ async fn a_resumed_run_rejournals_the_plaintext_once_articles_it_replays() {
 /// Dropping an article is a bandwidth cost, never a correctness one, and
 /// a disclosure that arrived alongside a corrupted payload would be
 /// telling the user about the wrong problem.
+///
+/// And a precondition, asserted before either half: the cut has to
+/// remove at least one article the journal vouched for. A shortening
+/// that removes nothing recorded leaves the resume nothing to disclose,
+/// and until 15 Sep 2026 this test could stage exactly that - it cut the
+/// preallocated file at half its length whatever run 1 had recorded -
+/// and then blamed the resume for its silence.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_shortened_partial_output_says_its_articles_are_fetched_again() {
     if !have_par2() {
@@ -1623,34 +1691,80 @@ async fn a_shortened_partial_output_says_its_articles_are_fetched_again() {
     let out = fx.dir.join("out");
 
     // Run 1: kill with real placements recorded, exactly as the
-    // one-pass resume legs above do.
-    kill9_run1(
+    // one-pass resume legs above do - and with at least two articles
+    // recorded into the inner file, which is the least the cut below
+    // needs to refuse one and keep one.
+    kill9_run1_until(
         &cfg,
         &nzb,
         &out,
         &served,
         total_articles,
         (2, 5),
-        Some("R "),
         &[],
+        |journal| {
+            std::fs::read_to_string(journal).is_ok_and(|s| {
+                let spans = recorded_spans_in(&s, "movie.mkv");
+                let ids: std::collections::HashSet<&str> =
+                    spans.iter().map(|(_, _, id)| id.as_str()).collect();
+                ids.len() >= 2
+            })
+        },
     )
     .await;
 
     // The user action this test is about, in the only form a test can
     // stage it: something outside nzbfast shortened the file the
-    // placements point into. Half, so SOME articles survive - a run
-    // where everything drops proves less, because the interesting
-    // claim is that one bad article is not a failed resume.
+    // placements point into.
+    //
+    // WHERE to cut comes from the journal run 1 left, never from the
+    // file's length. The inner file is preallocated in full as soon as
+    // the first volume identifies it, so its length is the whole payload
+    // however far run 1 got, and the old cut at half that length reached
+    // a recorded span only when run 1 had recorded one past the midpoint.
+    // Measured 15 Sep 2026: the kill at 2/5 served records spans up to
+    // ~2.1 MB, 23-26 articles past that cut; the same kill at 1/5 records
+    // up to ~1.0 MB, none past it, and failed 10 of 10 with no warning -
+    // correctly, since nothing the journal vouched for was removed. The
+    // journal trails the mock's served count, further under load (the
+    // failure that opened this had restored only 53 articles, 1.3 MB), so
+    // the shipped kill sat ~24 articles from that edge and now and then
+    // fell off it. Record: research/ZERO-HEAD-ROWS-FLAKE-ANSWERED-2026-09-10.md.
+    //
+    // The cut is the START of the median recorded span, read from the
+    // same bytes the restore reads, and the restore admits a span only
+    // while `file_off + len <= len`: an article is refused when any of
+    // its spans ends past the cut and kept when all of them end at or
+    // before it. Some survive on purpose - a run where everything drops
+    // proves less, because the interesting claim is that one bad article
+    // is not a failed resume.
     let payload_out = out.join("movie.mkv");
     let before = std::fs::metadata(&payload_out)
         .unwrap_or_else(|e| panic!("run 1 wrote no direct-extract output to truncate: {e}"))
         .len();
-    assert!(before > 0, "run 1's output is empty - nothing to shorten");
+    let journal_txt = std::fs::read_to_string(out.join(".nzbfast.journal"))
+        .expect("run 1 left no journal to resume from");
+    let mut spans = recorded_spans_in(&journal_txt, "movie.mkv");
+    spans.sort_unstable();
+    spans.dedup();
+    let cut = spans.get(spans.len() / 2).map_or(0, |s| s.0);
+    let mut past_cut: std::collections::HashMap<&str, bool> = Default::default();
+    for (off, len, id) in &spans {
+        *past_cut.entry(id.as_str()).or_default() |= off + len > cut;
+    }
+    let dropped = past_cut.values().filter(|&&p| p).count();
+    let kept = past_cut.len() - dropped;
+    assert!(
+        dropped > 0 && kept > 0 && cut < before,
+        "run 1 recorded {} span(s) into a {before}-byte movie.mkv; a cut at {cut} refuses \
+         {dropped} article(s) and keeps {kept} - the premise needs at least one of each:\n{journal_txt}",
+        spans.len()
+    );
     std::fs::OpenOptions::new()
         .write(true)
         .open(&payload_out)
         .unwrap()
-        .set_len(before / 2)
+        .set_len(cut)
         .unwrap();
 
     let (log, ok) = {
@@ -1660,9 +1774,17 @@ async fn a_shortened_partial_output_says_its_articles_are_fetched_again() {
             .unwrap()
     };
     assert!(ok, "{log}");
+    let warned = log
+        .lines()
+        .find(|l| l.contains("their bytes are no longer there"));
     assert!(
-        log.contains("their bytes are no longer there"),
-        "the resume dropped articles for a shortened source and said nothing:\n{log}"
+        warned.is_some(),
+        "the resume dropped {dropped} article(s) for a shortened source and said nothing:\n{log}"
+    );
+    // ...and names the articles the cut refused, not some other count.
+    assert!(
+        warned.is_some_and(|l| l.contains(&format!(" {dropped} article(s) ("))),
+        "the cut refused {dropped} recorded article(s) but the disclosure counts otherwise:\n{log}"
     );
     // The other cause must NOT be claimed: nothing here is encrypted,
     // and a resume that blamed the password would send the reader
@@ -1672,12 +1794,168 @@ async fn a_shortened_partial_output_says_its_articles_are_fetched_again() {
         "a shortened file was reported as a password problem:\n{log}"
     );
     // And the point of the whole design: refetching is SAFE.
-    assert_eq!(
-        std::fs::read(&payload_out).unwrap(),
-        inner,
-        "a resume over a shortened output did not rebuild the payload"
-    );
+    // Compared by hand rather than with `assert_eq!`, which prints both
+    // 3 MB payloads as byte lists and nothing a reader can act on: the
+    // numbers that place a wrong byte are its offset against the cut
+    // and the recorded spans, and the run log says which route wrote it.
+    let got = std::fs::read(&payload_out).unwrap();
+    if got != inner {
+        let differs = |i: &usize| got.get(*i) != inner.get(*i);
+        let span = 0..got.len().max(inner.len());
+        let first = span.clone().find(differs).unwrap_or(0);
+        let last = span.clone().rev().find(differs).unwrap_or(0);
+        let wrong = span.filter(differs).count();
+        let zeros = got
+            .iter()
+            .skip(first)
+            .take(last + 1 - first)
+            .filter(|&&b| b == 0)
+            .count();
+        panic!(
+            "a resume over a shortened output did not rebuild the payload: {} B against {} B, \
+             {wrong} B wrong in [{first}, {last}] ({zeros} zero B in that range); cut {cut}, \
+             {dropped} article(s) refused and {kept} kept\njournal after run 1:\n{journal_txt}\n{log}",
+            got.len(),
+            inner.len()
+        );
+    }
     assert!(!out.join(".nzbfast.journal").exists());
+}
+
+/// §94 A map mode: a resumed store set keeps its member's REAL name when
+/// a later volume's head reaches the client before part1's.
+///
+/// A mapped resume keeps no header bytes on disk, so every volume's head
+/// article comes back off the wire, and the replay preclaims the member's
+/// source name under part1 - the first seeded volume. Whichever volume
+/// PARSES first founds the group and routes the member to the child, and
+/// the grant used to move only at that moment, only if its holder was
+/// already a member. With part1's head late it was not: the payload
+/// finished byte-perfect as `000-movie.mkv` beside the restored partial
+/// still at `movie.mkv`, and the job exited 0. Seen once in 30 rounds of
+/// the shortened-output test with its kill moved early and the box at
+/// load ~114 (15 Sep 2026); stalling part1's head here makes the order
+/// certain, and this failed three of three before `hand_over_preclaims`.
+/// No output is shortened: the ordering alone is the defect. Record:
+/// research/ZERO-HEAD-ROWS-FLAKE-ANSWERED-2026-09-10.md.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mapped_resume_keeps_the_member_name_when_a_later_volume_heads_first() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("resume-late-head");
+    let inner = payload(3_000_000, 61);
+    let n_vols = 4;
+    let per = inner.len() / n_vols;
+    let mut vol_names: Vec<String> = Vec::new();
+    let mut pos = 0usize;
+    for i in 0..n_vols {
+        let len = if i == 0 {
+            per + 1
+        } else if i < n_vols - 1 {
+            per
+        } else {
+            inner.len() - pos
+        };
+        let part = &inner[pos..pos + len];
+        pos += len;
+        let vol = fixtures::rar5_volume_n(
+            &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
+            i as u64,
+        );
+        let name = format!("r.part{}.rar", i + 1);
+        fx.add_file(&name, &vol, 25_000);
+        vol_names.push(name);
+    }
+    {
+        let names: Vec<&str> = vol_names.iter().map(String::as_str).collect();
+        assert!(fx.add_par2(20, &names, 25_000), "par2 create failed");
+    }
+    let total_articles = fx.articles.len() as u64;
+    let srv = MockServer::start(
+        fx.articles.clone(),
+        Chaos {
+            delay_ms: 10,
+            ..Chaos::default()
+        },
+    )
+    .await;
+    let served = srv.served.clone();
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+    kill9_run1_until(
+        &cfg,
+        &nzb,
+        &out,
+        &served,
+        total_articles,
+        (1, 5),
+        &[],
+        |journal| {
+            std::fs::read_to_string(journal).is_ok_and(|s| {
+                let spans = recorded_spans_in(&s, "movie.mkv");
+                let ids: std::collections::HashSet<&str> =
+                    spans.iter().map(|(_, _, id)| id.as_str()).collect();
+                ids.len() >= 2
+            })
+        },
+    )
+    .await;
+    let payload_out = out.join("movie.mkv");
+    // Run 2 asks a server that stalls part1's head on its first request,
+    // so every later volume's head lands first.
+    let strip = |s: &str| s.trim_matches(|c| c == '<' || c == '>').to_string();
+    let head = strip(
+        &fx.nzb_files
+            .iter()
+            .find(|(n, _)| n == "r.part1.rar")
+            .unwrap()
+            .1[0]
+            .0,
+    );
+    let victim = fx
+        .articles
+        .keys()
+        .find(|k| strip(k) == head)
+        .unwrap()
+        .clone();
+    let srv2 = MockServer::start(
+        fx.articles.clone(),
+        Chaos {
+            delay_ms: 10,
+            stall: [victim].into(),
+            ..Chaos::default()
+        },
+    )
+    .await;
+    let cfg2 = fx.write_config(&[&srv2]);
+    let (log, ok) = {
+        let (cfg, nzb, out) = (cfg2.clone(), nzb.clone(), out.clone());
+        tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+            .await
+            .unwrap()
+    };
+    let listing: Vec<(String, u64)> = std::fs::read_dir(&out)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().to_string(),
+                e.metadata().map(|m| m.len()).unwrap_or(0),
+            )
+        })
+        .collect();
+    assert!(ok, "{listing:?}\n{log}");
+    // Compared, never `assert_eq!`ed: two 3 MB byte lists are no message.
+    let got = std::fs::read(&payload_out).unwrap_or_default();
+    assert!(
+        got == inner && !out.join("000-movie.mkv").exists(),
+        "the payload did not finish under its own name: movie.mkv {} B, out/ holds \
+         {listing:?}\n{log}",
+        got.len()
+    );
 }
 
 /// A volume the SET rebuilt under its own name must not leave the

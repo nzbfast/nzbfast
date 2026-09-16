@@ -909,8 +909,8 @@ la stessa scelta. Di norma ogni file è provato da un'impronta sull'intero file,
 sola lettura su un solo core per quanti core abbia la macchina. Con questa opzione ogni
 file è provato dalle somme di controllo per blocco del set PAR2, e quelle girano su tutti i
 core insieme. Molto più veloce su un disco locale rapido, e di poco valore su una cartella
-di rete o un disco a piatti, dove il disco è già il limite. È spenta finché non la chiedi,
-ed ecco a cosa acconsenti quando lo fai: un set PAR2 può portare due registrazioni che
+di rete o un disco a piatti, dove il disco è già il limite. È attiva a meno che tu non la disattivi,
+ed ecco a cosa acconsenti lasciandola attiva: un set PAR2 può portare due registrazioni che
 descrivono file diversi, e par2cmdline e gli altri strumenti chiamano danneggiato un set
 simile dove nzbfast lo chiama allora integro. Nessun set costruito da software normale ha
 quella forma, un controllo dei primi 16 KiB rifiuta ancora ogni versione accidentale di

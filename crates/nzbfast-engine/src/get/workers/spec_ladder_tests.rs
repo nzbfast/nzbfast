@@ -161,6 +161,10 @@ fn a_rung_whose_volume_repeats_an_id_is_not_complete() {
 #[ignore]
 async fn c5_spec_ladder_rss_at_field_scale() {
     fn rss_kb() -> u64 {
+        // win-portability-gate: `ps` is not on Windows and this would panic
+        // there - but the test is `#[ignore]`d and hand-run on a unix box, so
+        // no job on any platform executes it. A `cfg(not(unix))` arm could
+        // only return a fabricated number.
         let out = std::process::Command::new("ps")
             .args(["-o", "rss=", "-p", &std::process::id().to_string()])
             .output()

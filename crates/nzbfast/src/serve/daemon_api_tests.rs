@@ -290,7 +290,9 @@ fn an_indexer_confirmed_suggestion_becomes_a_proven_name() {
         const TITLE: &str = "Test.Release.2026.1080p.WEB.H264-GRP";
         d.with_index_mut(|ix| {
             seed(ix, "x7Pq9RtK2mVb8NcJ4wZs", "cc", TITLE);
-            let (_, suggested, _) = ix.predb_corr_backlog(400, 0, false, 6_200).unwrap();
+            let (_, suggested, _) = ix
+                .predb_corr_backlog(400, 0, false, 6_200, std::time::Duration::MAX)
+                .unwrap();
             assert_eq!(suggested, 1, "the real scorer suggested the pairing");
             let picks = ix.corr_confirm_pick(5).unwrap();
             assert_eq!(picks.len(), 1);
@@ -418,7 +420,9 @@ fn an_indexer_confirmed_suggestion_becomes_a_proven_name() {
             // The backlog cursor parked below round one's rows; a seed
             // generation bump is production's own re-open mechanism.
             ix.kv_set("predb_seed_gen", "test2").unwrap();
-            let (_, suggested, _) = ix.predb_corr_backlog(400, 0, false, 6_300).unwrap();
+            let (_, suggested, _) = ix
+                .predb_corr_backlog(400, 0, false, 6_300, std::time::Duration::MAX)
+                .unwrap();
             assert_eq!(suggested, 1);
             Some(())
         })

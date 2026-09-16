@@ -4,6 +4,13 @@
 //  - data-i18n-html="k">…</div>   (rich text, markup kept)
 //  - data-i18n-title="k" + title="…"
 //  - data-i18n-placeholder="k" + placeholder="…"
+//
+// NOT scraped: data-i18n-aria="k". That attribute exists for a static
+// aria-label with no visible twin (a landmark's name, a dialog's name)
+// and always names a key some other element already contributes, so it
+// adds nothing to the reference and there is nothing here to extract. A
+// key used ONLY through it would be missing from the reference - if one
+// is ever wanted, give it a `data-i18n` home first.
 //  - t('k','default') / t2('k','default') in JS (t2 is an alias)
 //  - tn('base',n,'one','many') → base.one / base.many
 // Plus hand-maintained lists: dynamic-key families (status.*, err.*,
@@ -270,6 +277,34 @@ Object.assign(out, {
     'the index is busy - try again in a moment',
   'err.the index schema changed mid-query - try again in a moment':
     'the index schema changed mid-query - try again in a moment',
+  // The single-flight and expiry refusals (census 16 Sep 2026,
+  // research/API-ERROR-KEY-CENSUS-2026-09-16.md). Each of these seven is
+  // a refusal about a race only the DAEMON can see - a second tab, the
+  // scheduled benchmark twin, a background post-processing pass, a
+  // server-side result expiry - so the page has no local predicate and
+  // the display-edge fix TODO.md:3705-3717 prefers is not available:
+  // err.* on the wire text is the only mechanism there is. They are the
+  // 7 of 89 wire literals that census judged worth 27 catalogues each;
+  // the other 82 are listed there with the reason each was left English.
+  // REWORDING ANY OF THESE IN RUST SILENTLY UN-TRANSLATES 27 LOCALES
+  // with every gate green - the key IS the sentence. Change both sides.
+  'err.a system benchmark is already running - wait for it to finish':
+    'a system benchmark is already running - wait for it to finish',
+  'err.a connection test is already running - wait for it to finish, then try again':
+    'a connection test is already running - wait for it to finish, then try again',
+  'err.busy - retry when no download or scan is running':
+    'busy - retry when no download or scan is running',
+  'err.busy - try again when nothing is downloading':
+    'busy - try again when nothing is downloading',
+  'err.post-processing is still running for this job - try again when it settles':
+    'post-processing is still running for this job - try again when it settles',
+  "err.this job's files are already being moved - try again when it settles":
+    "this job's files are already being moved - try again when it settles",
+  'err.result expired - search again': 'result expired - search again',
+  'err.an unlock is already running for this job - try again when it settles':
+    'an unlock is already running for this job - try again when it settles',
+  "err.this job's files are being moved right now - try again when it settles":
+    "this job's files are being moved right now - try again when it settles",
   // Not from serve.rs: api() mints this one when the request never gets
   // an answer at all (ERR_UNREACHABLE), so it rides the same tErr() path
   // as the wire strings.

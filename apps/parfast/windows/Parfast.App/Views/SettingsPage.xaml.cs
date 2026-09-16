@@ -61,6 +61,12 @@ public sealed partial class SettingsPage : UserControl
         MemoryLabel.Text = Strings.SettingsMemoryLimit;
         FastSolverBox.Content = Strings.VerifyOptionsFastSolver;
         LowPriorityBox.Content = Strings.SettingsLowPriority;
+        DigestCacheBox.Content = Strings.SettingsDigestCache;
+        DigestCacheNote.Text = Strings.SettingsDigestCacheNote;
+        PairLargeCreatesBox.Content = Strings.SettingsPairLargeCreates;
+        PairLargeCreatesNote.Text = Strings.SettingsPairLargeCreatesNote;
+        ClearDigestCacheButton.Content = Strings.SettingsDigestCacheClear;
+        DigestCacheClearedText.Text = Strings.SettingsDigestCacheCleared;
 
         IntegrationHeader.Text = Strings.SettingsIntegration;
         AssocLabel.Text = Strings.SettingsRegisterTypes;
@@ -141,6 +147,8 @@ public sealed partial class SettingsPage : UserControl
             MemoryBox.Value = Vm.MemoryMb;
             FastSolverBox.IsChecked = Vm.FastSolver;
             LowPriorityBox.IsChecked = Vm.LowPriority;
+            DigestCacheBox.IsChecked = Vm.DigestCache;
+            PairLargeCreatesBox.IsChecked = Vm.PairLargeCreates;
             FastSolverBox.Visibility = Vm.ShowFastSolver ? Visibility.Visible : Visibility.Collapsed;
             LowPriorityBox.Visibility = Vm.ShowLowPriority ? Visibility.Visible : Visibility.Collapsed;
 
@@ -245,6 +253,8 @@ public sealed partial class SettingsPage : UserControl
         Vm.AutomaticThreads = AutoThreadsBox.IsChecked == true;
         Vm.FastSolver = FastSolverBox.IsChecked == true;
         Vm.LowPriority = LowPriorityBox.IsChecked == true;
+        Vm.DigestCache = DigestCacheBox.IsChecked == true;
+        Vm.PairLargeCreates = PairLargeCreatesBox.IsChecked == true;
     }
 
     private void OnThreadsChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
@@ -308,4 +318,27 @@ public sealed partial class SettingsPage : UserControl
         OnAdvancedChanged(sender, e);
 
     private void OnReset(object sender, RoutedEventArgs e) => Vm.ResetCommand.Execute(null);
+
+    private async void OnClearDigestCache(object sender, RoutedEventArgs e)
+    {
+        var confirmed = await Dialogs.ConfirmAsync(
+            this,
+            Strings.SettingsDigestCacheClear,
+            Strings.SettingsDigestCacheClearConfirm,
+            Strings.SettingsDigestCacheClear,
+            Strings.CommonCancel);
+        if (!confirmed)
+        {
+            return;
+        }
+
+        if (Vm.ClearDigestCache() is { } error)
+        {
+            DigestCacheClearedText.Visibility = Visibility.Collapsed;
+            await Dialogs.ShowAsync(this, Strings.ErrorTitle, error);
+            return;
+        }
+
+        DigestCacheClearedText.Visibility = Visibility.Visible;
+    }
 }

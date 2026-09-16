@@ -611,6 +611,33 @@ pub(super) fn verify_pass1_retaining(
         Err(e) => return Err(e.into()),
     };
     let disk_len = f.metadata()?.len();
+    // The digest cache (`crate::digest_cache`), on the whole-file tier
+    // only and only for a member of exactly its declared length. A record
+    // whose BLAKE3 matches the bytes on disk IS this member's whole-file
+    // MD5: equal to the FileDesc's, the member is clean with no chain;
+    // different, it is not the set's file and the pass below still runs
+    // for the block map. With no record, the pass below enrols the member.
+    let cache = crate::digest_cache::active().filter(|_| disk_len == file.length);
+    let mut digest = crate::digest_cache::MemberDigest::begin(
+        cache.as_ref(),
+        &f,
+        path,
+        disk_len,
+        crate::digest_cache::FLAG_VERIFY,
+    );
+    if digest.validated_md5() == Some(file.md5) {
+        if let Ok((_, Some(pending))) = digest.resolve(None) {
+            pending.commit();
+        }
+        return Ok(Pass1Out {
+            exists: true,
+            intact: true,
+            clean: true,
+            present: None,
+            resume: None,
+            md5_unfinished: false,
+        });
+    }
     let n_slices = file.length.div_ceil(bs as u64) as usize;
     let track = !file.blocks.is_empty();
     if threads > 1
@@ -664,6 +691,27 @@ pub(super) fn verify_pass1_retaining(
     // declaring one - see its arbitration step. Never on the pool
     // branch above (no snapshot to resume from) and never below
     // RESUME_MIN_BLOCK, where no snapshot is taken.
+    //
+    // IT IS ALSO WHY A DAMAGED `--slow` VERIFY BEATS A CLEAN ONE, which
+    // reads like a defect and is not (research/DESIGN-DIGEST-CACHE-
+    // 2026-09-15.md section 9b-3, last bullet; settled 16 Sep 2026).
+    // `parfast v --slow` is `set_fast_check(false)`, so every member
+    // comes through here rather than through `fast_pass1`, and the MD5
+    // chain is the whole wall: stop it at the first failed block and
+    // only the per-block CRC32 walks the rest, several times cheaper.
+    // Measured on a 320 MiB member damaged in block 0 (M3 Ultra, warm):
+    // 0.41 s of user time clean against 0.07 s damaged; 9b-3's 8.86 GB
+    // fixture showed 10.44 s against 5.55 s, the smaller ratio being
+    // where in the file its byte was rewritten.
+    //
+    // THE VERDICT IS UNAFFECTED ON ANY HONEST SET. A failed block CRC32
+    // says the bytes are not the ones the set describes, so the FileDesc
+    // MD5 could not have matched either - `md5_ok` is false either way.
+    // The one set where the two claims can disagree is H7's mirror (a
+    // FileDesc over bytes its own IFSC denies), and there this withholds
+    // a positive rather than deciding a negative - that is what
+    // `md5_unfinished` is, pinned by
+    // `filedesc_md5_over_bytes_the_ifsc_denies_is_unproven_not_damaged`.
     let mut md5_stopped = false;
     // The buffer is bounded regardless of the slice size - `bs` is
     // wire-supplied up to `par2::MAX_BLOCK_SIZE` (256 MiB), and this allocates
@@ -831,6 +879,22 @@ pub(super) fn verify_pass1_retaining(
     }
     let md5: [u8; 16] = whole.finalize().into();
     let md5_ok = !md5_stopped && disk_len >= file.length && md5 == file.md5;
+    // Only a chain that saw every byte of an exact-length member is an MD5
+    // worth recording. Every other outcome records nothing and SAYS SO -
+    // the early stop above means a damaged member never reaches the
+    // `resolve`, so the route was invisible under `NZBFAST_REPAIR_TIMING`
+    // where the enrolled case prints `hit`.
+    if !md5_stopped && disk_len == file.length {
+        if let Ok((_, Some(pending))) = digest.resolve(Some(md5)) {
+            pending.commit();
+        }
+    } else {
+        digest.unresolved(if md5_stopped {
+            "the member is damaged, so no whole-file MD5 was finished"
+        } else {
+            "the member is not its declared length"
+        });
+    }
     Ok(Pass1Out {
         exists: true,
         intact: md5_ok && disk_len == file.length,

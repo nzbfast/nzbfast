@@ -155,6 +155,12 @@ impl Daemon {
     /// Equal timestamps keep the store: a filesystem whose granularity
     /// cannot separate the two writes is describing the torn migration,
     /// not a session.
+    ///
+    /// This answers only "which of the two is the later RECORD", which is
+    /// answerable only while both exist. It deliberately does not read
+    /// either file - a snapshot that wins here and then turns out to be
+    /// unreadable falls through to the store in `load_queue`, where the
+    /// whole order of preference is written down (sweep item 37).
     pub(crate) fn legacy_snapshot_outlives_store(&self) -> bool {
         let mtime = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let (Some(snap), Some(store)) = (
@@ -1224,6 +1230,144 @@ mod queue_store_tests {
             .map(|j| j.lock_ok().nzo_id.clone())
             .collect();
         assert_eq!(back, ["live"], "a superseded snapshot was re-merged");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Put a `queue.json` beside the store with an mtime PAST it, which
+    /// is what a rollback session to a pre-§7a build leaves behind. The
+    /// three tests below differ only in what that snapshot contains and
+    /// what sits at its `.bak`.
+    fn snapshot_written_after_the_store(d: &Arc<Daemon>, body: &str) {
+        let snapshot = d.spool.join("queue.json");
+        std::fs::write(&snapshot, body).unwrap();
+        let later = std::fs::metadata(d.queue_store_path())
+            .and_then(|m| m.modified())
+            .unwrap()
+            + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&snapshot)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    }
+
+    /// Sweep item 37: the snapshot won the mtime comparison and then
+    /// turned out not to be readable AT ALL. The comparison decided
+    /// which of two records to believe; with one of them gone there is
+    /// no comparison left to honour, and `queue.jsonl` is the only
+    /// surviving copy of the queue. Before the fix `load_queue` returned
+    /// an empty queue here - having skipped the replay on the strength
+    /// of a snapshot it then could not read - and `recover_orphaned_spool`
+    /// re-adopted the spool copies with their priority, paused state,
+    /// category override and retry counts all dropped.
+    #[test]
+    fn an_unreadable_newer_snapshot_falls_back_to_the_store() {
+        let dir = tmp("rollbacktorn");
+        let d = test_daemon(&dir);
+        for id in ["first", "second"] {
+            d.queue.lock_ok().push_back(row(&d, id));
+        }
+        assert!(d.save_queue());
+        // Torn snapshot, and no `.bak` beside it: either the 14-day
+        // sweep took the migration's copy, or this snapshot - written by
+        // a build that predates the store - never had one refreshed.
+        snapshot_written_after_the_store(&d, "{\"queue\": [ {\"nzo_id\": \"tor");
+        assert!(
+            !d.spool.join("queue.json.bak").exists(),
+            "the premise of this test is that there is nothing to recover from"
+        );
+
+        let d2 = test_daemon(&dir);
+        d2.load_queue();
+        let back: Vec<String> = d2
+            .queue
+            .lock_ok()
+            .iter()
+            .map(|j| j.lock_ok().nzo_id.clone())
+            .collect();
+        assert_eq!(
+            back,
+            ["first", "second"],
+            "the queue came back empty while queue.jsonl still held every row"
+        );
+        // ...and the bytes nothing could read are KEPT rather than
+        // overwritten by the restore that went around them.
+        assert!(
+            d.spool.join("queue.json.corrupt").exists(),
+            "the unreadable snapshot was not preserved"
+        );
+        assert_eq!(
+            ids(&stored_queue(&d2)),
+            ["first", "second"],
+            "the store was rewritten over the rows it had just supplied"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// RUN negative control, the near miss: the snapshot will not parse
+    /// but its `.bak` will, so there IS still a legacy record and the
+    /// mtime comparison stands. The fallback must not fire - the store
+    /// is the older of the two, exactly as `legacy_snapshot_outlives_store`
+    /// says. (The all-good case is
+    /// `a_snapshot_written_after_the_store_is_an_older_build_and_is_adopted`
+    /// above.)
+    #[test]
+    fn an_unreadable_newer_snapshot_with_a_good_bak_keeps_preferring_the_snapshot() {
+        let dir = tmp("rollbackbak");
+        let d = test_daemon(&dir);
+        d.queue.lock_ok().push_back(row(&d, "stale-store-row"));
+        assert!(d.save_queue());
+        std::fs::write(
+            d.spool.join("queue.json.bak"),
+            serde_json::to_string_pretty(&json!({
+                "next_id": 77,
+                "queue": [
+                    { "nzo_id": "from-bak", "name": "Bak", "nzb_path": "/tmp/b.nzb",
+                      "out_dir": "/tmp/ob", "state": "Queued" },
+                ],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        snapshot_written_after_the_store(&d, "{ not json at all");
+
+        let d2 = test_daemon(&dir);
+        d2.load_queue();
+        let back: Vec<String> = d2
+            .queue
+            .lock_ok()
+            .iter()
+            .map(|j| j.lock_ok().nzo_id.clone())
+            .collect();
+        assert_eq!(
+            back,
+            ["from-bak"],
+            "a recoverable legacy snapshot was passed over for the stale store"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// RUN negative control, the other side: with no store there is
+    /// nothing to fall back TO, and an empty queue is the honest answer
+    /// rather than a bug. Nothing is invented and no store appears.
+    #[test]
+    fn an_unreadable_snapshot_with_no_store_still_starts_empty() {
+        let dir = tmp("rollbacknostore");
+        let d = test_daemon(&dir);
+        std::fs::write(d.spool.join("queue.json"), "{\"queue\": [ {\"nzo").unwrap();
+        assert!(!d.queue_store_path().exists());
+
+        d.load_queue();
+        assert!(
+            d.queue.lock_ok().is_empty(),
+            "a queue was conjured out of a corrupt file and no store"
+        );
+        assert!(
+            !d.queue_store_path().exists(),
+            "an empty store was written over a spool that had none"
+        );
+        assert!(d.spool.join("queue.json.corrupt").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

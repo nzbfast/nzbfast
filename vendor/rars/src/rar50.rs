@@ -20,62 +20,68 @@ pub use extract::{
     extract_volumes_to_with_progress, extract_volumes_to_with_redirections,
 };
 pub use write::reference::{
-    assemble, assemble_with_recovery, comment_header, member_header, write_reference_stored, write_reference_stored_volumes, ReferenceBlock,
-    ReferenceFragment, ReferenceVolumeSet, ReferenceHash,
-    ReferenceLayout, ReferenceMember, ReferenceQuickOpen, RAR5_SIGNATURE,
+    assemble, assemble_streamed, assemble_with_recovery, comment_header, member_header,
+    write_reference_stored, write_reference_stored_streamed, write_reference_stored_volumes,
+    ReferenceBlock, ReferenceFragment, ReferenceHash, ReferenceLayout, ReferenceMember,
+    ReferenceQuickOpen, ReferenceStreamedMember, ReferenceVolumeSet, RAR5_SIGNATURE,
 };
 pub use write::rev::{
     data_volume_matches, default_recovery_volume_count, max_recovery_volume_count,
     percent_recovery_volume_count, write_rev_volumes, RevSet,
 };
 pub use write::stream::{
-    crc32_of_reader, write_compressed_archive_streamed, write_compressed_volumes_streamed,
+    crc32_of_reader, write_compressed_archive_streamed, write_compressed_member_volumes_streamed,
+    write_compressed_members_streamed, write_compressed_volumes_streamed,
     write_encrypted_stored_archive_streamed, write_encrypted_stored_volumes_streamed,
     write_stored_archive_streamed, write_stored_archive_streamed_with_recovery,
     write_stored_volumes_streamed, write_stored_volumes_streamed_with_recovery,
-    StreamedStoredEntry,
+    StreamedDirectoryEntry, StreamedMember, StreamedStoredEntry,
 };
 pub use write::{
     ArchiveMetadataEntry, CompressedEntry, EncryptedArchiveCommentEntry, EncryptedCompressedEntry,
     EncryptedStoredEntry, EncryptedStoredEntryWithServices, EncryptedStoredServiceEntry,
-    FilterKind, FilterPolicy, Rar50VolumeWriter, Rar50Writer, StoredEntry, StoredEntryWithServices,
-    HashRecord, StoredServiceEntry, WriterOptions,
+    FilterKind, FilterPolicy, HashRecord, Rar50VolumeWriter, Rar50Writer, StoredEntry,
+    StoredEntryWithServices, StoredServiceEntry, WriterOptions,
 };
 
-const HEAD_MAIN: u64 = 1;
-const HEAD_FILE: u64 = 2;
-const HEAD_SERVICE: u64 = 3;
-const HEAD_CRYPT: u64 = 4;
-const HEAD_END: u64 = 5;
+const BLOCK_TYPE_MAIN: u64 = 1;
+const BLOCK_TYPE_FILE: u64 = 2;
+const BLOCK_TYPE_SERVICE: u64 = 3;
+const BLOCK_TYPE_ENCRYPTION: u64 = 4;
+const BLOCK_TYPE_END_OF_ARCHIVE: u64 = 5;
+/// END-of-archive flag 0x0001: this archive is a volume and another
+/// volume of the same set follows it. Mirrors the writer's constant of
+/// the same name in `rar50/write/volume.rs`.
+const END_OF_ARCHIVE_NOT_LAST_VOLUME: u64 = 0x0001;
 const REV5_SIGNATURE: &[u8] = b"Rar!\x1aRev";
 
-const HFL_EXTRA: u64 = 0x0001;
-const HFL_DATA: u64 = 0x0002;
-const HFL_SPLIT_BEFORE: u64 = 0x0008;
-const HFL_SPLIT_AFTER: u64 = 0x0010;
+const BLOCK_HAS_EXTRA_AREA: u64 = 0x0001;
+const BLOCK_HAS_DATA_AREA: u64 = 0x0002;
+const BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME: u64 = 0x0008;
+const BLOCK_CONTINUES_IN_NEXT_VOLUME: u64 = 0x0010;
 
-const MHFL_VOLUME: u64 = 0x0001;
-const MHFL_VOLUME_NUMBER: u64 = 0x0002;
-const MHFL_SOLID: u64 = 0x0004;
-const MHFL_RECOVERY: u64 = 0x0008;
-const MHFL_LOCKED: u64 = 0x0010;
+const ARCHIVE_IS_VOLUME: u64 = 0x0001;
+const ARCHIVE_HAS_VOLUME_NUMBER: u64 = 0x0002;
+const ARCHIVE_IS_SOLID: u64 = 0x0004;
+const ARCHIVE_HAS_RECOVERY_RECORD: u64 = 0x0008;
+const ARCHIVE_IS_LOCKED: u64 = 0x0010;
 
-const FHFL_DIRECTORY: u64 = 0x0001;
-const FHFL_MTIME: u64 = 0x0002;
-const FHFL_CRC32: u64 = 0x0004;
+const FILE_IS_DIRECTORY: u64 = 0x0001;
+const FILE_HAS_UNIX_MTIME: u64 = 0x0002;
+const FILE_HAS_CRC32: u64 = 0x0004;
 
-const MHEXTRA_LOCATOR: u64 = 0x01;
-const MHEXTRA_LOCATOR_QUICK_OPEN: u64 = 0x0001;
-const MHEXTRA_LOCATOR_RECOVERY: u64 = 0x0002;
+const MAIN_EXTRA_LOCATOR: u64 = 0x01;
+const LOCATOR_HAS_QUICK_OPEN_OFFSET: u64 = 0x0001;
+const LOCATOR_HAS_RECOVERY_RECORD_OFFSET: u64 = 0x0002;
 
-const FHEXTRA_CRYPT: u64 = 0x01;
-const FHEXTRA_HASH: u64 = 0x02;
-const FHEXTRA_HTIME: u64 = 0x03;
-const FHEXTRA_REDIR: u64 = 0x05;
-const FHEXTRA_SUBDATA: u64 = 0x07;
-const MHEXTRA_ARCHIVE_METADATA: u64 = 0x02;
-const MHEXTRA_ARCHIVE_METADATA_NAME: u64 = 0x0001;
-const MHEXTRA_ARCHIVE_METADATA_TIME: u64 = 0x0002;
+const FILE_EXTRA_ENCRYPTION: u64 = 0x01;
+const FILE_EXTRA_HASH: u64 = 0x02;
+const FILE_EXTRA_TIME: u64 = 0x03;
+const FILE_EXTRA_REDIRECTION: u64 = 0x05;
+const FILE_EXTRA_SERVICE_DATA: u64 = 0x07;
+const MAIN_EXTRA_METADATA: u64 = 0x02;
+const METADATA_HAS_ARCHIVE_NAME: u64 = 0x0001;
+const METADATA_HAS_CREATION_TIME: u64 = 0x0002;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -111,7 +117,7 @@ pub struct Archive {
 /// data area, which is at or above any watermark the engine can have
 /// published for that block, so a resumed read never crosses the trim.
 /// The header-encryption keys are the one piece of walk state a resume
-/// cannot re-derive, because the HEAD_CRYPT block that carries their salt
+/// cannot re-derive, because the BLOCK_TYPE_ENCRYPTION block that carries their salt
 /// sits at offset 8 - behind the trim. Boxed for the reason the key cache
 /// gives: moving the archive must not memcpy AES keys around the heap.
 #[derive(Debug, Clone)]
@@ -131,19 +137,19 @@ pub struct MainHeader {
 
 impl MainHeader {
     pub fn is_volume(&self) -> bool {
-        self.archive_flags & MHFL_VOLUME != 0
+        self.archive_flags & ARCHIVE_IS_VOLUME != 0
     }
 
     pub fn is_solid(&self) -> bool {
-        self.archive_flags & MHFL_SOLID != 0
+        self.archive_flags & ARCHIVE_IS_SOLID != 0
     }
 
     pub fn has_recovery_record(&self) -> bool {
-        self.archive_flags & MHFL_RECOVERY != 0
+        self.archive_flags & ARCHIVE_HAS_RECOVERY_RECORD != 0
     }
 
     pub fn is_locked(&self) -> bool {
-        self.archive_flags & MHFL_LOCKED != 0
+        self.archive_flags & ARCHIVE_IS_LOCKED != 0
     }
 
     pub fn locator(&self) -> Option<&LocatorRecord> {
@@ -205,8 +211,27 @@ pub struct BlockHeader {
     pub offset: usize,
     // Type-specific header bytes are archive-relative. Payload bytes are
     // source-absolute so SFX-prefixed archives can be read directly.
+    //
+    // ENCRYPTED HEADERS ARE THE EXCEPTION, and a caller that seeks with
+    // this must know it: the offsets are taken in the DECRYPTED
+    // plaintext, which the 16-byte IV precedes on disk, so the range
+    // runs 16 bytes short of the archive bytes it names (and the
+    // plaintext is padded to the AES block size besides). It indexes the
+    // buffer the parse worked on, not the file. `offset` above is
+    // unaffected; it is the block's real position either way.
     pub header_range: Range<usize>,
     pub data_range: Range<usize>,
+    /// The END-of-archive block's OWN type-specific flags, decoded.
+    ///
+    /// `Some` only on the [`Block::End`] record and only when its flags
+    /// vint decodes; `None` on every other block, and on an END record
+    /// whose body is malformed. Bit `0x0001` is the RAR5
+    /// "archive is a volume and the NEXT volume follows" flag - the one
+    /// piece of continuity a volume carries that is not a split member,
+    /// and the only thing that can tell a set whose volume boundary
+    /// falls BETWEEN members that it is not finished. See
+    /// [`Archive::next_volume_follows`].
+    pub end_flags: Option<u64>,
 }
 
 impl BlockHeader {
@@ -360,15 +385,15 @@ impl FileHeader {
     }
 
     pub fn is_split_before(&self) -> bool {
-        self.block.flags & HFL_SPLIT_BEFORE != 0
+        self.block.flags & BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME != 0
     }
 
     pub fn is_split_after(&self) -> bool {
-        self.block.flags & HFL_SPLIT_AFTER != 0
+        self.block.flags & BLOCK_CONTINUES_IN_NEXT_VOLUME != 0
     }
 
     pub fn is_directory(&self) -> bool {
-        self.file_flags & FHFL_DIRECTORY != 0
+        self.file_flags & FILE_IS_DIRECTORY != 0
     }
 
     pub fn is_stored(&self) -> bool {
@@ -619,11 +644,7 @@ impl Archive {
         )
     }
 
-    fn parse_shared(
-        input: Arc<[u8]>,
-        password: Option<&[u8]>,
-        tail: TailPolicy,
-    ) -> Result<Self> {
+    fn parse_shared(input: Arc<[u8]>, password: Option<&[u8]>, tail: TailPolicy) -> Result<Self> {
         let sig = find_archive_start(&input, SFX_SCAN_LIMIT).ok_or(Error::UnsupportedSignature)?;
         if sig.family != ArchiveFamily::Rar50Plus {
             return Err(Error::UnsupportedSignature);
@@ -830,6 +851,27 @@ impl Archive {
     /// short, which [`BlockHeader::data_is_truncated`] answers per block.
     pub fn has_truncated_tail(&self) -> bool {
         self.truncated_tail
+    }
+
+    /// Does this volume's END record say another volume of the same set
+    /// follows it?
+    ///
+    /// `None` when the archive carries no END record at all (a truncated
+    /// or still-arriving volume, or a walk stopped at the arrival
+    /// frontier) or when the record's flags did not decode, so a caller
+    /// can tell "says no" from "does not say".
+    ///
+    /// This is the ONLY continuity a volume carries across a boundary
+    /// that falls BETWEEN whole members: the split flags on the members
+    /// themselves say nothing when the archiver ended the volume on a
+    /// complete file.
+    pub fn next_volume_follows(&self) -> Option<bool> {
+        self.blocks.iter().rev().find_map(|block| match block {
+            Block::End(header) => header
+                .end_flags
+                .map(|flags| flags & END_OF_ARCHIVE_NOT_LAST_VOLUME != 0),
+            _ => None,
+        })
     }
 
     /// Finish a walk [`Self::parse_stream_incremental`] stopped early,
@@ -1054,7 +1096,25 @@ impl Archive {
             match block {
                 Block::File(_) => return Ok(None),
                 Block::Service(service) if service.name == b"CMT" => {
-                    return service.decoded_data_unverified(self, password).map(Some);
+                    // nzbfast: BOUNDED, for the same reason the RR
+                    // service below is (see `repair_recovery_to_within`).
+                    // `decoded_data_unverified` buffers the whole packed
+                    // member and grows its output to the service's OWN
+                    // declared `unpacked_size`, consulting neither the
+                    // buffered-decode limit nor the window limit, and
+                    // never reaching `BombGuardWriter` - so a small
+                    // parseable archive whose comment claims gigabytes
+                    // aborts the process.
+                    //
+                    // The archive's own length is the ceiling, which is
+                    // what the RR twin uses: an archive comment cannot
+                    // honestly decode to more than the file it lives in
+                    // without being a bomb, and the bounded call refuses
+                    // the packed input by the same number.
+                    let limit = self.source_len()? as u64;
+                    return service
+                        .decoded_data_unverified_bounded(self, password, limit)
+                        .map(Some);
                 }
                 _ => {}
             }
@@ -1239,14 +1299,17 @@ impl Archive {
                 "RAR 5 recovery prefix is out of bounds",
             ));
         }
-        let archive = ArchiveRangeSource(&self.source, source_len);
+        // ONE handle for the whole repair, not one per read - see
+        // `RepairRangeSource`. Non-file shapes are unchanged.
+        let archive = crate::source::RepairRangeSource::new(&self.source, source_len);
 
         // The recovery data is normally STORED, which means it is already
         // sitting in this file and can be read by range - no decode, no
         // buffer, no ceiling to trip. Only a compressed or encrypted record
         // has to be materialized, and that path is the bounded one.
         let (recovery_source, scan) = if recovery.is_stored() && !recovery.encrypted {
-            let range = recovery.block.data_range.start as u64..recovery.block.data_range.end as u64;
+            let range =
+                recovery.block.data_range.start as u64..recovery.block.data_range.end as u64;
             let scan = stream::scan_inline_recovery_chunks_in(&archive, range, budget)?;
             (None, scan)
         } else {
@@ -1280,25 +1343,17 @@ impl Archive {
             None => &archive,
         };
         if dest_prefilled {
-            stream::repair_prefix_streaming_prefilled(&archive, prefix_start, &scan, parity, dest, budget)
+            stream::repair_prefix_streaming_prefilled(
+                &archive,
+                prefix_start,
+                &scan,
+                parity,
+                dest,
+                budget,
+            )
         } else {
             stream::repair_prefix_streaming(&archive, prefix_start, &scan, parity, dest, budget)
         }
-    }
-}
-
-/// [`stream::RangeSource`] view over an already-parsed archive's backing
-/// store, so the streaming repair reads through whatever the archive was
-/// opened on (file, memory, or an arriving stream) without a second handle.
-struct ArchiveRangeSource<'a>(&'a ArchiveSource, u64);
-
-impl crate::recovery::stream::RangeSource for ArchiveRangeSource<'_> {
-    fn len(&self) -> u64 {
-        self.1
-    }
-
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        self.0.read_range_into(offset, buf)
     }
 }
 
@@ -1395,8 +1450,7 @@ impl Rev5VolumeMeta {
                 "RAR 5 REV recovery volume count is implausibly large",
             ));
         }
-        if usize::from(data_count) + usize::from(recovery_count)
-            > crate::recovery::rar5::FIELD_SIZE
+        if usize::from(data_count) + usize::from(recovery_count) > crate::recovery::rar5::FIELD_SIZE
         {
             return Err(Error::InvalidHeader(
                 "RAR 5 REV volume counts exceed the recovery field",
@@ -1715,10 +1769,7 @@ pub fn repair_rev5_volumes_streaming(
     }
     let shard_len_usize =
         usize::try_from(shard_len).map_err(|_| crate::recovery::rar5::Error::PlanOverflow)?;
-    if slots
-        .iter()
-        .any(|slot| slot.file_size > shard_len)
-    {
+    if slots.iter().any(|slot| slot.file_size > shard_len) {
         return Err(crate::recovery::rar5::Error::ShardSizeMismatch.into());
     }
 
@@ -1885,7 +1936,7 @@ pub fn repair_inline_recovery_path(
 fn parse_main_header_bytes(parsed: &ParsedBlockHeader) -> Result<MainHeader> {
     let mut reader = HeaderReader::new(&parsed.header, parsed.type_specific_range.clone())?;
     let archive_flags = reader.read_vint()?;
-    let volume_number = if archive_flags & MHFL_VOLUME_NUMBER != 0 {
+    let volume_number = if archive_flags & ARCHIVE_HAS_VOLUME_NUMBER != 0 {
         Some(reader.read_vint()?)
     } else {
         None
@@ -1902,15 +1953,15 @@ fn parse_main_header_bytes(parsed: &ParsedBlockHeader) -> Result<MainHeader> {
 fn parse_main_extra_area(input: &[u8], range: Range<usize>) -> Result<Vec<MainExtraRecord>> {
     let mut records = Vec::new();
     parse_extra_records(input, range, |record_type, data| match record_type {
-        MHEXTRA_LOCATOR => {
+        MAIN_EXTRA_LOCATOR => {
             let mut reader = SliceReader::new(input, data.start, data.end);
             let flags = reader.read_vint()?;
-            let quick_open_offset = if flags & MHEXTRA_LOCATOR_QUICK_OPEN != 0 {
+            let quick_open_offset = if flags & LOCATOR_HAS_QUICK_OPEN_OFFSET != 0 {
                 Some(reader.read_vint()?)
             } else {
                 None
             };
-            let recovery_record_offset = if flags & MHEXTRA_LOCATOR_RECOVERY != 0 {
+            let recovery_record_offset = if flags & LOCATOR_HAS_RECOVERY_RECORD_OFFSET != 0 {
                 Some(reader.read_vint()?)
             } else {
                 None
@@ -1925,10 +1976,10 @@ fn parse_main_extra_area(input: &[u8], range: Range<usize>) -> Result<Vec<MainEx
             }));
             Ok(())
         }
-        MHEXTRA_ARCHIVE_METADATA => {
+        MAIN_EXTRA_METADATA => {
             let mut reader = SliceReader::new(input, data.start, data.end);
             let flags = reader.read_vint()?;
-            let name = if flags & MHEXTRA_ARCHIVE_METADATA_NAME != 0 {
+            let name = if flags & METADATA_HAS_ARCHIVE_NAME != 0 {
                 let name_len = usize_from_u64(
                     reader.read_vint()?,
                     "RAR 5 archive metadata name length overflows usize",
@@ -1937,7 +1988,7 @@ fn parse_main_extra_area(input: &[u8], range: Range<usize>) -> Result<Vec<MainEx
             } else {
                 None
             };
-            let creation_time = if flags & MHEXTRA_ARCHIVE_METADATA_TIME != 0 {
+            let creation_time = if flags & METADATA_HAS_CREATION_TIME != 0 {
                 Some(reader.read_u64()?)
             } else {
                 None
@@ -1964,12 +2015,12 @@ fn parse_file_header_bytes(parsed: &ParsedBlockHeader) -> Result<FileHeader> {
     let file_flags = reader.read_vint()?;
     let unpacked_size = reader.read_vint()?;
     let attributes = reader.read_vint()?;
-    let mtime = if file_flags & FHFL_MTIME != 0 {
+    let mtime = if file_flags & FILE_HAS_UNIX_MTIME != 0 {
         Some(reader.read_u32()?)
     } else {
         None
     };
-    let data_crc32 = if file_flags & FHFL_CRC32 != 0 {
+    let data_crc32 = if file_flags & FILE_HAS_CRC32 != 0 {
         Some(reader.read_u32()?)
     } else {
         None
@@ -2008,18 +2059,18 @@ fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeade
     }
     parse_extra_records(input, range, |record_type, data| {
         match record_type {
-            FHEXTRA_CRYPT => {
+            FILE_EXTRA_ENCRYPTION => {
                 file.encrypted = true;
                 file.encryption = Some(parse_file_encryption_record(input, data)?);
             }
-            FHEXTRA_HASH => {
+            FILE_EXTRA_HASH => {
                 let (hash_type, hash_type_len) = read_vint_at(input, data.start, data.end)?;
                 file.hash = Some(FileHash {
                     hash_type,
                     data: input[data.start + hash_type_len..data.end].to_vec(),
                 });
             }
-            FHEXTRA_HTIME => {
+            FILE_EXTRA_TIME => {
                 // The header's own `mtime` field is only ever written by
                 // a Unix `rar`; WinRAR puts the times in THIS record as
                 // Windows FILETIMEs and leaves the flag clear, so an
@@ -2036,10 +2087,10 @@ fn parse_file_extra_area(input: &[u8], range: Range<usize>, file: &mut FileHeade
                     file.mtime = parse_file_time_record(input, data)?;
                 }
             }
-            FHEXTRA_REDIR => {
+            FILE_EXTRA_REDIRECTION => {
                 file.redirection = Some(parse_file_redirection_record(input, data)?);
             }
-            FHEXTRA_SUBDATA => {
+            FILE_EXTRA_SERVICE_DATA => {
                 file.service_data = Some(input[data].to_vec());
             }
             _ => {}
@@ -2232,7 +2283,9 @@ impl Rar50KeyCache {
         if let Some((_, _, keys)) = self
             .entries
             .iter()
-            .find(|&&(cached_salt, cached_count, _)| cached_salt == salt && cached_count == kdf_count)
+            .find(|&&(cached_salt, cached_count, _)| {
+                cached_salt == salt && cached_count == kdf_count
+            })
         {
             return Ok((**keys).clone());
         }
@@ -2240,8 +2293,7 @@ impl Rar50KeyCache {
         {
             self.derives += 1;
         }
-        let keys =
-            Rar50Keys::derive(password, salt, kdf_count).map_err(map_rar50_crypto_error)?;
+        let keys = Rar50Keys::derive(password, salt, kdf_count).map_err(map_rar50_crypto_error)?;
         self.entries.push((salt, kdf_count, Box::new(keys.clone())));
         Ok(keys)
     }
@@ -2342,9 +2394,11 @@ where
 {
     let mut pos = RAR50_SIGNATURE.len();
     let first = read_block(pos).map_err(|error| error.at_archive_offset(pos))?;
-    let header_keys = if first.block.header_type == HEAD_CRYPT {
+    let header_keys = if first.block.header_type == BLOCK_TYPE_ENCRYPTION {
         pos = first.next_offset;
-        Some(parse_archive_encryption_header(&first, password, key_cache)?)
+        Some(parse_archive_encryption_header(
+            &first, password, key_cache,
+        )?)
     } else {
         None
     };
@@ -2358,7 +2412,7 @@ where
     } else {
         &first
     };
-    if first.block.header_type != HEAD_MAIN {
+    if first.block.header_type != BLOCK_TYPE_MAIN {
         return Err(Error::InvalidHeader("RAR 5 main header is missing"));
     }
     let main = parse_main_header_bytes(first).map_err(|error| error.at_archive_offset(main_pos))?;
@@ -2448,28 +2502,44 @@ where
         }
         let next = parsed.next_offset;
         match parsed.block.header_type {
-            HEAD_FILE => {
+            BLOCK_TYPE_FILE => {
                 let mut file = parse_file_header_bytes(&parsed)
                     .map_err(|error| error.at_archive_offset(pos))?;
                 attach_file_crypto(&mut file, password, key_cache)
                     .map_err(|error| error.at_archive_offset(pos))?;
                 blocks.push(Block::File(file));
             }
-            HEAD_SERVICE => {
+            BLOCK_TYPE_SERVICE => {
                 let mut service = parse_file_header_bytes(&parsed)
                     .map_err(|error| error.at_archive_offset(pos))?;
                 attach_service_crypto(&mut service, password, key_cache)
                     .map_err(|error| error.at_archive_offset(pos))?;
                 blocks.push(Block::Service(service));
             }
-            HEAD_CRYPT => {
+            BLOCK_TYPE_ENCRYPTION => {
                 return Err(Error::UnsupportedFeature {
                     version: crate::version::ArchiveVersion::Rar50,
                     feature: "RAR 5 encrypted headers",
                 });
             }
-            HEAD_END => {
-                blocks.push(Block::End(parsed.block));
+            BLOCK_TYPE_END_OF_ARCHIVE => {
+                // Decode the END record's own flags vint. Nothing else in
+                // the parse reads the type-specific area of an END block,
+                // and without it bit 0x0001 - "another volume of this set
+                // follows" - is the one continuity signal a reader cannot
+                // see. A malformed body leaves it `None` rather than
+                // refusing the archive: the walk is over either way, and a
+                // caller that cannot read the flag falls back to the
+                // split-member evidence it had before.
+                let mut block = parsed.block;
+                block.end_flags = read_vint_at(
+                    &parsed.header,
+                    parsed.type_specific_range.start,
+                    parsed.type_specific_range.end,
+                )
+                .ok()
+                .map(|(flags, _)| flags);
+                blocks.push(Block::End(block));
                 return Ok(None);
             }
             _ => blocks.push(Block::Unknown(parsed.block)),
@@ -2850,12 +2920,12 @@ fn parse_block_header_image(
     let mut reader = SliceReader::new(&header, type_start, header_total);
     let header_type = reader.read_vint()?;
     let flags = reader.read_vint()?;
-    let extra_area_size = if flags & HFL_EXTRA != 0 {
+    let extra_area_size = if flags & BLOCK_HAS_EXTRA_AREA != 0 {
         Some(reader.read_vint()?)
     } else {
         None
     };
-    let data_size = if flags & HFL_DATA != 0 {
+    let data_size = if flags & BLOCK_HAS_DATA_AREA != 0 {
         Some(reader.read_vint()?)
     } else {
         None
@@ -2915,6 +2985,7 @@ fn parse_block_header_image(
             offset: sfx_offset + offset,
             header_range: (offset + type_specific_start)..(offset + type_specific_end),
             data_range: data_start..data_end,
+            end_flags: None,
         },
         header,
         type_specific_range: type_specific_start..type_specific_end,
@@ -3190,12 +3261,11 @@ mod tests {
                 host_os: 0,
             },
         ];
-        let whole = crate::rar50::write::Rar50Writer::new(
-            crate::rar50::write::WriterOptions::default(),
-        )
-        .stored_entries(&entries)
-        .finish()
-        .expect("wrote the fixture archive");
+        let whole =
+            crate::rar50::write::Rar50Writer::new(crate::rar50::write::WriterOptions::default())
+                .stored_entries(&entries)
+                .finish()
+                .expect("wrote the fixture archive");
         // Half of the second member's payload: past its header, short of
         // its end, so the END record is gone with it.
         let cut = whole.len() - second.len() / 2;
@@ -3206,6 +3276,57 @@ mod tests {
     /// refuses a data area running past the end of the file is what stops
     /// a hostile length driving a read past the end of a mapping, and the
     /// fuzz corpus exercises it.
+    /// The END record's "another volume follows" flag round-trips: the
+    /// writer stamps it on every volume but the last, and
+    /// `next_volume_follows` reads it back.
+    ///
+    /// It is the only continuity a volume carries when its boundary
+    /// falls BETWEEN whole members, which is what a multi-member stored
+    /// set produces whenever the next file header will not fit - so a
+    /// reader that cannot see this flag cannot tell such a set from a
+    /// finished one. (nzbfast-local change, 16 Sep 2026; see
+    /// vendor/rars/VENDORING.md.)
+    #[test]
+    fn end_of_archive_records_whether_another_volume_follows() {
+        let a: Vec<u8> = (0..30_000u32).map(|i| i as u8).collect();
+        let b: Vec<u8> = (0..30_000u32).map(|i| (i as u8) ^ 0x5a).collect();
+        let entries = [
+            crate::rar50::write::StoredEntry {
+                name: b"a.bin",
+                data: &a,
+                mtime: None,
+                attributes: 0,
+                host_os: 0,
+            },
+            crate::rar50::write::StoredEntry {
+                name: b"b.bin",
+                data: &b,
+                mtime: None,
+                attributes: 0,
+                host_os: 0,
+            },
+        ];
+        let volumes = crate::rar50::write::Rar50VolumeWriter::new(
+            crate::rar50::write::WriterOptions::default(),
+        )
+        .stored_entries(&entries)
+        .max_payload_per_volume(20_000)
+        .finish()
+        .expect("volume set written");
+        assert!(volumes.len() >= 3, "want a multi-volume set");
+
+        for (index, bytes) in volumes.iter().enumerate() {
+            let archive = Archive::parse(bytes).expect("volume parses");
+            let last = index + 1 == volumes.len();
+            assert_eq!(
+                archive.next_volume_follows(),
+                Some(!last),
+                "volume {index} of {} reports the wrong continuation",
+                volumes.len()
+            );
+        }
+    }
+
     #[test]
     fn a_cut_archive_is_still_refused_without_the_option() {
         let (cut, _) = archive_cut_inside_its_last_member();
@@ -3269,7 +3390,8 @@ mod tests {
                     Block::End(block) | Block::Unknown(block) => block,
                 };
                 assert!(
-                    header.data_range.end <= len && header.data_range.start <= header.data_range.end,
+                    header.data_range.end <= len
+                        && header.data_range.start <= header.data_range.end,
                     "block data range {:?} escapes a {len}-byte archive",
                     header.data_range
                 );
@@ -3320,12 +3442,11 @@ mod tests {
             attributes: 0,
             host_os: 0,
         }];
-        let whole = crate::rar50::write::Rar50Writer::new(
-            crate::rar50::write::WriterOptions::default(),
-        )
-        .stored_entries(&entries)
-        .finish()
-        .expect("wrote the fixture archive");
+        let whole =
+            crate::rar50::write::Rar50Writer::new(crate::rar50::write::WriterOptions::default())
+                .stored_entries(&entries)
+                .finish()
+                .expect("wrote the fixture archive");
         let strict = Archive::parse(&whole).expect("parsed");
         let tolerant = Archive::parse_with_options(
             &whole,
@@ -3414,13 +3535,14 @@ mod tests {
             block: BlockHeader {
                 header_crc: 0,
                 header_size: 0,
-                header_type: HEAD_FILE,
+                header_type: BLOCK_TYPE_FILE,
                 flags: 0,
                 extra_area_size: None,
                 data_size: Some(0),
                 offset: 0,
                 header_range: 0..0,
                 data_range: 0..0,
+                end_flags: None,
             },
             file_flags: 0,
             unpacked_size: 0,
@@ -3716,8 +3838,10 @@ mod rev_stream_tests {
         // Uneven sizes on purpose: REV pads every volume to the longest, and
         // the padding must never reach the rebuilt file.
         let (data, revs) = build_rev_set(&[600, 512, 480, 640], 2);
-        let rev_sources: Vec<MemorySource> =
-            revs.iter().map(|bytes| MemorySource(bytes.clone())).collect();
+        let rev_sources: Vec<MemorySource> = revs
+            .iter()
+            .map(|bytes| MemorySource(bytes.clone()))
+            .collect();
         let metas: Vec<Rev5VolumeRef> = rev_sources
             .iter()
             .map(|source| read_rev5_meta(source).unwrap())
@@ -3725,8 +3849,10 @@ mod rev_stream_tests {
         let slots = metas[0].meta.data_volumes.clone();
 
         for missing in [vec![1usize], vec![0, 3], vec![2, 3]] {
-            let sources: Vec<MemorySource> =
-                data.iter().map(|bytes| MemorySource(bytes.clone())).collect();
+            let sources: Vec<MemorySource> = data
+                .iter()
+                .map(|bytes| MemorySource(bytes.clone()))
+                .collect();
             let intact: Vec<Option<&dyn crate::recovery::stream::RangeSource>> = (0..data.len())
                 .map(|index| {
                     if missing.contains(&index) {
@@ -3785,8 +3911,10 @@ mod rev_stream_tests {
     fn streaming_rev_repairs_a_set_with_thousands_of_data_volumes() {
         let sizes: Vec<usize> = (0..6_800).map(|index| 24 + (index % 3) * 2).collect();
         let (data, revs) = build_rev_set(&sizes, 2);
-        let rev_sources: Vec<MemorySource> =
-            revs.iter().map(|bytes| MemorySource(bytes.clone())).collect();
+        let rev_sources: Vec<MemorySource> = revs
+            .iter()
+            .map(|bytes| MemorySource(bytes.clone()))
+            .collect();
         let metas: Vec<Rev5VolumeRef> = rev_sources
             .iter()
             .map(|source| read_rev5_meta(source).unwrap())
@@ -3795,8 +3923,10 @@ mod rev_stream_tests {
         let slots = metas[0].meta.data_volumes.clone();
 
         let missing = vec![13usize, 5_431];
-        let sources: Vec<MemorySource> =
-            data.iter().map(|bytes| MemorySource(bytes.clone())).collect();
+        let sources: Vec<MemorySource> = data
+            .iter()
+            .map(|bytes| MemorySource(bytes.clone()))
+            .collect();
         let intact: Vec<Option<&dyn crate::recovery::stream::RangeSource>> = (0..data.len())
             .map(|index| {
                 (!missing.contains(&index))
@@ -3840,25 +3970,42 @@ mod rev_stream_tests {
 
     /// The hostile counterpart: headers wider than the GF(2^16) code word,
     /// or dragging a reconstruction-cap recovery count, must die at parse
-    /// time - quickly, and before anything is sized from them.
+    /// time - and die on the COUNT CHECK, before anything is sized from
+    /// them.
+    ///
+    /// The instrument is the error each forged header earns, not a clock.
+    /// This test carried `started.elapsed().as_millis() < 500` until
+    /// 16 Sep 2026, which was reaching for "the refusal came before the
+    /// sizing" and measured how busy the box was instead - and nightly's
+    /// `one-process-loaded` campaign runs this suite under deliberate
+    /// load. **A work counter is the right instrument where there is work
+    /// to count, and here there is none to count**: this path's only
+    /// allocation is the header buffer, already bounded to 1 MiB by the
+    /// `header_size` check that precedes every line below, so the counter
+    /// would read zero whatever the count checks did. Naming the exact
+    /// refusal is the stronger assertion available: it pins WHICH check
+    /// fired, so moving a refusal later - past the metadata table, past a
+    /// sizing - changes the message and reds here.
     #[test]
     fn rev_parse_rejects_wire_scale_volume_counts() {
         let (_, revs) = build_rev_set(&[600, 512, 480], 2);
-        let started = std::time::Instant::now();
 
         // 65_535 data + 1 recovery volumes cannot fit the field.
         let mut over_field = revs[0].clone();
         forge_counts(&mut over_field, 65_535, 1, 65_535);
-        assert!(read_rev5_meta(&MemorySource(over_field)).is_err());
+        assert_eq!(
+            read_rev5_meta(&MemorySource(over_field)).unwrap_err(),
+            Error::InvalidHeader("RAR 5 REV volume counts exceed the recovery field"),
+            "the field check must be what refuses this, not a later length test"
+        );
 
         // A recovery volume count past the reconstruction cap.
         let mut over_cap = revs[0].clone();
         forge_counts(&mut over_cap, 3, 60_000, 3);
-        assert!(read_rev5_meta(&MemorySource(over_cap)).is_err());
-
-        assert!(
-            started.elapsed().as_millis() < 500,
-            "hostile headers must be refused before anything is sized"
+        assert_eq!(
+            read_rev5_meta(&MemorySource(over_cap)).unwrap_err(),
+            Error::InvalidHeader("RAR 5 REV recovery volume count is implausibly large"),
+            "the reconstruction cap must be what refuses this"
         );
     }
 
@@ -3869,8 +4016,7 @@ mod rev_stream_tests {
         rev[17..19].copy_from_slice(&data_count.to_le_bytes());
         rev[19..21].copy_from_slice(&recovery_count.to_le_bytes());
         rev[21..23].copy_from_slice(&recovery_number.to_le_bytes());
-        let header_size =
-            u32::from_le_bytes(rev[12..16].try_into().unwrap()) as usize;
+        let header_size = u32::from_le_bytes(rev[12..16].try_into().unwrap()) as usize;
         let header_crc = crc32(&rev[12..16 + header_size]);
         rev[8..12].copy_from_slice(&header_crc.to_le_bytes());
     }
@@ -3942,8 +4088,10 @@ mod rev_stream_tests {
                 })
                 .collect();
 
-            let mut rebuilt: Vec<Vec<u8>> =
-                missing.iter().map(|&i| vec![0u8; volumes[i].len()]).collect();
+            let mut rebuilt: Vec<Vec<u8>> = missing
+                .iter()
+                .map(|&i| vec![0u8; volumes[i].len()])
+                .collect();
             let indices = repair_rev5_volumes_streaming(
                 &slots,
                 &intact,
@@ -3961,7 +4109,8 @@ mod rev_stream_tests {
             assert_eq!(indices, missing);
             for (slot, &index) in missing.iter().enumerate() {
                 assert_eq!(
-                    rebuilt[slot], volumes[index],
+                    rebuilt[slot],
+                    volumes[index],
                     "WinRAR volume {} was not rebuilt byte for byte (missing {missing:?})",
                     index + 1
                 );
@@ -4039,8 +4188,10 @@ mod rev_stream_tests {
         let rev_source = MemorySource(revs[0].clone());
         let meta = read_rev5_meta(&rev_source).unwrap();
         let slots = meta.meta.data_volumes.clone();
-        let sources: Vec<MemorySource> =
-            data.iter().map(|bytes| MemorySource(bytes.clone())).collect();
+        let sources: Vec<MemorySource> = data
+            .iter()
+            .map(|bytes| MemorySource(bytes.clone()))
+            .collect();
 
         // Three gone, one equation.
         let intact: Vec<Option<&dyn crate::recovery::stream::RangeSource>> = vec![
@@ -4078,8 +4229,10 @@ mod rev_stream_tests {
         let rev_source = MemorySource(revs[0].clone());
         let meta = read_rev5_meta(&rev_source).unwrap();
         let slots = meta.meta.data_volumes.clone();
-        let sources: Vec<MemorySource> =
-            data.iter().map(|bytes| MemorySource(bytes.clone())).collect();
+        let sources: Vec<MemorySource> = data
+            .iter()
+            .map(|bytes| MemorySource(bytes.clone()))
+            .collect();
         let intact: Vec<Option<&dyn crate::recovery::stream::RangeSource>> = (0..4)
             .map(|index| {
                 (index != 1).then_some(&sources[index] as &dyn crate::recovery::stream::RangeSource)
@@ -4094,7 +4247,9 @@ mod rev_stream_tests {
         // A budget under one minimum stripe is a clean refusal, never an
         // attempt that would have to be unbounded.
         let error = repair_rev5_volumes_streaming(
-            &slots, &intact, &recovery,
+            &slots,
+            &intact,
+            &recovery,
             meta.meta.recovery_count as usize,
             16,
             &mut |_, _, _| Ok(()),

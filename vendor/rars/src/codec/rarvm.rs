@@ -366,7 +366,12 @@ impl Vm {
         let global_len = invocation.global_data.len().min(0x2000);
         memory[GLOBAL_BASE..GLOBAL_BASE + global_len]
             .copy_from_slice(&invocation.global_data[..global_len]);
-        let static_start = GLOBAL_BASE + global_len;
+        // Static data follows the fixed system globals even when the caller
+        // passes fewer than SYSTEM_GLOBAL_SIZE bytes (a program's first run
+        // has none): placed at GLOBAL_BASE it would be overwritten by the
+        // length and file-offset globals below, and a program that indexes
+        // its table as `[R3 + 64 + i]` (the RAR 3 IA-64 filter) reads zeros.
+        let static_start = GLOBAL_BASE + global_len.max(SYSTEM_GLOBAL_SIZE);
         let static_len = program
             .static_data
             .len()
@@ -423,10 +428,11 @@ impl Vm {
                 }
                 ip = next_ip;
             }
-            if instruction.opcode == Opcode::Ret && self.regs[7] >= MEMORY_SIZE as u32 {
-                terminated = true;
-                break;
-            }
+            // A top-level RET is reported by `execute_instruction` as a jump
+            // past the end, checked BEFORE it pops. Testing the stack pointer
+            // here, after the instruction, also ended the program on every
+            // subroutine RET that emptied the stack - so a program that CALLs
+            // (the RAR 3 IA-64 filter) stopped at its first return.
         }
         if !terminated {
             return Err(Error::InvalidData("RARVM instruction limit exceeded"));
@@ -1626,6 +1632,65 @@ mod tests {
         assert_eq!(result.output, [1, 2, 3]);
         assert_eq!(result.globals.len(), 68);
         assert_eq!(&result.globals[64..], b"stat");
+    }
+
+    /// A program's first run passes no globals. Its static data must still
+    /// start at `GLOBAL_BASE + SYSTEM_GLOBAL_SIZE`, where the standard IA-64
+    /// program reads its table; placed at `GLOBAL_BASE`, the length and
+    /// file-offset globals overwrote it and that program ran as the identity.
+    #[test]
+    fn static_data_follows_system_globals_when_no_globals_are_passed() {
+        let program = Program {
+            static_data: (1..=0x40).collect(),
+            instructions: vec![
+                instr(
+                    Opcode::Mov,
+                    false,
+                    vec![Operand::Register(0), Operand::Absolute(0x3c040)],
+                ),
+                instr(
+                    Opcode::Mov,
+                    false,
+                    vec![Operand::Register(1), Operand::Absolute(0x3c07c)],
+                ),
+                instr(Opcode::Ret, false, Vec::new()),
+            ],
+        };
+
+        let result = program
+            .execute(Invocation {
+                input: &[0; 0x30],
+                regs: [0; 7],
+                global_data: &[],
+                file_offset: 0x1234,
+                exec_count: 0,
+            })
+            .unwrap();
+
+        assert_eq!(result.regs[0], u32::from_le_bytes([1, 2, 3, 4]));
+        assert_eq!(result.regs[1], u32::from_le_bytes([0x3d, 0x3e, 0x3f, 0x40]));
+        assert_eq!(result.output, [0; 0x30]);
+    }
+
+    #[test]
+    fn ia64_standard_program_rewrites_a_branch_slot() {
+        // Template 0x16 with major opcode 5 in the first slot; the 20-bit
+        // immediate becomes absolute by subtracting (file_offset >> 4).
+        let program = Program::parse(crate::codec::rar29::RAR3_ITANIUM_FILTER_BYTECODE).unwrap();
+        let mut input = vec![0u8; 22];
+        input[0] = 0x16;
+        input[5] = 0x14;
+        let result = program
+            .execute(Invocation {
+                input: &input,
+                regs: [0; 7],
+                global_data: &[],
+                file_offset: 0x10,
+                exec_count: 0,
+            })
+            .unwrap();
+
+        assert_ne!(result.output, input);
     }
 
     #[test]

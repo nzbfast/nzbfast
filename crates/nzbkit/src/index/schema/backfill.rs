@@ -509,8 +509,10 @@ pub(super) fn retroactive_backfills(db: &mut Connection, fts: bool) {
 /// the first run was on a box carrying five other worktree builds and
 /// the spread is the interesting part:
 ///
-///     load ~39   30.8 s / 400k   =  77.1 s per million rows
-///     load ~23   16.6 s / 400k   =  41.6 s per million rows
+/// ```text
+/// load ~39   30.8 s / 400k   =  77.1 s per million rows
+/// load ~23   16.6 s / 400k   =  41.6 s per million rows
+/// ```
 ///
 /// So a 67M-row index, which the largest live ones are, is somewhere
 /// between 46 and 86 minutes, and it is CPU that a busy box makes
@@ -545,13 +547,6 @@ pub(super) fn quality_backfill_slice(db: &mut Connection, budget: std::time::Dur
         return true;
     }
     let _ = (|| -> rusqlite::Result<()> {
-        let mut cursor: i64 = db
-            .query_row("SELECT v FROM kv WHERE k='quality_v10_cursor'", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
         loop {
             // IMMEDIATE, like the nsegs, reclassify and ingest
             // transactions: this reads a cursor and writes it
@@ -561,6 +556,22 @@ pub(super) fn quality_backfill_slice(db: &mut Connection, budget: std::time::Dur
             // abandoned mid-chunk and left the cursor parked.
             let tx =
                 rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+            // ...and the cursor is read INSIDE it, which is the other
+            // half of that sentence and was missing: read once outside
+            // the loop, two scan connections opening the index at the
+            // same time took the SAME starting cursor and the slower
+            // one wrote a stale LOWER value back at every chunk, so the
+            // pair leapfrogged and re-did each other's work
+            // indefinitely. `fold_pass` above states this rule and
+            // follows it; this comment claimed it while the read sat
+            // outside.
+            let mut cursor: i64 = tx
+                .query_row("SELECT v FROM kv WHERE k='quality_v10_cursor'", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
             // The effective name, NOT the raw stem: a row named
             // after ingest (`apply_named` - predb sweep, spot
             // promotion, byte probes) derived every classification

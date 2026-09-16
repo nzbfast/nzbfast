@@ -1386,23 +1386,57 @@ fn big_damaged_file_repairs_identically_through_the_pool() {
 /// reasons the mapped differential is.
 #[test]
 fn a_slabbed_disk_repair_lands_the_same_bytes_through_every_staging() {
-    use super::reconstruct::{ForcedSlabWidth, ForcedSpill};
+    use super::reconstruct::{ForcedInPlace, ForcedSlabWidth, ForcedSpill};
     let bs = 4096usize;
     let a = payload(3 * bs + 1001, 71);
     let b = payload(2 * bs, 72);
     let files: &[(&str, &[u8])] = &[("a.bin", &a), ("b.bin", &b)];
 
-    // (forced slab width, force the spill arm) - `None` is production.
-    let arms: [(Option<usize>, bool); 6] = [
-        (None, false),
-        (Some(bs), false),
-        (Some(bs / 2), false),
-        (Some(bs / 2), true),
-        (Some(1366), true),
-        (Some(586), false),
+    // (forced slab width, force the spill arm, `NZBFAST_REPAIR_OUTPUT=
+    // inplace`) - `None` is production. The in-place arms take the OWNED
+    // constructor, which consumes each recovery payload as it widens it.
+    let arms: [(Option<usize>, bool, bool); 9] = [
+        (None, false, false),
+        (Some(bs), false, false),
+        (Some(bs / 2), false, false),
+        (Some(bs / 2), true, false),
+        (Some(1366), true, false),
+        (Some(586), false, false),
+        (None, false, true),
+        (Some(bs / 2), false, true),
+        (Some(1366), true, true),
     ];
-    for (wi, (forced, spill)) in arms.into_iter().enumerate() {
+    // A predecessor SIGKILLed mid-spill (parfast-stale-repair-slab-sweep-15sep).
+    let dead = spill_sweep::dead_pid();
+    let own_name = format!(".nzbfast-repair-slab.{}.tmp", std::process::id());
+    for (wi, (forced, spill, in_place)) in arms.into_iter().enumerate() {
         let dir = tmpdir(&format!("slabrepair{wi}"));
+        // Planted on the spill arms only, the arms that sweep: the
+        // no-strays check below is then also the proof the sweep removed it,
+        // and the byte checks that a repair which found one still lands
+        // exact bytes.
+        //
+        // Beside it, a file with the spill's OWN first name
+        // (parfast-spill-name-collision-15sep). On odd arms it is held
+        // locked through another handle for the whole repair - a concurrent
+        // spill in this process - so the sweep must keep it and the spill
+        // must take the next name; on even arms it is unlocked - a dead
+        // predecessor that had our pid, a container restart's shape - so
+        // the sweep must remove it.
+        let mut own_holder = None;
+        if spill {
+            std::fs::write(
+                dir.join(format!(".nzbfast-repair-slab.{dead}.tmp")),
+                vec![0xa5u8; 4 * bs],
+            )
+            .unwrap();
+            std::fs::write(dir.join(&own_name), vec![0x3cu8; bs]).unwrap();
+            if wi % 2 == 1 {
+                let h = std::fs::File::open(dir.join(&own_name)).unwrap();
+                h.try_lock().unwrap();
+                own_holder = Some(h);
+            }
+        }
         // Damage one block of each file, including a.bin's SHORT TAIL.
         let mut da = a.clone();
         let mut db = b.clone();
@@ -1427,11 +1461,15 @@ fn a_slabbed_disk_repair_lands_the_same_bytes_through_every_staging() {
 
         let _w = forced.map(ForcedSlabWidth::set);
         let _s = spill.then(ForcedSpill::on);
+        let _p = in_place.then(ForcedInPlace::on);
         let got = repair_dir(&dir);
+        drop(_p);
         drop(_s);
         drop(_w);
 
-        match got.unwrap_or_else(|e| panic!("arm {wi} ({forced:?}, spill={spill}) failed: {e:?}")) {
+        match got.unwrap_or_else(|e| {
+            panic!("arm {wi} ({forced:?}, spill={spill}, in_place={in_place}) failed: {e:?}")
+        }) {
             RepairStatus::Repaired(r) => assert_eq!(
                 r.blocks_rebuilt, 3,
                 "arm {wi} ({forced:?}, spill={spill}) rebuilt the wrong count"
@@ -1459,10 +1497,429 @@ fn a_slabbed_disk_repair_lands_the_same_bytes_through_every_staging() {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.contains("nzbfast-repair-slab"))
             .collect();
-        assert!(
-            strays.is_empty(),
-            "arm {wi} left scratch behind: {strays:?}"
+        // The held file is not the repair's scratch: it must be the only
+        // survivor, untouched.
+        let expected: Vec<String> = own_holder.iter().map(|_| own_name.clone()).collect();
+        assert_eq!(
+            strays, expected,
+            "arm {wi} left scratch behind, or swept a locked file"
         );
+        if let Some(h) = own_holder {
+            drop(h);
+            assert_eq!(
+                std::fs::read(dir.join(&own_name)).unwrap(),
+                vec![0x3cu8; bs],
+                "arm {wi} wrote over the locked file"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// AN UNSTRUCTURED SET UNDER `NZBFAST_REPAIR_OUTPUT=inplace` IS PRICED
+/// AT ITS OWN ARM, not at the joint Forney arm's one buffer (TODO 348 C).
+///
+/// Until this was fixed the plan priced one buffer before the recovery
+/// exponents were selected. A set whose recovery packets were themselves
+/// lost falls through to Gauss-Jordan, which holds two buffers and the
+/// `~4*m^2` matrix, and `check_repair_dim_dense` re-asserted that against
+/// the one-buffer slab: at m = 704 (NEON's Forney gate), 3,072-byte
+/// blocks and a 4 MiB budget the in-place plan was one slab of 3,072
+/// bytes, needing 6.3 MB, and the repair came back `SolveBudget` - while
+/// the whole pricing cut two slabs of 1,536, which fit (4,145,152 bytes)
+/// and repaired. The plan now takes the selection's structure as an input.
+///
+/// The refusal is reachable only where m = 704 takes Forney and the joint
+/// arm (aarch64 by default); on an x86 runner this set is dense at either
+/// pricing and the test is a plain repair assertion. The arithmetic it
+/// rests on is held host-independently first.
+///
+/// Mostly-zero payload on purpose: the recovery generator below skips the
+/// zero blocks, which is what keeps a 704-slice fixture cheap at
+/// opt-level 0. Every one of the 704 blocks is still solved for.
+#[test]
+fn an_in_place_repair_of_an_unstructured_set_is_not_refused_for_memory() {
+    use super::reconstruct::{
+        ForcedInPlace, ForcedSolveBudget, check_repair_dim_dense_within, plan_slabs_with,
+    };
+    let (m, present, bs) = (704usize, 8usize, 3072usize);
+    let budget = 4usize << 20;
+
+    // The arithmetic, with the arms named: one buffer on Forney's pricing
+    // is a slab the dense check refuses, and the dense arm's own pricing is
+    // a slab it admits.
+    let one = plan_slabs_with(m, bs, budget as u64, 1, false);
+    assert_eq!((one.slabs, one.width), (1, bs));
+    assert!(check_repair_dim_dense_within(m, one.width, budget as u64).is_err());
+    let own = plan_slabs_with(m, bs, budget as u64, 2, true);
+    assert_eq!((own.slabs, own.width), (2, bs / 2));
+    assert!(check_repair_dim_dense_within(m, own.width, budget as u64).is_ok());
+
+    // One file of `m + present` blocks. The first `m` are damaged; 24 of
+    // them and every present block carry data, the rest are zero.
+    let n = m + present;
+    let mut data = vec![0u8; n * bs];
+    for blk in (0..m).step_by(m / 24).chain(m..n) {
+        data[blk * bs..(blk + 1) * bs].copy_from_slice(&payload(bs, 900 + blk as u64));
+    }
+    // Recovery exponents 0..=705 less 3: no consecutive run of 704 and no
+    // progression, so the selection is unstructured - Gauss-Jordan.
+    let exps: Vec<u32> = (0..=m as u32 + 1).filter(|&e| e != 3).collect();
+    let logs = input_base_logs(n).unwrap();
+    let mut vol = Vec::new();
+    for &e in &exps {
+        let mut acc = vec![0u16; bs / 2];
+        for (blk, &k) in logs.iter().enumerate() {
+            let s = &data[blk * bs..(blk + 1) * bs];
+            if s.iter().any(|&b| b != 0) {
+                MulTable::new(gf16::pow2(k as u64 * e as u64)).xor_mul_into(&mut acc, s);
+            }
+        }
+        let mut body = e.to_le_bytes().to_vec();
+        body.extend(acc.iter().flat_map(|w| w.to_le_bytes()));
+        vol.extend(pkt(SET, par2::TYPE_RECVSLIC, &body));
+    }
+    let files: &[(&str, &[u8])] = &[("a.bin", &data)];
+
+    for in_place in [false, true] {
+        let dir = tmpdir(&format!("unstructured-inplace-{in_place}"));
+        let mut damaged = data.clone();
+        for blk in 0..m {
+            for x in &mut damaged[blk * bs..blk * bs + 64] {
+                *x ^= 0x5a;
+            }
+        }
+        std::fs::write(dir.join("a.bin"), &damaged).unwrap();
+        std::fs::write(dir.join("set.par2"), par2_index(SET, bs, files)).unwrap();
+        std::fs::write(dir.join("set.vol0+706.par2"), &vol).unwrap();
+
+        let _b = ForcedSolveBudget::set(budget);
+        let _p = in_place.then(ForcedInPlace::on);
+        let got = repair_dir(&dir);
+        drop(_p);
+        drop(_b);
+
+        match got {
+            Ok(RepairStatus::Repaired(r)) => assert_eq!(r.blocks_rebuilt, m, "in_place={in_place}"),
+            other => panic!("in_place={in_place}: expected Repaired, got {other:?}"),
+        }
+        assert!(
+            std::fs::read(dir.join("a.bin")).unwrap() == data,
+            "in_place={in_place} landed different bytes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The stale spill sweep: a SIGKILLed spilled repair leaves
+/// `.nzbfast-repair-slab.<pid>.tmp` behind, and the next spill in that
+/// directory removes it - but only it, and never a live one.
+mod spill_sweep {
+    use super::super::rebuilt::{
+        RebuiltStore, SPILL_TRIES, Swept, pid_alive, spill_name, sweep_stale_spills,
+    };
+    use super::tmpdir;
+    use std::path::Path;
+    use std::process::{Child, Command, Stdio};
+
+    /// A process that stays alive until its stdin closes: a shell reading
+    /// commands from a pipe, which every unix and every Windows has.
+    fn live_child() -> Child {
+        let shell = if cfg!(windows) { "cmd" } else { "sh" };
+        Command::new(shell)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a shell")
+    }
+
+    /// End `child` and reap it, so its pid is dead by construction rather
+    /// than by the probe under test.
+    fn finish(mut child: Child) {
+        drop(child.stdin.take());
+        child.wait().expect("reap the shell");
+    }
+
+    /// `N` distinct pids known dead: children spawned side by side (so no
+    /// two share a pid) and then reaped. Retried on the vanishing chance a
+    /// pid was reused in the gap, which the probe rightly reads as alive.
+    pub(super) fn dead_pids<const N: usize>() -> [u32; N] {
+        for _ in 0..16 {
+            let children: Vec<Child> = (0..N).map(|_| live_child()).collect();
+            let pids: [u32; N] = std::array::from_fn(|i| children[i].id());
+            children.into_iter().for_each(finish);
+            if pids.iter().all(|&p| !pid_alive(p)) {
+                return pids;
+            }
+        }
+        panic!("a reaped child's pid kept reading as alive");
+    }
+
+    pub(super) fn dead_pid() -> u32 {
+        dead_pids::<1>()[0]
+    }
+
+    fn slab(dir: &Path, pid: impl std::fmt::Display, len: usize) -> std::path::PathBuf {
+        let p = dir.join(format!(".nzbfast-repair-slab.{pid}.tmp"));
+        std::fs::write(&p, vec![7u8; len]).unwrap();
+        p
+    }
+
+    #[test]
+    fn pid_probe_reads_own_live_and_reaped_pids() {
+        assert!(pid_alive(std::process::id()), "our own pid read as dead");
+        let child = live_child();
+        let pid = child.id();
+        assert!(pid_alive(pid), "a running child {pid} read as dead");
+        finish(child);
+        // Reuse inside this gap is not a real risk; `dead_pid` retries.
+        assert!(!pid_alive(dead_pid()));
+        // Not processes, and must never read as dead.
+        assert!(pid_alive(0));
+        #[cfg(unix)]
+        assert!(pid_alive(u32::MAX), "a pid past pid_t read as dead");
+    }
+
+    #[test]
+    fn sweep_removes_dead_keeps_own_live_and_locked() {
+        let dir = tmpdir("spillsweep-owners");
+        let own = std::process::id();
+        let live = live_child();
+        let [dead, dead2] = dead_pids();
+        let stale = slab(&dir, dead, 4096);
+        let running = slab(&dir, live.id(), 200);
+        // A dead pid whose lock is held: an owner in another pid namespace
+        // or on another host, which only the lock can see.
+        let locked = slab(&dir, dead2, 300);
+        let holder = std::fs::File::open(&locked).unwrap();
+        holder.try_lock().unwrap();
+        // Our own pid, unlocked: a dead predecessor that had our pid (a
+        // container restart), which the sweep removes since
+        // parfast-spill-name-collision-15sep.
+        let mine_stale = slab(&dir, own, 100);
+        // Our own pid, locked through another handle in this process: a
+        // concurrent spill here, which the lock alone must keep.
+        let mine_live = slab(&dir, format!("{own}-1"), 50);
+        let mine_holder = std::fs::File::open(&mine_live).unwrap();
+        mine_holder.try_lock().unwrap();
+
+        let got = sweep_stale_spills(&dir, own);
+        assert_eq!(
+            got,
+            Swept {
+                files: 2,
+                bytes: 4196,
+                failed: 0
+            }
+        );
+        assert!(!stale.exists(), "the dead pid's file survived");
+        assert!(!mine_stale.exists(), "our own pid's unlocked file survived");
+        assert!(mine_live.exists(), "our own pid's locked file was removed");
+        assert!(running.exists(), "a live process's file was removed");
+        assert!(locked.exists(), "a locked file was removed");
+
+        // The same three files go once their owners do.
+        //
+        // Swept until they are gone, within a bound, rather than once: in a
+        // one-process `cargo test` the sibling tests here spawn shells on
+        // other threads, and a child spawned while `holder` was open shares
+        // its locked file description until its exec closes the copy, so a
+        // single sweep straight after the drop can still see `WouldBlock`
+        // (measured 15 Sep 2026: 1 of 4 whole-crate runs kept both released
+        // files, 0 of 60 runs of this test alone). That transient holder
+        // only ever makes the sweep KEEP a file. The end state and the
+        // totals are still exact.
+        finish(live);
+        drop(holder);
+        drop(mine_holder);
+        let mut total = Swept::default();
+        for _ in 0..200 {
+            let got = sweep_stale_spills(&dir, own);
+            total.files += got.files;
+            total.bytes += got.bytes;
+            total.failed += got.failed;
+            if !running.exists() && !locked.exists() && !mine_live.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            total,
+            Swept {
+                files: 3,
+                bytes: 550,
+                failed: 0
+            }
+        );
+        assert!(!running.exists() && !locked.exists() && !mine_live.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Case 2 of parfast-spill-name-collision-15sep: a spill whose first
+    /// names are held by live spills in this process takes the next free
+    /// name, round-trips its payload, removes only its own file on drop,
+    /// and fails only once every name is taken.
+    #[test]
+    fn spill_takes_the_next_name_when_its_own_is_held() {
+        let dir = tmpdir("spillsweep-collide");
+        let own = std::process::id();
+        let bs = 64u64;
+        let held: Vec<(std::path::PathBuf, std::fs::File)> = (0..2)
+            .map(|a| {
+                let p = dir.join(spill_name(own, a));
+                std::fs::write(&p, b"held").unwrap();
+                let h = std::fs::File::open(&p).unwrap();
+                h.try_lock().unwrap();
+                (p, h)
+            })
+            .collect();
+
+        let mut store = RebuiltStore::spill(&dir, 2, bs).expect("spill beside held names");
+        let RebuiltStore::Spill { path, .. } = &store else {
+            panic!("spill returned another staging");
+        };
+        let path = path.clone();
+        assert_eq!(path, dir.join(spill_name(own, 2)));
+        let payload: Vec<Vec<u8>> = (0..2u8)
+            .map(|i| (0..bs).map(|j| i.wrapping_mul(31) ^ j as u8).collect())
+            .collect();
+        let blocks: Vec<_> = payload
+            .iter()
+            .map(|b| super::super::reconstruct::RebuiltBlock::Bytes(b.clone()))
+            .collect();
+        store.put_slab(&blocks, 0, bs as usize).unwrap();
+        let out = dir.join("out.bin");
+        let dst = std::fs::File::create_new(&out).unwrap();
+        for mi in 0..2 {
+            store
+                .write_block_to(mi, bs as usize, &dst, mi as u64 * bs)
+                .unwrap();
+        }
+        drop(dst);
+        assert_eq!(std::fs::read(&out).unwrap(), payload.concat());
+        drop(store);
+        assert!(!path.exists(), "the spill left its own file behind");
+
+        // Every name held: the collision reaches the caller, and nothing is
+        // left behind by the attempt.
+        let all: Vec<(std::path::PathBuf, std::fs::File)> = (2..SPILL_TRIES)
+            .map(|a| {
+                let p = dir.join(spill_name(own, a));
+                std::fs::write(&p, b"held").unwrap();
+                let h = std::fs::File::open(&p).unwrap();
+                h.try_lock().unwrap();
+                (p, h)
+            })
+            .collect();
+        match RebuiltStore::spill(&dir, 2, bs) {
+            Err(super::super::RepairError::Io(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists)
+            }
+            Err(e) => panic!("expected AlreadyExists, got {e:?}"),
+            Ok(_) => panic!("a spill found a name past {SPILL_TRIES} tries"),
+        }
+        assert!(!dir.join(spill_name(own, SPILL_TRIES)).exists());
+        // Read back only once every holder is gone: a Windows lock is
+        // mandatory, so a read through another handle fails while one is
+        // held (parfast-spill-test-windows-lock-15sep).
+        drop(held);
+        drop(all);
+        for a in 0..SPILL_TRIES {
+            let p = dir.join(spill_name(own, a));
+            assert_eq!(
+                std::fs::read(&p).unwrap(),
+                b"held",
+                "{} was touched",
+                p.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_leaves_every_other_shape_alone() {
+        let dir = tmpdir("spillsweep-shapes");
+        let [dead, dead_dir, dead_link, dead_retry] = dead_pids();
+        // The positive controls, so a sweep that did nothing cannot pass:
+        // the first name and a retry's name.
+        let stale = slab(&dir, dead, 10);
+        let stale_retry = slab(&dir, format!("{dead_retry}-3"), 5);
+        let kept: Vec<std::path::PathBuf> = [
+            format!(".nzbfast-repair-slab.+{dead}.tmp"),
+            format!(".nzbfast-repair-slab.{dead}x.tmp"),
+            ".nzbfast-repair-slab..tmp".to_string(),
+            format!("nzbfast-repair-slab.{dead}.tmp"),
+            format!(".nzbfast-repair-slab.{dead}.tmp.bak"),
+            format!("x.nzbfast-repair-slab.{dead}.tmp"),
+            ".nzbfast-repair-slab.0.tmp".to_string(),
+            ".nzbfast-repair-slab.99999999999999999999.tmp".to_string(),
+            // Near-misses of the retry shape `<pid>-<attempt>`.
+            format!(".nzbfast-repair-slab.{dead}-.tmp"),
+            ".nzbfast-repair-slab.-1.tmp".to_string(),
+            format!(".nzbfast-repair-slab.+{dead}-1.tmp"),
+            format!(".nzbfast-repair-slab.{dead}-+1.tmp"),
+            format!(".nzbfast-repair-slab.{dead}--1.tmp"),
+            format!(".nzbfast-repair-slab.{dead}-1-2.tmp"),
+            format!(".nzbfast-repair-slab.{dead}-0.tmp"),
+            format!(".nzbfast-repair-slab.{dead}-01.tmp"),
+            format!(".nzbfast-repair-slab.{dead}-1x.tmp"),
+            format!(".nzbfast-repair-slab.{dead}-99999999999999999999.tmp"),
+            format!(".nzbfast-repair-slab.{dead}_1.tmp"),
+            format!(".nzbfast-repair-slab.{dead}.1.tmp"),
+            format!(".nzbfast-repair-slab.{dead}-1.tmp.bak"),
+        ]
+        .iter()
+        .map(|n| {
+            let p = dir.join(n);
+            std::fs::write(&p, b"keep").unwrap();
+            p
+        })
+        .collect();
+        // A directory with the exact name, and a matching file one level
+        // down: no recursion.
+        let named_dir = dir.join(format!(".nzbfast-repair-slab.{dead_dir}.tmp"));
+        std::fs::create_dir(&named_dir).unwrap();
+        let sub = dir.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let nested = slab(&sub, dead, 10);
+        // A symlink with the exact name, pointing at a file the sweep must
+        // not reach through it. Windows needs a privilege for symlinks, so
+        // the arm is skipped there when the box does not grant it.
+        let target = dir.join("target.bin");
+        std::fs::write(&target, b"payload").unwrap();
+        let link = dir.join(format!(".nzbfast-repair-slab.{dead_link}.tmp"));
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&target, &link).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let linked = false;
+
+        // A retry's name for a LIVE process is kept like its first name.
+        let live = live_child();
+        let live_retry = slab(&dir, format!("{}-2", live.id()), 7);
+
+        let got = sweep_stale_spills(&dir, std::process::id());
+        assert_eq!((got.files, got.bytes, got.failed), (2, 15, 0));
+        assert!(!stale.exists(), "the positive control survived");
+        assert!(
+            !stale_retry.exists(),
+            "the retry-name positive control survived"
+        );
+        assert!(
+            live_retry.exists(),
+            "a live process's retry name was removed"
+        );
+        finish(live);
+        for p in &kept {
+            assert!(p.exists(), "{} was removed", p.display());
+        }
+        assert!(named_dir.is_dir() && nested.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+        if linked {
+            assert!(link.symlink_metadata().is_ok(), "the symlink was removed");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -3080,6 +3537,12 @@ mod donate_claim_tests;
 #[cfg(test)]
 mod tree_adopt;
 
+/// `SurveyObserver::adoption_exclusions`, which had no test anywhere
+/// until a Sep 2026 repair-timing round went looking for a double read
+/// in the adoption scan and found the gate already sound.
+#[cfg(test)]
+mod adopt_exclusions;
+
 /// Mapping a packet file parses it EXACTLY as reading it does.
 ///
 /// `Catalog::scan_file` reads a volume whole up to `SLURP_MAX_BYTES` and
@@ -3326,4 +3789,19 @@ fn a_cancelled_present_sets_walk_stops_on_the_set_it_was_cancelled_in() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The per-slab spill flush's rule: the env forces it either way, and
+/// otherwise a cgroup limit decides - read only when the env is silent.
+#[test]
+fn spill_flush_wanted_rule() {
+    use super::rebuilt::spill_flush_wanted;
+    let unread = || -> Option<u64> { panic!("the cgroup is not read when the env forces") };
+    assert!(spill_flush_wanted(Some("1"), unread));
+    assert!(!spill_flush_wanted(Some("0"), unread));
+    assert!(spill_flush_wanted(None, || Some(512 << 20)));
+    assert!(!spill_flush_wanted(None, || None));
+    // Anything but `1` / `0` is not an override.
+    assert!(spill_flush_wanted(Some("yes"), || Some(512 << 20)));
+    assert!(!spill_flush_wanted(Some(""), || None));
 }

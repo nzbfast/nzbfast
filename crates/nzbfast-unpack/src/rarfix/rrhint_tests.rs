@@ -650,3 +650,321 @@ fn encrypted_rr_pass_derives_the_key_once_per_set() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ------------------------------- the embedded-recovery-record A/B harness
+//
+// `#[ignore]`d on purpose, exactly as the `.rev` pair in
+// `rarfix_rev_recovery_tests.rs` is: these are benchmark drivers, not
+// assertions, and they want a quiet box and a set far larger than a unit
+// test should build. They live HERE, beside `write_rr_set`, rather than in
+// a `research/` replica, because `rr_repair_volume` is `pub(crate)` and a
+// replica measures a copy of the path - the caveat the 16 Sep profile note
+// had to carry.
+//
+// They drive the SECOND `repair_cap()` consumer: `rarfix.rs`'s embedded
+// recovery-record repair, `repair_recovery_to_path` plus the raw RAR5
+// recovery-chunk scan fallback for headers too damaged to parse. Section 8
+// of `research/NZBFAST-REPAIR-SCAN-THREADING-2026-09-16.md` measured only
+// the `.rev` fold at the other call site and says at length that nothing
+// there is a statement about this path.
+//
+//   RRSCAN_SET       directory holding the kept set (built once)
+//   RRSCAN_WORK      a work copy made of HARD LINKS to it
+//   RRSCAN_SIZES     "<count>x<MiB>" for the builder - payload MiB PER
+//                    VOLUME, so the volume FILE is that plus its record
+//   RRSCAN_RECOVERY  recovery-record percent, default 20
+//   RRSCAN_VICTIM    1-based volume to damage, default 1
+//   RRSCAN_DAMAGE    payload | headers | none - which prebuilt damaged
+//                    variant the work copy links in as the victim
+//   RRSCAN_DAMAGE_PCT  damaged run as a percent of the volume, default 1
+//   RRSCAN_BUDGET_MIB  process budget; `repair_cap()` is a quarter of it,
+//                    clamped to [8 MiB, 512 MiB], so a ladder over the
+//                    budget is a ladder over the cap with no production
+//                    edit anywhere
+//
+// The damaged victims are built ONCE into the kept set as `.dmg-payload` /
+// `.dmg-headers` siblings and hard-linked in under the volume's real name,
+// rather than written fresh per run. That is what makes a cold arm
+// possible at all: a victim written by the parent immediately before the
+// run is warm in the page cache by construction, and it is the one file
+// the repair reads most.
+
+/// Deterministic, incompressible-ish payload, cheap enough to fill a GiB.
+/// An xorshift rather than `payload()`'s multiply - the same job, but
+/// `payload` allocates through a `flat_map` over 4-byte arrays and is far
+/// too slow at this size.
+fn rrscan_payload(len: usize) -> Vec<u8> {
+    let mut out = vec![0u8; len];
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    for chunk in out.chunks_mut(8) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let bytes = state.to_le_bytes();
+        chunk.copy_from_slice(&bytes[..chunk.len()]);
+    }
+    out
+}
+
+/// The ONE serializer for `nzbkit::mem::PROCESS_BUDGET` among `rarfix`'s
+/// tests, taken by every test in this crate that moves it.
+///
+/// The budget is a process-global: one value for the whole binary. Two
+/// `#[ignore]`d benchmark drivers move it - `rrscan_one_repair` below and
+/// `rarfix_rev_recovery_tests::revscan_one_repair` - and each is normally
+/// run one-per-process by its A/B driver, which is exactly the arrangement
+/// that makes the collision invisible: nextest gives every test its own
+/// process, so nothing in CI or in an ordinary sweep can show it, and it
+/// would surface as a flake under `cargo test -- --include-ignored` with
+/// both drivers' env set, on somebody else's push. A lock costs nothing in
+/// the one-per-process case and is the only thing that makes the other case
+/// correct, so both take it as their FIRST statement and hold it past every
+/// read of the value.
+///
+/// It lives in this test module rather than in a `testseam.rs` of its own
+/// only because a new file would need a `mod` line in `rarfix.rs`, which
+/// claim `nzbfast-fold-window-land-and-sweep-16sep` holds. A sibling test
+/// module reaches it as `super::rrhint_tests::one_budget_test_at_a_time`.
+/// If that file is free later, this belongs beside the door it guards.
+pub(crate) fn one_budget_test_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Poison is nothing here: every taker publishes the budget it wants on
+    // the way in, so a panicking predecessor leaves nothing to inherit.
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Byte-compare two files without holding either in memory.
+fn same_bytes(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::io::Read;
+    let (mut fa, mut fb) = match (std::fs::File::open(a), std::fs::File::open(b)) {
+        (Ok(fa), Ok(fb)) => (fa, fb),
+        _ => return false,
+    };
+    if fa.metadata().map(|m| m.len()).ok() != fb.metadata().map(|m| m.len()).ok() {
+        return false;
+    }
+    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        let n = match fa.read(&mut ba) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if n == 0 {
+            return true;
+        }
+        if fb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
+            return false;
+        }
+    }
+}
+
+fn rrscan_env(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.into())
+}
+
+/// Build the kept set once, with both damaged variants of the victim
+/// beside it. `cargo test --release -p nzbfast-unpack --lib --
+/// --ignored --exact ...::rrscan_build_set`.
+#[test]
+#[ignore]
+fn rrscan_build_set() {
+    use rars::rar50::{Rar50VolumeWriter, StoredEntry, WriterOptions};
+
+    let dir = PathBuf::from(std::env::var("RRSCAN_SET").expect("RRSCAN_SET"));
+    let spec = rrscan_env("RRSCAN_SIZES", "4x64");
+    let (count, mib) = spec.split_once('x').expect("RRSCAN_SIZES=<count>x<MiB>");
+    let count: usize = count.parse().unwrap();
+    let mib: usize = mib.parse().unwrap();
+    let percent: u64 = rrscan_env("RRSCAN_RECOVERY", "20").parse().unwrap();
+    let victim: usize = rrscan_env("RRSCAN_VICTIM", "1").parse().unwrap();
+    let damage_pct: usize = rrscan_env("RRSCAN_DAMAGE_PCT", "1").parse().unwrap();
+
+    // STORED, not compressed: the payload is incompressible by
+    // construction, so compressing it is pure build cost, and a stored
+    // member is what a real usenet posting of already-compressed media
+    // carries anyway. The repair path under measurement never looks at
+    // the member's compression method.
+    let data = rrscan_payload(count * mib * 1024 * 1024);
+    let entries = [StoredEntry {
+        name: b"inner/data.bin",
+        data: &data,
+        mtime: None,
+        attributes: 0o100644,
+        host_os: 1,
+    }];
+    let volumes = Rar50VolumeWriter::new(WriterOptions::default())
+        .stored_entries(&entries)
+        .max_payload_per_volume(mib * 1024 * 1024)
+        .recovery_percent(Some(percent))
+        .finish()
+        .unwrap();
+    assert!(
+        volumes.len() >= count,
+        "expected at least {count} volumes, got {}",
+        volumes.len()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut paths = Vec::new();
+    for (index, bytes) in volumes.iter().enumerate() {
+        let p = dir.join(format!("set.part{:02}.rar", index + 1));
+        std::fs::write(&p, bytes).unwrap();
+        paths.push(p);
+    }
+    drop(data);
+
+    // The two damaged variants, built once and never rewritten.
+    let target = &paths[victim - 1];
+    let clean = std::fs::read(target).unwrap();
+
+    // (a) payload damage: a run in the middle, which the headers survive,
+    //     so `read_path` parses and the measured call is
+    //     `repair_recovery_to_path`.
+    let mut bad = clean.clone();
+    let start = bad.len() / 3;
+    let end = (start + (bad.len() * damage_pct / 100).max(16)).min(bad.len());
+    for b in &mut bad[start..end] {
+        *b ^= 0x5a;
+    }
+    std::fs::write(target.with_extension("rar.dmg-payload"), &bad).unwrap();
+
+    // (b) header damage: everything after the 8-byte RAR5 signature for a
+    //     kilobyte, so the parse fails and the measured call is the raw
+    //     recovery-chunk scan fallback. The signature is kept because the
+    //     fallback refuses a non-RAR5 file outright.
+    let mut hdr = clean.clone();
+    let stop = 1024.min(hdr.len());
+    for b in &mut hdr[8..stop] {
+        *b ^= 0xa5;
+    }
+    std::fs::write(target.with_extension("rar.dmg-headers"), &hdr).unwrap();
+
+    // Prove each variant reaches the branch it is for, HERE rather than in
+    // the timed run - the probe reads the file and would warm it.
+    let probes = [
+        ("payload", target.with_extension("rar.dmg-payload"), true),
+        ("headers", target.with_extension("rar.dmg-headers"), false),
+    ];
+    for (name, path, want_parse) in probes {
+        let mut session = rars::ReadSession::new(rars::ArchiveReadOptions::default());
+        let parsed = session.read_path(&path).is_ok();
+        assert_eq!(
+            parsed,
+            want_parse,
+            "the {name} variant must {} parse, so the run takes the branch it is for",
+            if want_parse { "" } else { "NOT" }
+        );
+        println!(
+            "VARIANT {name} parses={parsed} branch={}",
+            if parsed {
+                "repair_recovery_to_path"
+            } else {
+                "raw recovery-chunk scan"
+            }
+        );
+    }
+
+    println!(
+        "BUILT {} volumes, {} bytes each (payload {mib} MiB + {percent}% record), \
+         victim {victim}, damaged run {} bytes ({damage_pct}%)",
+        volumes.len(),
+        clean.len(),
+        end - start
+    );
+}
+
+/// One timed embedded-recovery repair, in this process. Prints `TOTAL
+/// <ms>` and byte-compares the repaired volume against the kept clean
+/// original before it reports anything - a fast wrong answer is not a
+/// result.
+#[test]
+#[ignore]
+fn rrscan_one_repair() {
+    let _serial = one_budget_test_at_a_time();
+    let kept = PathBuf::from(std::env::var("RRSCAN_SET").expect("RRSCAN_SET"));
+    let work = PathBuf::from(std::env::var("RRSCAN_WORK").expect("RRSCAN_WORK"));
+    let victim: usize = rrscan_env("RRSCAN_VICTIM", "1").parse().unwrap();
+    let damage = rrscan_env("RRSCAN_DAMAGE", "payload");
+
+    // The arm: publish a process budget so `repair_cap()` lands where the
+    // caller wants it. Nothing in production code moves.
+    if let Ok(mib) = std::env::var("RRSCAN_BUDGET_MIB") {
+        nzbkit::mem::set_process_budget(nzbkit::mem::MemBudget {
+            total: mib.parse::<u64>().unwrap() * 1024 * 1024,
+        });
+    }
+
+    let name = format!("set.part{victim:02}.rar");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    for entry in std::fs::read_dir(&kept).unwrap().flatten() {
+        let leaf = entry.file_name().to_string_lossy().into_owned();
+        // The damaged variants are linked in UNDER THE VICTIM'S NAME
+        // below; their own names never appear in the work copy.
+        if !leaf.ends_with(".rar") {
+            continue;
+        }
+        if leaf == name && damage != "none" {
+            continue;
+        }
+        std::fs::hard_link(entry.path(), work.join(&leaf)).unwrap();
+    }
+    if damage != "none" {
+        let variant = kept.join(format!("{name}.dmg-{damage}"));
+        std::fs::hard_link(&variant, work.join(&name))
+            .unwrap_or_else(|e| panic!("no prebuilt {} ({e})", variant.display()));
+    }
+
+    let target = work.join(&name);
+    // Peak is a HIGH-WATER, so it has to be read the moment the repair
+    // returns and before the byte-compare below - which reads two whole
+    // volumes and, on the 2 GiB set, was itself the whole of a 4,956 MiB
+    // "peak" the first version of this driver reported. The baseline is
+    // taken too, so what is published is the repair's own rise over a
+    // process that has so far only made hard links.
+    let peak_before = nzbkit::mem::peak_rss().unwrap_or(0);
+    let start = std::time::Instant::now();
+    let outcome = rr_repair_volume(&target, None);
+    let elapsed = start.elapsed();
+    let peak_after = nzbkit::mem::peak_rss().unwrap_or(0);
+
+    let outcome = outcome.unwrap_or_else(|e| panic!("the repair failed: {e}"));
+    if damage == "none" {
+        assert!(
+            matches!(outcome, RrRepair::PrefixIntact),
+            "an undamaged volume must report its prefix intact, got {outcome:?}"
+        );
+    } else {
+        assert!(
+            matches!(outcome, RrRepair::Rebuilt),
+            "a damaged volume must report a rebuild, got {outcome:?}"
+        );
+        // STREAMED, 1 MiB at a time, rather than two `fs::read`s: a whole
+        // volume in memory twice is what contaminated the peak above, and
+        // it would do so again for anyone who moves the reading point.
+        assert!(
+            same_bytes(&target, &kept.join(&name)),
+            "the repaired volume is not byte-identical to the clean original"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&work);
+    // CAP is the READBACK of the arm, not a restatement of the env: a
+    // budget the production call never consults would leave every arm
+    // measuring the same thing and every outcome check would still pass
+    // (memory topic `nzbfast-absent-fault-passes-every-outcome-check`).
+    // Print what `rarfix.rs:1515` itself would read, from the same call.
+    //
+    // PEAK is the other half of the question, and for THIS consumer it may
+    // be the whole of it: the comment at that call site says the budget is
+    // there to keep an 8-20 GB volume repair from going resident, which is
+    // a claim about memory and not about wall time. A cap that moves no
+    // clock may still be moving this.
+    println!(
+        "CAP {} PEAK {} BASE {} TOTAL {:.3}",
+        nzbkit::mem::process_budget().repair_cap(),
+        peak_after,
+        peak_before,
+        elapsed.as_secs_f64() * 1000.0
+    );
+}

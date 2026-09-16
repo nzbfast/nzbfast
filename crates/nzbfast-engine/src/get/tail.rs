@@ -842,9 +842,19 @@ fn drop_orphaned_slot_files(
     // the shape `PublishedNames` exists to arbitrate), and a sweep that
     // decided per slot as it went could delete the second one's output
     // on its way past the first.
-    let owned: std::collections::HashSet<std::path::PathBuf> = (0..slots.len())
-        .filter_map(|i| extractor.slot_path(i))
-        .collect();
+    //
+    // EVERY slot the EXTRACTOR holds, not `0..slots.len()`. A mapped
+    // PAR2 repair that rebuilds a wholly-missing set member whole from
+    // parity has no job slot to write it through, so `plan_mapped_repair`
+    // takes a FRESH one (`alloc_slot`), whose index is past the job's
+    // last. Such a file is then neither owned, nor an extraction output,
+    // nor spared by the census (it is set-covered, so the census does not
+    // spare it) - and the job's own slot for that name, whose every
+    // article was lost, still carries the name. The sweep deleted the
+    // file parity had just recreated and `finish_job` reported Completed
+    // over it.
+    let owned: std::collections::HashSet<std::path::PathBuf> =
+        extractor.slot_paths().into_iter().collect();
     let recoverable = crate::smart::cleanup_recoverable();
     let staging = crate::smart::trash_staging_dir(out_dir);
     for s in slots {
@@ -1859,7 +1869,10 @@ pub(super) async fn finish_run(
     // identically-typed `u64` figures being swapped on the way into the
     // failure summary. The fields this body reads itself are spelled
     // `census.x`. See `finish_job` for the whole reasoning.
-    let census = take_census(
+    // `mut` for ONE write, and it is a correction rather than a second
+    // author: the spared-metadata prune below - see there, and
+    // [`settle::SettleVerdict::repaired_names`].
+    let mut census = take_census(
         servers,
         stats,
         nzb,
@@ -1886,6 +1899,7 @@ pub(super) async fn finish_run(
         unhealed_slots,
         rescue_left,
         repaired,
+        repaired_names,
     } = settle_verify_repair(
         verifier,
         extractor,
@@ -1915,6 +1929,52 @@ pub(super) async fn finish_run(
         donor_nzbs,
     )
     .await?;
+
+    // SWEEP ITEM 34 (16 Sep 2026, data-loss): un-spare what parity just
+    // rebuilt.
+    //
+    // `take_census` ran above, BEFORE any repair, and its coverage test
+    // can only ask the in-stream verifier. On a post whose PAR2 index
+    // never activates that answer is structurally "no set covers
+    // anything", so a short `.nfo` beside payload is spared - and
+    // `drop_spared_metadata` deletes what it spares, on the stated
+    // premise that "the recovery set does not cover them, so nothing can
+    // rebuild them". The disk-side fallback inside settle then fetches
+    // the volumes, reads the same critical packets out of them, and
+    // rebuilds exactly that file. The premise is now false, and the good
+    // arm of `finish_job` was deleting a member parity had restored
+    // while logging "nothing can rebuild it" about it.
+    //
+    // FIXED AT THE PREMISE, not at the deleter, because that is where
+    // the wrong claim is made: an entry that survives this line is still
+    // a file nothing can rebuild, so `drop_spared_metadata`'s argument
+    // holds again, unchanged, for everything it is handed. Every cheaper
+    // guard AT the deleter is wrong and the sweep says why - the slot
+    // cannot see a disk-PAR2 rewrite, and a holed file and a repaired
+    // one are the same length on disk, so neither presence nor size
+    // separates them. Only the repair's own report does.
+    //
+    // Empty on every path that ran no disk-side set, which is nearly all
+    // of them, and the retain is then a no-op over a list that is itself
+    // almost always empty.
+    if !repaired_names.is_empty() && !census.incomplete_spared.is_empty() {
+        let rebuilt: std::collections::HashSet<String> = repaired_names
+            .iter()
+            .map(|n| nzbkit::disk::sanitize_out_name(n).to_lowercase())
+            .collect();
+        let before = census.incomplete_spared.len();
+        census
+            .incomplete_spared
+            .retain(|n| !rebuilt.contains(&nzbkit::disk::sanitize_out_name(n).to_lowercase()));
+        let kept = before - census.incomplete_spared.len();
+        if kept > 0 {
+            info!(
+                target: "par2",
+                "{kept} metadata file(s) the download was short were rebuilt \
+                 from parity by the disk-side recovery set - kept, not removed"
+            );
+        }
+    }
     ph.mark("verify+repair");
 
     // finish() is where a chase that FAILED demotes (chase_finish ->

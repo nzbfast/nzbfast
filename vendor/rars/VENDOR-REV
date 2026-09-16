@@ -1,6 +1,6 @@
 fork: private perf fork of github.com/bitplane/rars, branch perf
-last-synced-rev: 10e8f5b
-last-synced-date: 2026-09-08
+last-synced-rev: aa07299 (less 7fc7c65's clean-room oracles) plus src/codec/rar50.rs from 43e478b, the 457afed hunk, the b449705 hunks to src/codec/rar50.rs and src/rar50/write/stream.rs, the b20261a hunk to src/codec/rar50.rs, the hand-applied SPEC C Part 7 x86 clip of fork 6009b50, and the cdbb587 hunks to src/source.rs, src/rar50.rs and src/rar15_40.rs, and the 38027ab + bc773d1 + e558553 + 741ddb9 hunks to src/rar50/write/{reference,mod,stream}.rs (the Windows FILETIME record, 16 Sep), and the a9651ce hunk to src/rar50/write/reference.rs (the rewrite path's size-vint width, 16 Sep), and the e352fba hunk to src/recovery/stream.rs (the IO_BUF marker-window split, 16 Sep), and the VENDOR-FIRST mid-member refill in src/codec/rar29.rs (ported to the fork as 47cb5a7, 16 Sep), see 15 and 16 Sep below
+last-synced-date: 2026-09-15
 local-drift: none at the sync. On 22 Aug 2026 the whole vendored tree
   (104 local commits since the 24 Jul sync at 050758e, the NEON BLAKE2sp
   leaves among them) was ported INTO the fork as one commit, 1b84503 on
@@ -78,3 +78,259 @@ local-drift: none at the sync. On 22 Aug 2026 the whole vendored tree
   a first read made the fork look ~14,000 lines stale and the port look
   enormous. `git fetch` settled it in seconds. Fetch before you measure
   drift; a stale checkout and a lost commit look identical.
+  14 Sep 2026: the trees had drifted BOTH ways since 10e8f5b. Three
+  vendor commits of 11 Sep (d0fba4b25 the pooled-encoder rayon deadlock,
+  4b03f72aa the armv7 test-cell split, f05f65b8a the GF(2^16) subset
+  walk) were never ported to the fork, and the fork's own 7eeeb30 /
+  dfc2764 (clippy fixes at the site, lint allows with reasons, comments)
+  never came back here. Ported the three into the fork as their own
+  patches (f511c96), after which `diff -r` of the two src trees showed
+  only fork-side lint edits; then the streamed-create work landed on top
+  (18a7d31) and sync-from-fork.sh --force re-mirrored, `diff -r` empty.
+  Fixtures were already identical. Pushed: origin perf is 18a7d31.
+  Later the same day: re-mirrored from 719cc0e (eecd733 CRC32 across
+  cores in the extract digesters, a712a02 the level-5 re-encode switch,
+  52ea038 the RAR4 stride copy, 719cc0e a split fragment always computes
+  its CRC32), with no --force: nothing had landed in vendor/rars since the
+  guard date. `diff -r` of the two src trees empty.
+  15 Sep 2026: mirrored from 7c01424 (dc9d5f4 the streamed recovery
+  record's worker team, and 7c01424 an unused `mut` it left in a build
+  without `parallel`; recovery/rar5.rs and the new
+  recovery/rar5/fold_team.rs) BY COPYING THOSE TWO FILES, not by
+  sync-from-fork.sh. The merge between them, d276d28, brings only a
+  rars-cli change. The fork commit
+  before it, 7fc7c65, adds test-only oracles for the clean-room rewrite
+  (codec/legacy_*_oracle.rs, crypto/legacy_rar30_kdf_oracle.rs and a mod
+  line each in codec/mod.rs and crypto/mod.rs) whose own message says
+  they are "never mirrored into nzbfast's vendor/rars"; the script's
+  `rsync --delete` would carry them here. `diff -r` of dc9d5f4's src
+  against this tree shows exactly those five files and two mod lines and
+  nothing else. Until the rewrite series deletes the oracles, a sync must
+  exclude them the same way, or be done by copying the changed files.
+  Later the same day: re-mirrored from aa07299 (a92cd27 the MAP-E "can
+  land now" rename of RAR 5 header constants, RAR 2.x sub-block names
+  and the split-fragment functions, plus reworded UnRAR-naming comments
+  - see VENDORING.md; a merge on the fork side picking up its own
+  9b78f25 `--` end-of-switches fix, not vendored - CLI only - and
+  7c01424/d276d28/dc9d5f4 above) BY sync-from-fork.sh, which hit exactly
+  the trap the paragraph above warns about: the full mirror carried the
+  five oracle files and their two mod lines back in. Deleted the five
+  files and reverted codec/mod.rs and crypto/mod.rs to drop the mod
+  lines, matching the exclusion above; `diff -r` of the fork's src
+  against this tree is then empty outside those five files and two mod
+  lines, the same shape as the last entry.
+  Later again on 15 Sep 2026, after that re-mirror: src/codec/rar50.rs
+  copied from fork 43e478b (the rarfast -mm<size> lane: a writer
+  allowance's wave and hint shares are capped by their host defaults,
+  and under an allowance the streamed writer's member window has no
+  floor of eight), by copying the one file, for the reason above. Before
+  the copy the fork's file and this one differed by that commit's hunks
+  and nothing else, and `cmp` after it is clean. 43e478b sits on top of
+  aa07299 and 56e72a1 (rarfast l, CLI only), so `diff -r` of its src
+  against this tree is again empty outside the five oracle files and
+  their two mod lines.
+  Later still on 15 Sep 2026: src/codec/rarvm.rs copied from fork
+  8793f51 (the VM placed static data under the system globals and ended
+  a program on a subroutine RET, so the RAR 3 standard IA-64 program ran
+  as the identity) and its two new rar29.rs tests hand-applied, by
+  copying for the reason above. Before the copy this rarvm.rs and the
+  fork's were byte-identical. rar29.rs is NOT a copy: the fork's carries
+  the clean-room spec C changes this tree does not have yet, so only the
+  two test functions, their two imports and `pub(crate)` on
+  RAR3_ITANIUM_FILTER_BYTECODE (already so in the fork) were applied.
+  Later again on 15 Sep 2026, VENDOR-FIRST rather than a copy: the write
+  policy charges each member's match-finder tree (members in flight share
+  the policy's tree quarter; see VENDORING.md). Landed here first in
+  src/parallel.rs, src/rar50/write/{filter_policy,mod,stream,volume}.rs
+  and one visibility word in src/codec/rar50.rs, then ported to the fork
+  as ad10bd6 on branch member-tree-15sep and merged over perf 6d30dd4 as
+  90020b6. The five write-side files were byte-identical to the fork's
+  before the change and were copied across; codec/rar50.rs differs from
+  the fork's by other lanes' hunks, so only that one word was applied
+  there. The fork builds and tests green on 90020b6.
+  Later still on 15 Sep 2026, LOCAL DRIFT (RESOLVED 16 Sep 2026): one
+  line of the rar50.rs test
+  `the_hint_budget_narrows_a_wave_without_moving_its_bytes` passes
+  `Some(usize::MAX)` where fork 43e478b had `Some(1 << 40)`. That shift
+  overflows the `Option<usize>` allowance on 32-bit, a deny-by-default
+  error that stopped the nightly armv7-cross test build before any test
+  ran (VENDORING.md, the 15 Sep row at the top of its table). Ported to
+  the fork as `5af99f6` on `perf` per the paragraph below.
+  And two more lines of the same drift, found by the armv7-cross RUN
+  once that build compiled (RESOLVED 16 Sep 2026): `Some(64 << 30)`
+  wraps to 0 on 32-bit with no lint, so the wave test's
+  `tree_wave_width` assertion (from 43e478b) and
+  `a_policy_charges_member_trees_without_moving_the_archive` in
+  src/rar50/write/mod.rs (from ad10bd6/90020b6) now pass
+  `Some(usize::MAX)`. Ported to the fork as `bcf8ea5` on `perf`
+  (claim `rars-fork-armv7-test-ports-16sep`), which no longer carries
+  either literal.
+  Later still on 15 Sep 2026: the hunks of fork 457afed to
+  src/codec/rar50.rs (a streamed window's wave shared between the
+  windows in flight under an allowance, `member_window_wave_width`, and
+  its test) applied here by hand rather than by copying the file,
+  because the fork's rar50.rs has since moved on with the clean-room
+  address-filter work, which is not vendored. The added and removed
+  lines of the two diffs were compared and are identical.
+  Its test passes `Some(usize::MAX)` here, not the `Some(1 << 40)` of
+  457afed, for the armv7 reason in the paragraph above this one. Fork
+  5af99f6 on perf ports BOTH huge-allowance lines, this test's and
+  `the_hint_budget_narrows_a_wave_without_moving_its_bytes`'s, so the
+  LOCAL DRIFT above is no longer open.
+  Later still on 15 Sep 2026, VENDOR-FIRST rather than a copy: a large
+  streamed member's window keeps its floor of eight blocks under an
+  allowance (`member_window_segment_blocks` in src/codec/rar50.rs, and
+  `StreamWindows` splitting it from small-member admission in
+  src/rar50/write/stream.rs; see VENDORING.md). Landed here first, then
+  ported to the fork as b449705 on branch perf by applying this tree's
+  diff with the paths rewritten: stream.rs was byte-identical to the
+  fork's before the change, and codec/rar50.rs took the hunks cleanly
+  beside the fork's clean-room work, which is still not vendored. The
+  fork commit also re-fits rarfast's `encoder_threads_for_cap`, which
+  is CLI code and has no copy here.
+  Later still on 15 Sep 2026, VENDOR-FIRST rather than a copy: the
+  three repair folds start a rayon team only from the work measured to
+  repay one (`STRIPED_TEAM_MIN_WINDOW` and `WHOLE_GRID_TEAM_MIN_WORK` in
+  src/recovery/rar5.rs, `RECONSTRUCT_TEAM_MIN_WORK` in
+  src/recovery/rar3.rs; see VENDORING.md). Landed here first, then
+  ported to the fork on branch perf by applying this tree's diff with
+  the paths rewritten. rar3.rs took it cleanly beside spec B's rewrite,
+  whose fold site is unchanged; rar5.rs conflicted only at the constant
+  block, where the fork gates `STREAMED_FOLD_PARALLEL` on `parallel`,
+  and was merged by hand keeping both. The one wording difference is
+  the RAR 3 doc comment, which names each tree's own fold. These two
+  files are the ones the clean-room series sync replaces with spec B's;
+  the fork's copies already carry the gates, so the sync keeps them.
+  Later again on 15 Sep 2026, a CORRECTION to the entry above, also
+  VENDOR-FIRST: those three gates were flat byte counts derived on one
+  20-thread box, and on a 32-thread box all three sat in a loss (the
+  striped one cost 12% end to end in `rarfast rc` on a 16 MiB-volume
+  set). They are work PER THREAD now - `max(12 MiB, threads x 2 MiB)`,
+  `max(12 MiB, threads x 1 MiB)`, `max(2 MiB, threads x 128 KiB)` -
+  measured as a win on both boxes, with the 20-thread numbers as the
+  floor. Ported to the fork on branch perf by splicing the new blocks
+  in by anchor rather than by patch: the two trees' RAR 3 doc comments
+  describe their own folds (this one per byte, the fork's four sources
+  to a pass), so a diff does not apply. See VENDORING.md and the host
+  repo's research/RARFAST-BENCH-2026-09-14.md section 14.6.
+  16 Sep 2026: the hunk of fork b20261a to src/codec/rar50.rs (the flat
+  plan's slack past the retained window sized from the member and the
+  dictionary rather than a 64 MiB floor - FLAT_SLACK_FLOOR, flat_slack,
+  flat_slack_with, one changed line in flat_plan_bytes, the reworded
+  FLAT_SLACK_MIN doc and one unit test; see VENDORING.md) applied here by
+  `git apply` off that fork commit rather than by copying the file, for
+  the reason the 15 Sep entries give: the fork's rar50.rs carries the
+  clean-room address-filter work, which is not vendored. Landed as
+  5a73d0532 (claim rars-flat-window-vendor-port-16sep). TWO LANES ported
+  it in parallel, independently, both by `git apply` off b20261a, and the
+  two trees came out byte-identical - `git diff` of the second against
+  the landed one was empty, which is a mechanical check on both rather
+  than a near miss. The second port was dropped rather than stacked.
+  Neither port wrote a ledger entry: the VENDORING.md row came
+  afterwards as 1304fb165 and THIS entry later still. Both were needed
+  and for different readers - `sync-from-fork.sh` mirrors src/** with
+  `rsync --delete` and the re-vendor WALK reads VENDORING.md's table,
+  while the `last-synced-rev` line above is what says which hunks sit on
+  top of the sync base. A hunk recorded in neither is deleted by the next
+  sync in silence, with every gate green and no test failing. Evidence
+  for the rule itself: the host repo's
+  research/RARFAST-BENCH-2026-09-14.md section 19 (and 19.9, which cites
+  1304fb165), artefacts in research/rarbench-2026-09-16/flatwin-*.
+  16 Sep 2026: the flat-slack test's 32-bit cells (4c1f4869f here, claim
+  red-armv7-cross-f5cdd402) are now IN THE FORK as 04b6ea4 on perf (claim
+  rars-fork-armv7-flatslack-port-16sep), so this one is no longer a local
+  divergence at all - the two trees carry the same test, comments
+  included, and a sync from 04b6ea4 or later is a no-op on it. It is
+  recorded here anyway because a sync base EARLIER than 04b6ea4 still
+  reinstates the break: `slack(4096 * MIB, ..)` is u32::MAX + 1, a
+  deny-by-default arithmetic_overflow COMPILE error that takes the whole
+  armv7 test build with it, and the grid's 8192 MiB column is the same
+  defect as a runtime overflow panic behind it. The fork-side port swept
+  the rest of crates/ for the shape and found nothing else owed: every
+  other GiB-scale literal there is u64-typed, already behind a
+  pointer-width cfg, or inside a 32-bit usize. See VENDORING.md's row.
+  16 Sep 2026: the whole of fork cdbb587 (branch repair-open-fix-16sep off
+  perf 411201a) applied here by `git apply` - new `source::RepairRangeSource`
+  in src/source.rs, the RAR5 repair's `ArchiveRangeSource` replaced by it in
+  src/rar50.rs, and the legacy RAR 1.5-4.0 protect repair rethreaded onto it
+  in src/rar15_40.rs (`ProtectRecoveryBytes` loses its archive borrow,
+  `read_into` / `read_tag` / `read_sector_window` / `repair_protect_sectors`
+  take the source). Claim rars-repair-open-fix-narrow-16sep. It is a whole
+  fork commit rather than a hunk of one because all three files were
+  BYTE-IDENTICAL between the two trees at 411201a, which was checked before
+  the branch was cut. The fork side was then MERGED TO perf as 78c5150
+  (fork lib tests 1092/1092 on the merged tree), so the next sync base
+  carries it as history and it is no longer drift that depends on this
+  entry being read; the last-synced-rev line above still names the hunks
+  because sync-from-fork.sh has not been re-run. Both arms
+  of `read_range_into`'s File shape stopped opening the volume once per read:
+  counted at the libc boundary, 366-2,259 opens a volume on the RAR5 arm and
+  45-517 on the legacy one, both linear in volume size, now flat at four on
+  both (the remaining four are the two header-parse opens, clone_prefill's
+  read of the source, and the one FileSource). See VENDORING.md and the host repo's
+  research/RARS-REPAIR-OPEN-FIX-2026-09-16.md.
+  16 Sep 2026, LOCAL DRIFT, deliberate: the RAR 3 x86 filter clip of
+  SPEC C Part 7 item 1 (fork 6009b50 on perf, claim
+  specc-part7-rar3-x86-past-2gib-16sep) applied here BY HAND, not by
+  sync-from-fork.sh and not by `git apply` off the fork commit. The fork
+  commit sits on top of the clean-room address-filter rewrite, which is
+  NOT vendored at all: this tree still has e8e9_encode/e8e9_decode in
+  src/codec/filters.rs and no src/codec/address_filters.rs, so the fork
+  diff does not apply and a mirror would have carried the whole rewrite.
+  The guard itself is independent of the rewrite - split_large_filter and
+  filtered_member are the same functions with the same o = F + p + 1 rule
+  on both sides - so the two production hunks and the four lib tests were
+  re-applied to the vendored shapes and the fork's fourth test (the one
+  that reads the transform through filters::encode_in_place) came across
+  unchanged. The fork's own address_filters.rs comment re-tensing did NOT
+  come across, having no vendored file to land in. The next full sync
+  supersedes all of this: the fork copy is the same policy.
+
+  16 Sep 2026, LOCAL DRIFT until the next sync: `IO_BUF` in
+  src/recovery/stream.rs split into two constants (fork e352fba on perf,
+  merged to perf, claim rars-io-buf-window-split-16sep), taken here with
+  `git apply` off that commit; the vendored file is byte-identical to the
+  fork's at that rev. One constant was serving the `{RB}` scan's
+  marker-search WINDOW and the CRC/copy BUFFER, which want opposite
+  things: the scan resumes at each accepted record's parity.end, where
+  the next marker sits, so find_marker hits in the first 4 bytes of every
+  window and the rest of a 256 KiB window is read for nothing against a
+  43.6 KB chunk stride. SCAN_WINDOW is 64 KiB and is used by the scan's
+  window and by the two window TESTS and nothing else; every CRC and copy
+  site (read_chunk_at, damaged_shards, the two per-shard buffers,
+  copy_range, copy_file_verified, crc32_of) keeps IO_BUF at 256 KiB,
+  deliberately - they stream with the buffer AS the stride so nothing is
+  re-read, and read_chunk_at must stay at or above one chunk or its CRC
+  read splits and multiplies open(). Measured in place on the real
+  scan_inline_recovery_chunks_in: bytes read 23,865,952 -> 8,819,464 a
+  volume (-63.0%), opens unchanged at 321, identical chunks, parity
+  ranges, shard indices and protected sizes on all 17 volumes; 0.842 of
+  the scan's wall at 16 MiB volumes and 0.806 at 6 MiB ones on a quiet
+  box. See VENDORING.md and the host repo's
+  research/RARS-IO-BUF-WINDOW-SPLIT-2026-09-16.md.
+
+  16 Sep 2026, VENDOR-FIRST, src/codec/rar29.rs: `Unpack29::
+  decode_member_from_reader` refills the packed stream mid-member
+  instead of draining the reader to EOF into one Vec first, so a
+  compressed RAR 2.9-4.x member no longer costs its whole packed size in
+  heap. It holds a 1 MiB window (STREAM_INPUT_WINDOW) and compact()
+  drops what is consumed. The refill is PROACTIVE, not error-driven: the
+  bit reader has no mid-symbol rollback, so resuming after a
+  NeedMoreInput would corrupt output, which is worse than the
+  allocation. The decoder instead pauses at a clean symbol boundary
+  whenever fewer than STREAM_INPUT_MARGIN (128 KiB) are held and more
+  input can still arrive; that margin is sized against the widest
+  excursion, read_vm_code's 16-bit length field, which is read before
+  MAX_VM_CODE_SIZE is checked. PPMd blocks are deliberately still
+  buffered - no provable margin exists for them - and so is the member
+  tail, which remaining_bits_are_zero reads whole and which leaves the
+  reader at EOF where read_to_end used to. Measured on a 146 MB
+  single-member -m3 set: peak RSS 288.6 MB -> 21.95 MB and flat in
+  member size, wall 0.947x median / 0.976x minimum. Output byte-
+  identical over 37 archive groups; eight new lib tests compare the
+  CARRIED DECODER STATE as well as the bytes, because on this engine
+  byte-identical output is not evidence. Ported to the fork as 47cb5a7
+  on perf (1128 passed there), in a worktree off the current tip - the
+  first port went onto a local perf 166 commits stale and was thrown
+  away. See VENDORING.md and the host repo's
+  research/RAR29-MIDSTREAM-REFILL-2026-09-16.md.

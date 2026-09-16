@@ -24,6 +24,7 @@
 
 pub mod checksum;
 pub mod job;
+pub mod pairing;
 pub mod planner;
 pub mod queue;
 pub mod runner;

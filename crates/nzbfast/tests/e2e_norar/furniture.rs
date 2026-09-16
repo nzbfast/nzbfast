@@ -175,3 +175,199 @@ async fn m4_34_a_furniture_only_set_does_not_suppress_the_sfv_tier() {
     }
     drop(fx);
 }
+
+/// Item 34 of the 16 Sep 2026 Fable sweep (data-loss): a `.nfo` the
+/// census SPARED and the disk-side PAR2 fallback then REBUILT from
+/// parity must survive the good finish.
+///
+/// `drop_spared_metadata`'s whole safety argument is the rule that
+/// selected the name - "the recovery set does not cover them, so nothing
+/// can rebuild them". The census can only ask that of the IN-STREAM
+/// verifier (`census.rs`'s `set_names` comes from `verifier.sets()`), so
+/// on a post whose PAR2 INDEX never arrives the answer is structurally
+/// "no set covers anything" - and the volumes that land a moment later
+/// carry the same critical packets, name the `.nfo`, and repair it.
+/// Before the fix the good arm then deleted the file parity had just
+/// restored and logged "nothing can rebuild it" about it.
+///
+/// THE SHAPE IS THE CONJUNCTION AND EVERY PART OF IT IS LOAD-BEARING:
+/// a named post (the spare rule only fires on a furniture EXTENSION, so
+/// a wholly obfuscated post cannot reach here at all), a `.nfo` short an
+/// article, payload beside it (`SpareRule::any_payload`), an index whose
+/// every article 430s so no set activates in stream, and volumes with
+/// enough parity to solve. The assertions below pin the index arm
+/// explicitly: if a set ever DOES activate here the premise is gone and
+/// the test would pass for the wrong reason.
+///
+/// The negative control is
+/// `e2e_sniffedpar2::a_disk_repair_does_not_certify_files_outside_its_recovery_set`,
+/// where the `.nfo` is genuinely outside the set and must still be
+/// deleted - a fix that spares on presence alone leaves a holed `.nfo`
+/// in a completed directory, which is the hazard the delete exists for.
+#[tokio::test(flavor = "multi_thread")]
+async fn item34_a_parity_rebuilt_nfo_is_not_dropped_as_spared_metadata() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("norarsparedrebuilt");
+    let video = payload(240_000, 63);
+    let nfo = payload(90_000, 64);
+    fx.add_file("Feature.Main.mkv", &video, 40_000);
+    fx.add_file("release.nfo", &nfo, 40_000);
+    // Index AND volumes, posted under their real names. The index is
+    // then shot out from under the job below.
+    assert!(fx.add_par2(30, &["Feature.Main.mkv", "release.nfo"], 40_000));
+
+    let mut missing: HashSet<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.contains("testset_par2-"))
+        .cloned()
+        .collect();
+    assert!(
+        !missing.is_empty(),
+        "the PAR2 index was never posted, so nothing here forces the \
+         set-less settle path"
+    );
+    // One article of the .nfo, so the file lands with a hole rather than
+    // never being written at all: both are `files_created`/`files_patched`
+    // to the repair, and the holed one is the shape the delete was
+    // written for.
+    let mut nfo_arts: Vec<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.contains("release_nfo-"))
+        .cloned()
+        .collect();
+    nfo_arts.sort();
+    assert!(nfo_arts.len() >= 2, "expected a multi-article .nfo");
+    missing.insert(nfo_arts[1].clone());
+
+    let (log, ok, out) = run_norar_chaos(
+        &fx,
+        Chaos {
+            missing,
+            ..Chaos::default()
+        },
+    )
+    .await;
+
+    assert!(
+        !log.contains("[par2] set live"),
+        "a set activated IN STREAM, so this post never reaches the \
+         set-less settle path this row is about:\n{log}"
+    );
+    assert!(
+        log.contains("repairing from disk"),
+        "the disk-side PAR2 fallback never ran, so nothing rebuilt the \
+         .nfo and this pins nothing:\n{log}"
+    );
+    assert!(ok, "the job did not complete:\n{log}");
+    let got = std::fs::read(out.join("release.nfo")).unwrap_or_else(|e| {
+        panic!(
+            "the .nfo parity had just rebuilt was deleted as spared \
+             metadata: {e}; tree: {:?}\n{log}",
+            tree_names(&out)
+        )
+    });
+    assert!(
+        got == nfo,
+        "the .nfo survived but is not the posted bytes\n{log}"
+    );
+    assert!(
+        !log.contains("nothing can rebuild it"),
+        "the closing line claims nothing could rebuild a file parity \
+         rebuilt:\n{log}"
+    );
+    // The payload is untouched either way - this row is about the
+    // furniture, and a fix that traded one for the other is not one.
+    assert!(
+        std::fs::read(out.join("Feature.Main.mkv")).unwrap() == video,
+        "the payload is not byte-exact\n{log}"
+    );
+    drop(fx);
+}
+
+/// THE NEGATIVE CONTROL for the row above, on the SAME set-less path:
+/// a spared `.nfo` the disk-side set does NOT name is still deleted.
+///
+/// Identical fixture to `item34_...` in every respect but one - the PAR2
+/// set covers the payload alone - so the two differ only in whether the
+/// repair can speak for the furniture. That is the whole discrimination
+/// the fix rests on, and it is the reason the prune reads the repair's
+/// own report rather than anything about the file: the `.nfo` here is
+/// present, is exactly its posted length, and is a zero-filled lie, so
+/// neither presence nor size could tell these two runs apart.
+///
+/// Sparing it instead would be a leak, not a fix - a holed `.nfo` handed
+/// to an *arr is the hazard `drop_spared_metadata` exists to prevent
+/// (issue #23), and a completed directory is not a scratch directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn item34_a_spared_nfo_no_disk_set_covers_is_still_dropped() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("norarsparedunrebuilt");
+    let video = payload(240_000, 63);
+    let nfo = payload(90_000, 64);
+    fx.add_file("Feature.Main.mkv", &video, 40_000);
+    fx.add_file("release.nfo", &nfo, 40_000);
+    // THE ONE DIFFERENCE: the set names the payload and nothing else.
+    assert!(fx.add_par2(30, &["Feature.Main.mkv"], 40_000));
+
+    let mut missing: HashSet<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.contains("testset_par2-"))
+        .cloned()
+        .collect();
+    assert!(!missing.is_empty(), "the PAR2 index was never posted");
+    let mut nfo_arts: Vec<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.contains("release_nfo-"))
+        .cloned()
+        .collect();
+    nfo_arts.sort();
+    assert!(nfo_arts.len() >= 2, "expected a multi-article .nfo");
+    missing.insert(nfo_arts[1].clone());
+
+    let (log, ok, out) = run_norar_chaos(
+        &fx,
+        Chaos {
+            missing,
+            ..Chaos::default()
+        },
+    )
+    .await;
+
+    assert!(
+        !log.contains("[par2] set live"),
+        "a set activated in stream, so this is not the same path as the \
+         row it controls:\n{log}"
+    );
+    assert!(
+        log.contains("repairing from disk"),
+        "the disk-side PAR2 fallback never ran, so this control is \
+         vacuous - it has to reach the same pass the row it controls \
+         does and come back with nothing to say about the .nfo:\n{log}"
+    );
+    assert!(ok, "the job did not complete:\n{log}");
+    assert!(
+        !out.join("release.nfo").exists(),
+        "a holed .nfo no recovery set covers survived in the completed \
+         directory - the spare was turned into a leak: {:?}\n{log}",
+        tree_names(&out)
+    );
+    assert!(
+        log.contains("metadata file(s) no server had"),
+        "the job completed silently about what it completed without:\n{log}"
+    );
+    assert!(
+        std::fs::read(out.join("Feature.Main.mkv")).unwrap() == video,
+        "the payload is not byte-exact\n{log}"
+    );
+    drop(fx);
+}

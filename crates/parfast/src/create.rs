@@ -146,7 +146,7 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn CreateWatch) -> 
         &members,
         &base,
         (block_size > 0).then_some(block_size),
-        recovery as usize,
+        as_count(recovery),
         create_plan(
             opts,
             recovery,
@@ -569,11 +569,8 @@ pub fn block_size(opts: &Options, lengths: &[u64]) -> (u64, Option<u64>) {
     } else {
         let count = opts.block_count.unwrap_or(help::DEFAULT_BLOCK_COUNT).max(1);
         let total: u64 = lengths.iter().sum();
-        let mut bs = total.div_ceil(count).next_multiple_of(4).max(4);
-        while bs < total.max(4) && slice_total(lengths, bs) > count {
-            bs += 4;
-        }
-        bs
+        let bs = total.div_ceil(count).next_multiple_of(4).max(4);
+        first_size_within(lengths, bs, total.max(4), count)
     };
     let legal = legal_block_size(lengths, asked);
     (legal, (legal != asked).then_some(asked))
@@ -633,11 +630,62 @@ pub fn legal_block_size(lengths: &[u64], asked: u64) -> u64 {
     // No multiple fits under the ceiling before the payload itself does, so
     // fall back to the finest legal size. Reachable only for a pathological
     // request; a set of one slice per member always satisfies the cap.
-    let mut bs = (total / cap).next_multiple_of(4).max(step).max(4);
-    while bs < total.max(4) && slice_total(lengths, bs) > cap {
-        bs += 4;
+    let bs = (total / cap).next_multiple_of(4).max(step).max(4);
+    first_size_within(lengths, bs, total.max(4), cap)
+}
+
+/// The smallest slice size at or above `start`, in the multiples of 4 the
+/// spec allows, whose per-file slice grids sum to at most `target` - and
+/// the first multiple of 4 at or past `stop` when none does.
+///
+/// A BINARY search, and that is the whole point of the function.
+/// `slice_total` is non-increasing in `bs` (`l.div_ceil(bs)` is, for each
+/// member, and a sum of non-increasing terms is), so the predicate is
+/// monotone and the answer is exactly the one a `bs += 4` scan reaches -
+/// in about 35 probes rather than `(stop - start) / 4` of them.
+///
+/// Which matters because the scan is reachable with `stop - start` at
+/// payload scale whenever the request is IMPOSSIBLE, and it always is
+/// when `-b<count>` names fewer blocks than the set has members: each
+/// member is sliced from its own offset zero, so every non-empty member
+/// costs at least one slice and the sum can never fall below their
+/// number, however large the size grows. `parfast c -b50 out.par2` over
+/// 100 files of 1 GiB ran (100 GiB - 2 GiB) / 4 = 2.6e10 iterations,
+/// each summing 100 lengths, before answering `total` - hours of busy
+/// loop for a command line the reference refuses at once. Even `-b2`
+/// over three 1 GiB files spun 4e8 iterations.
+fn first_size_within(lengths: &[u64], start: u64, stop: u64, target: u64) -> u64 {
+    debug_assert_eq!(start % 4, 0, "the search walks multiples of 4");
+    if start >= stop {
+        return start;
     }
-    bs
+    if slice_total(lengths, start) <= target {
+        return start;
+    }
+    // The step index the scan would stop at for want of room: the first
+    // `k` with `start + 4k >= stop`.
+    let last = stop.saturating_sub(start).div_ceil(4);
+    let (mut lo, mut hi) = (1u64, last);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if slice_total(lengths, start.saturating_add(4 * mid)) <= target {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    start.saturating_add(4 * lo)
+}
+
+/// A `u64` the user typed, narrowed to `usize` by CLAMPING.
+///
+/// `as usize` truncates on a 32-bit target (armv7 is one), so a figure
+/// out of range came back as a small, plausible and entirely different
+/// number - `-c4294967297` as 1. Saturating leaves the clamps and range
+/// checks downstream in charge of the answer, which is where the
+/// decision belongs; on a 64-bit target this is the identity.
+fn as_count(n: u64) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
 }
 
 /// Slices this grid costs: per FILE, never over the pooled total.
@@ -754,7 +802,7 @@ pub fn create_plan(
         // under a new set id, wrote over the existing vol000+ files, and
         // produced nothing at or above 16. The user's complementary set
         // did not exist and their volume names collided.
-        .with_first_exponent(opts.first_block as usize)
+        .with_first_exponent(as_count(opts.first_block))
         // The ceiling on one volume, in slices. TWO switches can set
         // one and both are ceilings - see `volume_ceiling`.
         .with_max_blocks_per_volume(volume_ceiling(opts, largest_member, block_size));
@@ -767,7 +815,7 @@ pub fn create_plan(
     }
     match recovery_file_count(opts, recovery) {
         0 => base,
-        n => base.with_volumes(par2gen::VolumePlan::Even(n as usize)),
+        n => base.with_volumes(par2gen::VolumePlan::Even(as_count(n))),
     }
 }
 
@@ -797,7 +845,7 @@ pub fn create_plan(
 pub fn volume_ceiling(opts: &Options, largest_member: u64, block_size: u64) -> Option<usize> {
     let from_limit = opts
         .limit
-        .then(|| (largest_member / block_size.max(1)).max(1) as usize)
+        .then(|| as_count((largest_member / block_size.max(1)).max(1)))
         .filter(|_| block_size > 0);
     let explicit = opts
         .volume_blocks
@@ -824,7 +872,7 @@ pub fn recovery_file_count(opts: &Options, recovery: u64) -> u64 {
     // par2cmdline 1.3.0 over ten recovery counts on 3 Sep 2026; the
     // uniform arm used to return `recovery`, so the header said 20
     // where the reference said 5.
-    par2gen::variable_volume_count(recovery as usize) as u64
+    par2gen::variable_volume_count(as_count(recovery)) as u64
 }
 
 /// par2gen names its volumes `<base>.vol{first:03}+{count:02}.par2` on a
@@ -1253,5 +1301,83 @@ mod tests {
         assert_eq!(strip_par2_suffix("movie"), "movie");
         assert_eq!(strip_par2_suffix(".par2"), "");
         assert_eq!(strip_par2_suffix("par2"), "par2");
+    }
+}
+
+#[cfg(test)]
+mod block_size_search_tests {
+    use super::{first_size_within, slice_total};
+
+    /// The linear `bs += 4` scan this replaced, verbatim, as the oracle.
+    fn linear(lengths: &[u64], start: u64, stop: u64, target: u64) -> u64 {
+        let mut bs = start;
+        while bs < stop && slice_total(lengths, bs) > target {
+            bs += 4;
+        }
+        bs
+    }
+
+    /// Same answer as the scan, over shapes small enough to run both:
+    /// one member and many, empty members among them, targets that are
+    /// reachable and targets that are not, and a start already past the
+    /// stop.
+    #[test]
+    fn the_binary_search_answers_exactly_what_the_scan_did() {
+        let sets: &[&[u64]] = &[
+            &[40_000, 17_000],
+            &[1],
+            &[0, 0, 5_000],
+            &[997, 997, 997, 997],
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            &[65_536, 4, 4, 4],
+        ];
+        for lengths in sets {
+            let total: u64 = lengths.iter().sum();
+            let stop = total.max(4);
+            for target in 1..=40u64 {
+                for start_div in [1u64, 2, 3, 7, 64] {
+                    let start = (total / start_div).next_multiple_of(4).max(4);
+                    assert_eq!(
+                        first_size_within(lengths, start, stop, target),
+                        linear(lengths, start, stop, target),
+                        "lengths={lengths:?} start={start} stop={stop} target={target}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The shape the scan could not finish: `-b<count>` naming fewer
+    /// blocks than the set has members. Each member is sliced from its
+    /// own offset zero, so the slice sum can never fall below the member
+    /// count and NO size satisfies the request - the scan walked the
+    /// whole payload in steps of 4 to find that out.
+    ///
+    /// NEGATIVE CONTROL, run: call `linear` here instead and the test
+    /// does not fail, it never returns - 2.6e10 iterations, each summing
+    /// 100 lengths. That is why this asserts a wall clock.
+    #[test]
+    fn an_impossible_block_count_answers_at_once_instead_of_spinning() {
+        let lengths: Vec<u64> = vec![1 << 30; 100];
+        let total: u64 = lengths.iter().sum();
+        let start = total.div_ceil(50).next_multiple_of(4).max(4);
+
+        let t0 = std::time::Instant::now();
+        let bs = first_size_within(&lengths, start, total.max(4), 50);
+        let took = t0.elapsed();
+
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "the search must not walk the payload: took {took:?}"
+        );
+        assert!(
+            bs >= total,
+            "no size can meet 50 blocks over 100 members, so the answer is the \
+             payload itself, not {bs}"
+        );
+        assert!(
+            slice_total(&lengths, bs) >= lengths.len() as u64,
+            "the floor is one slice per member, whatever the size"
+        );
     }
 }

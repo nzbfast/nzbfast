@@ -3049,6 +3049,12 @@ async fn compressed_rar_falls_back_and_unrars() {
         std::env::var_os("PATH")
             .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(c).is_file()))
     };
+    // rar-gate: the ask IS the `have("rar")` PATH closure above plus the
+    // NZBFAST_TEST_RAR=1 opt-in - a real guard the gate cannot read, because
+    // its sinks and probes are name-keyed and a closure has no name (TODO
+    // 221, blind spot 2). Do NOT answer this by calling rar_can_create():
+    // that probe SPAWNS rar, and the whole point of the opt-in is that these
+    // binaries are never spawned unprompted on a headless Mac.
     if std::env::var_os("NZBFAST_TEST_RAR").is_none()
         || !have("rar")
         || !have("unrar")

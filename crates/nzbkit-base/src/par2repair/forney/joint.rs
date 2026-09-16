@@ -1,8 +1,9 @@
 //! The JOINT solve: one owned buffer, one fused constructor-and-solver.
 //!
-//! The DEFAULT on aarch64 and on AVX-512 GFNI since 11 Sep 2026;
-//! `--fast` or `NZBFAST_FORNEY_JOINT=1` on the x86 classes that have no
-//! round yet ([`joint_default_on`] names them).
+//! The DEFAULT on aarch64, on AVX-512 GFNI since 11 Sep 2026, and on
+//! `Gfni256` and `Nibble` since 12 Sep 2026, each on its own native
+//! round; `--fast` or `NZBFAST_FORNEY_JOINT=1` on any x86 class still
+//! out ([`joint_default_on`] names what is in and what is not).
 //! When [`joint_gate`] says no this module builds no plan, allocates
 //! nothing and is never entered; the repair takes
 //! [`super::ForneyPlan::hankel`] and [`super::ForneyPlan::evaluate`]
@@ -281,12 +282,19 @@ pub(crate) fn joint_gate() -> bool {
 
 /// Whether the joint arm runs with NOTHING set: no `--fast`, no
 /// environment variable. **True on aarch64, on AVX-512 GFNI since
-/// 11 Sep 2026, and on `Gfni256` since 12 Sep 2026 (a Core Ultra 9 is
-/// width 6, a different kernel from the EPYC's 12, and its own round);
-/// false on the remaining x86 classes, and that asymmetry is
-/// PROVENANCE rather than a judgement about the hardware.** Still off:
-/// `Nibble` (AVX2 or SSSE3), boxed in by the census gate below until
-/// it has a round.
+/// 11 Sep 2026, and on `Gfni256` AND `Nibble` since 12 Sep 2026 - the
+/// Core Ultra 9 is width 6 and the i5-10600KF width 4, each a different
+/// kernel from the EPYC's 12, and each admitted on its own native
+/// round.** No x86 class is held out by this function any more; the
+/// asymmetry the older wording described was PROVENANCE (which part had
+/// run a round) rather than a judgement about the hardware, and every
+/// part has now run one.
+///
+/// This doc said "Still off: `Nibble`" until 16 Sep 2026, four days
+/// after the body below started returning true for it. That is not
+/// cosmetic on this function: an A/B that sets nothing on the control
+/// arm, on the strength of a stale default, races the joint arm against
+/// itself - the trap `rowop.rs` warns about for the GFNI flip.
 ///
 /// # Why there is no threshold here
 ///
@@ -396,31 +404,31 @@ pub(crate) fn joint_gate() -> bool {
 /// stripe whatever `n` is, so the structure predicts the same answer
 /// there, which is a prediction and not a measurement.
 ///
-/// # Which x86 classes are still out, and why
+/// # How each x86 class came in
 ///
-/// **AVX-512 GFNI came in later the same day on its own native round**
-/// (an EPYC 9354P, both bands, no rung a loss) - see the body below and
-/// `research/JOINT-DEFAULT-ON-X86-GFNI-2026-09-11.md`. Two classes
-/// remain out, and neither because it measured badly: because it did not
-/// measure.
+/// **AVX-512 GFNI came in on 11 Sep 2026 on its own native round** (an
+/// EPYC 9354P, both bands, no rung a loss) - see the body below and
+/// `research/JOINT-DEFAULT-ON-X86-GFNI-2026-09-11.md`. Two classes were
+/// out for one more day, and neither because it measured badly: because
+/// it had not measured, each fleet part having held a rig lock.
 ///
-/// - **`Gfni256`** - GFNI without AVX-512, fan-in 6. The EPYC round does
+/// - **`Gfni256`** - GFNI without AVX-512, fan-in 6. The EPYC round did
 ///   NOT cover it: that part is `Avx512Gfni` at fan-in 12, a different
-///   kernel. A Core Ultra 9 386H is the fleet's only such part and it
-///   held a rig lock all day.
-/// - **`Nibble`** - AVX2 or SSSE3, fan-in 4. An i5-10600KF is the
-///   fleet's part and it held a rig lock all day too.
-///
-/// The gap is not uniform across them: `--fast` only began engaging on
-/// GFNI at all at 08:01Z that day (`9d91798cec`), so stage 1's shallow
-/// behaviour on the GFNI-256 kernel has never been observed by anybody,
-/// while the nibble class at least has the 10 Sep whole-arm rounds
-/// behind it.
+///   kernel. In on 12 Sep on the Core Ultra 9 386H.
+/// - **`Nibble`** - AVX2 or SSSE3, fan-in 4. In on 12 Sep on the
+///   i5-10600KF, and it is the class that had LOST the 11 Sep whole-arm
+///   round - nine of fourteen rungs, -12.9% at 5,120. Two changes in
+///   this module between that round and the default turned it: stage 2
+///   keeps the shipped stripe width, and stage 1 runs the shipped Hankel
+///   below `JOINT_KERNEL_MIN_M_X86`. The body carries the ladder.
 ///
 /// `research/JOINT-CROSSOVER-PER-CLASS-2026-09-11.md` section 8 carries
-/// the two command lines to run when those boxes free. A class moves
-/// into this function when it has its own round, not when it seems
-/// likely to behave like a class that does.
+/// the command lines. The rule that admitted them stands for whatever
+/// class comes next: a class moves into this function when it has its
+/// OWN round, not when it seems likely to behave like a class that
+/// does - the nibble ladder is the standing proof, since predicting it
+/// from the GFNI rounds would have been exactly wrong before the two
+/// changes above and exactly right after.
 ///
 /// # What "class" means here is COARSER than "kernel", deliberately
 ///
@@ -2102,11 +2110,25 @@ mod tests {
         // And a plan built WITHOUT the test override reads the gate: on
         // a gated class a shallow plan runs the Hankel and reports the
         // arm as TAKEN, never as a decline.
+        //
+        // The one decline this aligned 64-word stripe CAN carry is the
+        // host's: `joint_stripe` asks `scale_available` before it asks
+        // the gate, so a box with no vector scale declines
+        // `NoScaleKernel` at every depth. Asserting `None` flat took the
+        // nightly armv7-cross job red on 00bdc3a3 - armv7 is the one
+        // shipped target with no scale kernel, so no x86 or arm64 runner
+        // could see it. Same two-state fact, read the same way, as
+        // `a_declining_stripe_names_which_condition_it_tripped`.
         let k = ks(1024);
         let joint = ForneyPlan::prepare_impl(&k, 2, true, true).expect("distinct bases");
+        let want = if gf16::scale_available() {
+            None
+        } else {
+            Some(JointDecline::NoScaleKernel)
+        };
         assert_eq!(
             joint.joint_decline(64),
-            Some(None),
+            Some(want),
             "the gate is not a decline"
         );
         assert_eq!(

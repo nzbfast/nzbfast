@@ -10,6 +10,23 @@ set -euo pipefail
 cd "$(dirname "$0")"
 REPO="$(cd .. && pwd)"
 
+# DEPLOYMENT TARGET. Unset, rustc stamps the engine 11.0 (arm64) / 10.12
+# (x86_64) while cc-rs compiles every C object in it - aws-lc, ring,
+# sqlite, mimalloc, rapidyenc - for the BUILD HOST's SDK default, so the
+# engine said "11.0" in its header and was 27.0 inside on the dev Mac
+# (research/MAC-DEPLOYMENT-TARGET-2026-09-15.md). The ENGINE is pinned to
+# 11.0, the floor of every mac CLI asset, and NOT to
+# the app's 14.0: it shares target/ with the release-bundle zip recipe,
+# whose binary is also the updater payload, so a second value would
+# compile the whole engine twice per release and bundle a different
+# binary from the one the updater ships. The app's own floor stays
+# LSMinimumSystemVersion below and `.macOS(.v14)` in Package.swift, which
+# is why this is scoped to the cargo line and never exported to swift.
+# Kept out of .cargo/config.toml: it moves rustc fingerprints, which a
+# checked-in setting would push onto every CI cache key. An ENGINE=
+# passed in was built elsewhere and does not get this.
+ENGINE_MACOS_FLOOR=11.0
+
 VERSION=$(grep '^version' "$REPO/crates/nzbfast/Cargo.toml" | head -1 | cut -d'"' -f2)
 # Beta serial rides into Info.plist so the wrapper can compare its
 # BUNDLED engine against a running one at attach time (the §98 upgrade
@@ -23,7 +40,7 @@ echo "== NzbFast.app v$VERSION (beta serial $BETA)"
 # --- engine: universal binary via the release lipo recipe -------------
 if [ -z "${ENGINE:-}" ]; then
     echo "== building universal engine"
-    (cd "$REPO" && cargo build --release \
+    (cd "$REPO" && MACOSX_DEPLOYMENT_TARGET=$ENGINE_MACOS_FLOOR cargo build --release \
         --target aarch64-apple-darwin --target x86_64-apple-darwin -p nzbfast)
     ENGINE="$REPO/target/nzbfast-universal"
     lipo -create -output "$ENGINE" \
@@ -35,7 +52,15 @@ lipo -info "$ENGINE"
 # --- wrapper: universal SwiftPM build ---------------------------------
 echo "== building wrapper"
 swift build -c release --arch arm64 --arch x86_64
-WRAPPER=.build/apple/Products/Release/NzbFast
+# ASK SwiftPM where it put the product, never spell the folder. The
+# universal output was .build/apple/Products/Release through Swift 6.3
+# and is .build/out/Products/Release on 6.4's build backend (measured
+# 15 Sep 2026). A literal path is worse than a failed build: a checkout
+# that last built on the old toolchain still holds a binary at the old
+# spelling, and `cp` would ship that stale wrapper with a green log.
+WRAPPER=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/NzbFast
+[ -f "$WRAPPER" ] || {
+    echo "swift build reported no wrapper at $WRAPPER" >&2; exit 1; }
 
 # --- assemble the bundle ----------------------------------------------
 APP=build/NzbFast.app
@@ -138,7 +163,8 @@ PLIST
 # STRIP THE DEBUG MAP BEFORE SIGNING, or the wrapper ships this
 # machine's absolute paths. `swift build` records one absolute path per
 # object file in the linked binary's debug map (the N_OSO stabs) -
-# .build/apple/Intermediates.noindex/.../Objects-normal/<arch>/<name>.o -
+# .build/<layout>/Intermediates.noindex/.../Objects-normal/<arch>/<name>.o,
+# where <layout> was `apple` through Swift 6.3 and is `out` on 6.4 -
 # and nothing in the Rust remap reaches it, because it is the Swift
 # linker's output and not cargo's. 30 such paths, naming the build
 # worktree, were measured in the 1.5.0 wrapper on 12 Sep 2026 and in

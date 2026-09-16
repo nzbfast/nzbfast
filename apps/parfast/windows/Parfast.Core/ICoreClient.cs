@@ -84,6 +84,13 @@ public interface ICoreClient : IDisposable
     ParfastSettings GetSettings();
     bool SetSettings(ParfastSettings settings);
 
+    /// <summary>
+    /// "Clear remembered checksums": deletes every record in the per-user digest
+    /// store, and returns how many went, or a negative value on failure.
+    /// </summary>
+    /// <remarks>Safe while a job runs, and leaves the setting alone.</remarks>
+    int ClearDigestCache();
+
     /// <summary>The detail behind the last false or negative return.</summary>
     JobError? LastError();
 

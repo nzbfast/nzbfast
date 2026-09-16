@@ -72,15 +72,19 @@
 //! and this is a module of the shared `integration` target - and
 //! because the mapping knob is latched in a `OnceLock`, so the first
 //! create in the process would decide that arm for every test after it.
-//! The doors are atomics; [`Arms`] serialises the tests that move them
-//! and lifts every pin on the way out. Under nextest each test is its
-//! own process and the lock is free; under `cargo test` and CI's
-//! `unit-one-process` job this whole binary is ONE process, which is
-//! the run it is for.
+//! The doors are atomics; [`crate::par2gen_arms::Arms`] serialises the
+//! tests that move them and lifts every pin on the way out. Under nextest
+//! each test is its own process and the lock is free; under `cargo test`
+//! and CI's `unit-one-process` job this whole binary is ONE process, which
+//! is the run it is for - and the serializer lives one module over rather
+//! than here BECAUSE that is the run it is for: `par2gen_cancel` runs
+//! creates over these same globals, and a lock private to this file
+//! ordered this file against itself while that module raced it. See that
+//! module's header for what it cost.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
+use crate::par2gen_arms::Arms;
 use nzbkit::par2gen::{
     CreatePlan, Member, VolumePlan, accum_budget_bytes, create_into_exact, ntt_range,
     pin_accum_budget_for_tests,
@@ -126,49 +130,12 @@ impl Drop for Tmp {
     }
 }
 
-/// The tests that pin a create-side process-global, one at a time, with
-/// every pin lifted on the way out however the test leaves. The guard is
-/// taken through `into_inner` so one failing test does not turn the rest
-/// into poisoned-lock failures that hide it.
-struct Arms(Option<MutexGuard<'static, ()>>);
-
-static ARMS: Mutex<()> = Mutex::new(());
-
-impl Arms {
-    fn take() -> Arms {
-        Arms(Some(ARMS.lock().unwrap_or_else(|e| e.into_inner())))
-    }
-}
-
-impl Drop for Arms {
-    fn drop(&mut self) {
-        ntt_range::pin_transform_off_for_tests(false);
-        ntt_range::pin_map_off_for_tests(false);
-        pin_accum_budget_for_tests(0);
-        drop(self.0.take());
-    }
-}
-
 /// A payload of exactly `slices` input slices at [`BS`], as two members:
 /// one long member of full blocks and a short one whose only block is a
 /// PARTIAL tail, because the tail is what the mapped path copies into
 /// its pad arena rather than reading out of the mapping.
 fn fixture(dir: &Path, slices: usize) -> Vec<Member> {
-    let bs = BS as usize;
-    [
-        ("payload.bin", payload((slices - 1) * bs, 7)),
-        ("tail.bin", payload(bs / 2, 11)),
-    ]
-    .into_iter()
-    .map(|(name, bytes)| {
-        let path = dir.join(name);
-        std::fs::write(&path, &bytes).unwrap();
-        Member {
-            name: name.to_string(),
-            path,
-        }
-    })
-    .collect()
+    fixture_at(dir, slices, BS)
 }
 
 /// One arm: its own directory holding its own copy of the payload (a
@@ -186,20 +153,7 @@ fn arm(
     rows: usize,
     plan: CreatePlan,
 ) -> (Vec<(String, Vec<u8>)>, u64) {
-    let dir = t.0.join(tag);
-    std::fs::create_dir_all(&dir).unwrap();
-    let members = fixture(&dir, slices);
-    let before = ntt_range::cold_builds_for_tests();
-    let names = create_into_exact(&dir, &members, "set", Some(BS), rows, plan).unwrap();
-    let cold = ntt_range::cold_builds_for_tests() - before;
-    assert!(names.len() > 2, "expected an index and volumes: {names:?}");
-    // The NAMES travel with the bytes: a volume split that came out
-    // differently would otherwise compare equal file for file.
-    let blobs = names
-        .iter()
-        .map(|n| (n.clone(), std::fs::read(dir.join(n)).unwrap()))
-        .collect();
-    (blobs, cold)
+    arm_at(t, tag, slices, rows, plan, BS)
 }
 
 /// Damage a member of `tag`'s arm well past one block and repair it from
@@ -244,7 +198,7 @@ fn assert_transformed(cold: u64, what: &str, slices: usize, rows: usize) {
 #[test]
 fn the_mapped_transform_writes_the_fold_s_bytes_and_the_set_repairs() {
     let _arms = Arms::take();
-    let (slices, rows) = ntt_range::floor_shape_for_tests();
+    let (slices, rows) = ntt_range::floor_shape_for_tests(BS as usize);
     let t = Tmp::new("mapped");
 
     ntt_range::pin_transform_off_for_tests(true);
@@ -273,7 +227,7 @@ fn the_copied_window_fallback_writes_the_fold_s_bytes() {
     // own XOR accumulation, its own probe - and only the mapped one runs
     // by default, so nothing else here would ever compile-and-run it.
     let _arms = Arms::take();
-    let (slices, rows) = ntt_range::floor_shape_for_tests();
+    let (slices, rows) = ntt_range::floor_shape_for_tests(BS as usize);
     let t = Tmp::new("copied");
 
     ntt_range::pin_transform_off_for_tests(true);
@@ -282,8 +236,18 @@ fn the_copied_window_fallback_writes_the_fold_s_bytes() {
 
     ntt_range::pin_transform_off_for_tests(false);
     ntt_range::pin_map_off_for_tests(true);
+    let sweeps = ntt_range::band_sweeps_for_tests();
     let (ntt, cold_ntt) = arm(&t, "ntt", slices, rows, CreatePlan::ENGINE);
     assert_transformed(cold_ntt, "copied-window", slices, rows);
+    // One batch whose corpus fits one window stays on the copied windows:
+    // the band route would be one plan either way. Were this ever to
+    // sweep bands, the window loop would be covered by nothing.
+    assert_eq!(
+        ntt_range::band_sweeps_for_tests() - sweeps,
+        0,
+        "the copied-window fixture took the band route, so this test no longer reaches the \
+         window loop - give it a shape the band route refuses, do not delete the assertion"
+    );
 
     assert_eq!(
         fold, ntt,
@@ -298,7 +262,7 @@ fn the_high_redundancy_subfloor_clause_runs_a_create_through_the_transform() {
     // admits. `ntt_range::subfloor_tests` covers its arithmetic; nothing
     // ran a create through it.
     let _arms = Arms::take();
-    let (floor_slices, _) = ntt_range::floor_shape_for_tests();
+    let (floor_slices, _) = ntt_range::floor_shape_for_tests(BS as usize);
     let (slices, rows) = ntt_range::subfloor_shape_for_tests();
     assert!(
         slices < floor_slices,
@@ -338,7 +302,7 @@ fn the_stripe_first_path_plans_every_row_once_across_several_batches() {
     // build no transform plan at all in any of its four passes. One plan
     // over the whole set can only have come from `stripe_first::run`.
     let _arms = Arms::take();
-    let (slices, rows) = ntt_range::floor_shape_for_tests();
+    let (slices, rows) = ntt_range::floor_shape_for_tests(BS as usize);
     let plan = CreatePlan {
         volumes: VolumePlan::Even(8),
         ..CreatePlan::ENGINE
@@ -402,7 +366,7 @@ fn a_pause_parks_the_stripe_first_arm_and_a_resume_finishes_it() {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     let _arms = Arms::take();
-    let (slices, rows) = ntt_range::floor_shape_for_tests();
+    let (slices, rows) = ntt_range::floor_shape_for_tests(BS as usize);
     let plan = CreatePlan {
         volumes: VolumePlan::Even(8),
         ..CreatePlan::ENGINE
@@ -497,4 +461,142 @@ fn a_pause_parks_the_stripe_first_arm_and_a_resume_finishes_it() {
         resumed, reference,
         "a paused-and-resumed stripe-first create wrote a different set"
     );
+}
+
+/// The block size the band tests run at. 550 words is two stripes at the
+/// 512-word stripe a sub-MiB block gets on every arch, the second one
+/// partial, and [`fixture_at`]'s tail member (half a block, 550 bytes)
+/// ends inside the FIRST band - so one band read pads that slice
+/// mid-band and the next reads nothing of it at all. At [`BS`] there is
+/// one stripe and a band is the whole block, which would prove nothing
+/// about bands.
+const BAND_BS: u64 = 1100;
+
+/// [`fixture`] at a block size of the caller's.
+fn fixture_at(dir: &Path, slices: usize, bs: u64) -> Vec<Member> {
+    let bs = bs as usize;
+    [
+        ("payload.bin", payload((slices - 1) * bs, 7)),
+        ("tail.bin", payload(bs / 2, 11)),
+    ]
+    .into_iter()
+    .map(|(name, bytes)| {
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        Member {
+            name: name.to_string(),
+            path,
+        }
+    })
+    .collect()
+}
+
+/// [`arm`] at a block size of the caller's.
+fn arm_at(
+    t: &Tmp,
+    tag: &str,
+    slices: usize,
+    rows: usize,
+    plan: CreatePlan,
+    bs: u64,
+) -> (Vec<(String, Vec<u8>)>, u64) {
+    let dir = t.0.join(tag);
+    std::fs::create_dir_all(&dir).unwrap();
+    let members = fixture_at(&dir, slices, bs);
+    let before = ntt_range::cold_builds_for_tests();
+    let names = create_into_exact(&dir, &members, "set", Some(bs), rows, plan).unwrap();
+    let cold = ntt_range::cold_builds_for_tests() - before;
+    assert!(names.len() > 2, "expected an index and volumes: {names:?}");
+    // The NAMES travel with the bytes: a volume split that came out
+    // differently would otherwise compare equal file for file.
+    let blobs = names
+        .iter()
+        .map(|n| (n.clone(), std::fs::read(dir.join(n)).unwrap()))
+        .collect();
+    (blobs, cold)
+}
+
+#[test]
+fn the_band_pass_over_copies_writes_the_fold_s_bytes_in_one_batch() {
+    // The route an over-RAM create takes (TODO 345 C): members read
+    // through copies because a mapping would not stay resident
+    // (`par2gen::mapped_payload_fits_memory`), a corpus bigger than one of
+    // the copied transform's windows, and so ONE plan over every source
+    // with the sources read a band of stripes at a time. Map-off stands in
+    // for the fit gate, which reads the box's available memory and cannot
+    // be set from here; the band pin stands in for a corpus over the
+    // window, and holds a band to one stripe so there are two of them.
+    let _arms = Arms::take();
+    let (slices, rows) = ntt_range::floor_shape_for_tests(BAND_BS as usize);
+    let t = Tmp::new("bands-one");
+
+    ntt_range::pin_transform_off_for_tests(true);
+    let (fold, cold_fold) = arm_at(&t, "fold", slices, rows, CreatePlan::ENGINE, BAND_BS);
+    assert_eq!(cold_fold, 0, "the fold arm must build no transform plan");
+
+    ntt_range::pin_transform_off_for_tests(false);
+    ntt_range::pin_map_off_for_tests(true);
+    ntt_range::pin_band_corpus_for_tests(slices * 1024);
+    let before = ntt_range::band_sweeps_for_tests();
+    let (bands, cold) = arm_at(&t, "bands", slices, rows, CreatePlan::ENGINE, BAND_BS);
+    let swept = ntt_range::band_sweeps_for_tests() - before;
+    assert_transformed(cold, "band", slices, rows);
+    assert_eq!(
+        swept, 2,
+        "a one-stripe band over {BAND_BS}-byte blocks is two sweeps; {swept} says the copied \
+         windows ran instead, or the stripe width moved - re-size BAND_BS, do not delete the \
+         assertion"
+    );
+    assert_eq!(cold, 1, "the band route builds ONE plan over every source");
+
+    assert_eq!(
+        fold, bands,
+        "the band pass and the fold must write the same recovery set"
+    );
+    repairs_real_damage(&t, "bands");
+}
+
+#[test]
+fn the_band_pass_over_copies_plans_every_row_once_across_several_batches() {
+    // The 15% shape of TODO 345: a batched create over copies ran the
+    // copied windows once PER BATCH. The fixture and budget pin are
+    // `the_stripe_first_path_plans_every_row_once_across_several_batches`'s,
+    // for its reasons, and `cold == 1` is a proof for the same one: every
+    // batch alone is under the row gate. The pinned budget also holds a
+    // chunk to one stripe (a stripe of every row is more than the budget),
+    // so the two stripes are two sweeps.
+    let _arms = Arms::take();
+    let (slices, rows) = ntt_range::floor_shape_for_tests(BAND_BS as usize);
+    let plan = CreatePlan {
+        volumes: VolumePlan::Even(8),
+        ..CreatePlan::ENGINE
+    };
+    let per_batch = rows / 4;
+    pin_accum_budget_for_tests(per_batch as u64 * BAND_BS);
+    let t = Tmp::new("bands-batched");
+
+    ntt_range::pin_transform_off_for_tests(true);
+    let (fold, cold_fold) = arm_at(&t, "fold", slices, rows, plan, BAND_BS);
+    assert_eq!(cold_fold, 0, "the fold arm must build no transform plan");
+
+    ntt_range::pin_transform_off_for_tests(false);
+    ntt_range::pin_map_off_for_tests(true);
+    let before = ntt_range::band_sweeps_for_tests();
+    let (bands, cold) = arm_at(&t, "bands", slices, rows, plan, BAND_BS);
+    let swept = ntt_range::band_sweeps_for_tests() - before;
+    assert_eq!(
+        cold, 1,
+        "a batched create over copies builds ONE plan over all {rows} rows only on the band \
+         route - {cold} says the batch loop ran instead"
+    );
+    assert_eq!(
+        swept, 2,
+        "two stripes under a one-stripe chunk are two sweeps; {swept} says otherwise"
+    );
+
+    assert_eq!(
+        fold, bands,
+        "the band pass must lay its volumes out exactly as the batched writer does"
+    );
+    repairs_real_damage(&t, "bands");
 }

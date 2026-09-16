@@ -265,7 +265,9 @@ pub(super) struct TreeMatchFinder {
     #[cfg(feature = "ratio-lab")]
     nice_length: usize,
     /// One position list per walker, refilled per chunk and kept between
-    /// chunks so the walk allocates nothing.
+    /// chunks so the walk allocates nothing. Only `advance_range`'s
+    /// `parallel`-gated arm and `share_chunk` touch this.
+    #[cfg(feature = "parallel")]
     shares: Vec<Vec<u32>>,
     /// The next position the finder expects; positions are presented in
     /// increasing order and every one of them is inserted.
@@ -284,6 +286,11 @@ impl TreeMatchFinder {
     /// because a window's answers must be the whole member's answers and a
     /// window is shorter than its member.
     pub(super) fn new(max_distance: usize) -> Self {
+        // min-then-max rather than `clamp`: `clamp` PANICS when the
+        // ceiling is below the floor, and these are two independent
+        // constants. Saturating to the floor is the wanted behaviour if
+        // they are ever set that way; a panic in a decoder is not.
+        #[allow(clippy::manual_clamp)]
         let cyclic = max_distance
             .min(TREE_MAX_WINDOW)
             .max(4 * TREE_SKEW_BOUND)
@@ -400,6 +407,7 @@ impl TreeMatchFinder {
             },
             #[cfg(feature = "ratio-lab")]
             nice_length: TREE_NICE_LENGTH,
+            #[cfg(feature = "parallel")]
             shares: Vec::new(),
             next: 0,
         }
@@ -540,7 +548,9 @@ impl TreeMatchFinder {
     /// bytes to decide - a load and a multiply against the descent it
     /// saves, and the alternative (a partition pass) is a list of every
     /// position in memory.
-    /// One walker's share of a chunk.
+    /// One walker's share of a chunk. Only called from `advance_range`'s
+    /// `parallel`-gated arm.
+    #[cfg(feature = "parallel")]
     fn walk(
         &self,
         span: &[u8],

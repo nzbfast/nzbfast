@@ -18,6 +18,18 @@
 # directory; the shape is `rar a -m0 -v20m -ep -idq <shape>/m.rar .`
 # from inside it.
 #
+# "BY HAND" IS NO LONGER TRUE, AND THAT PHRASE COST A WHOLE ITEM.
+# `make-shapes.sh` beside this file builds all four. The shapes are
+# gitignored 1 GiB binaries, so a fresh checkout has the rig and not the
+# corpus - and on 16 Sep 2026 the serial-bound survey read that state as
+# "the corpus nobody has built", recorded its pending_r item as
+# unmeasurable for that reason, and chipped out a session to build what
+# was already here (research/PENDING-R-RESIDUE-2026-09-16.md).
+# `sample-decode.sh`, `ab-binaries.sh` and `decode-sample-attr.py`, also
+# beside this file, are that session's: a leg under `sample`, a
+# round-robin A/B over one leg by instructions retired, and the
+# attribution of a decode-thread sample by lock-taking site.
+#
 # Layout expected under $R:  shapes/<name>/*.rar   (work/ is created)
 #
 #   R=<rigdir> NZBIN=<nzbfast> NZBSERVE=<nzbserve> [ARTS=..] [SHAPES=..]

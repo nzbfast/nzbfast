@@ -127,9 +127,16 @@ pub(super) fn check_repair_dim_within(
     // ~4.3 GB of matrix plus ~4.3 GB of window and about half an hour.
     // par2cmdline-turbo takes about the same, being cubic as well. Slow
     // is not the same as refused.
+    // Two buffers unless `NZBFAST_REPAIR_OUTPUT=inplace` and the solve
+    // that will run holds one ([`solve_buffers`]). Asked before the
+    // exponents are examined, so it prices a STRUCTURED set - the
+    // loosest pricing, which is right for a door that only refuses: a set
+    // that turns out unstructured is re-asserted at its own arm by
+    // `check_repair_dim_dense`, and the slab plan it was cut by already
+    // priced that arm (the drivers select before they plan).
     let window = (m as u64)
         .saturating_mul(block_size as u64)
-        .saturating_mul(2);
+        .saturating_mul(solve_buffers(m, true));
     let need = if super::forney::backsub_gate(m) {
         window
     } else {
@@ -213,7 +220,56 @@ impl SlabPlan {
 /// process can be given. A caller that wants to know whether a repair
 /// will be SLOW asks how many slabs came back, and that is a fact to
 /// report, not a door to close.
-pub(crate) fn plan_slabs(m: usize, block_size: usize, budget: u64) -> SlabPlan {
+///
+/// **The Forney stripe's arenas are NOT reserved here, on purpose.** A
+/// slabbed window fills the budget by construction, so the solve's stripe
+/// used to see no headroom and collapse to its granule (961 ms against
+/// 586 ms at m = 2,048 under 128 MiB). Reserving the 512-word arenas out
+/// of `spendable` looks like the fix and is not one: where it keeps the
+/// slab count it keeps the width, the window and the headroom, so it
+/// changes nothing; and where it helps it adds a slab - a third one at
+/// that m = 2,048 shape, and on the 65 GiB set above (over its 32 GiB
+/// budget by 0.024%) a sweep of 65 GiB - which costs more than the
+/// collapse it prevents. The stripe takes a bounded overspend instead:
+/// `forney::STRIPE_TARGET_BUDGET_SHARE`.
+///
+/// `structured` is [`selection_structured`] over the exponents the
+/// driver selected: whether the solve finds a Vandermonde to exploit, or
+/// falls through to Gauss-Jordan, which is the dense arm whatever
+/// `backsub_gate` says and pays its matrix and two buffers.
+pub(crate) fn plan_slabs(m: usize, block_size: usize, budget: u64, structured: bool) -> SlabPlan {
+    plan_slabs_with(
+        m,
+        block_size,
+        budget,
+        solve_buffers(m, structured),
+        !(structured && super::forney::backsub_gate(m)),
+    )
+}
+
+/// [`plan_slabs`] with the number of `m x w` buffers the solve holds at
+/// once handed in - 2 as shipped, 1 for an in-place solve (see
+/// [`solve_buffers`]) - and the ARM handed in with it (`dense`: the
+/// arm that charges its matrix off the top), so the arithmetic is
+/// testable without either switch.
+///
+/// THE ARM IS AN ARGUMENT BECAUSE A SLAB COUNT IS AN ARM'S NUMBER. Both
+/// tests that tabulate slab ladders were written against Forney and
+/// asked [`plan_slabs`], which reads the arm off `backsub_gate` - the
+/// host's threshold and `NZBFAST_BACKSUB`. At m = 1,024 an x86 host
+/// (threshold 1,280) takes the dense arm unforced and a NEON host (704)
+/// does not, so the same assertion was green on the dev Mac and red on
+/// every x86 runner, and ci-private's forced-dense step reddened both
+/// from d1515d22 on 15 Sep 2026. The 4 MiB matrix at that m was the
+/// whole difference: 124 MiB of spendable window against a 128 MiB one.
+pub(crate) fn plan_slabs_with(
+    m: usize,
+    block_size: usize,
+    budget: u64,
+    buffers: u64,
+    dense: bool,
+) -> SlabPlan {
+    let buffers = buffers.max(1);
     // A degenerate solve has no window to cut; one slab, and the callers'
     // `m == 0` arms never look at the width.
     if m == 0 || block_size == 0 {
@@ -225,17 +281,13 @@ pub(crate) fn plan_slabs(m: usize, block_size: usize, budget: u64) -> SlabPlan {
     // The per-`m` term the slab cannot shrink. Taken off the budget
     // first so the width is chosen against what is actually left; on
     // the Forney arm it is zero.
-    let fixed = if super::forney::backsub_gate(m) {
-        0
-    } else {
-        dense_matrix_bytes(m)
-    };
+    let fixed = if dense { dense_matrix_bytes(m) } else { 0 };
     let spendable = budget.saturating_sub(fixed);
-    // `2 * m * w <= spendable`, the widest even `w`, never wider than
-    // the block and never narrower than one word.
-    let per_slab = |w: u64| w.saturating_mul(2).saturating_mul(m as u64);
+    // `buffers * m * w <= spendable`, the widest even `w`, never wider
+    // than the block and never narrower than one word.
+    let per_slab = |w: u64| w.saturating_mul(buffers).saturating_mul(m as u64);
     let widest = {
-        let w = (spendable / (2 * m as u64).max(1)).min(block_size as u64) & !1;
+        let w = (spendable / (buffers * m as u64).max(1)).min(block_size as u64) & !1;
         (w as usize).max(2)
     };
     // The pass COUNT is what costs a sweep of the payload, so it is
@@ -279,7 +331,7 @@ fn round_up_even(n: usize) -> usize {
 /// small fixture, and moving the process-wide budget to do that would
 /// be visible to every other test sharing the process (`cargo test`
 /// puts a whole crate in one).
-pub(crate) fn plan_slabs_for(m: usize, block_size: usize) -> SlabPlan {
+pub(crate) fn plan_slabs_for(m: usize, block_size: usize, structured: bool) -> SlabPlan {
     #[cfg(test)]
     if let Some(width) = forced_slab_width() {
         // Even, always: the solve works in u16 words and the
@@ -290,7 +342,7 @@ pub(crate) fn plan_slabs_for(m: usize, block_size: usize) -> SlabPlan {
             width,
         };
     }
-    plan_slabs(m, block_size, solve_window_budget() as u64)
+    plan_slabs(m, block_size, solve_window_budget() as u64, structured)
 }
 
 /// Where a driver that must hold the whole rebuilt output should keep
@@ -331,8 +383,8 @@ pub(crate) struct SolvePlan {
 /// Tier 3 is what makes the whole thing unconditional: it needs only
 /// `4 * m` bytes of window at the narrowest slab, so there is no set
 /// this can fail to plan, and a repair is never refused for memory.
-pub(crate) fn plan_solve(m: usize, block_size: usize, budget: u64) -> SolvePlan {
-    let whole = plan_slabs(m, block_size, budget);
+pub(crate) fn plan_solve(m: usize, block_size: usize, budget: u64, structured: bool) -> SolvePlan {
+    let whole = plan_slabs(m, block_size, budget, structured);
     if whole.slabs == 1 {
         return SolvePlan {
             slabs: whole,
@@ -347,7 +399,7 @@ pub(crate) fn plan_solve(m: usize, block_size: usize, budget: u64) -> SolvePlan 
     let resident = (m as u64).saturating_mul(block_size as u64);
     let left = budget.saturating_sub(resident);
     if left > 0 {
-        let assembled = plan_slabs(m, block_size, left);
+        let assembled = plan_slabs(m, block_size, left, structured);
         if assembled.slabs <= whole.slabs {
             return SolvePlan {
                 slabs: assembled,
@@ -363,10 +415,10 @@ pub(crate) fn plan_solve(m: usize, block_size: usize, budget: u64) -> SolvePlan 
 
 /// [`plan_solve`] against this process's real budget, with the same
 /// test-forcing seam [`plan_slabs_for`] honours.
-pub(crate) fn plan_solve_for(m: usize, block_size: usize) -> SolvePlan {
+pub(crate) fn plan_solve_for(m: usize, block_size: usize, structured: bool) -> SolvePlan {
     #[cfg(test)]
     if forced_slab_width().is_some() {
-        let slabs = plan_slabs_for(m, block_size);
+        let slabs = plan_slabs_for(m, block_size, structured);
         let staging = if slabs.slabs == 1 {
             Staging::Whole
         } else if forced_spill() {
@@ -376,7 +428,140 @@ pub(crate) fn plan_solve_for(m: usize, block_size: usize) -> SolvePlan {
         };
         return SolvePlan { slabs, staging };
     }
-    plan_solve(m, block_size, solve_window_budget() as u64)
+    plan_solve(m, block_size, solve_window_budget() as u64, structured)
+}
+
+/// Whether the solve window is priced IN PLACE:
+/// `NZBFAST_REPAIR_OUTPUT=inplace`, against `whole` (the default).
+///
+/// WHOLE is every plan in this file as it shipped: a slab's window is two
+/// `m x w` buffers, the syndrome rows and the rebuilt output, because the
+/// dense product and the two-stage Forney solve both hold two - the
+/// syndromes with `T`, then `T` with the output.
+///
+/// IN PLACE prices ONE buffer when the solve that will run holds one. The
+/// joint Forney arm does: it takes the syndromes by move, builds one
+/// stripe of `T` per worker from the syndrome columns, zeroes those
+/// columns and evaluates the output back into them
+/// (`forney::ForneyPlan::run_joint`), so beside the one buffer it holds a
+/// stripe of `T` per worker - which `forney::stripe_w_for_buffers`
+/// prices. The other two arms keep two buffers under either setting.
+///
+/// Off by default, and a measurement arm rather than a recommendation:
+/// the window it gives back is spent on a wider slab, so the syndrome
+/// rows the FOLD holds beside the NTT retention window grow to the whole
+/// budget. What that does to the peak, and what the halved slab count
+/// buys, is research/PARFAST-SOLVE-WINDOW-HALVING-2026-09-15.md.
+pub(crate) fn in_place_output() -> bool {
+    #[cfg(test)]
+    if let Some(on) = FORCED_IN_PLACE.with(|f| f.get()) {
+        return on;
+    }
+    static PARSED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PARSED.get_or_init(|| match std::env::var("NZBFAST_REPAIR_OUTPUT") {
+        Err(_) => false,
+        Ok(v) => match v.as_str() {
+            "inplace" | "in-place" => true,
+            "whole" | "" => false,
+            // Loud, never silent - the same rule `solve_window_budget`
+            // keeps for its own variable.
+            other => {
+                warn!(
+                    target: "repair-timing",
+                    "NZBFAST_REPAIR_OUTPUT={other:?} is neither `whole` nor `inplace` - \
+                     pricing the solve window whole"
+                );
+                false
+            }
+        },
+    })
+}
+
+/// How many `m x w` buffers a solve over `m` missing blocks holds at its
+/// peak, for the plans above: 1 only when [`in_place_output`] is on AND
+/// the solve will take the joint Forney arm, 2 otherwise. `structured` is
+/// [`selection_structured`]: an unstructured selection is Gauss-Jordan,
+/// which holds two buffers and the matrix whatever the switch says.
+///
+/// PRICED AFTER SELECTION since 15 Sep 2026 (TODO 348 C). It used to be
+/// asked before the recovery exponents were examined, so a set that
+/// turned out to have no structure was priced at one buffer, and
+/// `check_repair_dim_dense` then re-asserted two buffers and the matrix
+/// against the slab that cut - under the switch such a set was REFUSED
+/// with `SolveBudget` where the whole pricing cut finer and repaired
+/// (`an_in_place_repair_of_an_unstructured_set_is_not_refused_for_memory`).
+/// Both drivers select before they plan, so the plan takes the answer as
+/// an input; the one door still asked before selection,
+/// [`check_repair_dim`], passes `true` because it only refuses.
+pub(crate) fn solve_buffers(m: usize, structured: bool) -> u64 {
+    if structured
+        && in_place_output()
+        && super::forney::backsub_gate(m)
+        && super::forney::joint_gate()
+    {
+        1
+    } else {
+        2
+    }
+}
+
+/// Whether a solve over `exps` for the `missing` input slices finds
+/// structure: consecutive exponents, or a progression that relabels onto
+/// them ([`progression_parameters`]). False means Gauss-Jordan on an
+/// explicit `m x m`. The one rule `Reconstructor::build` forks on, asked
+/// here so a driver can PLAN with the answer before it builds.
+///
+/// A selection the constructor will refuse anyway (an index out of
+/// range, an input count past the format) answers `true`, the pricing
+/// that refuses least; the constructor names the real error.
+pub(crate) fn selection_structured(n_inputs: usize, missing: &[usize], exps: &[u32]) -> bool {
+    if exponents_consecutive(exps) {
+        return true;
+    }
+    let Ok(logs) = super::input_base_logs(n_inputs) else {
+        return true;
+    };
+    let Some(ks) = missing
+        .iter()
+        .map(|&j| logs.get(j).copied())
+        .collect::<Option<Vec<u32>>>()
+    else {
+        return true;
+    };
+    progressions_enabled() && progression_parameters(&ks, exps).is_some()
+}
+
+fn exponents_consecutive(exps: &[u32]) -> bool {
+    !exps.is_empty() && exps.windows(2).all(|w| w[1] == w[0] + 1)
+}
+
+/// `NZBFAST_RS_PROGRESSIONS=0` turns the progression relabel off.
+fn progressions_enabled() -> bool {
+    std::env::var("NZBFAST_RS_PROGRESSIONS").ok().as_deref() != Some("0")
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_IN_PLACE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Force [`in_place_output`] on THIS THREAD until the guard drops.
+/// Test-only, for the reason [`ForcedSlabWidth`] is.
+#[cfg(test)]
+pub(crate) struct ForcedInPlace(Option<bool>);
+
+#[cfg(test)]
+impl ForcedInPlace {
+    pub(crate) fn on() -> Self {
+        Self(FORCED_IN_PLACE.with(|f| f.replace(Some(true))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForcedInPlace {
+    fn drop(&mut self) {
+        FORCED_IN_PLACE.with(|f| f.set(self.0));
+    }
 }
 
 #[cfg(test)]
@@ -435,6 +620,226 @@ impl ForcedSlabWidth {
 impl Drop for ForcedSlabWidth {
     fn drop(&mut self) {
         FORCED_SLAB_WIDTH.with(|f| f.set(self.0));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_SOLVE_BUDGET: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Force [`solve_window_budget`] on THIS THREAD until the guard drops.
+/// Test-only. Unlike [`ForcedSlabWidth`] it leaves the PLANNER in the
+/// loop, so a driver test can reach the real slab plan and the checks
+/// the constructor re-asks against it at a budget a fixture can meet.
+#[cfg(test)]
+pub(crate) struct ForcedSolveBudget(Option<usize>);
+
+#[cfg(test)]
+impl ForcedSolveBudget {
+    pub(crate) fn set(bytes: usize) -> Self {
+        Self(FORCED_SOLVE_BUDGET.with(|f| f.replace(Some(bytes))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForcedSolveBudget {
+    fn drop(&mut self) {
+        FORCED_SOLVE_BUDGET.with(|f| f.set(self.0));
+    }
+}
+
+/// How the feed pipeline between the readers and the fold worker is
+/// sized: the batch the readers split, how deep the channel queues, how
+/// much the worker coalesces into one fold call, and how many arenas the
+/// pool keeps.
+///
+/// WHY IT IS BUDGETED, and only when a budget is PUBLISHED. Until 14 Sep
+/// 2026 all four were constants, and the in-flight worst case they allow
+/// is `per_reader_batch * (2 * readers + 16)` - the readers' assembly
+/// batches, the channel's eight, and a merged set that drains the channel
+/// PLUS every sender it unblocks on the way. That is 384 MB at four
+/// readers and ~1.1 GiB at one (64 MiB batches), whatever `-m` said:
+/// `parfast r -t4 -m128` peaked at 758 MB and `-t1 -m128` at 1,323 MB on
+/// a 1 GiB / 64 KiB set at m=192, with ~380 MB of live repair work at
+/// four readers and 537 MB merged into a single call at one
+/// (research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md
+/// section 3e, and the floor attribution in
+/// research/PARFAST-REPAIR-RSS-FLOOR-2026-09-14.md). One core is what a
+/// small NAS has, so the fewest readers was the largest footprint.
+///
+/// Under a published budget `B`: the batch is `B / 8` (never above the
+/// unbudgeted 64 MiB, never below 1 MiB); the channel holds one batch per
+/// reader, which is the depth-8-for-eight-readers ratio the constant was
+/// chosen at (aa3fb30fd), so it queues one batch's worth of bytes at any
+/// reader count; and the worker stops coalescing once a call holds a
+/// batch's worth - which is exactly the fold unit the split across
+/// readers took away and coalescing exists to restore (the `try_recv`
+/// loop's comment). In flight is then about three batches plus one
+/// reader's: under `B / 2`. A budget whose half already holds the four
+/// constants' own worst case keeps the constants - which is every
+/// daemon on a box with more than ~9 GB, because the daemon always
+/// publishes (see [`feed_shape_for`]).
+///
+/// With nothing published this is [`FeedShape::UNBUDGETED`], the four
+/// constants as they were - and not the host-derived default, for the
+/// reason `fastpar::ntt_budget_within_published` gives: it would re-cap
+/// every bench box and library caller. The one exception is a process
+/// inside a cgroup memory limit, which takes a quarter of that limit as
+/// its budget ([`feed_budget_for`] has the incident).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FeedShape {
+    /// Present-slice bytes one round of readers assembles, split across
+    /// them by [`Self::per_reader_batch`].
+    pub batch_bytes: usize,
+    /// Batches the channel holds behind the one being folded.
+    pub channel_depth: usize,
+    /// The most bytes the fold worker coalesces before it folds; `None`
+    /// drains everything queued.
+    pub merge_bytes: Option<usize>,
+    /// Arenas [`ArenaPool`] keeps when it is on.
+    pub pool_cap: usize,
+}
+
+impl FeedShape {
+    pub(crate) const UNBUDGETED: FeedShape = FeedShape {
+        batch_bytes: BATCH_BYTES,
+        channel_depth: 8,
+        merge_bytes: None,
+        pool_cap: 16,
+    };
+
+    /// One reader's assembly batch. The 1 MiB floor is the one
+    /// [`Reconstructor::feeder`] applies anyway.
+    pub(crate) fn per_reader_batch(&self, readers: usize) -> usize {
+        (self.batch_bytes / readers.max(1)).max(1 << 20)
+    }
+}
+
+/// The share of a published budget one batch may take; see [`FeedShape`].
+const FEED_BUDGET_DIVISOR: u64 = 8;
+
+/// [`FeedShape`] for a published budget (or none) and a reader count.
+/// Pure, so both sides can be tested without publishing a budget, which
+/// cannot be undone in a process.
+pub(crate) fn feed_shape_for(published: Option<u64>, readers: usize) -> FeedShape {
+    let Some(total) = published else {
+        return FeedShape::UNBUDGETED;
+    };
+    // A budget the old constants already fit changes nothing. This is
+    // not only for `-m`: the `nzbfast` CLI and the daemon ALWAYS publish
+    // (`--mem-limit`, else `MemBudget::auto`), so without this test every
+    // daemon repair on every box would take the capped merge - a smaller
+    // fold unit on the big-box path, which is the direction the
+    // `try_recv` loop's comment records as a regression and which
+    // nothing here measured. The unbudgeted worst case fits half of
+    // 2.25 GiB at one reader and of 512 MiB at eight, so a daemon on a
+    // 16 GB box is untouched and a 512 MB box's 128 MiB is not.
+    let unbudgeted = FeedShape::UNBUDGETED;
+    let worst = unbudgeted
+        .per_reader_batch(readers)
+        .saturating_mul(2 * readers.max(1) + 2 * unbudgeted.channel_depth) as u64;
+    if worst <= total / 2 {
+        return unbudgeted;
+    }
+    let batch_bytes = usize::try_from(total / FEED_BUDGET_DIVISOR)
+        .unwrap_or(usize::MAX)
+        .clamp(1 << 20, BATCH_BYTES);
+    let readers = readers.clamp(1, FeedShape::UNBUDGETED.channel_depth);
+    FeedShape {
+        batch_bytes,
+        channel_depth: readers,
+        merge_bytes: Some(batch_bytes),
+        // Arenas in circulation at steady state under this shape: the
+        // readers' assembly batches, the channel's, and a merged set of
+        // about one batch - each `readers` deep.
+        pool_cap: (3 * readers).min(FeedShape::UNBUDGETED.pool_cap),
+    }
+}
+
+/// Where the total a [`FeedShape`] was sized from came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeedBudgetSource {
+    /// An entry point published it: `parfast -m`, or the `nzbfast` CLI
+    /// and daemon, which always publish.
+    Published,
+    /// Nothing was published and the process sits inside a cgroup memory
+    /// limit; the total is a quarter of that limit.
+    CgroupQuarter,
+}
+
+/// The budget [`feed_shape_for`] sizes the feed from, and where it came
+/// from, or `None` for the unbudgeted constants. Pure, for the same
+/// reason [`feed_shape_for`] is.
+///
+/// A published budget wins. With none, a cgroup limit gives a quarter of
+/// itself - the quarter `fastpar::ntt_default_budget` already takes for
+/// the NTT retention budget and the solve window. Until 15 Sep 2026 the
+/// feed was the one consumer of a repair that did not read the cgroup,
+/// and it was the one that killed it: `parfast r -t4` with no `-m`
+/// inside `MemoryMax=512M` was OOM-killed on 11 of 28 legs, every kill in
+/// the feed at 488-508 MiB anonymous, while the other two consumers had
+/// already derived `-m128`'s figures from the same limit and `-m128`
+/// completed 56 of 56 (research/PARFAST-512MB-CGROUP-REPAIR-2026-09-15.md
+/// sections 3, 4 and 6). Under 512M this is exactly `-m128`'s shape.
+///
+/// No cgroup is `None`, as before, so every box outside a container keeps
+/// the unbudgeted path byte for byte.
+pub(crate) fn feed_budget_for(
+    published: Option<u64>,
+    cgroup_limit: Option<u64>,
+) -> Option<(u64, FeedBudgetSource)> {
+    match (published, cgroup_limit) {
+        (Some(total), _) => Some((total, FeedBudgetSource::Published)),
+        (None, Some(limit)) => Some((limit / 4, FeedBudgetSource::CgroupQuarter)),
+        (None, None) => None,
+    }
+}
+
+/// The shape a construction runs under: [`feed_shape_for`] against
+/// [`feed_budget_for`] for this process and its reader count, unless a
+/// test is forcing one - with the budget's source, which a forced shape
+/// does not have.
+pub(crate) fn feed_shape() -> (FeedShape, Option<FeedBudgetSource>) {
+    #[cfg(test)]
+    if let Some(shape) = FORCED_FEED_SHAPE.with(|f| f.get()) {
+        return (shape, None);
+    }
+    let budget = feed_budget_for(
+        crate::mem::published_budget().map(|b| b.total),
+        crate::mem::cgroup_mem_limit(),
+    );
+    (
+        feed_shape_for(budget.map(|(total, _)| total), feed_readers()),
+        budget.map(|(_, source)| source),
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_FEED_SHAPE: std::cell::Cell<Option<FeedShape>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Force every [`Reconstructor`] constructed on THIS THREAD to take
+/// `shape` until the guard drops. Test-only, for the same reason
+/// [`ForcedSlabWidth`] is: the published budget is process-wide and
+/// cannot be withdrawn.
+#[cfg(test)]
+pub(crate) struct ForcedFeedShape(Option<FeedShape>);
+
+#[cfg(test)]
+impl ForcedFeedShape {
+    pub(crate) fn set(shape: FeedShape) -> Self {
+        Self(FORCED_FEED_SHAPE.with(|f| f.replace(Some(shape))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForcedFeedShape {
+    fn drop(&mut self) {
+        FORCED_FEED_SHAPE.with(|f| f.set(self.0));
     }
 }
 
@@ -584,6 +989,10 @@ pub(super) fn check_repair_dim_dense_within(
 /// disproof - the published repro for that finding used a raw byte
 /// count for exactly this reason, and still does.
 pub(super) fn solve_window_budget() -> usize {
+    #[cfg(test)]
+    if let Some(bytes) = FORCED_SOLVE_BUDGET.with(|f| f.get()) {
+        return bytes;
+    }
     match std::env::var("NZBFAST_REPAIR_SOLVE_BUDGET") {
         Ok(v) => match parse_budget_bytes(&v) {
             Some(bytes) => bytes,
@@ -616,6 +1025,12 @@ fn default_solve_window_budget() -> usize {
     // spelling asked `var_os` inside the clamp, which made a typo count
     // as an override and wave the whole host budget through unclamped:
     // exactly the misreading the warning above promises not to do.
+    //
+    // A limit a PERSON set (`-m`, `--mem-limit`, `mem_limit`) replaces
+    // this default in either direction since 15 Sep 2026, up to the flat
+    // 64 GiB ceiling and, under a cgroup limit, the cgroup quarter; a
+    // published `auto` still only lowers it.
+    // `clamp_to_published` carries the decision and why auto must not raise.
     super::fastpar::clamp_to_published(super::fastpar::ntt_default_budget(
         crate::mem::physical_ram(),
         crate::mem::cgroup_mem_limit(),
@@ -765,12 +1180,45 @@ impl Reconstructor {
     /// The FOLD WORKER does not: it is spawned below and outlives this
     /// call, and the fold's own progress is reported by the FEEDERS,
     /// which is both the earlier fact and the one a user is waiting on
-    /// (bytes read off disk, not bytes XORed after they arrived).
+    /// (bytes read off disk, not bytes XORed after they arrived). It
+    /// takes the CANCEL alone (`RepairControl::cancel_only`), polled
+    /// inside every fold call and transform stripe.
     pub fn new_controlled<D: AsRef<[u8]>>(
         block_size: usize,
         n_inputs: usize,
         missing: &[usize],
         recovery: &[(u32, D)],
+        path: SyndromePath,
+        control: &control::RepairControl,
+    ) -> Result<Reconstructor, RepairError> {
+        let borrowed: Vec<(u32, &[u8])> = recovery.iter().map(|(e, d)| (*e, d.as_ref())).collect();
+        Self::build(block_size, n_inputs, missing, borrowed, path, control)
+    }
+
+    /// [`new_controlled`](Self::new_controlled) over OWNED recovery
+    /// payloads, each freed the moment its syndrome row has been widened
+    /// from it. The borrowed door cannot free a caller's buffer, so for
+    /// the length of the widening loop it holds the recovery bytes and
+    /// the syndrome rows whole - two `m x block_size` buffers, the same
+    /// size as the solve's own window. This door holds one and a block.
+    /// Taken by the disk driver under `NZBFAST_REPAIR_OUTPUT=inplace`,
+    /// whose window is priced at one buffer ([`solve_buffers`]).
+    pub(super) fn new_controlled_owned(
+        block_size: usize,
+        n_inputs: usize,
+        missing: &[usize],
+        recovery: Vec<(u32, Vec<u8>)>,
+        path: SyndromePath,
+        control: &control::RepairControl,
+    ) -> Result<Reconstructor, RepairError> {
+        Self::build(block_size, n_inputs, missing, recovery, path, control)
+    }
+
+    fn build<D: AsRef<[u8]>>(
+        block_size: usize,
+        n_inputs: usize,
+        missing: &[usize],
+        recovery: Vec<(u32, D)>,
         path: SyndromePath,
         control: &control::RepairControl,
     ) -> Result<Reconstructor, RepairError> {
@@ -809,12 +1257,15 @@ impl Reconstructor {
         // second way: the solve runs through two transforms and the
         // explicit inverse is never built at all (m² entries - 134 MB
         // and 62 ms at the repair cap), so this is a fork, not a stage.
-        let consecutive = !recovery.is_empty() && recovery.windows(2).all(|w| w[1].0 == w[0].0 + 1);
+        //
+        // THE SAME RULE `selection_structured` answers for a driver's
+        // plan, from the same two helpers, so the plan and this fork
+        // cannot disagree about which arm a selection takes.
+        let exps: Vec<u32> = recovery.iter().map(|r| r.0).collect();
+        let consecutive = exponents_consecutive(&exps);
         let ks: Vec<u32> = missing.iter().map(|&j| base_logs[j]).collect();
-        let progression = if !consecutive
-            && std::env::var("NZBFAST_RS_PROGRESSIONS").ok().as_deref() != Some("0")
-        {
-            progression_parameters(&ks, &recovery.iter().map(|r| r.0).collect::<Vec<_>>())
+        let progression = if !consecutive && progressions_enabled() {
+            progression_parameters(&ks, &exps)
         } else {
             None
         };
@@ -903,8 +1354,10 @@ impl Reconstructor {
         );
         let mut exponents = Vec::with_capacity(recovery.len());
         let mut syndromes = Vec::with_capacity(recovery.len());
-        for (e, data) in recovery {
-            let data = data.as_ref();
+        // BY VALUE: on the owned door each payload drops at the end of
+        // its own iteration, once its row exists (`new_controlled_owned`).
+        for (e, payload) in recovery {
+            let data = payload.as_ref();
             if data.len() != block_size {
                 return Err(RepairError::Malformed(format!(
                     "recovery slice (exponent {e}) is {} bytes, block size is {block_size}",
@@ -915,7 +1368,7 @@ impl Reconstructor {
             for (dw, s) in w.iter_mut().zip(data.as_chunks::<2>().0) {
                 *dw = u16::from_le_bytes(*s);
             }
-            exponents.push(*e);
+            exponents.push(e);
             syndromes.push(w);
         }
         // EXPERIMENTAL NTT dispatch (merged NTT plan Stage 2): when the
@@ -930,29 +1383,66 @@ impl Reconstructor {
         // dispatcher admits such a corpus ON (`ntt_retention_admits`).
         // The fold remains the unconditional fallback, per window: a
         // window whose plan cannot be built folds instead.
-        let ntt_budget =
+        let ntt_admission =
             resolve_syndrome_path(path, block_size, n_inputs, missing.len(), &exponents);
+        let ntt_budget = ntt_admission.map(|a| a.budget);
+        // The stripe the dispatcher priced the arenas at, which every
+        // window below has to RUN at as well: a transform that took the
+        // default width after admission narrowed it would spend the
+        // arenas the narrowing existed to avoid
+        // (`fastpar::ntt_admit_within`).
+        let ntt_stripe_cap = ntt_admission.map_or(usize::MAX, |a| a.stripe_cap);
         let worker_exponents = exponents.clone();
+        // Sized once per construction, budgeted or not - see `FeedShape`,
+        // which carries the incident. Unbudgeted it is the four constants
+        // the comments below were written about.
+        let (feed, feed_source) = feed_shape();
+        if feed.merge_bytes.is_some() && std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
+            // The published wording is what the -m legs of every earlier
+            // round parsed, so it stays as it was.
+            let under = match feed_source {
+                Some(FeedBudgetSource::Published) => "the published budget",
+                Some(FeedBudgetSource::CgroupQuarter) => "a quarter of the cgroup memory limit",
+                None => "a forced shape",
+            };
+            info!(
+                target: "repair-timing",
+                "feed shape under {under}: batch {:.1} MB, channel {}, merge cap {:.1} MB",
+                feed.batch_bytes as f64 / 1e6,
+                feed.channel_depth,
+                feed.merge_bytes.unwrap_or(0) as f64 / 1e6
+            );
+        }
         // Capacity 8 (was 1, then 4 - aa3fb30fd deepened it alongside
         // BATCH_BYTES 32 -> 64 MiB): with M2c.2's parallel readers each
         // sender carries a BATCH_BYTES/N-sized batch, so a slightly deeper
         // queue keeps disks busy while a batch folds without growing
         // worst-case in-flight memory beyond the old single-feeder cap.
-        let (tx, rx) = std::sync::mpsc::sync_channel::<FeedBatch>(8);
+        // That held at eight readers only; under a published budget the
+        // depth follows the reader count so it holds at every count.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<FeedBatch>(feed.channel_depth);
         // Arenas in circulation at steady state: up to eight feeders'
         // assembly batches plus the channel's eight, and the fold
         // worker's merged set is those same batches - so 16 keeps every
         // arena of a streaming repair alive from first fold to finish.
-        let pool = ArenaPool::new(if ArenaPool::enabled() { 16 } else { 0 });
+        let pool = ArenaPool::new(if ArenaPool::enabled() {
+            feed.pool_cap
+        } else {
+            0
+        });
+        let merge_cap = feed.merge_bytes;
         let worker_pool = pool.clone();
         let fold_trace = std::env::var_os("NZBFAST_FOLD_TRACE").is_some();
-        // The one thing the worker takes from the control: the cancel.
+        // The one thing the worker takes from the control: the cancel
+        // (`cancel_only`, so nothing it polls can move the host's bar).
         // It reports nothing - the FEEDERS report the fold, because
         // bytes read off disk is both the earlier fact and the one a
         // user is waiting on - but it must stop DOING the work, or a
         // cancelled repair still pays for every XOR that was already
-        // queued.
-        let worker_control = control.clone();
+        // queued. Polled between batches below AND inside each fold call
+        // and transform window, which is where a merged call spends its
+        // time (see `RepairControl::cancel_only`).
+        let worker_control = control.cancel_only();
         let worker = std::thread::spawn(move || {
             let exponents = worker_exponents;
             let pool = worker_pool;
@@ -1011,10 +1501,12 @@ impl Reconstructor {
                         let t_w = std::time::Instant::now();
                         let (used, n) = ntt_syndromes_into(
                             block_size,
+                            ntt_stripe_cap,
                             &exponents,
                             &mut syndromes,
                             &retained,
                             NttFault::None,
+                            &worker_control,
                         );
                         ntt_window_present += n;
                         if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
@@ -1053,14 +1545,23 @@ impl Reconstructor {
                 // with 16 MB blocks holds ~256 MB in the merged batch. The
                 // fold is XOR accumulation, so merging and reordering are
                 // exact; this is a memory bound, not a correctness one.
-                while let Ok(more) = rx.try_recv() {
+                //
+                // Under a published budget the drain stops once the call
+                // holds `merge_cap` bytes - one `FeedShape` batch, the
+                // fold unit the split took away - rather than 16 of
+                // them: at one reader that was 537 MB in a single call
+                // against a 128 MB `-m`. Unbudgeted `merge_cap` is None
+                // and this is the unbounded drain it always was.
+                let mut mb = merged[0].arena.len();
+                while merge_cap.is_none_or(|cap| mb < cap) {
+                    let Ok(more) = rx.try_recv() else { break };
+                    mb += more.arena.len();
                     merged.push(more);
                 }
                 let t_f = std::time::Instant::now();
-                fold_batches(&exponents, &mut syndromes, &merged);
+                fold_batches(&exponents, &mut syndromes, &merged, &worker_control);
                 folded += t_f.elapsed();
                 calls += 1;
-                let mb: usize = merged.iter().map(|b| b.arena.len()).sum();
                 bytes += mb;
                 if fold_trace {
                     warn!(
@@ -1101,11 +1602,13 @@ impl Reconstructor {
             solve,
             tx: Some(tx),
             worker: Some(worker),
-            batch: pool.take(BATCH_BYTES),
-            batch_capacity: BATCH_BYTES,
+            batch: pool.take(feed.batch_bytes),
+            batch_capacity: feed.batch_bytes,
+            feed,
             pool,
             backsub_arm: label,
             ntt_selected: ntt_budget.is_some(),
+            ntt_stripe_cap,
             syn_charge,
             ntt_fault: match path {
                 SyndromePath::NttForceCorrupt(_) => NttFault::Corrupt,
@@ -1174,10 +1677,10 @@ impl Reconstructor {
     /// funnel into the same fold worker, so slices may arrive in any
     /// interleaving (the syndrome fold is order-free XOR accumulation).
     /// `max_batch` bounds the handle's assembly buffer - callers split
-    /// [`BATCH_BYTES`] across handles so total in-flight memory stays
-    /// what the single-feeder design used. Drop every Feeder (they
-    /// flush on drop) BEFORE calling [`Self::finish`], or finish blocks
-    /// on the channel.
+    /// this construction's feed batch across handles
+    /// (`per_reader_batch`) so total in-flight memory stays what the
+    /// single-feeder design used. Drop every Feeder (they flush on drop)
+    /// BEFORE calling [`Self::finish`], or finish blocks on the channel.
     pub fn feeder(&self, max_batch: usize) -> Feeder {
         let max_batch = max_batch.max(1 << 20);
         Feeder {
@@ -1187,6 +1690,12 @@ impl Reconstructor {
             pool: self.pool.clone(),
             max_batch,
         }
+    }
+
+    /// One reader's `max_batch` when `readers` feed this construction:
+    /// its `FeedShape` batch split evenly, as both drivers do.
+    pub(super) fn per_reader_batch(&self, readers: usize) -> usize {
+        self.feed.per_reader_batch(readers)
     }
 
     /// Hand a batch assembled elsewhere (the verify pass's retained
@@ -1426,10 +1935,12 @@ impl Reconstructor {
     fn ntt_syndromes(&self, syndromes: &mut [Vec<u16>], retained: &[FeedBatch]) -> (bool, usize) {
         ntt_syndromes_into(
             self.block_size,
+            self.ntt_stripe_cap,
             &self.exponents,
             syndromes,
             retained,
             self.ntt_fault,
+            &self.control.cancel_only(),
         )
     }
 }
@@ -1439,12 +1950,16 @@ impl Reconstructor {
 /// free function so the fold worker can run it per window as the
 /// retention budget fills (see the worker loop). Linear in its inputs,
 /// so windows compose by XOR. Returns (transform ran, slices fed).
+/// `stripe_cap` is the width the dispatcher admitted the shape at
+/// (`fastpar::NttAdmission::stripe_cap`).
 fn ntt_syndromes_into(
     block_size: usize,
+    stripe_cap: usize,
     exponents: &[u32],
     syndromes: &mut [Vec<u16>],
     retained: &[FeedBatch],
     fault: NttFault,
+    control: &control::RepairControl,
 ) -> (bool, usize) {
     {
         let timing = std::env::var_os("NZBFAST_REPAIR_TIMING").is_some();
@@ -1562,7 +2077,7 @@ fn ntt_syndromes_into(
                 if timing {
                     info!(target: "repair-timing", "ntt plan unbuildable ({why}) - fold fallback");
                 }
-                fold_batches(exponents, syndromes, retained);
+                fold_batches(exponents, syndromes, retained, control);
                 return (false, 0);
             }
         };
@@ -1574,7 +2089,9 @@ fn ntt_syndromes_into(
         // until 5 Sep 2026, so the thread rule the creator ran was not
         // the one the repair ran (the i5-10600KF's heavy repair stayed on
         // six threads after the shared rule went to twelve; round K).
-        let (w, threads) = super::fastpar::ntt_stripe_geometry(block_size);
+        // Capped at the width admission priced, which is narrower than
+        // the default only when the arenas did not fit the budget.
+        let (w, threads) = super::fastpar::ntt_stripe_geometry_capped(block_size, stripe_cap);
         let stripes = words.div_ceil(w);
         struct SynPtrs(Vec<*mut u16>, Vec<usize>);
         // SAFETY: raw pointers into the syndrome rows; workers XOR
@@ -1614,6 +2131,14 @@ fn ntt_syndromes_into(
                     let mut scratch = plan.new_scratch(w);
                     let mut out = vec![0u16; plan.needed * w];
                     loop {
+                        // Cancel only, never a park - the create's NTT
+                        // grain (`par2gen/ntt.rs`). Per stripe claim, so
+                        // a cancel costs at most one stripe per worker;
+                        // the driver refuses these syndromes before the
+                        // patch.
+                        if control.cancelled() {
+                            break;
+                        }
                         let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if c >= stripes {
                             break;
@@ -1712,6 +2237,138 @@ pub(super) fn progression_parameters(ks: &[u32], exps: &[u32]) -> Option<(Vec<u3
         .collect();
     let offset = (exps[0] as u64 * inverse % gf16::ORDER as u64) as u32;
     Some((transformed, offset))
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
+
+    /// `n` sources of `bs` bytes, each a different pattern, in ONE batch.
+    fn corpus(n: usize, bs: usize) -> Vec<FeedBatch> {
+        let logs = input_base_logs(n).unwrap();
+        let mut batch = FeedBatch::with_capacity(n * bs);
+        for (i, &k) in logs.iter().enumerate() {
+            let s: Vec<u8> = (0..bs)
+                .map(|j| ((i * 7919 + j * 104729) % 251) as u8)
+                .collect();
+            batch.push(k, &s);
+        }
+        vec![batch]
+    }
+
+    /// A raised cancel stops BOTH syndrome passes before they touch a
+    /// row (15 Sep 2026).
+    ///
+    /// Until then `fold_batches` and the NTT's stripes took no control,
+    /// so a cancel that landed after the feed's last check waited out
+    /// the whole pass with the driver parked on the fold worker's join:
+    /// SIGINT at `Repairing: 100.0%` took 53.37 s to exit against a
+    /// 53.36 s transform on the dev Mac, and the parfast cancel test was
+    /// killed at CI's 600 s ceiling on three pushes. A raised cancel is
+    /// the state that wakeup was lost in, so this asserts on STATE and
+    /// not on a clock: every row exactly as it was. The uncancelled
+    /// arm first proves both passes write the rows and agree, so the
+    /// assertion is never over nothing.
+    #[test]
+    fn a_raised_cancel_stops_both_syndrome_passes_before_a_row_is_touched() {
+        let (n, bs, m) = (64usize, 4096usize, 8usize);
+        let batches = corpus(n, bs);
+        let exps: Vec<u32> = (0..m as u32).collect();
+        let fresh = || vec![vec![0u16; bs / 2]; m];
+        let inert = control::RepairControl::default();
+
+        let mut folded = fresh();
+        fold_batches(&exps, &mut folded, &batches, &inert);
+        let mut transformed = fresh();
+        let (used, _) = ntt_syndromes_into(
+            bs,
+            usize::MAX,
+            &exps,
+            &mut transformed,
+            &batches,
+            NttFault::None,
+            &inert,
+        );
+        assert!(
+            used,
+            "the plan must build, or the NTT arm is the fold twice"
+        );
+        assert_ne!(folded, fresh(), "control arm: the fold writes the rows");
+        assert_eq!(folded, transformed, "control arm: the two passes agree");
+
+        let gate = control::PauseGate::new();
+        gate.cancel();
+        let cancel = control::RepairControl::new(None, Some(gate)).cancel_only();
+        let mut rows = fresh();
+        fold_batches(&exps, &mut rows, &batches, &cancel);
+        assert_eq!(rows, fresh(), "a cancelled fold still wrote syndrome rows");
+        let mut rows = fresh();
+        ntt_syndromes_into(
+            bs,
+            usize::MAX,
+            &exps,
+            &mut rows,
+            &batches,
+            NttFault::None,
+            &cancel,
+        );
+        assert_eq!(
+            rows,
+            fresh(),
+            "a cancelled transform still wrote syndrome rows"
+        );
+    }
+
+    /// The OWNER's half, raced: a cancel aligned with `finish` on a
+    /// `Barrier` - landing before, during or after the pass starts,
+    /// whichever the scheduler picks - hands `finish` back, on both
+    /// syndrome arms.
+    ///
+    /// `recv_timeout`, never a join (memory topic
+    /// nzbfast-detached-worker-lost-wakeup): an owner parked for good
+    /// fails here by name rather than wedging the suite. This is the
+    /// hang guard over the path the driver takes; the proof that the
+    /// pass POLLS is the state test above, because a pass slow enough to
+    /// miss a clock on a 32-way box is too big for a unit test.
+    #[test]
+    fn a_cancel_racing_finish_hands_finish_back() {
+        let (n, bs, m) = (256usize, 4096usize, 32usize);
+        let missing: Vec<usize> = (0..m).map(|i| i * (n / m)).collect();
+        let recovery: Vec<(u32, Vec<u8>)> = (0..m as u32).map(|e| (e, vec![0u8; bs])).collect();
+        let data: Vec<u8> = (0..bs).map(|j| (j % 251) as u8).collect();
+        for (arm, ntt) in [("fold", false), ("ntt", true)] {
+            for round in 0..4 {
+                let path = if ntt {
+                    SyndromePath::NttForce(usize::MAX)
+                } else {
+                    SyndromePath::Fold
+                };
+                let gate = control::PauseGate::new();
+                let ctl = control::RepairControl::new(None, Some(gate.clone()));
+                let mut rec =
+                    Reconstructor::new_controlled(bs, n, &missing, &recovery, path, &ctl).unwrap();
+                for i in (0..n).filter(|i| !missing.contains(i)) {
+                    rec.feed(i, &data);
+                }
+                let barrier = Arc::new(Barrier::new(2));
+                let (tx, rx) = mpsc::channel();
+                let start = barrier.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    let _ = rec.finish();
+                    let _ = tx.send(());
+                });
+                barrier.wait();
+                gate.cancel();
+                assert!(
+                    rx.recv_timeout(Duration::from_secs(60)).is_ok(),
+                    "{arm} round {round}: finish did not come back within 60 s of a cancel"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

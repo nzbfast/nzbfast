@@ -1147,6 +1147,19 @@ pub fn open_dashboard(port: u16, tls: bool, key: Option<String>) {
 /// until its key is deleted from the file.
 pub fn apply_saved_settings(opts: &mut ServeOpts, path: &std::path::Path) {
     let saved = load_settings(path);
+    // `fast_final_check` defaults ON as of 15 Sep 2026, matching
+    // parfast's own per-block default. Resolved here,
+    // ahead of the early return below, so a brand-new install - whose
+    // settings.json has nothing in it yet, or does not exist at all - gets
+    // the same default as every other install rather than falling through
+    // to `NZBFAST_VERIFY_IFSC_ONLY` (which stays off; see its doc). An
+    // explicit `false` a user saved is honoured either way.
+    nzbkit::par2::set_fast_check(
+        saved
+            .get("fast_final_check")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    );
     if saved.is_empty() {
         return;
     }
@@ -1230,15 +1243,6 @@ pub fn apply_saved_settings(opts: &mut ServeOpts, path: &std::path::Path) {
             "lean" => (opts.fast_verify, opts.verify_lean) = (true, true),
             _ => {}
         }
-    }
-    if let Some(v) = b("fast_final_check") {
-        // Straight to nzbkit, not onto `opts`: the value has no launch
-        // option and no daemon field, because the CLI, this setting and
-        // NZBFAST_VERIFY_IFSC_ONLY have to resolve to ONE value. Absent
-        // from settings.json the environment still answers, which is
-        // what keeps that variable the lowest rung rather than a
-        // shadowed one.
-        nzbkit::par2::set_fast_check(v);
     }
     if let Some(v) = n("min_free") {
         // `Some(0)`, NOT None: 0 is the user saying OFF, and the launch

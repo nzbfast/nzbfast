@@ -776,3 +776,101 @@ async fn envelope_racing_ab_wall_and_spend() {
         eprintln!("  {l}");
     }
 }
+
+/// TODO 343 item B on the shaped fleet: a fast flat-rate backbone (0)
+/// that refuses the last `holes` articles, a SHAPED flat-rate backbone
+/// (1) that holds everything, and a fast third server (2) that is a
+/// level-0 BLOCK ACCOUNT in the `block` config and the same flat-rate
+/// server in `control`. Arms: the racing posture, and the same plus
+/// `stat_probe_block`.
+///
+/// This is the shape where the per-server probe is most likely to COST:
+/// the flat-rate server left to deliver a hole is the shaped one, so a
+/// block-account STAT that ends the fan-out hands the article to a slow
+/// holder or a second hop. Run with --ignored.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "wall-clock A/B measurement - run with --ignored"]
+async fn per_server_stat_probe_on_the_shaped_fleet() {
+    let n = 200;
+    let reps = 3;
+    let probing = PoolConfig {
+        stat_probe_block: true,
+        ..racing_cfg()
+    };
+    let arms = [("racing", racing_cfg()), ("+probe", probing)];
+    let mut lines = Vec::new();
+    let mut summary = Vec::new();
+    for holes in [5usize, 20, 60, 120] {
+        for block in [true, false] {
+            let cfg_name = if block { "block" } else { "control" };
+            let mut cells: Vec<Vec<Cost>> = vec![Vec::new(), Vec::new()];
+            for r in 0..reps {
+                for (ai, (arm, cfg)) in arms.iter().enumerate() {
+                    let (articles, reqs) = corpus(n);
+                    let missing = reqs[n - holes..].iter().map(|r| r.id.to_string()).collect();
+                    let fast = MockServer::start(
+                        articles.clone(),
+                        Chaos {
+                            missing,
+                            missing_delay_ms: 40,
+                            ..throttled(FAST_BPS)
+                        },
+                    )
+                    .await;
+                    let shaped = MockServer::start(articles.clone(), throttled(SHAPED_BPS)).await;
+                    let third = MockServer::start(articles, throttled(FAST_BPS)).await;
+                    let third_cfg = PoolConfig {
+                        block_account: block,
+                        ..cfg.clone()
+                    };
+                    let c = run(
+                        &format!("{holes} {cfg_name} {arm} r{r}"),
+                        vec![
+                            (&fast, cfg.clone()),
+                            (&shaped, cfg.clone()),
+                            (&third, third_cfg),
+                        ],
+                        reqs,
+                    )
+                    .await;
+                    assert_eq!((c.done, c.lost), (n, 0), "{} changed a verdict", c.label);
+                    lines.push(format!(
+                        "{}  third {:.2} MB, stats {}",
+                        c.line(),
+                        c.bytes[2] as f64 / 1e6,
+                        third.stats.load(Ordering::Relaxed)
+                    ));
+                    cells[ai].push(c);
+                }
+            }
+            for (ai, (arm, _)) in arms.iter().enumerate() {
+                let c = &cells[ai];
+                let mut walls: Vec<f64> = c.iter().map(|l| l.wall.as_secs_f64()).collect();
+                walls.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                summary.push(format!(
+                    "| shaped | {holes} | {cfg_name} | {arm} | {:.3} | {:.2} | {:.2} | {n} done / 0 lost |",
+                    walls[walls.len() / 2],
+                    c.iter().map(|l| l.bytes[2] as f64).sum::<f64>() / reps as f64 / 1e6,
+                    c.iter()
+                        .map(|l| l.bytes.iter().sum::<u64>() as f64)
+                        .sum::<f64>()
+                        / reps as f64
+                        / 1e6,
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "\nTODO 343 item B shaped fleet ({n} articles x {ART} B, fast {FAST_BPS} x{CONNS} x2, shaped {SHAPED_BPS} x{CONNS}, window {WINDOW}):"
+    );
+    for l in &lines {
+        eprintln!("  {l}");
+    }
+    eprintln!(
+        "\n| rig | holes | config | arm | wall median s | third server MB mean | fleet MB mean | verdicts |"
+    );
+    eprintln!("|---|---|---|---|---|---|---|---|");
+    for s in &summary {
+        eprintln!("{s}");
+    }
+}

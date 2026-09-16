@@ -23,6 +23,52 @@
 //! postings a SECOND GENERATION of one already emitted - off by default,
 //! and the only way this corpus exercises the generation split at all
 //! (see `Stream::repost_pct`).
+//!
+//! # THE GENERATION-DROP TOTAL SATURATES. It is a startup transient, not a rate
+//!
+//! `ingest_drop_gen_depth` in this rig's `kv` is a FIXED total for a
+//! given (seed, fanout, batch): it rises early in the stream and then
+//! stops dead, and reads the same number at 200,000, 400,000 and
+//! 600,000 headers. Never divide it by `--headers`, and never quote a
+//! drop figure from this rig as a rate.
+//!
+//! Why, measured 16 Sep 2026 (full record:
+//! `research/GEN-DEPTH-CENSUS-SATURATION-2026-09-16.md`). A gen-depth
+//! drop needs more than `MAX_GEN_PASSES` = 4 generations of one release
+//! contending for the SAME (file, part) slot inside ONE batch, so the
+//! clones have to be SYNCHRONISED, not merely concurrent. There is
+//! exactly one place in this generator that starts many postings at the
+//! same article number: the FIRST `Stream::fill`, which opens `fanout`
+//! slots at once while `pool` is still nearly empty, so consecutive
+//! repost draws keep hitting the same one or two releases. Every deep
+//! cohort observed traces back to it - printing the start article of
+//! each live clone gives sets like `[1, 1, 1, 1, 23743, 30897]`. After
+//! that first call `fill` adds at most one posting per article, so later
+//! clones of one release are staggered across its own lifetime, sit at
+//! different (file, part) offsets, and defer at depth <= 4 forever.
+//!
+//! Everything measured follows from that:
+//!
+//! - the stop point tracks the drain of that startup cohort, not a
+//!   header count: at `--batch 20000 --repost-pct 25 --fanout 64` the
+//!   last increment lands at ~60k headers for seeds 1 and 2, ~180k for
+//!   seed 7, ~240k for seed 11, and seed 3 drops NOTHING over 400,000;
+//! - the total scales with the width of that first fill: 400,000
+//!   headers at seed 7 read 0 / 0 / 602 / 2,954 / 8,627 drops at
+//!   `--fanout` 6 / 16 / 32 / 64 / 128;
+//! - a SECOND stream start against the same index adds its own
+//!   transient, which is how the counter was cleared of being latched:
+//!   400,000 at seed 7 reads 2,954, and `--append` of 400,000 at seed 11
+//!   takes it to 7,181, exactly 2,954 + seed 11's own standalone 4,227.
+//!
+//! Comparing two batch sizes on one seed is still sound, because both
+//! arms run the identical stream and both totals are final values of the
+//! same window. Anything that needs drops to keep arriving - a rate, a
+//! long soak, a per-million figure - needs the corpus changed first, and
+//! the lever is the pool: pre-warm it to its cap before the first `fill`
+//! (which would move every published magnitude, so it was NOT done
+//! here), or drive repeated shorter runs with `--append` and fresh
+//! seeds, which is a transient per run by construction.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -248,6 +294,12 @@ struct Stream {
     /// stable-poster families are eligible - `Hex40` and `Teevee` mint a
     /// fresh `From` per article, so their cluster key never repeats and
     /// they cannot clash by construction however they are batched.
+    ///
+    /// It starts EMPTY and fills over roughly the first 150,000 to
+    /// 250,000 headers, which is why the gen-depth drop total saturates:
+    /// the deep, synchronised cohorts can only be minted while this is
+    /// small, and the first `fill` below is the only call that opens
+    /// enough slots at once to mint one. See the module header.
     pool: Vec<Release>,
 }
 

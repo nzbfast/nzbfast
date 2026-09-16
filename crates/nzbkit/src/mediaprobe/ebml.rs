@@ -12,6 +12,7 @@ use super::{
     AudioTrack, Chapter, Container, Hdr, MAX_CHAPTERS, MAX_DEPTH, MAX_STRING, MAX_TRACKS,
     MediaInfo, ProbeError, Rd, SubTrack, VideoTrack, be_uint, codec, normalize_lang, ratio, round3,
 };
+use std::collections::HashSet;
 use std::io::{Read, Seek};
 
 // Masters we descend into. Everything else is skipped by its declared
@@ -158,7 +159,8 @@ struct State {
     track: TrackBuf,
     seg_data_start: u64,
     seg_end: u64,
-    /// SeekHead targets: (element id, absolute file offset).
+    /// SeekHead targets: (element id, offset RELATIVE to the segment's
+    /// data start, which is what a SeekPosition carries).
     seek: Vec<(u32, u64)>,
     cur_seek_id: Option<u32>,
     cur_seek_pos: Option<u64>,
@@ -192,34 +194,93 @@ pub(super) fn parse<R: Read + Seek>(
     // Chapters and Tags are legitimately written after the clusters.
     // The SeekHead is the container's own index of where; chase only
     // what we have not already seen, and only backwards-safe targets.
-    let targets: Vec<(u32, u64)> = st
-        .seek
-        .iter()
-        .filter(|(id, _)| match *id {
-            CHAPTERS => !st.seen_chapters,
-            TAGS => !st.seen_tags,
-            TRACKS => !st.seen_tracks,
-            _ => false,
-        })
-        .copied()
-        .collect();
-    for (id, rel) in targets {
+    //
+    // These three are read ONCE, here, and must NOT become a per-target
+    // re-check inside the loop below. They answer "did the PRE-CLUSTER
+    // walk already cover this kind" - and a chase walk of a Chapters
+    // element sets `st.seen_chapters` itself, through `close()`, so
+    // re-reading them would drop every target after the first of its
+    // kind. Two distinct Chapters elements at two offsets are two
+    // elements and both belong in the answer; the offset set below is
+    // the dedupe, not this.
+    let (want_chapters, want_tags, want_tracks) =
+        (!st.seen_chapters, !st.seen_tags, !st.seen_tracks);
+    let chaseable = |id: u32| match id {
+        CHAPTERS => want_chapters,
+        TAGS => want_tags,
+        TRACKS => want_tracks,
+        // A SeekHead naming ANOTHER SeekHead is ordinary, specified
+        // Matroska rather than an exotic shape: it is how a muxer
+        // writes a small fixed-size index at the front of the Segment
+        // and defers the real one to the tail, which is exactly the
+        // case this chase exists for. Always chaseable - there is no
+        // `seen_` for it, because a second index is not redundant with
+        // the first. Handoff 16 Sep 2026.
+        SEEK_HEAD => true,
+        _ => false,
+    };
+    // The dedupe key is the RESOLVED ABSOLUTE OFFSET of the target
+    // element, and deliberately not its element ID: a SeekHead may
+    // legitimately list the same target twice (and a hostile one from
+    // Usenet certainly may), while two entries at two DIFFERENT offsets
+    // are two different elements whose contents both belong in the
+    // answer - keying on the ID would silently drop the second. It is
+    // not the offset of the Seek ENTRY either; two entries that resolve
+    // to one element are one walk.
+    //
+    // It IS the cycle guard, now that the chase is a WORKLIST rather
+    // than a snapshot: `st.seek` is drained by index and grows under
+    // the loop, because a walk of a second SeekHead appends its entries
+    // through `close(SEEK)`. A SeekHead naming itself, or two naming
+    // each other, is a trivial hostile file from Usenet; the resolved
+    // offset is what terminates it, on the second visit, with no cap on
+    // the number of entries chased - a cap would turn this correctness
+    // fix into a silent truncation.
+    //
+    // Termination does not rest on that set alone. Entries reach
+    // `st.seek` only from `close(SEEK)`, and every SEEK master opened
+    // has already paid `charge_element()` against the probe's global
+    // element budget, so the worklist cannot exceed MAX_ELEMENTS
+    // entries however the file is shaped; `next` advances on every
+    // iteration whatever happens to the entry. The offset set is what
+    // makes a cycle cost ONE extra walk rather than a burned budget and
+    // a "too complex to inspect fully" warning on a file that is fine.
+    let mut walked: HashSet<u64> = HashSet::new();
+    let mut next = 0usize;
+    while next < st.seek.len() {
+        let (id, rel) = st.seek[next];
+        next += 1;
+        if !chaseable(id) {
+            continue;
+        }
         let at = match st.seg_data_start.checked_add(rel) {
             Some(a) if a < file_end => a,
             _ => continue,
         };
+        if !walked.insert(at) {
+            continue;
+        }
         let label = match id {
             CHAPTERS => "chapters",
             TAGS => "tags",
+            SEEK_HEAD => "index",
             _ => "track list",
         };
         // The element at the target must be the one the index promised;
         // a SeekPosition pointing into the middle of a cluster is a
         // corrupt or hostile index, and walking it would be walking
         // payload as structure.
+        //
+        // Its declared END is read here too, and it is what the chase
+        // walk is bounded by. Walking to `file_end` instead let a walk
+        // run off the end of its own target into the NEXT top-level
+        // element, so a tail of [Tags][Chapters] parsed the Chapters
+        // twice - once by falling out of Tags and once as its own
+        // target - and `close(CHAPTER_ATOM)` pushed every chapter
+        // again. Bug sweep 16 Sep 2026, item 26.
         rd.seek_to(at);
-        match read_id(rd) {
-            Ok((found, _)) if found == id => {}
+        let id_len = match read_id(rd) {
+            Ok((found, n)) if found == id => n,
             Ok(_) => {
                 info.incomplete(format!("{label} index points at the wrong element"));
                 continue;
@@ -232,8 +293,30 @@ pub(super) fn parse<R: Read + Seek>(
                 info.incomplete(format!("{label} index is unreadable"));
                 continue;
             }
-        }
-        if walk(rd, info, &mut st, at, file_end).is_err() {
+        };
+        let elem_end = match read_size(rd) {
+            Ok((Some(s), size_len)) => at
+                .saturating_add(id_len as u64)
+                .saturating_add(size_len as u64)
+                .saturating_add(s)
+                .min(file_end),
+            // An unknown size is legal only on Segment and Cluster.
+            // A chase target with one has no end to walk to, and the
+            // walk would refuse it at its first element anyway.
+            Ok((None, _)) => {
+                info.incomplete(format!("{label} index points at an unsized element"));
+                continue;
+            }
+            Err(e) if e.is_gap() => {
+                info.incomplete(format!("{label} not downloaded yet"));
+                continue;
+            }
+            Err(_) => {
+                info.incomplete(format!("{label} index is unreadable"));
+                continue;
+            }
+        };
+        if walk(rd, info, &mut st, at, elem_end).is_err() {
             info.incomplete(format!("{label} not downloaded yet"));
         }
     }
@@ -1006,6 +1089,129 @@ mod tests {
         assert_eq!(i.chapters.len(), 2);
         assert_eq!(i.chapters[1].title, "Two");
         assert!(i.complete, "warnings: {:?}", i.warnings);
+    }
+
+    /// A SeekHead that lists one target twice is one element, and one
+    /// walk. Before the offset dedupe both entries survived the filter
+    /// (it is evaluated once, before the loop) and both were walked, so
+    /// every chapter was pushed twice.
+    #[test]
+    fn a_target_listed_twice_is_walked_once() {
+        let b = super::super::testmux::mkv_seekhead_same_target_twice();
+        let i = probe(&b);
+        assert_eq!(
+            i.chapters,
+            vec![
+                Chapter {
+                    start_ms: 0,
+                    title: "One".into()
+                },
+                Chapter {
+                    start_ms: 250,
+                    title: "Two".into()
+                },
+            ]
+        );
+        assert!(i.complete, "warnings: {:?}", i.warnings);
+    }
+
+    /// The honest-mux doubling: a tail of [Tags][Chapters] with both
+    /// indexed. The walk from Tags used to run past the end of its own
+    /// target into the Chapters behind it, and the Chapters target then
+    /// parsed the same element again.
+    #[test]
+    fn a_chase_walk_stops_at_the_end_of_its_own_target() {
+        let b = super::super::testmux::mkv_seekhead_tags_before_chapters();
+        let i = probe(&b);
+        assert_eq!(
+            i.chapters,
+            vec![
+                Chapter {
+                    start_ms: 0,
+                    title: "One".into()
+                },
+                Chapter {
+                    start_ms: 250,
+                    title: "Two".into()
+                },
+            ]
+        );
+        assert!(i.complete, "warnings: {:?}", i.warnings);
+    }
+
+    /// The negative control for that dedupe. Two Chapters elements at
+    /// two offsets are two elements: the key is the resolved offset, so
+    /// both are walked and both contribute. A key of "the element ID"
+    /// or a re-check of `seen_chapters` inside the loop would pass the
+    /// two tests above and silently lose "Three"/"Four" here.
+    #[test]
+    fn two_distinct_chapters_elements_both_survive_the_dedupe() {
+        let b = super::super::testmux::mkv_seekhead_two_chapter_elements();
+        let i = probe(&b);
+        assert_eq!(
+            i.chapters
+                .iter()
+                .map(|c| c.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["One", "Two", "Three", "Four"]
+        );
+        assert_eq!(
+            i.chapters.iter().map(|c| c.start_ms).collect::<Vec<_>>(),
+            vec![0, 250, 500, 750]
+        );
+    }
+
+    /// A front SeekHead that names only a SECOND SeekHead, which names
+    /// the Chapters. That is the deferred-index mux - a small
+    /// fixed-size index up front, the real one in the tail - and it is
+    /// ordinary, specified Matroska. Before the chase became a
+    /// worklist this returned ZERO chapters with `complete` still true,
+    /// by two independent mechanisms: the target filter refused
+    /// SEEK_HEAD, and the target list was a snapshot taken before the
+    /// loop, so the second index's entries arrived too late to be read.
+    #[test]
+    fn chapters_behind_a_second_chained_seekhead_are_found() {
+        let b = super::super::testmux::mkv_seekhead_chained();
+        let i = probe(&b);
+        assert_eq!(
+            i.chapters,
+            vec![
+                Chapter {
+                    start_ms: 0,
+                    title: "One".into()
+                },
+                Chapter {
+                    start_ms: 250,
+                    title: "Two".into()
+                },
+            ]
+        );
+        assert!(i.complete, "warnings: {:?}", i.warnings);
+    }
+
+    /// The cycle control, RUN rather than argued: two SeekHeads naming
+    /// each other, with the Chapters reachable only through the second.
+    /// A worklist over offsets a hostile file chose has to terminate on
+    /// its own - the resolved-offset set is what does it, on the second
+    /// visit - and it has to terminate with the file's real contents
+    /// rather than a budget warning or a doubled chapter list.
+    #[test]
+    fn a_seekhead_cycle_terminates_and_still_reads_what_is_there() {
+        for (what, b) in [
+            ("mutual", super::super::testmux::mkv_seekhead_cycle()),
+            ("self", super::super::testmux::mkv_seekhead_self_loop()),
+        ] {
+            let i = probe(&b);
+            assert_eq!(
+                i.chapters
+                    .iter()
+                    .map(|c| c.title.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["One", "Two"],
+                "{what} cycle"
+            );
+            assert!(i.complete, "{what} cycle warnings: {:?}", i.warnings);
+        }
     }
 
     /// V_MS/VFW/FOURCC is a wrapper, not a codec. The real id is the

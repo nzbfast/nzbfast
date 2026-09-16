@@ -733,7 +733,7 @@ pub(crate) fn physical_cores() -> Option<usize> {
 /// NOTHING WILL TELL YOU.** This fold is the losing arm the NTT's
 /// admission gates are calibrated against, and its cost per (source x
 /// row) is the DENOMINATOR of every one of them: `NTT_MIN_PRESENT`,
-/// `NTT_MIN_WORK` and `ntt_min_missing` in
+/// `ntt_min_work` and `ntt_min_missing` in
 /// `crates/nzbkit-base/src/par2repair/fastpar.rs`, and
 /// `CREATE_NTT_MIN_PRESENT_NEON` / `_X86` in
 /// `crates/nzbkit-base/src/par2gen/ntt_range.rs`. A faster fold RAISES
@@ -764,10 +764,16 @@ pub(crate) fn fold_parallel(
 /// [`fold_parallel`] that reports its unit grid's progress and can be
 /// called off inside it.
 ///
-/// ONE CALLER, deliberately: the dense back-substitution. The creator's
-/// folds and the syndrome windows go through [`fold_parallel`] with an
-/// inert control, because they are neither the stretch a user waits on
-/// nor a stretch anybody may cancel half-done.
+/// TWO CALLERS, and only the first reports. The dense back-substitution
+/// passes the repair's control. The syndrome pass ([`fold_batches`])
+/// passes `RepairControl::cancel_only`: it is not the stretch a user
+/// waits on, so it reports nothing, but it DOES stop. Until 15 Sep 2026
+/// it went through [`fold_parallel`] with an inert control, on the
+/// reasoning that nobody may cancel it half-done - and a half-done
+/// syndrome pass is exactly as harmless as a half-done
+/// back-substitution, because the driver refuses both before the patch.
+/// What that rule bought was a cancel waiting out a whole merged fold. The
+/// creator's folds still go through [`fold_parallel`] inert.
 ///
 /// The grain is the UNIT - one cache-sized cell of the destination grid,
 /// which is what the drain below already deals in - and never the row.
@@ -1415,7 +1421,16 @@ impl ArenaPool {
 /// Fold queued batches of present slices into every syndrome row - one
 /// row sweep for the whole set, however many feeder batches it arrived
 /// as.
-pub(super) fn fold_batches(exponents: &[u32], syndromes: &mut [Vec<u16>], batches: &[FeedBatch]) {
+/// Fold `batches` into the syndrome rows. `control` is the repair's
+/// [`cancel_only`](crate::par2repair::control::RepairControl::cancel_only)
+/// view (or the inert default): polled per unit, so a cancel stops the
+/// call instead of waiting for every row of a merged batch.
+pub(super) fn fold_batches(
+    exponents: &[u32],
+    syndromes: &mut [Vec<u16>],
+    batches: &[FeedBatch],
+    control: &crate::par2repair::control::RepairControl,
+) {
     if syndromes.is_empty() {
         return;
     }
@@ -1430,11 +1445,12 @@ pub(super) fn fold_batches(exponents: &[u32], syndromes: &mut [Vec<u16>], batche
     if srcs.is_empty() {
         return;
     }
-    fold_parallel(
+    fold_parallel_controlled(
         syndromes,
         &srcs,
         &|j, i| gf16::pow2(logs[i] as u64 * exponents[j] as u64),
         Some(crate::memgauge::Sub::RepairWork),
+        control,
     );
 }
 
@@ -1781,6 +1797,16 @@ pub(super) static UNATTENDED_UNSTRUCTURED_CEILING: std::sync::atomic::AtomicUsiz
 
 /// Cap the UNSTRUCTURED solve for a process that nobody is watching.
 ///
+/// **NOTHING IN THIS REPO CALLS THIS IN PRODUCTION SINCE 16 Sep 2026,
+/// and that is the finished state rather than a gap to fill.** The
+/// daemon set it from `serve/mod.rs` until then; that call is deleted,
+/// and the block where it stood carries the census that deleted it.
+/// What survives here is the MECHANISM - still live, still tested, and
+/// still the right answer for an embedder whose repair callers cannot
+/// be watched.
+///
+/// # What it caps, and what it never did
+///
 /// The dense arm's memory bound says what FITS. This says what a given
 /// process should START, and the two are different questions: a gapped
 /// set at m = 16,384 fits comfortably in 1 GB and still takes about four
@@ -1792,59 +1818,66 @@ pub(super) static UNATTENDED_UNSTRUCTURED_CEILING: std::sync::atomic::AtomicUsiz
 /// indistinguishable from outside, and a cancel would not be honoured
 /// until it finished anyway.
 ///
-/// So the DAEMON sets this and a command-line tool does not. It is a
-/// process-wide policy because it was a property of the process:
-/// `serve` is unattended for as long as it runs, and `parfast` never is.
-///
-/// **THE CONDITION THIS DOC NAMED IS NOW MET, AND THE NUMBER STILL
-/// STANDS.** It used to say "when the daemon grows in-repair progress
-/// and a cancel the fold honours, this is the thing to raise". The
-/// ENGINE grew both on 12 Sep 2026 (`par2repair::control`, plan 4.2
-/// item 1) and THE DAEMON ADOPTED THEM the same day
-/// (`daemon-infold-progress-cancel`): its download repair and its late-
-/// set pass both pass a `RepairControl` built from the job's own
-/// `SideCancel`, so the queue row moves through four phases and a
-/// Cancel reaches the fold.
-///
-/// The number was still not raised, and RAISING IT WAS THE WRONG READING
-/// OF THIS DOC ALL ALONG. The ceiling is not a guess at what a daemon
-/// can afford; it is a stand-in for "nobody can see this repair or stop
-/// it", and that question is answered per REPAIR rather than per
-/// process. So `check_repair_dim_dense` skips the ceiling entirely for a
-/// caller supplying BOTH halves (`RepairControl::is_attended`) - the
-/// controlled daemon repair is uncapped by that exemption, at any m the
-/// memory bound admits, while the paths that still pass nothing stay
-/// capped exactly as before. Raising the number would have uncapped
-/// those too, for nothing.
-///
-/// WHICH PATHS THOSE ARE, censused 12 Sep 2026 (claim
-/// `nested-repair-infold-control`) over every daemon-reachable entry
-/// that starts a solve - the disk driver's entries and the mapped
-/// driver's, five production call sites:
-///
-///  - CONTROLLED: `repair::nativepass` (the download disk repair and
-///    its adoption probe), `get::latesets` (the late-set round), and
-///    `unpack::nested_par2_repair` (the nested extraction ladder, which
-///    took its door that day).
-///  - STILL UNCONTROLLED, and the reason this call survives:
-///    `get::settle::noset`, the no-set obfuscated arm, which calls
-///    `PacketCatalog::repair_present_or_renamed_sets`; and the MAPPED
-///    in-stream driver `repair::try_mapped_repair`, which calls
-///    `repair_mapped_catalog_resumed` and so reaches the same
-///    `Reconstructor` with a default control.
-///  - CLI-only, and unaffected either way: `unpack::extract_local`
-///    (`nzbfast extract`) and `parfast`.
-///
-/// That is why this call SURVIVES in `serve/mod.rs` rather than being
-/// deleted along with the refusal: it is now the backstop for the
-/// daemon's uncontrolled repair paths and not a blanket policy. Pinned
-/// by `a_controlled_caller_is_exempt_from_the_unattended_ceiling` and
-/// by the daemon-side test that drives a real unstructured set past it.
-///
 /// Only the UNSTRUCTURED arm is capped. A structured repair is roughly
 /// linear in m and finishes in seconds even with every block missing
 /// (8.9 s at m = 32,768, the format's ceiling), so capping it by m would
 /// refuse fast work for no reason.
+///
+/// # Why the daemon stopped setting it
+///
+/// RAISING THE NUMBER WAS THE WRONG READING OF THIS DOC ALL ALONG, and
+/// the doc said so from 12 Sep. The ceiling is not a guess at what a
+/// daemon can afford; it is a stand-in for "nobody can see this repair
+/// or stop it", and that question is answered per REPAIR rather than
+/// per process. So [`super::reconstruct::check_repair_dim_dense`] skips
+/// the ceiling entirely for a caller supplying BOTH halves of a
+/// [`RepairControl`](super::RepairControl) - see
+/// `RepairControl::is_attended` - and the work was to give every
+/// daemon-reachable caller one, not to pick a bigger m.
+///
+/// That finished on 16 Sep 2026 (claim
+/// `repair-control-two-censused-sites-16sep`). The census below is the
+/// one taken THAT day, walked outwards from the two production solve
+/// drivers - `par2repair::repair_mapped_inner` and the disk driver's
+/// `repair_dir_set` body are the only two functions in the tree that
+/// construct a [`Reconstructor`](super::reconstruct::Reconstructor) -
+/// over every caller of every `pub` repair entry `par2repair` exposes:
+///
+///  - CONTROLLED, and all five are daemon-reachable:
+///    `repair::nativepass` (the download disk repair and its adoption
+///    probe), `get::latesets` (the late-set round),
+///    `unpack::nested_par2_repair` (the nested extraction ladder) -
+///    those three since 12 Sep - plus `get::settle::noset` (the no-set
+///    obfuscated arm, through
+///    [`PacketCatalog::repair_present_or_renamed_sets_controlled`](
+///    super::PacketCatalog::repair_present_or_renamed_sets_controlled))
+///    and the MAPPED in-stream driver `repair::try_mapped_repair`
+///    (through
+///    [`repair_mapped_catalog_resumed_controlled`](
+///    super::repair_mapped_catalog_resumed_controlled)), both since
+///    16 Sep.
+///  - CLI-only, and unaffected either way: `unpack::extract_local`
+///    (`nzbfast extract`) and `parfast`.
+///
+/// The previous version of this block listed the last two as STILL
+/// UNCONTROLLED and named them "the reason this call survives". They
+/// are not, and it does not.
+///
+/// # When to set it again
+///
+/// When a process genuinely cannot watch its own repairs - an embedder
+/// driving this engine from callers that have no progress sink and no
+/// cancel. Setting it is not the fix for a NEW unwatched path in the
+/// daemon: it is process-wide, so it would re-cap the five callers
+/// above that earned their exemption. Give the new path a control
+/// instead.
+///
+/// Zero (the default) means no ceiling: a caller that has not said
+/// otherwise is assumed to be a person who asked for this repair.
+/// Pinned by `inline_tests::
+/// a_controlled_caller_is_exempt_from_the_unattended_ceiling`, which
+/// drives the exemption and the refusal at the same m, so the mechanism
+/// cannot rot while no production caller uses it.
 pub fn set_unattended_unstructured_ceiling(m: usize) {
     UNATTENDED_UNSTRUCTURED_CEILING.store(m, std::sync::atomic::Ordering::Relaxed);
 }

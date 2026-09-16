@@ -24,11 +24,32 @@ research/POSTFAST-VS-NESTED-CORPUS-2026-09-03.md; closed 4 Sep 2026 by
 and synced into vendor/rars, and checked against unrar 7.23 as well as
 against our own reader.
 
-Three files and not one on purpose, and the sizes are picked so the
-members do NOT align with the volume cut: the middle file straddles a
-boundary and the sidecar starts mid-volume. A set whose members each
-happened to fill a volume would pass without a split flag ever being
-written, and would prove nothing about the arm this row exists for.
+Three files and not one on purpose, so the row reaches the plural
+emitter rather than the single-member one. WHERE the volume cuts fall
+was misdescribed here until 16 Sep 2026: this note claimed the members
+do not align with the cut, that the middle file straddles a boundary
+and that a set whose members filled a volume exactly would carry no
+split flag. Read out of the emitted headers, `volume_bytes` is the
+PAYLOAD budget per volume with headers counted on top, so 24000 bytes
+of feature.bin fill volumes 1 to 3 to the byte:
+
+  vol 1  feature.bin  8000 of 24000  SPLIT_AFTER
+  vol 2  feature.bin  8000 of 24000  SPLIT_BEFORE, SPLIT_AFTER
+  vol 3  feature.bin  8000 of 24000  SPLIT_BEFORE            <- the cut
+  vol 4  sample.bin   3000 of  3000  whole
+         notes.txt     300 of   300  whole
+
+So the first member ends exactly on a cut, sample.bin is whole in
+volume 4 and straddles nothing, and volume 3's last member carries no
+continuation flag - which is the boundary-between-members shape this
+note said the row avoids. Split flags are written regardless, on
+feature.bin, so the row does exercise the split-store arm it was added
+for; what it also exercises, and nobody knew, is a cut between whole
+members. It passes over that cut because its volume names are
+descriptive, so the obfuscated partition that groups on headers alone
+never sees this set. The opaque-named variant of the same cut is
+`c6-c2-opaque-volumes-over-three-members`, written the day this note
+was corrected, and that is the row where the cut is load bearing.
 
 The end state is the three payload files and the PAR2 index. The
 volumes are spent by the unpack and a clean run never fetches the

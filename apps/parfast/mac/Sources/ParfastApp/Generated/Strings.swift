@@ -234,7 +234,7 @@ public enum S {
     /// empty.create.title
     public static let emptyCreateTitle = "Drop files or folders here"
     /// empty.queue.body
-    public static let emptyQueueBody = "Jobs you start appear here, and run one at a time unless you raise the limit in Settings."
+    public static let emptyQueueBody = "Jobs you start appear here, and run one at a time unless you raise the limit in Settings. When this computer has room for both, two large single-file creates can run side by side."
     /// empty.queue.title
     public static let emptyQueueTitle = "The queue is empty"
     /// empty.verify.body
@@ -405,6 +405,16 @@ public enum S {
     public static let settingsCreate = "Create defaults"
     /// settings.default_scheme
     public static let settingsDefaultScheme = "Default volume scheme"
+    /// settings.digest_cache
+    public static let settingsDigestCache = "Remember checksums of large files"
+    /// settings.digest_cache_clear
+    public static let settingsDigestCacheClear = "Clear remembered checksums"
+    /// settings.digest_cache_clear_confirm
+    public static let settingsDigestCacheClearConfirm = "Forget every remembered checksum? The next create or full check of each large file takes the usual time again."
+    /// settings.digest_cache_cleared
+    public static let settingsDigestCacheCleared = "Remembered checksums cleared"
+    /// settings.digest_cache_note
+    public static let settingsDigestCacheNote = "A repeat create or full check of an unchanged file over 256 MB skips its slowest step. parfast keeps a small checksum record for each such file in your user cache folder, and re-checks the file's contents before trusting it."
     /// settings.fast_solver
     public static let settingsFastSolver = "Fast solver"
     /// settings.general
@@ -443,6 +453,10 @@ public enum S {
     public static let settingsOnOpenRepair = "Verify it, then repair if it can be repaired"
     /// settings.on_open_verify
     public static let settingsOnOpenVerify = "Verify it"
+    /// settings.pair_large_creates
+    public static let settingsPairLargeCreates = "Run two large single-file creates at once, so a queue of large files finishes sooner"
+    /// settings.pair_large_creates_note
+    public static let settingsPairLargeCreatesNote = "No single job gets faster. A second create starts beside a running one only when this computer has the cores and memory for both. On a spinning disk it gains nothing, because the two creates share the disk's speed, so you can turn it off there."
     /// settings.performance
     public static let settingsPerformance = "Performance"
     /// settings.purge_default

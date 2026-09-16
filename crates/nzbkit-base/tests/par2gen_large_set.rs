@@ -40,6 +40,45 @@ use nzbkit_base::par2gen::{
     pin_accum_budget_for_tests,
 };
 
+/// The tests here that touch a create-side PROCESS-GLOBAL, one at a time:
+/// the transform arm pins, the band arena pin, and the accumulator budget
+/// pin. Taken through `into_inner` so one failing test does not poison the
+/// rest into failures that hide it.
+///
+/// The plan and band counters are monotone and process-global, and
+/// nightly's one-process run puts this whole binary in ONE process. The
+/// ACCUMULATOR pin is worse than a counter, because it decides where the
+/// batch boundary falls: `the_accumulator_budget_really_splits_a_set_into_
+/// several_passes` pins 64 MiB and then reads `accum_budget_bytes()` back
+/// to prove its fixture crossed that boundary, while
+/// `a_cancel_in_a_later_pass_removes_the_earlier_passes_volumes` LIFTS the
+/// same pin at its end - so run in parallel, the first can read the host's
+/// unpinned 8 GiB and fail an assertion about a set it really did split.
+/// Measured 15 Sep 2026: "fixture no longer crosses the budget: 81
+/// recovery slices against a 8192-slice batch (8589934592 B budget)",
+/// failing in the target and passing alone. That race predates the band
+/// route; adding an eighth test to this binary is what made it show.
+static PROCESS_PINS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The accumulator budget pinned to `bytes` for as long as this is held,
+/// [`PROCESS_PINS`] with it, and the pin LIFTED however the test leaves -
+/// which is what the two tests above did not do for each other.
+struct PinnedAccum(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl PinnedAccum {
+    fn new(bytes: u64) -> PinnedAccum {
+        let held = PROCESS_PINS.lock().unwrap_or_else(|e| e.into_inner());
+        pin_accum_budget_for_tests(bytes);
+        PinnedAccum(held)
+    }
+}
+
+impl Drop for PinnedAccum {
+    fn drop(&mut self) {
+        pin_accum_budget_for_tests(0);
+    }
+}
+
 /// A payload with no long runs and no repeating period a fold could
 /// accidentally cancel against - a zero-filled fixture would pass a
 /// Reed-Solomon test that a wrong coefficient should have failed.
@@ -276,8 +315,10 @@ fn a_wide_set_at_the_creator_s_own_block_size_repairs_real_damage() {
 fn the_accumulator_budget_really_splits_a_set_into_several_passes() {
     // The budget scales with the box's RAM since 2 Sep 2026; pin it at
     // the 64 MiB this fixture was sized against so the boundary is
-    // where the assertion below expects it, whatever the machine.
-    pin_accum_budget_for_tests(64 << 20);
+    // where the assertion below expects it, whatever the machine. The
+    // guard also holds [`PROCESS_PINS`], because the pin is
+    // process-global and the cancel test below lifts it.
+    let _pins = PinnedAccum::new(64 << 20);
     // The multi-batch path at a block size that is not a toy. Getting
     // there is a fixed trade and this picks the cheap end of it: a batch
     // holds at most `ACCUM_BUDGET / block_size` recovery slices, so
@@ -354,7 +395,7 @@ fn a_cancel_in_a_later_pass_removes_the_earlier_passes_volumes() {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
-    pin_accum_budget_for_tests(64 << 20);
+    let _pins = PinnedAccum::new(64 << 20);
     let t = Tmp::new("cancelpass");
     let block = 1u64 << 20;
     let members = vec![
@@ -525,7 +566,7 @@ fn the_transform_writes_the_fold_s_bytes_at_a_real_block_size() {
     // afford on every push. That file covers all four dispatch shapes -
     // mapped, copied windows, the subfloor clause, stripe-first - at a
     // 128-byte block, where the transform runs as ONE stripe on ONE
-    // worker: `ntt_stripe_geometry` cuts a block into 512-word stripes
+    // worker: `ntt_create_stripe_geometry` cuts a block into 512-word stripes
     // and hands them to every core, so at 128 bytes there is a single
     // stripe and the atomic claim loop, the per-worker scratch and the
     // cross-worker column split never run at all.
@@ -544,17 +585,22 @@ fn the_transform_writes_the_fold_s_bytes_at_a_real_block_size() {
     // re-derived; the assertion that a plan was really built is what
     // makes that safe.
     //
-    // The arm pin and the plan counter are process-global and this test
-    // takes no lock over them, because none of the five tests beside it
-    // is anywhere near the gates - the widest is ~1,500 slices at 75
-    // rows - so nothing else in this binary builds a plan or cares which
-    // arm is pinned. A large-shape test added here later would break
-    // that: the counter is monotone, so a concurrent plan build inflates
-    // this test's difference and fails it LOUDLY rather than passing on
-    // somebody else's transform. The fix then is a shared serializer,
-    // the way `par2gen_create_ntt` next door already carries one.
+    // The arm pin and the plan counter are process-global. Until 15 Sep
+    // 2026 this test took no lock over them, because none of the five
+    // tests beside it was anywhere near the gates - the widest is ~1,500
+    // slices at 75 rows - so nothing else in this binary built a plan or
+    // cared which arm was pinned. The band route's real-block test below
+    // (TODO 345 C) is exactly the large-shape test that breaks that: the
+    // counter is monotone, so a concurrent plan build would inflate this
+    // test's difference and fail it LOUDLY rather than pass on somebody
+    // else's transform. Both now take [`PROCESS_PINS`], the shared
+    // serializer this comment always said the fix would be, the way
+    // `par2gen_create_ntt` next door carries one - and the two
+    // accumulator-pin tests take it as well, for a race of their own that
+    // predates either of them (see that static).
+    let _serial = PROCESS_PINS.lock().unwrap_or_else(|e| e.into_inner());
     let bs = 4_096u64;
-    let (slices, rows) = ntt_range::floor_shape_for_tests();
+    let (slices, rows) = ntt_range::floor_shape_for_tests(bs as usize);
     let t = Tmp::new("createntt");
     // Two members, the second a PARTIAL tail block - the block the
     // mapped path copies into its pad arena instead of reading out of
@@ -620,6 +666,108 @@ fn the_transform_writes_the_fold_s_bytes_at_a_real_block_size() {
     broken[n - 50_000..].fill(0xff);
     std::fs::write(&victim, &broken).unwrap();
     let status = nzbkit_base::par2repair::repair_dir(&t.0.join("ntt")).expect("repair runs");
+    assert!(
+        matches!(status, nzbkit_base::par2repair::RepairStatus::Repaired(_)),
+        "{status:?}"
+    );
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        good,
+        "victim not byte-exact"
+    );
+}
+
+#[test]
+fn the_band_route_writes_the_fold_s_bytes_at_a_real_block_size() {
+    // The band route over copies (`par2gen/stripe_first.rs`, module doc
+    // "Bands"; TODO 345 C) at the geometry a real set is built at - the
+    // half `par2gen_create_ntt`'s band tests cannot afford per push, where
+    // a 1,100-byte block is two stripes on two workers. 4,096 bytes is
+    // four 512-word stripes over every core, and the band arena pinned to
+    // ONE stripe of every slice makes four sweeps, so the chunk's offset
+    // into the arena (`c - c0`) is exercised at every stripe rather than
+    // only at zero.
+    //
+    // Map-off stands in for the fit gate, which reads the box's available
+    // memory and cannot be set from here; the corpus pin stands in for a
+    // payload over the copied transform's window. Every pin is lifted
+    // however the test leaves. The fold arm is the reference, as in the
+    // transform test above.
+    struct Unpin;
+    impl Drop for Unpin {
+        fn drop(&mut self) {
+            ntt_range::pin_transform_off_for_tests(false);
+            ntt_range::pin_map_off_for_tests(false);
+            ntt_range::pin_band_corpus_for_tests(0);
+        }
+    }
+    let _serial = PROCESS_PINS.lock().unwrap_or_else(|e| e.into_inner());
+    let _unpin = Unpin;
+    let bs = 4_096u64;
+    let (slices, rows) = ntt_range::floor_shape_for_tests(bs as usize);
+    let t = Tmp::new("bandsreal");
+    // The NAMES travel with the bytes, as in the transform test above.
+    let mut built: Vec<Vec<(String, Vec<u8>)>> = Vec::new();
+    for (tag, fold) in [("fold", true), ("bands", false)] {
+        ntt_range::pin_transform_off_for_tests(fold);
+        ntt_range::pin_map_off_for_tests(!fold);
+        ntt_range::pin_band_corpus_for_tests(if fold { 0 } else { slices * 1024 });
+        let dir = t.0.join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let members = vec![
+            {
+                let path = dir.join("payload.bin");
+                std::fs::write(&path, payload((slices - 1) * bs as usize, 43)).unwrap();
+                Member {
+                    name: "payload.bin".into(),
+                    path,
+                }
+            },
+            {
+                let path = dir.join("tail.bin");
+                std::fs::write(&path, payload(bs as usize / 2, 44)).unwrap();
+                Member {
+                    name: "tail.bin".into(),
+                    path,
+                }
+            },
+        ];
+        let cold0 = ntt_range::cold_builds_for_tests();
+        let sweeps0 = ntt_range::band_sweeps_for_tests();
+        let names =
+            create_into_exact(&dir, &members, "set", Some(bs), rows, CreatePlan::ENGINE).unwrap();
+        let cold = ntt_range::cold_builds_for_tests() - cold0;
+        let swept = ntt_range::band_sweeps_for_tests() - sweeps0;
+        let want = if fold { (0, 0) } else { (1, 4) };
+        assert_eq!(
+            (cold, swept),
+            want,
+            "the {tag} arm built {cold} plan(s) over {swept} band sweep(s) at {slices} inputs x \
+             {rows} rows; the band arm must build ONE plan over four one-stripe sweeps - re-size \
+             the fixture against the gates, do not delete the assertion"
+        );
+        built.push(
+            names
+                .iter()
+                .map(|n| (n.clone(), std::fs::read(dir.join(n)).unwrap()))
+                .collect(),
+        );
+    }
+    assert_eq!(
+        built[0], built[1],
+        "the band route and the fold must write the same recovery set"
+    );
+
+    // And it repairs, which is what proves the exponents are the ones the
+    // repairer expects.
+    let victim = t.0.join("bands").join("payload.bin");
+    let good = std::fs::read(&victim).unwrap();
+    let mut broken = good.clone();
+    let n = broken.len();
+    broken[10_000..300_000].fill(0);
+    broken[n - 50_000..].fill(0xff);
+    std::fs::write(&victim, &broken).unwrap();
+    let status = nzbkit_base::par2repair::repair_dir(&t.0.join("bands")).expect("repair runs");
     assert!(
         matches!(status, nzbkit_base::par2repair::RepairStatus::Repaired(_)),
         "{status:?}"

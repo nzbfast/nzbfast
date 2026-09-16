@@ -13,7 +13,7 @@ mod scratch;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::path::Path;
 use std::process::Command;
 
@@ -80,7 +80,15 @@ fn http_once(port: u16, req: &str, body: Option<(&str, &[u8])>) -> std::io::Resu
         }
     }
     let mut s = TcpStream::connect(("127.0.0.1", port))?;
-    s.write_all(&request)?;
+    // A failed write with an answer behind it is an answer: a peer that
+    // stops reading a body at its limit can reply and close while we are
+    // still writing, and the close fails our write. Shut our side down
+    // and read anyway; only zero bytes back is no answer. Same rule as
+    // `raw_once` in tests/daemon.rs, which carries the incident.
+    let wrote = s.write_all(&request);
+    if wrote.is_err() {
+        let _ = s.shutdown(Shutdown::Write);
+    }
     let mut out = String::new();
     // Zero bytes back is a refusal to serve, however the peer
     // phrased it: an RST (Err) when our request was never read off
@@ -91,7 +99,7 @@ fn http_once(port: u16, req: &str, body: Option<(&str, &[u8])>) -> std::io::Resu
     // truncated body must never be retried away.
     let read = s.read_to_string(&mut out);
     if out.is_empty() {
-        return Err(read.err().unwrap_or_else(|| {
+        return Err(wrote.err().or(read.err()).unwrap_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "closed without answering",

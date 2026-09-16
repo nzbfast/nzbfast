@@ -81,6 +81,8 @@ pub fn run(argv0: &str, args: &[String]) -> u8 {
     // slower than the bench driver.
     nzbkit::mem::opt_out_of_power_throttling();
     install_timing_sink();
+    // Dropped after the command returns, which is when it reports.
+    let _mem_floor = MemFloorSampler::start();
     let mut sink = out::Sink::stdio();
     // Ctrl-C is the engine's clean cancel from here on, and the engine's
     // progress is a meter on stdout - `control.rs`. The binary only:
@@ -89,7 +91,49 @@ pub fn run(argv0: &str, args: &[String]) -> u8 {
     run_controlled(argv0, args, &mut sink, Some(gate))
 }
 
-/// Give `NZBFAST_REPAIR_TIMING` somewhere to land, and only then.
+/// Whether this run's memory is BOUNDED: `-m` was given, or the process
+/// sits under a cgroup memory limit smaller than the machine. The
+/// binary's `main` asks this before any work to decide whether to fix
+/// glibc's mmap threshold, which is worth it only when something bounds
+/// the heap: inside `MemoryMax=512M` the fixed threshold removed an OOM
+/// kill and 63-243 MiB of retained feed batches, while on an unbounded
+/// 64 KiB repair it cost 6% wall and 4% CPU for ~2% of memory
+/// (research/PARFAST-512MB-M192-KILL-ATTRIBUTION-2026-09-15.md, the rank
+/// 1 addendum). Parsing twice is deliberate, and a line that does not
+/// parse is judged by the cgroup alone - `run` will refuse it before any
+/// allocation that matters.
+///
+/// `cli::parse` is not PURE, though this said so until 16 Sep 2026: a
+/// bare `@` list argument reads stdin, and reading stdin consumes it, so
+/// the second parse saw an empty listing and every file named there was
+/// silently dropped. What makes the double parse safe is that
+/// `cli::read_listing` CACHES the stdin read, so it happens once for the
+/// process however many times argv is parsed. Anything else added to
+/// `parse` that touches the world has to be idempotent the same way.
+pub fn memory_bounded(argv0: &str, args: &[String]) -> bool {
+    let published = cli::parse(argv0, args).is_ok_and(|p| p.opts.mem_mb.is_some());
+    bounded(
+        published,
+        nzbkit::mem::cgroup_mem_limit(),
+        nzbkit::mem::physical_ram(),
+    )
+}
+
+/// The rule behind [`memory_bounded`], with the host read out so it can
+/// be tested. A cgroup limit at or above physical RAM bounds nothing
+/// (a container given the whole machine); one with RAM unreadable is
+/// taken at its word.
+fn bounded(published: bool, cgroup_limit: Option<u64>, ram: Option<u64>) -> bool {
+    published
+        || match (cgroup_limit, ram) {
+            (Some(limit), Some(ram)) => limit < ram,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+}
+
+/// Give `NZBFAST_REPAIR_TIMING` and `NZBFAST_FOLD_TRACE` somewhere to land,
+/// and only then.
 ///
 /// The engine reports its phases (`plan prep`, `forney solve`, `create
 /// seals`, the fold traces) as tracing EVENTS. A binary that installs no
@@ -103,17 +147,27 @@ pub fn run(argv0: &str, args: &[String]) -> u8 {
 /// * **stderr, never stdout.** This CLI's stdout is par2cmdline-compatible
 ///   and pinned line for line by a captured conformance table. A timing
 ///   line on stdout would break every row of it.
-/// * **Nothing installed unless the variable is set.** Off, this function
-///   is one `var_os` and returns; there is no subscriber, so no other
-///   crate's events can reach a user's terminal either.
+/// * **Nothing installed unless one of the two variables is set.** Off,
+///   this function is two `var_os` calls and returns; there is no
+///   subscriber, so no other crate's events can reach a user's terminal
+///   either.
 /// * **The driver's exact format** - no ANSI, no timestamp, target kept.
 ///   The target is the `repair-timing` key these lines have always been
 ///   grepped by, and matching the driver is what lets the two be diffed
 ///   phase against phase, which is the whole reason this exists.
 ///
+/// `NZBFAST_FOLD_TRACE` installs it too, because the fold trace is the same
+/// kind of event: until 15 Sep 2026 setting it alone printed nothing and
+/// said nothing, which cost a timed ladder that had left the timing
+/// variable off (to keep its arms equal) every fold-call count it asked for
+/// (research/PARFAST-RSS-FLOOR-LINUX-X86-2026-09-14.md, section 3). The
+/// memory sampler below stays keyed on the timing variable alone.
+///
 /// `try_init` rather than `init`: a second call must not panic a repair.
 fn install_timing_sink() {
-    if std::env::var_os("NZBFAST_REPAIR_TIMING").is_none() {
+    if std::env::var_os("NZBFAST_REPAIR_TIMING").is_none()
+        && std::env::var_os("NZBFAST_FOLD_TRACE").is_none()
+    {
         return;
     }
     let _ = tracing_subscriber::fmt()
@@ -122,6 +176,134 @@ fn install_timing_sink() {
         .with_target(true)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+/// Where this run's memory high-water went, on stderr, under the same
+/// `NZBFAST_REPAIR_TIMING` that prints the phases.
+///
+/// The daemon has printed this attribution for every job since the
+/// 21 Aug floor ladder (`get/tail.rs`, `print_mem_floor`); this CLI never
+/// sampled at all, so a `parfast r` peak could be read only as one
+/// `ru_maxrss` figure. That is how the small-budget crossover note
+/// (research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md,
+/// section 3e) ended with ~450 MB of a 758 MB repair peak it could not
+/// name. A sampler thread moves a [`nzbkit::memgauge::PeakRecord`]'s two
+/// high-waters every few milliseconds, and the report names both, because
+/// they are different instants on the paths that matter - the record's
+/// own docs carry the measurement.
+///
+/// Same three properties as [`install_timing_sink`]: stderr only (stdout
+/// is conformance-pinned), nothing spawned unless the variable is set,
+/// and a report shape that can be grepped by its `mem-floor:` key.
+struct MemFloorSampler {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    record: std::sync::Arc<nzbkit::memgauge::PeakRecord>,
+}
+
+impl MemFloorSampler {
+    /// Tick period. A feed batch at the widest shape is 64 MiB and lives
+    /// for tens of milliseconds, so a coarser tick can step over a peak.
+    const TICK: std::time::Duration = std::time::Duration::from_millis(5);
+
+    fn start() -> Option<MemFloorSampler> {
+        std::env::var_os("NZBFAST_REPAIR_TIMING")?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let record = std::sync::Arc::new(nzbkit::memgauge::PeakRecord::new());
+        let (s, r) = (stop.clone(), record.clone());
+        let series = std::env::var_os("NZBFAST_MEM_FLOOR_SERIES").is_some();
+        let thread = std::thread::Builder::new()
+            .name("mem-floor".into())
+            .spawn(move || {
+                let t0 = std::time::Instant::now();
+                let mut tick = 0u64;
+                while !s.load(std::sync::atomic::Ordering::Relaxed) {
+                    r.note_rss_sample();
+                    if series && tick.is_multiple_of(5) {
+                        use nzbkit::memgauge::{Sub, cur};
+                        eprintln!(
+                            "mem-floor series: {:.3}s fp {} MB work {} MB scan {} MB",
+                            t0.elapsed().as_secs_f64(),
+                            nzbkit::mem::dashboard_rss().unwrap_or(0) >> 20,
+                            cur(Sub::RepairWork) >> 20,
+                            cur(Sub::RepairScan) >> 20,
+                        );
+                    }
+                    tick += 1;
+                    std::thread::sleep(Self::TICK);
+                }
+            })
+            .ok()?;
+        Some(MemFloorSampler {
+            stop,
+            thread: Some(thread),
+            record,
+        })
+    }
+}
+
+impl Drop for MemFloorSampler {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+        let maxrss = nzbkit::mem::peak_rss().unwrap_or(0);
+        let rows = [
+            ("live high-water", self.record.peak_footprint_attribution()),
+            ("sampled peak rss", self.record.peak_attribution()),
+        ];
+        for (which, at) in rows {
+            if let Some(at) = at {
+                eprintln!("{}", mem_floor_line(which, &at, maxrss));
+            }
+        }
+    }
+}
+
+/// One `mem-floor:` line. Summed over the same gauges the daemon's
+/// report sums (`wire_est` and `channel` overlap other tiers and are
+/// left out there too), so the two `unattributed` figures mean the same
+/// thing. `rss over footprint` is pages the kernel counts resident but
+/// does not charge: allocator-offered pages and clean file-backed ones.
+fn mem_floor_line(which: &str, at: &nzbkit::memgauge::PeakAttribution, maxrss: u64) -> String {
+    use nzbkit::memgauge::Sub;
+    let mb = |v: u64| v as f64 / 1e6;
+    let g = &at.gauges;
+    let attributed: u64 = [
+        Sub::RawFree,
+        Sub::RawOut,
+        Sub::OutFree,
+        Sub::OutOut,
+        Sub::Par2Capture,
+        Sub::JobMeta,
+        Sub::VerifierMeta,
+        Sub::Holds,
+        Sub::HoldsReserve,
+        Sub::RarsWork,
+        Sub::RepairScan,
+        Sub::RepairWork,
+        Sub::WriteStage,
+    ]
+    .into_iter()
+    .map(|s| g.cur_of(s))
+    .sum();
+    format!(
+        "mem-floor: {which} · ru_maxrss {:.0} MB · rss {:.0} MB · footprint {:.0} MB \
+         · rss over footprint {:.0} MB · repair work {:.0} MB (own peak {:.0}) \
+         · scan reads {:.0} MB (own peak {:.0}) · verifier tables {:.0} MB \
+         · unattributed {:.0} MB",
+        mb(maxrss),
+        mb(at.rss),
+        mb(at.footprint),
+        mb(at.rss.saturating_sub(at.footprint)),
+        mb(g.cur_of(Sub::RepairWork)),
+        mb(g.peak_of(Sub::RepairWork)),
+        mb(g.cur_of(Sub::RepairScan)),
+        mb(g.peak_of(Sub::RepairScan)),
+        mb(g.cur_of(Sub::VerifierMeta)),
+        mb(at.footprint.saturating_sub(attributed)),
+    )
 }
 
 /// [`run`] against a caller-supplied sink, which is what the unit tests
@@ -173,9 +355,16 @@ pub fn run_controlled(
     // `-m` below that is a ceiling the create still overshoots. It binds
     // everything above, which is the range that matters, and it is no
     // longer ignored outright.
+    //
+    // `from_user_limit`, not `with_total`: `-m` is a figure a person
+    // typed, and that funnel is what lets the repair's solve window and
+    // transform budget RISE to meet it above RAM/4 as well as fall below
+    // it (`mem::published_user_limit`, 15 Sep 2026). The total is the
+    // same either way.
     if let Some(mb) = parsed.opts.mem_mb {
-        nzbkit::mem::set_process_budget(nzbkit::mem::MemBudget::with_total(
+        nzbkit::mem::set_process_budget(nzbkit::mem::MemBudget::from_user_limit(
             mb.saturating_mul(1 << 20),
+            "-m",
         ));
     }
     // `-t`, the pool width, and the same defect one switch over: it was
@@ -256,6 +445,26 @@ pub fn run_controlled(
     // default on every class that can run it, and the engine's
     // `NZBFAST_FORNEY_JOINT` is the measurement rounds' control.
     nzbkit::par2::set_fast_check(!parsed.opts.slow);
+    // `--digest-cache`, published here for the tier's reason and in BOTH
+    // directions, so an in-process caller that runs parfast twice (the
+    // integration tests, the app's session) never inherits the first
+    // run's store. The store is always the per-user one: there is no
+    // option naming another directory, because a store that could be
+    // pointed at a folder beside the payload is a record travelling with
+    // a file, which is what the cache is built never to trust.
+    let digest_cache = if parsed.opts.digest_cache {
+        let cache = nzbkit::digest_cache::DigestCache::at_default_location();
+        if cache.is_none() {
+            sink.err(
+                "--digest-cache: no user cache folder is set for this account \
+                 (HOME, XDG_CACHE_HOME or LOCALAPPDATA); continuing without it.",
+            );
+        }
+        cache
+    } else {
+        None
+    };
+    nzbkit::digest_cache::publish(digest_cache);
     let command = parsed.command;
     // The watch reads the sink's loudness when it is built, so the level
     // goes on first; the commands set it again, to the same value.
@@ -296,6 +505,70 @@ pub fn run_controlled(
         code = control::EXIT_INTERRUPTED;
     }
     code
+}
+
+#[cfg(test)]
+mod memory_bound_tests {
+    use super::{bounded, memory_bounded};
+
+    const GIB: u64 = 1 << 30;
+
+    fn line(words: &[&str]) -> Vec<String> {
+        words.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The rule the mmap threshold is gated on, every arm. An unbounded
+    /// repair on a big box must stay unbounded: that is the case the
+    /// fixed threshold measured 4-6% slower on for no memory back.
+    #[test]
+    fn bounded_is_a_published_budget_or_a_cgroup_limit_below_ram() {
+        assert!(!bounded(false, None, Some(64 * GIB)), "no -m, no cgroup");
+        assert!(!bounded(false, None, None), "nothing known");
+        assert!(bounded(true, None, Some(64 * GIB)), "-m alone binds");
+        assert!(bounded(true, Some(128 * GIB), Some(64 * GIB)), "-m wins");
+        assert!(
+            bounded(false, Some(512 << 20), Some(31 * GIB)),
+            "a 512 MiB container on a 31 GB host"
+        );
+        assert!(
+            !bounded(false, Some(64 * GIB), Some(31 * GIB)),
+            "a limit above RAM bounds nothing"
+        );
+        assert!(
+            !bounded(false, Some(31 * GIB), Some(31 * GIB)),
+            "a limit EQUAL to RAM bounds nothing either"
+        );
+        assert!(
+            bounded(false, Some(512 << 20), None),
+            "a limit with RAM unreadable is taken at its word"
+        );
+    }
+
+    /// `-m` reaches the rule through the real parser, in the attached
+    /// spelling the reference accepts, for every command that takes it.
+    #[test]
+    fn dash_m_on_the_line_is_bounded_whatever_the_host() {
+        for cmd in ["r", "v", "c"] {
+            assert!(memory_bounded("parfast", &line(&[cmd, "-m128", "x.par2"])));
+        }
+        assert!(memory_bounded("par2repair", &line(&["-m128", "x.par2"])));
+    }
+
+    /// With no `-m`, and on a line that does not parse, the answer is the
+    /// host's alone - never a panic, never "bounded" by accident. Compared
+    /// against the rule rather than asserted false, because a test runner
+    /// can itself sit inside a memory-limited container.
+    #[test]
+    fn without_dash_m_the_host_decides() {
+        let host = bounded(
+            false,
+            nzbkit::mem::cgroup_mem_limit(),
+            nzbkit::mem::physical_ram(),
+        );
+        assert_eq!(memory_bounded("parfast", &line(&["r", "x.par2"])), host);
+        assert_eq!(memory_bounded("parfast", &line(&["r", "-Q"])), host);
+        assert_eq!(memory_bounded("parfast", &line(&[])), host);
+    }
 }
 
 #[cfg(test)]

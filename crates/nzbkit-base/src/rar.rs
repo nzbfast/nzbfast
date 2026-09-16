@@ -155,10 +155,24 @@ pub struct FileEntry {
     /// Decryption parameters for an encrypted entry (RAR5 only; a RAR4
     /// encrypted entry has `encrypted` set and no params).
     pub crypt: Option<EntryCrypt>,
-    /// Stored whole-file CRC32 of the unpacked data (RAR5 file flag
-    /// 0x04, or the RAR4 file-header CRC). For an encrypted entry it
-    /// verifies the decrypted output - but only when the crypt record's
-    /// tweaked-checksum flag is clear.
+    /// The CRC32 this piece's header stores (RAR5 file flag 0x04, or the
+    /// RAR4 file-header CRC), VERBATIM - the parser never normalises it.
+    ///
+    /// It is the whole unpacked FILE's CRC32 only on a piece with
+    /// `split_after` clear, which is an unsplit entry or a split file's
+    /// FINAL fragment. On any earlier fragment the field describes that
+    /// volume's own data area instead (the vendored writer stamps
+    /// `crc32(chunk)` there, and the RAR5 reader verifies a split member
+    /// against the last fragment alone), so a whole-file check or a
+    /// release-database key built from an arbitrary entry is wrong on
+    /// every multi-volume set. Filter on `!split_after` first:
+    /// `settle`'s `hdr`, `crypto_decrypt`'s tail map, `crypto.rs`'s
+    /// `file_crc.filter(|_| !split_after)` and the shape latch in
+    /// `extract::chase` all do, and the last of those had to be fixed
+    /// after this doc said otherwise.
+    ///
+    /// For an encrypted entry it verifies the decrypted output - but
+    /// only when the crypt record's tweaked-checksum flag is clear.
     pub file_crc: Option<u32>,
     /// Stored RAR5 file-hash extra record (FHEXTRA_HASH, type 0x02):
     /// `(hash_type, digest)`. hash_type 0 is BLAKE2sp (32-byte digest);

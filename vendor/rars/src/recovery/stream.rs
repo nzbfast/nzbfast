@@ -26,9 +26,36 @@ use super::rar5::{
 };
 use crate::error::{Error, Result};
 
-/// Copy/scan buffer size. Large enough that sequential reads stay cheap,
-/// small enough to be irrelevant next to any budget we accept.
+/// Copy/CRC buffer size, for the paths that stream a range straight through:
+/// `read_chunk_at`'s CRC64, `damaged_shards`, the per-shard CRC buffers, and
+/// the copy helpers. These read sequentially with the buffer AS the stride, so
+/// every byte read is a byte wanted and a larger buffer is simply fewer
+/// syscalls. Large enough that sequential reads stay cheap, small enough to be
+/// irrelevant next to any budget we accept.
+///
+/// This must stay at or above one recovery chunk: below it, `read_chunk_at`'s
+/// CRC64 read splits into several, which on a per-read-open source multiplies
+/// the `open()` count (measured 2.49x at 4 KiB -
+/// `research/RARS-RR-SCAN-COST-2026-09-16.md` section 4.3).
 const IO_BUF: usize = 256 * 1024;
+
+/// Marker-search window for the `{RB}` scan, and NOT the same job as
+/// `IO_BUF` - which is why it is no longer the same constant.
+///
+/// The scan resumes at each accepted record's `parity.end`, which is where the
+/// next record's marker sits, so on a healthy volume `find_marker` hits in the
+/// first 4 bytes of every window and the rest of the window is read for
+/// nothing. The stride is one recovery chunk (~43.6 KB on a 16 MiB volume),
+/// so a 256 KiB window traverses the record region about six times over: 23.87
+/// MB moved to validate a 3.49 MB record, 85% of it re-read.
+///
+/// 64 KiB rather than smaller because the OTHER caller of this loop is the raw
+/// fallback, which slides across a whole file finding no marker at all; there
+/// a too-small window costs syscalls (measured 1.20x at 4 KiB, 0.986 at 64
+/// KiB - i.e. free). 64 KiB takes essentially all of the win in the arm that
+/// matters and costs nothing in the arm that does not.
+/// `research/RARS-RR-SCAN-COST-2026-09-16.md` sections 3 and 5.
+const SCAN_WINDOW: usize = 64 * 1024;
 
 /// Fixed part of a `{RB}` inline recovery chunk header.
 const CHUNK_FIXED_HEADER: u64 = 0x48;
@@ -247,7 +274,7 @@ pub fn scan_inline_recovery_chunks_in(
     // cannot be decided while the records are still being discovered.
     let mut tables: Vec<Vec<u64>> = Vec::new();
 
-    let mut window = vec![0u8; IO_BUF];
+    let mut window = vec![0u8; SCAN_WINDOW];
     let mut offset = range.start;
     'scan: while offset + 4 <= source_len {
         // Clamp in u64 BEFORE narrowing, here and in every window loop
@@ -255,7 +282,7 @@ pub fn scan_inline_recovery_chunks_in(
         // 4 GiB casts to 0 and the loop never advances.
         // (nzbfast-local change, 27 Aug 2026 - re-apply on the next rars
         // re-sync, see vendor/rars/VENDORING.md.)
-        let len = (source_len - offset).min(IO_BUF as u64) as usize;
+        let len = (source_len - offset).min(SCAN_WINDOW as u64) as usize;
         src.read_at(offset, &mut window[..len])?;
 
         // Markers inside this window. A candidate that fails validation
@@ -400,6 +427,9 @@ fn read_chunk_at(
     // CRC64 over [0x0c, total_size), streamed. This is the expensive part
     // and the reason the caller carries a hashing budget.
     *hashed = hashed.saturating_add(total_size - 0x0c);
+    // Same sum the caller's anti-quadratic budget bounds, charged where it
+    // is incurred so a test can assert the budget instead of a stopwatch.
+    crate::recovery::workgauge::charge_scanned_bytes(total_size - 0x0c);
     let mut state = CRC64_XZ_SEED;
     let mut buf = vec![0u8; IO_BUF];
     let mut position = start + 0x0c;
@@ -1313,7 +1343,7 @@ mod tests {
         std::fs::write(&target_path, b"must survive").unwrap();
         std::os::unix::fs::symlink(&target_path, &dest_path).unwrap();
 
-        assert_eq!(clone_prefill(&src_path, &dest_path).unwrap(), true);
+        assert!(clone_prefill(&src_path, &dest_path).unwrap());
         assert_eq!(
             std::fs::read(&target_path).unwrap(),
             b"must survive",
@@ -1589,7 +1619,7 @@ mod tests {
         };
         assert!(scan_inline_recovery_chunks(&window, 1 << 20).is_err());
         assert!(
-            window.peak_read.load(Ordering::Relaxed) <= IO_BUF as u64,
+            window.peak_read.load(Ordering::Relaxed) <= SCAN_WINDOW as u64,
             "the scanner must never ask for more than one window"
         );
         assert!(window.total_read.load(Ordering::Relaxed) >= 64 << 20);
@@ -1610,7 +1640,7 @@ mod tests {
 
         // Push the first marker to each offset around the window edge.
         for delta in [-3i64, -2, -1, 0, 1, 2] {
-            let pad = (IO_BUF as i64 + delta) as usize;
+            let pad = (SCAN_WINDOW as i64 + delta) as usize;
             let mut padded = vec![0u8; pad];
             padded.extend_from_slice(&archive);
             let source = MemorySource(padded);
@@ -1642,20 +1672,44 @@ mod tests {
             hostile[pos + 0x0c..pos + 0x10]
                 .copy_from_slice(&((len - pos) as u32).to_le_bytes());
             hostile[pos + 0x10..pos + 0x14].copy_from_slice(&0x48u32.to_le_bytes());
+            // The two version bytes, and they are LOAD-BEARING here in a way
+            // the in-memory twin's fixture does not need: `read_chunk_at`
+            // checks them BEFORE it hashes, where `parse_inline_recovery_chunk`
+            // hashes first and checks after. Left as filler, every candidate
+            // died at this check and the scan never CRC64'd a byte - so this
+            // test's whole subject, the hash budget, was never reached. The
+            // wall clock it used to assert could not tell: a linear walk over
+            // 52,000 refused markers is fast, and it passed. (16 Sep 2026.)
+            hostile[pos + 0x14] = 1;
+            hostile[pos + 0x15] = 1;
             planted += 1;
             pos += 80;
         }
         assert!(planted > 50_000, "{planted} markers is not a dense fixture");
 
         let source = MemorySource(hostile);
-        let started = std::time::Instant::now();
+        let probe = crate::recovery::workgauge::probe();
         let result = scan_inline_recovery_chunks(&source, 1 << 20);
-        let elapsed = started.elapsed();
+        let hashed = probe.scanned_bytes();
 
         assert!(result.is_err(), "junk must not scan as a recovery set");
+        // Asserted against the budget itself rather than a stopwatch, for
+        // the reason the in-memory twin states in full: `hash_budget` is
+        // `4 * len` (floor 16 MiB) and is tested BEFORE each candidate, so
+        // the sum can overshoot by at most one whole-input hash. An
+        // unbudgeted scan of this fixture is ~110 GB, four orders past it.
+        let ceiling = 5 * len as u64;
         assert!(
-            elapsed.as_secs() < 5,
-            "streaming scan took {elapsed:?} - the hash budget is not bounding it"
+            hashed <= ceiling,
+            "streaming scan hashed {hashed} bytes of a {len}-byte input, past \
+             the {ceiling} the budget allows - it is not bounding the scan"
+        );
+        // ...and it must still have DONE the work: a scanner that refused
+        // everything up front would satisfy the ceiling while testing nothing.
+        assert!(
+            hashed > len as u64 / 2,
+            "streaming scan hashed only {hashed} bytes - it never validated a \
+             candidate, so the ceiling above proves nothing"
         );
     }
 

@@ -561,7 +561,17 @@ impl Index {
         if keys.is_empty() {
             return Ok(0);
         }
-        let tx = self.db.transaction()?;
+        // IMMEDIATE, not the DEFERRED `transaction()` this was: the body
+        // READS (`recompute`'s SELECTs) and then WRITES (the upsert
+        // below, and the `title_dirty` delete), and a deferred
+        // transaction takes its write lock at that upgrade - which does
+        // NOT get the busy timeout, so a concurrent writer makes it
+        // return SQLITE_BUSY at once rather than waiting. The same crate
+        // states this rule at `schema::backfill`'s fold pass and uses
+        // IMMEDIATE for it in ingest.
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for key in &keys {
             match TitleSummary::recompute(&tx, key)? {
                 Some(s) => {
@@ -613,7 +623,11 @@ impl Index {
     pub fn rebuild_title_summaries(&mut self) -> rusqlite::Result<u64> {
         ensure_schema(&self.db)?;
         self.summaries = true;
-        let tx = self.db.transaction()?;
+        // IMMEDIATE for the reason at `drain_title_dirty`: `seed` reads
+        // the release rows and writes the summary rows from them.
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let n = seed(&tx)?;
         tx.commit()?;
         Ok(n)

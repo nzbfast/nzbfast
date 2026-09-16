@@ -855,7 +855,12 @@ pub fn restore_pause(d: &Arc<Daemon>, saved: &serde_json::Map<String, Value>) {
         info!(target: "pause", "restored: queue paused");
         return;
     };
-    let left = deadline - unix_now();
+    // Saturating: `deadline` is read straight out of settings.json, so a
+    // hand-edited or corrupt `pause_until_unix` near i64::MIN/MAX
+    // overflowed this subtraction and panicked a debug build AT STARTUP.
+    // Clamped, an absurd deadline is simply an absurd duration, and the
+    // `left <= 0` arm below turns the past half into an ordinary expiry.
+    let left = deadline.saturating_sub(unix_now());
     if left <= 0 {
         // The auto-resume fell due while the daemon was down. Honour it:
         // start running, and clear the keys so we don't re-read them.
@@ -866,7 +871,13 @@ pub fn restore_pause(d: &Arc<Daemon>, saved: &serde_json::Map<String, Value>) {
     d.paused.store(true, Ordering::Relaxed);
     announce_pause(d);
     arm_pause_timer(d, std::time::Duration::from_secs(left as u64));
-    info!(target: "pause", "restored: paused, {} min left", (left + 59) / 60);
+    info!(
+        target: "pause",
+        "restored: paused, {} min left",
+        // Saturating for the same reason: `left` is wire-derived, and
+        // `+ 59` on an i64::MAX-ish value overflows on its own.
+        left.saturating_add(59) / 60
+    );
 }
 
 #[cfg(test)]

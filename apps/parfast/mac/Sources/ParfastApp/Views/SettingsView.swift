@@ -10,6 +10,8 @@ struct SettingsView: View {
     @EnvironmentObject var app: AppModel
     @State private var draft = CoreSettings()
     @State private var confirmingReset = false
+    @State private var confirmingClear = false
+    @State private var digestCacheCleared = false
 
     var body: some View {
         TabView {
@@ -105,6 +107,36 @@ struct SettingsView: View {
             }
             if app.capabilities.low_priority {
                 Toggle(S.settingsLowPriority, isOn: $draft.performance.low_priority)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle(S.settingsDigestCache, isOn: $draft.performance.digest_cache)
+                Text(S.settingsDigestCacheNote)
+                    .font(.system(size: 11))
+                    .foregroundStyle(T.textSecondary)
+                // Not gated on the toggle: records written while it was on
+                // stay on disk after it is turned off, and this is how they go.
+                HStack(spacing: 8) {
+                    Button(S.settingsDigestCacheClear) { confirmingClear = true }
+                        .confirmationDialog(S.settingsDigestCacheClearConfirm,
+                                            isPresented: $confirmingClear) {
+                            Button(S.settingsDigestCacheClear, role: .destructive) {
+                                digestCacheCleared = app.clearDigestCache()
+                            }
+                            Button(S.commonCancel, role: .cancel) {}
+                        }
+                    if digestCacheCleared {
+                        Text(S.settingsDigestCacheCleared)
+                            .font(.system(size: 11))
+                            .foregroundStyle(T.textSecondary)
+                    }
+                }
+                .padding(.top, 4)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle(S.settingsPairLargeCreates, isOn: $draft.performance.pair_large_creates)
+                Text(S.settingsPairLargeCreatesNote)
+                    .font(.system(size: 11))
+                    .foregroundStyle(T.textSecondary)
             }
             LabeledContent(S.appName) {
                 VStack(alignment: .leading, spacing: 2) {

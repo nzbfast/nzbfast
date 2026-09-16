@@ -75,7 +75,7 @@ pub fn rar5_volume(pieces: &[(&str, u64, &[u8], bool, bool)]) -> Vec<u8> {
         .iter()
         .map(|&(n, t, p, b, a)| (n, t, p, b, a, None))
         .collect();
-    rar5_volume_inner(&with_crc, None, &[])
+    rar5_volume_inner(&with_crc, None, &[], false)
 }
 
 /// Numbered multi-volume member (RAR5 volume_number, 0-based).
@@ -115,7 +115,7 @@ pub fn rar5_volume_n(pieces: &[(&str, u64, &[u8], bool, bool)], vol_no: u64) -> 
         .iter()
         .map(|&(n, t, p, b, a)| (n, t, p, b, a, None))
         .collect();
-    rar5_volume_inner(&with_crc, Some(vol_no), &[])
+    rar5_volume_inner(&with_crc, Some(vol_no), &[], false)
 }
 
 /// Like [`rar5_volume_n`], with a stored data CRC32 per piece (file
@@ -128,7 +128,7 @@ pub fn rar5_volume_n_crc(
     pieces: &[(&str, u64, &[u8], bool, bool, Option<u32>)],
     vol_no: u64,
 ) -> Vec<u8> {
-    rar5_volume_inner(pieces, Some(vol_no), &[])
+    rar5_volume_inner(pieces, Some(vol_no), &[], false)
 }
 
 /// [`rar5_volume_n`] with a SERVICE block (type 3, the shape of a `-rr`
@@ -151,13 +151,39 @@ pub fn rar5_volume_n_service(
         .iter()
         .map(|&(n, t, p, b, a)| (n, t, p, b, a, None))
         .collect();
-    rar5_volume_inner(&with_crc, Some(vol_no), service)
+    rar5_volume_inner(&with_crc, Some(vol_no), service, false)
+}
+
+/// [`rar5_volume_n`] whose END record carries the RAR5
+/// "another volume follows" flag (end-of-archive flag `0x0001`), the way
+/// every real archiver stamps every non-final volume of a set.
+///
+/// The plain [`rar5_volume_n`] always writes `0` there - "this is the
+/// last volume" - which is harmless for the sets it builds, because each
+/// of those spans ONE member and the split flags already say the set
+/// continues. It is not harmless for a set whose volume boundary falls
+/// BETWEEN whole members: there is no split flag anywhere on that
+/// boundary, so this record is the only thing that says the set is
+/// unfinished, and a fixture that writes `0` builds a shape no archiver
+/// produces. Reach for this whenever a fixture volume is not the last of
+/// its set and the test is about set continuity.
+pub fn rar5_volume_n_continued(
+    pieces: &[(&str, u64, &[u8], bool, bool)],
+    vol_no: u64,
+    next_volume: bool,
+) -> Vec<u8> {
+    let with_crc: Vec<_> = pieces
+        .iter()
+        .map(|&(n, t, p, b, a)| (n, t, p, b, a, None))
+        .collect();
+    rar5_volume_inner(&with_crc, Some(vol_no), &[], next_volume)
 }
 
 fn rar5_volume_inner(
     pieces: &[(&str, u64, &[u8], bool, bool, Option<u32>)],
     vol_no: Option<u64>,
     service: &[u8],
+    next_volume: bool,
 ) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(super::SIG5);
@@ -208,9 +234,10 @@ fn rar5_volume_inner(
         body.extend_from_slice(b"RR");
         block_v5(3, 0x02, &body, service, &mut out);
     }
-    // End of archive (type 5) with end-flags body (0 = last volume).
+    // End of archive (type 5) with end-flags body (0 = last volume,
+    // 0x0001 = another volume of this set follows).
     let mut end_body = Vec::new();
-    vint(0, &mut end_body);
+    vint(u64::from(next_volume), &mut end_body);
     block_v5(5, 0, &end_body, &[], &mut out);
     out
 }

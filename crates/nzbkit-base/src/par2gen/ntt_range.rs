@@ -15,7 +15,7 @@
 //! `NZBFAST_CREATE_NTT_RANGE=0` keeps the prefix plan (the A/B arm).
 
 use crate::par2ntt::{FlatPlan, SrcId};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// How much of a real create is spent CONSTRUCTING the transform plan.
 ///
@@ -123,13 +123,17 @@ pub fn pin_map_off_for_tests(off: bool) {
 }
 
 /// The shipped floor clause's shape on this build: the input count and
-/// the recovery-row count that [`rows_and_present_admitted`] admits.
-/// A fixture built from this crosses the gates at their measured value
-/// on whatever arch it runs on, instead of restating numbers that are
-/// per-arch and fold-denominated.
+/// the recovery-row count that [`rows_and_present_admitted`] admits AT
+/// `block_size`. A fixture built from this crosses the gates at their
+/// measured value on whatever arch it runs on, instead of restating
+/// numbers that are per-arch and fold-denominated - and it takes the
+/// block size because the row half became a function of it on 16 Sep
+/// 2026 ([`create_ntt_min_rows`]), so a caller that creates at 1 MiB on
+/// a GFNI-256 part and asks here with 64 KiB gets a shape the create
+/// then refuses.
 #[doc(hidden)]
-pub fn floor_shape_for_tests() -> (usize, usize) {
-    (create_ntt_min_present(), create_ntt_min_rows())
+pub fn floor_shape_for_tests(block_size: usize) -> (usize, usize) {
+    (create_ntt_min_present(), create_ntt_min_rows(block_size))
 }
 
 /// The high-redundancy subfloor clause's shape on this build - the
@@ -140,8 +144,43 @@ pub fn subfloor_shape_for_tests() -> (usize, usize) {
     (SUBFLOOR_MIN_PRESENT, SUBFLOOR_MIN_ROWS)
 }
 
+/// Test door: cap the arena the stripe-first BAND route copies each chunk
+/// into at `bytes` (0 lifts the pin), so a fixture far under the
+/// transform's real corpus budget still reaches that route, and still cuts
+/// its stripes into several chunks. See [`cold_builds_for_tests`].
+#[doc(hidden)]
+pub fn pin_band_corpus_for_tests(bytes: usize) {
+    BAND_CORPUS.store(bytes, Ordering::Relaxed);
+}
+
+/// Band sweeps the stripe-first route has made in this process, one per
+/// chunk. The proof a create took the band route: the copied windows
+/// ALSO build exactly one plan when the corpus fits one window, so the
+/// plan counter cannot tell the two apart. Process-global and monotone,
+/// read as a difference, as [`cold_builds_for_tests`] is.
+#[doc(hidden)]
+pub fn band_sweeps_for_tests() -> u64 {
+    BAND_SWEEPS.load(Ordering::Relaxed)
+}
+
 static TRANSFORM_OFF: AtomicBool = AtomicBool::new(false);
 static MAP_OFF: AtomicBool = AtomicBool::new(false);
+static BAND_CORPUS: AtomicUsize = AtomicUsize::new(0);
+static BAND_SWEEPS: AtomicU64 = AtomicU64::new(0);
+
+/// The band route's arena ceiling: the copied transform's own resident
+/// window in bytes, unless [`pin_band_corpus_for_tests`] holds it lower.
+pub(super) fn band_corpus_bytes(window_bytes: usize) -> usize {
+    match BAND_CORPUS.load(Ordering::Relaxed) {
+        0 => window_bytes,
+        pinned => pinned,
+    }
+}
+
+/// Charge one band sweep (see [`band_sweeps_for_tests`]).
+pub(super) fn note_band_sweep() {
+    BAND_SWEEPS.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Whether [`pin_map_off_for_tests`] is holding the mapped input path
 /// shut. Production reads this once per recovery batch through
@@ -251,7 +290,9 @@ pub(super) fn shape_possible(
     needed: usize,
     count: usize,
 ) -> bool {
-    block_size > 0 && needed <= crate::par2ntt::N && rows_and_present_admitted(n_slices, count)
+    block_size > 0
+        && needed <= crate::par2ntt::N
+        && rows_and_present_admitted(block_size, n_slices, count)
 }
 
 /// The create's row and input-count gates as ONE predicate - the
@@ -278,8 +319,8 @@ pub(super) fn shape_possible(
 /// 512 sources at 512 rows 8.05-8.19 against 5.31-5.49 - so on x86 the
 /// clause is 1,024 sources and 512 rows, and nothing below 1,024.
 /// `NZBFAST_CREATE_NTT_SUBFLOOR=0` drops the clause (the A/B arm).
-pub(super) fn rows_and_present_admitted(n_slices: usize, count: usize) -> bool {
-    let (floor_present, floor_rows) = (create_ntt_min_present(), create_ntt_min_rows());
+pub(super) fn rows_and_present_admitted(block_size: usize, n_slices: usize, count: usize) -> bool {
+    let (floor_present, floor_rows) = (create_ntt_min_present(), create_ntt_min_rows(block_size));
     if count >= floor_rows && n_slices >= floor_present {
         return true;
     }
@@ -365,14 +406,42 @@ pub(super) fn create_ntt_window(
 /// The create's row gate: `NZBFAST_CREATE_NTT_MIN_ROWS` (a bench knob for
 /// crossover sweeps), else the repair's row gate (`ntt_min_missing`: the
 /// create and repair crossovers measured together on the M3, 5 Sep 2026).
-pub(super) fn create_ntt_min_rows() -> usize {
-    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *N.get_or_init(|| {
+///
+/// AT THE BLOCK SIZE, since 16 Sep 2026, which is what makes the create
+/// inherit the repair's 1 MiB clause on GFNI-256. The clause was measured
+/// on the repair alone on 15 Sep, so the create was pinned to the
+/// small-block value for a day and the create's own 1 MiB ladder was
+/// owed; it ran on the same laptop (Core Ultra 9 386H, n = 4,096 at
+/// 1 MiB, `parfast c` fold against the transform admitted by
+/// `NZBFAST_CREATE_NTT_MIN_ROWS=0`, whole-process CPU, an A/A copy of
+/// each arm at every rung, every leg's recovery files hash-identical
+/// across the arms) and put the create's crossover FURTHER above 320
+/// than the repair's: ~393 rows on four threads and past 384 on sixteen,
+/// against ~408 / ~342 for the repair. The fold wins m = 320 there by
+/// 13.8% and 12.5% of CPU, both an order over their A/A floors, so
+/// keeping 320 at 1 MiB cost the create more than it cost the repair.
+/// Taking `ntt_min_missing(block_size)` is therefore the same rule the
+/// docstring above states, now actually asked at the size being created:
+/// on this class it returns 352 from 1 MiB, which buys back that band and
+/// leaves at most ~2% on the rungs between 352 and the create's own
+/// crossover (`research/NTT-ROW-GATE-GFNI-AVX512-2026-09-15.md`, "The
+/// create, the windowed curve and two more shapes"). Block size 0 is
+/// under every clause by construction, so a caller with no size still
+/// gets the small-block gate.
+pub(super) fn create_ntt_min_rows(block_size: usize) -> usize {
+    // The ENVIRONMENT is read once and the shipped value is pure in the
+    // block size, rather than the whole answer being cached: a
+    // `OnceLock<usize>` here would freeze whichever block size asked
+    // first, and a daemon creates at more than one.
+    static OVERRIDE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    match *OVERRIDE.get_or_init(|| {
         std::env::var("NZBFAST_CREATE_NTT_MIN_ROWS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or_else(crate::par2repair::ntt_min_missing)
-    })
+    }) {
+        Some(rows) => rows,
+        None => crate::par2repair::ntt_min_missing(block_size),
+    }
 }
 
 /// The create's input-count floor for the transform. NOT the repair's
@@ -434,6 +503,11 @@ pub(super) fn create_ntt_window_with_budget(
     (window >= NTT_WINDOW_MIN.min(n_slices)).then_some(window)
 }
 
+/// The create's ADMISSION arithmetic, pinned against the rules rather
+/// than against numbers: the high-redundancy subfloor clause, and (since
+/// 16 Sep 2026) the row gate's dependence on the block size. The name is
+/// the older half's and is kept because `par2gen_create_ntt` points at
+/// it by that name.
 #[cfg(test)]
 mod subfloor_tests {
     /// The high-redundancy clause admits few-source, many-row shapes
@@ -448,29 +522,77 @@ mod subfloor_tests {
         {
             return;
         }
+        // A SMALL block throughout, so what this pins is the subfloor
+        // clause and not the block-size one next door: the row gate is a
+        // function of the block size since 16 Sep 2026, and asking it at
+        // two sizes in one test would move the line under the assertions.
+        const BS: usize = 65536;
         let (present, rows) = (super::SUBFLOOR_MIN_PRESENT, super::SUBFLOOR_MIN_ROWS);
         let (floor, floor_rows) = (
             super::create_ntt_min_present(),
-            super::create_ntt_min_rows(),
+            super::create_ntt_min_rows(BS),
         );
         assert!(present < floor, "the clause sits below the input floor");
-        assert!(super::rows_and_present_admitted(present, rows));
-        assert!(super::rows_and_present_admitted(present + 1, rows + 100));
-        assert!(!super::rows_and_present_admitted(present - 1, rows));
-        assert!(!super::rows_and_present_admitted(present, rows - 1));
+        assert!(super::rows_and_present_admitted(BS, present, rows));
+        assert!(super::rows_and_present_admitted(
+            BS,
+            present + 1,
+            rows + 100
+        ));
+        assert!(!super::rows_and_present_admitted(BS, present - 1, rows));
+        assert!(!super::rows_and_present_admitted(BS, present, rows - 1));
         // The line: halfway to the floor the row gate is halfway down,
         // one row under it refuses, and at the floor it is the floor's.
         let mid = present + (floor - present) / 2;
         let mid_rows = rows - (rows - floor_rows) / 2;
         assert_eq!(super::subfloor_rows_at(mid, floor, floor_rows), mid_rows);
-        assert!(super::rows_and_present_admitted(mid, mid_rows));
-        assert!(!super::rows_and_present_admitted(mid, mid_rows - 1));
+        assert!(super::rows_and_present_admitted(BS, mid, mid_rows));
+        assert!(!super::rows_and_present_admitted(BS, mid, mid_rows - 1));
         assert_eq!(
             super::subfloor_rows_at(floor, floor, floor_rows),
             floor_rows
         );
         // The ordinary floor still admits at its own row gate.
-        assert!(super::rows_and_present_admitted(floor, floor_rows));
-        assert!(!super::rows_and_present_admitted(floor, floor_rows - 1));
+        assert!(super::rows_and_present_admitted(BS, floor, floor_rows));
+        assert!(!super::rows_and_present_admitted(BS, floor, floor_rows - 1));
+    }
+
+    /// The create's row gate FOLLOWS THE BLOCK SIZE (16 Sep 2026), which
+    /// is the whole content of the change: it is the repair's gate asked
+    /// at the size being created, so on a class whose repair gate rises
+    /// with the block the create rises with it, and on every other class
+    /// nothing moves. Pinned against `ntt_min_missing` rather than
+    /// against a number, because the number is per-arch and this is the
+    /// rule; the ladder that earned it is in
+    /// `research/NTT-ROW-GATE-GFNI-AVX512-2026-09-15.md`.
+    #[test]
+    fn the_create_row_gate_is_the_repair_s_gate_at_the_block_size() {
+        if std::env::var_os("NZBFAST_CREATE_NTT_MIN_ROWS").is_some() {
+            return;
+        }
+        let mib = 1usize << 20;
+        for bs in [0, 4096, 65536, 262_144, mib, 4 * mib] {
+            assert_eq!(
+                super::create_ntt_min_rows(bs),
+                crate::par2repair::ntt_min_missing(bs),
+                "create gate at {bs}"
+            );
+        }
+        // Never BELOW the small-block gate: every clause in
+        // `ntt_min_missing` so far raises the gate with the block size or
+        // leaves it alone, and a create admitted at a row count the same
+        // build's repair refuses is the shape this would show up as.
+        let small = super::create_ntt_min_rows(0);
+        for bs in [65536, mib, 4 * mib] {
+            assert!(super::create_ntt_min_rows(bs) >= small, "at {bs}");
+        }
+        // And the gate is what admission asks: one row under it the floor
+        // clause refuses at the SAME input count it admits at the gate.
+        let present = super::create_ntt_min_present();
+        for bs in [65536, mib] {
+            let rows = super::create_ntt_min_rows(bs);
+            assert!(super::rows_and_present_admitted(bs, present, rows));
+            assert!(!super::rows_and_present_admitted(bs, present - 1, rows));
+        }
     }
 }

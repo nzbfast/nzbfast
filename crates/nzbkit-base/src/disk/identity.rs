@@ -343,6 +343,104 @@ fn stored_entry(p: &Path) -> bool {
     rd.flatten().any(|e| e.file_name() == name)
 }
 
+/// A file's identity as the digest store keys it, with the change stamps
+/// that detect a write while a record is being consumed or written, or while
+/// a fused create reads the source (`par2gen::scan::FusedScan`). Here and not
+/// in `digest_cache` because that module is behind the `digest-cache`
+/// feature and the fused create is not: f6b877575 named it from `scan.rs`
+/// and reddened every build without the feature (ios, android,
+/// windows-arm64, the fuzz crate) on 15 Sep 2026. The stamps
+/// are platform ticks, compared only for equality.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Identity {
+    pub(crate) volume: u64,
+    pub(crate) index: u64,
+    pub(crate) length: u64,
+    pub(crate) mtime: i64,
+    pub(crate) ctime: i64,
+}
+
+impl Identity {
+    #[cfg(unix)]
+    pub(crate) fn of(file: &std::fs::File) -> std::io::Result<Identity> {
+        use std::os::unix::fs::MetadataExt;
+        let md = file.metadata()?;
+        let ticks = |s: i64, ns: i64| s.saturating_mul(1_000_000_000).saturating_add(ns);
+        Ok(Identity {
+            volume: md.dev(),
+            index: md.ino(),
+            length: md.len(),
+            mtime: ticks(md.mtime(), md.mtime_nsec()),
+            ctime: ticks(md.ctime(), md.ctime_nsec()),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn of(file: &std::fs::File) -> std::io::Result<Identity> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandle,
+            GetFileInformationByHandleEx,
+        };
+        let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        // SAFETY: a plain-data out struct, zero is a valid bit pattern.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: likewise.
+        let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+        // SAFETY: a live handle we borrow for the calls and out pointers to
+        // stack values of the right type, the second with its own size.
+        let ok = unsafe {
+            GetFileInformationByHandle(handle, &mut info) != 0
+                && GetFileInformationByHandleEx(
+                    handle,
+                    FileBasicInfo,
+                    (&raw mut basic).cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                ) != 0
+        };
+        if !ok {
+            return Err(std::io::Error::last_os_error());
+        }
+        let wide = |hi: u32, lo: u32| (u64::from(hi) << 32) | u64::from(lo);
+        Ok(Identity {
+            volume: u64::from(info.dwVolumeSerialNumber),
+            index: wide(info.nFileIndexHigh, info.nFileIndexLow),
+            length: wide(info.nFileSizeHigh, info.nFileSizeLow),
+            mtime: wide(
+                info.ftLastWriteTime.dwHighDateTime,
+                info.ftLastWriteTime.dwLowDateTime,
+            ) as i64,
+            // The change time, which moves on any write or metadata change
+            // and which a caller cannot put back the way it can the last
+            // write time - unix's ctime. It was 0 until 15 Sep 2026, so an
+            // in-place write that restored the mtime during a pass still
+            // held and could pair a BLAKE3 of one content with an MD5 of
+            // another (a_write_that_puts_the_mtime_back_records_nothing).
+            ctime: basic.ChangeTime,
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(crate) fn of(_file: &std::fs::File) -> std::io::Result<Identity> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+
+    pub(crate) fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// Both the pinned handle and whatever the path names now still carry
+    /// this identity - so neither an in-place write nor a replace-by-rename
+    /// happened since it was taken. The fused create's source check is this
+    /// same call (`par2gen::scan::FusedScan::finish_all`).
+    pub(crate) fn still_holds(&self, file: &std::fs::File, path: &Path) -> bool {
+        Identity::of(file).is_ok_and(|now| now == *self)
+            && std::fs::File::open(path)
+                .and_then(|f| Identity::of(&f))
+                .is_ok_and(|now| now == *self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

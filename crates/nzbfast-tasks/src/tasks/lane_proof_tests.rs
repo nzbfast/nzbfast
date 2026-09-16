@@ -363,7 +363,9 @@ fn seed_corr_suggestion(d: &Arc<Daemon>, title: &str) -> (i64, [&'static str; 3]
         .collect();
     ix.ingest("alt.binaries.x264", &entries, T + 4_000).unwrap();
     // Suggest-only: the walk stores a candidate and names nothing.
-    let (examined, suggested, applied) = ix.predb_corr_backlog(100, 0, false, T + 4_000).unwrap();
+    let (examined, suggested, applied) = ix
+        .predb_corr_backlog(100, 0, false, T + 4_000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!(
         (examined, suggested, applied),
         (1, 1, 0),

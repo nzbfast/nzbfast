@@ -396,3 +396,184 @@ fn derived_part_names_survive_length_changing_case() {
     assert!(derive_part_name("x.rar", 0, 1).is_none());
     assert!(derive_part_name("\u{130}.part", 0, 1).is_none());
 }
+
+// ------------------------------------------------- the threaded scans
+//
+// Phases 1, 2 and 4 of the `.rev` repair read and checksum files that are
+// independent of each other, and since 16 Sep 2026 they do it on a bounded
+// pool (`scan_in_order`). The three tests below pin the three things that
+// threading could have changed and must not have: the ORDER a slot is
+// claimed in, what a file that cannot be checksummed does to the rest of
+// the scan, and that nothing is published before every rebuild is judged.
+
+/// Two byte-identical volumes must resolve to the same slots they resolve
+/// to serially - the ONE behaviour a concurrent scan could plausibly break.
+///
+/// A slot is claimed FIRST MATCH WINS over `collect_rar_volumes` order, and
+/// that order is `(release_stem, vol_sort_key)`. A duplicate of part 1 under
+/// an earlier-sorting stem therefore claims slot 0, the real `set.part01.rar`
+/// finds it taken and matches nothing, and the name derived for the missing
+/// slot is built from the DUPLICATE's `partNN` pattern - so the rebuild is
+/// published as `aaa.part03.rar` and not as `set.part03.rar`.
+///
+/// That is a peculiar outcome and the test asserts it anyway, on purpose:
+/// the point is not that it is desirable, it is that it is what the shipped
+/// serial scan does, and that computing the checksums concurrently did not
+/// quietly change which of two identical files wins a slot. Verified
+/// against the pre-threading code, which produces exactly this.
+#[test]
+fn rev_scan_gives_two_identical_volumes_the_same_slots_a_serial_scan_would() {
+    let dir = temp_dir("dup-order");
+    let data = build_set(&dir, &[600, 512, 480, 640], 2, false);
+    // Byte-identical to part 1, under a stem that sorts before "set".
+    std::fs::copy(dir.join("set.part01.rar"), dir.join("aaa.part01.rar")).unwrap();
+    std::fs::remove_file(dir.join("set.part03.rar")).unwrap();
+
+    assert!(try_rev_reconstruct(&dir));
+
+    assert_eq!(
+        std::fs::read(dir.join("aaa.part03.rar")).unwrap(),
+        data[2],
+        "the duplicate sorts first, claims slot 0, and its partNN pattern is \
+         what the rebuilt name is derived from"
+    );
+    assert!(
+        !dir.join("set.part03.rar").exists(),
+        "the losing name must not also be published - one rebuild, one file"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A volume whose checksum cannot be taken is skipped and the scan carries
+/// on, exactly as the inline `continue` did. One worker's error must not
+/// abort the others or change the outcome.
+///
+/// The unreadable entry is a DIRECTORY named like a volume:
+/// `collect_rar_volumes` takes it on the name alone and never stats it, and
+/// `crc32_of` fails on the first read. That needs no permission games and
+/// behaves the same on every platform the engine builds for.
+#[test]
+fn rev_scan_skips_a_volume_it_cannot_checksum_and_repairs_the_rest() {
+    let dir = temp_dir("unreadable");
+    let data = build_set(&dir, &[600, 512, 480, 640], 2, false);
+    std::fs::create_dir(dir.join("set.part09.rar")).unwrap();
+    let gone = dir.join("set.part02.rar");
+    std::fs::remove_file(&gone).unwrap();
+
+    assert!(
+        try_rev_reconstruct(&dir),
+        "a volume that cannot be checksummed must not condemn the repair"
+    );
+    assert_eq!(std::fs::read(&gone).unwrap(), data[1]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `scan_in_order` returns answers in INPUT order however the workers
+/// finish. The workload is staggered so the natural completion order is the
+/// reverse of the input order: without the sort, this fails.
+#[test]
+fn scan_in_order_returns_input_order_whatever_order_the_workers_finish_in() {
+    let items: Vec<usize> = (0..24).collect();
+    let stagger = |&i: &usize| {
+        std::thread::sleep(std::time::Duration::from_millis((24 - i) as u64));
+        i * 3
+    };
+    let want: Vec<usize> = items.iter().map(|&i| i * 3).collect();
+    for width in [1usize, 2, 8, 24] {
+        assert_eq!(
+            scan_in_order(&items, width, stagger),
+            want,
+            "width {width} reordered the answers"
+        );
+    }
+}
+
+// ----------------------------------------------------- the A/B harness
+//
+// `#[ignore]`d on purpose: these are benchmark drivers, not assertions,
+// and they want a quiet box and a set far larger than a unit test should
+// build. They live here rather than in a `research/` replica because
+// `try_rev_reconstruct` is `pub(crate)` - a replica measures a copy of the
+// path, and the 16 Sep profile note had to caveat exactly that. Driven by
+// `research/nzbfast-revscan-2026-09-16/revscan-ab.py`, one repair per
+// process, arms alternated in adjacent pairs.
+//
+//   REVSCAN_SET   a directory holding the kept set (built once)
+//   REVSCAN_WORK  a work copy made of HARD LINKS to it
+//   REVSCAN_DROP  the 1-based part to delete, or "none" for a scan-only run
+//   REVSCAN_SIZES "<count>x<MiB>" for the builder
+//   REVSCAN_REV   how many .rev volumes the builder writes
+
+/// Build the kept set once. `cargo test --release -p nzbfast-unpack --lib
+/// -- --ignored --exact ...::revscan_build_set`.
+#[test]
+#[ignore]
+fn revscan_build_set() {
+    let dir = PathBuf::from(std::env::var("REVSCAN_SET").expect("REVSCAN_SET"));
+    let spec = std::env::var("REVSCAN_SIZES").unwrap_or_else(|_| "17x16".into());
+    let (count, mib) = spec.split_once('x').expect("REVSCAN_SIZES=<count>x<MiB>");
+    let sizes = vec![mib.parse::<usize>().unwrap() * 1024 * 1024; count.parse::<usize>().unwrap()];
+    let rev: usize = std::env::var("REVSCAN_REV")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    build_named_set(&dir, "set", &sizes, rev, false);
+    println!("BUILT {} volumes of {mib} MiB + {rev} rev", sizes.len());
+}
+
+/// One timed repair, in this process. Prints `TOTAL <ms>` and, on a full
+/// repair, byte-compares the rebuild against the kept original before it
+/// reports anything - a fast wrong answer is not a result.
+#[test]
+#[ignore]
+fn revscan_one_repair() {
+    // The budget below is a process-global, and this is not the only
+    // `#[ignore]`d driver that moves it - see the lock's own comment.
+    let _serial = super::rrhint_tests::one_budget_test_at_a_time();
+    let kept = PathBuf::from(std::env::var("REVSCAN_SET").expect("REVSCAN_SET"));
+    let work = PathBuf::from(std::env::var("REVSCAN_WORK").expect("REVSCAN_WORK"));
+    let drop = std::env::var("REVSCAN_DROP").unwrap_or_else(|_| "none".into());
+    // Item 2's arm: publish a process budget so `repair_cap()` lands where
+    // the caller wants it. The fold team's gate is on the fold WINDOW, which
+    // is `min(volume, budget slice)`, so a budget small enough to put the
+    // window under `max(12 MiB, threads x 2 MiB)` gates the team off without
+    // touching anything else in the binary - a same-binary A/B of the team.
+    if let Ok(mib) = std::env::var("REVSCAN_BUDGET_MIB") {
+        nzbkit::mem::set_process_budget(nzbkit::mem::MemBudget {
+            total: mib.parse::<u64>().unwrap() * 1024 * 1024,
+        });
+    }
+
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    for entry in std::fs::read_dir(&kept).unwrap().flatten() {
+        std::fs::hard_link(entry.path(), work.join(entry.file_name())).unwrap();
+    }
+    let victim = (drop != "none").then(|| {
+        let name = format!("set.part{:02}.rar", drop.parse::<usize>().unwrap());
+        let original = std::fs::read(kept.join(&name)).unwrap();
+        // Unlink the LINK, never the kept file.
+        std::fs::remove_file(work.join(&name)).unwrap();
+        (name, original)
+    });
+
+    let start = std::time::Instant::now();
+    let rebuilt = try_rev_reconstruct(&work);
+    let elapsed = start.elapsed();
+
+    match &victim {
+        Some((name, original)) => {
+            assert!(rebuilt, "the repair reported nothing rebuilt");
+            assert_eq!(
+                &std::fs::read(work.join(name)).unwrap(),
+                original,
+                "the rebuild is not byte-identical to the original"
+            );
+        }
+        None => assert!(!rebuilt, "a whole set must report nothing to rebuild"),
+    }
+    let _ = std::fs::remove_dir_all(&work);
+    println!("TOTAL {:.3}", elapsed.as_secs_f64() * 1000.0);
+}

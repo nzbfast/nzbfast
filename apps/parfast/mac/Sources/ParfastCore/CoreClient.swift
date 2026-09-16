@@ -66,6 +66,11 @@ public protocol CoreClient: AnyObject {
     func settingsGet() throws -> CoreSettings
     func settingsSet(_ settings: CoreSettings) throws
 
+    /// `pf_digest_cache_clear`: "Clear remembered checksums". Answers how many
+    /// records went. Safe while a job runs, and leaves the setting alone.
+    @discardableResult
+    func clearDigestCache() throws -> Int
+
     /// `pf_last_error`, for the log drawer when a call returned a bare code.
     func lastError() -> CoreError?
 }

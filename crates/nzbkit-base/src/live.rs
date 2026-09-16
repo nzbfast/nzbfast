@@ -1097,6 +1097,24 @@ pub struct LiveVerifier {
     /// Has a set EVER been activated? A lock-free, monotonic mirror of
     /// "`plan` is `Active`" - see [`LiveVerifier::ever_activated`].
     activated: std::sync::atomic::AtomicBool,
+    /// TEST-ONLY SEAM, and the reason it exists is that the window it
+    /// opens cannot be reached any other way. `on_data_inner` drops the
+    /// slot and plan locks and then hashes lock-free; the `bind_gen`
+    /// re-check after that hash is the only thing standing between a
+    /// verdict computed against one descriptor and a DIFFERENT
+    /// descriptor's grid. Exercising it means another thread rebinding
+    /// the slot strictly between the lock drop and the re-lock - an
+    /// interleaving a test can only ask for, never demand, because the
+    /// hash is a few milliseconds of work that usually finishes first.
+    /// Racing for it gave a miss rate that rises without bound as the
+    /// box loads (measured 16 Sep 2026 on the dev Mac, one attempt per
+    /// run, 200 runs a point: 0/200 at load 11.8, 3/200 at ~35, 6/200
+    /// at ~80) and took CI red on a loaded Windows one-process runner.
+    /// So the test parks the feeding thread HERE instead of outrunning
+    /// it. Never `Some` outside a test: the field is `#[cfg(test)]`, so
+    /// no production build has it at all.
+    #[cfg(test)]
+    mid_hash_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Drop for LiveVerifier {
@@ -1131,6 +1149,8 @@ impl LiveVerifier {
             gate: Mutex::new(None),
             prefix: prefix::PrefixTable::new(n_slots),
             activated: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            mid_hash_hook: Mutex::new(None),
             slots: (0..n_slots)
                 .map(|_| Mutex::new(SlotState::empty()))
                 .collect(),
@@ -1152,6 +1172,18 @@ impl LiveVerifier {
     /// inside this file. Idempotent - see `live/prefix.rs`.
     pub fn arm_prefix(&self, slot: usize) {
         self.prefix.arm(slot);
+    }
+
+    /// Install the test-only mid-hash seam (see `mid_hash_hook`). The
+    /// hook runs with NO lock of this verifier held, which is what lets
+    /// the installing test drive another `on_data` through the same
+    /// slot while the feeding thread waits inside it. It fires on EVERY
+    /// span that reaches the hash, including the one the test lands to
+    /// move the binding, so a hook that blocks must disarm itself on
+    /// first use or it will park the thread meant to release it.
+    #[cfg(test)]
+    pub(crate) fn set_mid_hash_hook_for_test(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self.mid_hash_hook.lock_ok() = Some(f);
     }
 
     /// How far `slot`'s prefix hasher has got. Test-only - see
@@ -1927,6 +1959,21 @@ impl LiveVerifier {
         let set = active.sets[set_ix].clone();
         drop(s);
         drop(plan);
+
+        // The mid-hash window opens HERE: both locks are down, the
+        // verdicts below are computed against `bind_gen`, and the
+        // re-lock that checks it has not happened yet. Test-only, and
+        // absent from every production build - see `mid_hash_hook`. The
+        // guard is cloned OUT before the call so a hook that re-enters
+        // `on_data` (which is exactly what the binding-moves test does)
+        // does not deadlock on this mutex.
+        #[cfg(test)]
+        {
+            let hook = self.mid_hash_hook.lock_ok().clone();
+            if let Some(h) = hook {
+                h();
+            }
+        }
 
         // Lock-free hashing. Fast verify applies only to trusted spans -
         // ones straight out of a decoder that already enforced the yEnc

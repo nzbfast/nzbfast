@@ -509,7 +509,13 @@ impl Shared {
         // two thirds of the duplicate bodies in place, because the
         // first racer to reach a given article is usually one that has
         // it. All or nothing is the honest pair of arms.
-        let probe = is_ladder && self.stat_probe;
+        //
+        // TODO 343 item B narrows the same question to the one config
+        // where the copy is paid for: a block account whose body would
+        // duplicate one a flat-rate server may still deliver.
+        let probe = is_ladder
+            && (self.stat_probe
+                || self.block_probe_duplicates(my_bit, level, inf.tried_430, now_ms));
         self.sat.tally(saturation::Rule::from_name(rule));
         // TODO 202 §17: this dup left through a SHUT gate, on the
         // per-article escape - ledger it, so a leg can tell a gate that

@@ -56,3 +56,9 @@ indexer = ["nzbkit/indexer", "nzbfast-core/indexer"]
 # crate's tests compile nzbfast-core as a plain dependency, so without
 # this `wall`'s provider tests would reach the real internet.
 nzbfast-core = { path = "../nzbfast-core", features = ["test-support"] }
+# `scan`'s collector deadline tests drive a paused virtual clock
+# (`#[tokio::test(start_paused = true)]`) rather than racing a real one -
+# `test-util` is what makes `start_paused` and manual `advance` exist.
+# Dev-only: cargo unifies this into the main `tokio` dependency for test
+# builds and does not carry it into the shipped binary.
+tokio = { version = "1", features = ["test-util"] }

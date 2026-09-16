@@ -7,6 +7,27 @@ use crate::source::OwnedRangeReader;
 use crate::volume_extract::{SplitVolumeState, SplitVolumeStep};
 use std::io::{Read, Write};
 
+/// A member's optional BLAKE2sp verifier: the expected digest the header
+/// declared, paired with the hasher accumulating the decoded bytes.
+/// `None` when the member carries no BLAKE2sp (a CRC-only member, or one
+/// whose digest is not being checked). Named because the shape threads
+/// through ten signatures on the extract path and reads as noise at each
+/// of them (`clippy::type_complexity` names three).
+type HashState = Option<([u8; 32], blake2sp::Hasher)>;
+
+/// A member's packed-data reader with the cipher and keys it is read
+/// through, `None` on both when the member is not encrypted.
+/// The digester's running state for the member it is on: its CRC, its
+/// BLAKE2sp verifier, and the member's index in the set.
+#[cfg(feature = "parallel")]
+type MemberDigestState = (Crc32, HashState, usize);
+
+type PackedReaderParts<'a> = (
+    Box<dyn Read + Send + 'a>,
+    Option<Rar50Cipher>,
+    Option<Rar50Keys>,
+);
+
 // Filtered RAR5 members still need whole-member byte transforms. Members at or
 // below this boundary use the buffered path, while larger members stream once
 // and reject filtered streams through the codec's typed sentinel.
@@ -157,7 +178,7 @@ impl FileHeader {
         archive: &'a Archive,
         password: Option<&[u8]>,
         cache: &mut crate::source::RangeReaderCache,
-    ) -> Result<(Box<dyn Read + Send + 'a>, Option<Rar50Cipher>, Option<Rar50Keys>)> {
+    ) -> Result<PackedReaderParts<'a>> {
         let reader = archive.range_reader_cached(self.block.data_range.clone(), cache)?;
         if !self.encrypted {
             return Ok((reader, None, None));
@@ -243,7 +264,7 @@ impl FileHeader {
     fn verify_streaming_integrity(
         &self,
         crc: Crc32,
-        hash: Option<([u8; 32], blake2sp::Hasher)>,
+        hash: HashState,
         keys: Option<&Rar50Keys>,
     ) -> Result<()> {
         if let Some(expected) = self.data_crc32 {
@@ -462,7 +483,7 @@ impl FileHeader {
     ///
     /// A split member's EXPECTED digests live in its LAST fragment's header
     /// (every earlier fragment carries the digest of its own PACKED bytes
-    /// instead - see [`FileHeader::split_fragment_packed_digests`] - and
+    /// instead - see [`FileHeader::nonfinal_fragment_digests`] - and
     /// the rars writer leaves the earlier ones out entirely), and the
     /// incremental split path does not have that header until the decode
     /// has already run. So it drives the stream from the FIRST fragment's
@@ -475,8 +496,8 @@ impl FileHeader {
         decoder: &mut Unpack50Decoder,
         buffered_decode_limit: u64,
         writer: &mut dyn Write,
-        hash: Option<([u8; 32], blake2sp::Hasher)>,
-    ) -> Result<(Crc32, Option<([u8; 32], blake2sp::Hasher)>)> {
+        hash: HashState,
+    ) -> Result<(Crc32, HashState)> {
         if self.is_stored() {
             return Err(Error::InvalidHeader(
                 "RAR 5 stored file does not use streaming compressed decode",
@@ -490,6 +511,11 @@ impl FileHeader {
         let output_size = usize::try_from(self.unpacked_size)
             .map_err(|_| Error::InvalidHeader("RAR 5 unpacked size overflows host address size"))?;
         let crc = Crc32::new();
+        // A split member is verified against its LAST fragment's CRC32, and
+        // only that fragment's header carries one, so this header saying
+        // "no CRC32" means nothing for a fragment: those always compute it.
+        let crc_wanted =
+            self.data_crc32.is_some() || self.is_split_before() || self.is_split_after();
 
         // Pipeline: the decoder runs on a spawned thread and hands coalesced
         // ~1 MB buffers over a bounded channel; writing stays on the calling
@@ -503,7 +529,9 @@ impl FileHeader {
         // one extra buffer over the old three keeps the deeper pipeline from
         // starving now that the writer and digester can each hold one.
         const PIPE_BUF: usize = 1 << 20;
-        const POOL_BUFFERS: usize = 4;
+        // Twice the digester's batch, so a full batch in the digester still
+        // leaves the decoder and the writer buffers to work with.
+        const POOL_BUFFERS: usize = 2 * DIGEST_BATCH;
         enum PipeChunk {
             Data(Vec<u8>),
             Repeated { byte: u8, len: usize },
@@ -607,20 +635,33 @@ impl FileHeader {
             let digester = scope.spawn(move || {
                 let mut crc = crc;
                 let mut hash = hash;
-                for chunk in digest_rx {
-                    match chunk {
-                        PipeChunk::Data(buffer) => {
-                            crc.update(&buffer);
-                            if let Some((_, hasher)) = &mut hash {
-                                hasher.update(&buffer);
+                // Buffers that are already waiting are digested together, so
+                // the CRC runs on several cores (`digest_pieces`); a digester
+                // that keeps up takes them one at a time, as it always did.
+                let mut batch: Vec<Vec<u8>> = Vec::with_capacity(DIGEST_BATCH);
+                while let Ok(first) = digest_rx.recv() {
+                    let mut next = Some(first);
+                    let mut repeated = None;
+                    while let Some(chunk) = next.take() {
+                        match chunk {
+                            PipeChunk::Data(buffer) => batch.push(buffer),
+                            PipeChunk::Repeated { byte, len } => {
+                                repeated = Some((byte, len));
+                                break;
                             }
-                            let mut buffer = buffer;
-                            buffer.clear();
-                            let _ = pool_tx.send(buffer);
                         }
-                        PipeChunk::Repeated { byte, len } => {
-                            digest_repeated_chunk(&mut crc, &mut hash, byte, len);
+                        if batch.len() < DIGEST_BATCH {
+                            next = digest_rx.try_recv().ok();
                         }
+                    }
+                    let pieces: Vec<&[u8]> = batch.iter().map(Vec::as_slice).collect();
+                    digest_pieces(&mut crc, &mut hash, crc_wanted, &pieces);
+                    for mut buffer in batch.drain(..) {
+                        buffer.clear();
+                        let _ = pool_tx.send(buffer);
+                    }
+                    if let Some((byte, len)) = repeated {
+                        digest_repeated_chunk(&mut crc, &mut hash, byte, len);
                     }
                 }
                 // The pool sender drops with the digester, which is what
@@ -754,7 +795,9 @@ impl FileHeader {
         let (mut reader, cipher, keys) = self
             .packed_reader_parts(archive, password, reader_cache)
             .map_err(|error| self.entry_error("decoding", error))?;
-        let crc = Crc32::new();
+        // See `stream_packed_digests`: a fragment's own header is no guide.
+        let crc = (self.data_crc32.is_some() || self.is_split_before() || self.is_split_after())
+            .then(Crc32::new);
         let hash =
             streaming_hash_verifier(self).map_err(|error| self.entry_error("decoding", error))?;
         let mut written = 0u64;
@@ -876,7 +919,14 @@ impl FileHeader {
 /// digester, whose exit drops the pool sender and wakes a producer
 /// parked on the drained pool.
 const STORED_PIPE_BUF: usize = 1 << 20;
-const STORED_POOL: usize = 4;
+/// Twice [`DIGEST_BATCH`], so a digester holding a full batch still leaves
+/// the producer and the writer buffers to work with.
+const STORED_POOL: usize = 2 * DIGEST_BATCH;
+/// How many waiting 1 MiB buffers a pipeline's digester takes at once, so
+/// their CRC32 runs on as many cores ([`digest_pieces`]). Four is where the
+/// 14 Sep 2026 measurement on the dev Mac flattened: 25 GB/s at four pieces,
+/// 28 at eight.
+const DIGEST_BATCH: usize = 4;
 // Below this size, allocating four 1 MiB buffers and creating a reader plus
 // digest thread costs substantially more than the copy and integrity work.
 // Keep tiny STORE members on the caller: this path is especially important
@@ -889,10 +939,12 @@ fn pipe_stored_chunks<E>(
     cipher: Option<Rar50Cipher>,
     size_hint: u64,
     read_error: impl Fn(std::io::Error) -> E,
-    crc: Crc32,
-    hash: Option<([u8; 32], blake2sp::Hasher)>,
+    // `None` when the member records no CRC32, so none is computed: a
+    // BLAKE2sp-only member spent 14% of its test CPU on a CRC32 nothing read.
+    crc: Option<Crc32>,
+    hash: HashState,
     mut consume: impl FnMut(&[u8]) -> std::result::Result<usize, E>,
-) -> std::result::Result<(Crc32, Option<([u8; 32], blake2sp::Hasher)>), E> {
+) -> std::result::Result<(Crc32, HashState), E> {
     if size_hint <= STORED_INLINE_MAX {
         let capacity = usize::try_from(size_hint)
             .unwrap_or(STORED_INLINE_BUF)
@@ -913,12 +965,14 @@ fn pipe_stored_chunks<E>(
                 None => reader.read(&mut buf).map_err(&read_error)?,
             };
             if count == 0 {
-                return Ok((crc, hash));
+                return Ok((crc.unwrap_or_default(), hash));
             }
             let chunk = &buf[..count];
             let content_len = consume(chunk)?;
             let content = &chunk[..content_len];
-            crc.update(content);
+            if let Some(crc) = &mut crc {
+                crc.update(content);
+            }
             if let Some((_, hasher)) = &mut hash {
                 hasher.update(content);
             }
@@ -958,10 +1012,7 @@ fn pipe_stored_chunks<E>(
     let (digests, reclaimed) = std::thread::scope(|scope| {
         let encrypted = cipher.is_some();
         let producer = scope.spawn(move || {
-            loop {
-                let Ok(mut buf) = pool_rx.recv() else {
-                    break;
-                };
+            while let Ok(mut buf) = pool_rx.recv() {
                 debug_assert_eq!(buf.len(), STORED_PIPE_BUF);
                 let read = if encrypted {
                     // Whole buffers, so every chunk the decrypt stage sees
@@ -1025,15 +1076,26 @@ fn pipe_stored_chunks<E>(
         };
 
         let digester = scope.spawn(move || {
-            let mut crc = crc;
+            let crc_wanted = crc.is_some();
+            let mut crc = crc.unwrap_or_default();
             let mut hash = hash;
-            for (buf, content_len) in digest_rx {
-                let chunk = &buf[..content_len];
-                crc.update(chunk);
-                if let Some((_, hasher)) = &mut hash {
-                    hasher.update(chunk);
+            // The buffers already waiting are digested together, so the CRC
+            // runs on several cores; a digester that keeps up takes them one
+            // at a time, as it always did.
+            let mut batch: Vec<(Vec<u8>, usize)> = Vec::with_capacity(DIGEST_BATCH);
+            while let Ok(first) = digest_rx.recv() {
+                batch.push(first);
+                while batch.len() < DIGEST_BATCH {
+                    match digest_rx.try_recv() {
+                        Ok(next) => batch.push(next),
+                        Err(_) => break,
+                    }
                 }
-                let _ = pool_tx.send(buf);
+                let pieces: Vec<&[u8]> = batch.iter().map(|(buf, len)| &buf[..*len]).collect();
+                digest_pieces(&mut crc, &mut hash, crc_wanted, &pieces);
+                for (buf, _) in batch.drain(..) {
+                    let _ = pool_tx.send(buf);
+                }
             }
             // The pool sender drops with the digester, which is what wakes
             // a producer parked on the drained pool after an early stop.
@@ -1137,9 +1199,33 @@ fn write_repeated_bytes(writer: &mut dyn Write, byte: u8, mut len: usize) -> std
     Ok(())
 }
 
+/// One batch of a pipeline's digests, in order: CRC32 over `pieces` on as
+/// many cores as there are pieces ([`Crc32::update_pieces`]) and, for a
+/// member with a BLAKE2sp record, the hash on a thread beside it. The CRC32
+/// is skipped outright when the member records none.
+fn digest_pieces(crc: &mut Crc32, hash: &mut HashState, crc_wanted: bool, pieces: &[&[u8]]) {
+    match hash.as_mut() {
+        Some((_, hasher)) if crc_wanted => std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for piece in pieces {
+                    hasher.update(piece);
+                }
+            });
+            crc.update_pieces(pieces);
+        }),
+        Some((_, hasher)) => {
+            for piece in pieces {
+                hasher.update(piece);
+            }
+        }
+        None if crc_wanted => crc.update_pieces(pieces),
+        None => {}
+    }
+}
+
 fn digest_repeated_chunk(
     crc: &mut Crc32,
-    hash: &mut Option<([u8; 32], blake2sp::Hasher)>,
+    hash: &mut HashState,
     byte: u8,
     len: usize,
 ) {
@@ -1164,10 +1250,14 @@ fn digest_repeated_chunk(
     }
 }
 
+/// Only called from this file's `mod tests`, which is where the
+/// repeated-chunk digest agreement is proved; the production path calls
+/// `write_repeated_bytes` and `digest_repeated_chunk` separately.
+#[allow(dead_code)]
 fn write_repeated_chunk(
     writer: &mut dyn Write,
     crc: &mut Crc32,
-    hash: &mut Option<([u8; 32], blake2sp::Hasher)>,
+    hash: &mut HashState,
     byte: u8,
     len: usize,
 ) -> std::io::Result<()> {
@@ -2633,7 +2723,7 @@ where
         self.frag_pos = 0;
         self.frag_len = (range.end - range.start) as u64;
         self.frag_digest = file
-            .split_fragment_packed_digests()
+            .nonfinal_fragment_digests()
             .map(|expected| FragmentDigest::new(expected, volume_index));
         self.cursor = Some(archive.owned_range_reader(range)?);
         Ok(())
@@ -2821,12 +2911,14 @@ impl SolidChainDriver {
             return false;
         }
         let members = collect_solid_chain(volumes, coords, password_available);
-        // Saturating: `output_size` is the archive's own declared
-        // unpacked size, so a crafted set can push the sum past
-        // `usize::MAX` - an overflow panic in any checked build and a
-        // silent wrap in release, which would hand
-        // `solid_chain_worthwhile` a tiny figure for an enormous chain.
-        // Saturation answers "definitely not worthwhile" instead.
+        // nzbfast: saturating. `chain_member_shape` checks only that
+        // EACH header-declared size fits a usize, so the sum overflowed
+        // - a panic under overflow checks (debug builds, and the armv7
+        // nightly cross run this file's own note says compiles with them
+        // on) and a silent wrap in release, which would have handed
+        // `solid_chain_worthwhile` a small number for an enormous chain.
+        // Saturating is the right direction here: an impossible total is
+        // certainly not worthwhile.
         let total: usize = members
             .iter()
             .fold(0usize, |acc, m| acc.saturating_add(m.output_size));
@@ -2912,7 +3004,10 @@ where
     // same way the digester below does, so a filter declared by a member
     // after the first translates addresses against that member's own start.
     let member_sizes: Vec<usize> = members.iter().map(|m| m.output_size).collect();
-    let total: usize = member_sizes.iter().sum();
+    // nzbfast: saturating, for the reason at `SolidChainDriver::claim`.
+    let total: usize = member_sizes
+        .iter()
+        .fold(0usize, |acc, s| acc.saturating_add(*s));
     // The window must persist for members after the group.
     session.decoder.set_retain_history(true);
     // A group under this budget takes the flat-apply fast path; larger
@@ -3070,8 +3165,7 @@ where
         let digester = scope.spawn(move || {
             let mut cursor = 0usize; // member index
             let mut error: Option<Error> = None;
-            let mut member_state: Option<(Crc32, Option<([u8; 32], blake2sp::Hasher)>, usize)> =
-                None;
+            let mut member_state: Option<MemberDigestState> = None;
             'digest: for chunk in digest_rx {
                 let mut chunk = match chunk {
                     PipeChunk::Data(buffer) => ChunkCursor::Data(buffer, 0),
@@ -3957,7 +4051,7 @@ impl PendingSplitRefs {
         final_file: &FileHeader,
         session: &mut DecoderSession<'_>,
         open: &mut F,
-        mut spent: Option<&mut (dyn FnMut(usize) + Send)>,
+        spent: Option<&mut (dyn FnMut(usize) + Send)>,
     ) -> Result<()>
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
@@ -4049,7 +4143,7 @@ impl PendingSplitRefs {
             // members release their volumes at the next volume boundary,
             // exactly as before.
             let watermark = if final_file.unpacked_size > session.buffered_decode_limit {
-                spent.as_deref_mut().map(|f| {
+                spent.map(|f| {
                     Box::new(move |volume: usize| f(volume)) as Box<dyn FnMut(usize) + Send + '_>
                 })
             } else {
@@ -4140,6 +4234,12 @@ impl PendingSplitRefs {
         Ok(())
     }
 
+    // Eight distinct things a split stored member needs to be written:
+    // the volumes, the final header, the decryptor, the sink, the
+    // consumption callback, the shared fragment error and the digests.
+    // None of them travel together, so a parameter struct would be one
+    // field per argument.
+    #[allow(clippy::too_many_arguments)]
     fn write_stored_to(
         &self,
         volumes: &[Archive],
@@ -4158,7 +4258,7 @@ impl PendingSplitRefs {
         // seams, so the split needs nothing seam-aware).
         let mut reader = self.fragment_reader(volumes, None, spent, fragment_error, digests)?;
         let cipher = decryptor.map(|d| Rar50Cipher::new(d.keys.key, d.iv));
-        let crc = Crc32::new();
+        let crc = final_file.data_crc32.is_some().then(Crc32::new);
         let hash = streaming_hash_verifier(final_file)?;
         let mut written = 0u64;
         let mut discarded = 0u64;
@@ -4264,7 +4364,7 @@ impl PendingSplitRefs {
     fn localize_fragment_damage(&self, volumes: &[Archive]) -> Option<Error> {
         for &(volume_index, file_index) in &self.fragments {
             let file = volumes.get(volume_index)?.files().nth(file_index)?;
-            let expected = match file.split_fragment_packed_digests() {
+            let expected = match file.nonfinal_fragment_digests() {
                 Some(expected) => expected,
                 None => continue,
             };
@@ -4317,7 +4417,7 @@ impl PendingSplitRefs {
                 volume_index,
                 file.block.data_range.clone(),
                 match digests {
-                    FragmentDigests::Check => file.split_fragment_packed_digests(),
+                    FragmentDigests::Check => file.nonfinal_fragment_digests(),
                     FragmentDigests::Defer => None,
                 },
             ));
@@ -4375,7 +4475,7 @@ enum FragmentDigests {
 
 /// The digests a non-final split fragment's PACKED bytes must produce,
 /// when its own header carries them - see
-/// [`FileHeader::split_fragment_packed_digests`].
+/// [`FileHeader::nonfinal_fragment_digests`].
 #[derive(Clone, Copy)]
 struct SplitFragmentDigests {
     crc32: Option<u32>,
@@ -4391,7 +4491,7 @@ impl FileHeader {
     /// record's 0x0002 flag is per fragment and WinRAR sets it only on
     /// the final one) - while the FINAL fragment carries the whole
     /// member's unpacked digests. unrar checks it at every volume
-    /// boundary (UIERROR_CHECKSUMPACKED), which is what localizes damage
+    /// boundary and reports the checksum error there, which is what localizes damage
     /// to one volume instead of failing the member at its end; both
     /// split walks do the same. Measured on the WinRAR 7.21 rar50
     /// multivolume fixtures (plain, solid, encrypted, .rev) and rar
@@ -4401,7 +4501,7 @@ impl FileHeader {
     ///
     /// A ciphertext digest is checkable without the password, and a
     /// mismatch proves on-disk damage - never a wrong-password symptom.
-    fn split_fragment_packed_digests(&self) -> Option<SplitFragmentDigests> {
+    fn nonfinal_fragment_digests(&self) -> Option<SplitFragmentDigests> {
         if !self.is_split_after() || self.uses_hash_mac() {
             return None;
         }
@@ -4575,7 +4675,7 @@ struct SplitDecryptor {
     iv: [u8; 16],
 }
 
-fn streaming_hash_verifier(file: &FileHeader) -> Result<Option<([u8; 32], blake2sp::Hasher)>> {
+fn streaming_hash_verifier(file: &FileHeader) -> Result<HashState> {
     let Some(hash) = &file.hash else {
         return Ok(None);
     };
@@ -4776,8 +4876,8 @@ fn fill_ciphertext(inner: &mut dyn Read, target: &mut [u8]) -> std::io::Result<u
 mod tests {
     use super::super::{
         ArchiveSource, Block, BlockHeader, CompressedEntry, FileEncryption, FileHash, FilterKind,
-        FilterPolicy, MainHeader, Rar50Writer, WriterOptions, HEAD_FILE, HFL_SPLIT_AFTER,
-        HFL_SPLIT_BEFORE,
+        FilterPolicy, MainHeader, Rar50Writer, WriterOptions, BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME,
+        BLOCK_CONTINUES_IN_NEXT_VOLUME, BLOCK_TYPE_FILE,
     };
     use super::*;
     use std::cell::RefCell;
@@ -4787,7 +4887,7 @@ mod tests {
 
     fn plain_file(name: &[u8], data: &[u8], hash: Option<FileHash>) -> FileHeader {
         FileHeader {
-            block: empty_block(HEAD_FILE, 0, 0..0),
+            block: empty_block(BLOCK_TYPE_FILE, 0, 0..0),
             file_flags: 0,
             unpacked_size: data.len() as u64,
             attributes: 0x20,
@@ -4809,23 +4909,23 @@ mod tests {
     /// never when the record is MAC-keyed, and only records that are
     /// actually present and well formed.
     #[test]
-    fn split_fragment_packed_digests_apply_to_nonfinal_unkeyed_fragments_only() {
+    fn nonfinal_fragment_digests_apply_to_unkeyed_fragments_only() {
         let hash = FileHash {
             hash_type: 0,
             data: vec![0xab; 32],
         };
         let mut middle = plain_file(b"a.bin", b"data", Some(hash));
-        middle.block.flags = HFL_SPLIT_BEFORE | HFL_SPLIT_AFTER;
+        middle.block.flags = BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME | BLOCK_CONTINUES_IN_NEXT_VOLUME;
         middle.data_crc32 = Some(0x1234_5678);
         let digests = middle
-            .split_fragment_packed_digests()
+            .nonfinal_fragment_digests()
             .expect("middle fragment carries digests");
         assert_eq!(digests.crc32, Some(0x1234_5678));
         assert_eq!(digests.blake2, Some([0xab; 32]));
 
         let mut last = middle.clone();
-        last.block.flags = HFL_SPLIT_BEFORE;
-        assert!(last.split_fragment_packed_digests().is_none());
+        last.block.flags = BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME;
+        assert!(last.nonfinal_fragment_digests().is_none());
 
         // The 0x0002 encryption flag keys the digests; WinRAR sets it only
         // on final fragments, and a keyed record is not checkable here.
@@ -4838,12 +4938,12 @@ mod tests {
             iv: [0; 16],
             check_value: None,
         });
-        assert!(keyed.split_fragment_packed_digests().is_none());
+        assert!(keyed.nonfinal_fragment_digests().is_none());
 
         let mut unstamped = middle.clone();
         unstamped.data_crc32 = None;
         unstamped.hash = None;
-        assert!(unstamped.split_fragment_packed_digests().is_none());
+        assert!(unstamped.nonfinal_fragment_digests().is_none());
 
         // A malformed hash record length never becomes a check; the
         // final-fragment verify paths are the ones that error on it.
@@ -4853,7 +4953,7 @@ mod tests {
             hash_type: 0,
             data: vec![0xab; 16],
         });
-        assert!(short_hash.split_fragment_packed_digests().is_none());
+        assert!(short_hash.nonfinal_fragment_digests().is_none());
     }
 
     /// The two real fixture sets the split-hash-seeding tests drive, and
@@ -4936,9 +5036,10 @@ mod tests {
             .with_rar50_split_hash_seeding(seeding)
     }
 
-    /// Run a parsed volume set through `extract_volume_sequence_to_with_progress`
-    /// - the only caller of `incremental_split_decode` - and return the
-    /// single split member's bytes.
+    /// Run a parsed volume set through
+    /// `extract_volume_sequence_to_with_progress` (the only caller of
+    /// `incremental_split_decode`) and return the single split member's
+    /// bytes.
     fn sequence_split_member(
         archives: Vec<Archive>,
         options: crate::ArchiveReadOptions<'_>,
@@ -5209,7 +5310,7 @@ mod tests {
     #[test]
     fn growing_chain_keeps_erroring_after_a_fragment_digest_mismatch() {
         let data = *b"0123456";
-        let mut first = split_fragment_file(b"a.bin", HFL_SPLIT_AFTER);
+        let mut first = split_fragment_file(b"a.bin", BLOCK_CONTINUES_IN_NEXT_VOLUME);
         first.block.data_range = 0..data.len();
         first.data_crc32 = Some(!crc32(&data));
 
@@ -5227,14 +5328,9 @@ mod tests {
 
         let mut got = Vec::new();
         let mut buf = [0u8; 16];
-        loop {
-            match chain.read(&mut buf) {
-                Ok(count) => {
-                    assert_ne!(count, 0, "the mismatch must error, never read as clean EOF");
-                    got.extend_from_slice(&buf[..count]);
-                }
-                Err(_) => break,
-            }
+        while let Ok(count) = chain.read(&mut buf) {
+            assert_ne!(count, 0, "the mismatch must error, never read as clean EOF");
+            got.extend_from_slice(&buf[..count]);
         }
         assert_eq!(got, data);
 
@@ -5254,7 +5350,7 @@ mod tests {
     fn finish_checks_a_fragment_left_exactly_at_its_boundary() {
         let data = *b"0123456";
         for (crc, expect_mismatch) in [(crc32(&data), false), (!crc32(&data), true)] {
-            let mut first = split_fragment_file(b"a.bin", HFL_SPLIT_AFTER);
+            let mut first = split_fragment_file(b"a.bin", BLOCK_CONTINUES_IN_NEXT_VOLUME);
             first.block.data_range = 0..data.len();
             first.data_crc32 = Some(crc);
 
@@ -5267,7 +5363,7 @@ mod tests {
                 Ok(Some(archive_with_blocks(
                     vec![Block::File(split_fragment_file(
                         b"a.bin",
-                        HFL_SPLIT_BEFORE,
+                        BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME,
                     ))],
                     Vec::new(),
                 )))
@@ -5453,11 +5549,11 @@ mod tests {
         crc: Option<u32>,
     ) -> (PendingSplitRefs, FileHeader, Vec<Archive>) {
         let half = payload.len() / 2;
-        let mut first = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        let mut first = split_fragment_file(b"a.txt", BLOCK_CONTINUES_IN_NEXT_VOLUME);
         first.block.data_range = 0..half;
         first.block.data_size = Some(half as u64);
         first.encrypted = encrypted;
-        let mut second = split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE);
+        let mut second = split_fragment_file(b"a.txt", BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME);
         second.block.data_range = 0..payload.len() - half;
         second.block.data_size = Some((payload.len() - half) as u64);
         second.encrypted = encrypted;
@@ -5708,7 +5804,7 @@ mod tests {
             None,
             content.len() as u64,
             |error: std::io::Error| error,
-            Crc32::new(),
+            Some(Crc32::new()),
             None,
             |chunk: &[u8]| {
                 seen.extend_from_slice(chunk);
@@ -5801,8 +5897,8 @@ mod tests {
         let full = [first.as_slice(), second.as_slice()].concat();
         let expected_crc = crc32(&full);
         let volumes = vec![
-            stored_split_archive(first, &full, expected_crc, HFL_SPLIT_AFTER),
-            stored_split_archive(second, &full, expected_crc, HFL_SPLIT_BEFORE),
+            stored_split_archive(first, &full, expected_crc, BLOCK_CONTINUES_IN_NEXT_VOLUME),
+            stored_split_archive(second, &full, expected_crc, BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME),
         ];
         let captured = Rc::new(RefCell::new(Vec::new()));
         let sink = captured.clone();
@@ -5836,6 +5932,7 @@ mod tests {
             adaptive_entropy_blocks: true,
             write_policy: None,
             tokenizer_horizon_choice: false,
+            level_five_fallbacks: true,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",
@@ -5875,6 +5972,7 @@ mod tests {
             adaptive_entropy_blocks: true,
             write_policy: None,
             tokenizer_horizon_choice: false,
+            level_five_fallbacks: true,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",
@@ -5969,7 +6067,7 @@ mod tests {
     fn constant_time_hash_comparison_keeps_hash_validation_behaviour() {
         let data = b"hash me";
         let file = FileHeader {
-            block: empty_block(HEAD_FILE, 0, 0..0),
+            block: empty_block(BLOCK_TYPE_FILE, 0, 0..0),
             file_flags: 0,
             unpacked_size: data.len() as u64,
             attributes: 0x20,
@@ -6186,7 +6284,7 @@ mod tests {
 
         let mut writer = Vec::new();
         let mut crc_ff = Crc32::new();
-        let mut hash_none: Option<([u8; 32], blake2sp::Hasher)> = None;
+        let mut hash_none: HashState = None;
         write_repeated_chunk(&mut writer, &mut crc_ff, &mut hash_none, 0xff, 1024).unwrap();
         assert_eq!(writer, vec![0xffu8; 1024]);
     }
@@ -6213,10 +6311,10 @@ mod tests {
     fn stored_split_archive(data: &[u8], full: &[u8], crc: u32, flags: u64) -> Archive {
         // Real archivers stamp NON-final fragments with the digests of
         // that fragment's own packed bytes (see
-        // split_fragment_packed_digests); only the final fragment carries
+        // nonfinal_fragment_digests); only the final fragment carries
         // the whole member's unpacked digests, and the chain now rejects
         // a fragment whose packed bytes miss its own record.
-        let (crc, hash) = if flags & HFL_SPLIT_AFTER != 0 {
+        let (crc, hash) = if flags & BLOCK_CONTINUES_IN_NEXT_VOLUME != 0 {
             (crc32(data), blake2sp::hash(data))
         } else {
             (crc, blake2sp::hash(full))
@@ -6231,7 +6329,7 @@ mod tests {
                 extras: Vec::new(),
             },
             blocks: vec![Block::File(FileHeader {
-                block: empty_block(HEAD_FILE, flags, 0..data.len()),
+                block: empty_block(BLOCK_TYPE_FILE, flags, 0..data.len()),
                 file_flags: 0,
                 unpacked_size: full.len() as u64,
                 attributes: 0x20,
@@ -6272,12 +6370,13 @@ mod tests {
             offset: 0,
             header_range: 0..0,
             data_range,
+            end_flags: None,
         }
     }
 
     fn split_fragment_file(name: &[u8], hfl_flags: u64) -> FileHeader {
         FileHeader {
-            block: empty_block(HEAD_FILE, hfl_flags, 0..0),
+            block: empty_block(BLOCK_TYPE_FILE, hfl_flags, 0..0),
             file_flags: 0,
             unpacked_size: 0,
             attributes: 0x20,
@@ -6326,7 +6425,7 @@ mod tests {
         ));
 
         let only_continuation = vec![archive_with_blocks(
-            vec![Block::File(split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE))],
+            vec![Block::File(split_fragment_file(b"a.txt", BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME))],
             Vec::new(),
         )];
         assert!(matches!(
@@ -6340,7 +6439,7 @@ mod tests {
 
         let interrupted = vec![archive_with_blocks(
             vec![
-                Block::File(split_fragment_file(b"a.txt", HFL_SPLIT_AFTER)),
+                Block::File(split_fragment_file(b"a.txt", BLOCK_CONTINUES_IN_NEXT_VOLUME)),
                 Block::File(plain_file(b"other.txt", b"", None)),
             ],
             Vec::new(),
@@ -6355,7 +6454,7 @@ mod tests {
         ));
 
         let incomplete = vec![archive_with_blocks(
-            vec![Block::File(split_fragment_file(b"a.txt", HFL_SPLIT_AFTER))],
+            vec![Block::File(split_fragment_file(b"a.txt", BLOCK_CONTINUES_IN_NEXT_VOLUME))],
             Vec::new(),
         )];
         assert!(matches!(
@@ -6370,14 +6469,14 @@ mod tests {
 
     #[test]
     fn validate_split_fragment_rejects_directories_and_demands_password_for_encrypted() {
-        let mut dir = split_fragment_file(b"d", HFL_SPLIT_AFTER);
+        let mut dir = split_fragment_file(b"d", BLOCK_CONTINUES_IN_NEXT_VOLUME);
         dir.file_flags = 0x0001;
         assert!(matches!(
             validate_split_fragment(&dir, None),
             Err(Error::InvalidHeader(_))
         ));
 
-        let mut encrypted = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        let mut encrypted = split_fragment_file(b"a.txt", BLOCK_CONTINUES_IN_NEXT_VOLUME);
         encrypted.encrypted = true;
         assert!(matches!(
             validate_split_fragment(&encrypted, None),
@@ -6385,42 +6484,44 @@ mod tests {
         ));
         validate_split_fragment(&encrypted, Some(b"pw")).unwrap();
 
-        let plain = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        let plain = split_fragment_file(b"a.txt", BLOCK_CONTINUES_IN_NEXT_VOLUME);
         validate_split_fragment(&plain, None).unwrap();
     }
 
     #[test]
     fn validate_split_continuation_refs_rejects_property_drift_between_fragments() {
-        let first = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        let first = split_fragment_file(b"a.txt", BLOCK_CONTINUES_IN_NEXT_VOLUME);
         let pending = PendingSplitRefs::new(&first, 0, 0);
 
-        let renamed = split_fragment_file(b"b.txt", HFL_SPLIT_BEFORE);
+        let renamed = split_fragment_file(b"b.txt", BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME);
         assert!(matches!(
             validate_split_continuation_refs(&pending, &renamed, None),
             Err(Error::InvalidHeader(_))
         ));
 
-        let mut new_compression = split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE);
+        let mut new_compression =
+            split_fragment_file(b"a.txt", BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME);
         new_compression.compression_info = 0x123;
         assert!(matches!(
             validate_split_continuation_refs(&pending, &new_compression, None),
             Err(Error::InvalidHeader(_))
         ));
 
-        let mut new_encryption = split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE);
+        let mut new_encryption =
+            split_fragment_file(b"a.txt", BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME);
         new_encryption.encrypted = true;
         assert!(matches!(
             validate_split_continuation_refs(&pending, &new_encryption, Some(b"pw")),
             Err(Error::InvalidHeader(_))
         ));
 
-        let same = split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE);
+        let same = split_fragment_file(b"a.txt", BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME);
         validate_split_continuation_refs(&pending, &same, None).unwrap();
     }
 
     #[test]
     fn archive_extract_to_rejects_split_entries_in_single_volume_archive() {
-        let split = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        let split = split_fragment_file(b"a.txt", BLOCK_CONTINUES_IN_NEXT_VOLUME);
         let archive = archive_with_blocks(vec![Block::File(split)], Vec::new());
         let err = archive
             .extract_to(crate::ArchiveReadOptions::default(), never_open)
@@ -6858,7 +6959,7 @@ mod tests {
     #[test]
     fn pending_split_refs_write_stored_to_rejects_unpacked_size_mismatch() {
         let payload: &[u8] = b"unmatched-size payload";
-        let mut first = split_fragment_file(b"a.txt", HFL_SPLIT_AFTER);
+        let mut first = split_fragment_file(b"a.txt", BLOCK_CONTINUES_IN_NEXT_VOLUME);
         first.block.data_range = 0..payload.len();
         first.block.data_size = Some(payload.len() as u64);
         first.unpacked_size = (payload.len() + 5) as u64; // mismatch
@@ -6886,7 +6987,7 @@ mod tests {
         // digests, which is the check this test exercises. A SPLIT_AFTER
         // fragment's records would be per-fragment packed digests and hit
         // the volume-boundary check instead.
-        let mut first = split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE);
+        let mut first = split_fragment_file(b"a.txt", BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME);
         first.block.data_range = 0..payload.len();
         first.block.data_size = Some(payload.len() as u64);
         first.unpacked_size = payload.len() as u64;
@@ -6915,7 +7016,7 @@ mod tests {
         wrong_hash[0] ^= 0xff;
 
         // The FINAL fragment, for the same reason as the CRC twin above.
-        let mut first = split_fragment_file(b"a.txt", HFL_SPLIT_BEFORE);
+        let mut first = split_fragment_file(b"a.txt", BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME);
         first.block.data_range = 0..payload.len();
         first.block.data_size = Some(payload.len() as u64);
         first.unpacked_size = payload.len() as u64;
@@ -7036,7 +7137,7 @@ mod tests {
         service.compression_info = 1 << 7;
         service.unpacked_size = declared_unpacked;
         service.block = empty_block(
-            crate::rar50::HEAD_SERVICE,
+            crate::rar50::BLOCK_TYPE_SERVICE,
             0,
             service_offset..service_offset + packed.len(),
         );

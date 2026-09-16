@@ -651,6 +651,33 @@ impl Entry {
         if !self.is_stored() {
             return Err(Error::InvalidHeader("RAR 1.3 entry is not stored"));
         }
+        // nzbfast: a STORED member's packed and unpacked sizes are the
+        // same number by definition, and this is the only version that
+        // did not say so - RAR 1.5+ (`rar15_40`) and RAR 5
+        // (`rar50/extract`) both refuse the mismatch. Without it the
+        // emitted length came from `pack_size` alone and the only thing
+        // standing between a caller and a member of the wrong size was
+        // the 16-bit rotate-add checksum, which is forgeable by
+        // construction.
+        //
+        // Encrypted members are exempt for the same reason they are
+        // elsewhere: the packed range is padded to the cipher's block
+        // size, so the two legitimately differ and the truncation
+        // downstream is what reconciles them. A SPLIT piece is exempt
+        // too - its `pack_size` is this volume's fragment while
+        // `unp_size` is the whole file - though no caller reaches here
+        // with one today: the single-archive path refuses a split entry
+        // outright and the multivolume path goes through `write_to`,
+        // which checks the assembled total instead.
+        if !self.is_encrypted()
+            && !self.is_split_before()
+            && !self.is_split_after()
+            && self.header.pack_size != self.header.unp_size
+        {
+            return Err(Error::InvalidHeader(
+                "RAR 1.3 stored file has mismatched packed and unpacked sizes",
+            ));
+        }
         if self.is_encrypted() {
             let password = password.ok_or(Error::NeedPassword)?;
             let mut checksum = Rar13Checksum::new();
@@ -1003,7 +1030,19 @@ impl PendingSplitRefs {
             checksum: &mut checksum,
         };
         if self.method == METHOD_STORE {
-            std::io::copy(&mut reader, &mut checksum_writer)?;
+            // nzbfast: and the assembled length has to be the one the
+            // header declared. The fragments are copied verbatim, so
+            // without this the emitted size came from the packed ranges
+            // alone and the only gate on it was the 16-bit rotate-add
+            // checksum - forgeable by construction. RAR 1.5+ and RAR 5
+            // both refuse a stored pack/unp mismatch; this is the same
+            // rule for the shape that assembles from several volumes.
+            let copied = std::io::copy(&mut reader, &mut checksum_writer)?;
+            if copied != u64::from(final_entry.header.unp_size) {
+                return Err(Error::InvalidHeader(
+                    "RAR 1.3 stored file assembled to a different size than its header declared",
+                ));
+            }
         } else {
             unpack15.decode_member_from_reader(
                 &mut reader,
@@ -1979,6 +2018,64 @@ mod tests {
         assert_eq!(extracted[0].data, b"hello rar 1.3");
         assert!(archive.entries[1].is_directory());
         assert!(extracted[1].is_directory);
+    }
+
+    /// nzbfast: a STORED member's packed and unpacked sizes are the same
+    /// number by definition, and RAR 1.3 was the only version that did
+    /// not say so - RAR 1.5+ and RAR 5 both refuse the mismatch. Without
+    /// it the emitted length came from `pack_size` alone, and the only
+    /// thing between a caller and a member of the wrong size was the
+    /// 16-bit rotate-add checksum, which is forgeable by construction.
+    ///
+    /// NEGATIVE CONTROL, run: remove the pack/unp check from
+    /// `write_stored_to` and this extracts happily, 4 bytes short of
+    /// what its own header declared.
+    #[test]
+    fn a_stored_entry_whose_declared_sizes_disagree_is_refused() {
+        let payload: &[u8] = b"rar13-size-mismatch-fixture";
+        let input = [StoredEntry {
+            name: b"F.bin",
+            data: payload,
+            file_time: 0,
+            file_attr: 0x20,
+            password: None,
+            file_comment: None,
+        }];
+        let good = write_stored_archive(&input, WriterOptions::default()).unwrap();
+        // The round trip is fine to begin with, so the refusal below is
+        // about the tamper and not about the fixture.
+        let archive = Archive::parse(&good).unwrap();
+        assert_eq!(collect_extract(&archive, None).unwrap()[0].data, payload);
+
+        // The file header carries pack_size then unp_size, both LE u32
+        // and both `payload.len()` for a stored entry - so the pair is a
+        // unique eight-byte needle. Raise only the SECOND.
+        let n = payload.len() as u32;
+        let mut needle = Vec::new();
+        needle.extend_from_slice(&n.to_le_bytes());
+        needle.extend_from_slice(&n.to_le_bytes());
+        let at = good
+            .windows(8)
+            .position(|w| w == needle.as_slice())
+            .expect("the size pair must be findable");
+        let mut bad = good.clone();
+        bad[at + 4..at + 8].copy_from_slice(&(n + 4).to_le_bytes());
+
+        let archive = Archive::parse(&bad).expect("the header still parses - it is the CONTENT");
+        // Wrapped in `AtEntry` by the extract loop, which is what names
+        // the member in the message a caller sees.
+        let err = collect_extract(&archive, None).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                Error::AtEntry { source, .. }
+                    if **source
+                        == Error::InvalidHeader(
+                            "RAR 1.3 stored file has mismatched packed and unpacked sizes"
+                        )
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

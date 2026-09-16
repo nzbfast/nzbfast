@@ -74,6 +74,12 @@ pub fn history_change_cat(d: &Daemon, id: &str, cat: &str) -> Value {
             "error": "no job with that nzo_id (a job still downloading keeps its category until it finishes)"});
     };
     if finalizing {
+        // KEYED for i18n: this exact sentence is an `err.` key in
+        // web/i18n/extract.js and all 27 catalogues (census 16 Sep 2026,
+        // research/API-ERROR-KEY-CENSUS-2026-09-16.md). tErr() matches the
+        // WHOLE string, so rewording it here silently un-translates 27
+        // locales with every gate green. Change both sides together.
+        // The re-verify arm below sends the same sentence; keep them equal.
         return json!({"status": false,
             "error": "post-processing is still running for this job - try again when it settles"});
     }
@@ -92,6 +98,11 @@ pub fn history_change_cat(d: &Daemon, id: &str, cat: &str) -> Value {
         }
     }
     if !d.moving.lock_ok().insert(id.to_string()) {
+        // KEYED for i18n: this exact sentence is an `err.` key in
+        // web/i18n/extract.js and all 27 catalogues (census 16 Sep 2026,
+        // research/API-ERROR-KEY-CENSUS-2026-09-16.md). tErr() matches the
+        // WHOLE string, so rewording it here silently un-translates 27
+        // locales with every gate green. Change both sides together.
         return json!({"status": false,
             "error": "this job's files are already being moved - try again when it settles"});
     }
@@ -466,8 +477,16 @@ pub const HISTORY_DEFAULT_LIMIT: usize = 500;
 /// that rejects most of them would otherwise reach its render window
 /// with nothing left - see the probe test in the loop. Worst case per
 /// call is therefore `HISTORY_STAT_BUDGET + limit` in the facet loop
-/// plus one probe per rendered row, and none of the three terms is
-/// something a query string can raise.
+/// plus one probe per rendered row.
+///
+/// `limit` IS a query-string term, and that is the one deliberate
+/// escape hatch: an explicit `limit` larger than this budget raises the
+/// flat allowance to match it (see `probe_cap`), exactly as
+/// `HISTORY_DEFAULT_LIMIT` documents, and `limit == 0` asks for the
+/// unbounded shape. A caller only buys probes it then pays to RENDER,
+/// which is what makes it a budget rather than a hole - unlike `start`,
+/// which is deliberately not in the sum because it bought stats without
+/// rendering anything (see the note at `probe_cap`).
 pub(super) const HISTORY_STAT_BUDGET: usize = HISTORY_DEFAULT_LIMIT;
 
 impl HistQuery {
@@ -675,7 +694,10 @@ pub fn history_page(d: &Daemon, q: &HistQuery, summary: bool) -> (Vec<Value>, us
         // for a query that matches almost nothing, so it would have
         // probed every candidate row in the store - the unbounded scan,
         // rebuilt. Bounded this way the whole loop spends at most
-        // `probe_cap + limit`, a constant no query string can inflate.
+        // `probe_cap + limit` - a bound the caller can only move by
+        // asking for a bigger `limit`, which it then pays to render.
+        // `start`, the term that moved it for free, is deliberately not
+        // in it; see the note at `probe_cap`.
         let flat_left = probes < probe_cap;
         let window_left = matched < q.limit && window_probes < q.limit;
         let probe = storage_deleted_candidate(&j) && (flat_left || window_left);

@@ -664,65 +664,8 @@ fn slot_json(
     // dashboard maps to an i18n phrase, an optional server-name
     // detail (language-neutral by construction), and for an open
     // stall episode the seconds since bytes last moved.
-    let (activity, activity_detail, activity_secs) = match j.state {
-        // The whole post-network tail: repair hand-off, unlock,
-        // rename, the move to the destination.
-        JobState::Completed => ("finalizing", String::new(), None),
-        // §129: the activity map still carries the REAL stage.
-        JobState::Finishing => (
-            activity_map.get(&j.nzo_id).copied().unwrap_or("finalizing"),
-            String::new(),
-            None,
-        ),
-        JobState::Downloading if !j.suspended => {
-            let tok = activity_map.get(&j.nzo_id).copied().unwrap_or("fetching");
-            if tok == "fetching" && active_id.as_deref() == Some(j.nzo_id.as_str()) {
-                let connected: usize = pool_view.iter().map(|(_, c, _)| *c).sum();
-                let bytes: u64 = pool_view.iter().map(|(_, _, b)| *b).sum();
-                let joined = |v: &[&str]| match v.len() {
-                    0 => String::new(),
-                    1 => v[0].to_string(),
-                    n => format!("{} +{}", v[0], n - 1),
-                };
-                // A provider that has been granting NO sessions for the
-                // whole window outranks "no data for Ns": both describe
-                // the same flatline, but only this one says whose it is
-                // and what to do about it. Gated on the stall episode
-                // deliberately - a dead BACKUP while the job downloads
-                // fine at full speed is a fact for the Providers card,
-                // not an alarm on a row that is working. (Soak, 12 Aug
-                // 2026: two jobs sat 25 minutes at zero bytes behind a
-                // capped Giganews account and the row said nothing but
-                // "no data for Ns" the whole time.)
-                let stalled = stall.as_ref().filter(|(sid, _)| *sid == j.nzo_id);
-                if let Some((tok, o)) = row_outage(stalled.is_some(), outages) {
-                    (tok, o.host.clone(), Some(o.secs))
-                } else if let Some((_, since)) = stalled {
-                    ("waiting", String::new(), Some(since.elapsed().as_secs()))
-                } else if !pool_view.is_empty() && connected == 0 {
-                    let all: Vec<&str> = pool_view.iter().map(|(h, _, _)| h.as_str()).collect();
-                    // Bytes already moved means the connections
-                    // dropped mid-run; none yet means first dial.
-                    let tok = if bytes > 0 {
-                        "reconnecting"
-                    } else {
-                        "connecting"
-                    };
-                    (tok, joined(&all), None)
-                } else {
-                    let up: Vec<&str> = pool_view
-                        .iter()
-                        .filter(|(_, c, _)| *c > 0)
-                        .map(|(h, _, _)| h.as_str())
-                        .collect();
-                    ("fetching", joined(&up), None)
-                }
-            } else {
-                (tok, String::new(), None)
-            }
-        }
-        _ => ("", String::new(), None),
-    };
+    let (activity, activity_detail, activity_secs) =
+        slot_activity(j, activity_map, active_id, stall, pool_view, outages);
     // Unpack-space preflight: a shape whose volumes land on disk
     // and unpack after the download needs room for the archive
     // parts PLUS the extracted payload - roughly twice the set -
@@ -935,12 +878,18 @@ fn slot_json(
         // taken to match `parfast`'s so the two products cannot
         // disagree about what 60% means); `done`/`total` are the
         // current phase's own, in that phase's own units.
+        //
+        // `bar()` and not `phase()` beside `permille()`: the two are
+        // one word and reading them apart is two loads of a value that
+        // moves between them, which on a poll landing on the end of an
+        // engine call draws `write` at 0.0% (`repairprog::
+        // RepairProgress::bar` carries the measurement).
         "repair": repair_map
             .get(&j.nzo_id)
             .map(|c| c.repair_progress())
-            .and_then(|p| p.phase().map(|ph| json!({
+            .and_then(|p| p.bar().map(|(ph, pm)| json!({
                 "phase": ph,
-                "pct": p.permille() as f64 / 10.0,
+                "pct": pm as f64 / 10.0,
                 "done": p.done(),
                 "total": p.total(),
             })))
@@ -1102,6 +1051,82 @@ fn slot_json(
             .map(|(_, b)| format!("{:.2}", *b as f64 / API_MB))
             .unwrap_or_default(),
     })
+}
+
+/// The "what is happening right now" triple for one queue slot: the
+/// activity token, its server-name detail and the stall seconds.
+///
+/// Split out of `slot_json` for the size gate, verbatim: it reads only the
+/// row and the `SlotCtx` fields it is handed, and `slot_json` reads its
+/// product as the one tuple below.
+fn slot_activity(
+    j: &Job,
+    activity_map: &std::collections::HashMap<String, &'static str>,
+    active_id: &Option<String>,
+    stall: &Option<(String, Instant)>,
+    pool_view: &[(String, usize, u64)],
+    outages: &[ServerOutage],
+) -> (&'static str, String, Option<u64>) {
+    let (activity, activity_detail, activity_secs) = match j.state {
+        // The whole post-network tail: repair hand-off, unlock,
+        // rename, the move to the destination.
+        JobState::Completed => ("finalizing", String::new(), None),
+        // §129: the activity map still carries the REAL stage.
+        JobState::Finishing => (
+            activity_map.get(&j.nzo_id).copied().unwrap_or("finalizing"),
+            String::new(),
+            None,
+        ),
+        JobState::Downloading if !j.suspended => {
+            let tok = activity_map.get(&j.nzo_id).copied().unwrap_or("fetching");
+            if tok == "fetching" && active_id.as_deref() == Some(j.nzo_id.as_str()) {
+                let connected: usize = pool_view.iter().map(|(_, c, _)| *c).sum();
+                let bytes: u64 = pool_view.iter().map(|(_, _, b)| *b).sum();
+                let joined = |v: &[&str]| match v.len() {
+                    0 => String::new(),
+                    1 => v[0].to_string(),
+                    n => format!("{} +{}", v[0], n - 1),
+                };
+                // A provider that has been granting NO sessions for the
+                // whole window outranks "no data for Ns": both describe
+                // the same flatline, but only this one says whose it is
+                // and what to do about it. Gated on the stall episode
+                // deliberately - a dead BACKUP while the job downloads
+                // fine at full speed is a fact for the Providers card,
+                // not an alarm on a row that is working. (Soak, 12 Aug
+                // 2026: two jobs sat 25 minutes at zero bytes behind a
+                // capped Giganews account and the row said nothing but
+                // "no data for Ns" the whole time.)
+                let stalled = stall.as_ref().filter(|(sid, _)| *sid == j.nzo_id);
+                if let Some((tok, o)) = row_outage(stalled.is_some(), outages) {
+                    (tok, o.host.clone(), Some(o.secs))
+                } else if let Some((_, since)) = stalled {
+                    ("waiting", String::new(), Some(since.elapsed().as_secs()))
+                } else if !pool_view.is_empty() && connected == 0 {
+                    let all: Vec<&str> = pool_view.iter().map(|(h, _, _)| h.as_str()).collect();
+                    // Bytes already moved means the connections
+                    // dropped mid-run; none yet means first dial.
+                    let tok = if bytes > 0 {
+                        "reconnecting"
+                    } else {
+                        "connecting"
+                    };
+                    (tok, joined(&all), None)
+                } else {
+                    let up: Vec<&str> = pool_view
+                        .iter()
+                        .filter(|(_, c, _)| *c > 0)
+                        .map(|(h, _, _)| h.as_str())
+                        .collect();
+                    ("fetching", joined(&up), None)
+                }
+            } else {
+                (tok, String::new(), None)
+            }
+        }
+        _ => ("", String::new(), None),
+    };
+    (activity, activity_detail, activity_secs)
 }
 
 // `output=xml`, a child module: see sabcompat/xmlout.rs. SAB's

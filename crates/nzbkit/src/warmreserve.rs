@@ -322,7 +322,6 @@ impl WarmReserve {
     pub async fn tick(&self) {
         let servers = self.servers.lock_ok().clone();
         let accepting = self.warm.accepting();
-        let idle_for = self.warm.idle_for();
         let mut status = Vec::with_capacity(servers.len());
         let mut keep: HashMap<String, Arc<HostLease>> = HashMap::new();
         let mut to_dial: Vec<(ServerConfig, Arc<HostLease>, usize)> = Vec::new();
@@ -340,9 +339,16 @@ impl WarmReserve {
             // consumer (a NAS, a seedbox), which never releases and where
             // a standing reserve costs nobody anything - so it never
             // stands down either.
+            //
+            // This server's OWN clock, like this server's own timeout.
+            // The stand-down exists to stop the dialler refilling what
+            // the release just handed back, and the release is decided
+            // per account, so a pool-wide reading here stood a reserve
+            // down because a DIFFERENT account was idle and kept one
+            // dialling because a different account was busy.
             if want > 0
                 && let Some(after) = s.idle_release_policy().after
-                && idle_for >= after
+                && self.warm.idle_for_server(s) >= after
             {
                 want = 0;
                 note = ReserveNote::Released;
@@ -453,7 +459,15 @@ impl WarmReserve {
                 continue;
             }
             self.dialled.fetch_add(1, Ordering::Relaxed);
-            self.warm.give(&s, conn).await;
+            // `give_spare`, NOT `give`: this park is the reserve
+            // maintaining its own floor, and no job asked for it. `give`
+            // restarts the pool's idle-release clock, which is the clock
+            // the stand-down above reads - so parking through it let a
+            // reserve refilling reaped sessions defer its own release
+            // forever, and every other server's with it. The full
+            // reasoning, and why this cannot instead get a spare trimmed
+            // the moment it is parked, is on `give_spare`.
+            self.warm.give_spare(&s, conn).await;
         }
     }
 }

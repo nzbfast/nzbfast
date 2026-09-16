@@ -118,8 +118,10 @@ const ISO9660_ID_AT: u64 = 16 * 2048 + 1;
 /// applied (`None if is_iso9660(&mut f) => Some("iso")`), an
 /// extensionless ISO fixture and an extensionless EBML feature:
 ///
-///     lone iso  : nameless_video = Some(iso)      <- the gap closes
-///     iso + feat: nameless_video = None           <- and this breaks
+/// ```text
+/// lone iso  : nameless_video = Some(iso)      <- the gap closes
+/// iso + feat: nameless_video = None           <- and this breaks
+/// ```
 ///
 /// against `Some(feature)` for that second row today. `nameless_video`
 /// fires only on the LONE non-sample video, so naming the ISO makes it

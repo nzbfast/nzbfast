@@ -568,6 +568,67 @@ fn turning_fast_verify_off_survives_a_restart_after_lean_was_chosen() {
     }
 }
 
+/// `fast_final_check` defaults ON as of 15 Sep 2026, matching parfast's
+/// own per-block default. A fresh install -
+/// `scratch()` writes an empty `settings.json` - must still get that
+/// default: `apply_saved_settings` used to gate the whole resolution
+/// behind `if saved.is_empty() { return; }`, so an install that had
+/// literally never saved anything fell through to
+/// `NZBFAST_VERIFY_IFSC_ONLY` (unset, off) instead of the shipped
+/// default. An explicit choice, in either direction, must still survive
+/// a restart untouched.
+#[test]
+fn fast_final_check_defaults_on_for_a_fresh_install() {
+    let dir = scratch("fastfinalcheck");
+
+    {
+        let d = serve(&dir);
+        let s = settings_block(d.port);
+        assert_eq!(
+            s["fast_final_check"], true,
+            "a fresh install did not default to the shipped fast_final_check \
+             default: {s:?}"
+        );
+
+        let r = api(d.port, "mode=config&name=fast_final_check&value=0");
+        assert_eq!(
+            r["status"].as_bool(),
+            Some(true),
+            "fast_final_check rejected: {r}"
+        );
+        assert_eq!(
+            settings_block(d.port)["fast_final_check"],
+            false,
+            "not applied live"
+        );
+    } // daemon killed here
+
+    {
+        let d = serve(&dir);
+        let s = settings_block(d.port);
+        assert_eq!(
+            s["fast_final_check"], false,
+            "an explicit off reverted to the default across a restart: {s:?}"
+        );
+
+        let r = api(d.port, "mode=config&name=fast_final_check&value=1");
+        assert_eq!(
+            r["status"].as_bool(),
+            Some(true),
+            "fast_final_check rejected: {r}"
+        );
+    }
+
+    {
+        let d = serve(&dir);
+        let s = settings_block(d.port);
+        assert_eq!(
+            s["fast_final_check"], true,
+            "an explicit on did not survive the restart: {s:?}"
+        );
+    }
+}
+
 /// A launcher that owns the port keeps it: the API refuses to save one,
 /// and a `port` already in settings.json does not move the listener.
 ///

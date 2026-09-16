@@ -157,6 +157,48 @@ pub struct CreateControl {
     /// so the meters, the bucket limiter and the `gate_if_held` mirror
     /// are all the ones that module already measured.
     inner: RepairControl,
+    /// The validated digest cache this create consults
+    /// (`crate::digest_cache`), resolved ONCE on the entry point's own
+    /// thread by [`Self::with_active_digest_cache`] and carried from there,
+    /// because the scan runs on threads the entry point spawns and a store
+    /// read on one of those is not necessarily the store the caller made
+    /// active (a unit test's is thread-local by design).
+    digest_cache: Option<Arc<crate::digest_cache::DigestCache>>,
+    /// Bytes the whole-file MD5 CHAIN lane has accounted for, across
+    /// every member scanned so far - the counter the batched create's
+    /// fold pacer paces against, and NOT a phase.
+    ///
+    /// # Why this is not a [`CreatePhase`]
+    ///
+    /// The chain is a SECOND pass over bytes [`CreatePhase::Verify`]
+    /// already counts once (see [`RepairPhase::Verify`]'s own doc: "in
+    /// BYTES of declared member length"), so a phase for it would make
+    /// every sink in the fleet - the daemon's bar, the CLI's, an
+    /// embedder's - report a create as two hundred percent of itself.
+    /// A pacer needs a RATE from one lane; a sink needs the member's
+    /// bytes counted once. Those are different readers, so they get
+    /// different counters.
+    ///
+    /// # Why it is not `CreatePhase::Verify`, which is what shipped
+    ///
+    /// It WAS `Verify` until 16 Sep 2026, and that made the batched
+    /// pacer a measured no-op: on the route a large single member
+    /// actually takes (`scan::scan_mapped`, and `scan::
+    /// scan_parallel_positional` the same way) `Verify` is stepped by
+    /// the BLOCK-DIGEST lanes, which are `threads`-way parallel over
+    /// the member, while the whole-file chain is a separate sequential
+    /// lane that deliberately steps nothing. The counter therefore
+    /// saturated inside the first batch or two with most of the chain's
+    /// wall still to run, and the pacer read that as "the chain has
+    /// finished" and restored the ceiling: `8 -> 8 workers, 0 move(s)`
+    /// in all nine batched legs of the acceptance round
+    /// (research/PARFAST-BATCHED-CREATE-FOLD-PACER-2026-09-15.md).
+    ///
+    /// An `Arc` rather than a bare atomic because [`CreateControl`] is
+    /// `Clone` and a clone must SHARE this - the scan thread and the
+    /// batch driver are handed the same control, and a per-clone
+    /// counter would silently read zero on either side of that.
+    chain: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl std::fmt::Debug for CreateControl {
@@ -175,7 +217,21 @@ impl CreateControl {
     pub fn new(sink: Option<Arc<dyn ProgressSink>>, gate: Option<Arc<PauseGate>>) -> CreateControl {
         CreateControl {
             inner: RepairControl::new(sink, gate),
+            digest_cache: None,
+            chain: Arc::default(),
         }
+    }
+
+    /// This control with the digest cache the calling thread's entry point
+    /// made active. Called on that thread, before any worker exists.
+    pub(super) fn with_active_digest_cache(mut self) -> CreateControl {
+        self.digest_cache = crate::digest_cache::active();
+        self
+    }
+
+    /// The store this create consults, if any.
+    pub(super) fn digest_cache(&self) -> Option<&Arc<crate::digest_cache::DigestCache>> {
+        self.digest_cache.as_ref()
     }
 
     /// Whether anything is listening or holding.
@@ -224,6 +280,38 @@ impl CreateControl {
     /// A phase is over: the sink lands on full exactly once.
     pub(super) fn finish(&self, phase: RepairPhase) {
         self.inner.finish(phase);
+    }
+
+    /// `add` more bytes accounted for by the whole-file MD5 chain - see
+    /// the [`Self::chain`] field. Called from whichever lane of
+    /// `scan::scan_at_length`'s arms actually RUNS that chain, which on
+    /// the mapped and positional arms is not the lane that steps
+    /// [`CreatePhase::Verify`]. One relaxed `fetch_add`, no sink, no
+    /// bucket filter: the only reader is a pacer asking for a rate.
+    ///
+    /// A member whose chain is ABANDONED part-way (a validated digest
+    /// record answers for it, `crate::digest_cache`) credits the rest of
+    /// its length here as it leaves, because the chain's WORK for that
+    /// member is then over - which is the question the pacer is asking.
+    pub(super) fn chain_step(&self, add: u64) {
+        self.chain
+            .fetch_add(add, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// What the chain has accounted for so far, in the same units and
+    /// against the same whole as [`CreatePhase::Verify`]'s total (the
+    /// sum of the members' declared lengths), so a caller can compare
+    /// the two directly.
+    pub(super) fn chain_done(&self) -> u64 {
+        self.chain.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Back to zero, before a create's scan starts. A control outlives
+    /// one create at some call sites (the session crate reuses one
+    /// across a pairing), and a carried-over count would read as a
+    /// chain that finished before it began.
+    pub(super) fn chain_reset(&self) {
+        self.chain.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The A/B ARM. `NZBFAST_CREATE_CONTROL=on` installs a silent
@@ -399,6 +487,76 @@ mod tests {
         if std::env::var_os("NZBFAST_CREATE_CONTROL").is_none() {
             assert!(!CreateControl::default().or_env_arm().is_active());
         }
+    }
+
+    /// The chain counter and the phase meters are DIFFERENT QUESTIONS
+    /// and must not alias: one asks how far a single sequential lane has
+    /// got (a rate, for the fold pacer), the other how much of the
+    /// member has been accounted for at all (a bar, for a sink). They
+    /// were the same counter until 16 Sep 2026 and the pacer built on
+    /// that read a finished chain before the chain had started.
+    ///
+    /// Pinned in BOTH directions, and the sink is the instrument for it:
+    /// a phase step must not move the chain counter, and a chain step
+    /// must not reach a sink at all - the chain is a second pass over
+    /// bytes `Verify` already counted, so a sink that heard it would
+    /// report the create as twice itself.
+    #[test]
+    fn the_chain_counter_is_its_own_and_reaches_no_sink() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = Arc::clone(&calls);
+        let c = CreateControl::new(
+            Some(Arc::new(move |p: RepairPhase, done: u64, _t: u64| {
+                rec.lock().unwrap().push((p, done));
+            })),
+            None,
+        );
+        assert_eq!(c.chain_done(), 0);
+        c.begin(RepairPhase::Verify, 100);
+        c.step(RepairPhase::Verify, 100);
+        c.finish(RepairPhase::Verify);
+        assert!(
+            !calls.lock().unwrap().is_empty(),
+            "the phase step reached no sink - this test is measuring nothing"
+        );
+        assert_eq!(
+            c.chain_done(),
+            0,
+            "a phase step moved the chain counter - they are the same counter again"
+        );
+
+        let heard = calls.lock().unwrap().len();
+        c.chain_step(30);
+        assert_eq!(c.chain_done(), 30);
+        c.chain_step(70);
+        assert_eq!(c.chain_done(), 100);
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            heard,
+            "the chain reached the progress sink - a bar would double-count the member"
+        );
+
+        c.chain_reset();
+        assert_eq!(c.chain_done(), 0);
+    }
+
+    /// A clone SHARES the chain counter, because the scan thread and the
+    /// batch driver are handed the same control and a per-clone counter
+    /// would read zero on one side of that. An inert control has one
+    /// too - it is not gated on a sink or a gate the way the meters are.
+    #[test]
+    fn a_cloned_control_shares_the_chain_counter() {
+        let c = CreateControl::new(None, Some(PauseGate::new()));
+        let twin = c.clone();
+        c.chain_step(7);
+        assert_eq!(twin.chain_done(), 7);
+        twin.chain_step(5);
+        assert_eq!(c.chain_done(), 12);
+        let inert = CreateControl::default();
+        inert.chain_step(3);
+        assert_eq!(inert.chain_done(), 3);
+        // ...and a SEPARATE control is separate.
+        assert_eq!(CreateControl::default().chain_done(), 0);
     }
 
     /// The trail is the cancel promise: what it noted is what goes,

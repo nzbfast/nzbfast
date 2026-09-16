@@ -2386,24 +2386,41 @@ pub fn verify_dir(dir: &std::path::Path) -> Result<DirVerify> {
     let mut order: Vec<usize> = (0..jobs.len()).collect();
     order.sort_unstable_by_key(|&i| std::cmp::Reverse(jobs[i].1.length));
     let next = std::sync::atomic::AtomicUsize::new(0);
-    // One global lane budget for both levels. `inner` is each outer
-    // worker's fair share, so even when every member is damaged at once the
-    // runnable hash lanes stay at or below `machine` instead of multiplying
-    // two full-width pools. The hard cap also bounds clean-file buffers,
-    // file handles and thread stacks independently of a 1024-worker launcher
-    // override.
+    // One global lane budget for both levels, split BY SIZE across the
+    // outer workers. Each worker's `inner` is its own first member's
+    // proportional share of the machine, so the runnable hash lanes stay at
+    // or below `machine` even when every member is damaged at once, and a
+    // member holding most of the bytes is no longer hashed by one lane
+    // while the rest of the machine finishes its sidecars and idles. The
+    // hard cap also bounds clean-file buffers, file handles and thread
+    // stacks independently of a 1024-worker launcher override.
+    //
+    // It used to be `machine / workers`, one number for every member: on a
+    // set with at least as many members as the box has cores that is 1 for
+    // all of them INCLUDING THE LARGEST, which cost 8.6x on a 3 GiB member
+    // beside twenty 50 MiB ones (entry 1 of
+    // research/SERIAL-BOUND-SURVEY-2026-09-16.md). `lane_plan` carries the
+    // rule and the measurements; `order` above is what makes the plan's
+    // biggest-first assumption true.
     let machine = nzbkit::mem::cpu_workers().clamp(1, nzbkit::par2::VERIFY_MAX_WORKERS);
-    let workers = machine.min(jobs.len()).max(1);
-    // One large damaged member has only one outer job, but its block checks
-    // are independent. Give each outer worker a fair share of the remaining
-    // machine for that diagnostic pass; clean files remain one MD5 chain.
-    let inner = (machine / workers).max(1);
-    debug_assert!(workers.saturating_mul(inner) <= machine);
+    let sizes: Vec<u64> = order.iter().map(|&i| jobs[i].1.length).collect();
+    let lanes = nzbkit::par2::lane_plan(&sizes, machine, jobs.len());
+    let workers = lanes.len().max(1);
+    debug_assert!(lanes.iter().sum::<usize>() <= machine);
     let mut worker_results = Vec::with_capacity(workers);
+    // Shared by reference into every lane: the `move` below carries this
+    // worker's lane count, not the queue.
+    let (order, jobs, next) = (&order, &jobs, &next);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
+            .map(|w| {
+                // This worker's share of the one budget, for every member it
+                // claims - not just its first. A worker that holds most of
+                // the machine because it started on the dominant member
+                // keeps those lanes for the short members it picks up after,
+                // by which time the others are nearly done anyway.
+                let inner = lanes.get(w).copied().unwrap_or(1);
+                scope.spawn(move || {
                     let mut out = Vec::new();
                     loop {
                         let oi = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2618,6 +2635,13 @@ mod nested_depth_tests;
 #[cfg(test)]
 #[path = "unpack/nested_repair_cancel_tests.rs"]
 mod nested_repair_cancel_tests;
+
+/// The one-dominant-member PAR2 shape, which had no corpus anywhere in
+/// the tree until 16 Sep 2026 - and whose absence is why the lane
+/// division above was wrong for as long as it was.
+#[cfg(test)]
+#[path = "unpack/skewed_set_tests.rs"]
+mod skewed_set_tests;
 
 /// The `<prefix>-<n>-<name>` collision ladders, on a member name already
 /// AT the component cap.

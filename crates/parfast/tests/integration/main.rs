@@ -14,6 +14,10 @@
 #[cfg(unix)]
 mod cancel;
 mod creator_packet;
+/// `--digest-cache` through the binary: no store without the flag, one
+/// record on first use, a validated hit after, and the same set bytes on
+/// every run.
+mod digest_cache;
 /// The verify tier: the default per-block verdict and `--slow`'s
 /// whole-file one answer the same on an honest set, by exit code, stdout
 /// and repaired bytes.
@@ -24,6 +28,14 @@ mod purge;
 /// TODO 334: the repair's load prints from the engine's scan report;
 /// this holds it byte for byte against the whole-read load it replaced.
 mod scan_load;
+/// Every test's scratch directory, in one copy: the pid-scoped path
+/// that stops two concurrent runs of this binary deleting each other's
+/// working directory mid-create (16 Sep 2026).
+mod scratch;
+/// A set with ONE DOMINANT MEMBER - the shape whose absence from this
+/// tree hid an 8.6x verify scheduling defect until 16 Sep 2026. Holds
+/// every outer width to the same lines and the same verdicts.
+mod skewed_set;
 // The whole module is unix-only, not just its one test: it reaches the
 // engine fold by making a recovery volume unreadable, which is a
 // `PermissionsExt` 0o000 and has no Windows equivalent. Gated on the

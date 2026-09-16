@@ -424,21 +424,30 @@ pub fn repair_present_sets_controlled_as(
     caller: RetentionCaller,
     control: &dyn Fn() -> super::RepairControl,
 ) -> Result<Vec<SetOutcome>, RepairError> {
-    /// The whole of the door, and the sibling's observer exactly but
-    /// for calling its supplier rather than cloning one value: a
-    /// control, and the two answers the driver would have given itself
-    /// with no observer.
-    struct Controlled<'a>(&'a dyn Fn() -> super::RepairControl);
-    impl SurveyObserver for Controlled<'_> {
-        fn after_survey(&mut self, _members: &[MemberSurvey]) -> AfterSurvey {
-            AfterSurvey::Repair
-        }
-        fn control(&self) -> super::RepairControl {
-            (self.0)()
-        }
-    }
-    let mut observe = Controlled(control);
+    let mut observe = ControlledSets(control);
     repair_sets_inner(dir, false, caller, Some(&mut observe))
+}
+
+/// The whole of the controlled door on this family, and the
+/// uncontrolled sibling's (absent) observer exactly but for calling a
+/// supplier rather than cloning one value: a control, and the two
+/// answers the driver would have given itself with no observer.
+///
+/// ONE COPY, and `pub(super)` for it: both controlled entries of this
+/// family need it - [`repair_present_sets_controlled_as`] here and
+/// [`PacketCatalog::repair_present_or_renamed_sets_controlled`](
+/// super::PacketCatalog::repair_present_or_renamed_sets_controlled),
+/// the no-set obfuscated arm's door - and a second copy is a second
+/// place for `after_survey` to drift away from `Repair`.
+pub(super) struct ControlledSets<'a>(pub(super) &'a dyn Fn() -> super::RepairControl);
+
+impl SurveyObserver for ControlledSets<'_> {
+    fn after_survey(&mut self, _members: &[MemberSurvey]) -> AfterSurvey {
+        AfterSurvey::Repair
+    }
+    fn control(&self) -> super::RepairControl {
+        (self.0)()
+    }
 }
 
 /// [`repair_present_sets`], plus a content fallback for the wholly

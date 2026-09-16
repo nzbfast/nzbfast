@@ -162,8 +162,10 @@ impl From<Request> for Message {
 // this trait is to make sure that Server implements Share and Send
 #[doc(hidden)]
 // Upstream idiom: a compile-time assertion, so nothing ever names it. Allowed
-// rather than removed, to keep the diff against upstream 0.12.0 to the four
-// documented patches.
+// rather than removed, so that the diff against upstream 0.12.0 stays
+// exactly the patches VENDORING.md documents and nothing else. There
+// were four of those when this was written and there are thirteen now;
+// the reason is the inventory, not its size.
 #[allow(dead_code)]
 trait MustBeShareDummy: Sync + Send {}
 #[doc(hidden)]

@@ -74,8 +74,8 @@ pub use nzbkit::par2repair::FAST_PAR_DEFAULT;
 // IS `crate::watchlist`, so the layer crate is named outright at every
 // reference instead (`nzbfast_meta::watchlist::WatchItem`).
 pub(crate) use nzbfast_core::{
-    conntune, diag, diskfree, eatvol, failkind, health, identify, identity, localtime, manifest,
-    netfetch, notify, persist, pwfile, sandbox, setup, sizes, srrdb, streamhub, tools,
+    conntune, diag, diskfree, eatvol, failkind, health, holdstat, identify, identity, localtime,
+    manifest, netfetch, notify, persist, pwfile, sandbox, setup, sizes, srrdb, streamhub, tools,
 };
 pub(crate) use nzbfast_engine::get;
 pub(crate) use nzbfast_meta::{newznab, nzbindex, plex, rss, wall};

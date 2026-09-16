@@ -333,9 +333,10 @@ pub struct Par2File {
 mod verify;
 pub(crate) use verify::fit_ifsc;
 pub use verify::{
-    BlockCheck, VERIFY_MAX_WORKERS, clear_fast_check, fast_check_enabled, set_fast_check,
-    verify_file, verify_file_blocks, verify_file_md5_path, verify_file_md5_streaming,
-    verify_file_path, verify_file_path_tiered, verify_file_seekable, verify_file_streaming,
+    BlockCheck, VERIFY_MAX_WORKERS, clear_fast_check, fast_check_enabled, lane_plan,
+    set_fast_check, verify_file, verify_file_blocks, verify_file_md5_path,
+    verify_file_md5_streaming, verify_file_path, verify_file_path_tiered, verify_file_seekable,
+    verify_file_streaming,
 };
 pub(crate) use verify::{ifsc_covers_every_block, verify_blocks_path_or_streaming, verify_head};
 
@@ -712,16 +713,20 @@ pub(crate) struct Desc {
 // suites all reach these through `crate::par2::…`, and not one of those
 // paths moves.
 //
-// `RawPacket` is deliberately NOT among them: every caller of
-// `scan_packets` receives one in a closure and reads its fields, so no
-// site in this crate has ever named the type. It stays `pub(crate)` in
-// `packet` so a caller that does need to name it gets a re-export added
-// here, rather than a path reaching through a private module.
+// `RawPacket` was deliberately NOT among them until 14 Sep 2026: every
+// caller of `scan_packets` received one in a closure and read its
+// fields, so no site named the type. The re-export was added the way
+// this comment asked for it, when the catalog needed ONE per-packet
+// function for both of its scan arms (the whole read and
+// `scan_file_windowed`), rather than a path reaching through a private
+// module.
 mod packet;
 use packet::packet_spans;
+#[cfg(test)]
+pub(crate) use packet::scan_file_windowed;
 pub(crate) use packet::{
-    MAX_BLOCK_SIZE, parse_comm_ascii, parse_comm_uni, parse_filedesc, parse_ifsc, parse_main,
-    parse_unifilen, scan_packets,
+    MAX_BLOCK_SIZE, RawPacket, parse_comm_ascii, parse_comm_uni, parse_filedesc, parse_ifsc,
+    parse_main, parse_unifilen, scan_file_windowed_in, scan_packets,
 };
 pub use packet::{SparseFrame, SparseRecovery, sparse_frame};
 
@@ -734,7 +739,7 @@ pub use packet::{SparseFrame, SparseRecovery, sparse_frame};
 /// It hashes the DECODED name, which is what [`parse_filedesc`] keeps, so
 /// a descriptor whose name bytes are not UTF-8 reads as unbound: the
 /// lossy decode has already replaced them. That costs such a descriptor
-/// nothing except a CONTESTED id, because [`Claim::offer_desc`]
+/// nothing except a CONTESTED id, because [`DescClaim::offer_desc`]
 /// out-ranks rather than refuses - which is the whole reason it does.
 pub(crate) fn filedesc_id(d: &Desc) -> [u8; 16] {
     let mut h = Md5::new();
@@ -756,6 +761,16 @@ pub(crate) fn filedesc_id(d: &Desc) -> [u8; 16] {
 /// about the post. So a contradicted claim LATCHES empty and stays
 /// empty - the two readings annihilate rather than race, which is the
 /// same answer in every order (W4-10).
+///
+/// Stated as the invariant it is, because one rule layered on top of it
+/// has already broken it once: what a claim settles to is a function of
+/// the SET of distinct readings offered, and of nothing else - not the
+/// order they arrived in, not how often each repeated. [`Claim::offer`]
+/// holds that by construction (one distinct reading settles, two or
+/// more settle nothing, and the latch makes repeats free). A rule
+/// layered on top holds it only if the rule is itself a function of
+/// that set; [`DescClaim`] is the only such rule, and the shape of the
+/// mistake is written up there.
 struct Claim<T> {
     value: Option<T>,
     contradicted: bool,
@@ -796,43 +811,91 @@ impl<T: PartialEq> Claim<T> {
     }
 }
 
-impl Claim<Desc> {
-    /// [`Claim::offer`] with M4-38's tiebreak: a descriptor that BINDS
-    /// `fid` outranks one that merely carries a copy of it, so the two
-    /// are not a contradiction at all.
-    ///
-    /// A file id is not an opaque label - [`filedesc_id`] fixes it from
-    /// the descriptor's own fields - so a packet whose id was COPIED
-    /// from another file cannot also bind it: the name, length or 16k
-    /// hash it forged differs, and MD5 is what stands between those two
-    /// facts. Without this, a forgery beside the real descriptor is an
-    /// equivocation, and W4-10 empties the claim: the honest file leaves
-    /// the set entirely, which is safe and is still a whole member lost
-    /// to a packet anyone can write. Two SELF-BOUND descriptors cannot
-    /// share an id short of an MD5 collision, so the tiebreak is a
-    /// decision procedure and not a preference.
-    ///
-    /// It OUT-RANKS rather than refuses, deliberately. Nothing in the
-    /// format makes a producer's ids verifiable by any other tool -
-    /// par2cmdline never recomputes them - so a set that numbers its
-    /// files by some other rule is self-consistent and must still
-    /// parse. An unbound descriptor still describes its own file; it
-    /// only loses a CONTESTED id, and where neither or both bind it the
-    /// W4-10 rule is untouched.
+/// A claim over one file id's FileDesc packets: [`Claim::offer`] with
+/// M4-38's tiebreak, where a descriptor that BINDS `fid` outranks one
+/// that merely carries a copy of it, so the two are not a contradiction
+/// at all.
+///
+/// A file id is not an opaque label - [`filedesc_id`] fixes it from the
+/// descriptor's own fields - so a packet whose id was COPIED from
+/// another file cannot also bind it: the name, length or 16k hash it
+/// forged differs, and MD5 is what stands between those two facts.
+/// Without this, a forgery beside the real descriptor is an
+/// equivocation, and W4-10 empties the claim: the honest file leaves
+/// the set entirely, which is safe and is still a whole member lost to
+/// a packet anyone can write.
+///
+/// It OUT-RANKS rather than refuses, deliberately. Nothing in the
+/// format makes a producer's ids verifiable by any other tool -
+/// par2cmdline never recomputes them - so a set that numbers its files
+/// by some other rule is self-consistent and must still parse. An
+/// unbound descriptor still describes its own file; it only loses a
+/// CONTESTED id.
+///
+/// THE RULE, stated over the SET of descriptors offered, because that
+/// is the only form in which it composes with W4-10. Partition them by
+/// whether they bind `fid` - a property of the descriptor ALONE, so
+/// which class one falls in never depends on what arrived before it.
+/// Fold each class by W4-10 on its own. The binding class answers
+/// wherever it was non-empty, EVEN WHERE IT ANNIHILATED; the unbound
+/// class answers only where nothing bound the id at all. `bound_seen`
+/// is the whole of the extra state that needs: it separates "no binder
+/// yet" from "the binders annihilated", and once a binder is seen the
+/// unbound class can never be consulted again, so the two folds share
+/// one slot.
+///
+/// Two self-bound descriptors CAN share an id without an MD5 collision,
+/// which is why the binding class gets a fold and not a first-past-the-
+/// post: [`filedesc_id`] hashes the 16k hash, the length and the name,
+/// and NOT the whole-file MD5, so two descriptors that agree on those
+/// three and disagree about the file's MD5 both bind the id honestly -
+/// both evidence, and so they annihilate like any other disagreeing
+/// pair.
+///
+/// The pairwise form this replaces read the tiebreak against whichever
+/// descriptor was held at the time, which is order-dependent the moment
+/// THREE meet on one id: two mutually-disagreeing unbound forgeries
+/// annihilated the claim between them, and the real binding descriptor
+/// arriving after them was then refused by the contradiction latch it
+/// should have out-ranked. A,B,C kept the member and B,C,A lost it -
+/// the exact race W4-10 exists to remove (bug sweep 16 Sep 2026, item
+/// 17; pinned by `three_descriptors_on_one_id_settle_the_same_in_every_order`).
+#[derive(Default)]
+struct DescClaim {
+    inner: Claim<Desc>,
+    /// Whether any descriptor offered so far binds `fid`. NOT derivable
+    /// from `inner`: once the binding class has annihilated, `inner`
+    /// reads exactly as an annihilated unbound class does, and the two
+    /// must answer differently to a binder arriving next.
+    bound_seen: bool,
+}
+
+impl DescClaim {
     fn offer_desc(&mut self, fid: [u8; 16], v: Desc) {
-        if !self.contradicted
-            && let Some(cur) = &self.value
-            && *cur != v
-        {
-            let new_binds = filedesc_id(&v) == fid;
-            if new_binds != (filedesc_id(cur) == fid) {
-                if new_binds {
-                    self.value = Some(v);
-                }
+        if filedesc_id(&v) == fid {
+            if !self.bound_seen {
+                // The first binder out-ranks the whole unbound class,
+                // including one that has already annihilated: those
+                // readings were never evidence about THIS id, so they
+                // are discarded rather than weighed against it.
+                self.bound_seen = true;
+                self.inner = Claim {
+                    value: Some(v),
+                    contradicted: false,
+                };
                 return;
             }
+            // A later binder is evidence, and meets the one held under
+            // W4-10 below.
+        } else if self.bound_seen {
+            // Out-ranked, whatever the binding class settled to.
+            return;
         }
-        self.offer(v);
+        self.inner.offer(v);
+    }
+
+    fn into_settled(self) -> Option<Desc> {
+        self.inner.into_settled()
     }
 }
 
@@ -875,7 +938,7 @@ struct SetClaims {
     /// opposite ends, and the honest reading is: Main saying nothing is
     /// not the same as Main contradicting itself.
     mentioned: std::collections::HashSet<[u8; 16]>,
-    descs: HashMap<[u8; 16], Claim<Desc>>,
+    descs: HashMap<[u8; 16], DescClaim>,
     ifscs: HashMap<[u8; 16], Claim<Vec<BlockCheck>>>,
     /// file id -> the optional Unicode Filename packet's spelling of the
     /// name (M4-22). A `Claim` like everything else here: two that
@@ -1203,7 +1266,7 @@ impl Par2Set {
             // A file id with no usable descriptor is dropped: either
             // no FileDesc packet survived, or two of them disagreed
             // about the name, length or digest AND neither outranks
-            // the other (`Claim::offer_desc`), and in all of those we
+            // the other (`DescClaim::offer_desc`), and in all of those we
             // do not know what file this is. The other members of the
             // set still verify and still repair.
             let d = descs.remove(&fid)?.into_settled()?;

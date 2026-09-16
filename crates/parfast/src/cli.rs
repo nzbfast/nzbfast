@@ -91,6 +91,16 @@ pub struct Options {
     /// the daemon's `fast_final_check` setting and `nzbfast verify --fast`
     /// set, so CLI and daemon answer under one rule.
     pub slow: bool,
+    /// `--digest-cache`: use and keep the per-user store of validated
+    /// whole-file digests (`nzbkit::digest_cache`). A create or a `--slow`
+    /// verify of a large file records its MD5 beside a BLAKE3 of the same
+    /// bytes, and a later one of the same, unchanged file takes the MD5
+    /// from that record once a multi-threaded BLAKE3 pass has re-proved
+    /// the content - never on a length or a timestamp. Opt-in; no
+    /// environment variable turns it on. Not a reference switch, so a long
+    /// option per spec R.3, and accepted on every command for `--slow`'s
+    /// wrapper reason. Published to the engine in `run()`.
+    pub digest_cache: bool,
     /// `--comment`: the set's comment, written as the spec's optional
     /// text packet. Not a reference switch either - par2cmdline
     /// implements neither comment packet, which is exactly why this is a
@@ -401,8 +411,12 @@ fn apply_switch(
         'v' => o.level += 1 + value.chars().filter(|&c| c == 'v').count() as i32,
         'q' => o.level -= 1 + value.chars().filter(|&c| c == 'q').count() as i32,
         'm' => o.mem_mb = Some(number('m', value)?),
-        't' => o.threads = Some(number('t', value)? as usize),
-        'T' => o.file_threads = Some(number('T', value)? as usize),
+        // `try_from`, not `as`: on a 32-bit target (armv7) a usize is
+        // 32 bits, so `as usize` truncated a value the user typed rather
+        // than clamping it. Saturating to `usize::MAX` keeps the
+        // thread-count clamps downstream in charge of the answer.
+        't' => o.threads = Some(usize::try_from(number('t', value)?).unwrap_or(usize::MAX)),
+        'T' => o.file_threads = Some(usize::try_from(number('T', value)?).unwrap_or(usize::MAX)),
         // ---- verify or repair ----
         'p' => o.purge = true,
         'O' => o.rename_only = true,
@@ -461,7 +475,11 @@ fn apply_switch(
             if !creating {
                 return Err(creating_only("recovery file count"));
             }
-            let n = number('n', value)? as u32;
+            // `try_from`, not `as`: `number` parses a u64, so `as u32`
+            // TRUNCATED before the range check and `-n4294967297` passed
+            // as 1. Out of range for the narrowing is the same answer as
+            // out of range for the ceiling below, so it is one message.
+            let n = u32::try_from(number('n', value)?).unwrap_or(u32::MAX);
             if n == 0 || n > crate::help::MAX_RECOVERY_FILES {
                 return Err(ParseError::msg("Invalid recovery file count option."));
             }
@@ -559,6 +577,10 @@ fn apply_switch(
         // a wrapper that passes one long option to all three must not
         // fail on the two where it does nothing.
         '-' if value == "std-naming" => o.std_naming = true,
+        // The validated digest cache (see `Options::digest_cache`). A long
+        // option for spec R.3's reason, accepted on every command for the
+        // same wrapper reason as the two above.
+        '-' if value == "digest-cache" => o.digest_cache = true,
         // An explicit ceiling on one volume's recovery slice count.
         // The engine has honoured an arbitrary ceiling all along
         // (`par2gen::CreatePlan::max_blocks_per_volume`); what was
@@ -640,14 +662,30 @@ fn with_par2_suffix(p: PathBuf) -> PathBuf {
 
 /// `@filelist.txt`, or a bare `@` for stdin. One name per line; blank
 /// lines are skipped, as the reference's own listing reader does.
+///
+/// THE STDIN READ IS CACHED, and that is what makes [`parse`] safe to
+/// call twice. On a Linux glibc build `main` parses argv once through
+/// `memory_bounded` (to decide the mmap threshold) and again in
+/// `run_controlled`; reading stdin CONSUMES it, so the second parse got
+/// an empty listing and every file named on stdin was silently dropped.
+/// A cache is the right shape rather than a second argv scanner:
+/// `parse` stays the one place that knows what an argument means, and
+/// the read still happens exactly once for the process.
 fn read_listing(path: &str) -> Result<Vec<String>, ParseError> {
     use std::io::Read as _;
     let text = if path.is_empty() {
-        let mut s = String::new();
-        std::io::stdin()
-            .read_to_string(&mut s)
-            .map_err(|e| ParseError::msg(format!("Failed to read file list from stdin: {e}")))?;
-        s
+        static STDIN_LISTING: std::sync::OnceLock<Result<String, String>> =
+            std::sync::OnceLock::new();
+        STDIN_LISTING
+            .get_or_init(|| {
+                let mut s = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut s)
+                    .map(|_| s)
+                    .map_err(|e| format!("Failed to read file list from stdin: {e}"))
+            })
+            .clone()
+            .map_err(ParseError::msg)?
     } else {
         std::fs::read_to_string(path)
             .map_err(|e| ParseError::msg(format!("Failed to open file list {path}: {e}")))?

@@ -885,8 +885,8 @@ same choice. Normally each file is proved by one digest over the whole file, whi
 single read on one core however many cores the machine has. With this on, each file is
 proved from the PAR2 set's per-block checksums instead, and those run on every core at
 once. Much faster on a fast local disk, and worth very little on a network share or a
-spinning disk, where the disk is already the limit. It is off unless you ask for it, and
-here is what you agree to when you do: a PAR2 set can carry two records that describe
+spinning disk, where the disk is already the limit. It is on unless you turn it off, and
+here is what you agree to by leaving it on: a PAR2 set can carry two records that describe
 different files, and par2cmdline and the other tools call such a set damaged where
 nzbfast then calls it clean. No set built by normal software looks like that, a check of
 the first 16 KiB still refuses every accidental version of it, and a repair proves itself

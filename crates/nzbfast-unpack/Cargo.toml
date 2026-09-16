@@ -50,6 +50,12 @@ tracing = { version = "0.1", default-features = false, features = ["std", "attri
 trash = "5.2.6"
 
 [features]
+# Probe-only, and never in a shipped build: hands `rars` its
+# `fold-team-probe` knob so the `#[ignore]`d `revscan_*` benchmark drivers
+# can move the `.rev` repair fold's team gate from the environment and
+# measure BOTH arms at one memory budget. See
+# `research/NZBFAST-REPAIR-FOLD-GATE-SMALL-VOLUME-2026-09-16.md`.
+fold-team-probe = ["rars/fold-team-probe"]
 # The test seams `crates/nzbfast`'s own tests reach into this crate for.
 # They were `#[cfg(test)]` while the two crates were one, and a
 # `cfg(test)` item is invisible from another crate whatever its

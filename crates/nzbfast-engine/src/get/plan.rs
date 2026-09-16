@@ -1773,6 +1773,11 @@ mod tests {
     /// `cargo test -p nzbfast --release --bin nzbfast r9_plan_rss -- --ignored --nocapture`
     /// macOS: ps is the portable-enough RSS read for a one-shot.
     fn rss_kb() -> u64 {
+        // win-portability-gate: `ps` is not on Windows and this would panic
+        // there - but both callers (`r9_plan_rss_at_field_scale` and
+        // `c6_nzb_retained_rss_at_field_scale`) are `#[ignore]`d and hand-run
+        // on a unix box, so no job on any platform executes it. A `cfg(not(unix))` arm
+        // could only return a fabricated number.
         let out = std::process::Command::new("ps")
             .args(["-o", "rss=", "-p", &std::process::id().to_string()])
             .output()

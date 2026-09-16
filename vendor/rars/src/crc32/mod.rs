@@ -31,7 +31,61 @@ impl Crc32 {
     pub const fn finish(self) -> u32 {
         !self.value
     }
+
+    /// Folds in `other`: the checksum, from a fresh [`Crc32::new`], of the
+    /// `len` bytes that come straight after everything this one has seen.
+    /// It is what lets the pieces of one stream be checksummed apart and
+    /// joined in order.
+    pub fn combine(&mut self, other: Crc32, len: u64) {
+        let mut joined = crc32fast::Hasher::new_with_initial(!self.value);
+        joined.combine(&crc32fast::Hasher::new_with_initial_len(!other.value, len));
+        self.value = !joined.finalize();
+    }
+
+    /// [`Self::update`] over `pieces` in order, each piece on a thread of its
+    /// own when there are several and they are large enough to pay for it.
+    ///
+    /// CRC32 is one stream, so one checksum is one core however many the box
+    /// has. Measured 14 Sep 2026 on the dev Mac (M3 Ultra): 9.8 GB/s for one
+    /// stream, 25 GB/s for 4 MiB cut four ways and joined with
+    /// [`Self::combine`], a thread spawned per piece included. That single
+    /// stream was half the CPU of `rarfast t` on a stored or a text archive,
+    /// and the whole of its gap to the reference unrar.
+    pub fn update_pieces(&mut self, pieces: &[&[u8]]) {
+        #[cfg(feature = "parallel")]
+        if pieces.len() > 1
+            && pieces.iter().map(|piece| piece.len()).sum::<usize>() >= PARALLEL_PIECES_MIN_BYTES
+        {
+            std::thread::scope(|scope| {
+                let rest: Vec<_> = pieces[1..]
+                    .iter()
+                    .map(|piece| {
+                        scope.spawn(move || {
+                            let mut part = Crc32::new();
+                            part.update(piece);
+                            part
+                        })
+                    })
+                    .collect();
+                self.update(pieces[0]);
+                for (handle, piece) in rest.into_iter().zip(&pieces[1..]) {
+                    let part = handle.join().expect("CRC32 piece thread panicked");
+                    self.combine(part, piece.len() as u64);
+                }
+            });
+            return;
+        }
+        for piece in pieces {
+            self.update(piece);
+        }
+    }
 }
+
+/// Below this many bytes in all, [`Crc32::update_pieces`] hashes on the
+/// calling thread: two 1 MiB pieces already ran 11.4 GB/s against 9.8 for
+/// one stream, and anything smaller is spawn cost for nothing.
+#[cfg(feature = "parallel")]
+const PARALLEL_PIECES_MIN_BYTES: usize = 2 << 20;
 
 impl Default for Crc32 {
     fn default() -> Self {
@@ -138,6 +192,43 @@ mod tests {
     #[test]
     fn raw_crc_matches_unfinalized_seeded_rar15_value() {
         assert_eq!(crc32_raw(b"password"), 0xca3d_b92a);
+    }
+
+    #[test]
+    fn combined_and_pieced_checksums_match_one_stream() {
+        let data = deterministic_bytes(9_000_001);
+        let whole = crc32(&data);
+        for cut in [0usize, 1, 4096, 1 << 20, 4_500_000, data.len()] {
+            let (left, right) = data.split_at(cut);
+            let mut joined = Crc32::new();
+            joined.update(left);
+            let mut tail = Crc32::new();
+            tail.update(right);
+            joined.combine(tail, right.len() as u64);
+            assert_eq!(joined.finish(), whole, "cut at {cut}");
+        }
+        for sizes in [
+            vec![data.len()],
+            vec![1 << 20; 8],
+            vec![0, 3, 2 << 20, 1, 4 << 20],
+            vec![3_000_000, 3_000_000, 3_000_001],
+        ] {
+            let mut at = 0;
+            let mut pieces = Vec::new();
+            for size in sizes {
+                let end = (at + size).min(data.len());
+                pieces.push(&data[at..end]);
+                at = end;
+            }
+            let mut pieced = Crc32::new();
+            pieced.update(b"prefix");
+            pieced.update_pieces(&pieces);
+            let covered = &data[..at];
+            let mut expected = Crc32::new();
+            expected.update(b"prefix");
+            expected.update(covered);
+            assert_eq!(pieced.finish(), expected.finish());
+        }
     }
 
     #[test]

@@ -2715,7 +2715,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
      rail is built from each card's data-sg/data-sk, so adding a card needs
      no list kept in sync here. -->
 <div class="setshell">
-  <aside class="setrail" id="setRail" aria-label="Settings sections"></aside>
+  <aside class="setrail" id="setRail" data-i18n-aria="hdr.settings.title" aria-label="Settings"></aside>
   <div class="setmain" id="setMain">
   <div class="setsearchbar">
     <input class="search" id="setQ" type="search" autocomplete="off"
@@ -3006,7 +3006,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
       <option value="full" data-i18n="set.perf.verifymode.full">full: MD5 every block</option>
       <option value="fast" data-i18n="set.perf.verifymode.fast">fast: CRC32 blocks (default)</option>
       <option value="lean" data-i18n="set.perf.verifymode.lean">lean: CRC32 blocks, no article CRCs</option></select></div>
-  <div class="row" data-adv="1"><label data-i18n="set.perf.finalcheck">Fast final check<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.perf.finalcheck.hint">the check that reads your finished files back from the disk, at the end of a download and when you run nzbfast verify by hand. Normally each file is proved by one digest over the whole file, and that is a single read on one core however many cores the machine has. With this on, each file is proved from the PAR2 set's per-block checksums instead, which run on every core at once. Much faster on a fast local disk, and worth very little on a network share or a spinning disk, where the disk is already the limit. What it costs: a PAR2 set can carry two records that describe different files, and other tools call such a set damaged where this calls it clean. No normal set is built that way, and a repair still proves itself the old way whatever this says</span></label>
+  <div class="row" data-adv="1"><label data-i18n="set.perf.finalcheck">Fast final check<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.perf.finalcheck.hint">the check that reads your finished files back from the disk, at the end of a download and when you run nzbfast verify by hand. Normally each file is proved by one digest over the whole file, and that is a single read on one core however many cores the machine has. With this on, each file is proved from the PAR2 set's per-block checksums instead, which run on every core at once. On by default. Much faster on a fast local disk, and worth very little on a network share or a spinning disk, where the disk is already the limit. What it costs: a PAR2 set can carry two records that describe different files, and other tools call such a set damaged where this calls it clean. No normal set is built that way, and a repair still proves itself the old way whatever this says</span></label>
     <input type="checkbox" id="s_fast_final_check" onchange="setCfg('fast_final_check',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.perf.fastpar">Fast PAR mode<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.perf.fastpar.hint">speeds up repair of badly damaged downloads. Turns itself off automatically if a repair does not verify</span></label>
     <input type="checkbox" id="s_fast_par" onchange="setCfg('fast_par',this.checked?1:0)"></div>
@@ -4237,7 +4237,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
 </div></div>
 <div id="helpDrawer" class="helpdrawer" aria-hidden="true">
   <div class="hd-back" onclick="closeHelp()"></div>
-  <div class="hd-panel" role="dialog" aria-modal="true" aria-label="Manual">
+  <div class="hd-panel" role="dialog" aria-modal="true" data-i18n-aria="hlp.drawer" aria-label="Manual">
     <div class="hd-bar">
       <span class="hd-title">📖 <span data-i18n="hlp.drawer">Manual</span></span>
       <span class="grow"></span>
@@ -4436,6 +4436,16 @@ function applyI18n(){
   // catalogues ship inside the binary, so this HTML is trusted).
   document.querySelectorAll('[data-i18n-html]').forEach(el=>{
     const tr=I18N[el.dataset.i18nHtml]; if(tr!=null) el.innerHTML=tr;
+  });
+  // A STATIC aria-label with no visible twin and no tooltip to hang a
+  // `data-i18n-title` on: a landmark's name, a dialog's name. Those were
+  // announced in English on every locale, because the title pass below
+  // only restamps an aria-label that is already beside a title, and
+  // `extract.js` has no aria scrape at all. The key names an EXISTING
+  // string - this attribute adds no reference entry and no translation
+  // work, which is why it is a separate pass and not a new key.
+  document.querySelectorAll('[data-i18n-aria]').forEach(el=>{
+    const tr=I18N[el.dataset.i18nAria]; if(tr!=null) el.setAttribute('aria-label',tr);
   });
   document.querySelectorAll('[data-i18n-title]').forEach(el=>{
     const tr=I18N[el.dataset.i18nTitle]; if(tr==null) return;
@@ -9327,9 +9337,19 @@ async function toggleHistRow(tr){
 function copyFailDetail(btn){
   const pre=btn.parentElement.querySelector('pre');
   if(!pre) return;
-  navigator.clipboard.writeText(pre.textContent)
-    .then(()=>toast(t('toast.copied','Copied to clipboard')))
-    .catch(()=>toast(t('toast.copyfail','Could not copy'), true));
+  // navigator.clipboard is undefined on a NON-SECURE origin, which is
+  // exactly where this dashboard usually runs: http://<lan-ip>:6789.
+  // Reading `.writeText` off undefined throws SYNCHRONOUSLY, before the
+  // .catch below is attached, so the user got no feedback at all - not
+  // even the failure toast written for this. The try is what makes the
+  // catch reachable.
+  try{
+    navigator.clipboard.writeText(pre.textContent)
+      .then(()=>toast(t('toast.copied','Copied to clipboard')))
+      .catch(()=>toast(t('toast.copyfail','Could not copy'), true));
+  }catch(e){
+    toast(t('toast.copyfail','Could not copy'), true);
+  }
 }
 
 function lane(cls,label,done,total,note){

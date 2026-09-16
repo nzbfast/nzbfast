@@ -52,6 +52,9 @@ pub fn str_el(id: &[u8], v: &str) -> Vec<u8> {
 }
 
 const EBML_HEADER: &[u8] = &[0x1A, 0x45, 0xDF, 0xA3];
+const SEEK_HEAD_ID: &[u8] = &[0x11, 0x4D, 0x9B, 0x74];
+const CHAPTERS_ID: &[u8] = &[0x10, 0x43, 0xA7, 0x70];
+const TAGS_ID: &[u8] = &[0x12, 0x54, 0xC3, 0x67];
 const SEGMENT: &[u8] = &[0x18, 0x53, 0x80, 0x67];
 
 fn ebml_head(doctype: &str) -> Vec<u8> {
@@ -192,6 +195,25 @@ pub fn mkv_chapters() -> Vec<u8> {
     out
 }
 
+/// One SeekHead>Seek entry. SeekPosition is written as a fixed 8-byte
+/// integer and `el` writes every size as a fixed 4-byte vint, so an
+/// entry's size does not depend on the offset it carries - which is
+/// what lets a builder compute the offsets AFTER deciding how many
+/// entries the index holds.
+fn seek_entry(id: &[u8], pos: u64) -> Vec<u8> {
+    let mut s = el(&[0x53, 0xAB], id);
+    s.extend(el(&[0x53, 0xAC], &pos.to_be_bytes()));
+    el(&[0x4D, 0xBB], &s)
+}
+
+/// Length of a SeekHead holding `n` entries, known before any offset
+/// is. Every top-level EBML ID a fixture indexes is four bytes, so the
+/// stub entry's id stands in for any of them.
+fn seek_head_len(n: usize) -> usize {
+    let stub: Vec<u8> = (0..n).flat_map(|_| seek_entry(CHAPTERS_ID, 0)).collect();
+    el(SEEK_HEAD_ID, &stub).len()
+}
+
 /// Chapters written AFTER the clusters, reachable only through the
 /// SeekHead - the Matroska twin of a trailing moov.
 pub fn mkv_seekhead_chapters() -> Vec<u8> {
@@ -204,11 +226,6 @@ pub fn mkv_seekhead_chapters() -> Vec<u8> {
 
     // SeekPosition is written as a fixed 8-byte integer so the index's
     // own size does not depend on the offset it is about to carry.
-    let seek_entry = |id: &[u8], pos: u64| {
-        let mut s = el(&[0x53, 0xAB], id);
-        s.extend(el(&[0x53, 0xAC], &pos.to_be_bytes()));
-        el(&[0x4D, 0xBB], &s)
-    };
     let head_len = el(
         &[0x11, 0x4D, 0x9B, 0x74],
         &seek_entry(&[0x10, 0x43, 0xA7, 0x70], 0),
@@ -229,6 +246,192 @@ pub fn mkv_seekhead_chapters() -> Vec<u8> {
     let mut out = ebml_head("matroska");
     out.extend(el(SEGMENT, &seg));
     out
+}
+
+/// A Tags element carrying one neutral SimpleTag - enough to be a real
+/// second top-level element in a tail without perturbing anything the
+/// probe reports (a BPS tag would rewrite a track bitrate).
+fn tags_comment(value: &str) -> Vec<u8> {
+    let mut simple = str_el(&[0x45, 0xA3], "COMMENT"); // TagName
+    simple.extend(str_el(&[0x44, 0x87], value)); // TagString
+    let tag = el(&[0x73, 0x73], &el(&[0x67, 0xC8], &simple));
+    el(&[0x12, 0x54, 0xC3, 0x67], &tag)
+}
+
+/// A Matroska whose tail - everything after the cluster the pre-cluster
+/// walk stops at - holds `tail` in the order given, indexed by a
+/// SeekHead whose entries are `index`, each naming a tail part by
+/// position.
+///
+/// Every shape the chase's dedupe has to get right is expressible here:
+/// one part indexed twice, two parts indexed in an order that does not
+/// match their physical layout, and two DISTINCT elements sharing an
+/// ID. [`mkv_seekhead_chapters`] is the single-target case, kept
+/// separate because it is the ordinary mux.
+pub fn mkv_seekhead_tail(tail: &[(&[u8], Vec<u8>)], index: &[usize]) -> Vec<u8> {
+    let info_el = info(60_000.0, None);
+    let tracks_el = tracks(&[video_track("V_MPEG4/ISO/AVC", AVCC, &[])]);
+    let cluster = el(&[0x1F, 0x43, 0xB6, 0x75], &uint(&[0xE7], 0));
+
+    // SeekPosition is written as a fixed 8-byte integer, and `el`
+    // writes every size as a fixed 4-byte vint, so an entry's size does
+    // not depend on the offset it carries and the index's own length is
+    // known before the offsets are.
+    let stub: Vec<u8> = index
+        .iter()
+        .flat_map(|_| seek_entry(&[0x10, 0x43, 0xA7, 0x70], 0))
+        .collect();
+    let head_len = el(&[0x11, 0x4D, 0x9B, 0x74], &stub).len();
+
+    // SeekPosition is relative to the segment's DATA start, and the
+    // SeekHead is the first thing in it.
+    let mut offsets = Vec::with_capacity(tail.len());
+    let mut at = (head_len + info_el.len() + tracks_el.len() + cluster.len()) as u64;
+    for (_, body) in tail {
+        offsets.push(at);
+        at += body.len() as u64;
+    }
+
+    let entries: Vec<u8> = index
+        .iter()
+        .flat_map(|&i| seek_entry(tail[i].0, offsets[i]))
+        .collect();
+    let seek_head = el(&[0x11, 0x4D, 0x9B, 0x74], &entries);
+    assert_eq!(seek_head.len(), head_len, "seek head size must be stable");
+
+    let mut seg = seek_head;
+    seg.extend(info_el);
+    seg.extend(tracks_el);
+    seg.extend(cluster);
+    for (_, body) in tail {
+        seg.extend_from_slice(body);
+    }
+    let mut out = ebml_head("matroska");
+    out.extend(el(SEGMENT, &seg));
+    out
+}
+
+/// One Chapters element in the tail, listed by the SeekHead TWICE. A
+/// corrupt or hostile index is all this takes, and the file is
+/// otherwise entirely ordinary.
+pub fn mkv_seekhead_same_target_twice() -> Vec<u8> {
+    mkv_seekhead_tail(
+        &[(CHAPTERS_ID, chapters(&[(0, "One"), (250, "Two")]))],
+        &[0, 0],
+    )
+}
+
+/// A tail of [Tags][Chapters] with both indexed in that order - the
+/// honest-mux shape. Nothing here is malformed: the chase simply has
+/// two targets, and the first one physically precedes the second.
+pub fn mkv_seekhead_tags_before_chapters() -> Vec<u8> {
+    mkv_seekhead_tail(
+        &[
+            (TAGS_ID, tags_comment("hello")),
+            (CHAPTERS_ID, chapters(&[(0, "One"), (250, "Two")])),
+        ],
+        &[0, 1],
+    )
+}
+
+/// TWO distinct Chapters elements in the tail, both indexed. The
+/// negative control for the chase's dedupe: they share an element ID
+/// and differ only in offset, so a key that is the ID rather than the
+/// offset drops the second one's chapters entirely. (A Segment is
+/// specified to carry at most one Chapters, so this is a malformed mux
+/// - which is exactly the population the prober is fed from Usenet, and
+/// dropping half of what a file actually contains is not a reading of
+/// it we get to make.)
+pub fn mkv_seekhead_two_chapter_elements() -> Vec<u8> {
+    mkv_seekhead_tail(
+        &[
+            (CHAPTERS_ID, chapters(&[(0, "One"), (250, "Two")])),
+            (CHAPTERS_ID, chapters(&[(500, "Three"), (750, "Four")])),
+        ],
+        &[0, 1],
+    )
+}
+
+/// A Matroska with TWO SeekHeads, laid out as
+/// `[front][Info][Tracks][Cluster][tail][Chapters]`: a small
+/// fixed-size index at the front of the Segment and the real one in the
+/// tail. The caller builds both entry lists from the offsets this
+/// computes, which is what lets one builder express the ordinary
+/// deferred-index shape and a cycle in the same layout.
+///
+/// `front_n` and `tail_n` are the entry COUNTS, which have to be known
+/// before the offsets can be: see [`seek_head_len`]. Both are asserted
+/// against what the caller actually returned.
+fn mkv_chained_seekheads(
+    front_n: usize,
+    tail_n: usize,
+    entries: impl Fn(u64, u64, u64) -> (Vec<u8>, Vec<u8>),
+) -> Vec<u8> {
+    let info_el = info(60_000.0, None);
+    let tracks_el = tracks(&[video_track("V_MPEG4/ISO/AVC", AVCC, &[])]);
+    let cluster = el(&[0x1F, 0x43, 0xB6, 0x75], &uint(&[0xE7], 0));
+    let chapters_el = chapters(&[(0, "One"), (250, "Two")]);
+
+    // Every offset is relative to the segment's DATA start, which is
+    // what a SeekPosition carries and where the front index begins.
+    let front_at = 0u64;
+    let tail_at = (seek_head_len(front_n) + info_el.len() + tracks_el.len() + cluster.len()) as u64;
+    let chapters_at = tail_at + seek_head_len(tail_n) as u64;
+
+    let (front_entries, tail_entries) = entries(front_at, tail_at, chapters_at);
+    let front = el(SEEK_HEAD_ID, &front_entries);
+    let tail = el(SEEK_HEAD_ID, &tail_entries);
+    assert_eq!(front.len(), seek_head_len(front_n), "front index size");
+    assert_eq!(tail.len(), seek_head_len(tail_n), "tail index size");
+
+    let mut seg = front;
+    seg.extend(info_el);
+    seg.extend(tracks_el);
+    seg.extend(cluster);
+    seg.extend(tail);
+    seg.extend(chapters_el);
+    let mut out = ebml_head("matroska");
+    out.extend(el(SEGMENT, &seg));
+    out
+}
+
+/// The deferred-index shape: a front SeekHead that names only a SECOND
+/// SeekHead in the tail, which is the one that names the Chapters.
+/// Nothing here is malformed - it is how a muxer writes a small index
+/// of known size up front and puts the real one at the end - and
+/// before the chase became a worklist the Chapters were silently
+/// absent, with the parse still reporting complete.
+pub fn mkv_seekhead_chained() -> Vec<u8> {
+    mkv_chained_seekheads(1, 1, |_front, tail, chapters| {
+        (
+            seek_entry(SEEK_HEAD_ID, tail),
+            seek_entry(CHAPTERS_ID, chapters),
+        )
+    })
+}
+
+/// Two SeekHeads naming EACH OTHER, with the Chapters reachable only
+/// through the second. The cycle control: a worklist over
+/// attacker-supplied offsets has to terminate on its own, and the
+/// resolved-offset set is what does it. The Chapters are real and must
+/// come back exactly once.
+pub fn mkv_seekhead_cycle() -> Vec<u8> {
+    mkv_chained_seekheads(1, 2, |front, tail, chapters| {
+        let mut back = seek_entry(SEEK_HEAD_ID, front);
+        back.extend(seek_entry(CHAPTERS_ID, chapters));
+        (seek_entry(SEEK_HEAD_ID, tail), back)
+    })
+}
+
+/// The degenerate cycle: the tail SeekHead's first entry names ITSELF.
+/// A one-element loop is the shortest hostile file that exists, and it
+/// does not go through a second offset on the way round.
+pub fn mkv_seekhead_self_loop() -> Vec<u8> {
+    mkv_chained_seekheads(1, 2, |_front, tail, chapters| {
+        let mut me = seek_entry(SEEK_HEAD_ID, tail);
+        me.extend(seek_entry(CHAPTERS_ID, chapters));
+        (seek_entry(SEEK_HEAD_ID, tail), me)
+    })
 }
 
 /// [`mkv_full`] with a payload cluster of `bytes` junk after the
@@ -801,11 +1004,6 @@ pub fn mkv_remux_fixture_scaled(scale: usize) -> Vec<u8> {
 
     // SeekPosition is written as a fixed 8-byte integer so the index's
     // own size does not move when the offset it carries does.
-    let seek_entry = |id: &[u8], pos: u64| {
-        let mut s = el(&[0x53, 0xAB], id);
-        s.extend(el(&[0x53, 0xAC], &pos.to_be_bytes()));
-        el(&[0x4D, 0xBB], &s)
-    };
     let head_len = el(&[0x11, 0x4D, 0x9B, 0x74], &seek_entry(CUES_ID, 0)).len();
 
     let mut off = (head_len + info_el.len() + tracks_el.len()) as u64;
@@ -1011,6 +1209,21 @@ pub fn all() -> Vec<(&'static str, Vec<u8>)> {
         ("mkv_hdr", mkv_hdr()),
         ("mkv_chapters", mkv_chapters()),
         ("mkv_seekhead_chapters", mkv_seekhead_chapters()),
+        (
+            "mkv_seekhead_same_target_twice",
+            mkv_seekhead_same_target_twice(),
+        ),
+        (
+            "mkv_seekhead_tags_before_chapters",
+            mkv_seekhead_tags_before_chapters(),
+        ),
+        (
+            "mkv_seekhead_two_chapter_elements",
+            mkv_seekhead_two_chapter_elements(),
+        ),
+        ("mkv_seekhead_chained", mkv_seekhead_chained()),
+        ("mkv_seekhead_cycle", mkv_seekhead_cycle()),
+        ("mkv_seekhead_self_loop", mkv_seekhead_self_loop()),
         ("mkv_disabled_track", mkv_disabled_track()),
         ("mkv_vfw_xvid", mkv_vfw_xvid()),
         ("webm", webm()),

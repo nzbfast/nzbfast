@@ -8,7 +8,12 @@
 //! Candidates are INDEPENDENT files, so both passes fan out across them
 //! (R2 / N11 - this was the last serial payload-sized pass in a file
 //! where the syndrome feed, the hash verify and the patch write were all
-//! parallelized already). The whole point of the parallel shape is that
+//! parallelized already), and since 16 Sep 2026 the sliding scan also
+//! fans out WITHIN one, because across-candidates alone leaves the
+//! shape that pays adoption most - a single wholly-unidentified member,
+//! `indices.len() == 1` - on one core of a wide box (claim
+//! `par2-adoption-scan-within-candidate-16sep`,
+//! `research/PAR2-ADOPTION-DOUBLE-READ-2026-09-16.md`). The whole point of the parallel shape is that
 //! it must not change a single adoption decision: `adopted_from`,
 //! `consumed_sources` and the bytes a slice is read from are all
 //! reported, so "first candidate in sorted order wins, at its first
@@ -41,6 +46,7 @@
 //! `unit_tests.rs` pins both halves of that arithmetic.
 
 use super::*;
+use std::io::Seek;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -547,14 +553,140 @@ pub(super) fn md5_of_file(path: &Path, limit: Option<u64>) -> Result<[u8; 16], R
     Ok(hasher.finalize().into())
 }
 
-/// How many candidate files may be read at once. Both passes are a mix
-/// of one sequential whole-file read and per-byte arithmetic over it
-/// (MD5, or the rolling CRC32 plus MD5 on a hit), so the work is
-/// CPU-shaped and the cap is really about not turning one repair into a
-/// deep queue of concurrent whole-file reads on a spinning disk or a
-/// network share - the same 8 the syndrome feed readers settled on.
+/// The machine half of the adoption fan-out, with no per-file term.
+///
+/// Both passes are a mix of one sequential whole-file read and per-byte
+/// arithmetic over it (MD5, or the rolling CRC32 plus MD5 on a hit), so
+/// the work is CPU-shaped and the cap is really about not turning one
+/// repair into a deep queue of concurrent whole-file reads on a
+/// spinning disk or a network share - the same 8 the syndrome feed
+/// readers settled on.
+///
+/// THE 8 STILL BINDS NOW THAT THE SLIDING SCAN SPLITS ONE CANDIDATE
+/// (16 Sep 2026, claim `par2-adoption-scan-within-candidate-16sep`).
+/// The stated reason above is about FILES, and the obvious reading is
+/// that it does not transfer to chunks of a single file, so it was
+/// re-derived rather than inherited. It does transfer, for a different
+/// reason on each side of the trade: N chunks of one file are N
+/// concurrent sequential read streams at N distant offsets, which is
+/// the seek pattern the cap was bought to avoid on a spinning disk or
+/// a share whatever the file count says; and on the CPU-bound side
+/// where the widening pays, the measured single-thread rate
+/// (820 MiB/s, `research/PAR2-ADOPTION-DOUBLE-READ-2026-09-16.md`)
+/// means 8 already carries a repair-sized pass to the point where it
+/// stops being the phase worth chasing. Raising it is a measurement on
+/// a wide box, not a free win - and the ring-buffer cap in
+/// [`sliding_scan`] is the OTHER term, which a raise here would not
+/// relax.
+fn adoption_fanout() -> usize {
+    crate::mem::cpu_workers().clamp(1, 8)
+}
+
+/// How many candidate files may be read at once - [`adoption_fanout`]
+/// with the per-file term the whole-file passes are bounded by.
 fn adoption_workers(files: usize) -> usize {
-    crate::mem::cpu_workers().min(8).min(files).max(1)
+    adoption_fanout().min(files).max(1)
+}
+
+/// One unit of sliding-scan work: a candidate's position in `indices`,
+/// plus the half-open range of WINDOW START offsets inside that
+/// candidate this unit is answerable for. `start == 0 && end == len` is
+/// the whole file, which is what every unit was before 16 Sep 2026.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScanUnit {
+    pos: usize,
+    start: u64,
+    end: u64,
+}
+
+/// The smallest window-start range worth a thread of its own.
+///
+/// Two terms, and the first is the one that decides it. A chunk has to
+/// read `bs - 1` bytes past its own range to close the window that
+/// straddles the boundary (see [`scan_candidate`]), so the overlap is a
+/// fixed `bs` per split and the block multiple here IS the overlap
+/// budget: a floor of `M * bs` caps the wasted fraction at `1 / M`
+/// whenever it is the floor rather than the width that limits the cut.
+/// The 4 MiB floor is the second term and binds only on small blocks
+/// (`bs <= 1 MiB`), where four blocks would be a chunk too short to pay
+/// for a thread at all.
+///
+/// THE MULTIPLE WAS 8 UNTIL 16 Sep 2026 AND IS NOW 4, MEASURED - claim
+/// `adoption-fanout-constants-measure-16sep`, written up in
+/// `research/PAR2-ADOPTION-WITHIN-CANDIDATE-2026-09-16.md`. The rig
+/// (`rig_sliding_scan_costs` in the tests beside this file) swept the
+/// chunk count over a real 192 MiB candidate at 1 MiB and 16 MiB block
+/// sizes and found NO per-unit fixed cost to speak of: process CPU
+/// tracked the planned byte count to within a few percent from 1 chunk
+/// to 32, and the per-thread rate stayed flat at 316-346 MiB/s across
+/// the whole ladder. So the ring allocation, the thread start-up and
+/// the units finishing unevenly are all below the noise, the straddle
+/// overlap is the ONLY cost of a split, and the trade is exactly
+/// arithmetic: each halving of the multiple doubles the reachable chunk
+/// count for one more `bs` of reread per split.
+///
+/// 8 -> 4 takes the note's stated gap - a 192 MiB member at a 16 MiB
+/// block, 12 blocks, which did not split at all - to a 3-way cut worth
+/// a measured 2.69x on the pass, for 15% more bytes read. It changes
+/// NOTHING on the 1 MiB shape the landed A/B measured: there the width
+/// cap already limited the cut to 8 and still does, so there is no
+/// regression risk on the arm that has a number behind it.
+///
+/// IT DID NOT GO TO 2, and the reason is the axis this box cannot
+/// measure rather than the CPU: the overlap is re-read I/O as well as
+/// re-hashed bytes, 2 would put that at 50% of the candidate, and a
+/// spinning disk or a network share is the same unmeasured risk that
+/// keeps [`adoption_fanout`] at 8. 2 is worth 4.59x at that corner and
+/// is the next rung IF that reading is ever taken.
+fn min_scan_chunk(bs: usize) -> u64 {
+    (bs as u64).saturating_mul(4).max(4 << 20)
+}
+
+/// Cut `indices` into the units the scan's workers pull from, in SERIAL
+/// SCAN ORDER - candidate by candidate, and within a candidate by
+/// ascending offset. That order is the whole contract: `ScanShared`'s
+/// early exits and the merge in [`sliding_scan`] are keyed on a unit's
+/// index in this list, and every one of their arguments is "an earlier
+/// unit is earlier in the serial walk", which the lexicographic order
+/// below is exactly.
+///
+/// A candidate is split only when there is width going spare: with at
+/// least `width` candidates the plan is one unit each, byte for byte
+/// what it always was, so the ordinary many-candidate repair cannot
+/// reach any of the new arithmetic.
+fn plan_units(
+    cands: &[(PathBuf, u64)],
+    indices: &[usize],
+    width: usize,
+    floor: u64,
+) -> Vec<ScanUnit> {
+    let whole = |pos: usize| ScanUnit {
+        pos,
+        start: 0,
+        end: cands[indices[pos]].1,
+    };
+    if width < 2 || indices.len() >= width {
+        return (0..indices.len()).map(whole).collect();
+    }
+    let per = (width.div_ceil(indices.len().max(1))) as u64;
+    let mut out: Vec<ScanUnit> = Vec::with_capacity(indices.len());
+    for pos in 0..indices.len() {
+        let len = cands[indices[pos]].1;
+        let chunks = per.min(len / floor.max(1)).max(1);
+        let (base, rem) = (len / chunks, len % chunks);
+        let mut start = 0u64;
+        for k in 0..chunks {
+            let n = base + u64::from(k < rem);
+            out.push(ScanUnit {
+                pos,
+                start,
+                end: start + n,
+            });
+            start += n;
+        }
+        debug_assert_eq!(start, len, "the chunks of a candidate must cover it");
+    }
+    out
 }
 
 /// Hash the candidates named by `want` in parallel, filling the matching
@@ -1043,17 +1175,31 @@ fn prefetch_wholes(
 /// of every slice in `missing_set` not already adopted. Slices without
 /// IFSC data can only be found by the whole-file fast path.
 ///
-/// One worker per candidate, each building its own adoption list, merged
-/// afterwards in `indices` order. Three things keep the answer identical
-/// to the serial walk it replaces:
+/// The work is cut into UNITS by [`plan_units`] - a candidate, or a
+/// byte range of one - and the workers pull units off a shared cursor,
+/// each building its own adoption list, merged afterwards in unit
+/// order. Three things keep the answer identical to the serial walk it
+/// replaces:
 ///
-/// * The merge is a first-writer-wins fold over the positions in order,
-///   so the earliest candidate holding a slice's content still wins, at
+/// * The merge is a first-writer-wins fold over the units in order, so
+///   the earliest candidate holding a slice's content still wins, at
 ///   the first offset it found it - and the fold stops the moment every
 ///   wanted slice is covered, which is the serial loop's own early exit.
 ///   A worker past that point simply has its list dropped, and its I/O
 ///   error with it: an error only propagates from a candidate the serial
 ///   walk would actually have opened.
+///
+///   THAT IS ONE FOLD OVER ONE ORDER, not two axes, and it is why
+///   splitting a candidate needed no second tie-break (16 Sep 2026,
+///   claim `par2-adoption-scan-within-candidate-16sep`). The serial
+///   walk visits candidate 0's offsets in order, then candidate 1's;
+///   `plan_units` emits units in exactly that lexicographic order; so
+///   "lowest unit index wins" IS "first candidate, then first offset",
+///   and every `pos`-keyed argument below reads as a unit index with
+///   nothing else changed. Within one unit the offsets ascend as they
+///   always did, and the ranges of one candidate's units are disjoint
+///   and ascending, so the concatenation the fold walks is the serial
+///   sequence of hits.
 ///
 /// `donor_cands` names the candidate slots whose files live in a §293
 /// donor directory. An I/O error on one of THOSE never propagates -
@@ -1085,6 +1231,40 @@ pub(super) fn sliding_scan(
     missing_set: &HashSet<usize>,
     bs: usize,
     adopted: &mut HashMap<usize, AdoptSrc>,
+) -> Result<(), RepairError> {
+    // Each worker holds a `bs`-byte ring; PAR2 block sizes run to
+    // hundreds of MB, so cap the fan-out by that too rather than let a
+    // wide machine turn one repair into gigabytes of window buffers.
+    let ring_cap = ((256 << 20) / bs.max(1)).max(1);
+    sliding_scan_planned(
+        cands,
+        indices,
+        donor_cands,
+        targets,
+        missing_set,
+        bs,
+        adopted,
+        adoption_fanout().min(ring_cap),
+        min_scan_chunk(bs),
+    )
+}
+
+/// [`sliding_scan`] with the fan-out plan named rather than derived, so
+/// the differential tests can drive the WIDE path over a fixture small
+/// enough to also drive the narrow one - which is the only way to
+/// compare the two on the same bytes. `width` is the worker ceiling and
+/// `floor` is [`min_scan_chunk`]'s.
+#[expect(clippy::too_many_arguments)]
+fn sliding_scan_planned(
+    cands: &[(PathBuf, u64)],
+    indices: &[usize],
+    donor_cands: std::ops::Range<usize>,
+    targets: &[Target],
+    missing_set: &HashSet<usize>,
+    bs: usize,
+    adopted: &mut HashMap<usize, AdoptSrc>,
+    width: usize,
+    floor: u64,
 ) -> Result<(), RepairError> {
     // Wanted slices get a dense ordinal in target-then-slice order, which
     // is the order the serial `by_crc` buckets were built in - so a CRC
@@ -1141,37 +1321,43 @@ pub(super) fn sliding_scan(
         tail: &tail,
         shared: &shared,
     };
+    let units = &plan_units(cands, indices, width, floor)[..];
     let found: Mutex<Vec<Option<Result<Vec<(usize, u64)>, RepairError>>>> =
-        Mutex::new((0..indices.len()).map(|_| None).collect());
-    // Each worker holds a `bs`-byte ring; PAR2 block sizes run to
-    // hundreds of MB, so cap the fan-out by that too rather than let a
-    // wide machine turn one repair into gigabytes of window buffers.
-    let workers = adoption_workers(indices.len()).min(((256 << 20) / bs.max(1)).max(1));
+        Mutex::new((0..units.len()).map(|_| None).collect());
+    let workers = width.min(units.len()).max(1);
     if workers < 2 {
-        run_scans(cands, indices, &ctx, &found);
+        run_scans(cands, indices, units, &ctx, &found);
     } else {
         std::thread::scope(|s| {
             for _ in 0..workers {
                 let (ctx, found) = (&ctx, &found);
-                s.spawn(move || run_scans(cands, indices, ctx, found));
+                s.spawn(move || run_scans(cands, indices, units, ctx, found));
             }
         });
     }
 
+    let slots = found.into_inner().unwrap_or_else(|e| e.into_inner());
+    // The donor-file half of the racing-cleanup tolerance: an I/O error
+    // from a donor-owned slot (vanished file, the shrank-mid-scan EOF)
+    // drops that candidate's list and moves on. It drops EVERY unit of
+    // that candidate, not just the one that erred: the property the
+    // header claims - that dropping an errored donor costs only lost
+    // adoptions, never wrong ones - rests on the whole candidate's
+    // claims going with it, and a candidate's claims are spread across
+    // its units.
+    let mut dead: HashSet<usize> = HashSet::new();
+    for (u, slot) in slots.iter().enumerate() {
+        if matches!(slot, Some(Err(_))) && donor_cands.contains(&indices[units[u].pos]) {
+            dead.insert(units[u].pos);
+        }
+    }
     let mut remaining = gs.len();
-    for (pos, slot) in found
-        .into_inner()
-        .unwrap_or_else(|e| e.into_inner())
-        .into_iter()
-        .enumerate()
-    {
+    for (u, slot) in slots.into_iter().enumerate() {
         if remaining == 0 {
             break;
         }
-        // The donor-file half of the racing-cleanup tolerance: an I/O
-        // error from a donor-owned slot (vanished file, the shrank-
-        // mid-scan EOF) drops that candidate's list and moves on.
-        if matches!(slot, Some(Err(_))) && donor_cands.contains(&indices[pos]) {
+        let pos = units[u].pos;
+        if dead.contains(&pos) {
             continue;
         }
         for (ord, offset) in slot.transpose()?.unwrap_or_default() {
@@ -1188,23 +1374,38 @@ pub(super) fn sliding_scan(
 }
 
 /// Cross-worker state for one [`sliding_scan`]. `best[ord]` is the
-/// lowest position in `indices` known to hold slice `ord`'s content
-/// (`usize::MAX` = nobody yet); it only ever decreases.
+/// lowest UNIT index known to hold slice `ord`'s content (`usize::MAX`
+/// = nobody yet); it only ever decreases.
+///
+/// A unit index, not a candidate position, since 16 Sep 2026 - and
+/// that is the whole of the restatement, because [`plan_units`] emits
+/// units in serial scan order, so "a lower unit index" means what "an
+/// earlier candidate" meant before: earlier in the walk this fan-out
+/// reproduces. When no candidate is split the two are the same number.
 struct ScanShared {
     best: Vec<AtomicUsize>,
     /// How many ordinals have left `usize::MAX`, so the O(slices) sweep
     /// below only runs once everything has been found by somebody.
     covered: AtomicUsize,
-    /// Lowest position that observed "every slice settled at or before
-    /// me". The condition is monotone in position, so every later
-    /// position inherits it without re-deriving it.
+    /// Lowest unit that observed "every slice settled at or before me".
+    /// The condition is monotone in the unit index, so every later unit
+    /// inherits it without re-deriving it.
     stop_from: AtomicUsize,
     next: AtomicUsize,
 }
 
 impl ScanShared {
-    /// Can a scan at `pos` still change any decision? False once every
-    /// wanted slice is held by `pos` itself or by an earlier position.
+    /// Can a scan at unit `pos` still change any decision? False once
+    /// every wanted slice is held by `pos` itself or by an earlier unit.
+    ///
+    /// Held BY `pos` ITSELF is still safe with a candidate split across
+    /// units, and it is the one arm worth spelling out: only the unit
+    /// that owns an offset range can claim from it, so `best[o] == pos`
+    /// means this very unit found `o` at an offset it has already
+    /// passed, and every window left in the unit is a higher offset
+    /// that would lose the merge anyway. A unit stopping therefore
+    /// forfeits nothing, whatever its siblings over the same candidate
+    /// are doing.
     fn settled_at(&self, pos: usize) -> bool {
         if pos >= self.stop_from.load(Ordering::Relaxed) {
             return true;
@@ -1219,7 +1420,7 @@ impl ScanShared {
         all
     }
 
-    /// Record that `pos` holds `ord`'s content.
+    /// Record that unit `pos` holds `ord`'s content.
     fn claim(&self, ord: usize, pos: usize) {
         if self.best[ord].fetch_min(pos, Ordering::Relaxed) == usize::MAX {
             self.covered.fetch_add(1, Ordering::Relaxed);
@@ -1242,33 +1443,49 @@ struct ScanCtx<'a> {
     shared: &'a ScanShared,
 }
 
-/// Pull candidate positions off the shared cursor until they run out.
+/// Pull scan units off the shared cursor until they run out.
 fn run_scans(
     cands: &[(PathBuf, u64)],
     indices: &[usize],
+    units: &[ScanUnit],
     ctx: &ScanCtx<'_>,
     found: &Mutex<Vec<Option<Result<Vec<(usize, u64)>, RepairError>>>>,
 ) {
     loop {
-        let pos = ctx.shared.next.fetch_add(1, Ordering::Relaxed);
-        if pos >= indices.len() {
-            break;
-        }
-        if ctx.shared.settled_at(pos) {
+        let u = ctx.shared.next.fetch_add(1, Ordering::Relaxed);
+        let Some(unit) = units.get(u) else { break };
+        if ctx.shared.settled_at(u) {
             continue;
         }
-        let (p, len) = &cands[indices[pos]];
-        let r = scan_candidate(p, *len, ctx, pos);
-        found.lock_ok()[pos] = Some(r);
+        let (p, len) = &cands[indices[unit.pos]];
+        let r = scan_candidate(p, *len, ctx, u, unit.start, unit.end);
+        found.lock_ok()[u] = Some(r);
     }
 }
 
 /// Slide the block-size window over one candidate file (plus `bs - 1`
 /// virtual zero bytes so tail blocks match at end-of-file) and return
 /// every still-wanted slice whose CRC32 and MD5 both match, as
-/// `(ordinal, offset)` in the order found. `pos` is this candidate's
-/// place in the scan order - see [`sliding_scan`] for what it is allowed
-/// to skip on the strength of it.
+/// `(ordinal, offset)` in the order found. `pos` is this UNIT's place
+/// in the scan order - see [`sliding_scan`] for what it is allowed to
+/// skip on the strength of it.
+///
+/// `from`..`to` is the half-open range of window START offsets this
+/// unit owns; the whole file is `0..len`. A window starting at `to - 1`
+/// still needs the `bs - 1` bytes after it, so the unit reads that far
+/// into its successor's range - the fixed overhead [`min_scan_chunk`]
+/// sizes a chunk against. Nothing else about the pass is range-local:
+/// the rolling register is warmed over this unit's own first `bs`
+/// bytes, which is what makes the window position-independent and the
+/// split possible at all.
+///
+/// THE VIRTUAL PADDING BELONGS TO THE FILE, NOT TO A CHUNK. `total` is
+/// derived from `len`, so only the unit whose range ends at `len` ever
+/// reads a zero out of the tail; an interior unit stops at a real byte
+/// and the `real = len - offset` bound is computed against the FILE's
+/// length in both. A chunk boundary is therefore invisible to the
+/// M4-40 rule below - which it has to be, or a split would let an
+/// interior window fabricate content the way the one-byte decoy did.
 ///
 /// M4-40 (no-RAR matrix, third extreme pass): the virtual padding is
 /// what makes a PARTIAL last block findable at a candidate's own EOF -
@@ -1296,19 +1513,31 @@ fn scan_candidate(
     len: u64,
     ctx: &ScanCtx<'_>,
     pos: usize,
+    from: u64,
+    to: u64,
 ) -> Result<Vec<(usize, u64)>, RepairError> {
     let bs = ctx.bs;
     let mut mine: Vec<(usize, u64)> = Vec::new();
     let mut f = File::open(path)?;
+    if from > 0 {
+        f.seek(std::io::SeekFrom::Start(from))?;
+    }
     let mut ring = vec![0u8; bs];
     let mut rpos = 0usize; // ring slot of the window's oldest byte
     let mut reg = 0xFFFF_FFFFu32;
     let mut buf = vec![0u8; 1 << 18];
-    let mut i: u64 = 0; // stream index: file bytes, then virtual zeros
+    let mut i: u64 = from; // stream index: file bytes, then virtual zeros
+    // The stream index at which this unit's FIRST window closes, and so
+    // the point the rolling register stops being warmed and starts
+    // rolling. It is `bs` for a unit that starts at the file's head,
+    // which is what it always was.
+    let first = from + bs as u64;
     let total = len + bs as u64 - 1;
-    'stream: while i < total {
+    // ...and the point it stops, one `bs` past the last start it owns.
+    let stop = (to + bs as u64 - 1).min(total);
+    'stream: while i < stop {
         let n = if i < len {
-            let want = crate::disk::chunk_len(len - i, buf.len());
+            let want = crate::disk::chunk_len(len.min(stop) - i, buf.len());
             let got = f.read(&mut buf[..want])?;
             if got == 0 {
                 return Err(std::io::Error::new(
@@ -1319,13 +1548,13 @@ fn scan_candidate(
             }
             got
         } else {
-            let want = crate::disk::chunk_len(total - i, buf.len());
+            let want = crate::disk::chunk_len(stop - i, buf.len());
             buf[..want].fill(0);
             want
         };
         for &b in &buf[..n] {
             let old = ring[rpos];
-            reg = if i < bs as u64 {
+            reg = if i < first {
                 ctx.roll.push(reg, b)
             } else {
                 ctx.roll.roll(reg, old, b)
@@ -1336,7 +1565,7 @@ fn scan_candidate(
                 rpos = 0;
             }
             i += 1;
-            if i < bs as u64 {
+            if i < first {
                 continue;
             }
             let crc = reg ^ 0xFFFF_FFFF;

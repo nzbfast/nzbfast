@@ -25,6 +25,34 @@
 //! the batch boundary means pinning the process-wide accumulator budget
 //! and this binary's `main.rs` refuses a module that leaves a
 //! product-global behind it.
+//!
+//! # The four tests here that take [`crate::par2gen_arms::Arms`]
+//!
+//! This module pins nothing, which is exactly why it looked safe and was
+//! not. Three tests here size themselves from `ntt_range`'s shipped gates
+//! so that their create takes a TRANSFORM arm, and both the arm dispatch
+//! and the plan counter that proves it are PROCESS-GLOBAL. A neighbour in
+//! `par2gen_create_ntt` holding `pin_transform_off_for_tests(true)` for
+//! its fold arm therefore takes this module's create off the transform -
+//! the only arm the pause tests below have a park site in - and this
+//! module's create lands inside that neighbour's counter window. Measured
+//! 15 Sep 2026 in one process, both directions at once; see the
+//! `par2gen_arms` header. Reading a pin is as much of a stake in it as
+//! writing one, so a test whose fixture comes from those gates takes the
+//! serializer even though it sets nothing.
+//!
+//! The FOURTH is `a_watched_create_writes_the_same_set_as_an_unwatched_one`,
+//! and it is the one that says where the line falls for a test added later.
+//! Its fixture is nowhere near the transform's gates and it pins nothing
+//! either - but it runs TWO creates and holds them to the same bytes, and
+//! the accumulator budget a neighbour pins while one of them runs decides
+//! where that create's batch boundary falls. Lifted between the two, the
+//! sets differ and the test reads it as a control-vs-no-control difference,
+//! which is the one thing it exists to deny. It went red that way in three
+//! of the five measured runs. So the rule is about the ASSERTION, not the
+//! fixture size: a test that holds a create to exact bytes, to a volume
+//! split, or to an arm takes the serializer; a test that only asks whether
+//! a cancel cleaned up after itself does not.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +63,8 @@ use nzbkit::par2gen::{
     CreatePlan, Member, create_into_exact, create_into_exact_controlled, ntt_range,
 };
 use nzbkit::par2repair::{PauseGate, ProgressSink};
+
+use crate::par2gen_arms::Arms;
 
 /// A payload with no repeating period a fold could accidentally cancel
 /// against.
@@ -314,7 +344,10 @@ fn a_cancelled_extend_keeps_the_volumes_it_was_extending() {
 #[test]
 fn a_watched_create_writes_the_same_set_as_an_unwatched_one() {
     // The control decides nothing about the bytes, and this is the
-    // claim `create_into_exact_controlled`'s doc makes.
+    // claim `create_into_exact_controlled`'s doc makes. Both creates
+    // have to see ONE accumulator budget for that comparison to be
+    // about the control at all: see the module header.
+    let _arms = Arms::take();
     let t = Tmp::new("parity");
     let a = payload(600_000, 23);
     let b = payload(90_001, 29);
@@ -458,7 +491,10 @@ impl ProgressSink for PauseOn {
 /// times that. A loaded box slows both halves together.
 #[test]
 fn a_pause_raised_inside_the_transform_parks_the_create() {
-    let (slices, rows) = ntt_range::floor_shape_for_tests();
+    // The arm is the subject, and the arm is process-global: see the
+    // module header.
+    let _arms = Arms::take();
+    let (slices, rows) = ntt_range::floor_shape_for_tests(NTT_BS as usize);
 
     // The control arm: the same create, unwatched, timed - and kept, so
     // the resumed create below can be held to its bytes.
@@ -552,7 +588,10 @@ fn a_pause_raised_inside_the_transform_parks_the_create() {
 /// their mind must not have to resume first.
 #[test]
 fn a_cancel_reaches_a_create_parked_in_its_transform() {
-    let (slices, rows) = ntt_range::floor_shape_for_tests();
+    // The arm is the subject, and the arm is process-global: see the
+    // module header.
+    let _arms = Arms::take();
+    let (slices, rows) = ntt_range::floor_shape_for_tests(NTT_BS as usize);
     let t = Tmp::new("pause-cancel");
     let members = ntt_fixture(&t, slices);
     let gate = PauseGate::new();
@@ -644,6 +683,9 @@ fn a_cancel_reaches_a_create_parked_in_its_transform() {
 #[test]
 #[ignore = "builds a 1.2 GiB fixture: the fused arm's own size gate, run by hand"]
 fn a_fused_create_reports_no_verify_progress_and_that_is_not_a_meter_bug() {
+    // Fusion is displaced by the transform, so which arm this create takes
+    // is decided by the same process-global pins: see the module header.
+    let _arms = Arms::take();
     let t = Tmp::new("fused");
     // 1.2 GiB clears FUSED_SOURCE_MIN_BYTES; ONE member is the unix
     // fusion shape; a 1 MiB block clears FUSED_SOURCE_MIN_BLOCK_BYTES;

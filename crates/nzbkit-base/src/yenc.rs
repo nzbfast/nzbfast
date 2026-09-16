@@ -158,6 +158,18 @@ pub fn decode_checked(body: &[u8]) -> Result<(Decoded, bool), YencError> {
 /// tests use (the env OnceLock cannot be toggled per test; see the
 /// test-global rules). Production callers go through [`decode_checked`].
 pub(crate) fn decode_checked_opts(body: &[u8], enc_ok: bool) -> Result<(Decoded, bool), YencError> {
+    // M4-78: some Windows-saved and indexer-rewritten first articles carry a
+    // UTF-8 BOM glued to the header, and `=ybegin ` then does not start the
+    // line. Stripped at the START OF THE BODY only: that is where an editor
+    // or an indexer writes one, and a BOM anywhere else is payload bytes.
+    //
+    // Here, at the entry point, and NOT in `decode_framed`: the SIMD
+    // decoder's bare-LF fallback re-enters this oracle with a body it has
+    // already stripped, and a strip inside the framed pass took a SECOND
+    // BOM off it - a body opening with two turned its first line into a
+    // header on that path alone (fuzz run 34931238885). Reframing a CR body
+    // below cannot move a leading BOM, so one strip serves both passes.
+    let body = strip_bom(body);
     match decode_framed(body, enc_ok) {
         // M4-76: a CR-FRAMED article. Both decoders split on `\n` and strip a
         // trailing `\r`, so CRLF and bare LF both work and bare CR does not -
@@ -184,14 +196,11 @@ pub(crate) fn decode_checked_opts(body: &[u8], enc_ok: bool) -> Result<(Decoded,
     }
 }
 
-/// [`decode_checked`] over a body whose line framing is already LF or CRLF.
-fn decode_framed(body: &[u8], enc_ok: bool) -> Result<(Decoded, bool), YencError> {
-    // M4-78: some Windows-saved and indexer-rewritten first articles carry a
-    // UTF-8 BOM glued to the header, and `=ybegin ` then does not start the
-    // line. Stripped at the START OF THE BODY only: that is where an editor
-    // or an indexer writes one, and a BOM anywhere else is payload bytes.
-    let body = strip_bom(body);
-
+/// [`decode_checked`] over a body whose line framing is already LF or CRLF
+/// and whose leading BOM, if any, [`decode_checked_opts`] has already
+/// stripped. The SIMD decoder's bare-LF fallback enters here, not through
+/// [`decode_checked_opts`], for exactly that reason.
+pub(crate) fn decode_framed(body: &[u8], enc_ok: bool) -> Result<(Decoded, bool), YencError> {
     let mut name = String::new();
     let mut file_size: u64 = 0;
     let mut part: Option<u32> = None;
@@ -1593,6 +1602,53 @@ mod tests {
         assert_eq!(
             crate::yenc_simd::decode_into(&junk, &mut buf),
             Err(YencError::MissingBegin)
+        );
+    }
+
+    /// M4-78's strip happens ONCE per decode, on both decoders. The SIMD
+    /// path used to strip its BOM, reach the END_NONE fallback a bare-LF
+    /// trailer forces, and hand the already-stripped body to the oracle's
+    /// public entry point, which stripped a SECOND one. A body opening
+    /// with two BOMs then had its first line read as a header on the
+    /// fallback and nowhere else, and the real header after it refused
+    /// as `DuplicateBegin`. Found by the scheduled fuzz run 34931238885;
+    /// the three repros are `fuzz/seeds/yenc_decode/crash-cdea1c54...`,
+    /// `crash-4fffa176...` and `crash-09cbedbc...`.
+    #[test]
+    fn a_second_leading_bom_is_payload_on_the_bare_lf_fallback_too() {
+        let data = test_data(2_048);
+        let article = encode("bom.bin", data.len() as u64, None, 1, &data);
+        // Bare LF throughout, so rapidyenc never sees a `\r\n=y` and the
+        // SIMD path has to take the fallback this test is about.
+        let mut lf = Vec::with_capacity(article.len());
+        for (i, &b) in article.iter().enumerate() {
+            if !(b == b'\r' && article.get(i + 1) == Some(&b'\n')) {
+                lf.push(b);
+            }
+        }
+        assert!(
+            !lf.windows(2).any(|w| w == b"\r\n"),
+            "fixture must be bare LF"
+        );
+        let decoy = b"=ybegin line=128 size=9 name=decoy.bin\n";
+
+        let mut two = vec![0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf];
+        two.extend_from_slice(decoy);
+        two.extend_from_slice(&lf);
+        assert_both_decode(&two, &data, "two BOMs, a BOM-glued decoy, bare LF");
+        assert_eq!(decode(&two).unwrap().name, "bom.bin");
+
+        // Control: ONE BOM glued to the decoy makes the decoy the real
+        // header, and the article's own header is then the duplicate - on
+        // both decoders, the verdict this refusal always had.
+        let mut one = vec![0xef, 0xbb, 0xbf];
+        one.extend_from_slice(decoy);
+        one.extend_from_slice(&lf);
+        assert_eq!(decode(&one), Err(YencError::DuplicateBegin));
+        let mut buf = Vec::new();
+        assert_eq!(
+            crate::yenc_simd::decode_into(&one, &mut buf),
+            Err(YencError::DuplicateBegin)
         );
     }
 

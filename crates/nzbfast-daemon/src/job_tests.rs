@@ -1038,3 +1038,48 @@ fn clear_attempt_verdicts_drops_whyslow_and_postproc_secs() {
     // Not the helper's to clear: retry and demote own this one.
     assert_eq!(j.fail_message, "msg");
 }
+
+/// The locked-archive probe must not fire on a job the slow-job watchdog
+/// DEMOTED. That abort records the same shape an ordinary local failure
+/// does - Failed, `FailKind::Local`, no hint, not disk-full - over a
+/// partial download, and `park_gen` then requeues the row; but the
+/// probe's `password_required = true` is only ever cleared by an unlock
+/// WINNER, so the flag rode onto a queued row, the drawer answered
+/// "password" for a job that has none, and `auto_retry_eligible` refused
+/// the job's next real failure instead of retrying it.
+///
+/// NEGATIVE CONTROL, run: drop `&& !demoted` from
+/// `locked_failure_probe` and the first case fails by name.
+#[test]
+fn the_locked_probe_declines_a_demoted_job() {
+    // What the watchdog's abort actually records (get/workers.rs's
+    // `bail!("stopped by user")` through `record_failure`).
+    assert!(
+        !locked_failure_probe(true, true, FailKind::Local, "stopped by user"),
+        "a demoted job is going back on the queue, not being filed - it must not \
+         be probed, and must not be left carrying password_required"
+    );
+    // The same sentence on a job that was NOT demoted is a real local
+    // failure and still probes, so the gate is the demote flag and not
+    // the message.
+    assert!(locked_failure_probe(
+        true,
+        false,
+        FailKind::Local,
+        "stopped by user"
+    ));
+    // And the arms that were already right stay right.
+    assert!(locked_failure_probe(true, false, FailKind::Local, ""));
+    assert!(
+        !locked_failure_probe(false, false, FailKind::Local, ""),
+        "a job that did not fail has nothing to probe"
+    );
+    assert!(
+        !locked_failure_probe(true, false, FailKind::Transport, ""),
+        "a transport failure is not a locked archive"
+    );
+    assert!(
+        !locked_failure_probe(true, false, FailKind::Local, "no space left on device"),
+        "a full disk already names its own remedy"
+    );
+}

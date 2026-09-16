@@ -165,11 +165,69 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 #     under the pipeline's per-article alloc/free churn plus the
 #     extractor's hold buffers, mimalloc beats both musl malloc (slow,
 #     lock-heavy) and glibc malloc (arena fragmentation) on throughput
-#     and RSS. The shipped Linux binaries are glibc/-gnu today, so this
-#     lands on the real NAS artifact, not a hypothetical musl one.
-# The idle-trim in serve.rs calls mi_collect(true) under the same cfg;
-# nzbkit::mem::trim() (glibc malloc_trim) stays as a harmless no-op once
-# mimalloc owns the heap.
+#     and RSS. THE SHIPPED LINUX BINARIES ARE STATIC MUSL, so this rides
+#     on top of musl's allocator, not glibc's: the human downloads
+#     (`nzbfast-X.Y.Z-linux-{x64,arm64,armv7}.tar.gz`, built by
+#     packaging/build-linux-tarballs.sh, which upload-release-assets.sh
+#     REFUSES unless static) and the ghcr.io images, which COPY those
+#     same bits. The `-gnu` triple-named asset is the CI provenance
+#     build only. (This comment said "glibc/-gnu today" until 15 Sep
+#     2026; the tarballs went musl on 15 Aug 2026 and nothing re-read
+#     this.) The speed half is measured and holds - on parfast, the same
+#     engine, a static musl build costs 1.05-1.47x a glibc build's
+#     cycles and a mimalloc global allocator recovers 100%+ of that in 7
+#     of 9 cells. The MEMORY half is the caution: musl + mimalloc is
+#     also the pairing that took 4 OOM kills in 54 parfast legs inside
+#     MemoryMax=512M, where plain musl took 0 in 18, and mimalloc's
+#     1,000 ms purge delay is why
+#     (research/PARFAST-512MB-M192-KILL-ATTRIBUTION-2026-09-15.md, the
+#     musl-allocator and mimalloc-plateau addenda). THAT SHAPE HAS NOW
+#     BEEN MEASURED ON THIS BINARY, 16 Sep 2026: the shipped static musl
+#     nzbfast repairing inside MemoryMax=512M was OOM-killed in 6 of 18
+#     jobs, against 7 of 18 for a dynamic glibc build of the same commit
+#     - so the libc costs nothing here (both already run mimalloc, so
+#     libc malloc serves almost nothing on this path) and the parfast
+#     musl-vs-mimalloc result does NOT transfer to this crate. The
+#     caution above therefore stands as a measured kill rate on the
+#     artifact users download, not as an inference; what carries it is
+#     the PURGE DELAY - 0 kills in 27 jobs at MIMALLOC_PURGE_DELAY 0 or
+#     10 ms against 5 in 12 at the 1,000 ms default, because the
+#     repair's anon PEAK falls ~120-130 MiB (same note, the
+#     purge-delay addendum). Retention correlates with the kills - 0 in
+#     16 fresh-daemon jobs against 13 in 20 on one still holding
+#     91-295 MiB - but it is NOT the lever, and that is measured
+#     rather than argued: collecting the heap at both edges of a repair
+#     drove the carried term from a 452 MiB tail down to a 123 MiB
+#     maximum and moved the kill rate 6-in-18 to 4-in-18, p = 0.71
+#     (same note, the repair-boundary addendum; the code is refused and
+#     does not land). Do not read this line as "mimalloc is the bug",
+#     and no longer read it as "collect at the END of a repair" - that
+#     was tried and refused. THE PURGE DELAY IS THE ONE THAT PAID and
+#     it SHIPPED on 16 Sep 2026 (a027d8633, bounded_heap_purge_delay in
+#     src/main.rs): mi_option_set_default(purge_delay, 10) when
+#     cgroup_mem_limit() answers a limit below physical RAM, priced at
+#     paired CPU 1.000-1.010 against an A/A floor of 0.992-1.004 and no
+#     wall cost outside the A/A, buying 120-150 MiB of peak RSS.
+#     EVERY FIGURE ABOVE WAS x86-64 WHEN IT SHIPPED, and the users the
+#     caution protects run NAS and container arm64. That is no longer an
+#     open inference: on 16 Sep 2026 the same round ran on aarch64 (the
+#     SHIPPED static musl arm64 artifact, in a cgroup v2 512 MiB scope on
+#     an arm64 Linux guest) and reproduced it - the default delay was
+#     OOM-killed 4 times in 12 jobs and the gate 0 times in 9, 8 of those
+#     9 on a carrying daemon, with the anon peak down 50-105 MiB by cell
+#     median and every kill CONSTRAINT_MEMCG at 0.0 MiB dirty. The gate
+#     was proved to FIRE there rather than assumed: cgroup_mem_limit()
+#     reads the limit, the use_numa_nodes-derived index reads back 1,000
+#     and writes 10, and an unbounded run is untouched (same note, the
+#     arm64 addendum, which also records that MIMALLOC_VERBOSE CANNOT
+#     check this gate - it prints at process init, before main() runs
+#     it). Still x86-64 and aarch64 only, and the aarch64 part is an
+#     Apple core rather than the Cortex-A53/A55 in an actual NAS; armv7
+#     is unmeasured and this fleet cannot execute it.
+# The idle-trim in nzbfast-tasks (spawn_memory_trim; it was serve.rs
+# until the 2 Sep 2026 crate split) calls mi_collect(true) under the
+# same cfg; nzbkit::mem::trim() (glibc malloc_trim) stays as a harmless
+# no-op once mimalloc owns the heap.
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }

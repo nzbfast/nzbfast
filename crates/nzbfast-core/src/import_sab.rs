@@ -269,6 +269,26 @@ pub fn import(ini_path: &Path, out_path: &Path, force: bool) -> Result<()> {
         })
         .collect();
 
+    // Never write JSON at a `.ini` path, and `--force` does NOT lift
+    // this one. `Config::load` picks its parser from exactly this
+    // predicate, so a JSON body here would be fed to the SABnzbd ini
+    // parser and come back NoServers - and the file overwritten is the
+    // user's live sabnzbd.ini, which is very often the same file this
+    // import is READING. Breaking both installs at once is not something
+    // a flag named "overwrite the destination" asks for.
+    //
+    // `setup::write_servers` has carried this guard since it was written;
+    // this sibling writer did not, and `--force` reached it.
+    if out_path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("ini"))
+    {
+        anyhow::bail!(
+            "{} is a SABnzbd ini, which nzbfast reads but cannot write - \
+             point --out at a JSON config such as config.local.json",
+            out_path.display()
+        );
+    }
     if out_path.exists() && !force {
         anyhow::bail!(
             "{} already exists - pass --force to overwrite",
@@ -541,6 +561,30 @@ enable = 1
         // Refuses to clobber without --force.
         assert!(import(&ini, &out, false).is_err());
         assert!(import(&ini, &out, true).is_ok());
+
+        // ...and refuses an `.ini` TARGET whatever --force says. That
+        // path is the SABnzbd config nzbfast reads and cannot write, and
+        // it is very often the same file this import is reading: a JSON
+        // body there comes back NoServers from the ini parser, so
+        // --force used to break both installs at once. `write_servers`
+        // has carried this guard since it was written; this writer did
+        // not.
+        //
+        // NEGATIVE CONTROL, run: drop the extension guard and the second
+        // assertion fails, having overwritten the ini.
+        let sab = dir.join("live-sabnzbd.ini");
+        std::fs::write(&sab, INI).unwrap();
+        for force in [false, true] {
+            assert!(
+                import(&ini, &sab, force).is_err(),
+                "an .ini target must be refused with force={force}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&sab).unwrap(),
+            INI,
+            "the SABnzbd ini must be byte-for-byte untouched"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

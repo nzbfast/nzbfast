@@ -76,11 +76,22 @@ pub fn path_writable(p: &std::path::Path) -> bool {
             Err(_) => false,
         }
     }
+    // Windows has no `access(2)`, and the obvious stand-in is WRONG
+    // here: `Permissions::readonly()` reads FILE_ATTRIBUTE_READONLY,
+    // which Windows sets on a CUSTOMISED or special folder and does not
+    // enforce for directories at all. Downloads, Documents, Desktop and
+    // Pictures all carry it as a matter of course, so the picker
+    // reported the most likely download folders as read-only while
+    // writing to them worked perfectly.
+    //
+    // So ask the same question the other arm asks - can we write? - the
+    // only way this platform answers it, by writing. `write_probe`
+    // creates and removes one marker directory, which is what
+    // `move_tree` does first anyway; it is the probe the SMB incident
+    // below already established as the honest one.
     #[cfg(not(unix))]
     {
-        p.metadata()
-            .map(|m| !m.permissions().readonly())
-            .unwrap_or(false)
+        write_probe(p).is_ok()
     }
 }
 

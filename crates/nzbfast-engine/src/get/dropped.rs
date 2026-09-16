@@ -31,11 +31,21 @@ use nzbkit::disk::{join_out_name, sanitize_out_name};
 use std::path::Path;
 use tracing::{info, warn};
 
-/// Re-fetch every demoted volume whose file carries dropped ranges.
-/// Never fails the job itself: a volume the fetch could not complete
-/// keeps its holes, and the read-back or unpack that follows reports
-/// them exactly as it reports any damaged volume. Returns the number
-/// of volumes re-fetched in full.
+/// Re-fetch every demoted volume whose file carries dropped ranges,
+/// returning the number of volumes re-fetched in full.
+///
+/// An INCOMPLETE fetch never fails the job: a volume that comes back
+/// short keeps its holes (see the `short` arm below, which warns and
+/// moves on), and the read-back or unpack that follows reports them
+/// exactly as it reports any damaged volume.
+///
+/// An ERROR is a different thing and DOES fail the job - this doc said
+/// "never fails the job itself" flatly until 16 Sep 2026. The fetch
+/// itself and the install `rename` both propagate with `?`, and all
+/// three call sites `.await?` this, so a wedged side fetch or a failed
+/// rename ends the job rather than leaving the holes to the disk pass.
+/// Deliberate for the rename, which means the volume is neither the old
+/// copy nor the new one; the fetch arm is simply what `?` does.
 pub(super) async fn refetch_dropped_volumes(
     extractor: &Arc<nzbkit::extract::Extractor>,
     slot_file: &[usize],

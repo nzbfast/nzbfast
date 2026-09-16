@@ -169,6 +169,26 @@ Note either below.
   path. The recipe in `../README.md` used to copy all six, which is how
   a seeding step can look done and be two-thirds inert.
 
+- `yenc_decode/crash-cdea1c5453632bd80c44ec8414faa403bae0aa9b` (103 B),
+  `crash-4fffa176aed78fe8ab96475c48ad00e5819dace4` (224 B) and
+  `crash-09cbedbc13eb6d3d5ca064949be92468edc4a4f8` (180 B), 15 Sep 2026 -
+  three REPROS of one wrong answer, no memory fault: `simd=Err(DuplicateBegin)`
+  against `scalar=Ok(..)`. Found by the scheduled run 34931238885 on
+  `00bdc3a3` under the unpinned, the `generic` decode and the `vpclmul`
+  CRC legs, and already red on the 14 Sep scheduled run - the kernel
+  does not matter, because the defect is in the Rust framing around
+  rapidyenc, which had not changed since 3 Sep. All three bodies open
+  with TWO UTF-8 BOMs, then `=ybegin`, a second `=ybegin` line and a
+  bare-LF `=yend`. The SIMD path stripped one BOM (M4-78), took the
+  END_NONE fallback a bare-LF trailer forces, and handed the
+  already-stripped body back to the oracle's public entry point - which
+  stripped the SECOND BOM, turned line one into a header and refused
+  line two as a duplicate. The oracle, called once on the raw body,
+  strips once and reads line one as payload. The fix strips at the one
+  entry point of each decoder, so the fallback reaches the oracle's
+  framed pass with the bytes it already holds; the ordinary-test twin is
+  `yenc::tests::a_second_leading_bom_is_payload_on_the_bare_lf_fallback_too`.
+
 - `yenc_decode/crash-d94c80b4149bae0e461b8c0d86d2f5757efdf9cf` (127 B,
   3 Sep 2026) - a REPRO, and the x86 TWIN of the entry below: same class
   (a width-aligned SIMD over-read that cannot fault and cannot change an

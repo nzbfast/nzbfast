@@ -114,6 +114,14 @@ rars = { path = "../../vendor/rars" }
 # declining. zstd/brotli/lz4 are the remaining codecs 7z permits; each
 # would add a real dependency, so they stay off until one is seen.
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd"] }
+# The validated digest cache (`digest_cache`, the `digest-cache` feature
+# below): BLAKE3 is the tree hash that re-proves a large file's content on
+# every core in about a second, which is what lets a record's MD5 stand in
+# for the one-core MD5 chain. `rayon` for `update_rayon`, on a pool the
+# cache builds for itself (rayon-core, already in the lockfile under the
+# rars fork's `parallel` feature), never the global one.
+blake3 = { version = "1.8", optional = true, features = ["rayon"] }
+rayon-core = { version = "1.12", optional = true }
 
 # PAR2 hashes every downloaded byte through MD5; the asm backend is
 # ~25% faster than the portable soft path - a slow-x86 win (docker
@@ -219,13 +227,23 @@ ktls = ["dep:ktls"]
 # `required-features`. The facade forwards it, so CONTRIBUTING.md's
 # `--features nzbkit/heavy-tests` reaches this one too.
 heavy-tests = []
+# The validated digest cache (`digest_cache`): parfast's `--digest-cache`
+# and the parfast app's setting, never the daemon. Off by default so the
+# daemon's own graph and the phone builds carry no BLAKE3; without it the
+# module is an inert stub the create and verify paths compile against.
+# `test-support` turns it on, because a default-off feature otherwise runs
+# in no test suite at all - the one-process hand line passes exactly
+# `--features test-support` (memory topic
+# nzbfast-default-off-feature-is-untested).
+digest-cache = ["dep:blake3", "dep:rayon-core"]
 # `renameclaim`, the rename-race harness, and nothing else. Its pins are
 # in `par2repair`'s tests HERE and `journal`'s in the facade - two crates
 # since the base cut, where a `cfg(test)` item is invisible whatever its
 # visibility. The facade turns it on through a DEV dependency, so
 # `cargo build -p nzbkit` never sees it. Same arrangement
 # nzbfast-unpack's own `test-support` uses, and for the same reason.
-test-support = []
+# (And the digest cache, above, so its tests are in that one-process run.)
+test-support = ["digest-cache"]
 
 [dev-dependencies]
 # nzbkit's own, minus what only the facade's modules and its examples

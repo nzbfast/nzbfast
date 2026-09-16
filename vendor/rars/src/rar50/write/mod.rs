@@ -24,6 +24,7 @@ use filter_policy::{
     sampled_incompressible, should_store_compressed_payload, validate_compression_level,
     working_memory_for,
 };
+use reference::SERVICE_HOST_OS;
 use volume::{
     write_compressed_volume_set_impl, write_encrypted_compressed_volume_set_impl,
     write_encrypted_stored_volume_set_impl, write_encrypted_stored_volumes_impl,
@@ -123,6 +124,15 @@ pub struct WriterOptions {
     /// it does not reach.
     /// (nzbfast-local change, 7 Sep 2026; see VENDORING.md.)
     pub tokenizer_horizon_choice: bool,
+    /// Whether level 5 ALSO encodes each compressed member at levels 4
+    /// down to 1 and keeps whichever came out smallest. `true` by default,
+    /// which is what level 5 has always meant in this writer. Measured
+    /// 14 Sep 2026 on rarbench's 256 MiB text at a 32 MiB dictionary it
+    /// bought 66 bytes (625,354 against 625,420) for 151 s against 22 s,
+    /// so `rarfast -m5` turns it off. Off, level 5 is one encode at its own
+    /// settings, and the streamed writers accept it.
+    /// (nzbfast-local change, 14 Sep 2026; see VENDORING.md.)
+    pub level_five_fallbacks: bool,
 }
 
 /// The checksum a file header carries for its payload.
@@ -165,6 +175,7 @@ impl WriterOptions {
             adaptive_entropy_blocks: true,
             write_policy: None,
             tokenizer_horizon_choice: false,
+            level_five_fallbacks: true,
         }
     }
 
@@ -172,6 +183,13 @@ impl WriterOptions {
     /// [`HashRecord`].
     pub const fn with_hash_record(mut self, hash_record: HashRecord) -> Self {
         self.hash_record = hash_record;
+        self
+    }
+
+    /// Whether level 5 also tries every lower level; see
+    /// [`Self::level_five_fallbacks`].
+    pub const fn with_level_five_fallbacks(mut self, enabled: bool) -> Self {
+        self.level_five_fallbacks = enabled;
         self
     }
 
@@ -238,6 +256,7 @@ impl Default for WriterOptions {
             adaptive_entropy_blocks: true,
             write_policy: None,
             tokenizer_horizon_choice: false,
+            level_five_fallbacks: true,
         }
     }
 }
@@ -729,19 +748,22 @@ impl<'a> Rar50Writer<'a> {
         let total_bytes = self.members.iter().map(Rar50WriteMember::input_size).sum();
         let total_entries = self.members.len();
         let total_work = if compressed {
+            let mut candidates = encode_option_candidates_for_level(
+                self.options.compression_level,
+                dictionary_size_for_options(self.options)?,
+                self.options.optimal_parse,
+                self.options.adaptive_entropy_blocks,
+                self.options.tokenizer_horizon_choice,
+                working_memory_for(self.options),
+            )?;
+            if !self.options.level_five_fallbacks {
+                candidates.truncate(1);
+            }
             compression_work_total(
                 &self.members,
                 self.options.features.solid,
                 self.filter_policy,
-                encode_option_candidates_for_level(
-                    self.options.compression_level,
-                    dictionary_size_for_options(self.options)?,
-                    self.options.optimal_parse,
-                    self.options.adaptive_entropy_blocks,
-                    self.options.tokenizer_horizon_choice,
-                    working_memory_for(self.options),
-                )?
-                .len() as u64,
+                candidates.len() as u64,
             )
         } else {
             total_bytes
@@ -820,7 +842,7 @@ impl<'a> Rar50Writer<'a> {
             self.options.tokenizer_horizon_choice,
             working_memory_for(self.options),
         )?;
-        let encode_option_candidates = encode_option_candidates_for_level(
+        let mut encode_option_candidates = encode_option_candidates_for_level(
             self.options.compression_level,
             dictionary_size,
             self.options.optimal_parse,
@@ -828,6 +850,9 @@ impl<'a> Rar50Writer<'a> {
             self.options.tokenizer_horizon_choice,
             working_memory_for(self.options),
         )?;
+        if !self.options.level_five_fallbacks {
+            encode_option_candidates.truncate(1);
+        }
 
         let mut resolved_members = Vec::with_capacity(self.members.len());
         match member_kind.unwrap_or(Rar50WriteMemberKind::Stored) {
@@ -992,7 +1017,7 @@ impl<'a> Rar50Writer<'a> {
                 Ok(ResolvedRar50WritePlan {
                     hash_record: self.options.hash_record,
                     main_flags: if self.options.features.solid {
-                        MHFL_SOLID
+                        ARCHIVE_IS_SOLID
                     } else {
                         0
                     },
@@ -1217,7 +1242,7 @@ impl<'a> Rar50Writer<'a> {
                 Ok(ResolvedRar50WritePlan {
                     hash_record: self.options.hash_record,
                     main_flags: if self.options.features.solid {
-                        MHFL_SOLID
+                        ARCHIVE_IS_SOLID
                     } else {
                         0
                     },
@@ -1473,7 +1498,10 @@ fn resolve_compressed_members<'a>(
     #[cfg(feature = "parallel")]
     {
         if members.len() > 1 {
-            crate::parallel::map_collect(members, resolve)
+            crate::parallel::map_collect_bounded(
+                members,
+                filter_policy::members_in_flight_for(encode_option_candidates),
+resolve)
         } else {
             members.into_iter().map(resolve).collect()
         }
@@ -1484,7 +1512,6 @@ fn resolve_compressed_members<'a>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn resolve_compressed_member<'a>(
     member: Rar50WriteMember<'a>,
@@ -1699,6 +1726,11 @@ fn encode_candidates_with_progress(
     Ok(best)
 }
 
+// Eight, and each one a separate part of the encode contract: the
+// members, the target, the method, the algorithm version, the
+// dictionary, the option candidates, the progress tracker and the hash
+// record. The unencrypted twin above already carries this allow.
+#[allow(clippy::too_many_arguments)]
 fn resolve_encrypted_compressed_members<'a>(
     members: Vec<Rar50WriteMember<'a>>,
     target: crate::ArchiveVersion,
@@ -1714,7 +1746,10 @@ fn resolve_encrypted_compressed_members<'a>(
     #[cfg(feature = "parallel")]
     {
         if members.len() > 1 {
-            crate::parallel::map_collect(members, |(index, member)| {
+            crate::parallel::map_collect_bounded(
+                members,
+                filter_policy::members_in_flight_for(encode_option_candidates),
+|(index, member)| {
                 resolve_encrypted_compressed_member(
                     member,
                     index,
@@ -1770,7 +1805,6 @@ fn resolve_encrypted_compressed_members<'a>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn resolve_encrypted_compressed_member<'a>(
     member: Rar50WriteMember<'a>,
@@ -2044,7 +2078,7 @@ fn resolved_archive_head_len(
 fn resolved_main_flags(plan: &ResolvedRar50WritePlan<'_>) -> u64 {
     plan.main_flags
         | if plan.recovery_percent.is_some() {
-            MHFL_RECOVERY
+            ARCHIVE_HAS_RECOVERY_RECORD
         } else {
             0
         }
@@ -2289,7 +2323,7 @@ fn emit_resolved_writer_plan_pass(
         append_encrypted_header_block(
             &mut out,
             &header_keys.keys,
-            HEAD_END,
+            BLOCK_TYPE_END_OF_ARCHIVE,
             0,
             None,
             &end_header_specific(0),
@@ -2331,8 +2365,12 @@ fn write_main_header(
     }
     write_block(
         out,
-        HEAD_MAIN,
-        if extra.is_empty() { 0 } else { HFL_EXTRA },
+        BLOCK_TYPE_MAIN,
+        if extra.is_empty() {
+            0
+        } else {
+            BLOCK_HAS_EXTRA_AREA
+        },
         None,
         &specific,
         extra,
@@ -2353,8 +2391,12 @@ fn encrypted_main_header_block(
     }
     encrypted_header_block(
         keys,
-        HEAD_MAIN,
-        if extra.is_empty() { 0 } else { HFL_EXTRA },
+        BLOCK_TYPE_MAIN,
+        if extra.is_empty() {
+            0
+        } else {
+            BLOCK_HAS_EXTRA_AREA
+        },
         None,
         &specific,
         extra,
@@ -2559,10 +2601,7 @@ struct HeaderEncryptionKeys {
 
 fn header_encryption_keys(password: &[u8]) -> Result<HeaderEncryptionKeys> {
     let mut salt = [0u8; 16];
-    crate::write_entropy::fill(
-        &mut salt,
-        "RAR 5 writer could not generate encryption salt",
-    )?;
+    crate::write_entropy::fill(&mut salt, "RAR 5 writer could not generate encryption salt")?;
     let keys = Rar50Keys::derive(password, salt, 0).map_err(super::map_rar50_crypto_error)?;
     Ok(HeaderEncryptionKeys { keys, salt })
 }
@@ -2588,7 +2627,7 @@ fn write_head_crypt(out: &mut Vec<u8>, header_keys: &HeaderEncryptionKeys) -> Re
     specific.push(0);
     specific.extend_from_slice(&header_keys.salt);
     specific.extend_from_slice(&header_keys.keys.password_check_record());
-    write_block(out, HEAD_CRYPT, 0, None, &specific, &[], &[])
+    write_block(out, BLOCK_TYPE_ENCRYPTION, 0, None, &specific, &[], &[])
 }
 
 fn archive_metadata_record(metadata: ArchiveMetadataEntry<'_>) -> Result<Vec<u8>> {
@@ -2604,10 +2643,10 @@ fn archive_metadata_record(metadata: ArchiveMetadataEntry<'_>) -> Result<Vec<u8>
     }
     let mut flags = 0;
     if metadata.name.is_some() {
-        flags |= MHEXTRA_ARCHIVE_METADATA_NAME;
+        flags |= METADATA_HAS_ARCHIVE_NAME;
     }
     if metadata.creation_time.is_some() {
-        flags |= MHEXTRA_ARCHIVE_METADATA_TIME;
+        flags |= METADATA_HAS_CREATION_TIME;
     }
 
     let mut record = Vec::new();
@@ -2624,7 +2663,7 @@ fn archive_metadata_record(metadata: ArchiveMetadataEntry<'_>) -> Result<Vec<u8>
     }
 
     let mut extra = Vec::new();
-    write_extra_record(&mut extra, MHEXTRA_ARCHIVE_METADATA, &record);
+    write_extra_record(&mut extra, MAIN_EXTRA_METADATA, &record);
     Ok(extra)
 }
 
@@ -2635,10 +2674,10 @@ fn write_locator_record(
 ) {
     let mut flags = 0;
     if quick_open_offset.is_some() {
-        flags |= MHEXTRA_LOCATOR_QUICK_OPEN;
+        flags |= LOCATOR_HAS_QUICK_OPEN_OFFSET;
     }
     if recovery_record_offset.is_some() {
-        flags |= MHEXTRA_LOCATOR_RECOVERY;
+        flags |= LOCATOR_HAS_RECOVERY_RECORD_OFFSET;
     }
 
     let mut record = Vec::new();
@@ -2649,7 +2688,7 @@ fn write_locator_record(
     if let Some(recovery_record_offset) = recovery_record_offset {
         write_vint(&mut record, recovery_record_offset);
     }
-    write_extra_record(out, MHEXTRA_LOCATOR, &record);
+    write_extra_record(out, MAIN_EXTRA_LOCATOR, &record);
 }
 
 fn write_stored_entry(
@@ -2713,7 +2752,7 @@ fn write_compressed_entry_payload(
         dictionary_size,
         solid_continuation,
     )?;
-    let specific = file_specific(
+    let (specific, time_extra) = file_specific(
         entry.name,
         entry.data.len() as u64,
         Some(digests.crc32),
@@ -2722,14 +2761,15 @@ fn write_compressed_entry_payload(
         compression_info,
         entry.host_os,
     )?;
+    extra.extend_from_slice(&time_extra);
     let flags = if extra.is_empty() {
-        HFL_DATA
+        BLOCK_HAS_DATA_AREA
     } else {
-        HFL_EXTRA | HFL_DATA
+        BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA
     };
     write_block(
         out,
-        HEAD_FILE,
+        BLOCK_TYPE_FILE,
         flags,
         Some(packed.len() as u64),
         &specific,
@@ -2783,7 +2823,7 @@ fn write_compressed_entry_fragment(
         dictionary_size,
         solid_continuation,
     )?;
-    let specific = file_specific(
+    let (specific, time_extra) = file_specific(
         entry.name,
         entry.data.len() as u64,
         (!split_after).then(|| digests.map_or_else(|| crc32(entry.data), |digests| digests.crc32)),
@@ -2792,20 +2832,21 @@ fn write_compressed_entry_fragment(
         compression_info,
         entry.host_os,
     )?;
-    let mut block_flags = HFL_DATA;
+    extra.extend_from_slice(&time_extra);
+    let mut block_flags = BLOCK_HAS_DATA_AREA;
     if split_before {
-        block_flags |= HFL_SPLIT_BEFORE;
+        block_flags |= BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME;
     }
     if split_after {
-        block_flags |= HFL_SPLIT_AFTER;
+        block_flags |= BLOCK_CONTINUES_IN_NEXT_VOLUME;
     }
     if !extra.is_empty() {
-        block_flags |= HFL_EXTRA;
+        block_flags |= BLOCK_HAS_EXTRA_AREA;
     }
 
     write_block(
         out,
-        HEAD_FILE,
+        BLOCK_TYPE_FILE,
         block_flags,
         Some(data.len() as u64),
         &specific,
@@ -2825,7 +2866,7 @@ fn write_stored_entry_with_cache(
     if hash_record == HashRecord::Blake2sp {
         write_hash_record(&mut extra, entry.data);
     }
-    let specific = stored_file_specific(
+    let (specific, time_extra) = stored_file_specific(
         entry.name,
         entry.data.len() as u64,
         Some(crc32(entry.data)),
@@ -2833,15 +2874,16 @@ fn write_stored_entry_with_cache(
         entry.mtime,
         entry.host_os,
     )?;
+    extra.extend_from_slice(&time_extra);
     write_block_with_cache(
         out,
         cached_headers,
         BlockParts {
-            header_type: HEAD_FILE,
+            header_type: BLOCK_TYPE_FILE,
             flags: if extra.is_empty() {
-                HFL_DATA
+                BLOCK_HAS_DATA_AREA
             } else {
-                HFL_EXTRA | HFL_DATA
+                BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA
             },
             data_size: Some(entry.data.len() as u64),
             type_specific: &specific,
@@ -3059,10 +3101,7 @@ fn encrypted_payload(
 fn encryption_keys(password: &[u8]) -> Result<(Rar50Keys, [u8; 16], [u8; 16])> {
     let mut salt = [0u8; 16];
     let mut iv = [0u8; 16];
-    crate::write_entropy::fill(
-        &mut salt,
-        "RAR 5 writer could not generate encryption salt",
-    )?;
+    crate::write_entropy::fill(&mut salt, "RAR 5 writer could not generate encryption salt")?;
     crate::write_entropy::fill(&mut iv, "RAR 5 writer could not generate encryption IV")?;
     let keys = Rar50Keys::derive(password, salt, 0).map_err(super::map_rar50_crypto_error)?;
     Ok((keys, salt, iv))
@@ -3114,7 +3153,7 @@ fn write_encrypted_stored_entry_fragment_with_header_keys(
         }
     }
 
-    let specific = stored_file_specific(
+    let (specific, time_extra) = stored_file_specific(
         entry.name,
         entry.data.len() as u64,
         (!split_after).then_some(encrypted.crc32_mac),
@@ -3122,12 +3161,13 @@ fn write_encrypted_stored_entry_fragment_with_header_keys(
         entry.mtime,
         entry.host_os,
     )?;
-    let mut block_flags = HFL_EXTRA | HFL_DATA;
+    extra.extend_from_slice(&time_extra);
+    let mut block_flags = BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA;
     if split_before {
-        block_flags |= HFL_SPLIT_BEFORE;
+        block_flags |= BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME;
     }
     if split_after {
-        block_flags |= HFL_SPLIT_AFTER;
+        block_flags |= BLOCK_CONTINUES_IN_NEXT_VOLUME;
     }
 
     let data_size = Some(data.len() as u64);
@@ -3135,7 +3175,7 @@ fn write_encrypted_stored_entry_fragment_with_header_keys(
         append_encrypted_header_block_with(
             out,
             header_keys,
-            HEAD_FILE,
+            BLOCK_TYPE_FILE,
             block_flags,
             data_size,
             &specific,
@@ -3145,7 +3185,7 @@ fn write_encrypted_stored_entry_fragment_with_header_keys(
     } else {
         write_block_with(
             out,
-            HEAD_FILE,
+            BLOCK_TYPE_FILE,
             block_flags,
             data_size,
             &specific,
@@ -3240,7 +3280,7 @@ fn write_encrypted_compressed_entry_fragment_with_header_keys(
         dictionary_size,
         solid_continuation,
     )?;
-    let specific = file_specific(
+    let (specific, time_extra) = file_specific(
         entry.name,
         entry.data.len() as u64,
         (!split_after).then_some(encrypted.crc32_mac),
@@ -3249,12 +3289,13 @@ fn write_encrypted_compressed_entry_fragment_with_header_keys(
         compression_info,
         entry.host_os,
     )?;
-    let mut block_flags = HFL_EXTRA | HFL_DATA;
+    extra.extend_from_slice(&time_extra);
+    let mut block_flags = BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA;
     if split_before {
-        block_flags |= HFL_SPLIT_BEFORE;
+        block_flags |= BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME;
     }
     if split_after {
-        block_flags |= HFL_SPLIT_AFTER;
+        block_flags |= BLOCK_CONTINUES_IN_NEXT_VOLUME;
     }
 
     let data_size = Some(data.len() as u64);
@@ -3262,7 +3303,7 @@ fn write_encrypted_compressed_entry_fragment_with_header_keys(
         append_encrypted_header_block_with(
             out,
             header_keys,
-            HEAD_FILE,
+            BLOCK_TYPE_FILE,
             block_flags,
             data_size,
             &specific,
@@ -3273,7 +3314,7 @@ fn write_encrypted_compressed_entry_fragment_with_header_keys(
     } else {
         write_block_with(
             out,
-            HEAD_FILE,
+            BLOCK_TYPE_FILE,
             block_flags,
             data_size,
             &specific,
@@ -3329,7 +3370,7 @@ fn write_stored_entry_fragment_with_digests(
             None => write_hash_record(&mut extra, data),
         }
     }
-    let specific = stored_file_specific(
+    let (specific, time_extra) = stored_file_specific(
         entry.name,
         unpacked_size,
         data_crc32,
@@ -3337,20 +3378,21 @@ fn write_stored_entry_fragment_with_digests(
         entry.mtime,
         entry.host_os,
     )?;
-    let mut block_flags = HFL_DATA;
+    extra.extend_from_slice(&time_extra);
+    let mut block_flags = BLOCK_HAS_DATA_AREA;
     if split_before {
-        block_flags |= HFL_SPLIT_BEFORE;
+        block_flags |= BLOCK_CONTINUED_FROM_PREVIOUS_VOLUME;
     }
     if split_after {
-        block_flags |= HFL_SPLIT_AFTER;
+        block_flags |= BLOCK_CONTINUES_IN_NEXT_VOLUME;
     }
     if !extra.is_empty() {
-        block_flags |= HFL_EXTRA;
+        block_flags |= BLOCK_HAS_EXTRA_AREA;
     }
 
     write_block(
         out,
-        HEAD_FILE,
+        BLOCK_TYPE_FILE,
         block_flags,
         Some(data.len() as u64),
         &specific,
@@ -3361,13 +3403,21 @@ fn write_stored_entry_fragment_with_digests(
 
 fn write_stored_service(out: &mut Vec<u8>, name: &[u8], data: &[u8]) -> Result<()> {
     let mut extra = Vec::new();
-    write_extra_record(&mut extra, FHEXTRA_SUBDATA, &[]);
-    let specific = stored_file_specific(name, data.len() as u64, Some(crc32(data)), 0, None, 0)?;
+    write_extra_record(&mut extra, FILE_EXTRA_SERVICE_DATA, &[]);
+    let (specific, _no_time) =
+        stored_file_specific(
+            name,
+            data.len() as u64,
+            Some(crc32(data)),
+            0,
+            None,
+            SERVICE_HOST_OS,
+        )?;
 
     write_block(
         out,
-        HEAD_SERVICE,
-        HFL_EXTRA | HFL_DATA,
+        BLOCK_TYPE_SERVICE,
+        BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA,
         Some(data.len() as u64),
         &specific,
         &extra,
@@ -3423,11 +3473,19 @@ pub(super) fn write_recovery_service_record(
     extra: &[u8],
     data: &[u8],
 ) -> Result<()> {
-    let specific = stored_file_specific(b"RR", data.len() as u64, Some(crc32(data)), 0, None, 0)?;
+    let (specific, _no_time) =
+        stored_file_specific(
+            b"RR",
+            data.len() as u64,
+            Some(crc32(data)),
+            0,
+            None,
+            SERVICE_HOST_OS,
+        )?;
     write_block(
         out,
-        HEAD_SERVICE,
-        HFL_EXTRA | HFL_DATA,
+        BLOCK_TYPE_SERVICE,
+        BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA,
         Some(data.len() as u64),
         &specific,
         extra,
@@ -3440,7 +3498,7 @@ pub(super) fn recovery_service_extra(recovery_percent: u64) -> Vec<u8> {
     let mut service_data = Vec::new();
     write_vint(&mut service_data, recovery_percent);
     let mut extra = Vec::new();
-    write_extra_record(&mut extra, FHEXTRA_SUBDATA, &service_data);
+    write_extra_record(&mut extra, FILE_EXTRA_SERVICE_DATA, &service_data);
     extra
 }
 
@@ -3451,15 +3509,23 @@ fn write_stored_service_with_cache(
     data: &[u8],
 ) -> Result<()> {
     let mut extra = Vec::new();
-    write_extra_record(&mut extra, FHEXTRA_SUBDATA, &[]);
-    let specific = stored_file_specific(name, data.len() as u64, Some(crc32(data)), 0, None, 0)?;
+    write_extra_record(&mut extra, FILE_EXTRA_SERVICE_DATA, &[]);
+    let (specific, _no_time) =
+        stored_file_specific(
+            name,
+            data.len() as u64,
+            Some(crc32(data)),
+            0,
+            None,
+            SERVICE_HOST_OS,
+        )?;
 
     write_block_with_cache(
         out,
         cached_headers,
         BlockParts {
-            header_type: HEAD_SERVICE,
-            flags: HFL_EXTRA | HFL_DATA,
+            header_type: BLOCK_TYPE_SERVICE,
+            flags: BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA,
             data_size: Some(data.len() as u64),
             type_specific: &specific,
             extra: &extra,
@@ -3498,13 +3564,21 @@ fn write_header_encrypted_recovery_service(
     write_vint(&mut service_data, recovery_percent);
     let data = recovery_record_data(out, recovery_percent, progress, pass, placeholder)?;
     let mut extra = Vec::new();
-    write_extra_record(&mut extra, FHEXTRA_SUBDATA, &service_data);
-    let specific = stored_file_specific(b"RR", data.len() as u64, Some(crc32(&data)), 0, None, 0)?;
+    write_extra_record(&mut extra, FILE_EXTRA_SERVICE_DATA, &service_data);
+    let (specific, _no_time) =
+        stored_file_specific(
+            b"RR",
+            data.len() as u64,
+            Some(crc32(&data)),
+            0,
+            None,
+            SERVICE_HOST_OS,
+        )?;
     append_encrypted_header_block(
         out,
         header_keys,
-        HEAD_SERVICE,
-        HFL_EXTRA | HFL_DATA,
+        BLOCK_TYPE_SERVICE,
+        BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA,
         Some(data.len() as u64),
         &specific,
         &extra,
@@ -3525,7 +3599,7 @@ fn write_encrypted_service_with_header_keys(
     validate_nonempty_password(password)?;
     let encrypted = encrypted_stored_payload(data, password, hash_record)?;
     let mut extra = Vec::new();
-    write_extra_record(&mut extra, FHEXTRA_SUBDATA, service_data);
+    write_extra_record(&mut extra, FILE_EXTRA_SERVICE_DATA, service_data);
     write_file_encryption_record(
         &mut extra,
         encrypted.salt,
@@ -3535,13 +3609,13 @@ fn write_encrypted_service_with_header_keys(
     if let Some(mac) = encrypted.blake2sp_mac {
         write_hash_record_with_value(&mut extra, mac);
     }
-    let specific = stored_file_specific(
+    let (specific, _no_time) = stored_file_specific(
         name,
         data.len() as u64,
         Some(encrypted.crc32_mac),
         0,
         None,
-        0,
+        SERVICE_HOST_OS,
     )?;
 
     let stream_len = encrypted.stream_len();
@@ -3551,8 +3625,8 @@ fn write_encrypted_service_with_header_keys(
         append_encrypted_header_block_with(
             out,
             header_keys,
-            HEAD_SERVICE,
-            HFL_EXTRA | HFL_DATA,
+            BLOCK_TYPE_SERVICE,
+            BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA,
             data_size,
             &specific,
             &extra,
@@ -3565,8 +3639,8 @@ fn write_encrypted_service_with_header_keys(
     } else {
         write_block_with(
             out,
-            HEAD_SERVICE,
-            HFL_EXTRA | HFL_DATA,
+            BLOCK_TYPE_SERVICE,
+            BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA,
             data_size,
             &specific,
             &extra,
@@ -3586,7 +3660,7 @@ fn stored_file_specific(
     attributes: u64,
     mtime: Option<u32>,
     host_os: u64,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, Vec<u8>)> {
     file_specific(
         name,
         unpacked_size,
@@ -3598,6 +3672,33 @@ fn stored_file_specific(
     )
 }
 
+/// The host-OS byte a member written on Windows carries.
+const HOST_OS_WINDOWS: u64 = 0;
+
+/// TIME extra record flag: the modification time is present. The
+/// unix-format bit (0x01) beside it is what a Windows member leaves
+/// CLEAR, which is how eight bytes of FILETIME are told from four of
+/// Unix seconds.
+const TIME_RECORD_HAS_MTIME: u64 = 0x02;
+
+/// Unix epoch as a Windows FILETIME: 100-nanosecond ticks from
+/// 1601-01-01 to 1970-01-01.
+const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+
+/// The file-header type-specific bytes, and the TIME extra record that
+/// has to go with them.
+///
+/// The second half is empty for a Unix member, whose whole-second time
+/// fits the header's own `FILE_HAS_UNIX_MTIME` field. It is NOT empty for
+/// a WINDOWS member: that field is Unix seconds by definition, and `rar`
+/// on Windows carries the time as a Windows FILETIME in an extra record
+/// instead - measured against rar 7.23 on an x86-64 Windows 11 box, 16 Sep 2026
+/// (research/RARFAST-WINDOWS-CREATED-BYTES-2026-09-16.md).
+///
+/// It is returned rather than written, and the return type is a PAIR
+/// rather than one buffer, so that every caller has to say what it does
+/// with the record. Dropping the field without adding the record would
+/// lose the member's time silently, at whichever site was missed.
 fn file_specific(
     name: &[u8],
     unpacked_size: u64,
@@ -3606,20 +3707,33 @@ fn file_specific(
     mtime: Option<u32>,
     compression_info: u64,
     host_os: u64,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, Vec<u8>)> {
     if name.is_empty() {
         return Err(Error::InvalidHeader("RAR 5 file name is empty"));
     }
-    let mut file_flags = if data_crc32.is_some() { FHFL_CRC32 } else { 0 };
-    if mtime.is_some() {
-        file_flags |= FHFL_MTIME;
+    let windows = host_os == HOST_OS_WINDOWS;
+    let mut file_flags = if data_crc32.is_some() {
+        FILE_HAS_CRC32
+    } else {
+        0
+    };
+    if mtime.is_some() && !windows {
+        file_flags |= FILE_HAS_UNIX_MTIME;
+    }
+    let mut time_extra = Vec::new();
+    if let Some(secs) = mtime.filter(|_| windows) {
+        let mut record = Vec::new();
+        write_vint(&mut record, TIME_RECORD_HAS_MTIME);
+        let ticks = u64::from(secs) * 10_000_000 + FILETIME_UNIX_EPOCH;
+        record.extend_from_slice(&ticks.to_le_bytes());
+        write_extra_record(&mut time_extra, FILE_EXTRA_TIME, &record);
     }
 
     let mut specific = Vec::new();
     write_vint(&mut specific, file_flags);
     write_vint(&mut specific, unpacked_size);
     write_vint(&mut specific, attributes);
-    if let Some(mtime) = mtime {
+    if let Some(mtime) = mtime.filter(|_| !windows) {
         specific.extend_from_slice(&mtime.to_le_bytes());
     }
     if let Some(data_crc32) = data_crc32 {
@@ -3629,7 +3743,7 @@ fn file_specific(
     write_vint(&mut specific, host_os);
     write_vint(&mut specific, name.len() as u64);
     specific.extend_from_slice(name);
-    Ok(specific)
+    Ok((specific, time_extra))
 }
 
 fn validate_entry(entry: &StoredEntry<'_>) -> Result<()> {
@@ -3752,7 +3866,7 @@ fn write_block_with(
 
 pub(super) fn write_end_header(out: &mut Vec<u8>, end_flags: u64) -> Result<()> {
     let header = block_header_image(
-        HEAD_END,
+        BLOCK_TYPE_END_OF_ARCHIVE,
         0,
         None,
         &end_header_specific(end_flags),
@@ -3840,6 +3954,11 @@ fn encrypted_header_block(
 // nzbfast-local change, 5 Sep 2026 — see VENDORING.md.
 // Write into the archive directly so encrypted member data is not copied
 // through a second full-payload temporary buffer.
+// The RAR 5 header shape, argument for argument: type, flags, data
+// size, type-specific bytes, extra area and data, plus the output and
+// the keys. A struct here would restate the format's own field list
+// under a second set of names.
+#[allow(clippy::too_many_arguments)]
 fn append_encrypted_header_block(
     out: &mut Vec<u8>,
     keys: &Rar50Keys,
@@ -3902,7 +4021,7 @@ fn block_header_image(
     let mut body = Vec::new();
     write_vint(&mut body, header_type);
     write_vint(&mut body, flags);
-    if flags & HFL_EXTRA != 0 {
+    if flags & BLOCK_HAS_EXTRA_AREA != 0 {
         write_vint(&mut body, extra.len() as u64);
     }
     if let Some(data_size) = data_size {
@@ -3939,7 +4058,7 @@ fn write_hash_record_with_value(out: &mut Vec<u8>, hash: [u8; 32]) {
     let mut record = Vec::new();
     write_vint(&mut record, 0);
     record.extend_from_slice(&hash);
-    write_extra_record(out, FHEXTRA_HASH, &record);
+    write_extra_record(out, FILE_EXTRA_HASH, &record);
 }
 
 fn write_file_encryption_record(
@@ -3955,7 +4074,7 @@ fn write_file_encryption_record(
     record.extend_from_slice(&salt);
     record.extend_from_slice(&iv);
     record.extend_from_slice(&check_value);
-    write_extra_record(out, FHEXTRA_CRYPT, &record);
+    write_extra_record(out, FILE_EXTRA_ENCRYPTION, &record);
 }
 
 fn write_vint(out: &mut Vec<u8>, mut value: u64) {
@@ -3968,16 +4087,184 @@ fn write_vint(out: &mut Vec<u8>, mut value: u64) {
 
 #[cfg(test)]
 mod tests {
-    use crate::codec::rar50::Unpack50Encoder;
     use super::filter_policy::{
         auto_delta_filter_range, disjoint_filter_ranges, encode_member_with_auto_size_filter,
         encode_member_with_filter_policy_candidates, encode_member_with_filter_spec,
         encode_member_with_filter_specs,
     };
     use super::*;
+    use crate::codec::rar50::Unpack50Encoder;
     use crate::codec::rar50::{encode_literal_only, encode_lz_member};
     use crate::codec::rar50::{encode_lz_member_with_options, EncodeOptions, Rar50FilterSpec};
     use crate::x86_filter_scan::auto_x86_filter_ranges;
+
+    /// A member written with the WINDOWS host byte carries its time as a
+    /// FILETIME in a TIME extra record, and leaves the header's own
+    /// Unix-seconds field out - which is what `rar` 7.23 does on Windows,
+    /// measured on an x86-64 Windows 11 box on 16 Sep 2026
+    /// (research/RARFAST-WINDOWS-CREATED-BYTES-2026-09-16.md). This
+    /// writer is the one the VOLUME set and the streamed routes go
+    /// through; the reference-layout writer's own goldens are in
+    /// `rar50::write::reference`.
+    ///
+    /// The check is on the header rather than on the whole archive
+    /// because this writer's layout is the fork's own in other respects;
+    /// the byte-for-byte claim for a volume set is the conformance leg's
+    /// `add-volumes` row.
+    #[test]
+    fn a_windows_stored_member_carries_a_filetime_record_and_no_mtime_field() {
+        fn one_member(host_os: u64) -> Vec<u8> {
+            Rar50Writer::new(WriterOptions::new(
+                ArchiveVersion::Rar50,
+                FeatureSet::store_only(),
+            ))
+            .stored_entries(&[StoredEntry {
+                name: b"a.txt",
+                data: b"hello\n",
+                mtime: Some(1_000_000_000),
+                attributes: 0x20,
+                host_os,
+            }])
+            .finish()
+            .unwrap()
+        }
+        // 2001-09-09 01:46:40 UTC as a FILETIME, little-endian, behind
+        // the record's size, type and flags bytes.
+        let record = [
+            0x0a, 0x03, 0x02, 0x00, 0x80, 0xff, 0x44, 0xd1, 0x38, 0xc1, 0x01,
+        ];
+        let windows = one_member(0);
+        assert!(
+            windows.windows(record.len()).any(|w| w == record),
+            "a windows member should carry the FILETIME record"
+        );
+        // The Unix member does the opposite: the whole second sits in the
+        // header field and there is no record at all.
+        let unix = one_member(1);
+        assert!(
+            !unix.windows(record.len()).any(|w| w == record),
+            "a unix member should not carry a FILETIME record"
+        );
+        assert!(
+            unix.windows(4).any(|w| w == 1_000_000_000u32.to_le_bytes()),
+            "a unix member keeps the whole second in the header's own field"
+        );
+        assert!(
+            !windows
+                .windows(4)
+                .any(|w| w == 1_000_000_000u32.to_le_bytes()),
+            "and a windows member does not, because that field is Unix seconds"
+        );
+    }
+
+    /// Every service block this writer emits carries the WRITER's host
+    /// byte, which is the opposite rule to the member beside it.
+    ///
+    /// The member here is given the OPPOSITE byte to this platform's, so
+    /// the two rules are separated on Windows and on Unix alike rather
+    /// than agreeing by coincidence on one of them - and the value is
+    /// then pinned to the REFERENCE-layout writer's own service block
+    /// rather than to a literal, because a literal is exactly what was
+    /// wrong here. This writer wrote a hardcoded `0` in every service
+    /// block from the start until 16 Sep 2026: the Windows answer, and
+    /// invisible from a Mac by observation, which is the mirror of the
+    /// bug `reference::SERVICE_HOST_OS` was named for.
+    ///
+    /// `CMT`, `QO` and `RR` are all three here because they are three
+    /// different functions - `write_stored_service`,
+    /// `write_stored_service_with_cache` and
+    /// `write_recovery_service_record` - and the class of bug is one of
+    /// them being missed. The member data is text so that the only
+    /// pseudo-random region in the archive is the recovery parity, which
+    /// FOLLOWS every header searched for below.
+    #[test]
+    fn every_service_block_carries_the_writers_host_os_not_the_members() {
+        let platform_host = reference::SERVICE_HOST_OS as u8;
+        let member_host = u64::from(1 - platform_host);
+        let data = b"the quick brown fox jumps over the lazy dog\n".repeat(200);
+
+        let mut features = FeatureSet::store_only();
+        features.archive_comment = true;
+        features.quick_open = true;
+        let archive = Rar50Writer::new(WriterOptions::new(ArchiveVersion::Rar50, features))
+            .stored_entries(&[StoredEntry {
+                name: b"payload.txt",
+                data: &data,
+                mtime: Some(1_000_000_000),
+                attributes: 0,
+                host_os: member_host,
+            }])
+            .archive_comment(Some(b"a comment"))
+            .finish()
+            .expect("writes");
+
+        // `RR` needs an archive of its own: the writer refuses a
+        // recovery record beside a comment or a quick-open block.
+        let with_recovery = Rar50Writer::new(WriterOptions::new(
+            ArchiveVersion::Rar50,
+            FeatureSet::store_only(),
+        ))
+        .stored_entries(&[StoredEntry {
+            name: b"payload.txt",
+            data: &data,
+            mtime: Some(1_000_000_000),
+            attributes: 0,
+            host_os: member_host,
+        }])
+        .recovery_percent(Some(5))
+        .finish()
+        .expect("writes");
+
+        // A service header's name is preceded by its length, and the
+        // host-OS vint sits before that.
+        fn service_host(archive: &[u8], name: &[u8]) -> u8 {
+            let at = (2..archive.len() - name.len())
+                .find(|&i| {
+                    &archive[i..i + name.len()] == name && archive[i - 1] == name.len() as u8
+                })
+                .unwrap_or_else(|| {
+                    panic!("no {} service header", String::from_utf8_lossy(name))
+                });
+            archive[at - 2]
+        }
+
+        for (blob, name) in [
+            (&archive, &b"CMT"[..]),
+            (&archive, b"QO"),
+            (&with_recovery, b"RR"),
+        ] {
+            assert_eq!(
+                service_host(blob, name),
+                platform_host,
+                "{} follows the writer, not the member's {member_host}",
+                String::from_utf8_lossy(name),
+            );
+        }
+
+        // And the same value the REFERENCE-layout writer reaches, read
+        // out of its own quick-open block rather than compared against a
+        // constant: the two writers disagreeing is how this arrives
+        // again, and that is what cost nineteen conformance rows once.
+        let big = vec![7u8; 4097];
+        let reference_archive = reference::write_reference_stored(
+            &[reference::ReferenceMember {
+                name: "big.bin",
+                data: &big,
+                mtime: None,
+                attributes: 0,
+                host_os: member_host,
+                is_dir: false,
+            }],
+            reference::ReferenceHash::Crc32,
+            reference::ReferenceQuickOpen::All,
+        )
+        .expect("writes");
+        assert_eq!(
+            service_host(&reference_archive, b"QO"),
+            platform_host,
+            "the two service writers are one rule, not two",
+        );
+    }
 
     #[test]
     fn finishing_a_large_archive_does_not_double_its_capacity() {
@@ -4192,8 +4479,10 @@ mod tests {
         assert!(total(&sampled) < total(&plain));
         assert_eq!(extract_volume_bytes(&sampled), data);
 
-        let mut solid = FeatureSet::default();
-        solid.solid = true;
+        let solid = FeatureSet {
+            solid: true,
+            ..FeatureSet::default()
+        };
         let solid = WriterOptions::new(ArchiveVersion::Rar50, solid).with_dictionary_size(4 << 20);
         assert!(matches!(
             Rar50Writer::new(solid)
@@ -4223,7 +4512,7 @@ mod tests {
     /// The in-memory volume writer sets the END header's next-volume flag
     /// on every volume but the last - including a volume a member ends
     /// EXACTLY on, the shape native unrar 7.23 stopped at when every
-    /// volume said "last" (7 Sep 2026; the fixture is the review's probe: two
+    /// volume said "last" (7 Sep 2026; the fixture is Codex's probe: two
     /// 64-byte members in two 119-byte volumes). Native `rar x` extracts
     /// both members from this writer's output now; here our reader does.
     #[test]
@@ -4487,7 +4776,7 @@ mod tests {
         let mut extra = Vec::new();
         write_hash_record(&mut extra, data);
         let compression_info = 1 << 7; // RAR5 v0, non-solid, method m1, 128 KiB dictionary.
-        let specific = file_specific(
+        let (specific, _no_time) = file_specific(
             name,
             data.len() as u64,
             Some(crc32(data)),
@@ -4499,8 +4788,8 @@ mod tests {
         .unwrap();
         write_block(
             &mut archive,
-            HEAD_FILE,
-            HFL_EXTRA | HFL_DATA,
+            BLOCK_TYPE_FILE,
+            BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA,
             Some(packed.len() as u64),
             &specific,
             &extra,
@@ -4574,8 +4863,10 @@ mod tests {
                 ])
                 .finish()
                 .unwrap();
-            let mut features = crate::FeatureSet::default();
-            features.file_encryption = true;
+            let features = crate::FeatureSet {
+                file_encryption: true,
+                ..crate::FeatureSet::default()
+            };
             let mut encrypted_options = WriterOptions::new(crate::ArchiveVersion::Rar50, features);
             if let Some(hash_record) = hash_record {
                 encrypted_options = encrypted_options.with_hash_record(hash_record);
@@ -4733,7 +5024,8 @@ mod tests {
             .finish()
             .unwrap();
         assert_eq!(
-            unbounded_archive, bounded_archive,
+            unbounded_archive,
+            bounded_archive,
             "a memory allowance moved {} bytes of archive",
             unbounded_archive.len(),
         );
@@ -4774,6 +5066,139 @@ mod tests {
             let size = admitted(3 << 30, 1u64 << shift);
             super::filter_policy::validate_dictionary_size(ArchiveVersion::Rar50, size).unwrap();
         }
+    }
+
+    /// A policy charges each member's match-finder tree by narrowing how
+    /// many members encode at once, and that is a MEMORY decision like the
+    /// wave: the same archive comes out at any member width. Pinned at a
+    /// dictionary the tree arms at, on a set of several members, through
+    /// the single archive and the volume set - the two `map_collect`
+    /// admission sites postfast reaches. (15 Sep 2026, TODO 349 B.)
+    #[test]
+    fn a_policy_charges_member_trees_without_moving_the_archive() {
+        use super::filter_policy::{encode_options_for_level, members_in_flight_for};
+        const DICTIONARY: u64 = 4 << 20;
+        let member = |seed: u32| -> Vec<u8> {
+            (0..80_000u32)
+                .flat_map(|line| {
+                    format!("member {seed} record {line:08} {}\n", line.wrapping_mul(2_654_435_761) % 997)
+                        .into_bytes()
+                })
+                .collect()
+        };
+        let datas = [member(1), member(2), member(3)];
+        assert!(
+            datas.iter().all(|data| data.len() as u64 > DICTIONARY / 2),
+            "every member wide enough that the payload fit keeps the 4 MiB the tree arms at"
+        );
+        let entries: Vec<_> = datas
+            .iter()
+            .enumerate()
+            .map(|(index, data)| CompressedEntry {
+                name: [b"a.txt", b"b.txt", b"c.txt"][index],
+                data,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            })
+            .collect();
+
+        // 160 MiB: a quarter is 40 MiB, one 4 MiB tree, so it admits the
+        // whole dictionary and ONE member at a time. An unbounded allowance
+        // admits every member of the set at once. Without these the equality
+        // below could pass by both arms choosing the same width.
+        //
+        // Unbounded is `usize::MAX`, not `64 << 30`: on 32-bit that literal
+        // is not flagged (the shift is under the width) and wraps to 0,
+        // which admits one member and failed the armv7-cross RUN.
+        // `members_in_flight_for` only divides the allowance, so the
+        // maximum cannot overflow it. (nzbfast-local change, 15 Sep 2026;
+        // see VENDORING.md.)
+        let width = |working: Option<usize>| {
+            members_in_flight_for(&[encode_options_for_level(
+                None,
+                DICTIONARY,
+                false,
+                true,
+                false,
+                working,
+            )
+            .unwrap()])
+        };
+        assert_eq!(width(Some(160 << 20)), 1);
+        assert!(width(Some(usize::MAX)) >= entries.len());
+        assert_eq!(width(None), usize::MAX, "no policy, no bound");
+        assert_eq!(
+            members_in_flight_for(&[encode_options_for_level(
+                None,
+                DICTIONARY / 2,
+                false,
+                true,
+                false,
+                Some(160 << 20),
+            )
+            .unwrap()]),
+            usize::MAX,
+            "a dictionary under the tree's arming point holds no tree to charge"
+        );
+
+        let base = WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::default())
+            .with_dictionary_size(DICTIONARY);
+        let narrow = base.with_write_policy(Some(crate::Rar50WritePolicy::from_working_memory(
+            160 << 20,
+        )));
+        let wide = base.with_write_policy(Some(crate::Rar50WritePolicy::from_working_memory(
+            64 << 30,
+        )));
+        let archive = |options| {
+            Rar50Writer::new(options)
+                .compressed_entries(&entries)
+                .finish()
+                .unwrap()
+        };
+        let one_at_a_time = archive(narrow);
+        let declared: Vec<u64> = Archive::parse(&one_at_a_time)
+            .unwrap()
+            .files()
+            .map(|file| file.decoded_compression_info().unwrap().dictionary_size)
+            .collect();
+        assert_eq!(declared, vec![DICTIONARY; 3], "the tree armed on every member");
+        assert_eq!(archive(wide), one_at_a_time, "member width moved the single archive");
+        assert_eq!(archive(base), one_at_a_time, "the policy moved the single archive");
+
+        let volumes = |options| {
+            Rar50VolumeWriter::new(options)
+                .max_payload_per_volume(16 << 10)
+                .compressed_entries(&entries)
+                .finish()
+                .unwrap()
+        };
+        assert_eq!(volumes(wide), volumes(narrow), "member width moved the volume set");
+
+        // And the streamed writer's small-member queue, the third site,
+        // which is byte-identical to the in-memory writer at any width.
+        let streamed = |options| {
+            let mut sources: Vec<_> = entries
+                .iter()
+                .map(|entry| {
+                    let (size, crc32) = crc32_of_reader(&mut &entry.data[..]).unwrap();
+                    StreamedStoredEntry {
+                        name: entry.name,
+                        mtime: None,
+                        attributes: 0x20,
+                        host_os: 3,
+                        size,
+                        crc32,
+                        source: std::io::Cursor::new(entry.data),
+                    }
+                })
+                .collect();
+            let mut out = Vec::new();
+            write_compressed_archive_streamed(options, &mut sources, &mut out).unwrap();
+            out
+        };
+        assert_eq!(streamed(narrow), one_at_a_time, "the streamed queue moved the archive");
+        assert_eq!(streamed(wide), one_at_a_time, "member width moved the streamed archive");
     }
 
     #[test]
@@ -4834,8 +5259,10 @@ mod tests {
 
         // Two such members in a solid set fit their TOTAL (400 KB -> 512 KiB),
         // and every member declares the same size.
-        let mut solid = FeatureSet::default();
-        solid.solid = true;
+        let solid = FeatureSet {
+            solid: true,
+            ..FeatureSet::default()
+        };
         let entries = [entry(small, b"one.txt"), entry(small, b"two.txt")];
         let archive = Rar50Writer::new(WriterOptions::new(ArchiveVersion::Rar50, solid))
             .compressed_entries(&entries)
@@ -4935,19 +5362,24 @@ mod tests {
         data.extend_from_slice(b"abc");
         data.extend_from_slice(&long_tail);
 
-        let level_five =
-            encode_options_for_level(Some(5), DEFAULT_RAR50_DICTIONARY_SIZE, false, true, false, None)
-                .unwrap();
-        let fallback_candidates =
-            encode_option_candidates_for_level(
-                Some(5),
-                DEFAULT_RAR50_DICTIONARY_SIZE,
-                false,
-                true,
-                false,
-                None,
-            )
-                .unwrap();
+        let level_five = encode_options_for_level(
+            Some(5),
+            DEFAULT_RAR50_DICTIONARY_SIZE,
+            false,
+            true,
+            false,
+            None,
+        )
+        .unwrap();
+        let fallback_candidates = encode_option_candidates_for_level(
+            Some(5),
+            DEFAULT_RAR50_DICTIONARY_SIZE,
+            false,
+            true,
+            false,
+            None,
+        )
+        .unwrap();
         assert!(fallback_candidates.len() > 1);
 
         let level_five_only =
@@ -5152,7 +5584,7 @@ mod tests {
 
         let mut extra = Vec::new();
         write_hash_record(&mut extra, data);
-        let specific = file_specific(
+        let (specific, _no_time) = file_specific(
             name,
             data.len() as u64,
             Some(crc32(data)),
@@ -5164,8 +5596,8 @@ mod tests {
         .unwrap();
         write_block(
             &mut archive,
-            HEAD_FILE,
-            HFL_EXTRA | HFL_DATA,
+            BLOCK_TYPE_FILE,
+            BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA,
             Some(packed.len() as u64),
             &specific,
             &extra,
@@ -5213,7 +5645,7 @@ mod tests {
 
         let mut extra = Vec::new();
         write_hash_record(&mut extra, &data);
-        let specific = file_specific(
+        let (specific, _no_time) = file_specific(
             name,
             data.len() as u64,
             Some(crc32(&data)),
@@ -5225,8 +5657,8 @@ mod tests {
         .unwrap();
         write_block(
             &mut archive,
-            HEAD_FILE,
-            HFL_EXTRA | HFL_DATA,
+            BLOCK_TYPE_FILE,
+            BLOCK_HAS_EXTRA_AREA | BLOCK_HAS_DATA_AREA,
             Some(packed.len() as u64),
             &specific,
             &extra,

@@ -35,6 +35,9 @@ const RAR5_RECOVERY_PARITY_PER_RECORD_MAX: u64 = 64 * KIB;
 
 use std::borrow::Cow;
 
+#[cfg(feature = "parallel")]
+mod fold_team;
+
 use crate::write_progress::ProgressReporter;
 use crate::{WriteOperation, WriteProgressEvent};
 
@@ -316,11 +319,11 @@ pub fn assign_recovery_groups(
 }
 
 /// Places each found record in the group whose parity it carries.
-fn group_records<'a>(
-    found: &'a [FoundInlineRecoveryChunk],
+fn group_records(
+    found: &[FoundInlineRecoveryChunk],
     plan: InlineRecoveryPlan,
     area_floor: u64,
-) -> Result<Vec<Vec<&'a InlineRecoveryChunk>>> {
+) -> Result<Vec<Vec<&InlineRecoveryChunk>>> {
     let groups = recovery_groups(plan)?;
     let records: Vec<(u64, usize, u64)> = found
         .iter()
@@ -561,6 +564,73 @@ fn encode_inline_recovery_parity_with_progress(
     Ok((plan, parity))
 }
 
+/// Where [`InlineRecoveryFolder`]'s CRC slices fall in the prefix: a slice
+/// is the part of one data shard one group covers, so it is at most a
+/// group long, never crosses a shard edge, and the last one ends with the
+/// prefix. Every slice edge is also an even offset, so a chunk cut at one
+/// never splits a symbol.
+#[derive(Debug, Clone, Copy)]
+struct SliceLayout {
+    shard_len: usize,
+    prefix_len: u64,
+}
+
+/// One slice-bounded chunk of a [`SliceLayout::walk`].
+struct SliceStep<'a> {
+    shard: usize,
+    offset: usize,
+    group: usize,
+    chunk: &'a [u8],
+    /// The chunk completes its slice, so the slice's CRC state is final.
+    ends_slice: bool,
+}
+
+const SLICE_GROUP_LEN: usize = RAR5_RECOVERY_PARITY_PER_RECORD_MAX as usize;
+
+impl SliceLayout {
+    /// Hands `bytes`, which start at prefix position `start`, to `each` one
+    /// slice-bounded chunk at a time, in order, and returns the position
+    /// past them.
+    fn walk<'a>(
+        self,
+        start: u64,
+        mut bytes: &'a [u8],
+        mut each: impl FnMut(SliceStep<'a>) -> Result<()>,
+    ) -> Result<u64> {
+        let mut position = start;
+        while !bytes.is_empty() {
+            if position >= self.prefix_len {
+                return Err(Error::PrefixExceedsPlan);
+            }
+            let at = usize::try_from(position).map_err(|_| Error::PlanOverflow)?;
+            let shard = at / self.shard_len;
+            let offset = at % self.shard_len;
+            let group = offset / SLICE_GROUP_LEN;
+            let slice_end = ((group + 1) * SLICE_GROUP_LEN).min(self.shard_len);
+            let take = bytes.len().min(slice_end - offset);
+            let (chunk, rest) = bytes.split_at(take);
+            bytes = rest;
+            position += take as u64;
+            each(SliceStep {
+                shard,
+                offset,
+                group,
+                chunk,
+                ends_slice: offset + take == slice_end || position == self.prefix_len,
+            })?;
+        }
+        Ok(position)
+    }
+
+    /// The first byte of the slice holding `position`. Bytes cut there
+    /// start a slice whole, so their CRC needs no state from before the cut.
+    #[cfg(feature = "parallel")]
+    fn slice_start(self, position: u64) -> u64 {
+        let offset = position % self.shard_len as u64;
+        position - offset % SLICE_GROUP_LEN as u64
+    }
+}
+
 /// The inline recovery record of an archive computed AS THE ARCHIVE PASSES,
 /// for a writer that never holds it: the parity rows and the per-group
 /// CRC states are accumulated from `push` calls in file order and the
@@ -593,10 +663,67 @@ pub struct InlineRecoveryFolder {
     slice_crc: u64,
     /// The low byte of a symbol whose high byte has not arrived.
     carry: Option<u8>,
+    /// Worker threads doing the CRC64 and the fold in large batches, when
+    /// the prefix is big enough to pay for them; `None` folds inline.
+    #[cfg(feature = "parallel")]
+    team: Option<fold_team::FoldTeam>,
 }
 
 impl InlineRecoveryFolder {
     pub fn new(prefix_len: u64, recovery_percent: u64) -> Result<Self> {
+        let folder = Self::serial(prefix_len, recovery_percent)?;
+        #[cfg(feature = "parallel")]
+        let folder = {
+            let mut folder = folder;
+            if prefix_len >= fold_team::MIN_PREFIX {
+                let workers = std::thread::available_parallelism()
+                    .map_or(1, usize::from)
+                    .min(fold_team::MAX_WORKERS);
+                folder.start_team(workers, fold_team::BATCH_BYTES);
+            }
+            folder
+        };
+        Ok(folder)
+    }
+
+    /// A folder whose team has `workers` threads and hands them `batch`
+    /// bytes at a time, whatever the prefix length (the tests' way in).
+    #[cfg(all(test, feature = "parallel"))]
+    fn with_team(
+        prefix_len: u64,
+        recovery_percent: u64,
+        workers: usize,
+        batch: usize,
+    ) -> Result<Self> {
+        let mut folder = Self::serial(prefix_len, recovery_percent)?;
+        folder.start_team(workers, batch);
+        assert!(folder.team.is_some(), "the test team did not start");
+        Ok(folder)
+    }
+
+    #[cfg(feature = "parallel")]
+    fn start_team(&mut self, workers: usize, batch: usize) {
+        if workers < 2 || self.parity.is_empty() {
+            return;
+        }
+        let layout = SliceLayout {
+            shard_len: self.shard_len,
+            prefix_len: self.prefix_len,
+        };
+        let parity = std::mem::take(&mut self.parity);
+        let states = std::mem::take(&mut self.states_by_group);
+        match fold_team::FoldTeam::start(layout, &self.matrix, parity, states, workers, batch) {
+            Ok(team) => self.team = Some(team),
+            // Fewer than two threads could be spawned: the rows come back
+            // and the fold runs inline, as it would on a one-core box.
+            Err((parity, states)) => {
+                self.parity = parity;
+                self.states_by_group = states;
+            }
+        }
+    }
+
+    fn serial(prefix_len: u64, recovery_percent: u64) -> Result<Self> {
         let plan = plan_inline_recovery(prefix_len, recovery_percent)?;
         let data_shards = usize::try_from(plan.data_shards).map_err(|_| Error::PlanOverflow)?;
         let recovery_shards =
@@ -626,6 +753,8 @@ impl InlineRecoveryFolder {
             states_by_group: vec![vec![0u64; data_shards]; group_count],
             slice_crc: 0,
             carry: None,
+            #[cfg(feature = "parallel")]
+            team: None,
         })
     }
 
@@ -635,31 +764,25 @@ impl InlineRecoveryFolder {
     }
 
     /// The next bytes of the prefix, in file order.
-    pub fn push(&mut self, mut bytes: &[u8]) -> Result<()> {
-        let group_len = usize::try_from(RAR5_RECOVERY_PARITY_PER_RECORD_MAX)
-            .map_err(|_| Error::PlanOverflow)?;
-        while !bytes.is_empty() {
-            if self.position >= self.prefix_len {
-                return Err(Error::PrefixExceedsPlan);
-            }
-            let position = usize::try_from(self.position).map_err(|_| Error::PlanOverflow)?;
-            let shard = position / self.shard_len;
-            let offset = position % self.shard_len;
-            let group_end = (offset / group_len + 1) * group_len;
-            let slice_end = group_end.min(self.shard_len);
-            let take = bytes.len().min(slice_end - offset);
-            let (chunk, rest) = bytes.split_at(take);
-            bytes = rest;
-            self.slice_crc = crc64_update(chunk, self.slice_crc);
-            self.fold(shard, offset, chunk)?;
-            self.position += take as u64;
-            let at_slice_end = offset + take == slice_end;
-            if at_slice_end || self.position == self.prefix_len {
-                let group = offset / group_len;
-                self.states_by_group[group][shard] = self.slice_crc;
+    pub fn push(&mut self, bytes: &[u8]) -> Result<()> {
+        #[cfg(feature = "parallel")]
+        if let Some(team) = self.team.as_mut() {
+            return team.push(bytes);
+        }
+        let layout = SliceLayout {
+            shard_len: self.shard_len,
+            prefix_len: self.prefix_len,
+        };
+        let start = self.position;
+        self.position = layout.walk(start, bytes, |step| {
+            self.slice_crc = crc64_update(step.chunk, self.slice_crc);
+            self.fold(step.shard, step.offset, step.chunk)?;
+            if step.ends_slice {
+                self.states_by_group[step.group][step.shard] = self.slice_crc;
                 self.slice_crc = 0;
             }
-        }
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -747,6 +870,15 @@ impl InlineRecoveryFolder {
 
     /// The record over everything pushed, which must be the whole prefix.
     pub fn finish(mut self) -> Result<Vec<u8>> {
+        #[cfg(feature = "parallel")]
+        if let Some(team) = self.team.take() {
+            // The team folds a half symbol at the prefix's end itself, so
+            // there is no carry left to settle here.
+            let (parity, states) = team.finish()?;
+            self.parity = parity;
+            self.states_by_group = states;
+            self.position = self.prefix_len;
+        }
         if self.position != self.prefix_len {
             return Err(Error::PrefixExceedsPlan);
         }
@@ -1434,6 +1566,14 @@ fn find_recovery_marker(input: &[u8]) -> Option<usize> {
     None
 }
 
+/// Copies one found inline recovery record out of `input` verbatim.
+///
+/// NO CALLER TODAY, in any build or feature set. Left in place rather
+/// than deleted on a CI-only pass (9 Sep 2026): it is the only statement
+/// in this module of how a found chunk maps back to its bytes, and
+/// removing library code is the fork owner's call, not a lint fix's.
+/// If it is still unreferenced at the next re-vendor, delete it.
+#[allow(dead_code)]
 fn append_inline_recovery_chunk(
     input: &[u8],
     found: &FoundInlineRecoveryChunk,
@@ -1552,6 +1692,9 @@ fn parse_inline_recovery_chunk(input: &[u8], hashed: &mut u64) -> Result<InlineR
     }
     let expected_crc = read_u64(input, 0x04)?;
     *hashed = hashed.saturating_add((total_size_usize - 0x0c) as u64);
+    // Same sum the caller's anti-quadratic budget bounds, charged where it
+    // is incurred so a test can assert the budget instead of a stopwatch.
+    crate::recovery::workgauge::charge_scanned_bytes((total_size_usize - 0x0c) as u64);
     let actual_crc = crc64_xz(&input[0x0c..total_size_usize]);
     if actual_crc != expected_crc {
         return Err(Error::BadRecoveryChunk);
@@ -1591,6 +1734,11 @@ fn parse_inline_recovery_chunk(input: &[u8], hashed: &mut u64) -> Result<InlineR
         return Err(Error::BadRecoveryChunk);
     }
 
+    // One slot per DECLARED data shard, so the shard-count refusal above
+    // has to come first. That ordering is what
+    // `rar5_inline_parse_rejects_a_wire_scale_grid` asserts, by requiring
+    // this charge to be zero on a refused record.
+    crate::recovery::workgauge::charge_sized_cells(data_shards);
     let mut data_shard_states = Vec::with_capacity(data_shards as usize);
     let mut pos = 0x40;
     for _ in 0..data_shards {
@@ -1767,7 +1915,7 @@ fn recover_damaged_shards(
         };
 
         #[cfg(feature = "parallel")]
-        {
+        if whole_grid_fold_on_team(shard_len, tables.iter().flatten().count()) {
             use rayon::prelude::*;
             rebuilt_row
                 .par_chunks_mut(RECOVER_FOLD_CHUNK)
@@ -1775,8 +1923,8 @@ fn recover_damaged_shards(
                 .for_each(|(index, destination)| {
                     fold_chunk(destination, index * RECOVER_FOLD_CHUNK);
                 });
+            continue;
         }
-        #[cfg(not(feature = "parallel"))]
         for (index, destination) in rebuilt_row.chunks_mut(RECOVER_FOLD_CHUNK).enumerate() {
             fold_chunk(destination, index * RECOVER_FOLD_CHUNK);
         }
@@ -1788,7 +1936,228 @@ fn recover_damaged_shards(
     Ok(())
 }
 
-/// Whether the streamed record's fold runs its pieces on the pool.
+/// Threads a repair fold assumes its rayon team would spread over.
+///
+/// `available_parallelism`, NOT `rayon::current_num_threads`, which BUILDS
+/// the global pool on first call: asking that question on a fold the gate is
+/// about to run serially would pay the very cost the gate exists to avoid.
+/// rarfast sizes its own pool from the same call, so the two agree unless a
+/// host narrows the pool by hand. Cached: the answer costs a syscall.
+#[cfg(feature = "parallel")]
+pub(crate) fn fold_team_threads() -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CACHED: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(test)]
+    {
+        let forced = fold_team_threads_override().load(Ordering::Relaxed);
+        if forced != 0 {
+            return forced;
+        }
+    }
+    let cached = CACHED.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let threads = std::thread::available_parallelism().map_or(1, usize::from);
+    CACHED.store(threads, Ordering::Relaxed);
+    threads
+}
+
+/// The one cell `with_fold_team_threads` writes and `fold_team_threads`
+/// reads. A `static` declared inside each of them would be a SEPARATE cell,
+/// so the override would write one and the gate read another: one function
+/// owns it, both go through here. 0 means "ask the host".
+#[cfg(all(test, feature = "parallel"))]
+fn fold_team_threads_override() -> &'static std::sync::atomic::AtomicUsize {
+    use std::sync::atomic::AtomicUsize;
+    static OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+    &OVERRIDE
+}
+
+/// Runs `body` with the fold gates believing the host has `threads` threads,
+/// so a test can reach BOTH arms of a gate on any box. Serialised against
+/// itself; the gates only choose an arm, never a result, so a concurrent
+/// test reading the forced width is unaffected in what it computes.
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) fn with_fold_team_threads<T>(threads: usize, body: impl FnOnce() -> T) -> T {
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    fold_team_threads_override().store(threads, Ordering::Relaxed);
+    let out = body();
+    fold_team_threads_override().store(0, Ordering::Relaxed);
+    out
+}
+
+/// Fold work - destination bytes times the sources folded into them - below
+/// which one rebuilt row of the whole-grid repair stays on the calling
+/// thread, for a host of `threads` threads.
+///
+/// The team is paid for ONCE PER ROW here, so the work has to cover one
+/// dispatch across the whole pool. Measured 15 Sep 2026, serial build against
+/// parallel, cold process and warm pool. On an M1 Ultra (20 threads) 8 MiB
+/// of work was 0.97-1.10x the serial time, 12 MiB 0.87-0.96x and 64 MiB
+/// 0.63-0.68x; on an M3 Ultra (32 threads) the same 12 MiB was a LOSS at
+/// 1.01-1.23x, 24 MiB 0.93-0.97x and 32 MiB 0.72-0.85x. So the threshold is
+/// work PER THREAD, not a byte count: 1 MiB a thread wins on both (20
+/// threads 0.87x at 20 MiB, 32 threads 0.72-0.85x at 32 MiB), floored at the
+/// 12 MiB the 20-thread box measured so a small host keeps a real floor.
+/// See the host repo's `research/RARFAST-BENCH-2026-09-14.md` section 14
+/// (nzbfast-local change, 15 Sep 2026; see VENDORING.md).
+#[cfg(feature = "parallel")]
+fn whole_grid_team_min_work_for(threads: usize) -> usize {
+    const FLOOR: usize = 12 << 20;
+    const PER_THREAD: usize = 1 << 20;
+    FLOOR.max(threads.saturating_mul(PER_THREAD))
+}
+
+/// Whether one rebuilt row of `shard_len` bytes, folded from `sources` live
+/// tables, is enough work to repay a rayon team on this host.
+#[cfg(feature = "parallel")]
+fn whole_grid_fold_on_team(shard_len: usize, sources: usize) -> bool {
+    shard_len.saturating_mul(sources) >= whole_grid_team_min_work_for(fold_team_threads())
+}
+
+/// Source-window bytes below which the striped repair folds a window into a
+/// rebuilt row on the calling thread, for a host of `threads` threads.
+///
+/// This fold dispatches once per (source, damaged row) per stripe, so its
+/// team is woken and parked once per SOURCE - a 17-volume set is 17
+/// dispatches a stripe - and it pays per WINDOW, never per repair. Measured
+/// 15 Sep 2026, serial build against parallel, cold process and warm pool.
+/// On an M1 Ultra (20 threads) a 1 MiB window was 2.0-2.6x the serial time,
+/// 4 MiB (a one-volume repair of 4 MiB volumes, rarfast `rc`'s case)
+/// 1.14-1.23x, 8 MiB 1.02-1.10x, 12 MiB 0.91-0.94x and 64 MiB 0.55-0.66x;
+/// on an M3 Ultra (32 threads) every one of those was worse - 16 MiB still
+/// 1.30-1.34x, 24 MiB 1.14-1.15x, 32 MiB 0.96x, 64 MiB 0.72-0.81x - and a
+/// 16 MiB window cost 12% END TO END in `rarfast rc`, which is the defect
+/// this gate's first form shipped. Coarser tasks (1 and 4 MiB) only brought
+/// small windows back to even, never ahead. So: 2 MiB of window a thread,
+/// which wins on both (20 threads 0.64-0.69x, 32 threads 0.72-0.81x),
+/// floored at the 12 MiB the 20-thread box measured.
+///
+/// `rarfast rc` cannot reach this: `REV_REBUILD_BUDGET` is 64 MiB and a
+/// one-volume repair divides it three ways, so its stripe caps near 21 MiB
+/// and the fold stays serial on any host of 11 threads or more - which is
+/// what every end-to-end measurement of `rc` says it should do. nzbfast's
+/// `repair_cap()` reaches 512 MiB, so a daemon-side repair still gets the
+/// team. See the host repo's `research/RARFAST-BENCH-2026-09-14.md` section
+/// 14 (nzbfast-local change, 15 Sep 2026; see VENDORING.md).
+#[cfg(feature = "parallel")]
+fn striped_team_min_window_for(threads: usize) -> usize {
+    const FLOOR: usize = 12 << 20;
+    const PER_THREAD: usize = 2 << 20;
+    FLOOR.max(threads.saturating_mul(PER_THREAD))
+}
+
+/// Probe-only override of the striped fold's gate, in BYTES, read once from
+/// `RARS_STRIPED_FOLD_MIN_WINDOW`.
+///
+/// Behind a NON-DEFAULT feature and absent from every shipped build: the
+/// gate below cannot be answered from outside the crate, because the gate is
+/// precisely what stops the team starting, so a measurement of "would the
+/// team win at a window the gate refuses?" has to be able to move it. `0`
+/// forces the team ON at every window and a value past any window forces it
+/// OFF, so ONE binary serves both arms of an A/B at the SAME memory budget -
+/// which the budget-driven arm pair of
+/// `research/NZBFAST-REPAIR-SCAN-THREADING-2026-09-16.md` section 7.4 could
+/// not do, and its section 7.8 lists as a limit. Unset leaves the shipped
+/// rule untouched.
+///
+/// Cached, because this is read inside the fold's own inner loop and a
+/// `getenv` there would be the thing being measured.
+#[cfg(all(feature = "parallel", feature = "fold-team-probe"))]
+fn striped_team_min_window_probe() -> Option<usize> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // `usize::MAX` is "not looked up yet"; `usize::MAX - 1` is "looked up,
+    // unset". A window can never reach either, so no real threshold collides.
+    const UNREAD: usize = usize::MAX;
+    const ABSENT: usize = usize::MAX - 1;
+    static CACHED: AtomicUsize = AtomicUsize::new(UNREAD);
+
+    let cached = CACHED.load(Ordering::Relaxed);
+    if cached == ABSENT {
+        return None;
+    }
+    if cached != UNREAD {
+        return Some(cached);
+    }
+    let read = std::env::var("RARS_STRIPED_FOLD_MIN_WINDOW")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok());
+    CACHED.store(read.unwrap_or(ABSENT), Ordering::Relaxed);
+    read
+}
+
+/// Probe-only: the fold's task length, so a bench can bound the team's WIDTH
+/// rather than only its existence.
+///
+/// `RARS_STRIPED_FOLD_TEAM_WIDTH=N` cuts the window into at most `N` pieces
+/// instead of fixed `RECOVER_FOLD_CHUNK` ones, which caps the concurrency at
+/// `N` with no second pool and no change to the process's shared rayon pool -
+/// the implementation route
+/// `research/NZBFAST-REPAIR-FOLD-GATE-SMALL-VOLUME-2026-09-16.md` section 8
+/// recommends costing. Its section 6 measured the same axis through
+/// `RAYON_NUM_THREADS`, which narrows the WHOLE pool and so is a proxy; this
+/// is the thing itself, and section 9 lists the difference as a limit.
+///
+/// Even, because a chunk start off a 2-byte symbol boundary would corrupt the
+/// fold - the same constraint `RECOVER_FOLD_CHUNK` satisfies by being 64 KiB.
+#[cfg(all(feature = "parallel", feature = "fold-team-probe"))]
+fn striped_fold_chunk_len(window: usize) -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const UNREAD: usize = usize::MAX;
+    const ABSENT: usize = usize::MAX - 1;
+    static CACHED: AtomicUsize = AtomicUsize::new(UNREAD);
+
+    let mut width = CACHED.load(Ordering::Relaxed);
+    if width == UNREAD {
+        width = std::env::var("RARS_STRIPED_FOLD_TEAM_WIDTH")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&w| w > 0)
+            .unwrap_or(ABSENT);
+        CACHED.store(width, Ordering::Relaxed);
+    }
+    if width == ABSENT {
+        return RECOVER_FOLD_CHUNK;
+    }
+    // Ceiling division, so `width` pieces cover the window, then rounded UP to
+    // an even length. Never below 2, and never past the window itself.
+    let per = window.div_ceil(width).max(2);
+    let per = per.next_multiple_of(2);
+    per.min(window.max(2))
+}
+
+/// The fold's task length. Fixed at `RECOVER_FOLD_CHUNK` in every shipped
+/// build; only the probe feature can move it.
+#[cfg(feature = "parallel")]
+fn striped_fold_chunk(window: usize) -> usize {
+    #[cfg(feature = "fold-team-probe")]
+    return striped_fold_chunk_len(window);
+    #[cfg(not(feature = "fold-team-probe"))]
+    {
+        let _ = window;
+        RECOVER_FOLD_CHUNK
+    }
+}
+
+/// Whether folding one `window` of bytes into a rebuilt row is enough work
+/// to repay a rayon team on this host.
+#[cfg(feature = "parallel")]
+fn striped_fold_on_team(window: usize) -> bool {
+    #[cfg(feature = "fold-team-probe")]
+    if let Some(forced) = striped_team_min_window_probe() {
+        return window >= forced;
+    }
+    window >= striped_team_min_window_for(fold_team_threads())
+}
+
+/// Whether the streamed record's fold runs its pieces on the pool. Read
+/// only inside `fold_symbols`'s `parallel`-gated arm.
+#[cfg(feature = "parallel")]
 const STREAMED_FOLD_PARALLEL: bool = true;
 
 /// One chunk of a table-driven fold; even so chunk starts stay on symbol
@@ -2025,6 +2394,11 @@ pub fn make_encoder_matrix(data_shards: usize, recovery_shards: usize) -> Result
         return Err(Error::TooManyShards);
     }
     let gf = shared_gf16();
+    // The whole grid, sized from counts that reached here off the wire.
+    // Every caller that refuses a wire-scale plan must do so before this
+    // line; `rar5_group_solver_refuses_a_wire_scale_grid` pins that by
+    // requiring the charge to stay at zero.
+    crate::recovery::workgauge::charge_sized_cells((data_shards as u64) * (recovery_shards as u64));
     let mut matrix = vec![vec![0u16; data_shards]; recovery_shards];
     for (i, row) in matrix.iter_mut().enumerate() {
         for (j, cell) in row.iter_mut().enumerate() {
@@ -2358,6 +2732,11 @@ impl StripeRepairPlan {
         // rows.len() times the memory the repair uses. Each cell is exactly
         // what `make_encoder_matrix` computes for that (row, column).
         let gf = shared_gf16();
+        // `rows.len() * data_count` cells, both terms off the wire. Every
+        // refusal above is the claim that a rejected grid never reaches
+        // here, and `rar5_striped_plan_refuses_a_wire_scale_grid` asserts
+        // exactly that by requiring this charge to be zero.
+        crate::recovery::workgauge::charge_sized_cells((rows.len() as u64) * (data_count as u64));
         let mut matrix = Vec::with_capacity(rows.len());
         for &row in rows {
             let mut cells = vec![0u16; data_count];
@@ -2486,14 +2865,16 @@ where
             };
             let destination = &mut destination[..window.len()];
             #[cfg(feature = "parallel")]
-            {
+            if striped_fold_on_team(window.len()) {
                 use rayon::prelude::*;
+                // One length for both halves, so the zip stays aligned.
+                let chunk = striped_fold_chunk(window.len());
                 destination
-                    .par_chunks_mut(RECOVER_FOLD_CHUNK)
-                    .zip(window.par_chunks(RECOVER_FOLD_CHUNK))
+                    .par_chunks_mut(chunk)
+                    .zip(window.par_chunks(chunk))
                     .for_each(|(destination, source)| table.fold_into(destination, source));
+                continue;
             }
-            #[cfg(not(feature = "parallel"))]
             for (destination, source) in destination
                 .chunks_mut(RECOVER_FOLD_CHUNK)
                 .zip(window.chunks(RECOVER_FOLD_CHUNK))
@@ -2711,6 +3092,203 @@ mod tests {
             let record = folder.finish().unwrap();
             assert_eq!(record.len(), expected.len(), "len {len} pct {percent}");
             assert!(record == expected, "len {len} pct {percent}: record differs");
+        }
+    }
+
+    /// The worker team writes the same record as the whole-prefix builder.
+    /// Batches here are smaller than a slice, cut mid-slice and mid-shard,
+    /// and rounded down from odd; there are more workers than rows and
+    /// than a batch has slices; and the prefix ends inside a symbol.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn inline_recovery_folder_team_matches_the_whole_prefix_builder() {
+        let cases = [
+            (3_000_001usize, 5u64, 2usize, 100_003usize),
+            (3_000_001, 5, 7, 1 << 20),
+            (150_001, 10, 3, 4_096),
+            (20 << 20, 3, 5, 3 << 20),
+            (20 << 20, 100, 12, 8 << 20),
+            (13_000_000, 1, 16, 70_000),
+        ];
+        for (len, percent, workers, batch) in cases {
+            let prefix: Vec<u8> = (0..len)
+                .map(|i| ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as u8)
+                .collect();
+            let expected = build_structural_inline_recovery_data(&prefix, percent).unwrap();
+            let mut folder =
+                super::InlineRecoveryFolder::with_team(len as u64, percent, workers, batch)
+                    .unwrap();
+            let mut at = 0usize;
+            let mut step = 1usize;
+            while at < len {
+                let take = step.min(len - at);
+                folder.push(&prefix[at..at + take]).unwrap();
+                at += take;
+                step = (step * 7 + 3) % 2_000_003 + 1;
+            }
+            let record = folder.finish().unwrap();
+            assert!(
+                record == expected,
+                "len {len} pct {percent} workers {workers} batch {batch}: record differs"
+            );
+        }
+    }
+
+    /// A team refuses bytes past the plan and a short prefix, and a folder
+    /// dropped with batches out still stops its threads.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn inline_recovery_folder_team_refuses_a_wrong_length_and_stops_when_dropped() {
+        let mut long = super::InlineRecoveryFolder::with_team(1_000_000, 5, 4, 65_536).unwrap();
+        long.push(&vec![7u8; 999_999]).unwrap();
+        assert_eq!(long.push(&[1, 2]), Err(super::Error::PrefixExceedsPlan));
+
+        let mut short = super::InlineRecoveryFolder::with_team(1_000_000, 5, 4, 65_536).unwrap();
+        short.push(&vec![7u8; 500_000]).unwrap();
+        assert_eq!(short.finish(), Err(super::Error::PrefixExceedsPlan));
+
+        let mut dropped = super::InlineRecoveryFolder::with_team(1_000_000, 5, 4, 65_536).unwrap();
+        dropped.push(&vec![7u8; 300_000]).unwrap();
+        drop(dropped);
+    }
+
+    /// `new` starts the team from `MIN_PREFIX` up on a multi-core box, and
+    /// folds inline below it.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn inline_recovery_folder_starts_its_team_from_the_minimum_prefix() {
+        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+        let big = super::InlineRecoveryFolder::new(super::fold_team::MIN_PREFIX, 5).unwrap();
+        assert_eq!(big.team.is_some(), cores >= 2);
+        let small = super::InlineRecoveryFolder::new(super::fold_team::MIN_PREFIX - 2, 5).unwrap();
+        assert!(small.team.is_none());
+    }
+
+    /// The repair folds' team gates are work PER THREAD, floored at what the
+    /// 20-thread box measured - the first form of this gate was a flat
+    /// 12 MiB and cost 12% end to end on a 32-thread box at a 16 MiB window
+    /// (VENDORING.md, bench note section 14).
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn repair_folds_start_a_team_only_from_the_measured_crossover() {
+        // The formula at the widths it was measured on, and where the floor
+        // still rules.
+        for (threads, window, work) in [
+            (1usize, 12 << 20, 12 << 20),
+            (2, 12 << 20, 12 << 20),
+            (6, 12 << 20, 12 << 20),
+            (20, 40 << 20, 20 << 20),
+            (32, 64 << 20, 32 << 20),
+            (64, 128 << 20, 64 << 20),
+        ] {
+            assert_eq!(
+                super::striped_team_min_window_for(threads),
+                window,
+                "striped gate at {threads} threads"
+            );
+            assert_eq!(
+                super::whole_grid_team_min_work_for(threads),
+                work,
+                "whole-grid gate at {threads} threads"
+            );
+        }
+
+        super::with_fold_team_threads(32, || {
+            // rarfast `rc`'s own window, and the 16 MiB window that the flat
+            // gate let through and lost 12% on.
+            assert!(!super::striped_fold_on_team(4 << 20));
+            assert!(!super::striped_fold_on_team(16 << 20));
+            assert!(!super::striped_fold_on_team((64 << 20) - 2));
+            assert!(super::striped_fold_on_team(64 << 20));
+
+            assert!(!super::whole_grid_fold_on_team(1 << 20, 16));
+            assert!(super::whole_grid_fold_on_team(4 << 20, 8));
+            assert!(super::whole_grid_fold_on_team(usize::MAX, 2));
+        });
+
+        super::with_fold_team_threads(2, || {
+            assert!(!super::striped_fold_on_team(4 << 20));
+            assert!(super::striped_fold_on_team(12 << 20));
+            assert!(!super::whole_grid_fold_on_team(1 << 20, 4));
+            assert!(super::whole_grid_fold_on_team(12 << 20, 1));
+        });
+    }
+
+    /// Both sides of each gate rebuild the same bytes: the striped repair
+    /// with a window under and over `STRIPED_TEAM_MIN_WINDOW`, and the
+    /// whole-grid repair under and over `WHOLE_GRID_TEAM_MIN_WORK`, against
+    /// the per-symbol reference.
+    #[test]
+    fn repair_folds_rebuild_the_same_bytes_on_both_sides_of_the_team_gate() {
+        // Two threads puts both gates at their 12 MiB floor, so a 12 MiB code
+        // word reaches the TEAM arm on any box; without this the gates on a
+        // wide host would put every affordable test size on the serial arm
+        // and the parallel one would never run here.
+        #[cfg(feature = "parallel")]
+        return super::with_fold_team_threads(2, both_sides_of_the_team_gate);
+        #[cfg(not(feature = "parallel"))]
+        both_sides_of_the_team_gate();
+    }
+
+    fn both_sides_of_the_team_gate() {
+        let data_count = 3;
+        let shard_len = (12 << 20) + 64;
+        let data: Vec<Vec<u8>> = (0..data_count)
+            .map(|index| {
+                (0..shard_len)
+                    .map(|at| {
+                        (at as u32).wrapping_mul(2_654_435_761 + index as u32) as u8
+                            ^ (at >> 11) as u8
+                    })
+                    .collect()
+            })
+            .collect();
+        let refs: Vec<&[u8]> = data.iter().map(Vec::as_slice).collect();
+        let parity = encode_parity_shards(&refs, 2).unwrap();
+        let victim = 1;
+
+        let plan = StripeRepairPlan::new(data_count, 2, shard_len, &[victim], &[1]).unwrap();
+        for stripe in [(12 << 20) - 2, shard_len] {
+            let mut rebuilt = vec![0u8; shard_len];
+            repair_shards_striped(
+                &plan,
+                stripe,
+                |index, offset, buf| {
+                    buf.copy_from_slice(&data[index][offset..offset + buf.len()]);
+                    Ok(())
+                },
+                |_, offset, buf| {
+                    buf.copy_from_slice(&parity[1][offset..offset + buf.len()]);
+                    Ok(())
+                },
+                |_, offset, bytes| {
+                    rebuilt[offset..offset + bytes.len()].copy_from_slice(bytes);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(
+                rebuilt == data[victim],
+                "striped rebuild at stripe {stripe}"
+            );
+        }
+
+        // Three sources of 12 MiB is over the whole-grid gate; a 1 MiB prefix
+        // of the same code word's shards is under it.
+        for len in [1 << 20, shard_len] {
+            let cut: Vec<Vec<u8>> = data.iter().map(|shard| shard[..len].to_vec()).collect();
+            let cut_refs: Vec<&[u8]> = cut.iter().map(Vec::as_slice).collect();
+            let cut_parity = encode_parity_shards(&cut_refs, 2).unwrap();
+            let present: Vec<Option<&[u8]>> = cut
+                .iter()
+                .enumerate()
+                .map(|(index, shard)| (index != victim).then_some(shard.as_slice()))
+                .collect();
+            let rebuilt = reconstruct_data_shards(&present, &[(0, &cut_parity[0])]).unwrap();
+            assert!(
+                rebuilt[victim] == cut[victim],
+                "whole-grid rebuild at {len} bytes"
+            );
         }
     }
 
@@ -3556,7 +4134,11 @@ mod tests {
         // because each group is solved against its own parity.
         let mut damaged = prefix.clone();
         damaged[hit] ^= 0xff;
-        damaged[(1 * plan.group_count + groups[1].offset) as usize + 9] ^= 0xff;
+        // Shard 1, written as a named index rather than `1 *
+        // plan.group_count` so it still reads as the parallel of the
+        // shard-3 line above without tripping `identity_op`.
+        let shard = 1u64;
+        damaged[(shard * plan.group_count + groups[1].offset) as usize + 9] ^= 0xff;
         assert_eq!(
             repair_inline_recovery_prefix(&damaged, &recovery_data).unwrap(),
             prefix
@@ -3651,14 +4233,33 @@ mod tests {
         }
         assert!(planted > 50_000, "{planted} markers is not a dense fixture");
 
-        let started = std::time::Instant::now();
+        let probe = crate::recovery::workgauge::probe();
         let result = repair_inline_recovery_archive(&hostile);
-        let elapsed = started.elapsed();
+        let hashed = probe.scanned_bytes();
 
         assert!(result.is_err(), "junk must not repair");
+        // The claim is about the WORK, not the clock. `find_inline_recovery_chunks`
+        // budgets `4 * len` (floor 16 MiB) bytes of CRC64 and tests that
+        // budget BEFORE each candidate, so the sum can overshoot by at most
+        // one whole-input hash: `5 * len` is the arithmetic ceiling, and an
+        // unbudgeted scan of this fixture is ~110 GB, four orders past it.
+        // This was `elapsed.as_secs() < 5` until 16 Sep 2026, which measured
+        // the box: nightly's `one-process-loaded` runs this suite under
+        // deliberate load, and a mutation census was told this test had
+        // "caught" a mutation it had not.
+        let ceiling = 5 * len as u64;
         assert!(
-            elapsed.as_secs() < 5,
-            "scan took {elapsed:?} - the hash budget is not bounding it"
+            hashed <= ceiling,
+            "scan hashed {hashed} bytes of a {len}-byte input, past the {ceiling} \
+             the budget allows - the hash budget is not bounding it"
+        );
+        // ...and it must still have DONE the work: a scan that refused
+        // everything up front would satisfy the ceiling above while testing
+        // nothing. The first candidate alone declares a record reaching EOF.
+        assert!(
+            hashed > len as u64 / 2,
+            "scan hashed only {hashed} bytes - it never validated a candidate, \
+             so the ceiling above proves nothing"
         );
     }
 
@@ -4049,8 +4650,14 @@ mod tests {
     fn rar5_striped_plan_refuses_a_wire_scale_grid() {
         // Hostile declarations arrive raw off the wire as u16s. Every one of
         // these refusals must come before anything is sized from the
-        // declaration, so together they also have to be instant.
-        let started = std::time::Instant::now();
+        // declaration - and "sized" is the assertion, not "fast". The plan's
+        // one wire-scaled allocation is its `rows.len() * data_count` matrix,
+        // which charges the work gauge, so a refusal that reached it is a
+        // non-zero cell count whatever the box was doing. This was
+        // `started.elapsed().as_millis() < 500` until 16 Sep 2026; a 500 ms
+        // budget on a box running nightly's `one-process-loaded` campaign is
+        // not a measurement.
+        let probe = crate::recovery::workgauge::probe();
         // 32768 recovery shards is past the hard recovery cap.
         assert_eq!(
             StripeRepairPlan::new(32_767, 32_768, 4096, &[7], &[0]).unwrap_err(),
@@ -4081,9 +4688,12 @@ mod tests {
             .unwrap_err(),
             Error::ReconstructionTooLarge
         );
-        assert!(
-            started.elapsed().as_millis() < 500,
-            "a refused grid must not be built first"
+        assert_eq!(
+            probe.sized_cells(),
+            0,
+            "a refused grid must not be built first - the plan sized \
+             {} matrix cells before refusing",
+            probe.sized_cells()
         );
         // The caps sit far above anything real. WinRAR tops out at 200 data
         // shards per inline record, and a plan that size must still build -
@@ -4140,16 +4750,26 @@ mod tests {
     fn rar5_inline_parse_rejects_a_wire_scale_grid() {
         let record = wire_scale_consistent_record();
         assert!(record.len() < 300 * 1024, "the fixture stays tiny");
-        let started = std::time::Instant::now();
+        let probe = crate::recovery::workgauge::probe();
         let mut hashed = 0u64;
         assert_eq!(
             parse_inline_recovery_chunk(&record, &mut hashed).unwrap_err(),
             Error::BadRecoveryChunk
         );
-        assert!(
-            started.elapsed().as_millis() < 500,
-            "the refusal must not size anything first"
+        // The refusal must land BEFORE the per-declared-shard state vector,
+        // which is the only thing this parser sizes from the record's own
+        // numbers. Asserted on that allocation rather than on a 500 ms clock,
+        // which said nothing about ordering and red under load.
+        assert_eq!(
+            probe.sized_cells(),
+            0,
+            "the refusal must not size anything first - the parser reserved \
+             {} shard slots from a record it then rejected",
+            probe.sized_cells()
         );
+        // The hash is not the thing under test here, but it bounds the whole
+        // refusal: a 262 KB record can cost at most one CRC64 over itself.
+        assert!(hashed <= record.len() as u64, "hashed {hashed} over a {}-byte record", record.len());
     }
 
     /// Defence in depth for the same grid: even handed a pre-parsed plan,
@@ -4166,14 +4786,21 @@ mod tests {
         let ranges = vec![0..0usize; 32_767];
         let parity = [0u8; 2];
         let rows = [(0usize, &parity[..])];
-        let started = std::time::Instant::now();
+        let probe = crate::recovery::workgauge::probe();
         let result = solve_damaged_group_shards(plan, &ranges, 2, &[0], &rows, &mut |_| {
             Ok(Vec::new())
         });
         assert_eq!(result.unwrap_err(), Error::ReconstructionTooLarge);
-        assert!(
-            started.elapsed().as_millis() < 500,
-            "the refusal must not size anything first"
+        // 32_767 x 32_768 is ~2 GiB of encoder matrix, and `make_encoder_matrix`
+        // charges every cell it sizes. Zero is the whole claim: the solver
+        // refused from the declaration and never reached the grid. A 500 ms
+        // clock said the same thing only on an idle box.
+        assert_eq!(
+            probe.sized_cells(),
+            0,
+            "the refusal must not size anything first - the solver sized \
+             {} encoder cells from a grid it then refused",
+            probe.sized_cells()
         );
     }
 }

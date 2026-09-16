@@ -150,7 +150,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::info;
 
 // The JOINT arm: a fused constructor-and-solver, the DEFAULT on
-// aarch64 since 11 Sep 2026 and still opt-in on x86. Nothing below is
+// aarch64 since 11 Sep 2026 and on every x86 kernel class since
+// 12 Sep 2026, each admitted on its own native round. Nothing below is
 // entered, and no table below is built, when the gate says no - see
 // `joint::joint_gate` and `joint::joint_default_on`, plus
 // `research/JOINT-FORNEY-INTEGRATION-2026-09-10.md` for the arm and
@@ -400,6 +401,74 @@ const SPECTRA_BUDGET: usize = 8 << 20;
 /// arch constant chosen against one round of shapes is exactly what
 /// went stale here.
 const STRIPE_W_TARGET: usize = 512;
+
+/// The share of the solve budget the stripe's arenas may take even when
+/// the window has left no headroom for them, as a divisor: the 512-word
+/// stripe is kept whenever its arenas for every worker come to a quarter
+/// of the budget or less, and when they do not, the stripe HALVES until
+/// they do - it does not fall to the granule.
+///
+/// **Why the budget is allowed to be overspent here.** A slabbed solve's
+/// window FILLS the budget by construction - `reconstruct::plan_slabs`
+/// sizes the slab to it - so the headroom [`stripe_w_for_buffers`] narrows
+/// against was zero on every slabbed repair, and the stripe collapsed to
+/// [`STRIPE_GRAN`] for no memory at all. Measured 14 Sep 2026 on the M3
+/// Ultra at `-t4`, 1 GiB / 64 KiB, m = 2,048 under a 128 MiB budget (two
+/// 32 KiB slabs, a window of exactly 128 MiB): 1,024 stripe uses and a
+/// 961 ms solve at 32 words, against 64 uses and 586 ms pinned at 512
+/// under the SAME budget - and peak RSS 953 MB pinned against 1,048 MB
+/// collapsed, so the narrow stripe did not even buy the memory it was
+/// narrowing for. The arenas it refused were 20 MB for four workers. On
+/// the x86 nibble kernels the same collapse is the 2x
+/// [`STRIPE_W_TARGET`]'s table measured
+/// (`research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md`,
+/// section 3c).
+///
+/// **Why not reserve the arenas in the slab plan instead**, which would
+/// keep the budget whole: at that shape a reservation adds a THIRD slab
+/// (20 MB off 128 MiB puts the widest slab under half the block), and a
+/// slab is a full sweep of the payload - 0.8-1.6 CPU-s a sweep of a
+/// page-cached 1 GiB there, a full re-read on a spinning NAS - to save
+/// 375 ms of solve. On the set `plan_slabs` exists for, 65 GiB whose
+/// window missed a 32 GiB budget by 0.024%, any reservation that moves
+/// the slab count is a sweep of 65 GiB. And a reservation that adds NO
+/// slab changes nothing, because the same slab count is the same width,
+/// the same window and the same headroom. So the slab plan is untouched
+/// and the overspend is bounded here instead.
+///
+/// **A quarter, and what still narrows.** The budget is itself a quarter
+/// of the OOM line (RAM/4, cgroup/4), so the most this spends past the
+/// window is a sixteenth of the machine. The arenas are ~`1,020 *
+/// workers / block_size` of the window, so a 32 KiB slab on four workers
+/// asks ~15% of the budget and keeps the target, while many workers on
+/// small blocks - 32 workers at 4 KiB ask 8x the window - still narrow,
+/// down to [`STRIPE_GRAN`]. The rule does not ask whether the solve is
+/// slabbed: an unslabbed window that happens to fill its budget is the
+/// same shape and gets the same bound.
+///
+/// **Halving against the share, not collapsing (15 Sep 2026).** Until
+/// then the share only decided whether the TARGET stood; a stripe that
+/// missed it narrowed against the headroom alone, which under a slab is
+/// zero, so it went straight to [`STRIPE_GRAN`]. Measured on the M3
+/// Ultra, 1 GiB / 64 KiB, m = 4,096 under 128 MiB at `-t4`: four 16 KiB
+/// slabs, 512-word arenas of 36.6 MB against a 32 MiB quarter, so 32
+/// words, 1,024 stripe uses and a 1.77 s solve against 1.18 s. The width
+/// ladder at that m (forced, no `-m`, one window, CPU-seconds, best of
+/// two) is 13.62 at 512 words, 13.86 at 256, 14.53 at 128, 15.43 at 64
+/// and 17.92 at 32 - so each halving is cheap and the granule is not.
+/// Halving while the arenas exceed the quarter stops at 256 words
+/// (18.3 MB), and the arenas still never exceed the quarter this guard is.
+///
+/// **Both bounds are kept, as a maximum.** [`stripe_w_for_buffers`] halves while
+/// the arenas exceed the LARGER of the headroom and the quarter. The
+/// share alone would narrow wider stripes the headroom already pays for:
+/// 4 KiB blocks at m = 32,768 on 32 workers under 1 GiB leave 805 MB of
+/// headroom against a 256 MiB quarter, and take 128 words on the headroom
+/// where the quarter alone would drive them to the granule. Under a slab
+/// the headroom is zero and the quarter is what binds; on a roomy
+/// unslabbed window the headroom is. Neither bound ever narrows a stripe
+/// the other admits.
+const STRIPE_TARGET_BUDGET_SHARE: u64 = 4;
 
 /// Whether this shape takes the transform solve. `NZBFAST_BACKSUB` is
 /// the escape hatch in both directions (`forney` / `dense`), the way
@@ -659,24 +728,54 @@ fn column_stripes(rows: &mut [Vec<u16>], w: usize) -> Vec<(usize, Vec<&mut [u16]
 /// `m` describe the solve, `words` the block, `workers` the concurrency
 /// [`per_stripe`] will run at, and `budget` the whole solve's byte
 /// budget (`reconstruct::solve_window_budget`).
+#[cfg(test)]
 fn stripe_w_for(nseg: usize, m: usize, words: usize, workers: usize, budget: u64) -> usize {
-    // What the solve already holds for the whole of its life: the two
+    stripe_w_for_buffers(nseg, m, words, workers, budget, 2)
+}
+
+/// The production form of the test-only `stripe_w_for` above, for a solve holding `buffers` `m x block` buffers:
+/// 2 as shipped, 1 for the joint arm under
+/// `reconstruct::in_place_output`, whose second buffer is replaced by
+/// one stripe of `T` per worker (`run_joint`) - priced here, per worker,
+/// because nothing else prices it once the window no longer does.
+fn stripe_w_for_buffers(
+    nseg: usize,
+    m: usize,
+    words: usize,
+    workers: usize,
+    budget: u64,
+    buffers: u64,
+) -> usize {
+    // What the solve already holds for the whole of its life: the
     // `m x block` buffers `check_repair_dim_within` admitted it on.
     // `words` is block words, so the block is `2 * words` bytes.
-    let window = (m as u64).saturating_mul(words as u64).saturating_mul(4);
+    let window = (m as u64)
+        .saturating_mul(words as u64)
+        .saturating_mul(2)
+        .saturating_mul(buffers.max(1));
     let headroom = budget.saturating_sub(window);
     let workers = workers.max(1) as u64;
+    let t_rows = if buffers == 1 { m as u64 } else { 0 };
     // Stage 1 per worker: the `nseg * CONV` spectral arena, the one
     // resident output spectrum, and the two mixed-radix coordinate
-    // arenas - `(nseg + 3) * CONV * w` words.
+    // arenas - `(nseg + 3) * CONV * w` words - plus, in place, the
+    // worker's `m * w` words of `T`.
     let per_worker = |w: usize| {
         (nseg as u64 + 3)
             .saturating_mul(CONV as u64)
+            .saturating_add(t_rows)
             .saturating_mul(w as u64)
             .saturating_mul(2)
     };
     let mut w = STRIPE_W_TARGET;
-    while w > STRIPE_GRAN && per_worker(w).saturating_mul(workers) > headroom {
+    // The arenas may take whichever is LARGER: what the window left, or
+    // the bounded overspend - a quarter of the budget, whatever the
+    // window left (STRIPE_TARGET_BUDGET_SHARE says why both bounds are
+    // kept and what each costs). Halving against the headroom alone sent
+    // every slabbed solve whose target arenas missed the share straight
+    // to the granule, because a slab's window leaves no headroom at all.
+    let bound = headroom.max(budget / STRIPE_TARGET_BUDGET_SHARE);
+    while w > STRIPE_GRAN && per_worker(w).saturating_mul(workers) > bound {
         w >>= 1;
     }
     w
@@ -1245,9 +1344,11 @@ impl ForneyPlan {
     /// figure `fastpar::ntt_default_budget` derives from RAM and any
     /// cgroup limit - having priced the `2 * m * block_size` window it
     /// holds for the whole solve. The stripe arenas are the rest of that
-    /// same peak, so they are spent out of what the window LEFT, and the
-    /// admission decision is untouched: a shape that repairs today still
-    /// repairs, only possibly on a narrower stripe.
+    /// same peak, so they are spent out of what the window LEFT - or, when
+    /// that is less, out of a quarter of the budget
+    /// ([`STRIPE_TARGET_BUDGET_SHARE`]) - and the admission decision is
+    /// untouched: a shape that repairs today still repairs, only possibly
+    /// on a narrower stripe.
     ///
     /// What it costs, per worker, is `(nseg + 3) * CONV * w` words: the
     /// `nseg * CONV` spectral arena plus the output spectrum and the two
@@ -1279,12 +1380,20 @@ impl ForneyPlan {
         {
             return w.min(words.max(1));
         }
-        stripe_w_for(
+        // One buffer only for a plan that will run the joint arm, and
+        // only under the in-place switch - the one solve that holds one.
+        let buffers = if self.joint.is_some() && super::reconstruct::in_place_output() {
+            1
+        } else {
+            2
+        };
+        stripe_w_for_buffers(
             self.nseg,
             self.m,
             words,
             crate::mem::cpu_workers(),
             super::reconstruct::solve_window_budget() as u64,
+            buffers,
         )
         .min(words.max(1))
     }
@@ -1780,6 +1889,14 @@ mod tests {
         // Tight: a 1 GiB budget leaves 805 MB, and 32 workers want
         // 2.16 GB at the target. Two halvings fit.
         assert_eq!(stripe_w_for(nseg, m, words, 32, 1 << 30), 128);
+        // ...on the HEADROOM, which is why that bound is kept beside the
+        // quarter share: 128 words is 541 MB here, past the 256 MiB
+        // quarter, so halving against the share alone would have taken
+        // this repair to the granule.
+        assert!(
+            (nseg as u64 + 3) * CONV as u64 * 128 * 2 * 32
+                > (1u64 << 30) / STRIPE_TARGET_BUDGET_SHARE
+        );
         // Tighter still, and it stops at the granule rather than
         // running off the bottom - a stripe off the granule builds a
         // FoldTable per source on every remainder (see STRIPE_GRAN).
@@ -1788,6 +1905,100 @@ mod tests {
         // usable width rather than zero or a panic.
         assert_eq!(stripe_w_for(nseg, m, words, 32, 1 << 20), STRIPE_GRAN);
         assert_eq!(stripe_w_for(nseg, m, words, 32, 0), STRIPE_GRAN);
+
+        // THE BOUNDED OVERSPEND (14 Sep 2026), at the measured slab: m =
+        // 2,048 at a 32 KiB slab under a 128 MiB budget, four workers.
+        // The window IS the budget, so the headroom is zero - and the
+        // 512-word arenas are ~20 MB, under a quarter of it, so the target
+        // stands rather than collapsing to the granule (1,024 stripe uses
+        // and a 961 ms solve, against 64 uses and 586 ms).
+        let (s_nseg, s_m, s_words) = (2048usize.div_ceil(BLK), 2048usize, 16384usize);
+        let budget = 128u64 << 20;
+        assert_eq!(
+            s_m as u64 * s_words as u64 * 4,
+            budget,
+            "the window fills the budget"
+        );
+        assert_eq!(
+            stripe_w_for(s_nseg, s_m, s_words, 4, budget),
+            STRIPE_W_TARGET
+        );
+        // The same unslabbed at 64 KiB and m = 1,024, whose window also
+        // lands exactly on 128 MiB and collapsed the same way.
+        assert_eq!(
+            stripe_w_for(1024usize.div_ceil(BLK), 1024, 32768, 4, budget),
+            STRIPE_W_TARGET
+        );
+        // One worker past a quarter's worth of arenas and it narrows as it
+        // always did - which is the many-core small-block shape the rest of
+        // this test holds.
+        let per_worker = (s_nseg as u64 + 3) * CONV as u64 * STRIPE_W_TARGET as u64 * 2;
+        let over = (budget / STRIPE_TARGET_BUDGET_SHARE / per_worker) as usize + 1;
+        assert!(stripe_w_for(s_nseg, s_m, s_words, over, budget) < STRIPE_W_TARGET);
+
+        // THE HALVING (15 Sep 2026), at the shape that still collapsed: m =
+        // 4,096 under the same 128 MiB is four 16 KiB slabs (8,192 words)
+        // on four workers. The window fills the budget, so the headroom is
+        // zero, and the 512-word arenas are 36.6 MB - over the 32 MiB
+        // quarter, so the target does not stand. Narrowing against the
+        // headroom took it to the granule (1,024 stripe uses, a 1.77 s
+        // solve against 1.18 s); halving against the quarter stops at 256
+        // words, 18.3 MB, one step down the measured width ladder (13.62
+        // CPU-s at 512, 13.86 at 256, 17.92 at 32).
+        let (q_nseg, q_m, q_words) = (4096usize.div_ceil(BLK), 4096usize, 8192usize);
+        assert_eq!(
+            q_m as u64 * q_words as u64 * 4,
+            budget,
+            "the window fills the budget"
+        );
+        let arenas = |w: usize| (q_nseg as u64 + 3) * CONV as u64 * w as u64 * 2 * 4;
+        let quarter = budget / STRIPE_TARGET_BUDGET_SHARE;
+        assert!(
+            arenas(STRIPE_W_TARGET) > quarter,
+            "the target misses the quarter"
+        );
+        assert!(arenas(256) <= quarter, "one halving fits it");
+        assert_eq!(stripe_w_for(q_nseg, q_m, q_words, 4, budget), 256);
+        // The arenas never exceed the quarter at the width chosen, wherever
+        // the halving stops - down to the granule, which is the floor.
+        for workers in [1usize, 2, 4, 8, 16, 64] {
+            let w = stripe_w_for(q_nseg, q_m, q_words, workers, budget);
+            let spent = (q_nseg as u64 + 3) * CONV as u64 * w as u64 * 2 * workers as u64;
+            assert!(
+                w == STRIPE_GRAN || spent <= quarter,
+                "workers={workers}: {w} words spend {spent} past a {quarter} quarter"
+            );
+        }
+    }
+
+    /// In place (`NZBFAST_REPAIR_OUTPUT=inplace`, joint arm) the window is
+    /// ONE buffer and each worker holds its own `m * w` words of `T`
+    /// instead of the second one, so the stripe is priced with that term.
+    /// Shape chosen so the quarter-share rule is not what decides: 32
+    /// workers at m = 4,096 on a 32 KiB slab, with a budget of exactly the
+    /// one-buffer window plus the T-less arenas at the target.
+    #[test]
+    fn an_in_place_stripe_prices_each_workers_t() {
+        let (nseg, m, words, workers) = (4096usize.div_ceil(BLK), 4096usize, 16384usize, 32usize);
+        let window = m as u64 * words as u64 * 2;
+        let arenas_without_t =
+            (nseg as u64 + 3) * CONV as u64 * STRIPE_W_TARGET as u64 * 2 * workers as u64;
+        let budget = window + arenas_without_t;
+        assert!(
+            arenas_without_t > budget / STRIPE_TARGET_BUDGET_SHARE,
+            "the share rule must not be what keeps the target at this shape"
+        );
+        // Without T the target would fit the headroom exactly; with it, one
+        // halving is what fits.
+        assert_eq!(
+            stripe_w_for_buffers(nseg, m, words, workers, budget, 1),
+            STRIPE_W_TARGET / 2
+        );
+        // Two buffers is the shipped rule, whatever door asks.
+        assert_eq!(
+            stripe_w_for_buffers(nseg, m, words, workers, budget, 2),
+            stripe_w_for(nseg, m, words, workers, budget)
+        );
     }
 
     /// The identity stage 2 is built on: with `α = 2^{257·128}` and
@@ -1812,10 +2023,39 @@ mod tests {
         }
     }
 
-    /// The default arm of the gate, pinned to the constant it documents.
+    /// The default arm of the gate, pinned to the constant it documents -
+    /// and, when the process is run under the escape hatch, the OVERRIDE
+    /// arm instead of nothing at all.
+    ///
     /// Deliberately does NOT set `NZBFAST_BACKSUB`: it is a process-wide
     /// escape hatch and this binary runs every other test beside this
     /// one (the one-process rule in CONTRIBUTING.md's build section).
+    ///
+    /// IT USED TO SIMPLY RETURN when the variable was set, and that made
+    /// it a green tick over nothing on the one CI job that deliberately
+    /// sets it: the `dense-solve-arm` job runs this whole binary under
+    /// `NZBFAST_BACKSUB=dense`, so the one test that pins the threshold
+    /// passed there by doing nothing, and no count-based invariant can
+    /// see that - a self-returning test reports as `passed` like any
+    /// other. Measured 16 Sep 2026 under claim
+    /// `dense-arm-no-proof-any-test-took-it-16sep`: exactly four tests in
+    /// that job's whole filter observe a different gate answer when the
+    /// arm is forced (six on aarch64, whose constant is lower), so the
+    /// forced run could not afford to lose one of them to a vacuum.
+    ///
+    /// So the forced arms are asserted here instead of skipped, and what
+    /// they assert is the property a refactor quietly making
+    /// `NZBFAST_BACKSUB` a no-op would break: under `dense` the gate is
+    /// false at every m, under `forney` true at every m. On a part with a
+    /// fused multi kernel - every runner in this fleet, and the x86 box
+    /// that job runs on - the `dense` answer at the constant is a FLIP of
+    /// what the default rule would have said, so the assertion is not
+    /// vacuous there. On a part without one (armv7) it agrees with the
+    /// default, which is harmless: armv7 never sets the variable.
+    ///
+    /// The name is kept across that widening on purpose - it is the name
+    /// in the 4 Sep 2026 armv7 claim and in a shelf of research run logs,
+    /// and a rename would make every one of those references misleading.
     ///
     /// The default arm is TWO conditions, and this pins both. It used to
     /// assert a bare `true` at the constant, which is the answer on every
@@ -1834,8 +2074,38 @@ mod tests {
     /// instead. Both arms are checked on every part.
     #[test]
     fn gate_defaults_to_the_measured_constant() {
-        if std::env::var_os("NZBFAST_BACKSUB").is_some() {
-            return;
+        // The escape hatch's own arms, which this test is the only
+        // reader of. `backsub_gate`'s match is the subject: an override
+        // that stopped overriding would answer the default rule here.
+        match std::env::var("NZBFAST_BACKSUB")
+            .unwrap_or_default()
+            .as_str()
+        {
+            forced @ ("dense" | "0" | "off") => {
+                for m in [0, 1, backsub_min_missing(), usize::MAX] {
+                    assert!(
+                        !backsub_gate(m),
+                        "NZBFAST_BACKSUB={forced} must force the dense product at every m, and it did \
+                         not at m={m} - the override is a no-op, so the job that sets it is \
+                         running the arm it was already running"
+                    );
+                }
+                return;
+            }
+            forced @ ("forney" | "1") => {
+                for m in [0, 1, backsub_min_missing(), usize::MAX] {
+                    assert!(
+                        backsub_gate(m),
+                        "NZBFAST_BACKSUB={forced} must force the transform solve at every m, and it \
+                         did not at m={m} - the override is a no-op"
+                    );
+                }
+                return;
+            }
+            // Unset, or a spelling `backsub_gate` does not recognise:
+            // either way it takes the default rule, which is what the
+            // rest of this test pins.
+            _ => {}
         }
         let fused = gf16::multi_fold_width() > 0;
         let gate = backsub_min_missing();

@@ -1463,6 +1463,8 @@ struct Shared {
     block_bits: u32,
     /// TODO 96.4 STAT verdict probes armed (OR-fold, like `tail_fanout`).
     stat_probe: bool,
+    /// TODO 343 item B: the probe armed for block accounts only (OR-fold).
+    stat_probe_block: bool,
     /// §96.5 per-server remaining-block budgets in bytes (0 = no
     /// budget). When a server's own `bytes` counter crosses its entry,
     /// its workers drain their pipelines and bow out for good - the
@@ -1943,6 +1945,7 @@ impl Shared {
             budget_noted: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
             dup_bytes_lost: AtomicU64::new(0),
             stat_probe: servers.iter().any(|(_, c)| c.stat_probe),
+            stat_probe_block: servers.iter().any(|(_, c)| c.stat_probe_block),
         });
         (shared, unservable)
     }

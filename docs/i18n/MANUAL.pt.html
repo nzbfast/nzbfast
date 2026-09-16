@@ -880,7 +880,7 @@ inteiro, e essa é uma única leitura num só núcleo por mais núcleos que a m�
 isto ligado, cada ficheiro é provado pelas somas de verificação por bloco do conjunto PAR2,
 e essas correm em todos os núcleos ao mesmo tempo. Muito mais rápido num disco local veloz,
 e de pouco valor numa pasta de rede ou num disco de pratos, onde o disco já é o limite.
-Está desligada enquanto não a pedir, e é isto que aceita quando o faz: um conjunto PAR2
+Está ligada a menos que a desligue, e é isto que aceita ao deixá-la ligada: um conjunto PAR2
 pode levar dois registos que descrevem ficheiros diferentes, e o par2cmdline e as outras
 ferramentas chamam danificado a um conjunto assim onde o nzbfast lhe chama então limpo.
 Nenhum conjunto construído por software normal tem essa forma, uma verificação dos

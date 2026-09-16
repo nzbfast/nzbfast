@@ -530,9 +530,43 @@ async fn a_recategorize_inside_the_pick_to_start_gap_cannot_start_the_job() {
 /// time the transaction ends the name has landed either way, so the
 /// record settles correct even in the broken case - what cannot be
 /// taken back is what was published while it was wrong.
+///
+/// LOAD FLAKE, FOUND AND CLOSED 16 Sep 2026, and it was NOT the fence.
+/// Sighted once in a full daemon run and reproduced alone at load 54 to
+/// 64 (`research/NZBFAST-REPAIR-SCAN-THREADING-2026-09-16.md` 5.1); the
+/// sighting never captured the assertion, so the first job here was to
+/// run it under load with the output kept. It failed once in 57 runs at
+/// load 90 to 127 on 18 cores, and the line was
+/// "the job is downloading, but not into the renamed directory" - the
+/// LAST assertion of the three below, not the fenced-window poll, which
+/// held clean over every sample of every run. The kept scratch settles
+/// what it means: the durable row named `renamed` and `complete/renamed`
+/// as its `out_dir`, and `complete` itself did not exist yet. So the
+/// record was right, the fence was right, and what the case had caught
+/// is that NOTHING ORDERS the flip to Downloading against the pipeline's
+/// first write. `start_next` flips the state under the job lock and
+/// hands off; the directory is created by the writer behind it. The old
+/// spelling read the filesystem at the first payload that said
+/// Downloading, so it was racing a mkdir it had no claim on - measured,
+/// that mkdir has already happened in 24 of 24 runs and the flake is the
+/// 25th. The window poll's own margin is not the problem and was
+/// measured while it was suspect: 55 ms of detection lag, the last
+/// sample landing 3.90 s after detection, so 2.05 s of the 6 s stall
+/// still to run, and that margin did not move across 57 runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rename_holds_its_fence_until_the_new_label_lands() {
-    let rig = relocate_rig("relorename", &[("NZBFAST_TEST_STALL_RENAME_MS", "6000")]).await;
+    // The stall and the window the case watches inside it are ONE
+    // constant now, not two that can drift into each other: the window
+    // is two thirds of the stall, which left 2.05 s of measured slack
+    // above. Two independent numbers were the first suspect in the
+    // flake hunt above and were cleared, but nothing held them together.
+    const STALL_MS: u64 = 6_000;
+    const WINDOW_MS: u64 = STALL_MS * 2 / 3;
+    let rig = relocate_rig(
+        "relorename",
+        &[("NZBFAST_TEST_STALL_RENAME_MS", &STALL_MS.to_string())],
+    )
+    .await;
     let port = rig.d.port;
     let log = rig.d.log_path();
     let out_root = rig.out_root.clone();
@@ -558,7 +592,7 @@ async fn a_rename_holds_its_fence_until_the_new_label_lands() {
         // The directory is published and the label has not caught up.
         // Let the runner at it.
         http(port, "/api?mode=resume&apikey=sekrit&output=json", None);
-        let deadline = opened + std::time::Duration::from_millis(4_000);
+        let deadline = opened + std::time::Duration::from_millis(WINDOW_MS);
         while std::time::Instant::now() < deadline {
             let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
             assert!(
@@ -583,9 +617,34 @@ async fn a_rename_holds_its_fence_until_the_new_label_lands() {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
         assert!(started, "the fence never lifted: the job stayed unstartable");
+        // WAIT for the directory, and refuse the OLD one the instant it
+        // appears. Not a loosening of the line it replaces, and stronger
+        // than it in the one way that matters: the old spelling asked
+        // "does `renamed` exist at this instant", which the product never
+        // promised - the flip to Downloading and the writer's mkdir are
+        // unordered, and that gap is the whole of the load flake written
+        // up above. What the case actually wants to know is WHICH
+        // directory the runner started into, and that is answered by the
+        // first one to appear. A start into the pre-rename directory now
+        // fails at the moment it happens rather than at a deadline, and
+        // the old spelling never asked the question at all.
+        let mut into_renamed = false;
+        for _ in 0..200 {
+            if out_root.join("renamed").exists() {
+                into_renamed = true;
+                break;
+            }
+            assert!(
+                !out_root.join("slow").exists(),
+                "the job started into the PRE-rename directory: the fence lifted with the \
+                 directory half applied"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert!(
-            out_root.join("renamed").exists(),
-            "the job is downloading, but not into the renamed directory"
+            into_renamed,
+            "the job is downloading and neither directory was ever created - the pipeline \
+             wrote nowhere"
         );
 
         // Nothing was ever published under the old label. This is the

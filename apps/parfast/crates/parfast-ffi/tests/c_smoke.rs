@@ -53,6 +53,10 @@ fn keep_every_symbol() {
     black_box(parfast_ffi::pf_capabilities as *const () as usize);
     black_box(parfast_ffi::pf_settings_get as *const () as usize);
     black_box(parfast_ffi::pf_settings_set as *const () as usize);
+    // Kept and never CALLED by any test here: it deletes the real
+    // per-user store. Its logic is tested in parfast-session against a
+    // scratch folder.
+    black_box(parfast_ffi::pf_digest_cache_clear as *const () as usize);
     black_box(parfast_ffi::pf_last_error as *const () as usize);
     black_box(parfast_ffi::pf_string_free as *const () as usize);
 }

@@ -173,6 +173,49 @@ fn a_preclaimed_source_is_adoptable_by_its_own_archive_group() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// §94 A map mode, the grant's other half: the member is routed by
+/// whichever volume PARSES first, and on a resume that need not be the
+/// volume holding the grant. A mapped store set keeps no header bytes on
+/// disk, so every volume's head article comes back off the wire, and
+/// part2's can land before part1's. Part2 then founded the group and
+/// routed the member while part1 - the only seeded slot, so the grant's
+/// holder - was not a member yet, the child got no grant, and the payload
+/// finished byte-perfect as `000-movie.mkv` beside the restored partial
+/// still at `movie.mkv` (15 Sep 2026, 1 in 30 early-kill rounds of
+/// `e2e_resume::a_shortened_partial_output_says_its_articles_are_fetched_again`).
+#[test]
+fn a_preclaimed_source_is_adopted_when_a_later_volume_parses_first() {
+    let dir = tmpdir("preclaim-late-head");
+    let inner = "movie.mkv";
+    let half = 150_000usize;
+    let data = payload(2 * half, 23);
+    let v1 = fixtures::rar5_volume_n(&[(inner, data.len() as u64, &data[..half], false, true)], 0);
+    let v2 = fixtures::rar5_volume_n(&[(inner, data.len() as u64, &data[half..], true, false)], 1);
+    let ex = Arc::new(Extractor::with_resume(&dir, 2, true, true));
+    ex.anchor();
+    // What the replay does for the one seeded volume: its own name and
+    // the source it reads. Part2 kept nothing, so it has no seed.
+    ex.preclaim_name(0, "r.part1.rar");
+    ex.preclaim_name(0, inner);
+    ex.write(1, "r.part2.rar", v2.len() as u64, 0, &v2).unwrap();
+    ex.write(0, "r.part1.rar", v1.len() as u64, 0, &v1).unwrap();
+    ex.finish().unwrap();
+    let names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.file_name()))
+        .collect();
+    // Compared, never `assert_eq!`ed: a 300 KB byte list is no message.
+    assert!(
+        std::fs::read(dir.join(inner)).is_ok_and(|got| got == data),
+        "the set did not adopt its own preclaimed member name: {names:?}"
+    );
+    assert!(
+        !dir.join("000-movie.mkv").exists(),
+        "the member was pushed off its own name: {names:?}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// §94 A: the replay's ORDER is what decides whether it costs memory.
 ///
 /// A resumed job feeds its restored spans back through `write` before

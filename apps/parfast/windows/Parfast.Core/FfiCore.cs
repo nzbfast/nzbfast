@@ -136,6 +136,8 @@ public sealed class FfiCore : ICoreClient
 
     public int OpenQueueStore(string path) => pf_queue_open_store(Live(), path);
 
+    public int ClearDigestCache() => pf_digest_cache_clear(Live());
+
     public PlanPreview PlanPreview(CreateSpec spec) =>
         ReadJson<PlanPreview>(pf_plan_preview(Live(), ParfastJson.Write(spec))) ?? Contracts.PlanPreview.Empty;
 
@@ -278,6 +280,9 @@ public sealed class FfiCore : ICoreClient
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern int pf_queue_open_store(
         nint session, [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int pf_digest_cache_clear(nint session);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern nint pf_plan_preview(

@@ -2203,6 +2203,48 @@ fn the_inner_file_crc_is_latched_for_the_naming_oracle() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A SPLIT set is the shape srrdb exists to catalog, and the piece that
+/// normally parses first is part 1 - whose stored CRC32 is that VOLUME's
+/// data area, not the file's (`FileEntry::file_crc`). The latch is
+/// first-writer-wins, so before the `!split_after` gate part 1's
+/// fragment CRC was what the naming oracle was handed for every
+/// multi-volume set: `archive-crc:<fragment>` matches no SRR, so the
+/// oracle silently never fired for its own shape.
+///
+/// NEGATIVE CONTROL, run: drop `e.split_after` from the `chase.rs` guard
+/// and the first assertion below fails holding the fragment CRC.
+#[test]
+fn a_split_sets_crc_key_is_the_final_fragments_whole_file_value() {
+    let dir = tmpdir("crc-split");
+    let data = payload(200_000, 9);
+    let whole = crc32fast::hash(&data);
+    let (head, tail) = data.split_at(120_000);
+    let fragment = crc32fast::hash(head);
+    assert_ne!(fragment, whole, "the fixture must make the two differ");
+
+    let ex = Extractor::new(&dir, 2, true);
+    // Part 1: continues into the next volume, so its header CRC
+    // describes only these bytes.
+    let v1 = fixtures::rar5_volume_n_crc(
+        &[("movie.mkv", 200_000, head, false, true, Some(fragment))],
+        0,
+    );
+    feed(&ex, 0, "v.part1.rar", &v1, 7000, 3);
+    assert_eq!(
+        ex.inner_crc(),
+        None,
+        "a fragment CRC must not be latched as the file's"
+    );
+
+    // Part 2 ends the file, so its header carries the whole-file value.
+    let v2 =
+        fixtures::rar5_volume_n_crc(&[("movie.mkv", 200_000, tail, true, false, Some(whole))], 1);
+    feed(&ex, 1, "v.part2.rar", &v2, 7000, 3);
+    ex.finish().unwrap();
+    assert_eq!(ex.inner_crc(), Some(("movie.mkv".to_string(), whole)));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A header-encrypted set is the case the oracle cannot serve, and
 /// it must say so rather than offering a CRC of something else: the
 /// headers never parse, so there is no entry and no key. This is the
@@ -2346,4 +2388,112 @@ fn shape_tag_round_trips_through_the_wire_form() {
     );
     // An unknown token from a newer daemon still reads as itself.
     assert_eq!(shape_word("rar9"), "rar9");
+}
+
+/// A mapped PAR2 repair that rebuilds a wholly-missing set member has no
+/// job slot to write through, so `repair.rs` gives it a FRESH one whose
+/// index is past the job's last. `slot_paths` must see it.
+///
+/// This is the invariant the engine's orphan sweep turns on: it built its
+/// "do not delete" set over `0..job_slots.len()`, so the file parity had
+/// just recreated was neither owned, nor an extraction output, nor spared
+/// by the census (it is set-covered, so the census does not spare it) -
+/// and the sweep deleted it on a job that then reported Completed.
+///
+/// NEGATIVE CONTROL, run: enumerate `0..1` through `slot_path` instead
+/// and the recreated file is absent, which is the deleting state.
+#[test]
+fn a_slot_allocated_after_the_jobs_own_is_still_owned() {
+    let dir = tmpdir("slot-paths-fresh");
+    let data = payload(50_000, 3);
+    let ex = Extractor::new(&dir, 1, true);
+    // The job's own slot: one plain posted file.
+    feed(&ex, 0, "movie.mkv", &data, 7000, 3);
+
+    // The repair's: a set member every article of which was lost, so the
+    // parity rebuilds it whole through a slot the job never had.
+    let fresh = ex.alloc_slot();
+    assert!(
+        fresh >= 1,
+        "the repair's slot is past the job's, not {fresh}"
+    );
+    let nfo = b"recreated from parity".to_vec();
+    ex.write_repair(fresh, "movie.nfo", nfo.len() as u64, 0, &nfo)
+        .unwrap();
+    ex.finish().unwrap();
+
+    let owned: std::collections::HashSet<std::path::PathBuf> =
+        ex.slot_paths().into_iter().collect();
+    assert!(
+        owned.contains(&dir.join("movie.nfo")),
+        "the parity-rebuilt member must be owned, not swept: {owned:?}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A mixed directory - one set that extracts beside one that demotes - is
+/// what `repair::reextract_dir_outcome` falls through to the unrar rung
+/// on, and the rung walks EVERY `.rar` group it finds. It re-extracted
+/// the set that was already done, and `publish_into` refuses to
+/// overwrite, so that payload landed a second time as
+/// `extracted-1-<name>`: two copies of the feature on disk, and
+/// `rename_movie` then saw two videos and declined to name the release.
+///
+/// The fix spends the extracted groups' volumes first, and this is the
+/// mechanism it turns on: `slot_group` tells a caller which fed volume
+/// belongs to which group, and the group key is exactly what
+/// `ExtractReport::fallbacks` is keyed by - the canonicalized INNER file
+/// name, which no volume-stem grouping (`packed_groups`) can answer.
+///
+/// NEGATIVE CONTROL, run: make `slot_group` answer `None` and the
+/// extracted volume is no longer distinguishable from the demoted one,
+/// failing the last assertion.
+#[test]
+fn slot_group_separates_an_extracted_set_from_a_demoted_one() {
+    let dir = tmpdir("slot-group-mixed");
+    let good = payload(120_000, 11);
+    let ex = Extractor::new(&dir, 2, true);
+    // Slot 0: an ordinary store-mode set. It extracts.
+    let v0 = fixtures::rar5_volume_n(&[("movie.mkv", 120_000, &good, false, false)], 0);
+    feed(&ex, 0, "movie.rar", &v0, 7000, 3);
+    // Slot 1: a volume whose declared data area overruns itself, which
+    // demotes rather than shipping a sparse file.
+    let bad = payload(4_000, 5);
+    let v1 = fixtures::rar5_volume_oversized("subs.mkv", 8 << 20, &bad, 8 << 20);
+    feed(&ex, 1, "subs.rar", &v1, 700, 3);
+    let rep = ex.finish().unwrap();
+
+    assert!(
+        rep.extracted.iter().any(|(n, _)| n == "movie.mkv"),
+        "{:?}",
+        rep.extracted
+    );
+    assert!(!rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    let demoted: std::collections::HashSet<&str> =
+        rep.fallbacks.iter().map(|(g, _)| g.as_str()).collect();
+
+    let g0 = ex.slot_group(0).expect("the extracted set has a group");
+    assert!(
+        !demoted.contains(g0.as_str()),
+        "slot 0 extracted, so its group must not be in {demoted:?}"
+    );
+    // The demoted slot must NOT look extracted. It reaches that either
+    // by carrying a group the report names, or - the shape here, a
+    // slot-level fallback whose headers never formed a group at all - by
+    // answering `None`, which the caller must read as "unknown" and
+    // therefore leave alone for the unrar rung.
+    if let Some(g1) = ex.slot_group(1) {
+        assert!(
+            demoted.contains(g1.as_str()),
+            "slot 1 demoted, so its group ({g1}) must be in {demoted:?} - without \
+             this the unrar rung cannot tell which volumes are already spent"
+        );
+    }
+    assert_ne!(
+        ex.slot_group(1),
+        ex.slot_group(0),
+        "the demoted slot must never share the extracted slot's group, or its \
+         volume is spent before unrar has had it"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
 }

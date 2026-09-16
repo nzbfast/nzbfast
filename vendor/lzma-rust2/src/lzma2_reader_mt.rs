@@ -14,6 +14,66 @@ use std::{
 /// Interval for checking worker errors while waiting for results.
 const ERROR_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
+/// nzbfast: ceiling on what a worker will RESERVE up front for one work
+/// unit's decoded output.
+///
+/// The declared size is what the preallocation exists for and it is also
+/// attacker-controlled (see the worker's own comment), so the two are
+/// separated here: a legitimate unit is a 7-Zip block, ~256 MiB at
+/// `-mx9` and smaller everywhere else, and 64 MiB of it is reserved in
+/// one go while the rest grows by doubling - two or three copies on a
+/// unit whose decode already costs far more than that. A declaration
+/// past the cap buys the archive nothing.
+const PREALLOC_CAP: usize = 64 << 20;
+
+/// nzbfast: total DICTIONARY memory this reader will commit across its
+/// workers.
+///
+/// Every worker builds its own `Lzma2Reader`, so every worker allocates
+/// and zero-fills its own window of `dict_size`: the cost is
+/// `workers x dict`, while a caller's admission gate charges the declared
+/// dictionary ONCE (nzbkit's 7z content gate does, and so does
+/// sevenz-rust2's own `max_mem_limit_kb`). A crafted archive declaring a
+/// 64 MiB dictionary - free under that gate - whose stream is thirty tiny
+/// INDEPENDENT blocks therefore committed 20 x 64 MiB of zeroed pages on
+/// a 20-core box for a few KB of input, and the props byte allows a
+/// declaration up to 4 GiB.
+///
+/// So the worker count follows the dictionary. Parallelism is what gives
+/// way, never correctness: a single worker decodes exactly what twenty
+/// do, and a dictionary that large already makes each unit's decode
+/// dominate its dispatch.
+const WORKER_DICT_BUDGET: u64 = 512 << 20;
+
+/// nzbfast: the worker count that fits `dict_size` inside
+/// [`WORKER_DICT_BUDGET`], never below one and never above what was
+/// asked for. A function so the rule is testable directly - the shape it
+/// guards against is a memory figure, which no decode assertion carries.
+fn workers_for_dict(asked: u32, dict_size: u32) -> u32 {
+    let asked = asked.clamp(1, 256);
+    if dict_size == 0 {
+        return asked;
+    }
+    let affordable = (WORKER_DICT_BUDGET / u64::from(dict_size)).max(1);
+    asked.min(u32::try_from(affordable).unwrap_or(u32::MAX))
+}
+
+/// nzbfast: how much a worker reserves up front for a unit that DECLARES
+/// `decoded_len` bytes of output.
+///
+/// A function rather than an inline `.min()` so the rule is testable on
+/// every platform. The end-to-end shape cannot carry it: a reservation
+/// too large to meet aborts the process on Linux but is granted lazily on
+/// macOS, so a test that decodes a hostile stream passes on this fleet's
+/// own boxes with the cap removed.
+const fn prealloc_for(decoded_len: usize) -> usize {
+    if decoded_len < PREALLOC_CAP {
+        decoded_len
+    } else {
+        PREALLOC_CAP
+    }
+}
+
 use crate::{
     Lzma2Reader, set_error,
     work_queue::{WorkStealingQueue, WorkerHandle},
@@ -84,7 +144,9 @@ impl<R: Read> Lzma2ReaderMt<R> {
     /// - `preset_dict`: An optional preset dictionary.
     /// - `num_workers`: The maximum number of worker threads for decompression. Currently capped at 256 Threads.
     pub fn new(inner: R, dict_size: u32, preset_dict: Option<&[u8]>, num_workers: u32) -> Self {
-        let max_workers = num_workers.clamp(1, 256);
+        // nzbfast: the dictionary is per WORKER, so the worker count is
+        // bounded by it - see `workers_for_dict`.
+        let max_workers = workers_for_dict(num_workers, dict_size);
 
         let work_queue = WorkStealingQueue::new();
         // nzbfast: bound the result channel by the worker count, not by 1.
@@ -342,8 +404,33 @@ impl<R: Read> Lzma2ReaderMt<R> {
                                 // Clean EOF from inner reader.
                                 // Send any remaining data as the final work unit.
                                 self.send_work_unit();
+                                // nzbfast: an EMPTY pack stream dispatches
+                                // nothing at all - a 7z folder may declare
+                                // pack_size 0, so the very first control byte
+                                // is already EOF and `send_work_unit` is a
+                                // no-op on an empty unit. `saturating_sub(1)`
+                                // then made the last sequence id 0, a unit
+                                // that was never sent; `Draining` compared
+                                // `next_sequence_to_return` (0) against it,
+                                // found 0 > 0 false, and waited on a result
+                                // channel whose sender THIS reader owns, so
+                                // it never disconnects, with the one
+                                // pre-spawned worker parked in `steal()`.
+                                // The read wedged permanently - on the 7z
+                                // chase thread, which has no catch_unwind and
+                                // would not have been helped by one.
+                                //
+                                // Nothing dispatched means nothing to drain.
+                                // (The single-threaded `Lzma2Reader` answers
+                                // UnexpectedEof on the same input; a wedge is
+                                // strictly worse than either that or an empty
+                                // read.)
+                                if self.next_sequence_to_dispatch == 0 {
+                                    self.state = State::Finished;
+                                    continue;
+                                }
                                 self.last_sequence_id =
-                                    Some(self.next_sequence_to_dispatch.saturating_sub(1));
+                                    Some(self.next_sequence_to_dispatch - 1);
                                 self.state = State::Draining;
                                 continue;
                             }
@@ -464,10 +551,47 @@ fn worker_thread_logic(
 
         // nzbfast: the exact size the chunk headers declared, so a 64 MiB
         // unit is one allocation rather than six doublings and five copies.
-        // A wrong declaration only costs a `Vec` growth: `read_to_end` is
-        // still what decides how many bytes come out.
-        let mut decompressed_data = Vec::with_capacity(decoded_len);
-        let result = match reader.read_to_end(&mut decompressed_data) {
+        //
+        // CAPPED by `prealloc_for`, because `decoded_len` is summed from
+        // chunk headers INSIDE the packed payload and no header-level
+        // gate can see it: `nameprobe`'s 7z content gate charges the
+        // declared dictionary and PPMd window only, and sevenz-rust2's
+        // own admission is a dictionary-size check. A compressed chunk
+        // costs six input bytes and may declare 2 MiB, so ~6 KiB of
+        // crafted payload declares 2 GB and ~1 MiB declares ~350 GB.
+        // That reached `Vec::with_capacity` raw, and a reservation that
+        // cannot be met calls `handle_alloc_error`, which ABORTS the
+        // process rather than returning an error a caller could refuse
+        // the archive on. Past the cap the Vec grows the ordinary way,
+        // which costs a handful of copies on a unit already big enough
+        // for the decode itself to dominate.
+        //
+        // The comment here used to say "a wrong declaration only costs a
+        // `Vec` growth". That is true of an UNDER-declaration and false
+        // of the hostile direction.
+        let mut decompressed_data = Vec::with_capacity(prealloc_for(decoded_len));
+        // And the decode is held TO that declaration. LZMA2 states each
+        // chunk's decoded size exactly (control bits 0..4 plus the first
+        // two header bytes for a compressed chunk, the length word for an
+        // uncompressed one), so the sum is the unit's output for any
+        // well-formed stream. `read_to_end` alone took no bound at all,
+        // and the whole unit is materialized here before the consumer
+        // sees one byte of it, so a write-side bomb guard is not what can
+        // stop it.
+        let result = match Read::take(&mut reader, decoded_len as u64 + 1)
+            .read_to_end(&mut decompressed_data)
+        {
+            Ok(_) if decompressed_data.len() > decoded_len => {
+                set_error(
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "LZMA2 work unit decoded past the size its chunk headers declared",
+                    ),
+                    &error_store,
+                    &shutdown_flag,
+                );
+                return;
+            }
             Ok(_) => decompressed_data,
             Err(error) => {
                 set_error(error, &error_store, &shutdown_flag);
@@ -762,5 +886,167 @@ mod tests {
                 }
             }
         }
+    }
+    /// nzbfast: a work unit's DECLARED decoded size is attacker-controlled
+    /// and no header-level gate can see it, so the worker's preallocation
+    /// is capped rather than trusting the declaration.
+    ///
+    /// The stream below is ONE work unit: a leading dict-reset chunk
+    /// followed by dependent chunks (control 0x80..0xDF, so nothing after
+    /// the first splits the unit), each six or seven bytes on the wire and
+    /// each declaring the format's maximum 2 MiB of output. 200,000 of
+    /// them is ~1.2 MB of input declaring ~400 GB.
+    ///
+    /// What the DECODE asserts is the reachable half: the archive is
+    /// refused (one data byte cannot feed an LZMA range decoder) rather
+    /// than costing memory proportional to what its headers claimed. The
+    /// reservation itself is asserted through `prealloc_for`, because an
+    /// end-to-end decode CANNOT carry it - see that function's note on why
+    /// removing the cap does not fail this test on a Mac.
+    #[test]
+    fn an_over_declared_work_unit_is_refused_without_reserving_what_it_declared() {
+        // control 0xFF: dict reset + new props (5-byte header), unpack
+        // bits 0x1F and unpack low half 0xFFFF -> declares 2 MiB; packed
+        // 0x0000 -> one data byte; then the props byte.
+        let mut stream: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00];
+        // control 0x9F: compressed, no reset (4-byte header), the same
+        // 2 MiB declaration, one data byte. Dependent, so the unit never
+        // splits.
+        for _ in 0..200_000 {
+            stream.extend_from_slice(&[0x9F, 0xFF, 0xFF, 0x00, 0x00, 0x00]);
+        }
+        stream.push(0x00);
+
+        let declared: usize = 200_001 * (1 << 21);
+        assert!(
+            declared > 16 * PREALLOC_CAP,
+            "the fixture must declare far more than the cap, not {declared}"
+        );
+        assert_eq!(
+            prealloc_for(declared),
+            PREALLOC_CAP,
+            "the worker must reserve the cap, not the ~400 GB the headers claim"
+        );
+        for workers in [2u32, 4] {
+            assert!(
+                decode_mt(&stream, workers).is_err(),
+                "{workers} workers: a unit with one data byte per 2 MiB claim must be refused"
+            );
+        }
+    }
+
+    /// The reservation rule on its own, which is the half no end-to-end
+    /// decode can assert: an ordinary unit is reserved exactly, and any
+    /// declaration at or past the cap is reserved at the cap.
+    ///
+    /// NEGATIVE CONTROL, run: making `prealloc_for` the identity fails the
+    /// last two cases by name.
+    #[test]
+    fn the_reservation_follows_the_declaration_only_up_to_the_cap() {
+        assert_eq!(prealloc_for(0), 0);
+        assert_eq!(prealloc_for(1 << 20), 1 << 20, "a 1 MiB unit is exact");
+        assert_eq!(
+            prealloc_for(PREALLOC_CAP - 1),
+            PREALLOC_CAP - 1,
+            "just under the cap is still exact"
+        );
+        assert_eq!(prealloc_for(PREALLOC_CAP), PREALLOC_CAP);
+        assert_eq!(
+            prealloc_for(usize::MAX),
+            PREALLOC_CAP,
+            "the largest declaration expressible must still reserve the cap"
+        );
+    }
+    /// nzbfast: an EMPTY LZMA2 pack stream. A 7z folder may declare
+    /// `pack_size` 0, so the very first control byte read is already EOF
+    /// and no work unit is ever dispatched.
+    ///
+    /// That used to WEDGE: `last_sequence_id` became `Some(0)` through a
+    /// `saturating_sub(1)` on a dispatch counter still at zero, naming a
+    /// unit nobody sent, and `Draining` then waited on a channel whose
+    /// sender the reader itself owns (so never `Disconnected`) with its
+    /// one pre-spawned worker parked in `steal()`. Permanently, on a
+    /// chase thread with no `catch_unwind` - which would not have helped
+    /// anyway, since nothing panicked.
+    ///
+    /// NEGATIVE CONTROL, run: restore the `saturating_sub(1)` arm and
+    /// this test hangs instead of failing. It is written with a watchdog
+    /// thread for exactly that reason - a wedge does not fail a test, it
+    /// stops the suite, and nextest reports a retried timeout as "flaky".
+    #[test]
+    fn an_empty_pack_stream_ends_instead_of_wedging() {
+        for workers in [1u32, 2, 8] {
+            let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>();
+            let handle = thread::spawn(move || {
+                let mut out = Vec::new();
+                let r = Lzma2ReaderMt::new(&[][..], DICT, None, workers).read_to_end(&mut out);
+                let _ = tx.send(r.map(|_| out));
+            });
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(Ok(out)) => assert!(
+                    out.is_empty(),
+                    "{workers} workers: an empty stream cannot decode to bytes"
+                ),
+                // An error is a perfectly good answer too - the
+                // single-threaded reader gives UnexpectedEof here. What
+                // must not happen is neither.
+                Ok(Err(_)) => {}
+                Err(_) => panic!(
+                    "{workers} workers: the reader never returned on an empty pack stream"
+                ),
+            }
+            handle.join().expect("the reader thread must not panic");
+        }
+    }
+
+    /// The same shape one layer in: a stream that is nothing but the
+    /// end-of-stream marker, which `read_and_dispatch_chunk` takes
+    /// through its `control == 0x00` arm rather than through EOF. That
+    /// one DOES dispatch (the marker byte makes the unit non-empty), so
+    /// it is the control arm for the fix above.
+    #[test]
+    fn a_marker_only_stream_still_decodes_to_nothing() {
+        let mut out = Vec::new();
+        Lzma2ReaderMt::new(&[0x00u8][..], DICT, None, 2)
+            .read_to_end(&mut out)
+            .expect("a bare end marker is a valid empty stream");
+        assert!(out.is_empty());
+    }
+    /// nzbfast: every worker builds its own `Lzma2Reader` and so its own
+    /// dictionary, while the admission gates above this reader charge the
+    /// declared dictionary once. A crafted archive declaring 64 MiB - free
+    /// under nzbkit's 7z content gate - committed `workers x 64 MiB` of
+    /// zeroed pages for a few KB of input, and the props byte allows a
+    /// declaration up to 4 GiB.
+    ///
+    /// NEGATIVE CONTROL, run: restore `num_workers.clamp(1, 256)` and the
+    /// last three cases fail by name.
+    #[test]
+    fn the_worker_count_follows_the_dictionary_size() {
+        // An ordinary dictionary costs the caller nothing: it gets every
+        // worker it asked for.
+        assert_eq!(workers_for_dict(20, 1 << 20), 20, "1 MiB x 20 is affordable");
+        assert_eq!(workers_for_dict(8, 64 << 20), 8, "64 MiB x 8 is the budget");
+        assert_eq!(workers_for_dict(1, u32::MAX), 1, "never below one");
+        // ...and the shapes that do not fit give up PARALLELISM, not
+        // correctness.
+        assert_eq!(
+            workers_for_dict(20, 64 << 20),
+            8,
+            "64 MiB x 20 is 1.3 GB of zeroed pages; the budget affords eight"
+        );
+        assert_eq!(
+            workers_for_dict(256, 1 << 30),
+            1,
+            "a 1 GiB dictionary affords exactly one worker"
+        );
+        assert_eq!(
+            workers_for_dict(256, u32::MAX),
+            1,
+            "the largest dictionary the props byte allows affords one"
+        );
+        // The asked-for count is still a ceiling, and the hard cap holds.
+        assert_eq!(workers_for_dict(0, 1 << 20), 1);
+        assert_eq!(workers_for_dict(u32::MAX, 4096), 256);
     }
 }

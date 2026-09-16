@@ -771,6 +771,24 @@ impl Journal {
         // silently appending to an unlinked inode nothing would ever
         // read.
         let generation = next_generation();
+        // ...and it is only the last `G` line if it is a LINE. The
+        // previous run can have died mid-append (ENOSPC, power loss)
+        // leaving its last record without a trailing newline, and a bare
+        // `writeln!` then GLUES the marker onto that torn record: the
+        // result parses as neither, so `remove` never sees this
+        // generation's `G` as the last one and refuses to unlink the
+        // journal after a perfectly successful job. The leftover then
+        // makes the next run resume against a file it has finished with.
+        //
+        // One `metadata` and at most one byte read, once per open.
+        if let Ok(len) = file.metadata().map(|m| m.len())
+            && len > 0
+        {
+            let mut last = [0u8; 1];
+            if crate::disk::read_exact_at(&file, &mut last, len - 1).is_ok() && last[0] != b'\n' {
+                writeln!(file)?;
+            }
+        }
         writeln!(file, "G {generation}")?;
         // The leading dot is invisible to Windows, where this file sits
         // in the user's own download folder looking like junk we forgot

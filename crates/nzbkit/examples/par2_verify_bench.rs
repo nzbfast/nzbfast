@@ -58,19 +58,27 @@ fn main() {
     let mut order: Vec<usize> = (0..jobs.len()).collect();
     order.sort_unstable_by_key(|&i| std::cmp::Reverse(jobs[i].1.length));
     let machine = nzbkit::mem::cpu_workers().clamp(1, nzbkit::par2::VERIFY_MAX_WORKERS);
-    let workers = machine.min(jobs.len()).max(1);
-    let inner = (machine / workers).max(1);
+    // The production driver's lane plan, not a second copy of it: the
+    // per-worker widths come out of `nzbkit::par2::lane_plan`, so a
+    // scheduling change lands on this bench at the same time it lands on
+    // `verify_dir`. (It was `machine / workers` on both sides until 16 Sep
+    // 2026 - see entry 1 of research/SERIAL-BOUND-SURVEY-2026-09-16.md.)
+    let sizes: Vec<u64> = order.iter().map(|&i| jobs[i].1.length).collect();
+    let lanes = nzbkit::par2::lane_plan(&sizes, machine, jobs.len());
+    let workers = lanes.len().max(1);
 
     let mut digest = 0u64;
     let mut wall = std::time::Duration::ZERO;
     for pass in 0..passes {
         let next = std::sync::atomic::AtomicUsize::new(0);
+        let (jobs, order, next) = (&jobs, &order, &next);
         let t0 = std::time::Instant::now();
         let mut results: Vec<(usize, u64)> = Vec::new();
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..workers)
-                .map(|_| {
-                    scope.spawn(|| {
+                .map(|w| {
+                    let inner = lanes.get(w).copied().unwrap_or(1);
+                    scope.spawn(move || {
                         let mut out = Vec::new();
                         loop {
                             let oi = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

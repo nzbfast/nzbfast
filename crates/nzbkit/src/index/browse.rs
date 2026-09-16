@@ -7,6 +7,30 @@ use super::cards::RES_RANK_SQL;
 use super::query::{fts_match, stem_fold_arm};
 use super::*;
 
+/// Removes the per-request `oracle_ok` scalar function on EVERY exit
+/// from `browse_once`, not only the success one.
+///
+/// It is registered on the SHARED connection and captures a cloned
+/// oracle snapshot and backbone list, so a request that returned early -
+/// a prepare or query error, or the `SQLITE_SCHEMA` retry path, which
+/// re-enters `browse_once` - left that stale closure registered for
+/// whatever asked next. An RAII guard rather than a second
+/// `remove_function` on each error path: `?` is everywhere between the
+/// registration and the end of the function, and the next one added
+/// would be exempt from any rule that is not the type system's.
+///
+/// `None` when the request set no verdict function, which makes the drop
+/// a no-op.
+struct OracleFnGuard<'a>(Option<&'a rusqlite::Connection>);
+
+impl Drop for OracleFnGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(db) = self.0 {
+            let _ = db.remove_function("oracle_ok", 2);
+        }
+    }
+}
+
 /// Browse-view filter/sort/page request (M25). Defaults: everything,
 /// newest-first, first page.
 #[derive(Debug, Clone)]
@@ -386,7 +410,9 @@ impl Index {
         // place; because the same predicate feeds both the COUNT and the
         // page SELECT below, `total` and the returned rows always agree
         // (the old page-level trim left `total` unfiltered - broken paging).
-        let verdict_fn = q.verdict_ok.is_some();
+        // Drop the per-request verdict function on EVERY exit from this
+        // function, not only the success one - see `OracleFnGuard`.
+        let _oracle_fn = OracleFnGuard(q.verdict_ok.is_some().then_some(&self.db));
         if let Some(vf) = &q.verdict_ok {
             let snap = vf.snap.clone();
             let bbs = vf.backbones.clone();
@@ -532,11 +558,6 @@ impl Index {
             release_from_row,
         )?;
         let out = rows.collect::<rusqlite::Result<_>>()?;
-        // Drop the per-request verdict function so a stale snapshot never
-        // lingers on the shared connection (no-op if it was never set).
-        if verdict_fn {
-            let _ = self.db.remove_function("oracle_ok", 2);
-        }
         Ok((out, total))
     }
 

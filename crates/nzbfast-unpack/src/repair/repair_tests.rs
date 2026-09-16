@@ -1804,6 +1804,248 @@ fn ambiguous_obfuscated_continuations_are_not_guessed() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+fn bytes_of(len: usize, mul: u8, add: u8) -> Vec<u8> {
+    (0..len as u32)
+        .map(|i| (i as u8).wrapping_mul(mul).wrapping_add(add))
+        .collect()
+}
+
+/// The shape this whole group is about, built by `rars`' OWN volume
+/// writer rather than by a hand fixture: a three-volume RAR5 set of two
+/// stored members sized so the first volume ends on a WHOLE member.
+///
+/// Verified against the writer's output, not assumed - with a first
+/// member exactly one volume's payload long, the writer emits
+/// volume 0 = `{tag}0.bin` complete with NO split flag and its
+/// end-of-archive record saying another volume follows; volume 1 =
+/// `{tag}1.bin` split_after; volume 2 = its split_before remainder.
+/// That first boundary is the one the partition could not see: nothing
+/// on it is split, so only the end-of-archive flag says the set goes on.
+///
+/// Returns the volumes in volume order, with the two payloads.
+fn boundary_between_members_set(tag: &str, seed: u8) -> (Vec<Vec<u8>>, Vec<u8>, Vec<u8>) {
+    const PAYLOAD: usize = 20_000;
+    let whole = bytes_of(PAYLOAD, 13, seed);
+    let spilled = bytes_of(30_000, 29, seed.wrapping_add(7));
+    let whole_name = format!("{tag}0.bin");
+    let spill_name = format!("{tag}1.bin");
+    let entries = [
+        rars::rar50::StoredEntry {
+            name: whole_name.as_bytes(),
+            data: &whole,
+            mtime: None,
+            attributes: 0,
+            host_os: 0,
+        },
+        rars::rar50::StoredEntry {
+            name: spill_name.as_bytes(),
+            data: &spilled,
+            mtime: None,
+            attributes: 0,
+            host_os: 0,
+        },
+    ];
+    let volumes = rars::rar50::Rar50VolumeWriter::new(rars::rar50::WriterOptions::default())
+        .stored_entries(&entries)
+        .max_payload_per_volume(PAYLOAD)
+        .finish()
+        .expect("rars writes the volume set");
+    assert_eq!(volumes.len(), 3, "the writer changed shape under this test");
+    (volumes, whole, spilled)
+}
+
+/// A RAR5 archiver ends a volume on a WHOLE member whenever the next
+/// file header will not fit in what is left of the volume. Nothing on
+/// that boundary is split, so the partition's only continuity evidence -
+/// a member cut across the boundary - is absent, and before this test
+/// the set was cut in two there: the head closed at volume 0, volume 1
+/// found no open set expecting it and started an orphan that nothing
+/// could ever attach to, and `rars` then refused the orphan with
+/// "RAR 5 split entry is incomplete" because the member it begins does
+/// spill into volume 2. The job failed with every byte of the set
+/// present on disk, and volume 2 was written off as a stray.
+///
+/// The fix reads the one signal the container does carry across such a
+/// boundary: the end-of-archive record's "another volume follows" flag
+/// (`rars::Archive::next_volume_follows`). A volume that SAYS it is not
+/// the last stays open. Deliberately a widening of `open` only - it
+/// never closes a set the old split-flag rule kept open, so a volume can
+/// only ever be offered to MORE candidate sets, and the ambiguity rule
+/// still refuses to guess between them (the two controls below).
+#[test]
+fn obfuscated_set_survives_a_volume_boundary_between_members() {
+    let (vols, whole, spilled) = boundary_between_members_set("part", 5);
+
+    let dir = reex_dir("obf-member-aligned");
+    // Hash names in an order that is not volume order: only the headers
+    // can put this set back together.
+    for (name, bytes) in [("cc71", &vols[0]), ("aa12", &vols[1]), ("bb40", &vols[2])] {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+
+    assert!(
+        extract_local(&dir, None).unwrap(),
+        "a set whose first volume boundary falls between whole members must extract - \
+         every volume is present and every one says whether another follows"
+    );
+    for (name, want) in [("part0.bin", &whole), ("part1.bin", &spilled)] {
+        assert_eq!(
+            &std::fs::read(dir.join(name)).unwrap(),
+            want,
+            "member {name} is missing or wrong"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// NEGATIVE CONTROL for the merge direction, which is the error that
+/// matters: a set wrongly SPLIT fails visibly with every byte kept, a
+/// set wrongly MERGED publishes a confidently wrong payload.
+///
+/// The set above beside a complete standalone archive. The standalone's
+/// end-of-archive record says it IS the last volume, so the new rule
+/// must leave it closed and the set's own volume 1 must still find its
+/// own head. `Some(false)` has to mean "finished", not "no opinion".
+#[test]
+fn a_finished_archive_is_not_eaten_by_an_open_member_aligned_set() {
+    let (vols, whole, spilled) = boundary_between_members_set("set", 11);
+    let lone = bytes_of(30_000, 31, 9);
+    let alone = nzbkit::rar::fixtures::rar5_volume_n_continued(
+        &[("lone.bin", lone.len() as u64, &lone, false, false)],
+        0,
+        false,
+    );
+
+    let dir = reex_dir("obf-not-eaten");
+    for (name, bytes) in [
+        ("aa01", &vols[0]),
+        ("aa02", &alone),
+        ("aa03", &vols[1]),
+        ("aa04", &vols[2]),
+    ] {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+
+    assert!(
+        extract_local(&dir, None).unwrap(),
+        "two distinct complete archives must both extract"
+    );
+    for (name, want) in [
+        ("set0.bin", &whole),
+        ("set1.bin", &spilled),
+        ("lone.bin", &lone),
+    ] {
+        assert_eq!(
+            &std::fs::read(dir.join(name)).unwrap(),
+            want,
+            "member {name} is missing or wrong - the partition mixed the two archives"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// NEGATIVE CONTROL, the harder half: TWO such sets in one directory.
+/// Both heads are open on the end-of-archive flag alone, both await
+/// volume 1, and a boundary between whole members carries no split name
+/// to tell them apart - so there is no evidence, and the pass must
+/// decline rather than guess. Declining costs a failed job with every
+/// input byte still on disk for PAR2 or a retry; guessing would
+/// cross-wire two sets and publish a payload built from both.
+#[test]
+fn two_member_aligned_sets_are_not_cross_wired() {
+    let (va, _aw, as_) = boundary_between_members_set("aset", 1);
+    let (vb, _bw, bs) = boundary_between_members_set("bset", 3);
+
+    let dir = reex_dir("obf-two-aligned");
+    // Heads sort first; the two sets' continuations are interleaved so
+    // filename order is no help either.
+    let files = [
+        ("aa01", &va[0]),
+        ("aa02", &vb[0]),
+        ("ab01", &vb[1]),
+        ("ab02", &va[1]),
+        ("ac01", &vb[2]),
+        ("ac02", &va[2]),
+    ];
+    for (name, bytes) in files {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+
+    assert!(
+        !extract_local(&dir, None).unwrap_or(false),
+        "two sets with no evidence to tell their continuations apart cannot be \
+         partitioned, so the pass must not report success"
+    );
+    // The spilled members are the ones a cross-wire would corrupt:
+    // either they are absent, or each holds its own set's bytes.
+    for (name, want) in [("aset1.bin", &as_), ("bset1.bin", &bs)] {
+        let path = dir.join(name);
+        if path.exists() {
+            assert_eq!(
+                &std::fs::read(&path).unwrap(),
+                want,
+                "{name} was published from the other set's bytes"
+            );
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// An ORDINARY obfuscated RAR5 split set - one member spanning three
+/// volumes, the dominant obfuscated shape on the wire - written by
+/// `rars`' own volume writer rather than by a fixture.
+///
+/// This is the sibling defect the boundary-between-members reproduction
+/// above turned up, and it is the wider one. The RAR5 spec makes the
+/// main header's volume-number field optional on the FIRST volume
+/// ("present for all volumes except first"), and the partition was
+/// written to that: a set head is the volume with no number. Optional is
+/// not forbidden, though, and an archiver that writes the field anyway -
+/// this repo's own `Rar50VolumeWriter`, on every volume - puts 0 there.
+/// Such a head went through the NUMBERED door, looked for an open set
+/// already holding zero volumes, and could not find one because no set
+/// is ever empty; it then started a set the partition never reopened, so
+/// volume 1 had nothing to attach to either. Every volume became its own
+/// singleton and the job failed with the whole set present on disk.
+///
+/// The fixtures all model a numberless head, so nothing here could see
+/// it. Volume number 0 IS the first volume by definition, so the fix
+/// reads it as one.
+#[test]
+fn an_obfuscated_set_whose_head_numbers_itself_zero_still_groups() {
+    let data = bytes_of(60_000, 13, 5);
+    let entry = rars::rar50::StoredEntry {
+        name: b"film.mkv",
+        data: &data,
+        mtime: None,
+        attributes: 0,
+        host_os: 0,
+    };
+    let vols = rars::rar50::Rar50VolumeWriter::new(rars::rar50::WriterOptions::default())
+        .stored_entry(entry)
+        .max_payload_per_volume(20_000)
+        .finish()
+        .expect("rars writes the volume set");
+    assert_eq!(vols.len(), 3, "the writer changed shape under this test");
+
+    let dir = reex_dir("obf-zero-numbered-head");
+    // Names descend as the volume numbers ascend: only the headers order it.
+    for (i, bytes) in vols.iter().enumerate() {
+        std::fs::write(dir.join(format!("h{}", 9 - i)), bytes).unwrap();
+    }
+
+    assert!(
+        extract_local(&dir, None).unwrap(),
+        "a set whose first volume numbers itself 0 must still be grouped"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("film.mkv")).unwrap(),
+        data,
+        "payload is missing or wrong"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// One four-volume RAR4 stored set, written twice: once under names
 /// that order it and once under hash names that do not.
 fn rar4_vols(total: &[u8], per_volume: usize) -> Vec<Vec<u8>> {

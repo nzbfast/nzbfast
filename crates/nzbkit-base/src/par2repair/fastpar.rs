@@ -257,7 +257,86 @@ pub(super) fn run_with_ntt_fallback<T>(
 /// so it stays. One constant is right everywhere only to ~10%. The
 /// budget is an OOM guard, not a speed one; the present-count gate is
 /// [`NTT_MIN_PRESENT`], swept on its own 7 Sep 2026.
+///
+/// **Re-measured 15 Sep 2026 with the conjugate-paired leaf in, on both
+/// x86 GFNI classes it still covers, and NOT split**
+/// (`research/NTT-ROW-GATE-GFNI-AVX512-2026-09-15.md`). NEON and nibble
+/// had moved to their own constants on 5 Sep; GFNI-256 (fan-in 6) and
+/// AVX-512 GFNI (fan-in 12) had not been measured since. Corpus resident
+/// (no `-m`), forced transform against fold, whole-process CPU-seconds,
+/// two reps each run as an ABBA quartet with an A/A copy of both arms:
+///
+/// | class, part, pool | 64 KiB, n = 16,384 | 1 MiB, n = 4,096 |
+/// |---|---:|---:|
+/// | GFNI-256, Core Ultra 9 386H, `-t4` | ~286-309 | ~361-376 |
+/// | GFNI-256, Core Ultra 9 386H, `-t16` | ~256-273 | ~354-360 |
+/// | AVX-512, EPYC 9354P 8 vCPU guest, `-t4` | ~234 | - |
+/// | AVX-512, EPYC 9354P 8 vCPU guest, `-t8` | ~202 | ~323 |
+///
+/// **The shape moves the crossover further than the class does**, so a
+/// per-class constant would key on the smaller difference. At 64 KiB the
+/// AVX-512 part wants ~256 (the transform wins all four readings from
+/// there, by 6-11%) and GFNI-256 sits on 320 (a tie on four threads, a
+/// 12-13% transform win on sixteen). At 1 MiB both want 320 or more: on
+/// AVX-512 the fold wins by ~11% at 256 and ties at 320, and on GFNI-256
+/// the fold still wins by 4-8% at 320. Lowering the AVX-512 arm to 256
+/// would buy 5-17% over m = 256..319 on the small-block shape and pay
+/// about the same over the same band on the large-block one, which is the
+/// nearer of the two to a real posting's recovery set; 320 is the
+/// compromise between them, within the ~10% this constant was already
+/// said to hold to. Two traps for the next calibration: the ~400 above
+/// was the storage-bound WALL reading it was flagged as (wall on the
+/// 64 KiB sweep is 321-333), and 14 Sep's leaves-over-fold ratio of
+/// 355-375 overstated the crossover because it leaves out the fold's own
+/// fixed per-leg costs. The rise with block size is the same direction
+/// the 15 Sep work-floor grid found on the x86 nibble arm (up 1.31x from
+/// 128 KiB to 1 MiB at m = 1,024, written at [`NTT_MIN_WORK`]), where
+/// NEON's had only ever moved down. **It is the block size, not `n`**:
+/// on the Core Ultra at `-t4`, quartering `n` at a fixed 64 KiB block
+/// moves the crossover ~10-25 rows (to ~312), quadrupling the block at a
+/// fixed n = 16,384 moves it ~50 (to ~344, where 320 already costs
+/// 4-5%). That rise is followed by a block-size clause on the GFNI-256 arm,
+/// [`NTT_MIN_MISSING_GFNI256_LARGE_BLOCK`], not by a per-class constant;
+/// the 4-5% at 256 KiB did not survive a quiet re-read and that clause's
+/// docstring says why it starts at 1 MiB.
 pub(crate) const NTT_MIN_MISSING: usize = 320;
+
+/// The row gate on the GFNI-256 arm (fan-in 6) at blocks of 1 MiB and up,
+/// keyed on the block size the way [`default_stripe_words`] keys the
+/// nibble stripe. Measured 15 Sep 2026 on the Core Ultra 9 386H, one
+/// binary (origin/main `71d930ee0`), corpus resident, forced transform
+/// against fold, whole-process CPU, two reps of an ABBA quartet with an
+/// A/A copy of each arm, every leg SHA-256 gated
+/// (`research/NTT-ROW-GATE-GFNI-AVX512-2026-09-15.md`, section "The
+/// block-size clause"). CPU crossover at n = 16,384:
+///
+/// | block | `-t4` | `-t16` | F/T at m = 320, `-t4` / `-t16` |
+/// |---|---:|---:|---|
+/// | 64 KiB | ~293 | ~272 | 1.05 / 1.13 (transform) |
+/// | 256 KiB | ~325-338 | ~308 | 0.98-1.00 / 1.02 (tie) |
+/// | 1 MiB | ~408 | ~342 | 0.88 / 0.96 (fold, both past A/A) |
+///
+/// **Why 1 MiB and not 256 KiB.** The first read of the 256 KiB shape
+/// (~344, 320 costing 4-5%) came off a single `-t4` round; re-read back
+/// to back on the old and the current binary on a quiet box it crosses at
+/// ~325 and ~338, a 0-2% band that clears no floor, so the rise below
+/// 1 MiB is inside the ~10% this family holds to and 320 keeps it.
+/// **Why 352 and not 384.** At 1 MiB the fold wins m = 320 by 12% on
+/// four threads and 4% on sixteen, but sixteen threads cross at ~342 and
+/// the transform wins m = 384 there by 8%; 352 sits 1.03x past that
+/// crossover and 0.86x of the four-thread one, so neither pool is handed
+/// a band where the other arm wins by more than its noise.
+///
+/// **Not on AVX-512 GFNI (fan-in 12)**: its only 1 MiB reading, a KVM
+/// guest at `-t8`, crosses at ~323, so the clause would cost it the band
+/// this buys GFNI-256; a bare-metal part is owed before that arm moves.
+/// **Not on NEON**: the 15 Sep work-floor grid put NEON's 1 MiB crossover
+/// BELOW its 128 KiB one (0.63-0.80x, [`NTT_MIN_WORK`]), and the 11 Sep
+/// large-block row round left [`NTT_MIN_MISSING_NEON`] unchanged, so its
+/// block-size effect points the other way. Blocks past 1 MiB are
+/// unmeasured; the rise is in the direction that makes 352 conservative
+/// there. The rule that a fold change moves it is at [`NTT_MIN_PRESENT`].
+pub(crate) const NTT_MIN_MISSING_GFNI256_LARGE_BLOCK: usize = 352;
 
 /// The row gate on aarch64 (NEON), re-measured 5 Sep 2026 with the
 /// conjugate-paired leaf in: the M3 Ultra's crossover moved from ~290
@@ -301,28 +380,40 @@ pub(crate) const NTT_MIN_MISSING_NEON: usize = 192;
 /// the fold still ahead at 128 (1.90 vs 2.08-2.11); create at 512 KiB /
 /// ~2,150 inputs 2.65-2.73 vs 2.49-2.52 at 192 rows (a 6% loss) and
 /// 2.79-2.83 vs 3.43-3.49 at 256, at 64 KiB / ~17,000 inputs 2.03-2.04
-/// vs 2.44-2.57 already at 192. 256 clears every measured shape; the
-/// GFNI and AVX-512 arms are unmeasured with the paired leaf and keep
-/// [`NTT_MIN_MISSING`].
+/// vs 2.44-2.57 already at 192. 256 clears every measured shape. The
+/// GFNI-256 and AVX-512 arms were re-measured with the paired leaf on
+/// 15 Sep 2026 and keep [`NTT_MIN_MISSING`]; its docstring says why.
 pub(crate) const NTT_MIN_MISSING_NIBBLE: usize = 256;
 
-/// The row gate this build runs under: [`NTT_MIN_MISSING_NEON`] on
-/// aarch64, [`NTT_MIN_MISSING_NIBBLE`] on the x86 nibble arms (keyed on
-/// the selected kernel's fan-in, as the back-substitution gate is),
-/// [`NTT_MIN_MISSING`] everywhere else.
+/// The row gate this build runs under for `block_size`:
+/// [`NTT_MIN_MISSING_NEON`] on aarch64, and on x86 whatever
+/// [`ntt_min_missing_for`] answers for the selected kernel's fan-in (as
+/// the back-substitution gate keys on it).
 ///
 /// This is the VERTICAL asymptote `a/c` of the one crossover
 /// [`NTT_MIN_PRESENT`] carries the horizontal end of, so the fold's
 /// cost is its denominator too and a fold change moves it the same
 /// way. The rule and what it costs to forget it are written out once,
 /// at [`NTT_MIN_PRESENT`]; do not re-derive it here.
-pub(crate) fn ntt_min_missing() -> usize {
+pub(crate) fn ntt_min_missing(block_size: usize) -> usize {
     if cfg!(target_arch = "aarch64") {
         NTT_MIN_MISSING_NEON
-    } else if crate::gf16::multi_fold_width() == 4 {
-        NTT_MIN_MISSING_NIBBLE
     } else {
-        NTT_MIN_MISSING
+        ntt_min_missing_for(crate::gf16::multi_fold_width(), block_size)
+    }
+}
+
+/// The x86 row gate as a pure function of the fold kernel's fan-in and the
+/// block size, so the tests pin every arm without the host's CPU:
+/// [`NTT_MIN_MISSING_NIBBLE`] at fan-in 4,
+/// [`NTT_MIN_MISSING_GFNI256_LARGE_BLOCK`] at fan-in 6 from 1 MiB blocks,
+/// [`NTT_MIN_MISSING`] for everything else (GFNI-256 under 1 MiB, AVX-512
+/// GFNI at fan-in 12, and the single-source path at 0).
+pub(crate) fn ntt_min_missing_for(fan_in: usize, block_size: usize) -> usize {
+    match fan_in {
+        4 => NTT_MIN_MISSING_NIBBLE,
+        6 if block_size >= 1 << 20 => NTT_MIN_MISSING_GFNI256_LARGE_BLOCK,
+        _ => NTT_MIN_MISSING,
     }
 }
 /// How far the recovery exponents may SPREAD, as work per row the
@@ -405,7 +496,11 @@ pub(crate) fn ntt_min_missing() -> usize {
 /// m = 400, which is the margin the rest of this family carries; it is
 /// 1.77x past the M3's worst. One constant and not a per-arch pair for
 /// the reason written out at [`NTT_MIN_PRESENT`]: the margin already
-/// covers the gap.
+/// covers the gap. Since 15 Sep 2026 the x86 nibble work floor
+/// ([`NTT_MIN_WORK_NIBBLE`]) refuses that 1,312-present point itself -
+/// it asks for 1,475 present at m = 400 - so on that arm the worst span
+/// point the gate can still reach is 2,048 present's 571, 1.34x under
+/// 768. The value is unchanged.
 ///
 /// **What it fixes.** The flat 3 was above the crossover at BOTH
 /// corners the present gate admits, which is to say it had negative
@@ -475,14 +570,21 @@ pub(crate) const NTT_MIN_WORK_PER_ROW: usize = 768;
 /// the two ends of that one curve, and the gate is
 /// `n_present >= max(NTT_MIN_PRESENT, NTT_MIN_WORK / m)`.
 ///
-/// Both are set past the WORST measured crossover, which is the i5's:
-/// the work floor by 1.27x (524,288 against its 413k at m=256) and the
-/// present floor by 1.33x (320 against its ~240 at m=2,048), the way the
-/// row gate is set 1.2x past its own. That leaves them 1.5-2.7x past
-/// every NEON point, which is why this is **one pair for every arch
-/// rather than the per-arch pair [`NTT_MIN_MISSING`] needs**: the gap
-/// between the boxes fits inside the margin, and a split would rest on
-/// four legs a point.
+/// Both were set past the WORST measured crossover, which is the i5's:
+/// the work floor by 1.27x (524,288 against its 413k at m=256, 128 KiB)
+/// and the present floor by 1.33x (320 against its ~240 at m=2,048), the
+/// way the row gate is set 1.2x past its own. That left them 1.5-2.7x
+/// past every NEON point, which is why this was **one pair for every
+/// arch rather than the per-arch pair [`NTT_MIN_MISSING`] needs**: the
+/// gap between the boxes fit inside the margin, and a split would have
+/// rested on four legs a point.
+///
+/// **The work end was split on 15 Sep 2026**, once both boxes had a
+/// same-binary grid at two block sizes: the i5's worst crossover had
+/// risen to 459k at 1 MiB, past the margin, so the x86 nibble arms read
+/// [`NTT_MIN_WORK_NIBBLE`] through [`ntt_min_work`]. The present end is
+/// still one constant. The table and the decision are at
+/// [`NTT_MIN_WORK`].
 ///
 /// The floor was 512 for the first day (`fda1e39a5`), which was the
 /// value the m = 1,024 row alone supported. Swept past that row on both
@@ -491,10 +593,13 @@ pub(crate) const NTT_MIN_WORK_PER_ROW: usize = 768;
 /// takes back is worth 11-15% of the whole repair at m = 2,048 / 384
 /// present on both boxes.
 ///
-/// Block size moves the crossover far less than `m` does and always
-/// downward (NEON, m = 400: ~650 at 64 KiB, ~580 at 128 KiB, ~460 at
-/// 512 KiB), so it is not a third clause - the 128 KiB column above is
-/// the conservative one.
+/// Block size moved the crossover far less than `m` did and, on NEON,
+/// always downward (m = 400: ~650 at 64 KiB, ~580 at 128 KiB, ~460 at
+/// 512 KiB), so it was not made a third clause - the 128 KiB column
+/// above is the conservative one there. The 15 Sep grid found it NOT
+/// always downward on x86 (up 1.31x from 128 KiB to 1 MiB at m = 1,024
+/// on the i5) and kept it out of the gate for a different reason,
+/// written at [`NTT_MIN_WORK`].
 ///
 /// **Read on wall, not on whole-process CPU, where the two disagree -
 /// but only on an IDLE host, because on a busy one the disagreement is
@@ -516,7 +621,10 @@ pub(crate) const NTT_MIN_WORK_PER_ROW: usize = 768;
 /// against the stage's ~330, because the transform spreads over 12
 /// threads on 6 cores and buys wall with CPU. At the admitted boundary
 /// there (512 present) that shape is 14% faster in wall for 6% more
-/// CPU, which is the trade a downloader wants.
+/// CPU, which is the trade a downloader wants. At 1 MiB blocks
+/// (15 Sep) the same row reads 448 on wall and 776 on CPU, and the
+/// transform's CPU premium at 512 present is 18%; the nibble boundary
+/// there is 576 present since.
 ///
 /// What this admits that 8,192 refused, measured on the M3: a
 /// 1 GiB posting at 256 KiB with 400 rows missing (3,696 present) at
@@ -532,7 +640,7 @@ pub(crate) const NTT_MIN_WORK_PER_ROW: usize = 768;
 /// MORE present blocks to be worth admitting than it did when these
 /// numbers were measured. That direction is easy to get backwards: a
 /// faster fold makes the gate STRICTER, not looser. The four numbers
-/// it moves are this constant, [`NTT_MIN_WORK`], [`ntt_min_missing`]
+/// it moves are this constant, [`ntt_min_work`], [`ntt_min_missing`]
 /// and the create's own pair in
 /// `crates/nzbkit-base/src/par2gen/ntt_range.rs`, and the fold itself
 /// (`crates/nzbkit-base/src/par2repair/linalg.rs`) carries the pointer
@@ -561,11 +669,102 @@ pub(crate) const NTT_MIN_WORK_PER_ROW: usize = 768;
 pub(crate) const NTT_MIN_PRESENT: usize = 320;
 
 /// The other end of the same curve: the syndrome-work floor,
-/// `n_present * n_missing`, which is what binds below m = 1,024. See
-/// [`NTT_MIN_PRESENT`] for the sweep both come from - and for the rule
-/// that the fold's cost is this constant's denominator too, so a fold
-/// change requires re-deriving it.
+/// `n_present * n_missing`, which binds wherever it asks for more than
+/// [`NTT_MIN_PRESENT`] does - below m = 1,638 at this value. See
+/// [`NTT_MIN_PRESENT`] for the 7 Sep sweep it was set from - and for the
+/// rule that the fold's cost is this constant's denominator too, so a
+/// fold change requires re-deriving it. The gate reads
+/// [`ntt_min_work`], which since 15 Sep 2026 answers
+/// [`NTT_MIN_WORK_NIBBLE`] on the x86 nibble arms; this value is every
+/// other arch's, NEON included.
+///
+/// **Swept again 14-15 Sep 2026 on both boxes, on one binary
+/// (`87ee76638`), at 1 MiB and 128 KiB blocks**
+/// (`research/NTT-MIN-WORK-SMALL-SETS-2026-09-14.md`: 448 legs on the
+/// M3 Ultra, 406 on the i5-10600KF, every one SHA-gated with its path
+/// asserted). Crossover as work, `n_present x m`, read on CPU on the M3
+/// (a loaded desktop) and on wall on the i5 (idle; its feed+fold+solve
+/// stage agrees within 11% on every row, and within 4.3% at the two
+/// points in bold that set the x86 floor):
+///
+/// | m | M3 1 MiB | M3 128 KiB | i5 1 MiB | i5 128 KiB |
+/// |---:|---:|---:|---:|---:|
+/// | 192 | 205k | 324k | - | - |
+/// | 256 | 176k | 279k | 376k | **442k** |
+/// | 320 | 178k | 264k | 369k | 382k |
+/// | 448 | 189k | 259k | 328k | 360k |
+/// | 640 | 200k | 268k | 346k | 348k |
+/// | 1,024 | 268k | **334k** | **459k** | 351k |
+///
+/// **On NEON this value is 1.57x past the worst point, and it stays.**
+/// A NEON floor of `416 << 10` (1.27x past 334k) is what the M3's grid
+/// alone supports, and it is NOT taken, because lowering the floor
+/// moves its hand-off to [`NTT_MIN_PRESENT`] from m = 1,638 down to
+/// m = 1,331, and crossover work RISES with m past 1,024 on that part
+/// (7 Sep: ~440k at m = 2,048). Interpolated between those two rows the
+/// NEON crossover at m = 1,331 is ~280 present, which the 320 present
+/// floor would clear by only ~1.15x. That band - m = 1,024..2,048 at
+/// 128 KiB, present ~250-450 - has no leg in this family, and a NEON
+/// floor needs it first.
+///
+/// **On the x86 nibble arms it did not hold.** 524,288 sat 1.14x past
+/// the i5's 459k (448 present at m = 1,024, 1 MiB) and 1.19x past its
+/// 442k (m = 256, 128 KiB), both under the 1.27x it was set with against
+/// the 7 Sep figure of 413k. Every shape it admitted still won on wall;
+/// the margin is what had gone. That arm has its own constant now.
+///
+/// **Block size is still not a third clause, and the reason changed.**
+/// The 1 MiB crossover over the 128 KiB one at the same `m` is
+/// 0.63-0.80 on the M3 (down 1.25-1.6x) but 0.85, 0.97, 0.91, 1.00 and
+/// 1.31 on the i5 at m = 256..1,024: inside the margin at four rows of
+/// five and UPWARD at the fifth, the opposite direction to NEON. A
+/// clause needs the same move past the margin on both boxes; instead
+/// each floor is set against its own box's worse block size.
 pub(crate) const NTT_MIN_WORK: usize = 512 << 10;
+
+/// The work floor on the x86 nibble arms (AVX2 without GFNI), 15 Sep
+/// 2026: 1.29x past the i5-10600KF's worst crossover on this gate, 459k
+/// at m = 1,024 / 1 MiB on wall (the stage reads 453k), and 1.33x past
+/// its 442k at m = 256 / 128 KiB. The table is at [`NTT_MIN_WORK`].
+///
+/// **What it gives back, measured.** The shapes between 524,288 and
+/// this value were transform wins on wall: (m = 256, 2,048 present) by
+/// 14% at 1 MiB and 9% at 128 KiB, (1,024, 512) by 2.5% and 10%. That
+/// is the margin being paid for, as at every constant in this family.
+/// At 1 MiB it is a cheap trade on this box - the transform bought
+/// those two wall wins with 31% and 18% MORE whole-process CPU than the
+/// fold, running 12 threads on 6 cores - but at 128 KiB (256, 2,048)
+/// won on CPU too (15%), and that is the real cost.
+///
+/// The GFNI and AVX-512 x86 arms are unmeasured on this gate and keep
+/// [`NTT_MIN_WORK`], as they keep [`NTT_MIN_MISSING`] for the row gate.
+/// **It was expected to move with the transform's x86 CPU at 1 MiB, and
+/// on 15 Sep 2026 it did not need to.** That A/B
+/// (research/NTT-X86-TRANSFORM-CPU-1MIB-2026-09-15.md) left the pool at
+/// every logical CPU - six threads cuts the CPU 15-36% but pays up to
+/// 10% wall at the shapes this floor admits, a policy call - and moved
+/// the REPAIR's stripe to 512 ([`repair_stripe_words`]), which at
+/// (m = 1,024, 512 present) bought 0.8% of wall, at the A/A floor. The
+/// 459k point was measured at the old 1,024 stripe, so it can only have
+/// come DOWN, by an estimated ~20 present at that depth (to roughly
+/// 440k); the 128 KiB 442k point ran at 512 before and after. This
+/// value therefore sits ~1.30x past the worst point, inside the 1.27x
+/// rule, and is not re-derived: tightening it could buy ~2.5% and would
+/// rest on an interpolated crossover rather than a measured one.
+pub(crate) const NTT_MIN_WORK_NIBBLE: usize = 576 << 10;
+
+/// The work floor this build runs under: [`NTT_MIN_WORK_NIBBLE`] on the
+/// x86 nibble arms (keyed on the selected kernel's fan-in, as
+/// [`ntt_min_missing`] is), [`NTT_MIN_WORK`] everywhere else, aarch64
+/// included. The rule that a fold change moves it is at
+/// [`NTT_MIN_PRESENT`].
+pub(crate) fn ntt_min_work() -> usize {
+    if !cfg!(target_arch = "aarch64") && crate::gf16::multi_fold_width() == 4 {
+        NTT_MIN_WORK_NIBBLE
+    } else {
+        NTT_MIN_WORK
+    }
+}
 
 /// Flat ceiling on the default resident-corpus budget. The NTT is a
 /// big-machine feature; low-memory hosts stay on the streaming fold
@@ -609,9 +808,10 @@ pub(super) fn ntt_default_budget(ram: Option<u64>, cgroup_limit: Option<u64>) ->
 }
 
 /// Present blocks one retention WINDOW must hold before the streaming
-/// transform is worth running over it - the gate that decides whether a
-/// corpus bigger than the budget takes the transform in windows or
-/// streams the fold instead.
+/// transform is considered over it at all. Since 14 Sep 2026 this is a
+/// SANITY floor under [`ntt_window_row_gate`], which is the gate that
+/// decides whether a corpus bigger than the budget takes the transform
+/// in windows or streams the fold instead.
 ///
 /// The fold worker has transformed the corpus in budget-sized windows
 /// since 2 Sep 2026 (the transform is linear, so windows XOR into the
@@ -644,24 +844,268 @@ pub(super) fn ntt_default_budget(ram: Option<u64>, cgroup_limit: Option<u64>) ->
 /// Fitted, the per-window charge is 0.52 s on the 32-thread box and
 /// 5.5 s on the 12-thread one, which puts break-even against the fold
 /// at ~265 sources per window on the first and **~785 on the second**.
-/// The floor is therefore set from the WORSE arm, and from the measured
-/// points on either side of it rather than the fit: a 1,030-source
-/// window is 1.1x the fold there and a 1,540-source one 1.45x - a whole
-/// window of RAM for very little - where 2,048 buys 1.73x (50.8 against
-/// 88.4) and 2.3x on the M3. It is also two full eight-source groups of
-/// the fused kernel per live leaf (base logs are coprime to 65,535, so
-/// only 128 of the 255 leaves carry sources), which is where the leaf
-/// stops running under-filled.
 ///
-/// One flat constant rather than a per-arch pair like
-/// [`NTT_MIN_MISSING_NIBBLE`]: what separates the two boxes here is the
-/// thread count the combine is spread over, not the kernel, so an
-/// eight-core Apple part would sit nearer the i5 and an arch-keyed
-/// constant would tell it the wrong thing.
+/// **It was 2,048 from 5 Sep to 14 Sep 2026**, set from the WORSE arm
+/// and from the measured points on either side of it rather than the
+/// fit: a 1,030-source window is 1.1x the fold there and a 1,540-source
+/// one 1.45x, where 2,048 buys 1.73x (50.8 against 88.4) and 2.3x on the
+/// M3. It was also two full eight-source groups of the fused kernel per
+/// live leaf (base logs are coprime to 65,535, so only 128 of the 255
+/// leaves carry sources). It was one flat constant rather than a
+/// per-arch pair on the argument that the thread count, not the kernel,
+/// separates the two boxes; and it admitted the transform for blocks up
+/// to 512 KiB on a 4 GB box, 1 MiB on 8 GB, 2 MiB on 16 GB and 4 MiB on
+/// 32 GB.
 ///
-/// At 2,048 the transform is admitted for blocks up to 512 KiB on a
-/// 4 GB box, 1 MiB on 8 GB, 2 MiB on 16 GB and 4 MiB on 32 GB.
-pub(crate) const NTT_MIN_WINDOW_PRESENT: usize = 2048;
+/// **That was the right reading of ONE shape and the wrong constant for
+/// the rest**, because the charge is not a fixed number of seconds a
+/// window. It is `c_w * min(m, 4369)` per 64 KiB of width - it grows with
+/// the ROWS, plateaus at the depth-2 tile, and does not move with the
+/// sources the window holds - so "sources per window" was a proxy that
+/// only held at 900 rows and 1 MiB. On a 512 MB box (a 128 MiB budget)
+/// at 64 KiB blocks a window holds ~1,650 sources once the worker arenas
+/// are paid, so 2,048 refused the transform at EVERY `m`, while the
+/// forced transform beat the fold from m = 256 (by 18%) to m = 4,096
+/// (7x in CPU, 10x in wall), 120 SHA-gated legs
+/// (`research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md`).
+/// The curve in window size that replaced it, per kernel class, is
+/// [`ntt_window_row_gate`].
+///
+/// **320 is [`NTT_MIN_PRESENT`]**: a window holding fewer sources than
+/// the present gate asks of a whole corpus would be a transform over a
+/// shape that gate refuses on its own. The curve already refuses every
+/// window at or under its combine ratio whatever `m` is (163 sources on
+/// NEON, 312 on x86 since that constant was measured), so on both it is a
+/// guard and not a calibration: on x86 it binds alone only for windows of
+/// 313 to 319 sources, where the curve would ask thousands of rows anyway.
+pub(crate) const NTT_MIN_WINDOW_PRESENT: usize = 320;
+
+/// The windowed crossover's one per-class constant on aarch64 (NEON):
+/// `k = c_w / c_f`, the per-window combine over the fold, in SOURCES.
+///
+/// Measured 14 Sep 2026 on the M3 Ultra at `-t4` with
+/// `NZBFAST_NTT_PROFILE=1` over a 1 GiB / 64 KiB / 16,384-block repair,
+/// in CPU-seconds per 64 KiB of width: fold `c_f` = 1.9e-6 per
+/// source-row (10.7 -> 131 CPU-s over m = 192..4,096, linear), combine
+/// `c_w` = 3.1e-4 per row per window (0.08 thread-s a window at m = 256,
+/// 0.34 at 1,024, 0.35 at 4,096 on 16 KiB slabs, identical at 2,304 and
+/// 16,128 sources a window). 3.1e-4 / 1.9e-6 = 163
+/// (`research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md`,
+/// section 3a). No margin on it: the margin is the row gate's own, which
+/// [`ntt_window_row_gate`] scales.
+pub(crate) const NTT_WINDOW_COMBINE_NEON: usize = 163;
+
+/// The same constant on x86, measured 14 Sep 2026 on BOTH x86 kernel
+/// classes the fleet has, and set to the largest of the four cells.
+///
+/// Same fixture and definitions as the NEON constant (1 GiB / 64 KiB /
+/// 16,384 blocks, CPU-seconds per 64 KiB of width, `c_f` the slope of
+/// whole-process CPU over no-`-m` fold legs at m = 192..4,096 divided by
+/// n, `c_w` the median over m = 256 / 1,024 / 4,096 with the corpus
+/// resident and under `-m128` of each window's depth0 - leaves over its
+/// rows), release parfast on Windows, two reps, minimum of the two:
+///
+/// | box, kernel class, pool | `c_f` | `c_w` | `k` |
+/// |---|---:|---:|---:|
+/// | i5-10600KF, nibble (AVX2), `-t4` | 3.37e-6 | 7.56e-4 | 225 |
+/// | i5-10600KF, nibble (AVX2), `-t12` | 4.25e-6 | 1.33e-3 | **312** |
+/// | Core Ultra 9 386H, GFNI-256, `-t4` | 8.93e-7 | 2.22e-4 | 249 |
+/// | Core Ultra 9 386H, GFNI-256, `-t16` | 1.61e-6 | 4.44e-4 | 276 |
+/// | EPYC 9354P, AVX-512 GFNI, `-t4` (15 Sep) | 1.58e-6 | 3.62e-4 | 229 |
+/// | EPYC 9354P, AVX-512 GFNI, `-t8` (15 Sep) | 1.67e-6 | 4.21e-4 | 251 |
+///
+/// **One constant, not a split on [`crate::gf16::multi_fold_width`]**:
+/// the GFNI class sits inside the nibble class's own thread-count spread,
+/// so a per-class pair would key on a difference the measurement does not
+/// show. 312 is the worst cell with no margin on it, for the reason the
+/// NEON constant gives - the margin is the row gate's, which
+/// [`ntt_window_row_gate`] scales - and a larger `k` refuses more
+/// windows, so the worst cell is the conservative end. The AVX-512 GFNI
+/// arm inherited it unmeasured and was measured on 15 Sep 2026 (the last
+/// two rows: an 8 vCPU KVM guest, same fixture and definitions, Linux,
+/// `research/harness/rowgate.py`'s `k` phase, two reps, minimum of the
+/// two) at 229 / 251, inside the same family and under 312, so it keeps
+/// the one constant (`research/NTT-ROW-GATE-GFNI-AVX512-2026-09-15.md`).
+///
+/// **It was 702 until this measurement, inferred** from the WALL figures
+/// in [`NTT_MIN_WINDOW_PRESENT`]'s table times a 1.2 margin, and the
+/// inference was wrong in the fold, not the combine: 88 s of wall over
+/// 9,340 x 900 on twelve threads read as `c_f` ~ 6.5e-7, five times
+/// under the i5's measured CPU slope. On a 128 MiB budget at 64 KiB
+/// (a 1,630-source window) 702 asked 449 rows and 312 asks 316.
+///
+/// Validated at `-t4 -m128`, both builds interleaved per rung: on the i5
+/// the transform is now taken from m = 384 (19.16 CPU-s against the
+/// fold's 22.44, where 702 folded), and on the Core Ultra at m = 512 at
+/// the full stripe (10.89 against 702's 14.75, which was over the fold).
+/// One rung below the GFNI edge [`ntt_admit_within`] then re-admitted a
+/// row-refused window at a narrowed stripe that lost to the fold (m = 384,
+/// 14.16 CPU-s against 10.50); that was the narrowing rule's, not this
+/// constant's, it moved with it, and since 15 Sep 2026 that window folds
+/// (step 5 of the rule;
+/// `research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md`,
+/// sections 6 and 8; driver `research/harness/wcomb.ps1`, reducer
+/// `research/harness/wcombsum.py`).
+///
+/// **Measured again at 1 MiB BLOCKS on 16 Sep 2026, because nothing made
+/// it scale-free by construction**: the combine it prices is per WINDOW,
+/// while the transform's saving inside a window grows with the block. On
+/// the GFNI-256 part, with a 64 KiB control in the same sitting on the
+/// same binary (`research/NTT-ROW-GATE-GFNI-AVX512-2026-09-15.md`,
+/// "`k` at 1 MiB"):
+///
+/// | block, pool | `c_f` | `c_w` | `k` |
+/// |---|---:|---:|---:|
+/// | 64 KiB, `-t4` (control; 249 on 14 Sep) | 8.82e-7 | 2.21e-4 | 251 |
+/// | 64 KiB, `-t16` (control; 276 on 14 Sep) | 1.63e-6 | 4.42e-4 | 272 |
+/// | 1 MiB, `-t4` | 1.02e-6 | 2.30e-4 | 225 |
+/// | 1 MiB, `-t16` | 2.26e-6 | 4.56e-4 | 202 |
+///
+/// **`c_w` is what does NOT move: +4.0% and +3.2% across a 16x block**,
+/// which is what [`crate::par2ntt`]'s `Node::Combine` arm says must
+/// happen - the combine is a `fold_into` over the stripe's words, once
+/// per stripe, so a window's combine is linear in the block exactly as
+/// the fold is. All of `k`'s movement is the FOLD getting dearer per byte
+/// at 1 MiB (+15.8% / +38.9%), which is the direction
+/// [`NTT_MIN_MISSING_GFNI256_LARGE_BLOCK`] moved on.
+///
+/// **312 STAYS, and the rungs are why rather than the spread.** The 1 MiB
+/// cells do sit inside the 225-312 the six 64 KiB cells span, but the
+/// windowed ladders settle it: at 1 MiB the measured crossover excess over
+/// a resident ladder in the same sitting is 13 rows at 2,064-source
+/// windows (where 312 asks 62) and ~123 rows at 1,040-source windows
+/// (where 312 asks 150, and 225 and 202 ask 97 and 84). **312 is the only
+/// candidate conservative at BOTH**, so re-deriving `k` here would buy a
+/// fifth of the overcharge at large windows and pay 26-39 rows for it at
+/// small ones. No single `k` fits both cells either (73 fitted to one, 246
+/// to the other), so the overcharge belongs to
+/// [`ntt_window_row_gate`]'s one-parameter SHAPE and not to this number.
+///
+/// **312 CARRIES AN UNCERTAINTY, and that clause above is more confident
+/// than the evidence** (16 Sep 2026, the same note's "`k` at 1 MiB on
+/// the NIBBLE class" and the estimator section under it). Two things a
+/// reader of the tables above cannot see:
+///
+/// - **The NIBBLE class measures ABOVE 312 at 1 MiB**, where the
+///   GFNI-256 rows above measure below it: `k` = 395 at `-t12` on the i5,
+///   380 with both halves rung-matched, 21-27% over this constant. A `k`
+///   set below the truth UNDER-asks, which is the non-conservative
+///   direction, and it is the class that SET this number. Nothing moved
+///   on it, because `k` without a measured ask is the half that did not
+///   decide 312 the first time and a nibble-class windowed ladder at
+///   1 MiB is still owed.
+/// - **`c_f` is a least-squares SLOPE in `m`, so its RUNG SET is a free
+///   parameter, and nobody recorded the choice.** The fold is not linear
+///   in `m` on this part, and refitting the 14 Sep i5 `-t12` legs over
+///   m = 192..2048 instead of 192..4096 - same legs, same log, same
+///   night - moves `c_f` 18% and reads `k` = 264. Refitted on the one
+///   rung set every fixture shares, the ten 64 KiB cells span 197-264
+///   rather than 183-312, and the selection rule that set this constant
+///   (one number, the largest cell, no margin) gives 264. **312 is a
+///   value the common rung set does not produce in any cell**, and its
+///   own fit is the worst conditioned of the ten (worst residual 14.88
+///   and intercept 18.18, both the largest; 2.15 and 8.31 without the
+///   m = 4,096 rung). `research/harness/wcombsum.py` and `rowgate.py`
+///   both take `--rungs` and print the rung set beside every `c_f` and
+///   `k` since that date, so a figure copied out of either carries its
+///   own provenance.
+///
+/// **THE SECOND BULLET'S UNCERTAINTY IS A FLOOR, NOT A MEASUREMENT DEBT**
+/// (16 Sep 2026, the same note's two-binary control section). The
+/// two-binary control ran the 14 Sep tree `87ee76638` and an
+/// origin/main tip interleaved in ONE quiet sitting on the i5 at
+/// `-t4 -t6 -t12`, 132 legs: **`c_f` agrees to 2.3% between them at
+/// every pool on both rung sets**, against the 28-35% that separated the
+/// 14 and 16 Sep SITTINGS. So the spread above is not a code difference
+/// waiting to be resolved by a better round - the three sittings order
+/// by their box load exactly as they order by `c_f`, and a constant
+/// cannot be conditioned on a sitting. A future re-measure will not
+/// tighten this; do not commission one expecting it to. The highest
+/// 64 KiB cell now measured anywhere is 288, so the conservatism
+/// argument below is unchanged and slightly wider than it was.
+///
+/// **It STAYS anyway, and the reason is rows rather than inertia.** 312
+/// is conservative against every 64 KiB cell on either rung set, and what
+/// [`ntt_window_row_gate`] does with the whole 197-395 spread is worth 34
+/// rows of excess at 2,048-source windows and 15 at 4,096; below about
+/// 1,000 sources `reconstruct`'s `plan_slabs` limit decides instead of
+/// this number, whatever it is. Re-deriving it on a shared rung set would
+/// move it DOWN 15% while the one cell above it stayed put, which is the
+/// wrong direction to move first.
+pub(crate) const NTT_WINDOW_COMBINE_X86: usize = 312;
+
+/// [`NTT_WINDOW_COMBINE_NEON`] on aarch64, [`NTT_WINDOW_COMBINE_X86`]
+/// everywhere else - keyed on the target the way [`ntt_min_missing`] is,
+/// with the nibble and GFNI arms sharing one measured figure because
+/// they measured inside each other's spread.
+pub(crate) fn ntt_window_combine() -> usize {
+    if cfg!(target_arch = "aarch64") {
+        NTT_WINDOW_COMBINE_NEON
+    } else {
+        NTT_WINDOW_COMBINE_X86
+    }
+}
+
+/// The windowed row gate: the fewest missing rows at which a corpus taken
+/// `sources` blocks per window beats the fold, or `None` when no row
+/// count does. `gate` is the single-window row gate ([`ntt_min_missing`])
+/// and `k` the class's combine ratio ([`ntt_window_combine`]).
+///
+/// Per window of `S` sources and `m` rows the fold costs `c_f * S * m`;
+/// the transform costs `c_l * S` for the leaves plus `c_w * m` for the
+/// upper tree every window rebuilds. All three are linear in the block
+/// width, so the width cancels and the crossover is
+///
+/// ```text
+///     m*(S) = (c_l / c_f) * S / (S - k)        k = c_w / c_f
+/// ```
+///
+/// a hyperbola with no solution at `S <= k`. `c_l / c_f` is the
+/// single-window crossover, which the row gate already carries with its
+/// margin, so the gate is that constant scaled by `S / (S - k)` and `k`
+/// is the one number this adds. Only WHOLE rows of the excess are
+/// charged (`gate + gate * k / (S - k)`, integer division), so a big
+/// window keeps exactly the row gate it had: on NEON the excess is zero
+/// from S = 31,460 and at most one row from S = 15,812.
+///
+/// **It must stay a curve in S, not a flat row margin.** Wherever the
+/// arenas leave a window its whole budget, `S >= 2m` - `plan_slabs`
+/// holds `2 * m * w` inside it - so the excess is at most `k / 2` rows
+/// (81 on NEON). A flat 81 would refuse the transform at m = 192..272
+/// on every big-window shape where it wins today, and the curve adds
+/// 16 rows at S = 2,048 falling to nothing past S = 31,459, which is
+/// what leaves a big box's dispatch as it was.
+///
+/// **The one parameter does not describe 1 MiB, measured 16 Sep 2026**,
+/// and it is the SHAPE rather than `k` (see [`NTT_WINDOW_COMBINE_X86`],
+/// which was re-measured that day and kept). Three ladders on one fixture
+/// in one sitting on the GFNI-256 part put the crossover's excess over a
+/// resident ladder at 13 rows for 2,064-source windows and ~123 for 1,040,
+/// where this curve grows 2.2x between them and the measurement grows 8x:
+/// no `k` fits both (73 fitted to one, 246 to the other). It errs
+/// CONSERVATIVE at both with the shipped 312 - it over-asks, so a window
+/// it refuses folds - which is why nothing was changed on two points
+/// (`research/NTT-ROW-GATE-GFNI-AVX512-2026-09-15.md`, "`k` at 1 MiB").
+///
+/// **ANSWERED the same day, and the one parameter STAYS** - five window
+/// sizes on that fixture, in that note's "The windowed ask's FORM"
+/// section. The small-window end is not a curve-shape problem at all:
+/// [`crate::par2repair::reconstruct`]'s `plan_slabs` keeps `2 * m * w`
+/// inside the budget, so a window of `S` sources only survives to
+/// m ~ S/2, and a 784-source probe walks into that limit with the fold
+/// winning by 32%. So the protection down there is ARITHMETIC, and a
+/// second parameter fitted to recover the large-window band would lower
+/// the ask across the range and give it up where the fold is measured
+/// winning - with a fitted pole too unstable to ship anyway (~921 across
+/// one sitting, ~226 across another). What today's conservatism costs is
+/// ~40 rows of `m` at 1,500-2,000-source windows, worth nothing to ~7% of
+/// repair CPU. A rung up, at 4 MiB, the window term's cost in rows is the
+/// SAME and it is [`ntt_min_missing`]'s block-size clause that stops
+/// carrying (that note's "The 4 MiB windowed ladder").
+pub(crate) fn ntt_window_row_gate(sources: usize, gate: usize, k: usize) -> Option<usize> {
+    let spare = sources.checked_sub(k).filter(|&s| s > 0)?;
+    Some(gate.saturating_add(gate.saturating_mul(k) / spare))
+}
 
 /// The conservative shape gates, as a pure function so the tests pin
 /// them without touching the process environment - `stream_windows` is
@@ -674,13 +1118,13 @@ pub(crate) fn ntt_gates_pass(
     budget: usize,
     stream_windows: bool,
 ) -> bool {
-    n_missing >= ntt_min_missing()
+    n_missing >= ntt_min_missing(block_size)
         && n_present >= NTT_MIN_PRESENT
         // The present gate's low-m branch. `saturating_mul` is not
         // decoration: both counts reach the PAR2 ceiling of 65,535, and
         // 65,535^2 does not fit a 32-bit `usize` (armv7), where the
         // wrapped product would refuse a shape the gate means to admit.
-        && n_present.saturating_mul(n_missing) >= NTT_MIN_WORK
+        && n_present.saturating_mul(n_missing) >= ntt_min_work()
         // The span gate. A set posted whole spans `n_missing - 1` and
         // takes the floor arm unconditionally; everything wider has to
         // carry [`NTT_MIN_WORK_PER_ROW`] of work for each row the
@@ -693,32 +1137,51 @@ pub(crate) fn ntt_gates_pass(
         && (exp_span < n_missing
             || exp_span.saturating_mul(NTT_MIN_WORK_PER_ROW)
                 < n_present.saturating_mul(n_missing))
-        && ntt_retention_admits(block_size, n_present, budget, stream_windows)
+        && ntt_retention_admits(block_size, n_present, n_missing, budget, stream_windows)
 }
 
 /// The retention arm of [`ntt_gates_pass`]: the corpus fits the budget
 /// (one window - the retained path, unchanged), or the budget holds a
-/// window worth transforming and the worker takes the corpus a window
-/// at a time. The budget itself is untouched either way, so the peak
-/// resident set is what it always was - this admits shapes the flat
-/// "corpus must fit" clause refused, it never raises what one of them
-/// holds.
+/// window worth transforming at this row count and the worker takes the
+/// corpus a window at a time. The budget itself is untouched either
+/// way, so the peak resident set is what it always was - this admits
+/// shapes the flat "corpus must fit" clause refused, it never raises
+/// what one of them holds.
 pub(crate) fn ntt_retention_admits(
     block_size: usize,
     n_present: usize,
+    n_missing: usize,
     budget: usize,
     stream_windows: bool,
 ) -> bool {
     if n_present.saturating_mul(block_size) <= budget {
         return true;
     }
-    stream_windows && budget / block_size.max(1) >= NTT_MIN_WINDOW_PRESENT
-    // A window of full-length slices, which is what this divides. The
-    // worker charges a short tail its zero-padded block as well as its
-    // fed bytes (the pad arena the transform builds), so a set that is
-    // ALL tails fills a window at about half this count - still twice
-    // the measured crossover, which is why the floor is stated in whole
-    // blocks and not in charged bytes.
+    stream_windows && ntt_window_row_ask(block_size, budget).is_some_and(|rows| n_missing >= rows)
+}
+
+/// The fewest missing rows a window of `corpus_budget` bytes admits the
+/// transform at ([`ntt_window_row_gate`] under this build's row gate and
+/// combine ratio), or `None` when the window is too small for ANY row
+/// count - under [`NTT_MIN_WINDOW_PRESENT`], or at or under `k` sources.
+///
+/// One function for two readers, because they must agree:
+/// [`ntt_retention_admits`] admits a windowed corpus on it, and
+/// [`ntt_admit_within`] reads its `None` as "refused on the ARENAS" - the
+/// one refusal a narrower stripe can honestly answer.
+///
+/// A window of full-length slices, which is what this divides. The
+/// worker charges a short tail its zero-padded block as well as its fed
+/// bytes (the pad arena the transform builds), so a set that is ALL
+/// tails fills a window at about half this count - which the curve then
+/// prices as the smaller window it is not, in the fold's favour. Stated
+/// in whole blocks for that reason.
+pub(crate) fn ntt_window_row_ask(block_size: usize, corpus_budget: usize) -> Option<usize> {
+    let sources = corpus_budget / block_size.max(1);
+    if sources < NTT_MIN_WINDOW_PRESENT {
+        return None;
+    }
+    ntt_window_row_gate(sources, ntt_min_missing(block_size), ntt_window_combine())
 }
 
 /// Whether an over-budget corpus may take the transform one window at a
@@ -745,6 +1208,11 @@ pub(crate) fn ntt_stream_windows() -> bool {
 /// would re-cap every library caller and bench box - auto's 16 GiB
 /// ceiling is under the M3 Ultra's measured 10 GiB corpus's headroom.
 /// `NZBFAST_NTT_BUDGET` still overrides absolutely, either direction.
+///
+/// A published limit a PERSON set binds in either direction too, since
+/// 15 Sep 2026, raising only to cgroup / 4 under a cgroup limit; a
+/// published `auto` only lowers - [`clamp_to_published`] says why.
+///
 /// Used by BOTH the creator and the repair since 8 Sep 2026. The
 /// creator honoured the published budget and the repair did not, so a
 /// `--mem-limit` that held creation to 2 GiB let a repair on the same
@@ -772,12 +1240,72 @@ pub(crate) fn ntt_budget_within_published() -> usize {
 /// The published-budget clamp, in ONE place and PURE: no environment,
 /// no host probe, so a test can drive both sides of it without touching
 /// process-global state that cannot be un-published.
+///
+/// **Which direction a published budget binds in (15 Sep 2026).** A
+/// limit a PERSON set - `parfast -m`, `--mem-limit`, the daemon's
+/// `mem_limit` setting, an embedded host's limit, all of which arrive
+/// through [`crate::mem::MemBudget::from_user_limit`] - REPLACES the host
+/// default in both directions, up to [`NTT_BUDGET_CEIL`] and the address
+/// space. Until then it only ever lowered it, so `parfast r -m256` on a
+/// 512 MB box still solved and retained against RAM/4 = 128 MB, and only
+/// the two raw env overrides could go higher. The design: the
+/// automatic default stays RAM/4, because the window is the one
+/// allocation an OOM kill cannot be rescued from (a 512 MB Linux box
+/// floors at 160-180 MB and RAM/4 already lands near 340 MB peak,
+/// `research/PARFAST-REPAIR-RSS-FLOOR-2026-09-14.md`), and the room above
+/// it comes from the knob the user already owns.
+///
+/// **A published budget that is NOT a person's figure still only
+/// lowers**, and that half is load-bearing rather than caution: the
+/// nzbfast CLI, the daemon and the embedded host publish
+/// `MemBudget::auto` when nobody set a limit, and auto is RAM/4 FLOORED at
+/// 256 MiB and cgroup/2 rather than cgroup/4. Letting that raise would
+/// double the repair window on every sub-1 GiB box and in every
+/// memory-limited container with nothing set at all - the automatic
+/// default moving, which is exactly what the decision rules out.
+/// [`crate::mem::published_user_limit`] is what tells the two apart.
+///
+/// **Under a cgroup limit a person's figure raises only to cgroup / 4
+/// (decided 15 Sep 2026).** Built uncapped, the raise let `-m256` inside
+/// `MemoryMax=512M` hand both budgets 256 MiB where the container's
+/// quarter held 128, and 9 of 36 legs were OOM-killed inside the first
+/// slab on cells main completed every time, with a fixed glibc mmap
+/// threshold still leaving a kill
+/// (`research/PARFAST-512MB-CGROUP-REPAIR-2026-09-15.md`, the addendum).
+/// So the chosen arm is `min(user, cgroup / 4)`: inside a container that
+/// is the shipped lowering-only dispatch exactly, and a container user
+/// widens the window by giving the container more memory; on a bare box
+/// (no cgroup limit) the raise stands as built. A figure below the
+/// quarter still lowers.
 pub(crate) fn clamp_to_published(base: usize) -> usize {
-    clamp_to(base, crate::mem::published_budget().map(|b| b.total))
+    clamp_to(
+        base,
+        crate::mem::published_budget().map(|b| b.total),
+        crate::mem::published_user_limit().is_some(),
+        crate::mem::cgroup_mem_limit(),
+    )
 }
 
-fn clamp_to(base: usize, published: Option<u64>) -> usize {
+/// [`clamp_to_published`] with its three process-global reads handed in:
+/// `published` is the published total, `chosen` whether a person set it,
+/// `cgroup_limit` the container's hard limit when there is one.
+/// Pure, so `published_clamp_tests` drives every arm without publishing.
+fn clamp_to(base: usize, published: Option<u64>, chosen: bool, cgroup_limit: Option<u64>) -> usize {
     match published {
+        // A person's figure binds both ways. The ceiling is the same flat
+        // one the host default has, and the address-space clamp keeps a
+        // figure written for a bigger machine from asking a 32-bit process
+        // for more than it can hold (`reconstruct::fit_addressable`'s
+        // reasoning; the same `max_total` it asks). The cgroup quarter is
+        // the same one `ntt_default_budget` takes, and caps the raise in a
+        // container (`clamp_to_published` says why).
+        Some(total) if chosen => usize::try_from(
+            total
+                .min(NTT_BUDGET_CEIL)
+                .min(crate::mem::MemBudget::max_total())
+                .min(cgroup_limit.map_or(u64::MAX, |l| l / 4)),
+        )
+        .unwrap_or(usize::MAX),
         Some(total) => base.min(usize::try_from(total).unwrap_or(usize::MAX)),
         None => base,
     }
@@ -840,8 +1368,10 @@ pub(crate) fn exponent_span(exponents: &[u32]) -> usize {
     max - min
 }
 
-/// The stripe width the transform runs at when `NZBFAST_NTT_W` does not
-/// pin it: 512 words, except 1,024 on the x86 nibble-shuffle arms (AVX2
+/// The stripe width the CREATE's transform runs at when `NZBFAST_NTT_W`
+/// does not pin it (the repair's own since 15 Sep 2026, when it measured
+/// 512 better at 1 and 4 MiB: [`repair_stripe_words`]): 512 words, except
+/// 1,024 on the x86 nibble-shuffle arms (AVX2
 /// or SSSE3 without GFNI, `gf16::multi_fold_width() == 4`) at blocks of
 /// 1 MiB and up. Measured 6 Sep 2026 on the i5-10600KF, same binary,
 /// mirrored, outputs identical (lane parfast-optimisation-search-2,
@@ -855,26 +1385,186 @@ pub(crate) fn exponent_span(exponents: &[u32]) -> usize {
 /// the rule keys on the block size. The M3 Ultra at the same shapes is
 /// flat to worse at 1,024 (transform 2.54-2.66 s against 2.30-2.57 on
 /// the repair), so aarch64 and the GFNI arms keep 512.
-pub(crate) fn default_stripe_words(block_size: usize) -> usize {
+///
+/// RE-MEASURED 16 Sep 2026 on the same i5, one binary, 45 gated legs
+/// (`research/CREATE-STRIPE-WIDTH-X86-2026-09-16.md`). The 6 Sep result
+/// reproduces at the fill it was set on: 1,024 wins the 10 GiB creates on
+/// both wall and CPU, disjoint, at 1 MiB (2.3% / 3.3%) and 4 MiB (1.9% /
+/// 2.3%), against an A/A floor of 0.4-0.7%. So this rule stays and the
+/// per-pass split is measured rather than inherited.
+///
+/// BUT THE SIGN REVERSES AT A HIGH LEAF FILL, WHICH THE BLOCK SIZE CANNOT
+/// SEE, AND SINCE 16 Sep 2026 THIS FUNCTION READS THE LEAF KERNEL TOO.
+/// The 6 Sep control shapes fill leaves to 19-81 and run the PAIRED leaf;
+/// near PAR2's 32,768-block ceiling the fill is 256 and the ADDITIVE leaf
+/// takes over (its gate is 128 sources), and there 512 wins by 8.7% /
+/// 8.1% at 1 MiB and 11.9% / 14.7% at 4 MiB, also disjoint. Across both
+/// block sizes the block size predicted nothing and the fill predicted
+/// the sign every time.
+///
+/// THE LADDER THAT LOCATED IT (`research/CREATE-WIDTH-FILL-LADDER-I5-2026-09-16.md`,
+/// 123 legs on the same i5, one binary, 1 MiB blocks throughout so only
+/// the fill moves): the preference does not slide with the fill, it STEPS
+/// at `par2ntt::additive`'s 128-source gate. `w512` against `w1024` reads
+/// +3.3% wall / +3.8% CPU at median fill 126, the last all-paired plan,
+/// and -19.8% / -21.4% at 129, the first all-additive one - one source of
+/// fill, 23 points of wall, both cells disjoint against A/A floors of
+/// 0.3-2.0%. It is the majority of leaves and not the fraction: 31 of 128
+/// leaves additive still behaves like the paired regime (+3.1%) and 96 of
+/// 128 like the additive one (-8.3%), which is why the key is the MEDIAN
+/// leaf's kernel (`par2ntt::FlatPlan::median_leaf_kernel`). Above the gate
+/// 512's win decays and is largest at the gate: -19.8% at fill 129, -12.9%
+/// at 160, -12.9% at 192, -3.8% at 256. THE DECAY IS MEASURED AND
+/// UNEXPLAINED; "512 above the gate" is right at every point on that
+/// ladder, so it does not block this rule, but nobody should write a
+/// width that varies WITHIN the additive regime without explaining it.
+///
+/// THE ARM TEST IS NOT WIDENED, AND THAT IS MEASURED RATHER THAN CAUTIOUS
+/// (`research/CREATE-WIDTH-ADDITIVE-KERNEL-GFNI-2026-09-16.md`, 63 legs on
+/// the fleet's one GFNI-256 part at the same cell shapes). Forcing W 1,024
+/// above the gate there does not reproduce the penalty, it REVERSES the
+/// sign on both columns: `w512` against `w1024` is +3.4% / +2.9% at fill
+/// 129 and +6.6% / +7.3% at 160. So a kernel-keyed width applied to every
+/// arch would cost that box 3-7% of its transform at exactly the fills it
+/// aimed at.
+///
+/// AARCH64 IS THE THIRD ARM AND IT REFUSES THE PENALTY TOO
+/// (`research/CREATE-WIDTH-AARCH64-2026-09-16.md`, the same cells through
+/// `research/harness/cstripe-mac.py`; read its CPU column, it discards its
+/// own wall as noise). Forcing W 1,024 above the gate reads +0.4% CPU at
+/// fill 129, +1.8% at 160, +0.9% at 192 and +2.1% at 256 - a small BENEFIT
+/// there too, with no trace of a 10-20% penalty at any above-gate cell. So
+/// both arms that run 512 refuse it and THE NIBBLE ARM IS ALONE, which is
+/// what makes this arm test the right place for the clause rather than a
+/// coincidence of where the arm test already sat.
+///
+/// The step at the gate is real on all three arms, and its SIZE and its
+/// DIRECTION are both the arm's: -25.2 points of CPU here, -9.7 on
+/// GFNI-256, and **+6.0 on NEON**, which shifts toward 1,024 rather than
+/// away from it. The kernel modulates; the ARM decides - and it does not
+/// modulate the same way everywhere, so no rule may assume it does.
+/// aarch64 and GFNI keep 512 at every fill, which is what they already
+/// ran; on NEON that is measured RIGHT below the gate (512 wins there by
+/// 5.6-10.1% of CPU) and mildly wrong above it, by about 2%, which is a
+/// separate item and not this clause's.
+///
+/// THIS CLAUSE SHIPPED WITHOUT EVER BEING OBSERVED ON THE ARM IT
+/// AFFECTS, AND THAT IS A DELIBERATE, REVERSIBLE DECISION RATHER THAN AN
+/// OVERSIGHT. The rule above rests on 186 legs across three arms. What
+/// has never been watched is this IMPLEMENTATION of it selecting a width
+/// on an x86 nibble part: the one such part on the test fleet was
+/// occupied for the whole of 16 Sep 2026 and the verifying round never
+/// got a slot, so the change shipped with that round scheduled rather
+/// than held back.
+///
+/// **So this constant is PROVISIONAL until that round runs**, and its
+/// failure mode is the invisible one - a clause that never fires looks
+/// exactly like a clause that fired and bought nothing. Two readings are
+/// REVERT proposals and not tuning exercises: a plan at median leaf fill
+/// 126 whose timing MOVES at all means the clause is firing below the
+/// gate where the ladder says it must not, and one at fill 129 whose
+/// unpinned arm still runs W 1,024 means the wiring never fired.
+/// **Whoever runs that round deletes these two paragraphs**, in either
+/// direction. While they stand, nobody should cite this rule as
+/// measured.
+///
+/// `median_leaf` is `None` where the caller has no plan to ask, and that
+/// resolves to the pre-16-Sep behaviour rather than to 512: an absent
+/// plan is not evidence of a full leaf.
+///
+/// THE REPAIR IS A SEPARATE RULE AND IS NOT TOUCHED BY ANY OF THIS -
+/// [`repair_stripe_words`] is 512 at every block size on every arm, and
+/// the two passes were measured apart.
+pub(crate) fn default_stripe_words(
+    block_size: usize,
+    median_leaf: Option<crate::par2ntt::LeafKernel>,
+) -> usize {
     if cfg!(target_arch = "x86_64") && crate::gf16::multi_fold_width() == 4 && block_size >= 1 << 20
     {
-        1024
+        if median_leaf == Some(crate::par2ntt::LeafKernel::Additive) {
+            512
+        } else {
+            1024
+        }
     } else {
         512
     }
 }
 
-/// Stripe width and worker count the syndrome pass will use for this
-/// block size. Factored out of `Reconstructor::ntt_syndromes` so the
+/// The stripe width the REPAIR's transform runs at when `NZBFAST_NTT_W`
+/// does not pin it: 512 words at every block size on every arm. Until
+/// 15 Sep 2026 the repair took [`default_stripe_words`], whose 1,024 on
+/// the x86 nibble arms at 1 MiB and up was won on the CREATE (6 Sep) with
+/// the one repair it was checked on flat. Measured apart on the
+/// i5-10600KF, one binary per round, forced transform on twelve threads,
+/// four mirrored reps, SHA-gated with the width read back from the trace
+/// (research/NTT-X86-TRANSFORM-CPU-1MIB-2026-09-15.md), 512 beat 1,024
+/// on BOTH wall and whole-process CPU at every cell: at 1 MiB, (256
+/// missing, 512 present) 4.72 s / 41.2 CPU-s against 4.89 / 42.2, (256,
+/// 2,048) 5.83 / 51.7 against 6.02 / 53.6, (320, 1,536) 6.11 / 53.7
+/// against 6.23 / 54.9, (1,024, 512) 16.68 / 144.6 against 16.82 / 146.1;
+/// at 4 MiB, (256, 512) 19.72 / 164.4 against 20.43 / 169.8 and (256,
+/// 1,024) 20.88 / 177.6 against 21.57 / 183.5 - against an A/A floor of
+/// +1.1% wall. The 6 Sep 10 GiB / 1 MiB / 900-missing repair was flat
+/// between the two, so no measured repair loses; aarch64 and the GFNI
+/// arms were at 512 already.
+pub(crate) fn repair_stripe_words() -> usize {
+    512
+}
+
+/// Stripe width and worker count the REPAIR's syndrome pass will use for
+/// this block size. Factored out of `Reconstructor::ntt_syndromes` so the
 /// admission gate prices the arenas with the SAME geometry the transform
 /// actually runs - an estimate derived independently would drift.
 pub(crate) fn ntt_stripe_geometry(block_size: usize) -> (usize, usize) {
-    let words = block_size / 2;
-    let w: usize = std::env::var("NZBFAST_NTT_W")
+    ntt_stripe_geometry_capped(block_size, usize::MAX)
+}
+
+/// Stripe width and worker count the CREATE's transform runs at: the same
+/// pool rule and pin as the repair, over [`default_stripe_words`], the
+/// width the create was measured at. The two passes share every other
+/// part of the geometry.
+///
+/// `median_leaf` is the plan's [`crate::par2ntt::FlatPlan::median_leaf_kernel`],
+/// which the width has read on the x86 nibble arm since 16 Sep 2026, and
+/// `None` from a site with no plan in hand. Every caller that HAS a plan
+/// passes it: the width is a property of the transform about to run, not
+/// of the block size alone.
+pub(crate) fn ntt_create_stripe_geometry(
+    block_size: usize,
+    median_leaf: Option<crate::par2ntt::LeafKernel>,
+) -> (usize, usize) {
+    stripe_geometry_at(
+        block_size,
+        default_stripe_words(block_size, median_leaf),
+        usize::MAX,
+    )
+}
+
+/// An explicit `NZBFAST_NTT_W` (16 words or more), or `None`.
+fn ntt_stripe_pin() -> Option<usize> {
+    std::env::var("NZBFAST_NTT_W")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&v: &usize| v >= 16)
-        .unwrap_or_else(|| default_stripe_words(block_size))
+}
+
+/// [`ntt_stripe_geometry`] with the stripe held at or under `cap` words -
+/// the width [`ntt_admit_within`] narrowed to so the worker arenas fit
+/// the budget, or `usize::MAX` for the geometry's own. The admission
+/// price and the transform both run through this, so a narrowed stripe
+/// is priced at exactly the width it then runs at.
+pub(crate) fn ntt_stripe_geometry_capped(block_size: usize, cap: usize) -> (usize, usize) {
+    stripe_geometry_at(block_size, repair_stripe_words(), cap)
+}
+
+/// The geometry both passes share: `default_w` unless `NZBFAST_NTT_W`
+/// pins it, held under `cap` and the block, and the transform's pool.
+fn stripe_geometry_at(block_size: usize, default_w: usize, cap: usize) -> (usize, usize) {
+    let words = block_size / 2;
+    let w: usize = ntt_stripe_pin()
+        .unwrap_or(default_w)
+        .min(cap)
         .min(words.max(16));
     let stripes = words.div_ceil(w);
     // Every logical CPU, on purpose: the transform's leaf is table-lookup
@@ -887,6 +1577,16 @@ pub(crate) fn ntt_stripe_geometry(block_size: usize) -> (usize, usize) {
     // (-13% both); a 1,024-word stripe lost on either count. Hybrid parts
     // without SMT (Core Ultra 9 386H) report physical == logical and
     // never saw the rule. `NZBFAST_NTT_THREADS` still pins it.
+    //
+    // Re-asked 15 Sep 2026 at 1 MiB blocks, where the i5's forced repair
+    // transform cost 1.2-2.6x the fold's CPU: six threads cuts that CPU
+    // 15-36% and takes it UNDER the fold's at every shape the gates admit,
+    // but it pays in wall exactly there - (256 missing, 2,048 present)
+    // 6.61 s against 6.02 on twelve, which is the fold's 6.58, so the win
+    // the transform was admitted for is gone - and the 64 KiB heavy shape
+    // still reads +17% wall for -14% CPU on six. The pool stays every
+    // logical CPU; trading wall for CPU is a policy call, not a
+    // measurement (research/NTT-X86-TRANSFORM-CPU-1MIB-2026-09-15.md).
     let cores = crate::mem::cpu_workers();
     let threads = std::env::var("NZBFAST_NTT_THREADS")
         .ok()
@@ -910,19 +1610,164 @@ pub(crate) fn ntt_stripe_geometry(block_size: usize) -> (usize, usize) {
 /// leave room for. Charging them here would refuse the fast path for
 /// memory the process spends either way.
 pub(crate) fn ntt_worker_arenas(block_size: usize, needed: usize) -> usize {
-    let (w, threads) = ntt_stripe_geometry(block_size);
+    ntt_worker_arenas_capped(block_size, needed, usize::MAX)
+}
+
+/// [`ntt_worker_arenas`] at a capped stripe
+/// ([`ntt_stripe_geometry_capped`]).
+pub(crate) fn ntt_worker_arenas_capped(block_size: usize, needed: usize, cap: usize) -> usize {
+    let (w, threads) = ntt_stripe_geometry_capped(block_size, cap);
     crate::par2ntt::FlatPlan::scratch_bytes(needed, w).saturating_mul(threads)
 }
 
+/// What [`resolve_syndrome_path`] hands the Reconstructor when it selects
+/// the transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NttAdmission {
+    /// The RETENTION budget the worker's runtime backstop compares
+    /// retained bytes against: the corpus budget, arenas already paid.
+    pub(crate) budget: usize,
+    /// The widest stripe the transform may run at, in words - a cap on
+    /// [`ntt_stripe_geometry_capped`], `usize::MAX` for the geometry's
+    /// own width.
+    pub(crate) stripe_cap: usize,
+}
+
+/// The narrowest stripe, in u16 words, the dispatcher will narrow the
+/// transform to so its worker arenas fit the budget. Below it, a shape
+/// the arenas do not fit folds.
+///
+/// 32 words is 64 bytes, the widest granule any shipped fused kernel
+/// takes (`gf16::xor_mul_multi_gfni512` works in 64-byte chunks; NEON
+/// and AVX2 take 32) - the floor `forney::STRIPE_GRAN` holds for the same
+/// reason - and every halving from the 512- or 1,024-word default is a
+/// power of two, so every narrowed stripe stays on it. It sits above the
+/// 16-word minimum [`ntt_stripe_geometry_capped`] allows a PIN, because a
+/// pin is an experiment and this is a default.
+///
+/// What a narrower stripe costs, measured 14 Sep 2026 on the M3 Ultra at
+/// `-t4`: the 1 GiB / 64 KiB repair at m = 4,096, forced, the whole
+/// corpus in one window, whole-process CPU best of two SHA-gated legs -
+/// 13.62 CPU-s at 512 words, 13.86 at 256 (+1.8%), 14.53 at 128
+/// (+6.7%), 15.43 at 64 (+13%), 17.92 at 32 (+32%). Even the floor is
+/// 7x under the 131 CPU-s the fold costs at that depth, which is what a
+/// refusal hands back; and [`ntt_admit_within`] stops at the first
+/// width whose arenas no longer outweigh the corpus, so the floor binds
+/// only where the rows are deep and the budget tiny.
+pub(crate) const NTT_STRIPE_W_FLOOR: usize = 32;
+
+/// Choose the stripe the transform runs at under `budget`, and admit or
+/// refuse the shape there. `admit_at(cap)` is the dispatcher's gate
+/// priced at a stripe cap; `needed` is the rows the arenas are priced
+/// on and `n_present` the corpus.
+///
+/// **Why narrow rather than refuse.** The arenas are
+/// `FlatPlan::scratch_bytes(needed, W)` per worker and grow with the
+/// rows with nothing tying them to the budget. At m = 4,096 on four
+/// threads they are 161 MB at W = 512 - over a 512 MB box's whole
+/// 128 MiB budget - so the corpus budget saturated to zero and the
+/// dispatcher took the fold at its worst: 32.95 s / 131 CPU-s, against
+/// 4.98 s / 19.0 forced. Forced at `NZBFAST_NTT_W=128` the arenas are a
+/// quarter and the same repair cost 4% more (5.17 s / 19.8); halving
+/// `NZBFAST_NTT_THREADS` instead cost 34% of wall (6.68 s), which is why
+/// the lever is the width and never the pool
+/// (`research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md`,
+/// section 3d).
+///
+/// **The rule, in order.**
+///
+/// 1. A pinned `NZBFAST_NTT_W` is a pin: priced and admitted at that
+///    width, never narrowed. It is the A/B arm.
+/// 2. A corpus that fits ONE window at the geometry's own width is
+///    admitted or refused there, exactly as before - narrowing could buy
+///    it nothing but a slower stripe. This is the arm a big box takes,
+///    and why its dispatch is unchanged.
+/// 3. Otherwise the stripe halves while the arenas outweigh the corpus
+///    budget they leave (`arenas > budget - arenas`): past that point a
+///    window is smaller than the arenas beside it, and the per-window
+///    combine ([`ntt_window_row_gate`]) costs more than a halving's few
+///    percent. At m = 2,048 under 128 MiB (32 KiB slabs) W = 512 leaves
+///    1,244 sources a window, 13 windows a slab; W = 256 leaves ~2,670,
+///    6.1 a slab.
+/// 4. The gates are asked at that width. A refusal narrows further only
+///    while the window the width leaves is too small for ANY row count
+///    ([`ntt_window_row_ask`] answers `None`) - a refusal on the ARENAS,
+///    which is the one thing a narrower stripe answers - down to
+///    [`NTT_STRIPE_W_FLOOR`], where a refusal folds.
+/// 5. **A window refused on its ROWS folds at the width it was refused
+///    at.** Narrowing it would shrink the arenas, hand the window more
+///    sources and lower [`ntt_window_row_gate`]'s ask until the rows
+///    cleared it - admitting the shape at a stripe the curve never
+///    priced, because the curve prices the window and not the stripe.
+///    Step 4 did exactly that until 15 Sep 2026: `-t4 -m128`, the
+///    1 GiB / 64 KiB set, m = 384 on the Core Ultra 9 386H (GFNI-256),
+///    refused at W = 512, narrowed to W = 128, admitted eight 1,920-source
+///    windows and paid 14.16 CPU-s against the fold's 10.50 and the
+///    full-width forced arm's 10.28; on the inferred combine ratio the
+///    same penalty sat one rung up (14.75 against 12.81), so it moved with
+///    `k` and never went away. In both x86 validate rounds every other
+///    narrowed width was chosen by step 3, so this refuses the band the
+///    defect lived in and nothing else. Charging the narrower stripe's
+///    cost into the curve instead was weighed and not taken: it needs a
+///    per-class stripe-cost constant no x86 box has measured, to rescue a
+///    band whose one measured x86 cell lost
+///    (`research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md`,
+///    section 8).
+pub(crate) fn ntt_admit_within(
+    block_size: usize,
+    needed: usize,
+    n_present: usize,
+    budget: usize,
+    admit_at: impl Fn(usize) -> Option<NttAdmission>,
+) -> Option<NttAdmission> {
+    let (w0, _) = ntt_stripe_geometry(block_size);
+    let arenas = |cap: usize| ntt_worker_arenas_capped(block_size, needed, cap);
+    let whole_corpus = n_present.saturating_mul(block_size);
+    if ntt_stripe_pin().is_some() || whole_corpus <= budget.saturating_sub(arenas(usize::MAX)) {
+        return admit_at(usize::MAX);
+    }
+    // Halving to the next power of two below, so a width the block
+    // clamped off the granule (a block narrower than the default stripe)
+    // lands back on it at the first step.
+    let narrower = |w: usize| {
+        let p = w.next_power_of_two();
+        if p == w { w / 2 } else { p / 2 }
+    };
+    let cap_of = |w: usize| if w == w0 { usize::MAX } else { w };
+    // Refused on the ARENAS (step 4): the corpus does not fit what this
+    // width leaves, and that window is too small for any row count to take
+    // it a window at a time. The retained-only A/B arm has no windows, so
+    // there the corpus not fitting is the whole of it.
+    let starved = |cap: usize| {
+        let corpus = budget.saturating_sub(arenas(cap));
+        whole_corpus > corpus
+            && (!ntt_stream_windows() || ntt_window_row_ask(block_size, corpus).is_none())
+    };
+    let mut w = w0;
+    while w > NTT_STRIPE_W_FLOOR && arenas(cap_of(w)) > budget.saturating_sub(arenas(cap_of(w))) {
+        w = narrower(w).max(NTT_STRIPE_W_FLOOR);
+    }
+    loop {
+        if let Some(admitted) = admit_at(cap_of(w)) {
+            return Some(admitted);
+        }
+        // Step 5: a refusal the window could answer on its rows folds here.
+        if w <= NTT_STRIPE_W_FLOOR || !starved(cap_of(w)) {
+            return None;
+        }
+        w = narrower(w).max(NTT_STRIPE_W_FLOOR);
+    }
+}
+
 /// Resolve the syndrome path for this repair shape. Returns the
-/// retention budget when the NTT path is selected.
+/// retention budget and the stripe cap when the NTT path is selected.
 pub(super) fn resolve_syndrome_path(
     path: SyndromePath,
     block_size: usize,
     n_inputs: usize,
     n_missing: usize,
     exponents: &[u32],
-) -> Option<usize> {
+) -> Option<NttAdmission> {
     let max_exp = exponents.iter().copied().max().unwrap_or(0) as usize;
     // Hard requirements in every mode: syndromes to compute, sources to
     // transform, and a transform prefix that exists (max exponent
@@ -942,7 +1787,10 @@ pub(super) fn resolve_syndrome_path(
         SyndromePath::Fold => None,
         SyndromePath::NttForce(budget)
         | SyndromePath::NttForceCorrupt(budget)
-        | SyndromePath::NttForcePanic(budget) => Some(budget),
+        | SyndromePath::NttForcePanic(budget) => Some(NttAdmission {
+            budget,
+            stripe_cap: usize::MAX,
+        }),
         SyndromePath::Auto => {
             let mode = std::env::var("NZBFAST_NTT").unwrap_or_default();
             let budget = ntt_budget_within_published();
@@ -962,30 +1810,45 @@ pub(super) fn resolve_syndrome_path(
             //
             // What this prices is the NTT's INCREMENTAL footprint only;
             // see [`ntt_worker_arenas`] for what is deliberately left
-            // out and why.
-            let corpus_budget = budget.saturating_sub(ntt_worker_arenas(block_size, exp_span + 1));
+            // out and why. Priced per candidate stripe width, because a
+            // footprint that does not fit at the default width is
+            // narrowed before it is refused - see [`ntt_admit_within`].
+            let n_present = n_inputs - n_missing;
             let gated = || {
-                ntt_gates_pass(
-                    block_size,
-                    n_inputs - n_missing,
-                    n_missing,
-                    exp_span,
-                    corpus_budget,
-                    ntt_stream_windows(),
-                )
-                // The corpus budget, not the whole budget: what comes
-                // back is the RETENTION headroom the worker's runtime
-                // backstop compares against, and the arenas are already
-                // spoken for. Returning `budget` here let a shape whose
-                // actual retention landed between the two keep retaining
-                // past what was priced.
-                .then_some(corpus_budget)
+                ntt_admit_within(block_size, exp_span + 1, n_present, budget, |cap| {
+                    let corpus_budget = budget.saturating_sub(ntt_worker_arenas_capped(
+                        block_size,
+                        exp_span + 1,
+                        cap,
+                    ));
+                    ntt_gates_pass(
+                        block_size,
+                        n_present,
+                        n_missing,
+                        exp_span,
+                        corpus_budget,
+                        ntt_stream_windows(),
+                    )
+                    // The corpus budget, not the whole budget: what comes
+                    // back is the RETENTION headroom the worker's runtime
+                    // backstop compares against, and the arenas are
+                    // already spoken for. Returning `budget` here let a
+                    // shape whose actual retention landed between the two
+                    // keep retaining past what was priced.
+                    .then_some(NttAdmission {
+                        budget: corpus_budget,
+                        stripe_cap: cap,
+                    })
+                })
             };
             match mode.as_str() {
                 // The environment is the bench/test/ops escape hatch: it
                 // overrides the daemon setting in both directions and
                 // ignores the trip-breaker.
-                "force" => Some(budget),
+                "force" => Some(NttAdmission {
+                    budget,
+                    stripe_cap: usize::MAX,
+                }),
                 "1" => gated(),
                 "0" | "off" => None,
                 // Unset: the daemon's "fast par mode" setting decides,
@@ -1064,7 +1927,7 @@ mod retry_seam_tests {
 
 #[cfg(test)]
 mod published_clamp_tests {
-    use super::clamp_to;
+    use super::{NTT_BUDGET_CEIL, clamp_to};
 
     /// The clamp itself, driven from both sides without publishing a
     /// budget process-wide - `set_process_budget` cannot be
@@ -1089,19 +1952,35 @@ mod published_clamp_tests {
         const MB: usize = 1 << 20;
         const BIG: usize = 8 * MB;
         const SMALL: usize = 2 * MB;
-        // Nothing published: the host-derived budget stands untouched.
-        assert_eq!(clamp_to(BIG, None), BIG);
-        // Published and SMALLER: it binds. This is the whole point - a
-        // repair on a `--mem-limit`ed process must not solve or retain
-        // against host RAM.
-        assert_eq!(clamp_to(BIG, Some(SMALL as u64)), SMALL);
-        // Published and LARGER: the clamp only ever lowers. A published
-        // budget is a ceiling, never a grant - raising the host figure
-        // to meet it would hand out memory the host probe said was not
-        // there.
-        assert_eq!(clamp_to(SMALL, Some(BIG as u64)), SMALL);
+        // Nothing published: the host-derived budget stands untouched,
+        // and `chosen` cannot conjure a budget out of an absence.
+        assert_eq!(clamp_to(BIG, None, false, None), BIG);
+        assert_eq!(clamp_to(BIG, None, true, None), BIG);
+        // Published and SMALLER: it binds, whoever chose it. This is the
+        // whole point - a repair on a `--mem-limit`ed process must not
+        // solve or retain against host RAM.
+        assert_eq!(clamp_to(BIG, Some(SMALL as u64), false, None), SMALL);
+        assert_eq!(clamp_to(BIG, Some(SMALL as u64), true, None), SMALL);
+        // Published and LARGER, and NOT a person's figure: it only lowers.
+        // That published figure is `MemBudget::auto`, which the CLI and
+        // the daemon publish when nobody set a limit - RAM/4 floored at
+        // 256 MiB, cgroup/2 - so raising to meet it would move the
+        // automatic default on every small box and container
+        // (`clamp_to_published`).
+        assert_eq!(clamp_to(SMALL, Some(BIG as u64), false, None), SMALL);
+        // Published and LARGER, and a person's figure: it RAISES the host
+        // default (15 Sep 2026) - `parfast r -m256` on a 512 MB box gets
+        // the 256 MiB it asked for rather than RAM/4.
+        assert_eq!(clamp_to(SMALL, Some(BIG as u64), true, None), BIG);
+        // ...capped at the flat ceiling the host default has, and at what
+        // this target can address, so the one absolute cap stays absolute.
+        let cap = usize::try_from(NTT_BUDGET_CEIL.min(crate::mem::MemBudget::max_total()))
+            .expect("the ceiling fits the target");
+        assert_eq!(clamp_to(SMALL, Some(NTT_BUDGET_CEIL * 4), true, None), cap);
+        assert_eq!(clamp_to(SMALL, Some(u64::MAX), true, None), cap);
         // Equal: admitted, not refused by an off-by-one.
-        assert_eq!(clamp_to(SMALL, Some(SMALL as u64)), SMALL);
+        assert_eq!(clamp_to(SMALL, Some(SMALL as u64), false, None), SMALL);
+        assert_eq!(clamp_to(SMALL, Some(SMALL as u64), true, None), SMALL);
         // A budget past `usize` saturates instead of truncating. On a
         // 64-bit host both spellings agree and neither arm can fail, so
         // these two only ever discriminate on a 32-bit build (armv7).
@@ -1109,12 +1988,70 @@ mod published_clamp_tests {
         // exactly 0 there, which would clamp every budget to nothing,
         // while `try_from(..).unwrap_or(MAX)` saturates and leaves the
         // host figure standing.
-        assert_eq!(clamp_to(SMALL, Some(1u64 << 32)), SMALL);
+        assert_eq!(clamp_to(SMALL, Some(1u64 << 32), false, None), SMALL);
         // `u64::MAX` is the weaker of the pair and is kept as
         // DOCUMENTATION, not as cover: its low 32 bits are all ones, so
         // the broken `as` spelling happens to land on `usize::MAX` and
         // this arm passes either way, at every width. The arm above is
         // the control; this one only records the intent.
-        assert_eq!(clamp_to(SMALL, Some(u64::MAX)), SMALL);
+        assert_eq!(clamp_to(SMALL, Some(u64::MAX), false, None), SMALL);
+    }
+
+    /// A person's raise under a cgroup limit stops at the container's
+    /// quarter (decided 15 Sep 2026): uncapped, `-m256` inside
+    /// `MemoryMax=512M` gave both budgets 256 MiB and 9 of 36 legs were
+    /// OOM-killed (`research/PARFAST-512MB-CGROUP-REPAIR-2026-09-15.md`).
+    /// Magnitudes in MiB for the 32-bit reason the test above records.
+    #[test]
+    fn a_persons_raise_stops_at_the_cgroup_quarter() {
+        const MB: usize = 1 << 20;
+        // The 512 MB container: RAM/4 is far above, the quarter is 128.
+        let cgroup = Some(512 * MB as u64);
+        let quarter = 128 * MB;
+        let host_in_cgroup = quarter; // what `ntt_default_budget` gave
+        // Bare box (no cgroup limit), a person's limit above RAM/4: it
+        // raises, as the uncapped branch did.
+        let ram_quarter = 128 * MB; // a 512 MB bare box
+        assert_eq!(
+            clamp_to(ram_quarter, Some(256 * MB as u64), true, None),
+            256 * MB
+        );
+        // A cgroup limit and a person's limit above the quarter: capped at
+        // the quarter, which is the shipped dispatch exactly.
+        assert_eq!(
+            clamp_to(host_in_cgroup, Some(256 * MB as u64), true, cgroup),
+            quarter
+        );
+        assert_eq!(
+            clamp_to(host_in_cgroup, Some(192 * MB as u64), true, cgroup),
+            quarter
+        );
+        // The cap is a ceiling on the RAISE only: a box whose RAM/4 (64)
+        // is under its cgroup's quarter still rises to the quarter.
+        assert_eq!(
+            clamp_to(64 * MB, Some(256 * MB as u64), true, cgroup),
+            quarter
+        );
+        // A person's limit BELOW the quarter still lowers, in or out of a
+        // container.
+        assert_eq!(
+            clamp_to(host_in_cgroup, Some(64 * MB as u64), true, cgroup),
+            64 * MB
+        );
+        assert_eq!(
+            clamp_to(ram_quarter, Some(64 * MB as u64), true, None),
+            64 * MB
+        );
+        // No person's limit: the cgroup changes nothing in the clamp (the
+        // host figure already carries the quarter), published or not.
+        assert_eq!(
+            clamp_to(host_in_cgroup, None, false, cgroup),
+            host_in_cgroup
+        );
+        assert_eq!(
+            clamp_to(host_in_cgroup, Some(256 * MB as u64), false, cgroup),
+            host_in_cgroup
+        );
+        assert_eq!(clamp_to(ram_quarter, None, false, None), ram_quarter);
     }
 }

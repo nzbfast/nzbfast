@@ -1,0 +1,80 @@
+# C6 + C2: opaque volume names over a set of SEVERAL files, cut where a
+# whole member ends.
+
+[layout]
+name = "c6-c2-opaque-volumes-over-three-members"
+seed = 616
+note = """
+The obfuscated multi-member volume set, and the one shape whose
+reassembly depends on a container fact rather than on a split flag or a
+name.
+
+C6's sibling row is one spanning member over three volumes, which can
+never produce an interior volume whose last member is finished: every
+volume but the last ends mid-file and says so in the file header. This
+row holds three members over four volumes, sized so the first member
+ends EXACTLY on a volume cut - which a RAR5 archiver produces for real
+whenever the next file header will not fit in what is left of the
+volume. Confirmed against the emitted headers rather than the
+arithmetic:
+
+  vol 1  feature.bin  8000 of 16000  SPLIT_AFTER
+  vol 2  feature.bin  8000 of 16000  SPLIT_BEFORE            <- the cut
+  vol 3  sample.bin   8000 of 10000  SPLIT_AFTER
+  vol 4  sample.bin   2000 of 10000  SPLIT_BEFORE
+         notes.txt     300 of   300  whole
+
+Volume 2's last member carries no continuation flag at all, so on the
+split flags alone the set looks finished there, and volume 3 looks like
+the head of a second set. With descriptive volume names that costs
+nothing: the names group the four. Under C6 the names are four
+independent tokens and there is no name evidence of any kind, so a
+client that grouped on the split flags cut this set in two, and the
+orphan's own member spills across volumes 3 and 4 - so the tail half is
+not a working archive either and `rars` refuses it as an incomplete
+split entry. Every byte present, the job failed. That is bug-sweep item
+51, fixed 16 Sep 2026 in `d34c528ac`, and this row is the layout it
+came from.
+
+The spill after the cut is the load-bearing half of the sizing. A cut
+between whole members with no spill afterwards extracts correctly under
+either rule - both halves are complete archives - so a row that stopped
+at the boundary would pass before the fix as well as after it. The
+answer the client must read is the end-of-archive record's "another
+volume follows" flag, which the emitted volumes 1 to 3 set and volume 4
+does not; the third member is there so the last volume is not a lone
+tail, which is the arrangement an archiver reaches by filling volumes.
+
+It carries no volume_style for the reason C6's own row gives, unchanged
+by the extra members: a style is how a DESCRIPTIVE set spells its
+order, and selecting one beside opaque names would be two answers to
+one question. Nor a recovery set - a PAR2 set's FileDesc packets carry
+the real member names, which is a name source this row exists to
+withhold.
+
+The end state is the three payload files. The volumes are spent by the
+unpack.
+"""
+
+[source]
+files = [
+    { name = "feature.bin", bytes = 16000 },
+    { name = "sample.bin", bytes = 10000 },
+    { name = "notes.txt", bytes = 300 },
+]
+
+[container]
+kind = "rar-stored"
+volume_bytes = 8000
+volume_names = "opaque"
+
+[encoding]
+# 4,000-byte articles, as C6's row uses: the payload stays small and
+# every volume is still multi-part on the wire.
+article_bytes = 4000
+
+[expect]
+complete = true
+
+[expect.ladder]
+reaches = ""

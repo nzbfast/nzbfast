@@ -17,9 +17,12 @@
 //! byte before.
 //!
 //! Reads never exceed the capacity when they go direct, so an overrun
-//! always fits; `unread` asserts both halves of that contract. The
-//! direct path is OFF unless `NZBFAST_WIRE_DIRECT` says otherwise -
-//! see [`direct_read_cap`] for the measurement that decided it.
+//! always fits; `unread` asserts both halves of that contract. Whether
+//! the direct path runs is PLATFORM-DEPENDENT and `NZBFAST_WIRE_DIRECT`
+//! overrides it either way: ON at 256 KiB on Linux, off elsewhere - see
+//! [`direct_read_cap`] and `DIRECT_READ_DEFAULT` for the two
+//! measurements that decided each, and note that on a TLS session it is
+//! off whatever the default says.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -27,10 +30,18 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 /// The most one direct read takes: `NZBFAST_WIRE_DIRECT` in KiB, and
-/// OFF (0, every chunk copies out of the buffer) when unset. Read
-/// once.
+/// `DIRECT_READ_DEFAULT` when unset - which is 256 KiB on LINUX and 0
+/// (every chunk copies out of the buffer) everywhere else. Read once.
 ///
-/// Off by default because it MEASURED as a loss on macOS (loopback
+/// So the default is platform-dependent, and on the platform the daemon
+/// mostly ships to it is ON. This doc said "off by default" flatly until
+/// 16 Sep 2026, three lines above the constant that says otherwise; a
+/// reader tuning or bisecting a CPU regression on Linux excluded the
+/// direct path from the A/B on the strength of it, while the shipped
+/// binary was taking it. The measurement below is the MACOS half, and
+/// the Linux half is at `DIRECT_READ_DEFAULT`.
+///
+/// Off on macOS because it MEASURED as a loss there (loopback
 /// mock rig, 1 GiB of 740 KB articles, 16 connections, 3 paired
 /// rounds x 3 benches, 2 Sep 2026): -4.5% instructions retired
 /// (4.94 G -> 4.72 G) and -0.015 s user per GiB, but +0.065 s sys, so
@@ -41,9 +52,9 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 /// and a 12.8 MB cycling ring all measured the same as the hot buffer;
 /// only a fresh-page destination cost more, +0.05 s/GiB, and after
 /// the pool's warm-up the body buffers are resident). Linux's
-/// `copy_to_user` and fault-around are a different kernel: an A/B on
-/// the bench farm with `NZBFAST_WIRE_DIRECT=256` is the open question,
-/// and this knob exists so that A/B is one variable.
+/// `copy_to_user` and fault-around are a different kernel, and that A/B
+/// has since RUN - see `DIRECT_READ_DEFAULT`, which is why the default
+/// differs by platform. The knob stays so either arm is one variable.
 pub(crate) fn direct_read_cap() -> usize {
     static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {

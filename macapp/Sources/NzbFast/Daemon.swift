@@ -1015,9 +1015,9 @@ final class Daemon {
         // Under the lock so it orders against spawn's publish: after
         // this, spawn either saw the flag and threw, or published its
         // child where the guard below will find it.
-        stateLock.lock()
-        stopping = true
-        stateLock.unlock()
+        stateLock.withLock {
+            stopping = true
+        }
         Self.log.notice(
             "stop: begin (spawnedByUs \(self.spawnedByUs), child pid \(self.child?.processIdentifier ?? -1), port \(self.port))")
         // Test hook for the quit watchdog (see QuitWatchdog): wedge here

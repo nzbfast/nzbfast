@@ -74,19 +74,24 @@ struct Leg {
     /// backbones at once costs the same questions, just not in series),
     /// but it must not explode.
     dispatched: u64,
+    /// Body bytes the LAST server put on the wire - the block account in
+    /// the TODO 343 item B legs, the same flat-rate backbone in their
+    /// control.
+    last_bytes: u64,
 }
 
 impl Leg {
     fn line(&self) -> String {
         format!(
             "{:<28} wall {:>6.2}s   ladder tail {:>6.2}s   {} done, {} missing, \
-             {} dispatches",
+             {} dispatches, {:.3} MB last server",
             self.label,
             self.wall.as_secs_f64(),
             self.tail.as_secs_f64(),
             self.done,
             self.missing,
             self.dispatched,
+            self.last_bytes as f64 / 1e6,
         )
     }
 }
@@ -100,6 +105,13 @@ impl Leg {
 /// `default()` arm survives only in the `--ignored` A/B table, as the
 /// thing to compare against.
 async fn ladder_leg(label: &str, n_dead: usize, base: PoolConfig) -> Leg {
+    ladder_leg_on(label, n_dead, base, false).await
+}
+
+/// [`ladder_leg`] with the LAST backbone flagged `block_account` when
+/// `block_last` is set - a level-0 block account beside four flat-rate
+/// backbones (TODO 343 item B).
+async fn ladder_leg_on(label: &str, n_dead: usize, base: PoolConfig, block_last: bool) -> Leg {
     let data: Vec<u8> = (0..(ART * N_GOOD) as u32).map(|i| i as u8).collect();
     let mut articles: HashMap<String, Vec<u8>> = HashMap::new();
     let segs = make_file_articles("payload.bin", &data, ART, "good", &mut articles);
@@ -121,7 +133,8 @@ async fn ladder_leg(label: &str, n_dead: usize, base: PoolConfig) -> Leg {
 
     let servers: Vec<(ServerConfig, PoolConfig)> = mocks
         .iter()
-        .map(|m| {
+        .enumerate()
+        .map(|(si, m)| {
             let mut sc = m.server_config();
             sc.connections = CONNS as u32;
             (
@@ -129,6 +142,7 @@ async fn ladder_leg(label: &str, n_dead: usize, base: PoolConfig) -> Leg {
                 PoolConfig {
                     connections: CONNS,
                     ramp_delay: Duration::from_millis(0),
+                    block_account: block_last && si == SERVERS - 1,
                     ..base.clone()
                 },
             )
@@ -191,6 +205,7 @@ async fn ladder_leg(label: &str, n_dead: usize, base: PoolConfig) -> Leg {
         done,
         missing,
         dispatched,
+        last_bytes: mocks[SERVERS - 1].bytes_out.load(Ordering::Relaxed),
     }
 }
 
@@ -420,6 +435,19 @@ async fn hole_leg(
     interleave: bool,
     base: PoolConfig,
 ) -> HoleLeg {
+    hole_leg_on(label, n_hole, holders, interleave, base, false).await
+}
+
+/// [`hole_leg`] with the LAST server - always a holder - flagged
+/// `block_account` when `block_last` is set (TODO 343 item B).
+async fn hole_leg_on(
+    label: &str,
+    n_hole: usize,
+    holders: usize,
+    interleave: bool,
+    base: PoolConfig,
+    block_last: bool,
+) -> HoleLeg {
     let data: Vec<u8> = (0..(ART * N_GOOD) as u32).map(|i| i as u8).collect();
     let mut articles: HashMap<String, Vec<u8>> = HashMap::new();
     let segs = make_file_articles("payload.bin", &data, ART, "good", &mut articles);
@@ -447,7 +475,8 @@ async fn hole_leg(
     }
     let servers: Vec<(ServerConfig, PoolConfig)> = mocks
         .iter()
-        .map(|m| {
+        .enumerate()
+        .map(|(si, m)| {
             let mut sc = m.server_config();
             sc.connections = CONNS as u32;
             (
@@ -455,6 +484,7 @@ async fn hole_leg(
                 PoolConfig {
                     connections: CONNS,
                     ramp_delay: Duration::from_millis(0),
+                    block_account: block_last && si == SERVERS - 1,
                     ..base.clone()
                 },
             )
@@ -535,6 +565,14 @@ async fn hole_leg(
             .map(|m| m.bytes_out.load(Ordering::Relaxed))
             .sum(),
         stats: mocks.iter().map(|m| m.stats.load(Ordering::Relaxed)).sum(),
+        last_bytes: mocks[SERVERS - 1].bytes_out.load(Ordering::Relaxed),
+        last_hole_bodies: mocks[SERVERS - 1]
+            .body_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|id| holeset.contains(id.as_str()))
+            .count() as u64,
     }
 }
 
@@ -553,13 +591,19 @@ struct HoleLeg {
     wire_bytes: u64,
     /// STAT commands answered fleet-wide.
     stats: u64,
+    /// Body bytes the LAST server (a holder; the block account in the
+    /// TODO 343 item B legs) put on the wire.
+    last_bytes: u64,
+    /// Hole-article BODY requests that server answered.
+    last_hole_bodies: u64,
 }
 
 impl HoleLeg {
     fn line(&self) -> String {
         format!(
             "{:<30} wall {:>6.2}s  {} done, {} missing, {:>3} hole bodies \
-             ({:>2} WASTED), {:>3} refusals, {:>3} stats, {:.2} MB wire",
+             ({:>2} WASTED), {:>3} refusals, {:>3} stats, {:.2} MB wire, \
+             last server {:.3} MB / {} hole bodies",
             self.label,
             self.wall.as_secs_f64(),
             self.done,
@@ -569,6 +613,8 @@ impl HoleLeg {
             self.probes,
             self.stats,
             self.wire_bytes as f64 / 1e6,
+            self.last_bytes as f64 / 1e6,
+            self.last_hole_bodies,
         )
     }
 }
@@ -705,5 +751,122 @@ async fn ladder_tail_across_the_damage_ladder() {
     }
     for leg in &table {
         assert_eq!(leg.done, N_GOOD, "{} lost healthy articles", leg.label);
+    }
+}
+
+/// The median of a small sample, for the TODO 343 item B cell summary.
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+/// TODO 343 item B: the STAT probe answered per SERVER. The last of the
+/// five backbones is a LEVEL-0 BLOCK ACCOUNT (`block` configs) or the
+/// same flat-rate backbone (`control`), and each is run shipped and
+/// shipped plus `stat_probe_block`, three reps a cell, alternated.
+///
+/// Two shapes per damage rung. `pieced` parks `n` hole articles at the
+/// tail, refused by the first backbones and held by the last `holders`
+/// (the block account among them) - where the ladder fan-out buys the
+/// block account's duplicate bodies. `poisoned` is the damage ladder
+/// every backbone refuses, where the probe can save nothing and must
+/// cost nothing. Printed rather than asserted beyond verdict counts.
+/// Run with `--ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "wall-clock A/B table - run with --ignored"]
+async fn per_server_stat_probe_on_a_level0_block_account() {
+    let probing = PoolConfig {
+        stat_probe_block: true,
+        ..PoolConfig::shipped()
+    };
+    let arms = [("shipped", PoolConfig::shipped()), ("+probe", probing)];
+    let mut lines = Vec::new();
+    let mut summary = Vec::new();
+    for n in [5usize, 20, 60, 120] {
+        for holders in [3usize, 2] {
+            for block in [true, false] {
+                let cfg_name = if block { "block" } else { "control" };
+                let mut cells: Vec<Vec<HoleLeg>> = vec![Vec::new(), Vec::new()];
+                for rep in 0..3 {
+                    for (ai, (arm, cfg)) in arms.iter().enumerate() {
+                        let leg = hole_leg_on(
+                            &format!("pieced {n} {holders}h {cfg_name} {arm} #{rep}"),
+                            n,
+                            holders,
+                            false,
+                            cfg.clone(),
+                            block,
+                        )
+                        .await;
+                        lines.push(leg.line());
+                        cells[ai].push(leg);
+                    }
+                }
+                for (ai, (arm, _)) in arms.iter().enumerate() {
+                    let c = &cells[ai];
+                    for leg in c {
+                        assert_eq!(
+                            (leg.done, leg.missing),
+                            (N_GOOD + n, 0),
+                            "{} changed a verdict",
+                            leg.label
+                        );
+                    }
+                    summary.push(format!(
+                        "| pieced | {n} | {holders} | {cfg_name} | {arm} | {:.3} | {:.1} | {:.1} | {:.2} | {:.1} | {} done / 0 missing |",
+                        median(c.iter().map(|l| l.wall.as_secs_f64()).collect()),
+                        c.iter().map(|l| l.last_bytes as f64).sum::<f64>() / 3.0 / 1e3,
+                        c.iter().map(|l| l.last_hole_bodies as f64).sum::<f64>() / 3.0,
+                        c.iter().map(|l| l.wire_bytes as f64).sum::<f64>() / 3.0 / 1e6,
+                        c.iter().map(|l| l.wasted as f64).sum::<f64>() / 3.0,
+                        N_GOOD + n,
+                    ));
+                }
+            }
+        }
+        for block in [true, false] {
+            let cfg_name = if block { "block" } else { "control" };
+            let mut cells: Vec<Vec<Leg>> = vec![Vec::new(), Vec::new()];
+            for rep in 0..3 {
+                for (ai, (arm, cfg)) in arms.iter().enumerate() {
+                    let leg = ladder_leg_on(
+                        &format!("poisoned {n} {cfg_name} {arm} #{rep}"),
+                        n,
+                        cfg.clone(),
+                        block,
+                    )
+                    .await;
+                    lines.push(leg.line());
+                    cells[ai].push(leg);
+                }
+            }
+            for (ai, (arm, _)) in arms.iter().enumerate() {
+                let c = &cells[ai];
+                for leg in c {
+                    assert_eq!(
+                        (leg.done, leg.missing),
+                        (N_GOOD, n),
+                        "{} changed a verdict",
+                        leg.label
+                    );
+                }
+                summary.push(format!(
+                    "| poisoned | {n} | 0 | {cfg_name} | {arm} | {:.3} | {:.1} | - | - | - | {N_GOOD} done / {n} missing |",
+                    median(c.iter().map(|l| l.wall.as_secs_f64()).collect()),
+                    c.iter().map(|l| l.last_bytes as f64).sum::<f64>() / 3.0 / 1e3,
+                ));
+            }
+        }
+    }
+    println!("\nTODO 343 item B, {SERVERS} servers x {CONNS} connections, {MISS_MS} ms refusals:");
+    for l in &lines {
+        println!("  {l}");
+    }
+    println!(
+        "\n| shape | damage | holders | config | arm | wall median s | last server KB mean | its hole bodies mean | fleet wire MB mean | wasted mean | verdicts |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|---|");
+    for s in &summary {
+        println!("{s}");
     }
 }

@@ -218,6 +218,21 @@ pub(super) async fn completion_tail(
     // the slot going and this ownership being on the books; the guard
     // deregisters however this ends, panic included.
     let _owner = owner;
+    // GH #71, the second road: hand every output descriptor back BEFORE
+    // the tail touches the folder, exactly as the runner's tail does
+    // (`postproc::run_tail`, right after `fetch.await`). This road never
+    // did, so the junk sweep inside `finalize_completed_gen` unlinked
+    // files the prefetch's extractor still held open - on NFS that is a
+    // `.nfs*` silly-rename, and an *arr's delete-with-files then fails
+    // EBUSY on the folder - and the payload's own descriptor outlived
+    // the job. `release_outputs` closes through each writer's shared
+    // state, so it holds however many clones of the extractor survive;
+    // the settle step below reads the extractor only for its shape.
+    if let Some(ex) = &shaper
+        && let Err(e) = ex.release_outputs()
+    {
+        warn!(target: "cleanup", "could not release the output handles: {e}");
+    }
     finalize_completed_gen(&d, &job, fence).await;
     // ISSUE #18's deferral is a HOLD, and whoever arms it owes the
     // release. With `write_manifest` on - the shipped default since

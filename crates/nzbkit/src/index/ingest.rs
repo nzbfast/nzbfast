@@ -778,11 +778,45 @@ const MAX_GEN_PASSES: u32 = 4;
 /// in one call. It is the stall in memory topic
 /// `nzbfast-tail-blocked-on-index-mutex`, priced.
 ///
-/// 20,000 rather than 10,000 because it is what the rest of the engine
-/// already picked independently - the gapfill leg's `CHUNK` and the tip
-/// walker's `TIP_CHUNK` are both 20,000 - so this makes the deepen pass
-/// agree with its neighbours instead of minting a third number, and it
-/// keeps three quarters of the instruction saving.
+/// It was 20,000 until 16 Sep 2026, because that is what the rest of
+/// the engine had already picked independently when this constant was
+/// minted - the gapfill leg's `CHUNK` and the tip walker's `TIP_CHUNK`
+/// were both 20,000 - so it made the deepen pass agree with its
+/// neighbours instead of minting a third number.
+///
+/// **That coherence argument was spent deliberately, and then the
+/// price was paid** (16 Sep 2026). Both neighbours now ingest at
+/// `INGEST_BATCH` as well and keep their own constant for the WIRE
+/// request only, so the three numbers stopped being the same kind of
+/// thing and this one could move without minting a third request size.
+/// `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md` swept eight sizes on
+/// the rig above and put 20,000 -> 10,000 at **+1.7% instructions per
+/// header for -35% of the hold p90** - the best marginal step on the
+/// curve, roughly double the next one down - plus 0.80% more
+/// message-ids placed on reposted traffic. It declined to spend that
+/// on a rig alone, and named the two things a rig cannot see. Both
+/// were then measured on a RUNNING daemon walking a real group's tip
+/// (section 8 of that file):
+///
+/// * **The hold this buys back is on the daemon's own index mutex, and
+///   it halves.** Six interleaved 480,000-article tip catch-ups, three
+///   per arm: the `with_index_mut` hold falls from a p90 of 4,374 ms to
+///   2,085 ms (**-52%**), p50 2,269 -> 1,126 ms, worst 5,398 ->
+///   3,411 ms. That lock is what every in-process reader waits out -
+///   the dashboard, the API, the wall enricher - so it is the stall in
+///   memory topic `nzbfast-tail-blocked-on-index-mutex`, measured at
+///   last on the site that takes it rather than on the SQLite write
+///   lock the rig takes.
+/// * **The +1.7% is throughput, not headroom, and is spent anyway.**
+///   Six interleaved deepen passes put `Index::ingest` at **82-89% of
+///   the scan pass's own forward+deepen wall**, so ingest IS the pass's
+///   serial bottleneck and a CPU cost here lands almost undiluted on
+///   the indexing rate: call it ~1.4%. Bought with it: half the worst
+///   latency the daemon inflicts on its own UI. (The daemon A/B cannot
+///   itself resolve 1.7% - its leg-to-leg spread was +-15% at load
+///   250 - so the instruction ladder above stays the authority on the
+///   CPU column. What the daemon establishes is the WEIGHT that column
+///   carries, which nothing had.)
 ///
 /// # This changes generation outcomes on reposted traffic, deliberately
 ///
@@ -816,8 +850,22 @@ const MAX_GEN_PASSES: u32 = 4;
 /// `kv` row, `ingest_drop_since`, which is a `SystemTime::now()` stamp
 /// that differs between any two runs of any binary.
 ///
+/// **Those three numbers are totals, not rates, and the rig cannot make
+/// them into rates.** Read the ORDERING, never the magnitude: all three
+/// arms ran the identical stream from one seed, so the monotone column
+/// is real, but the rig's gen-depth drops are a startup transient of its
+/// own generator and stop arriving part way through a run. The same arm
+/// reads 2,954 at 200,000, 400,000 and 600,000 headers, another seed
+/// reads zero at every one of them, and the audit above recorded 2,808
+/// at both 200,000 and 600,000 without noticing it was the same number
+/// twice. Never divide any of them by headers, never scale one to a live
+/// group, and never compare a figure taken at one seed or one `--fanout`
+/// against one taken at another. Mechanism and evidence:
+/// `research/GEN-DEPTH-CENSUS-SATURATION-2026-09-16.md`, and the ceiling
+/// is stated at the top of `examples/indexscan_bench.rs`.
+///
 /// Full record: `research/INDEXER-SCAN-CPU-AUDIT-2026-09-03.md`.
-pub const INGEST_BATCH: usize = 20_000;
+pub const INGEST_BATCH: usize = 10_000;
 
 /// The generation pass loop's state for one batch: how many passes
 /// remain AFTER the current one, and the running census of articles the
@@ -1152,8 +1200,8 @@ impl Index {
     /// * `dropped` - the article was discarded and does not come back.
     ///   `no_filename` is the fully-subject-obfuscated band (the ngPost
     ///   `--obfuscate` shape), `empty_stem` a filename that reduces to
-    ///   nothing, `unparseable` a missing message-id or an `(n/m)` that
-    ///   will not parse.
+    ///   nothing, `unparseable` a missing message-id, an `(n/m)` that
+    ///   will not parse, or one whose part exceeds its own total.
     /// * `over_budget` - `gen_depth`, the reinjection surplus a pass
     ///   refuses because the slot already holds more contradicting
     ///   articles than the remaining generation passes can place. Those
@@ -1716,7 +1764,27 @@ impl Index {
                 total
             };
             let part = if total == 1 { 1 } else { part };
-            if e.message_id.is_empty() || part == 0 || total == 0 {
+            // `part > total` is a header contradicting itself, and it is
+            // the same class of unusable counter as a zero on either
+            // side - `session_tag` has always refused the leading pair
+            // on exactly this test (`idx <= total`), the trailing part
+            // counter never did. Dropping the ARTICLE rather than
+            // widening `total` to it is deliberate: the widening remedy
+            // makes ingest synthesise two different totals for articles
+            // of ONE posting, which is precisely the signal
+            // `contradicts` treats as proof of a second posting, so a
+            // single garbled `(4/3)` would split an honest file into a
+            // fabricated second generation (or defer the honest
+            // articles, when the liar clusters first).
+            //
+            // Without this, parts {1,2,5} declaring /3 merge to
+            // `nsegs = 3 >= total_parts = 3` and the file, then the
+            // release, are stamped COMPLETE with part 3 missing: an NZB
+            // that downloads to a broken archive. That is the wrong side
+            // of the trade `contradicts`'s own note names - noise is
+            // survivable, a "complete" download that extracts to garbage
+            // is not.
+            if e.message_id.is_empty() || part == 0 || total == 0 || part > total {
                 drops.unparseable += 1;
                 continue;
             }

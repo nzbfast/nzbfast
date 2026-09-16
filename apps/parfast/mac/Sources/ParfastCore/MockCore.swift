@@ -273,6 +273,10 @@ public final class MockCore: CoreClient {
         notify()
     }
 
+    /// The demo build has no store, so there is nothing to clear.
+    @discardableResult
+    public func clearDigestCache() throws -> Int { 0 }
+
     public func lastError() -> CoreError? { lock.withLock { _lastError } }
 
     // MARK: - Demo helpers

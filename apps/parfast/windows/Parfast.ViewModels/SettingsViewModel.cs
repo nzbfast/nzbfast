@@ -217,9 +217,35 @@ public sealed class SettingsViewModel : Observable
         });
     }
 
+    public bool DigestCache
+    {
+        get => _settings.Performance.DigestCache;
+        set => Update(_settings with
+        {
+            Performance = _settings.Performance with { DigestCache = value },
+        });
+    }
+
+    public bool PairLargeCreates
+    {
+        get => _settings.Performance.PairLargeCreates;
+        set => Update(_settings with
+        {
+            Performance = _settings.Performance with { PairLargeCreates = value },
+        });
+    }
+
     public bool ShowFastSolver => _core.Capabilities.FastSolver;
 
     public bool ShowLowPriority => _core.Capabilities.LowPriority;
+
+    /// <summary>
+    /// "Clear remembered checksums". Null when the store is clear, else the core's
+    /// reason. Not tied to the setting: records written while it was on stay on
+    /// disk after it is turned off, and this is how they go.
+    /// </summary>
+    public string? ClearDigestCache() =>
+        _core.ClearDigestCache() >= 0 ? null : _core.LastError()?.Message ?? string.Empty;
 
     // ---- Integration. The registry is the truth; see the remarks. ----
 

@@ -2381,50 +2381,39 @@ fn dropping_a_binding_moves_the_generation_the_block_grid_is_named_by() {
 /// settle never re-judges (it re-reads only `Pending`) and which rides
 /// into the SlotReport as real damage.
 ///
-/// THE HANDSHAKE IS THE MUTEX, not a sleep: the feeding thread holds the
-/// slot lock from the top of `on_data_inner` until it drops it to hash,
-/// so the FIRST time this thread can observe the long binding is that
-/// exact instant. The head article then lands while the 4 MB MD5 pass is
-/// still running. A miss is not a false alarm - it shows up as the final
-/// binding assertion, which says the window was never entered.
+/// THE HANDSHAKE IS A TEST-ONLY SEAM, not a sleep and no longer a
+/// race. `on_data_inner` parks at `mid_hash_hook` with both locks down
+/// and nothing hashed, this thread lands the head there, and only then
+/// releases the hash into the `bind_gen` re-check. The interleaving the
+/// test is named for therefore runs on every machine, every time.
 ///
-/// IT HAS FLAKED, AND THE FAILING ASSERTION IS THE WHOLE DIAGNOSIS
-/// (2 Sep 2026). It lost TRY 1 in two independent ci sweeps on one dev
-/// box inside an hour, two different lanes, both green on retry. Before
-/// anyone bisected: 30 runs alone under 12-way CPU load, 400 runs beside
-/// a concurrently running full sweep, and two full sweeps at
-/// `--retries 0` - 430 targeted runs, 0 failures. Both sightings fall
-/// inside the hour that box's shared rustc toolchain was being wiped and
-/// reinstalled repeatedly by competing lanes, which is filesystem and
-/// process churn no ordinary load reproduces. A stall long enough for
-/// the 4 MB hash to finish before the head lands is a BENIGN miss and
-/// fails on the binding assertion below. Read WHICH assertion failed
-/// before reading anything into it: only the join expectation and the
-/// Bad-block count mean a production defect. Do not bisect this one on
-/// the strength of a retried sweep line.
+/// IT USED TO RACE FOR THAT WINDOW, AND THAT IS WHY THE SEAM EXISTS.
+/// The feeding thread held the slot lock until it dropped it to hash,
+/// so the first observable instant of the long binding was that drop,
+/// and this thread tried to land the head inside the ~4 MB MD5 pass
+/// that followed. Missing was benign but indistinguishable from having
+/// nothing to test, so a miss could only be reported as a failure.
+/// It flaked on a dev box on 2 Sep 2026, and `bf2659f42` (3 Sep)
+/// answered by retrying the window up to 24 times - which lowered the
+/// odds without bounding them. Measured 16 Sep 2026, one attempt per
+/// run, 200 runs a point: 0/200 misses at load average 11.8, 3/200 at
+/// ~35, 6/200 at ~80. The miss rate is a function of how loaded the box
+/// is and has no ceiling, which is how a Windows one-process runner -
+/// 1,190 tests in one libtest process with no `--test-threads=1` - hit
+/// 24 misses in a row and took run 35057017045 red on `fa409930`,
+/// failing both nextest tries. Raising the attempt count is the same
+/// bet with a bigger stake; do not reach for it if this ever flakes
+/// again. A failure here now means the code, not the clock.
 ///
-/// SO IT RETRIES ITS WINDOW (3 Sep 2026), because on Windows the benign
-/// miss stopped being rare. `windows-one-process` runs nzbkit-base's
-/// 1,190 tests in ONE libtest process with no `--test-threads=1`, and a
-/// stall between observing the long binding and calling `on_data` long
-/// enough for a 4 MB MD5 to finish is ordinary there rather than
-/// exceptional - it took nightly red on 7ec5395d (run 33737735769), on
-/// this test's binding assertion, which is the one the paragraph above
-/// already says means nothing on its own. A miss now costs an attempt
-/// instead of the run. What did NOT change is what the test is for: the
-/// join expectation and the Bad-block count are checked on EVERY
-/// attempt and a failure of either still fails immediately, and running
-/// out of attempts without ever entering the window is itself a
-/// failure - a window that never opens is a finding about the code
-/// under test, not a licence to pass.
+/// WHAT THE TEST IS FOR IS UNCHANGED: the join expectation catches a
+/// panic in the decode consumer, and the Bad-block count catches a
+/// verdict computed against `long.bin` being recorded on `short.bin`'s
+/// grid. Both are checked unconditionally now, because there is no
+/// longer an attempt that can end without having run the race.
 #[test]
 fn a_binding_that_moves_mid_hash_discards_the_verdicts_it_computed() {
     const BS: usize = 16_384;
     const LONG: usize = 4_000_000;
-    // Each attempt is one 4 MB MD5 pass, single-digit milliseconds of
-    // work, so a generous count costs nothing against the ~120 s this
-    // binary takes in one process.
-    const ATTEMPTS: usize = 24;
     let (long, short, head, payload) = crossed_length_fixture(LONG);
     // Plan lock first, then the slot lock - the order `on_data_inner`
     // takes them in, so this observer can never invert it.
@@ -2436,54 +2425,95 @@ fn a_binding_that_moves_mid_hash_discards_the_verdicts_it_computed() {
             _ => None,
         }
     };
-    for attempt in 1..=ATTEMPTS {
-        let v = LiveVerifier::new(1);
-        let meta = par2_meta(
-            [9u8; 16],
-            BS,
-            &[("long.bin", &long), ("short.bin", &short)],
-            true,
-        );
-        v.activate(&[meta.as_slice()]).expect("fixture parses");
-        std::thread::scope(|sc| {
-            let t1 = sc.spawn(|| {
-                v.on_data(0, "long.bin", LONG as u64, BS as u64, &payload[BS..]);
-            });
-            let t0 = std::time::Instant::now();
-            while bound_name(&v).as_deref() != Some("long.bin") {
-                assert!(
-                    t0.elapsed() < std::time::Duration::from_secs(30),
-                    "the feeding thread never took the long binding"
-                );
-                std::thread::yield_now();
-            }
-            // The head arrives on another decode thread, mid-hash.
-            v.on_data(0, "long.bin", LONG as u64, 0, &head);
-            // Load-bearing on every attempt, missed window or not: a
-            // panic in the decode consumer is a production defect
-            // whatever the timing did.
-            t1.join().expect(
-                "recording verdicts against a binding the slot no longer holds \
-                 panicked inside the decode consumer",
-            );
-        });
-        if bound_name(&v).as_deref() != Some("short.bin") {
-            // Benign miss: the hash finished before the head landed, so
-            // the race this test exists for never ran. Try again.
-            continue;
+
+    let v = LiveVerifier::new(1);
+    let meta = par2_meta(
+        [9u8; 16],
+        BS,
+        &[("long.bin", &long), ("short.bin", &short)],
+        true,
+    );
+    v.activate(&[meta.as_slice()]).expect("fixture parses");
+
+    // THE HANDSHAKE. `entered` says the feeding thread is inside the
+    // window - locks down, `bind_gen` captured, nothing hashed yet -
+    // and `resume` is this thread saying the head has landed and the
+    // binding has moved. Channels with a timeout rather than a join or
+    // a sleep: a join cannot report a thread that never arrived, and a
+    // sleep is the probabilistic bet this test stopped making.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+    // The hook fires on every span that reaches the hash, and the head
+    // this thread lands is one of them. `armed` makes only the FIRST -
+    // the feeding thread's - block; without it the head's own call
+    // would park on a `resume` nobody is left to send.
+    let armed = std::sync::atomic::AtomicBool::new(true);
+    let state = std::sync::Arc::new((
+        armed,
+        std::sync::Mutex::new(entered_tx),
+        std::sync::Mutex::new(resume_rx),
+    ));
+    let hook_state = std::sync::Arc::clone(&state);
+    v.set_mid_hash_hook_for_test(std::sync::Arc::new(move || {
+        if !hook_state
+            .0
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
         }
-        let s = v.slots[0].lock_ok();
+        hook_state
+            .1
+            .lock_ok()
+            .send(())
+            .expect("test thread is alive");
+        hook_state
+            .2
+            .lock_ok()
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the test thread never released the mid-hash window");
+    }));
+
+    std::thread::scope(|sc| {
+        let t1 = sc.spawn(|| {
+            v.on_data(0, "long.bin", LONG as u64, BS as u64, &payload[BS..]);
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the feeding thread never reached the mid-hash window");
+        // The feeding thread is parked mid-window holding no lock, so
+        // this is the interleaving under test and not an approximation
+        // of it: the head completes, `rejudge_binding` moves the slot to
+        // short.bin, and only then is the hash allowed to finish.
         assert_eq!(
-            s.blocks.iter().filter(|b| **b == BlockState::Bad).count(),
-            0,
-            "a verdict judged against long.bin was recorded on short.bin's grid \
-             (attempt {attempt})"
+            bound_name(&v).as_deref(),
+            Some("long.bin"),
+            "the feeding thread reached the hash without taking the long binding"
         );
-        return;
-    }
-    panic!(
-        "the head never re-judged the binding in {ATTEMPTS} attempts - the hash \
-         window was never entered, so the race this test exists for did not run"
+        v.on_data(0, "long.bin", LONG as u64, 0, &head);
+        assert_eq!(
+            bound_name(&v).as_deref(),
+            Some("short.bin"),
+            "the completed head did not re-judge the binding onto short.bin"
+        );
+        resume_tx.send(()).expect("the feeding thread is alive");
+        // A panic in the decode consumer is a production defect whatever
+        // the timing did.
+        t1.join().expect(
+            "recording verdicts against a binding the slot no longer holds \
+             panicked inside the decode consumer",
+        );
+    });
+
+    assert_eq!(
+        bound_name(&v).as_deref(),
+        Some("short.bin"),
+        "the binding moved back out from under the finished hash"
+    );
+    let s = v.slots[0].lock_ok();
+    assert_eq!(
+        s.blocks.iter().filter(|b| **b == BlockState::Bad).count(),
+        0,
+        "a verdict judged against long.bin was recorded on short.bin's grid"
     );
 }
 

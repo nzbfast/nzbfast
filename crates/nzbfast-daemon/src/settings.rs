@@ -411,6 +411,11 @@ pub(super) const DOWNLOAD: &[Setting] = &[
     // would be a second copy to drift. Reading it back through
     // `fast_check_enabled` also means the row reports what is actually
     // in effect, including a value that came from the environment.
+    //
+    // DEFAULT ON since 15 Sep 2026, matching parfast's own per-block
+    // default - see the default resolution in `apply_saved_settings`
+    // (this row has no launch option of its own to carry it). An
+    // explicit `false` saved by the user still wins.
     rw("fast_final_check", |_| {
         json!(nzbkit::par2::fast_check_enabled())
     }),

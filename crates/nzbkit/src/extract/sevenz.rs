@@ -2518,6 +2518,39 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// What a failed read-back assertion in the trim tests has to say, and
+    /// a bare boolean over [`Extractor::covered`] cannot: that predicate is
+    /// TWO-SIDED at the trim point, and the two sides have entirely
+    /// different causes - the spill never reached the slot's archive file
+    /// below it, or the frontier buffer no longer holds the bytes above it.
+    /// `windows-one-process` reported this as the six words "straddling
+    /// window not covered" on 15 Sep 2026 and no lane could tell which side
+    /// had gone, on a failure that reproduces on no other box.
+    ///
+    /// Re-reads the split as well as taking the caller's: the 7z worker
+    /// keeps trimming while the assertion runs, so `base` at the failure is
+    /// not necessarily the one the window was cut around.
+    fn trim_split_report(ex: &Extractor, slot: usize, base_then: u64, lo: u64, hi: u64) -> String {
+        let (mode, base_now, frontier_ram, frontier, writer) = {
+            let inner = ex.inner.lock().unwrap();
+            let s = &inner.slots[slot];
+            let ch = s.chase.as_ref();
+            (
+                format!("{:?}", s.mode),
+                ch.map(|c| c.buf.base()),
+                ch.map(|c| c.buf.frontier_ram_edge()),
+                ch.map(|c| c.buf.frontier()),
+                s.writer.as_ref().map(|w| w.covered_intervals(lo, hi - lo)),
+            )
+        };
+        format!(
+            "mode={mode} base_then={base_then} base_now={base_now:?} \
+             frontier_ram={frontier_ram:?} frontier={frontier:?} \
+             writer_in_window={writer:?} slot_in_window={:?}",
+            ex.covered_intervals(slot, lo, hi - lo)
+        )
+    }
+
     /// PAR2 read-back has to work over a trimmed prefix, or a job whose
     /// archive is being trimmed reports its own blocks bad. The slot's
     /// coverage and read paths split at the trim point: below it the
@@ -2545,20 +2578,71 @@ mod tests {
             high_base > 0,
             "nothing was ever trimmed - the test proved nothing"
         );
-        let base = ex.inner.lock().unwrap().slots[0]
+        let buf = ex.inner.lock().unwrap().slots[0]
             .chase
             .as_ref()
             .unwrap()
             .buf
-            .base();
-        assert!(base > 0);
+            .clone();
+        // A window straddling the trim point needs LIVE bytes ABOVE it,
+        // and the paced feed does not leave any on a starved box: the
+        // engine sprints to the arrival frontier, the trim follows its
+        // watermark there, and `base` ends up exactly at the end of the
+        // RAM run with nothing above it but the withheld hole. That is
+        // the same starvation shape
+        // `sevenz_identical_redelivery_below_the_trim_point_streams_on`
+        // below records, and it is how this test failed in nightly's
+        // `windows-one-process` on 15 Sep 2026 (run 35024269426, 646 s
+        // for a lib that is 60 s on the dev Mac) while every nextest job
+        // on the same commit was green - a bare "not covered" over a
+        // window whose upper half had never arrived. Reproduced the same
+        // night on a 16-core Windows laptop, ten copies of this test
+        // pinned to the same two cores: 1 failure in 70 runs. Piling on
+        // copies does NOT do it - 48 unpinned dilated the test 3.5x and
+        // reproduced nothing. The shape to recreate is the FEEDING
+        // thread losing its slice to the worker inside one process,
+        // which is narrow cores, not many processes.
+        //
+        // So BUILD the straddle instead of hoping the pacing left one.
+        // Freezing the decode is the load-bearing half and delivering a
+        // chunk is not enough on its own: the buffer notifies `arrived`
+        // as the span lands and the engine reads it back with no
+        // extractor lock, so on two cores it consumed the new chunk and
+        // the same write's trim followed it straight to the new
+        // frontier - 4 failures in 170 with the feed alone.
+        // `set_paused` takes the buffer's own state lock and every
+        // reader checks `paused` under it, so after this call the engine
+        // can only ever have served bytes that arrived BEFORE the chunk
+        // below. The watermark therefore stays at or under `at`, the
+        // trim that runs on that write cuts no further, and no later
+        // trim can run at all: the 7z trim fires only on the span path
+        // (`chase_span` and the attach, both under the routing lock),
+        // and this is the last write. The split is fixed and the run
+        // above it is a whole chunk deep.
+        buf.set_paused(true);
+        let at = buf.frontier_ram_edge() as usize;
+        let upto = (at + chunk).min(arch.len());
+        ex.write(0, "big.7z", arch.len() as u64, at as u64, &arch[at..upto])
+            .unwrap();
+        let (base, ram_edge) = (buf.base(), buf.frontier_ram_edge());
+        assert!(
+            base >= 4096,
+            "nothing was spilled below the trim point - the test proved \
+             nothing: base={base}"
+        );
+        assert!(
+            ram_edge >= base + 4096,
+            "nothing live above the trim point - the test proved nothing: \
+             base={base} ram_edge={ram_edge} (delivered {at}..{upto})"
+        );
         // A window straddling the trim point: half off disk, half out of
         // the frontier buffer, and it has to read as the archive does.
         let lo = (base - 4096) as usize;
         let hi = (base + 4096) as usize;
         assert!(
             ex.covered(0, lo as u64, (hi - lo) as u64),
-            "straddling window not covered"
+            "straddling window [{lo}, {hi}) not covered: {}",
+            trim_split_report(&ex, 0, base, lo as u64, hi as u64)
         );
         let mut got = vec![0u8; hi - lo];
         ex.read_at(0, lo as u64, &mut got).unwrap();
@@ -2568,6 +2652,10 @@ mod tests {
         let mut head = vec![0u8; 4096];
         ex.read_at(0, 0, &mut head).unwrap();
         assert_eq!(head, arch[..4096]);
+        // Let the worker go again before the extractor drops: a reader
+        // parked on a pause nothing clears is a wedge, not a tidy-up
+        // (the `Parked` arm in `frontier.rs`'s own drop test).
+        buf.set_paused(false);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2892,5 +2980,134 @@ mod tests {
             .unwrap();
         drop(ex);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// A 7z header may carry kMainStreamsInfo BLOCKS and no kFilesInfo at
+/// all: the files section is optional and `read_header` accepted it.
+/// `calculate_stream_map` ran only inside `read_files_info`, though, so
+/// the archive parsed Ok with an EMPTY stream map, and every decode path
+/// then indexed it - `block_first_pack_stream_index[block_index]` on a
+/// zero-length Vec is an index-out-of-bounds PANIC, raised on the 7z
+/// chase thread, which has no catch_unwind. One crafted archive.
+///
+/// The fixture is hand-built rather than written by the encoder, because
+/// no encoder emits this shape - that is the point.
+///
+/// NEGATIVE CONTROL, run: remove the `else { calculate_stream_map }` arm
+/// from `read_header` and this test aborts the harness with
+/// "index out of bounds: the len is 0 but the index is 0".
+#[cfg(test)]
+mod headerless_files_tests {
+    /// 7z "number" encoding, the inverse of the reader's `ReadNumber`:
+    /// the first byte's top `i` bits say how many little-endian low
+    /// bytes follow, and its remaining low bits carry the high part.
+    fn num(v: u64) -> Vec<u8> {
+        for i in 0..8u32 {
+            if i == 7 || v < (1u64 << (7 * (i + 1))) {
+                let high = (v >> (8 * i)) as u8;
+                let flag = if i == 0 {
+                    0u8
+                } else {
+                    ((0xFFu16 << (8 - i)) & 0xFF) as u8
+                };
+                let mut out = vec![flag | high];
+                for b in 0..i {
+                    out.push((v >> (8 * b)) as u8);
+                }
+                return out;
+            }
+        }
+        unreachable!("the loop returns at i == 7 at the latest")
+    }
+
+    /// kHeader{ kMainStreamsInfo{ kPackInfo, kUnpackInfo }, kEnd } - and
+    /// deliberately NO kFilesInfo.
+    fn header_without_files_info(pack_size: u64, unpack_size: u64) -> Vec<u8> {
+        let mut h = vec![0x01u8]; // kHeader
+        h.push(0x04); // kMainStreamsInfo
+        h.push(0x06); // kPackInfo
+        h.extend(num(0)); // packPos
+        h.extend(num(1)); // numPackStreams
+        h.push(0x09); // kSize
+        h.extend(num(pack_size));
+        h.push(0x00); // kEnd of PackInfo
+        h.push(0x07); // kUnpackInfo
+        h.push(0x0B); // kFolder
+        h.extend(num(1)); // numFolders
+        h.push(0x00); // external = 0
+        h.extend(num(1)); // numCoders in this folder
+        // Coder flags: idSize 1, attributes present (0x20).
+        h.push(0x21);
+        h.push(0x21); // coder id 0x21 = LZMA2
+        h.extend(num(1)); // propsSize
+        h.push(0x18); // LZMA2 dictionary prop
+        h.push(0x0C); // kCodersUnpackSize
+        h.extend(num(unpack_size));
+        h.push(0x00); // kEnd of UnpackInfo
+        h.push(0x00); // kEnd of StreamsInfo
+        h.push(0x00); // kEnd of Header
+        h
+    }
+
+    /// Wraps `header` in the 32-byte signature header, with both CRCs
+    /// correct so the archive is REFUSED for its content and not for
+    /// being malformed.
+    fn archive_with(header: &[u8], pack: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&[b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C]); // magic
+        out.extend_from_slice(&[0x00, 0x04]); // version
+        let start_crc_at = out.len();
+        out.extend_from_slice(&[0; 4]); // startHeaderCRC, filled below
+        let start_header_at = out.len();
+        out.extend_from_slice(&(pack.len() as u64).to_le_bytes()); // nextHeaderOffset
+        out.extend_from_slice(&(header.len() as u64).to_le_bytes()); // nextHeaderSize
+        out.extend_from_slice(&crc32fast::hash(header).to_le_bytes()); // nextHeaderCRC
+        let start_header = out[start_header_at..start_header_at + 20].to_vec();
+        out[start_crc_at..start_crc_at + 4]
+            .copy_from_slice(&crc32fast::hash(&start_header).to_le_bytes());
+        out.extend_from_slice(pack);
+        out.extend_from_slice(header);
+        out
+    }
+
+    #[test]
+    fn a_header_with_blocks_and_no_files_info_is_refused_not_panicked_on() {
+        let pack = vec![0u8; 64];
+        let arch = archive_with(&header_without_files_info(64, 4096), &pack);
+
+        let mut reader = sevenz_rust2::ArchiveReader::new(
+            std::io::Cursor::new(arch),
+            sevenz_rust2::Password::empty(),
+        )
+        .expect("the header is well formed - it is the CONTENT that is impossible");
+        // Whatever the verdict, it must BE a verdict. Before the fix
+        // this line did not return at all: it panicked inside the
+        // vendored reader, on a thread the chase spawns without
+        // catch_unwind, so the process took the hit rather than the
+        // archive being refused.
+        //
+        // Either answer is acceptable and both are reached: with no
+        // kSubStreamsInfo the block declares no sub-streams, so the
+        // decode simply yields nothing; a variant that declares some is
+        // refused by the files-range guard. What must never happen is a
+        // panic, and no entry may be produced out of an archive that
+        // names none.
+        let mut seen = 0usize;
+        let outcome = reader.for_each_entries(|_e, _r| {
+            seen += 1;
+            Ok(true)
+        });
+        assert_eq!(
+            seen, 0,
+            "an archive whose header declares no files cannot yield one"
+        );
+        if let Err(e) = outcome {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("stream map") || msg.contains("sub-streams") || msg.contains("pack"),
+                "an unexpected refusal reason: {msg}"
+            );
+        }
     }
 }

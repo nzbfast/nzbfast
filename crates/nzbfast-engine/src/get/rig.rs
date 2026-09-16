@@ -34,9 +34,18 @@ pub(super) fn install_password_probe(
     let dir = out_dir.to_path_buf();
     let poster = poster.to_string();
     let tried: std::sync::Mutex<std::collections::HashSet<([u8; 16], String)>> = Default::default();
-    let hub_pw = hub.clone();
+    // WEAK, never a clone of the Arc. The probe is stored IN the
+    // extractor, and `install_seek` publishes that extractor on this
+    // same hub, so a strong capture here is a cycle: hub -> extractor ->
+    // probe -> hub. Harmless for the daemon's own hub, which lives as
+    // long as the process; a prefetch runs on a PRIVATE hub, and the
+    // cycle kept every one of them alive for good - verifier, seek
+    // ladder, every message-id, and every output writer, which is how a
+    // prefetched job's descriptors stayed open for hours (GH #71).
+    let hub_pw = hub.as_ref().map(Arc::downgrade);
     let owner = stream_owner.to_string();
     extractor.set_password_probe(std::sync::Arc::new(move |probe| {
+        let hub_pw = hub_pw.as_ref().and_then(std::sync::Weak::upgrade);
         let t0 = std::time::Instant::now();
         let mut cands = harvest_password_candidates(&dir, None);
         if let Some(n) = dir.file_name().map(|n| n.to_string_lossy().to_string()) {
@@ -953,6 +962,47 @@ mod replay_failure_tests {
             pending.replayed(),
             (0, 0),
             "a failed replay must not count as replayed bytes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod probe_cycle_tests {
+    use super::*;
+
+    /// GH #71: the password probe lives INSIDE the extractor, and the run
+    /// publishes that extractor on the hub the probe was given. With the
+    /// hub captured strongly that is a cycle, so a prefetch's private hub
+    /// - and with it every output writer's open descriptor - never
+    /// dropped. Both must be gone once the last outside reference is.
+    #[test]
+    fn the_password_probe_does_not_keep_its_hub_alive() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-probe-cycle-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let hub = Arc::new(StreamHub::default());
+        let ex = Arc::new(nzbkit::extract::Extractor::new(&dir, 1, false));
+        install_password_probe(&ex, &Some(hub.clone()), &dir, "owner", "poster");
+        // What `install_seek` does on every run.
+        *hub.extractor.lock_ok() = Some(("owner".to_string(), ex.clone()));
+
+        let hub_weak = Arc::downgrade(&hub);
+        let ex_weak = Arc::downgrade(&ex);
+        drop(ex);
+        drop(hub);
+        assert!(
+            hub_weak.upgrade().is_none(),
+            "the hub outlived its last reference: the probe holds it"
+        );
+        assert!(
+            ex_weak.upgrade().is_none(),
+            "the extractor outlived its hub, so its writers stay open"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

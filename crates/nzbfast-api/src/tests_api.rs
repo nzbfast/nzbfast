@@ -822,6 +822,29 @@ fn a_grab_error_shows_the_host_and_nothing_else() {
         redact_url_creds("https://b/y?k=2 and http://a/x?k=1"),
         "https://b/... and http://a/..."
     );
+    // A PASSWORD CONTAINING A DELIMITER. Unescaped that is malformed by
+    // RFC 3986 - the authority genuinely ends at the '/' - but reading
+    // it that way made the "host" `user:pa`, so the username and the
+    // head of the password went into the log under a host's name. An
+    // `@` left in the dropped part is the tell, and the answer is to
+    // drop the authority too: there is no telling which side of that
+    // `@` is the credential without deciding whose parser is right.
+    //
+    // NEGATIVE CONTROL, run: remove the `tail[..stop].contains('@')`
+    // arm and each of these leaks its userinfo by name.
+    for input in [
+        "http://user:pa/ss@host/p failed",
+        "http://user:pa?ss@host/p failed",
+        "http://user:pa#ss@host/p failed",
+    ] {
+        let got = redact_url_creds(input);
+        assert!(!got.contains("user"), "{input} leaked its userinfo: {got}");
+        assert!(!got.contains("pa"), "{input} leaked its password: {got}");
+        assert!(
+            got.ends_with(" failed"),
+            "{input} must still read as a sentence: {got}"
+        );
+    }
 }
 
 /// §4 C2: the enricher's requests must REUSE a connection.

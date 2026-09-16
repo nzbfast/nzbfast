@@ -879,7 +879,27 @@ fn engine_proved(
 /// moves the bytes - macOS clones and pays nothing): the serial copy was
 /// 0.06 s of the 3-block leg, 0.19 s of the 101-block leg and 0.45 s of
 /// the 1,500-block leg, all of it in front of a fold that takes 0.25 to
-/// 6 s. The
+/// 6 s.
+///
+/// **"BESIDE" IS A PROPERTY OF THAT CORPUS AND NOT OF THE DESIGN, and on
+/// ONE LARGE MEMBER it is the largest single term in the repair.** Twenty-one
+/// members mean twenty-one small copies against a fold over all of them;
+/// one 8.86 GB member means ONE copy of 8.86 GB against a fold that a
+/// one-block repair finishes in 0.9 s, so the wait is what is left of the
+/// copy. Measured 16 Sep 2026 on a Core Ultra 9 386H (Windows 11, NTFS),
+/// the 8.86 GB single-member set of the 13 Sep tier rounds: `backup join`
+/// 4.09 s of a 6.88 s one-block repair, and 6.15 s of a 13.63 s one on an
+/// EPYC 9354P (Linux, ext4), against 0.000 s on an M5 Max, where APFS
+/// clones. It is FIXED - 0.66 s and 0.24 s at m=100 only because the
+/// longer fold covers more of the same copy, which is also why 99 further
+/// lost blocks cost the EPYC nothing net - and it is inherent: the
+/// join may not move below the patch, which overwrites in place the very
+/// bytes the copy still has to read, and a range-split copy of one
+/// member is 3x SLOWER than the serial one on that box's NVMe (1.07
+/// GB/s serial against 0.33 at four lanes). Do not chase it; the write-up
+/// and the three-box table are
+/// `research/PARFAST-SINGLE-MEMBER-REPAIR-FIXED-COST-2026-09-16.md`.
+/// The
 /// `.n` names are still chosen here, serially, so numbering does not
 /// depend on which copy starts first; at most four copies run at once,
 /// so a set of many damaged members does not fan a thread per file out
@@ -899,7 +919,17 @@ fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) -> BackupBa
             continue;
         }
         let src = loaded.data_path(name);
-        for n in 1..=9u32 {
+        // Keep counting until a free name exists, as par2cmdline does.
+        // This stopped at `.9`, and when all nine were taken the damaged
+        // original got NO backup at all - silently, while the fold then
+        // overwrote it in place. A repair that eats the evidence is the
+        // one outcome a backup exists to prevent, and nine is not a
+        // number the format or the reference puts any weight on.
+        //
+        // The ceiling is a runaway guard, not a policy: reaching it
+        // means something else is wrong with the directory, and writing
+        // no backup is still better than writing a millionth one.
+        for n in 1..=u32::from(u16::MAX) {
             let dst = loaded.data_path(&format!("{name}.{n}"));
             if !dst.exists() && !protected.contains(&verify::path_key(&dst)) {
                 jobs.push((src, dst));
@@ -938,9 +968,54 @@ struct BackupBatch {
 
 /// Wait for every backup copy handed over. A lane that panicked has
 /// nothing to report that the missing `.n` file does not already say.
+///
+/// THE WAIT IS TIMED, under the same `NZBFAST_REPAIR_TIMING` that prints
+/// every other phase, and it reports the bytes as well as the seconds.
+/// [`back_up_damaged`] says the copy runs BESIDE the fold and is
+/// therefore free; that is true of the corpus it was measured on (21
+/// members of 1 GiB, 0.06-0.45 s behind a 0.25-6 s fold) and false of
+/// one large member, where the copy is the WHOLE member and the fold of
+/// a one-block repair is a fraction of it. On the 8.86 GB single-member
+/// set this wait is 3.7 s of a 5.9 s repair on a Core Ultra 9 and ~0 on
+/// an M5 Max, because APFS clones and NTFS and ext4 copy - and until
+/// this line existed the seconds landed inside the engine's `patch`
+/// phase, where they read as a write that writes 4.4 MB.
+/// `research/PARFAST-SINGLE-MEMBER-REPAIR-FIXED-COST-2026-09-16.md`.
 fn join_backups(backups: BackupBatch) {
+    let timing = std::env::var_os("NZBFAST_REPAIR_TIMING").is_some();
+    // Sized BEFORE the join, from the destinations this batch declared,
+    // so a copy still in flight is counted at what it will be rather
+    // than at how far it has got.
+    let (n, bytes) = if timing {
+        let n = backups.created.len();
+        let b: u64 = backups
+            .created
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+            .sum();
+        (n, b)
+    } else {
+        (0, 0)
+    };
+    let t0 = std::time::Instant::now();
+    let lanes = backups.lanes.len();
     for h in backups.lanes {
         let _ = h.join();
+    }
+    if timing && lanes > 0 {
+        let done: u64 = backups
+            .created
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+            .sum();
+        tracing::info!(
+            target: "repair-timing",
+            "backup join: waited {:.2?} for {n} damaged-original cop{} on {lanes} lane(s),              {:.1} MB at join, {:.1} MB after",
+            t0.elapsed(),
+            if n == 1 { "y" } else { "ies" },
+            bytes as f64 / 1e6,
+            done as f64 / 1e6,
+        );
     }
 }
 

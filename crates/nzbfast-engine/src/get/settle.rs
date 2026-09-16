@@ -235,6 +235,33 @@ pub(super) struct SettleVerdict {
     /// optimisation, so the cost of saying yes too often is one job's
     /// re-extraction, where saying no too often is the payload.
     pub(super) repaired: bool,
+    /// Sweep item 34 (16 Sep 2026): the names a DISK-side recovery set
+    /// verified or rebuilt on this pass - a set the in-stream verifier
+    /// never had, and so a set the census could not consult.
+    ///
+    /// One consumer: the spared-metadata prune in `super::tail`.
+    /// `take_census` runs BEFORE settle and asks only `verifier.sets()`
+    /// whether a short furniture file is covered; on the set-less arm
+    /// that answer is structurally "no", so a `.nfo` short an article is
+    /// spared on the premise that "nothing can rebuild it" - and
+    /// `drop_spared_metadata` DELETES what it spares. The volumes the
+    /// fallback then fetches carry the same critical packets, name that
+    /// `.nfo`, and rebuild it. Without this channel the good finish
+    /// deleted the file parity had just restored and logged the premise
+    /// as if it still held.
+    ///
+    /// Names as the set spells them, un-normalised: the prune sanitizes
+    /// and case-folds both sides itself, the same way
+    /// `disk_par2_fallback`'s own `covered` set does.
+    ///
+    /// Proof of WHOLENESS and not merely of presence, which is what
+    /// makes sparing them safe: a name reaches this list only from a set
+    /// that reported `NoDamage` or `Repaired`, both of which are
+    /// hash-verified verdicts over the file on disk. An `Unrepairable`
+    /// set contributes nothing, so a member still holed is still spared
+    /// and still deleted - see the negative control
+    /// `e2e_sniffedpar2::a_disk_repair_does_not_certify_files_outside_its_recovery_set`.
+    pub(super) repaired_names: Vec<String>,
 }
 
 struct RepairOutcome {
@@ -1817,6 +1844,16 @@ async fn settle_with_set(
         // `damage` is what decides whether `run_set_repair` is called at
         // all, so it is exactly the "a repair pass ran" test.
         repaired: damage > 0,
+        // EMPTY ON THIS PATH BY CONSTRUCTION, and that is a claim rather
+        // than a gap (sweep item 34). The list exists to correct a spare
+        // the census made without knowing a set would name the file, and
+        // here a set DID activate in stream: `take_census` reads exactly
+        // these descriptors (`census.rs`'s `set_names` is
+        // `verifier.sets()`), so any name this repair speaks for was
+        // `covered` at census time and was never spared. The repair on
+        // this arm also works off the ACTIVE set, so it cannot reach a
+        // name that set does not already own.
+        repaired_names: Vec::new(),
     })
 }
 

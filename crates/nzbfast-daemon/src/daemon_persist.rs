@@ -160,24 +160,26 @@ impl Daemon {
         // NAMED for what it decides rather than for a file that exists:
         // a store can be present and still not be the record, which is
         // exactly the rollback case below.
-        let store_is_authority =
-            self.queue_store_path().exists() && !self.legacy_snapshot_outlives_store();
-        if store_is_authority {
+        let store_exists = self.queue_store_path().exists();
+        let store_wins_on_mtime = store_exists && !self.legacy_snapshot_outlives_store();
+        if store_wins_on_mtime {
             // The migration's two leftovers, taken once they are old
             // enough to cost more than they can buy back - the reasoning,
             // and the measured rollback behaviour behind it, is in
             // `sweep_retired_snapshots`.
+            //
+            // Gated on the MTIME answer and not on the authority the next
+            // block settles: a boot that had to fall back to the store
+            // because the snapshot would not read is the one boot whose
+            // leftovers are evidence, and sweeping them there would
+            // destroy the only other copies of a queue that has just been
+            // shown to be damaged.
             self.sweep_retired_snapshots();
         }
-        let (jsonl_arr, jsonl_next_id) = if store_is_authority {
-            self.queue_replay()
-        } else {
-            (Vec::new(), None)
-        };
         // A torn/corrupt file falls back to the .bak of the last good
         // parse - never "start empty" and let the next save_queue make
         // the loss permanent.
-        let (v, mut legacy_hist) = match store_is_authority {
+        let (v, mut legacy_hist) = match store_wins_on_mtime {
             true => (None, Vec::new()),
             false => match crate::persist::load_json_with_backup(&path) {
                 Some(v) => {
@@ -190,6 +192,55 @@ impl Daemon {
                 }
                 None => (None, Vec::new()),
             },
+        };
+        // THE ORDER OF PREFERENCE, stated once: a readable legacy
+        // snapshot NEWER than the store; else the store; else nothing.
+        // The mtime comparison above is not the rule, it is the rule's
+        // first clause - it decides which of two RECORDS to believe, and
+        // it is only answerable while both of them exist.
+        //
+        // Sweep item 37 (16 Sep 2026): the snapshot could win that
+        // comparison and then turn out not to be readable at all -
+        // neither it nor its `.bak` parses, which a 14-day-swept `.bak`
+        // plus one damaged file is enough to produce. `load_queue` then
+        // took the empty legacy queue as the answer AND had already
+        // skipped `queue_replay` on the strength of the comparison, so
+        // it returned with an empty queue while `queue.jsonl` still held
+        // every row. Nothing later reconciled it: `recover_orphaned_spool`
+        // re-adopted the spool copies with priority, paused state,
+        // category override, retries and heal stamps all dropped, and a
+        // single dashboard reorder in that session took
+        // `queue_rewrite_locked`, which rewrites the store from the
+        // in-memory rows and makes the loss permanent.
+        //
+        // So when the preferred record turns out not to exist, fall
+        // through to the next one. The store is by then the only
+        // surviving copy of the queue, and reading a superseded queue
+        // cannot be worse than starting empty - it is the same trade
+        // `load_json_with_backup` already makes between a primary and
+        // its `.bak`, one level up. The damaged snapshot is preserved,
+        // not overwritten: `load_json_with_backup` renames it to
+        // `queue.json.corrupt` on the way out, and the sweep above is
+        // held off this boot.
+        let store_is_authority = store_wins_on_mtime || (store_exists && v.is_none());
+        if store_is_authority && !store_wins_on_mtime {
+            // Never silent. This is a user whose queue.json has just been
+            // lost, and the queue they get back is a record an older
+            // build had already moved on from.
+            error!(
+                target: "queue",
+                "{} is newer than the queue store but nothing could read it (and \
+                 no usable .bak) - restoring from {} instead, which may be older \
+                 than the session that wrote it; the unreadable bytes are kept \
+                 beside it",
+                path.display(),
+                self.queue_store_path().display()
+            );
+        }
+        let (jsonl_arr, jsonl_next_id) = if store_is_authority {
+            self.queue_replay()
+        } else {
+            (Vec::new(), None)
         };
         // The queue half of the migration is owed whenever a legacy
         // snapshot is what we just read: the store has to exist before
@@ -586,8 +637,13 @@ impl Daemon {
                 continue;
             }
             // Never hand this number out again, whatever the allocator
-            // was restored to.
-            self.next_id.fetch_max(n + 1, Ordering::Relaxed);
+            // was restored to. Saturating: `n` is parsed straight out of
+            // a spool FILE NAME, so `18446744073709551615.nzb` in the
+            // spool panicked a debug build at startup and, in release,
+            // wrapped to 0 and silently skipped the id floor - which is
+            // the one thing this line exists to set.
+            self.next_id
+                .fetch_max(n.saturating_add(1), Ordering::Relaxed);
             // The user's own filing decision, or empty - in which case
             // `enqueue_as` infers exactly as it did for the add that was
             // lost, which is the same answer that add got.

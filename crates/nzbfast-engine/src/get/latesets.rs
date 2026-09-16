@@ -661,61 +661,19 @@ pub(super) fn apply_nonactivated_disk_sets(
              after {repairs} set repair(s)"
         );
     }
-    // The chain family's assignment, computed FIRST and read by BOTH
-    // gates below, which is the 1 Sep 2026 fix: asking the two families
-    // separately let one lost slot be both a foreign rebuild's unique
-    // fit and a vouched rebuild's, so the foreign file was kept under a
-    // real name while the chain tier credited the slot. See
-    // [`chain_assignment`].
-    let chain_by_slot = chain_assignment(&chained, &short, &slot_bytes, slots);
-    // X5-24, and it runs AFTER the loop because the question is global:
-    // whether a rebuild is uniquely assignable cannot be answered while
-    // another set that has not run yet may produce a second candidate
-    // for the same slot.
-    let assigned =
-        keep_uniquely_assignable_residuals(&residual, &chain_by_slot, &short, &slot_bytes, slots);
-    if !good
-        && residual_accounts_for_the_shortfall(
-            &assigned,
-            &short,
-            incomplete,
-            census.len(),
-            derrs_net,
-            !denied.is_empty(),
-        )
-    {
-        good = true;
-        late_shortfall = None;
-    }
-    // The CHAIN tier, and it runs after that one for the same global
-    // reason: a slot's rebuild may come from any set in the chain, and
-    // which set produced it is not decidable until every one of them
-    // has run.
-    //
-    // FOR WHOEVER MAKES THIS LOOP A FIXPOINT (W4-12 asks for one): both
-    // candidate lists have to accumulate ACROSS the rounds and both
-    // verdicts have to stay here, after the last one. A set that heals
-    // in round two is exactly the shape this tier exists for, and a
-    // fixpoint that runs the accounting per round asks each round to
-    // carry the whole shortfall alone - which is the very mistake this
-    // commit fixed one level down, where the pass was asked to account
-    // for slots an earlier pass had already accounted for.
-    if !good
-        && chain_accounts_for_the_shortfall(
-            &assigned,
-            &chain_by_slot,
-            &chained,
-            &short,
-            slots,
-            incomplete,
-            census.len(),
-            derrs_net,
-            !denied.is_empty(),
-        )
-    {
-        good = true;
-        late_shortfall = None;
-    }
+    (good, late_shortfall) = late_set_tiers(
+        good,
+        late_shortfall,
+        &chained,
+        &residual,
+        &short,
+        &slot_bytes,
+        slots,
+        incomplete,
+        &census,
+        derrs_net,
+        !denied.is_empty(),
+    );
     // W4-01B has the LAST WORD, after every tier above and whatever the
     // in-loop flip decided.
     //
@@ -740,6 +698,85 @@ pub(super) fn apply_nonactivated_disk_sets(
     // judged: X5-10's invariant, and the reason it is the last statement
     // in the function rather than a line inside the loop.
     crate::repair::sweep_spent_sources(&spent);
+    (good, late_shortfall)
+}
+
+/// The two post-loop verdict tiers of [`apply_nonactivated_disk_sets`]
+/// (X5-24 residuals, then the chain tier), over the candidate lists the
+/// rounds accumulated. Moved verbatim out of that function for its
+/// 500-line ceiling; it takes `good` and the shortfall by value and hands
+/// both back, and W4-01B's last word over `denied` stays in the caller,
+/// after it. `denied_unresolved` is `!denied.is_empty()` taken at the
+/// call, which is the same instant the two tiers read it inline.
+#[expect(clippy::too_many_arguments)]
+fn late_set_tiers(
+    mut good: bool,
+    mut late_shortfall: Option<crate::repair::RepairShortfall>,
+    chained: &[Chained],
+    residual: &[Residual],
+    short: &[usize],
+    slot_bytes: &[u64],
+    slots: &[Arc<FileSlot>],
+    incomplete: usize,
+    census: &[usize],
+    derrs_net: u64,
+    denied_unresolved: bool,
+) -> (bool, Option<crate::repair::RepairShortfall>) {
+    // The chain family's assignment, computed FIRST and read by BOTH
+    // gates below, which is the 1 Sep 2026 fix: asking the two families
+    // separately let one lost slot be both a foreign rebuild's unique
+    // fit and a vouched rebuild's, so the foreign file was kept under a
+    // real name while the chain tier credited the slot. See
+    // [`chain_assignment`].
+    let chain_by_slot = chain_assignment(chained, short, slot_bytes, slots);
+    // X5-24, and it runs AFTER the loop because the question is global:
+    // whether a rebuild is uniquely assignable cannot be answered while
+    // another set that has not run yet may produce a second candidate
+    // for the same slot.
+    let assigned =
+        keep_uniquely_assignable_residuals(residual, &chain_by_slot, short, slot_bytes, slots);
+    if !good
+        && residual_accounts_for_the_shortfall(
+            &assigned,
+            short,
+            incomplete,
+            census.len(),
+            derrs_net,
+            denied_unresolved,
+        )
+    {
+        good = true;
+        late_shortfall = None;
+    }
+    // The CHAIN tier, and it runs after that one for the same global
+    // reason: a slot's rebuild may come from any set in the chain, and
+    // which set produced it is not decidable until every one of them
+    // has run.
+    //
+    // FOR WHOEVER MAKES THIS LOOP A FIXPOINT (W4-12 asks for one): both
+    // candidate lists have to accumulate ACROSS the rounds and both
+    // verdicts have to stay here, after the last one. A set that heals
+    // in round two is exactly the shape this tier exists for, and a
+    // fixpoint that runs the accounting per round asks each round to
+    // carry the whole shortfall alone - which is the very mistake this
+    // commit fixed one level down, where the pass was asked to account
+    // for slots an earlier pass had already accounted for.
+    if !good
+        && chain_accounts_for_the_shortfall(
+            &assigned,
+            &chain_by_slot,
+            chained,
+            short,
+            slots,
+            incomplete,
+            census.len(),
+            derrs_net,
+            denied_unresolved,
+        )
+    {
+        good = true;
+        late_shortfall = None;
+    }
     (good, late_shortfall)
 }
 

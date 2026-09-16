@@ -1204,8 +1204,14 @@ impl Daemon {
     /// live daemon 14 Aug 2026) is done with it. Four workers queued
     /// behind a 62 s hold is how one dashboard tab wedged the daemon on
     /// 28 Jul; five seconds each cannot build that queue.
+    ///
+    /// `pub` rather than `pub(crate)` since 16 Sep 2026 so a maintenance
+    /// leg in another crate can size its own hold AGAINST it instead of
+    /// copying the number: `tasks::enrich`'s correlation backlog slice is
+    /// `HTTP_INDEX_WAIT / 4`, and the defect that item fixed was exactly
+    /// a hold nothing had written against this bound.
     #[cfg(feature = "indexer")]
-    pub(crate) const HTTP_INDEX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+    pub const HTTP_INDEX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
     /// Bounded-wait WRITE access, with the timeout reported: the
     /// write-side sibling of [`Self::index_read_checked`], and the
@@ -1772,7 +1778,30 @@ impl Daemon {
 
     /// Mutable variant for the odd transaction-shaped call (IMDb
     /// snapshot ingest). Same lazy-open, same single connection.
+    ///
+    /// # This is the hold every in-process reader waits out
+    ///
+    /// The tip walker ingests through here, one hop per
+    /// `nzbkit::index::INGEST_BATCH` sub-batch, so a catch-up walk
+    /// parks the dashboard, the API and the wall enricher for as long
+    /// as each of those transactions takes. `daemon_indexbusy` records
+    /// an ~80 s hold on the live daemon (14 Aug 2026) and four HTTP
+    /// workers queued behind a 62 s one wedged a dashboard tab on
+    /// 28 Jul. Two rigs priced the batch-size trade against the SQLite
+    /// write lock the DEEPEN pass takes and both said in their limits
+    /// that nothing had measured THIS lock on a running daemon, so
+    /// every hold is timed and filed under the CALLER's location -
+    /// `#[track_caller]`, so a call site costs nothing and needs no
+    /// edit. Read it back with `mode=index_holds`; the numbers it took
+    /// are in section 8 of
+    /// `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md`.
+    ///
+    /// The timer starts before the lock is ACQUIRED, deliberately: it
+    /// is a hold from the point of view of a reader queued behind it,
+    /// and the `blocking_db` hop plus a lazy open are part of what that
+    /// reader waits. It is the same reading the rigs take.
     #[cfg(feature = "indexer")]
+    #[track_caller]
     pub fn with_index_mut<T>(
         &self,
         f: impl FnOnce(&mut nzbkit::index::Index) -> Option<T>,
@@ -1780,6 +1809,8 @@ impl Daemon {
         if !self.index_db_wanted() {
             return None;
         }
+        let at = std::panic::Location::caller();
+        let _hold = crate::holdstat::Timer::start("index_mut", at.file(), at.line());
         // blocking_db: see `with_index` - the write side is the one
         // that actually starved the runner.
         crate::persist::blocking_db(|| {

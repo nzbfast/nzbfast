@@ -26,6 +26,15 @@ use super::ApiCtx;
 const DEFAULT_LIMIT: usize = 10;
 /// Ceiling on `limit`, so one call cannot ask the daemon to walk a
 /// whole history's worth of directories.
+///
+/// It only does that if the CLAMPED figure is what the payload builders
+/// see. `history_page` sizes its filesystem allowance as
+/// `q.limit.max(HISTORY_STAT_BUDGET)` plus one probe per rendered row,
+/// and `HistQuery::from_params` re-parses `limit` out of the raw query
+/// string with no upper bound - so while this ceiling was applied only
+/// to the post-hoc `.take(limit)`, it bounded the TRUNCATION and not the
+/// walk, which is the expensive half and the one it is named for. See
+/// `clamped_params` below.
 const MAX_LIMIT: usize = 100;
 
 fn limit_of(params: &std::collections::HashMap<String, String>) -> usize {
@@ -60,6 +69,20 @@ fn stream_url(d: &Daemon, base: &str, id: &str) -> String {
     format!("{base}/stream/{id}?t={}", d.stream_token(id))
 }
 
+/// `params` with `limit` rewritten to the value [`limit_of`] settled on,
+/// for handing to the payload builders.
+///
+/// They re-parse the query string themselves, so passing the caller's
+/// own `params` hands them the unclamped number - see [`MAX_LIMIT`].
+fn clamped_params(
+    params: &std::collections::HashMap<String, String>,
+    limit: usize,
+) -> std::collections::HashMap<String, String> {
+    let mut out = params.clone();
+    out.insert("limit".to_string(), limit.to_string());
+    out
+}
+
 fn m_playback(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -68,6 +91,7 @@ fn m_playback(
     _api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
     let limit = limit_of(params);
+    let params = &clamped_params(params, limit);
     let free_now = free_bytes(&crate::naming::out_dir(d));
     let warns = sab_warnings(d, ctx.cfg_path, ctx.via_add_only, free_now);
     // Projected from the SAB payloads rather than walked again here: one

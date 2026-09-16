@@ -612,9 +612,10 @@ impl Extractor {
             if let Some(w) = &s.writer {
                 // The out_dir-RELATIVE name, not the bare file name: a
                 // tree-preserved member is addressed by its whole
-                // relative path ("VIDEO_TS/x.vob").
-                let fname = out_name_of(&self.out_dir, &w.path);
-                if fname == name {
+                // relative path ("VIDEO_TS/x.vob"). Memoized on the
+                // writer (`out_name_rel`), which asks the CREATION path -
+                // which is what this always compared.
+                if w.out_name_rel(&self.out_dir).as_ref() == name {
                     return vec![(si, start.min(w.size), end.min(w.size), w.size)];
                 }
             }
@@ -638,7 +639,22 @@ impl Extractor {
                 }
                 // Look up by the RAW entry name (route_dest/inner_writer key);
                 // the sanitized form is only the on-disk fallback name.
-                let out_name = if let Some(&cs) = g.routed.get(&e.name) {
+                // NAME MATCH, NOT NAME RESOLUTION. This runs once per
+                // archive entry per call and the call runs once per
+                // offset-0 promote per member, so on a many-member set
+                // it is O(members^2) - and resolving each entry to an
+                // owned `String` first made every step of it a path walk
+                // plus an allocation, which measured as 47% of
+                // non-blocked CPU on an 8,192-member set
+                // (research/MANYSMALL-PER-MEMBER-RESIDUE-2026-09-16.md).
+                // Asking "is it this name?" instead lets the routed arm
+                // answer from the writer's memoized relative name and
+                // allocates nothing on either arm. Measured, one binary
+                // and an env-var arm: -11.8% of the job's instructions
+                // on a 2,048-member set and -45.2% on an 8,192-member
+                // one, +0.7% on a one-member control that cannot enter
+                // this loop (research/FILEWRITER-RELNAME-CACHE-2026-09-16.md).
+                let matched = if let Some(&cs) = g.routed.get(&e.name) {
                     // A routed level-1 file is an OUTPUT only when its
                     // child slot went Plain (real file, possibly under a
                     // disambiguated name). Any other mode is still
@@ -649,17 +665,21 @@ impl Extractor {
                     // mapping INTO a nested archive's outputs stays out
                     // of scope for v1 - those fall to the non-mapped
                     // path.
-                    match inner.child.as_ref().and_then(|c| c.plain_slot_out_name(cs)) {
-                        Some(n) => n,
-                        None => sanitize_out_name(&e.name),
+                    match inner
+                        .child
+                        .as_ref()
+                        .and_then(|c| c.plain_slot_name_matches(cs, name))
+                    {
+                        Some(hit) => hit,
+                        None => sanitize_out_name(&e.name) == name,
                     }
                 } else {
-                    g.out_names
-                        .get(&e.name)
-                        .cloned()
-                        .unwrap_or_else(|| sanitize_out_name(&e.name))
+                    match g.out_names.get(&e.name) {
+                        Some(v) => v == name,
+                        None => sanitize_out_name(&e.name) == name,
+                    }
                 };
-                if out_name != name {
+                if !matched {
                     continue;
                 }
                 let piece_end = base + e.data_len;
@@ -795,20 +815,31 @@ impl Extractor {
         out
     }
 
-    /// Output filename of a Plain slot (nested seek mapping: a routed
-    /// level-1 file whose child slot went Plain IS the output file).
-    /// Poison-tolerant like its caller: `map_output_range` calls this on
-    /// the CHILD while holding the PARENT lock, so a poisoned child lock
-    /// panicking here would poison the parent too and cascade upward.
-    pub(super) fn plain_slot_out_name(&self, slot: usize) -> Option<String> {
+    /// Does a Plain slot's output file carry `name`? (Nested seek
+    /// mapping: a routed level-1 file whose child slot went Plain IS the
+    /// output file.) `None` means the slot is not a Plain output at all,
+    /// so the caller must fall back to the entry name.
+    ///
+    /// A MATCH and not a resolution, because the caller asks it once per
+    /// archive entry per call: the writer memoizes its out_dir-relative
+    /// name (`FileWriter::out_name_rel`), so this is a byte compare
+    /// after the first ask and allocates nothing
+    /// (research/FILEWRITER-RELNAME-CACHE-2026-09-16.md). It reads the
+    /// CREATION path, which is what the mapping has always compared -
+    /// a published rename moves the file and not that path.
+    ///
+    /// Poison-tolerant: `map_output_range` calls this on the CHILD while
+    /// holding the PARENT lock, so a poisoned child lock panicking here
+    /// would poison the parent too and cascade upward.
+    pub(super) fn plain_slot_name_matches(&self, slot: usize, name: &str) -> Option<bool> {
         let inner = self.inner_read();
-        let s = &inner.slots[slot];
+        let s = inner.slots.get(slot)?;
         if !matches!(s.mode, SlotMode::Plain) {
             return None;
         }
         s.writer
             .as_ref()
-            .map(|w| out_name_of(&self.out_dir, &w.path))
+            .map(|w| w.out_name_rel(&self.out_dir).as_ref() == name)
     }
 
     /// (name, size) of every slot-owned output file - what a PARENT folds
@@ -837,6 +868,40 @@ impl Extractor {
     pub fn slot_path(&self, slot: usize) -> Option<PathBuf> {
         let inner = self.inner.lock_ok();
         inner.slots[slot].writer.as_ref().map(|w| w.current_path())
+    }
+
+    /// The group key a fed slot joined, if its headers ever parsed -
+    /// the canonicalized inner-file name, which is what
+    /// [`ExtractReport::fallbacks`](crate::extract::ExtractReport)
+    /// keys its entries by.
+    ///
+    /// So a caller that fed volumes in a known order can ask, per
+    /// volume, whether the set it belongs to was EXTRACTED or fell back.
+    /// A slot whose headers never parsed (a continuation volume whose
+    /// head never arrived) answers `None`, which a caller must read as
+    /// "unknown", never as "extracted".
+    pub fn slot_group(&self, slot: usize) -> Option<String> {
+        let inner = self.inner.lock_ok();
+        inner.slots.get(slot).and_then(|s| s.group.clone())
+    }
+
+    /// The live on-disk path of EVERY slot this extractor owns a writer
+    /// for - the job's own slots AND any allocated later through
+    /// [`alloc_slot`](Self::alloc_slot).
+    ///
+    /// That second half is the point. A mapped PAR2 repair rebuilding a
+    /// wholly-missing set member has no job slot to write through, so it
+    /// takes a fresh one; a caller that enumerated `0..job_slots.len()`
+    /// instead did not see the file parity had just recreated, and the
+    /// engine's orphan sweep deleted it on a job that then reported
+    /// Completed. Rename-aware, exactly as [`Self::slot_path`] is.
+    pub fn slot_paths(&self) -> Vec<PathBuf> {
+        let inner = self.inner.lock_ok();
+        inner
+            .slots
+            .iter()
+            .filter_map(|s| s.writer.as_ref().map(|w| w.current_path()))
+            .collect()
     }
 
     /// True when this slot's writer saw a byte range written more than
@@ -1784,6 +1849,42 @@ mod tests {
             400_000
         );
         assert_eq!(std::fs::read(dir.join("part.bin")).unwrap(), restored);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The per-entry name match in `map_output_range` reads a MEMO of the
+    /// writer's out_dir-relative CREATION name, and a wrong answer there
+    /// does not fail loudly - the promote falls through to an estimate
+    /// and prefetches the wrong articles
+    /// (research/FILEWRITER-RELNAME-CACHE-2026-09-16.md).
+    ///
+    /// So pin the contract on the one event that could plausibly have
+    /// moved the answer under the memo: a verified-name publish renaming
+    /// the file beneath a live writer. Both accessors must keep
+    /// answering by the CREATION name, must agree with each other, and
+    /// must keep saying no to the published one - a memo rebuilt from
+    /// `current_path` passes none of the three.
+    #[test]
+    fn plain_slot_name_match_keys_on_the_creation_name() {
+        let dir = tmpdir("relname");
+        let data = payload(4_096, 31);
+        let ex = Arc::new(Extractor::new(&dir, 1, true));
+        ex.anchor();
+        ex.write(0, "obf.bin", data.len() as u64, 0, &data).unwrap();
+        assert_eq!(ex.plain_slot_name_matches(0, "obf.bin"), Some(true));
+        assert_eq!(ex.plain_slot_name_matches(0, "real.bin"), Some(false));
+
+        let real = dir.join("real.bin");
+        std::fs::rename(dir.join("obf.bin"), &real).unwrap();
+        ex.note_slot_renamed(0, real);
+
+        assert_eq!(ex.plain_slot_name_matches(0, "obf.bin"), Some(true));
+        assert_eq!(ex.plain_slot_name_matches(0, "real.bin"), Some(false));
+        assert_eq!(
+            ex.map_output_range("obf.bin", 0, 100),
+            vec![(0, 0, 100, data.len() as u64)]
+        );
+        assert!(ex.map_output_range("real.bin", 0, 100).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

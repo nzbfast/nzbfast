@@ -79,7 +79,7 @@ pub(crate) use nzbfast_core::{netfetch, sizes};
 pub(crate) use nzbfast_core::{relname, tools};
 // The four the indexer half alone reaches, gated for the reason above.
 #[cfg(feature = "indexer")]
-pub(crate) use nzbfast_core::{identity, persist, ratelimit, servers};
+pub(crate) use nzbfast_core::{holdstat, identity, persist, ratelimit, servers};
 
 pub mod listsrc;
 pub mod newznab;

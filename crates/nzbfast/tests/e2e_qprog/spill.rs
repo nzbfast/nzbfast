@@ -694,6 +694,10 @@ async fn small_jobs_behind_a_stuck_head_finish_first_only_with_the_spill_on_at_s
 /// dev box runs up to a dozen other lanes' builds: a reader who cannot
 /// see what else was on the machine cannot tell a result from a queue.
 fn qspill_loadavg() -> Option<f64> {
+    // win-portability-gate: `uptime` is not on Windows, and the doc above
+    // is the contract - this answers None where the box will not say, which
+    // costs the row its load figure and nothing else. The only caller is an
+    // `#[ignore]`d measurement rig no job runs.
     let out = Command::new("uptime").output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     let (_, rest) = text.split_once("load average")?;

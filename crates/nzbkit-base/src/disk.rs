@@ -572,6 +572,30 @@ pub struct FileWriter {
     /// of nanoseconds against a pwrite of tens to hundreds of KB.
     file: std::sync::RwLock<Option<File>>,
     pub path: PathBuf,
+    /// Memo of [`out_name_of`]`(root, &self.path)` - the out_dir-relative
+    /// output name - keyed by the `root` it was resolved against.
+    ///
+    /// It memoizes a PURE function of `path`, and `path` is set once in
+    /// [`FileWriter::around`] and never assigned again (the struct only
+    /// ever lives behind an `Arc`, so there is no `&mut` to assign
+    /// through). A verified-name publish does NOT move it: the rename
+    /// records into [`renamed_to`] and leaves `path` alone, which is why
+    /// the settle rename cannot make this stale and why only the callers
+    /// that ask about the CREATION path may use it - a caller that wants
+    /// where the file lives now asks [`current_path`] and must keep
+    /// resolving.
+    ///
+    /// Keyed by `root` because nothing in the type pins a writer to one
+    /// output directory; a mismatch falls through to a full resolve
+    /// rather than answering for the wrong root. The whole reason this
+    /// exists is `Extractor::map_output_range`, which resolved every
+    /// archive entry's output name once per offset-0 promote and once
+    /// per member - O(members^2) path walks on a many-member set
+    /// (research/MANYSMALL-PER-MEMBER-RESIDUE-2026-09-16.md).
+    ///
+    /// [`renamed_to`]: FileWriter::current_path
+    /// [`current_path`]: FileWriter::current_path
+    out_name: std::sync::OnceLock<(PathBuf, String)>,
     /// Set when the on-disk file is RENAMED under a live writer (PAR2
     /// deobfuscation publishes the verified real name while the handle
     /// is open). The open handle does not care - renames are inode-level
@@ -1061,6 +1085,7 @@ impl FileWriter {
         Ok(FileWriter {
             file: std::sync::RwLock::new(Some(file)),
             path,
+            out_name: std::sync::OnceLock::new(),
             renamed_to: std::sync::Mutex::new(None),
             size,
             written: AtomicU64::new(0),
@@ -2050,6 +2075,32 @@ impl FileWriter {
     /// [`note_renamed`] has been called, the creation path before that.
     ///
     /// [`note_renamed`]: FileWriter::note_renamed
+    /// The `root`-relative output name of the CREATION path, resolved
+    /// once and memoized - see [`out_name`](FileWriter::out_name) for why
+    /// that is sound and for the walk it exists to remove.
+    ///
+    /// Borrowed on the memoized root, owned on any other: a caller in a
+    /// hot loop passes the same root every time and never allocates
+    /// after the first call.
+    pub fn out_name_rel<'a>(&'a self, root: &Path) -> std::borrow::Cow<'a, str> {
+        if let Some((r, n)) = self.out_name.get() {
+            if r == root {
+                return std::borrow::Cow::Borrowed(n.as_str());
+            }
+            return std::borrow::Cow::Owned(relpath::out_name_of(root, &self.path));
+        }
+        let _ = self
+            .out_name
+            .set((root.to_path_buf(), relpath::out_name_of(root, &self.path)));
+        // A concurrent first caller may have won the `set`; it resolved
+        // the same pure function, so the only question is whose root is
+        // in there now.
+        match self.out_name.get() {
+            Some((r, n)) if r == root => std::borrow::Cow::Borrowed(n.as_str()),
+            _ => std::borrow::Cow::Owned(relpath::out_name_of(root, &self.path)),
+        }
+    }
+
     pub fn current_path(&self) -> PathBuf {
         self.renamed_to
             .lock_ok()
@@ -2610,6 +2661,7 @@ pub use casefold::case_fold_key;
 // under the size gate on 31 Aug 2026; the module's own header says what
 // the subject is and why the halves belong together.
 mod identity;
+pub(crate) use identity::Identity;
 pub use identity::{case_insensitive_dir, file_object_id, is_redundant_link, same_file_object};
 
 mod cowcopy;

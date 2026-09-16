@@ -35,6 +35,10 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 struct Rec {
     calls: Mutex<Vec<(RepairPhase, u64, u64)>>,
+    /// Every `slab(index, of)`, and WHERE in `calls` it landed - which
+    /// is the half that says it was announced BEFORE the sweep it
+    /// frames rather than somewhere inside it.
+    slabs: Mutex<Vec<(usize, usize, usize)>>,
     /// Raised when `at` of the named phase has been passed, so a test
     /// can cancel FROM INSIDE the phase it wants to interrupt rather
     /// than by racing a timer.
@@ -42,6 +46,11 @@ struct Rec {
 }
 
 impl ProgressSink for Rec {
+    fn slab(&self, index: usize, of: usize) {
+        let at = self.calls.lock_ok().len();
+        self.slabs.lock_ok().push((index, of, at));
+    }
+
     fn progress(&self, phase: RepairPhase, done: u64, total: u64) {
         self.calls.lock_ok().push((phase, done, total));
         if let Some((want, at, gate)) = self.trip.as_ref()
@@ -209,6 +218,7 @@ fn a_cancel_raised_mid_fold_ends_the_repair_before_it_writes() {
     let gate = PauseGate::new();
     let rec = Arc::new(Rec {
         calls: Mutex::new(Vec::new()),
+        slabs: Mutex::new(Vec::new()),
         // From INSIDE the fold, at the first bucket it crosses - a
         // timer would either fire before the fold or after the repair
         // on a box of a different speed.
@@ -284,6 +294,7 @@ fn a_cancel_raised_mid_write_leaves_a_directory_a_re_run_recovers() {
     let gate = PauseGate::new();
     let rec = Arc::new(Rec {
         calls: Mutex::new(Vec::new()),
+        slabs: Mutex::new(Vec::new()),
         trip: Some((RepairPhase::Write, 1, gate.clone())),
     });
     let mut o = watching(rec.clone(), Some(gate.clone()));
@@ -578,6 +589,7 @@ fn the_controlled_entry_carries_progress_and_a_cancel_of_its_own() {
     let gate = PauseGate::new();
     let rec2 = Arc::new(Rec {
         calls: Mutex::new(Vec::new()),
+        slabs: Mutex::new(Vec::new()),
         trip: Some((RepairPhase::Fold, 1, gate.clone())),
     });
     let err = repair_dir_set_with_donors_controlled_as(
@@ -632,4 +644,540 @@ fn any_repair_temp(dir: &Path) -> bool {
         .unwrap()
         .flatten()
         .any(|e| e.file_name().to_string_lossy().contains("nzbfast-repair"))
+}
+
+/// A SLABBED repair announces every sweep, and announces it BEFORE the
+/// sweep reports anything.
+///
+/// The count is the half that cannot be inferred and the whole reason
+/// this method exists: a sink that weighs the four phases into one bar
+/// has to reserve the room for sweeps 2..N before sweep 1 spends it, or
+/// take the bar backwards to make room. Until 16 Sep 2026 nothing
+/// carried it and the daemon's bar froze at the literal pair
+/// `("solve", 950)` for 41.5% to 70.3% of a slabbed repair's wall
+/// (`research/REPAIR-SLABBED-BAR-2026-09-16.md`).
+///
+/// Driven through `ForcedSlabWidth` rather than through the memory
+/// budget, for the reason that seam exists: the budget route needs a
+/// multi-GiB corpus to trip, and this fixture is 64-byte blocks.
+#[test]
+fn a_slabbed_repair_announces_every_sweep_before_the_sweep_reports() {
+    use crate::par2repair::reconstruct::ForcedSlabWidth;
+    // BS is 64, so a forced 16-byte cut is four sweeps of the payload.
+    const SLABS: usize = 4;
+    let (dir, files) = damaged_set("control-slab-announce", &[(0, 3), (1, 7), (2, 11), (3, 19)]);
+    let rec = Arc::new(Rec::default());
+    let mut o = watching(rec.clone(), Some(PauseGate::new()));
+    let status = {
+        let _w = ForcedSlabWidth::set(BS / SLABS);
+        repair_dir_set_surveyed(&dir, &SET, &[], &mut o)
+            .expect("the repair runs")
+            .expect("the observer said Repair")
+    };
+    assert!(matches!(status, RepairStatus::Repaired(_)), "{status:?}");
+    assert!(intact(&dir, &files), "a slabbed repair is byte-exact");
+
+    let slabs = rec.slabs.lock_ok().clone();
+    assert_eq!(
+        slabs.iter().map(|&(i, of, _)| (i, of)).collect::<Vec<_>>(),
+        (0..SLABS).map(|i| (i, SLABS)).collect::<Vec<_>>(),
+        "the sweeps were not announced once each, in order, with the count"
+    );
+
+    // AND EACH ONE CAME FIRST. The fold of sweep `i` is the first call
+    // after its announcement, so the announcement's position in the
+    // call list must be the index of a `Fold` sizing call - which is
+    // what lets a sink weigh that fold in the frame it belongs to
+    // rather than in the previous sweep's.
+    let calls = rec.calls();
+    for &(i, _, at) in &slabs {
+        let (phase, done, _) = *calls
+            .get(at)
+            .unwrap_or_else(|| panic!("sweep {i} announced past the end of the repair"));
+        assert_eq!(
+            (phase, done),
+            (RepairPhase::Fold, 0),
+            "sweep {i} was announced at call {at}, which is not the opening of its fold - a \
+             sink that read it there would weigh part of the sweep in the wrong frame"
+        );
+    }
+
+    // THE FOLD IS ENTERED ONCE PER SWEEP - the shape the announcement
+    // is the frame for. Counting the SIZING calls (`done == 0`), since
+    // `begin` is the one call a phase makes exactly once per entry.
+    let entries = |phase| {
+        calls
+            .iter()
+            .filter(|&&(p, d, _)| p == phase && d == 0)
+            .count()
+    };
+    assert_eq!(
+        entries(RepairPhase::Fold),
+        SLABS,
+        "the fold was not entered once per sweep"
+    );
+    // THE SOLVE IS ENTERED MORE THAN ONCE PER SWEEP, and that is the
+    // engine's own shape rather than a slab effect: the dense arm
+    // reports its Gauss-Jordan inverse and its back-substitution as two
+    // Solve entries (`reconstruct.rs`, `begin(Solve, missing.len())`
+    // during construction and `begin(Solve, m)` in the back-substitution
+    // itself), so a one-sweep repair on this arm reports two as well.
+    // Asserted as a MULTIPLE so this stays a statement about sweeps: a
+    // sink weighs every entry of a phase into that sweep's band, and
+    // a re-entry inside one band is the case `repairprog` has handled
+    // since it was written.
+    let solves = entries(RepairPhase::Solve);
+    assert!(
+        solves >= SLABS && solves % SLABS == 0,
+        "the solve was entered {solves} time(s) over {SLABS} sweep(s) - not a whole \
+         number of entries per sweep, so this is no longer per-sweep behaviour"
+    );
+}
+
+/// A repair that does NOT slab announces exactly one sweep, of one -
+/// so a sink never has to treat "no announcement" and "one sweep"
+/// differently, and the ordinary bar is the pre-slab bar.
+#[test]
+fn an_ordinary_repair_announces_one_sweep_of_one() {
+    let (dir, files) = damaged_set("control-slab-single", &[(0, 3), (2, 11)]);
+    let rec = Arc::new(Rec::default());
+    let mut o = watching(rec.clone(), Some(PauseGate::new()));
+    let status = repair_dir_set_surveyed(&dir, &SET, &[], &mut o)
+        .expect("the repair runs")
+        .expect("the observer said Repair");
+    assert!(matches!(status, RepairStatus::Repaired(_)), "{status:?}");
+    assert!(intact(&dir, &files));
+    assert_eq!(
+        rec.slabs
+            .lock_ok()
+            .iter()
+            .map(|&(i, of, _)| (i, of))
+            .collect::<Vec<_>>(),
+        vec![(0, 1)]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The two doors opened 16 Sep 2026 (claim
+// `repair-control-two-censused-sites-16sep`), which are the two the
+// 12 Sep census named as the reason `serve/mod.rs` still set an
+// unattended unstructured ceiling: the no-set obfuscated arm's
+// directory walk, and the MAPPED in-stream driver. The assertions are
+// the same ones this file makes of the doors above it - a fraction that
+// rises and lands, and a cancel that ends a repair sooner than it would
+// have ended and leaves a directory a re-run recovers from - because a
+// test that only checked the sink was called would pass over a bar that
+// never moves.
+// ---------------------------------------------------------------------------
+
+/// A whole-file buffer set behind a [`VolumeIo`], for the mapped
+/// driver: that driver never touches the caller's disk, so its rig is
+/// memory and the recovery packets on disk are the only files.
+struct BufIo(Vec<Mutex<Vec<u8>>>);
+
+impl VolumeIo for BufIo {
+    fn read(&self, f: usize, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let d = self.0[f].lock_ok();
+        let off = off as usize;
+        buf.copy_from_slice(&d[off..off + buf.len()]);
+        Ok(())
+    }
+    fn write(&self, f: usize, off: u64, data: &[u8]) -> std::io::Result<()> {
+        let mut d = self.0[f].lock_ok();
+        let off = off as usize;
+        d[off..off + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+}
+
+/// The mapped driver's rig: a real recovery set on disk (so
+/// `PacketCatalog::build` has something to validate), the members'
+/// TRUE bytes, and the damaged copies behind a [`BufIo`] with their
+/// present vectors.
+///
+/// 200 blocks a member rather than `damaged_set`'s 40, and that is
+/// about the FOLD: the feed reports per block and the sink is reached
+/// once per `STEPS` bucket, so a set small enough to fold in two
+/// buckets cannot show a rising fraction and cannot be cancelled
+/// mid-feed either. Still 38 KB, which is free.
+fn mapped_rig(
+    tag: &str,
+    damage: &[(usize, usize)],
+) -> (PathBuf, Vec<Vec<u8>>, Vec<(Par2File, Vec<bool>)>, BufIo) {
+    let dir = tmpdir(tag);
+    let whole: Vec<Vec<u8>> = (0..3).map(|i| payload(BS * 200, 31 + i as u64)).collect();
+    let names: Vec<String> = (0..3).map(|i| format!("m{i}.bin")).collect();
+    let refs: Vec<(&str, &[u8])> = names
+        .iter()
+        .zip(&whole)
+        .map(|(n, d)| (n.as_str(), d.as_slice()))
+        .collect();
+    std::fs::write(dir.join("set.par2"), par2_index(SET, BS, &refs)).unwrap();
+    let exps: Vec<u32> = (0..32u32).collect();
+    std::fs::write(
+        dir.join("set.vol0+32.par2"),
+        par2_volume(SET, BS, &refs, &exps),
+    )
+    .unwrap();
+    let metas: Vec<Par2File> = names
+        .iter()
+        .zip(&whole)
+        .map(|(n, d)| meta_for(n, d, BS))
+        .collect();
+    let mut damaged = whole.clone();
+    let mut present: Vec<Vec<bool>> = metas
+        .iter()
+        .map(|m| vec![true; m.length.div_ceil(BS as u64) as usize])
+        .collect();
+    for &(fi, bi) in damage {
+        present[fi][bi] = false;
+        for b in &mut damaged[fi][bi * BS..(bi + 1) * BS] {
+            *b ^= 0xFF;
+        }
+    }
+    let files: Vec<(Par2File, Vec<bool>)> = metas.into_iter().zip(present).collect();
+    let io = BufIo(damaged.into_iter().map(Mutex::new).collect());
+    (dir, whole, files, io)
+}
+
+/// THE MAPPED DRIVER REPORTS ITS FOUR PHASES. Until 16 Sep 2026 this
+/// driver carried no control at all - not a counter, not a poll - and
+/// it is the route a downloading job actually takes, so it was the
+/// longest silent stretch left in the pipeline.
+///
+/// FOUR - including `Verify`, which was left silent by decision until
+/// this same day. This driver has no pre-fold verify pass - its
+/// present-block ledger was earned off the wire - so its only proof is
+/// the SELF-PROVE after the patch, and the disk driver's own Verify band
+/// is sized for a phase that runs FIRST
+/// (`nzbfast_core::repairprog::band` gives it `[0.0, 0.45)`). The first
+/// cut of this work published it there anyway and had to be backed out:
+/// it landed behind a Write that had already reached full, a monotone
+/// bar discarded it, and the row sat at `write, 100%` through the whole
+/// of a full-set reread - the stall this mechanism exists to remove.
+///
+/// The fix is `RepairRoute::Mapped`
+/// (`nzbfast_core::repairprog::band`'s route match), which this test
+/// does not reach - it is engine-level, and the route only changes WHERE
+/// a caller's band table puts the reading, not whether this driver
+/// reports it. What this test pins is the engine's own contract: the
+/// self-prove now calls `begin`/`step`/`finish` on `Verify` like every
+/// other phase, landing on full, and it does so AFTER `Write` - which is
+/// the ordering a route-aware band table depends on.
+#[test]
+fn the_mapped_driver_reports_a_rising_fraction_through_all_four_phases() {
+    let (dir, whole, files, io) = mapped_rig("mapped-progress", &[(0, 3), (1, 17), (2, 41)]);
+    let rec = Arc::new(Rec::default());
+    let control = RepairControl::new(Some(rec.clone()), Some(PauseGate::new()));
+    let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
+    let n = super::super::repair_mapped_catalog_resumed_controlled(
+        &files,
+        BS,
+        &mut cat,
+        &SET,
+        &io,
+        false,
+        &[],
+        &control,
+    )
+    .expect("the set has ample parity");
+    assert_eq!(n, 3, "one block rebuilt per damaged member");
+    for (fi, want) in whole.iter().enumerate() {
+        assert_eq!(&*io.0[fi].lock_ok(), want, "member {fi} is byte-exact");
+    }
+
+    for phase in [
+        RepairPhase::Fold,
+        RepairPhase::Solve,
+        RepairPhase::Write,
+        RepairPhase::Verify,
+    ] {
+        let seen = rec.of(phase);
+        assert!(
+            !seen.is_empty(),
+            "{phase:?} reported nothing - this driver reported nothing at all before \
+             16 Sep 2026 and the whole point of the control is that it now does"
+        );
+        let (done, total) = *seen.last().expect("non-empty");
+        assert_eq!(
+            done, total,
+            "{phase:?} must land on full, or a bar stops at whatever bucket the last \
+             batch happened to cross: {seen:?}"
+        );
+    }
+    // The FOLD is the phase this exists for, so it alone is held to a
+    // rising fraction rather than merely to a landing.
+    let fold = rec.of(RepairPhase::Fold);
+    assert!(
+        fold.len() >= 3,
+        "the fold reported {} call(s) - a phase announced and never updated is the \
+         bar that does not move",
+        fold.len()
+    );
+    assert!(
+        fold.windows(2).all(|w| w[0].0 <= w[1].0),
+        "the fold's fraction went backwards: {fold:?}"
+    );
+    // ORDER: fold, then solve, then write, then the self-prove - VERIFY
+    // LAST is the whole point of `RepairRoute::Mapped`, and it is what a
+    // route-aware band table depends on to place this reading after a
+    // full Write rather than before an empty Fold.
+    let calls = rec.calls();
+    let last_fold = calls
+        .iter()
+        .rposition(|c| c.0 == RepairPhase::Fold)
+        .expect("a fold happened");
+    let first_write = calls
+        .iter()
+        .position(|c| c.0 == RepairPhase::Write)
+        .expect("a write happened");
+    let last_write = calls
+        .iter()
+        .rposition(|c| c.0 == RepairPhase::Write)
+        .expect("a write happened");
+    let first_verify = calls
+        .iter()
+        .position(|c| c.0 == RepairPhase::Verify)
+        .expect("the self-prove happened");
+    assert!(
+        last_fold < first_write,
+        "the patch must not begin reporting before the fold has finished: {calls:?}"
+    );
+    assert!(
+        last_write < first_verify,
+        "the self-prove must not begin reporting before the patch has finished - it \
+         reads the bytes the patch just wrote: {calls:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A CANCEL RAISED MID-FOLD ENDS THE MAPPED REPAIR BEFORE IT WRITES,
+/// and the buffers are left exactly as they were.
+///
+/// Tripped from INSIDE the fold's own sink rather than on a timer -
+/// the same device every cancel test in this file uses, and the reason
+/// is measured: a watcher that presses on a clock loses the whole
+/// repair to one timeslice on a loaded box and sees it come back
+/// repaired.
+#[test]
+fn a_cancel_raised_mid_fold_ends_the_mapped_repair_before_it_writes() {
+    let (dir, whole, files, io) = mapped_rig("mapped-cancel", &[(0, 3), (1, 17), (2, 41)]);
+    let before: Vec<Vec<u8>> = io.0.iter().map(|m| m.lock_ok().clone()).collect();
+    let gate = PauseGate::new();
+    let rec = Arc::new(Rec {
+        trip: Some((RepairPhase::Fold, 1, gate.clone())),
+        ..Rec::default()
+    });
+    let control = RepairControl::new(Some(rec.clone()), Some(gate.clone()));
+    let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
+    let err = super::super::repair_mapped_catalog_resumed_controlled(
+        &files,
+        BS,
+        &mut cat,
+        &SET,
+        &io,
+        false,
+        &[],
+        &control,
+    )
+    .expect_err("a cancelled repair is not a verdict");
+    assert!(
+        matches!(err, RepairError::Cancelled),
+        "a user's Cancel must not be reported as a set that could not be repaired: {err:?}"
+    );
+    // IT STOPPED EARLY, which is the claim a mere `Cancelled` does not
+    // make: the fold's counter never reached its total.
+    let fold = rec.of(RepairPhase::Fold);
+    let (done, total) = *fold.last().expect("the fold reported before it was cut");
+    assert!(
+        done < total,
+        "the fold ran to completion anyway ({done}/{total}) - the cancel was not \
+         polled inside the feed"
+    );
+    assert!(
+        rec.of(RepairPhase::Write).is_empty(),
+        "nothing may be written after a cancel that landed in the fold"
+    );
+    for (fi, was) in before.iter().enumerate() {
+        assert_eq!(
+            &*io.0[fi].lock_ok(),
+            was,
+            "member {fi} was touched by a repair that never solved"
+        );
+    }
+
+    // AND IT IS RE-RUNNABLE, which is the whole of what a cancel owes a
+    // user who changes their mind - through a FRESH control, because
+    // the cancelled gate is sticky by design.
+    let again = super::super::repair_mapped_catalog_resumed_controlled(
+        &files,
+        BS,
+        &mut cat,
+        &SET,
+        &io,
+        false,
+        &[],
+        &RepairControl::new(None, Some(PauseGate::new())),
+    )
+    .expect("the re-run repairs");
+    assert_eq!(again, 3);
+    for (fi, want) in whole.iter().enumerate() {
+        assert_eq!(&*io.0[fi].lock_ok(), want, "the re-run is byte-exact");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A CANCELLED HANDLE REFUSES A MAPPED REPAIR WITHOUT BUYING THE
+/// CORPUS. `load_mapped_recovery` preads and re-proves one block per
+/// missing slice before a single syndrome is folded, so the check that
+/// matters sits AHEAD of it - and the NTT fallback runs that closure a
+/// second time, which is the shape that would otherwise pay twice for
+/// a repair already called off.
+#[test]
+fn a_cancelled_handle_refuses_a_mapped_repair_before_it_loads_recovery() {
+    let (dir, _whole, files, io) = mapped_rig("mapped-sticky", &[(0, 3)]);
+    let gate = PauseGate::new();
+    gate.cancel();
+    let rec = Arc::new(Rec::default());
+    let control = RepairControl::new(Some(rec.clone()), Some(gate));
+    let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
+    let err = super::super::repair_mapped_catalog_resumed_controlled(
+        &files,
+        BS,
+        &mut cat,
+        &SET,
+        &io,
+        false,
+        &[],
+        &control,
+    )
+    .expect_err("a cancelled handle does not repair");
+    assert!(matches!(err, RepairError::Cancelled), "{err:?}");
+    assert!(
+        rec.calls().is_empty(),
+        "no phase may be announced by a repair that never started: {:?}",
+        rec.calls()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// THE NO-SET ARM'S DOOR ASKS FOR A CONTROL ONCE PER SET, which is the
+/// property the supplier shape exists for: this walks EVERY qualifying
+/// set in the directory, and a caller handed one control for the
+/// directory would draw a bar that sat at 100% for every set after the
+/// first - the "Repairing, 100%" stall the whole mechanism removes, on
+/// a repair that is genuinely running.
+///
+/// Two sets in one directory, so "once per set" is distinguishable
+/// from "once".
+#[test]
+fn the_present_or_renamed_sets_door_asks_for_a_control_once_per_set() {
+    let dir = tmpdir("norenamed-per-set");
+    let asked = AtomicUsize::new(0);
+    for (si, id) in [[4u8; 16], [5u8; 16]].into_iter().enumerate() {
+        let name = format!("s{si}.bin");
+        let data = payload(BS * 40, 71 + si as u64);
+        let refs: &[(&str, &[u8])] = &[(name.as_str(), &data)];
+        std::fs::write(dir.join(format!("s{si}.par2")), par2_index(id, BS, refs)).unwrap();
+        let exps: Vec<u32> = (0..16u32).collect();
+        std::fs::write(
+            dir.join(format!("s{si}.vol0+16.par2")),
+            par2_volume(id, BS, refs, &exps),
+        )
+        .unwrap();
+        let mut damaged = data.clone();
+        for b in &mut damaged[BS * 3..BS * 4] {
+            *b ^= 0xFF;
+        }
+        std::fs::write(dir.join(&name), &damaged).unwrap();
+    }
+    let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
+    let outcomes = cat
+        .repair_present_or_renamed_sets_controlled(&|| {
+            asked.fetch_add(1, Ordering::Relaxed);
+            RepairControl::new(Some(Arc::new(Rec::default())), Some(PauseGate::new()))
+        })
+        .expect("the walk runs");
+    assert_eq!(outcomes.len(), 2, "both sets were attempted: {outcomes:?}");
+    for o in &outcomes {
+        assert!(
+            matches!(o.status, Ok(RepairStatus::Repaired(_))),
+            "each set has ample parity: {:?}",
+            o.status
+        );
+    }
+    assert_eq!(
+        asked.load(Ordering::Relaxed),
+        2,
+        "the control must be asked for once per SET, at that set's own boundary - \
+         one clone for the directory is a bar that reads full for every set but the first"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A CANCEL ENDS THE NO-SET ARM'S WALK ON THE SET IT LANDED IN, and the
+/// walk does not go on to report the sets behind it as unreadable.
+///
+/// The renamed-fallback arm of `repair_sets_catalog` is a SECOND loop
+/// with its own set edge, and this door is the only production caller
+/// that can reach it - so the break is pinned here rather than left to
+/// the sibling door's test, which only ever drives the first loop.
+#[test]
+fn a_cancelled_no_set_walk_stops_on_its_set_and_is_not_a_run_of_broken_ones() {
+    let dir = tmpdir("norenamed-cancel");
+    let mut truth: Vec<(String, Vec<u8>)> = Vec::new();
+    for (si, id) in [[6u8; 16], [7u8; 16]].into_iter().enumerate() {
+        let name = format!("t{si}.bin");
+        let data = payload(BS * 200, 91 + si as u64);
+        let refs: &[(&str, &[u8])] = &[(name.as_str(), &data)];
+        std::fs::write(dir.join(format!("t{si}.par2")), par2_index(id, BS, refs)).unwrap();
+        let exps: Vec<u32> = (0..16u32).collect();
+        std::fs::write(
+            dir.join(format!("t{si}.vol0+16.par2")),
+            par2_volume(id, BS, refs, &exps),
+        )
+        .unwrap();
+        let mut damaged = data.clone();
+        for b in &mut damaged[BS * 3..BS * 4] {
+            *b ^= 0xFF;
+        }
+        std::fs::write(dir.join(&name), &damaged).unwrap();
+        truth.push((name, data));
+    }
+    let gate = PauseGate::new();
+    let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
+    let outcomes = cat
+        .repair_present_or_renamed_sets_controlled(&|| {
+            RepairControl::new(
+                Some(Arc::new(Rec {
+                    trip: Some((RepairPhase::Fold, 1, gate.clone())),
+                    ..Rec::default()
+                })),
+                Some(gate.clone()),
+            )
+        })
+        .expect("the walk itself does not error");
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "the walk must BREAK on the cancelled set rather than carry a sticky gate into \
+         the next one - a run of `Cancelled` verdicts reads like N unreadable sets over \
+         a directory where the user simply pressed Cancel: {outcomes:?}"
+    );
+    assert!(
+        matches!(outcomes[0].status, Err(RepairError::Cancelled)),
+        "{:?}",
+        outcomes[0].status
+    );
+
+    // AND THE DIRECTORY IS RE-RUNNABLE, through a fresh gate: both sets
+    // repair, including the one the cancelled walk never reached.
+    let again = cat
+        .repair_present_or_renamed_sets_controlled(&|| {
+            RepairControl::new(None, Some(PauseGate::new()))
+        })
+        .expect("the re-run walks");
+    assert_eq!(again.len(), 2, "{again:?}");
+    assert!(intact(&dir, &truth), "the re-run is byte-exact");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -478,8 +478,16 @@ pub fn make_check(keys: &Rar5Keys) -> [u8; 12] {
 }
 
 /// Round a byte count up to the AES block size.
+///
+/// SATURATING, because both production callers hand this a WIRE-declared
+/// `unpacked_size` (`extract::crypto`'s `cipher_len`, and
+/// `journal::restore`), and the RAR5 vint reader deliberately saturates
+/// a hostile 10-byte size vint to `u64::MAX`. A plain `+ 15` then
+/// overflowed: a panic on the extractor's crypto path under overflow
+/// checks, and in release a wrap to `cipher_len == 0`, which is worse
+/// than either the panic or the clamp.
 pub fn align16(n: u64) -> u64 {
-    (n + 15) & !15
+    n.saturating_add(15) & !15
 }
 
 #[cfg(test)]

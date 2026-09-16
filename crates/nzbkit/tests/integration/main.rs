@@ -169,6 +169,7 @@ mod loss_doubt;
 mod lzma_dict_admission;
 mod mediaprobe;
 mod par2_parse;
+mod par2gen_arms;
 mod par2gen_cancel;
 mod par2gen_create_ntt;
 mod par2gen_interop;

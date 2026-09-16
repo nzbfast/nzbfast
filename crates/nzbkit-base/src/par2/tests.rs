@@ -401,6 +401,118 @@ fn the_seeking_walk_frames_a_volume_without_its_payloads() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `scan_file_windowed` says yes only where the optimistic walk would
+/// have, and then says exactly what `scan_packets` says over the whole
+/// file: the same packets, in order, with the same bodies and offsets.
+/// Window sizes from one header up to past the file force every edge -
+/// a header split across windows, a packet grown into, a window that
+/// holds everything. Every shape the in-memory walks resync over (a
+/// stray byte, a bad MD5, a length past EOF, trailing garbage that could
+/// hold a header) must decline instead, so the caller's whole read runs.
+#[test]
+fn the_windowed_scan_matches_the_whole_read_or_declines() {
+    type Seen = Vec<([u8; 16], [u8; 16], [u8; 16], Vec<u8>, usize)>;
+    fn whole(bytes: &[u8]) -> Seen {
+        let mut out = Vec::new();
+        scan_packets(bytes, |p| {
+            out.push((p.md5, p.set_id, p.ptype, p.body.to_vec(), p.body_offset))
+        });
+        out
+    }
+    fn windowed(path: &std::path::Path, window: usize) -> Option<Seen> {
+        let f = std::fs::File::open(path).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut out = Vec::new();
+        scan_file_windowed(&f, len, window, |p| {
+            out.push((p.md5, p.set_id, p.ptype, p.body.to_vec(), p.body_offset))
+        })
+        .map(|()| out)
+    }
+    let set = [0x5Au8; 16];
+    let fid = [0x46u8; 16];
+    let mut vol = pkt(set, TYPE_MAIN, &main_ids(64, &[fid]));
+    vol.extend(pkt(set, TYPE_FILEDESC, &desc_body(fid, 0xDD, 192, "w.bin")));
+    for e in 0..5u32 {
+        vol.extend(pkt(set, TYPE_RECVSLIC, &slice_body(e, e as u8 + 3)));
+    }
+    vol.extend(pkt(set, b"PAR 2.0\0Creator\0", b"who\0"));
+    let packet_len = pkt(set, TYPE_RECVSLIC, &slice_body(0, 0)).len();
+
+    let dir = std::env::temp_dir().join(format!("par2-windowed-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, bytes: &[u8]| {
+        let p = dir.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        p
+    };
+    let windows = [
+        64,
+        65,
+        100,
+        packet_len - 1,
+        packet_len,
+        packet_len + 7,
+        1 << 20,
+    ];
+
+    let clean = write("clean.par2", &vol);
+    let truth = whole(&vol);
+    assert_eq!(truth.len(), 8, "fixture: every packet verifies");
+    for w in windows {
+        assert_eq!(windowed(&clean, w), Some(truth.clone()), "window {w}");
+    }
+    // Under a header's worth of trailing bytes is ignored by both walks.
+    let mut tail = vol.clone();
+    tail.extend([0u8; 60]);
+    let tailed = write("tail.par2", &tail);
+    assert_eq!(whole(&tail), truth);
+    for w in windows {
+        assert_eq!(
+            windowed(&tailed, w),
+            Some(truth.clone()),
+            "short tail, window {w}"
+        );
+    }
+
+    // Each of these the whole-read walks handle by resyncing; the window
+    // must decline at every size, never answer differently.
+    let critical_len = pkt(set, TYPE_MAIN, &main_ids(64, &[fid])).len()
+        + pkt(set, TYPE_FILEDESC, &desc_body(fid, 0xDD, 192, "w.bin")).len();
+    let mut bad_md5 = vol.clone();
+    bad_md5[critical_len + 2 * packet_len + 80] ^= 0xFF;
+    let mut stray = vol[..critical_len].to_vec();
+    stray.push(0);
+    stray.extend_from_slice(&vol[critical_len..]);
+    let mut garbage_tail = vol.clone();
+    garbage_tail.extend([0u8; 64]);
+    // Cut INTO the last recovery packet, so a whole header survives and
+    // declares a length past EOF. (Cutting 8 bytes off the 68-byte
+    // Creator packet leaves 60, under a header, which both walks ignore -
+    // that is the short-tail case above, where the window must say yes.)
+    let creator_len = pkt(set, b"PAR 2.0\0Creator\0", b"who\0").len();
+    let truncated = vol[..vol.len() - creator_len - 8].to_vec();
+    let mut leading = vec![0u8; 4];
+    leading.extend_from_slice(&vol);
+    for (name, bytes) in [
+        ("bad-md5", &bad_md5),
+        ("stray", &stray),
+        ("garbage-tail", &garbage_tail),
+        ("truncated", &truncated),
+        ("leading", &leading),
+    ] {
+        let p = write(&format!("{name}.par2"), bytes);
+        for w in windows {
+            let got = windowed(&p, w);
+            // The contract first: a yes is always the whole read's answer.
+            if let Some(seen) = &got {
+                assert_eq!(seen, &whole(bytes), "{name}: a yes must match, window {w}");
+            }
+            assert_eq!(got, None, "{name} must decline at window {w}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// X5-14. A physical `.par2` whose FIRST valid packet belongs to set A
 /// and whose remainder is a complete set B describes B. Binding the
 /// identity to the first packet filed the whole file under A, and the
@@ -1873,6 +1985,115 @@ fn an_unbound_file_id_still_describes_its_file() {
     assert_eq!(set.files.len(), 1, "an unbound id is not a refusal");
     assert_eq!(set.files[0].name, "odd.bin");
     assert_eq!(set.files[0].blocks.len(), 2);
+}
+
+/// W4-10 over M4-38, which is where the composition of the two used to
+/// come apart. `DescClaim` must settle to a function of the SET of
+/// descriptors offered for one file id, so every ordering of the same
+/// packets answers the same.
+///
+/// The case that failed: TWO unbound forgeries and the real binding
+/// descriptor. Read pairwise, the two forgeries annihilated the claim
+/// between them and the contradiction latch then refused the binding
+/// descriptor it should have out-ranked - so A,B,C kept `real.bin` and
+/// B,C,A dropped the member from the set entirely (bug sweep 16 Sep
+/// 2026, item 17). ONE ordering is no test at all here: three of the
+/// six permutations passed throughout.
+#[test]
+fn three_descriptors_on_one_id_settle_the_same_in_every_order() {
+    const BS: usize = 4096;
+    let real: Vec<u8> = (0..2u32 * BS as u32).map(|i| (i % 253) as u8).collect();
+    let fid = honest_fid("real.bin", &real);
+    let set_id = [7u8; 16];
+
+    let honest = desc_of(fid, "real.bin", &real);
+    // Two forgeries wearing `real.bin`'s id, disagreeing with it AND
+    // with each other, so they annihilate on their own.
+    let forged_a = desc_of(fid, "evil-a.bin", &[0xABu8; 64]);
+    let forged_b = desc_of(fid, "evil-b.bin", &[0xCDu8; 128]);
+
+    let parse_in_order = |order: [&Vec<u8>; 3]| {
+        let mut buf = pkt(set_id, TYPE_MAIN, &main_of(BS as u64, &[fid]));
+        for d in order {
+            buf.extend(pkt(set_id, TYPE_FILEDESC, d));
+        }
+        buf.extend(pkt(set_id, TYPE_IFSC, &ifsc_body(fid, &real, BS, 2)));
+        Par2Set::parse(&[&buf]).unwrap()
+    };
+
+    let all: [[&Vec<u8>; 3]; 6] = [
+        [&honest, &forged_a, &forged_b],
+        [&honest, &forged_b, &forged_a],
+        [&forged_a, &honest, &forged_b],
+        [&forged_b, &honest, &forged_a],
+        [&forged_a, &forged_b, &honest],
+        [&forged_b, &forged_a, &honest],
+    ];
+    for (i, order) in all.into_iter().enumerate() {
+        let set = parse_in_order(order);
+        assert_eq!(
+            set.files.len(),
+            1,
+            "permutation {i}: the binding descriptor answers for the id \
+             however late it arrives, so the member never leaves the set"
+        );
+        assert_eq!(set.files[0].name, "real.bin", "permutation {i}");
+        assert_eq!(set.files[0].length, real.len() as u64, "permutation {i}");
+        assert_eq!(
+            set.files[0].md5,
+            <[u8; 16]>::from(Md5::digest(&real)),
+            "permutation {i}"
+        );
+    }
+}
+
+/// The binding class is FOLDED by W4-10, not first-past-the-post, and
+/// this is why it has to be: [`filedesc_id`] hashes the 16k hash, the
+/// length and the name and NOT the whole-file MD5, so two descriptors
+/// that agree on those three and disagree about the file's own digest
+/// BOTH bind the id, with no MD5 collision anywhere. They are both
+/// evidence, they contradict, and the member leaves the set - in every
+/// order, including with an unbound forgery mixed in.
+#[test]
+fn two_descriptors_that_both_bind_one_id_annihilate_in_every_order() {
+    const BS: usize = 4096;
+    let real: Vec<u8> = (0..2u32 * BS as u32).map(|i| (i % 251) as u8).collect();
+    let fid = honest_fid("real.bin", &real);
+    let set_id = [7u8; 16];
+
+    let honest = desc_of(fid, "real.bin", &real);
+    // Same name, length and 16k hash - so the same file id, honestly
+    // bound - with a different whole-file MD5. Body layout is
+    // fid | md5 | md5_16k | length | name.
+    let rival_md5 = {
+        let mut d = honest.clone();
+        d[16..32].copy_from_slice(&[0x5Au8; 16]);
+        d
+    };
+    assert_ne!(honest, rival_md5);
+    // A third descriptor that does NOT bind the id, to prove it cannot
+    // fill the hole the two binders left.
+    let forged = desc_of(fid, "evil.bin", &[0xABu8; 64]);
+
+    let orders: [[&Vec<u8>; 3]; 4] = [
+        [&honest, &rival_md5, &forged],
+        [&forged, &honest, &rival_md5],
+        [&rival_md5, &forged, &honest],
+        [&forged, &rival_md5, &honest],
+    ];
+    for (i, order) in orders.into_iter().enumerate() {
+        let mut buf = pkt(set_id, TYPE_MAIN, &main_of(BS as u64, &[fid]));
+        for d in order {
+            buf.extend(pkt(set_id, TYPE_FILEDESC, d));
+        }
+        buf.extend(pkt(set_id, TYPE_IFSC, &ifsc_body(fid, &real, BS, 2)));
+        let set = Par2Set::parse(&[&buf]).unwrap();
+        assert!(
+            set.files.is_empty(),
+            "permutation {i}: two descriptors that both bind the id are a \
+             contradiction like any other, and no unbound reading fills it"
+        );
+    }
 }
 
 // -- NZBFAST_VERIFY_IFSC_ONLY: the experimental verdict tier --------

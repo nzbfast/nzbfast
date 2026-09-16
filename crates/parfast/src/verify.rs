@@ -1065,9 +1065,17 @@ fn survey_inner(
         let blocks = if bs == 0 {
             0
         } else {
-            file.length.div_ceil(bs) as usize
+            // `try_from`, not `as`: `file.length` is a wire-supplied
+            // FileDesc length, and a usize is 32 bits on armv7 - so the
+            // count truncated per member there, and the running sum
+            // below then panicked under overflow checks or reported a
+            // silently wrong "You have X out of Y data blocks". A count
+            // that does not fit the address space is a set this host
+            // cannot verify either way; saturating says so without
+            // inventing a small number.
+            usize::try_from(file.length.div_ceil(bs)).unwrap_or(usize::MAX)
         };
-        total_blocks += blocks;
+        total_blocks = total_blocks.saturating_add(blocks);
         let path = loaded.data_path(&file.name);
         names.push(&file.name);
         counts.push(blocks);
@@ -1077,11 +1085,33 @@ fn survey_inner(
     // Members that exist are hashed CONCURRENTLY. Whole-file MD5 is
     // serial within one member and independent across members, so this
     // is the only axis that was left on the table.
-    let present: Vec<usize> = (0..paths.len()).filter(|&i| paths[i].is_some()).collect();
-    let width = file_threads(opts, present.len());
-    // Split the intra-file hint across the lanes rather than handing
-    // every lane the whole machine: the two multiply.
-    let inner = (threads(opts) / width).max(1);
+    // BIGGEST FIRST, which is both a tail guard and what makes the lane
+    // plan below mean anything: it hands worker `w` the share of the
+    // machine that member `w` deserves, so the two must agree about which
+    // member that is. This walk used to be in set order, which is why the
+    // survey measured this door spreading 3.71-5.58 s on the skewed corpus
+    // where `verify_dir`, which already sorted, sat stably at 3.87.
+    // PRINTING is unaffected - every line below reads `verdicts[i]`, in the
+    // set's own order.
+    let mut present: Vec<usize> = (0..paths.len()).filter(|&i| paths[i].is_some()).collect();
+    present.sort_unstable_by_key(|&i| std::cmp::Reverse(loaded.set.files[i].length));
+    // One lane budget, split BY SIZE rather than uniformly. `machine /
+    // width` handed every member the same width, which on a set with at
+    // least as many members as the box has cores is one lane for all of
+    // them INCLUDING THE LARGEST - and it stayed one after every other lane
+    // had gone idle. That cost 8.6x on a 3 GiB member beside twenty 50 MiB
+    // ones; `nzbkit::par2::lane_plan` carries the rule, the model and the
+    // measurements (entry 1 of
+    // research/SERIAL-BOUND-SURVEY-2026-09-16.md). `-T` is still a ceiling
+    // on the outer width, and `-T1` still hands one member at a time the
+    // whole machine.
+    let sizes: Vec<u64> = present
+        .iter()
+        .map(|&i| loaded.set.files[i].length)
+        .collect();
+    let lane_widths =
+        nzbkit::par2::lane_plan(&sizes, threads(opts), file_threads(opts, present.len()));
+    let width = lane_widths.len().max(1);
 
     // `block_size == 0` never reaches here - the Main-packet parser
     // refuses it (`par2/packet.rs`, the `block_size == 0` arm), so a set
@@ -1100,10 +1130,17 @@ fn survey_inner(
         // Each lane keeps its OWN results and hands them back through the
         // scope. No shared lock on the hot path, and so no question about
         // what a poisoned one would mean here.
+        // Shared by reference into every lane: the `move` below carries
+        // that lane's own width, not the queue.
+        let (present, paths, cursor, done, stop) = (&present, &paths, &cursor, &done, &stop);
         let lanes: Vec<Vec<(usize, Option<Pass1Out>)>> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..width)
-                .map(|_| {
-                    scope.spawn(|| {
+                .map(|w| {
+                    // This lane's share of the one budget, for every member
+                    // it claims. A lane that started on the dominant member
+                    // keeps its width for the short ones it picks up after.
+                    let inner = lane_widths.get(w).copied().unwrap_or(1);
+                    scope.spawn(move || {
                         let mut mine = Vec::new();
                         loop {
                             // The refusal is checked BEFORE the member is
@@ -1354,9 +1391,17 @@ pub fn survey_from_engine(
         let blocks = if bs == 0 {
             0
         } else {
-            file.length.div_ceil(bs) as usize
+            // `try_from`, not `as`: `file.length` is a wire-supplied
+            // FileDesc length, and a usize is 32 bits on armv7 - so the
+            // count truncated per member there, and the running sum
+            // below then panicked under overflow checks or reported a
+            // silently wrong "You have X out of Y data blocks". A count
+            // that does not fit the address space is a set this host
+            // cannot verify either way; saturating says so without
+            // inventing a small number.
+            usize::try_from(file.length.div_ceil(bs)).unwrap_or(usize::MAX)
         };
-        total_blocks += blocks;
+        total_blocks = total_blocks.saturating_add(blocks);
         let name = file.name.clone();
         if !m.exists {
             targets.push((name, Target::Missing));
@@ -1446,7 +1491,9 @@ pub fn verify_one(loaded: &Loaded, opts: &Options, name: &str, sink: &mut Sink) 
     let blocks = if bs == 0 {
         0
     } else {
-        file.length.div_ceil(bs) as usize
+        // See the note at `plan_targets`: a wire length narrowed
+        // with `as` truncates on a 32-bit host.
+        usize::try_from(file.length.div_ceil(bs)).unwrap_or(usize::MAX)
     };
     let path = loaded.data_path(&file.name);
     if !path.exists() {

@@ -310,6 +310,7 @@ impl Extractor {
                 c.abandon_slot(cs);
             }
         }
+        self.hand_over_preclaims(inner, into);
         if old.fallback && !into_was_fallback {
             let why = old
                 .fallback_reason

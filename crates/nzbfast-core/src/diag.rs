@@ -22,6 +22,16 @@ pub(crate) const FAIL_DETAIL_BYTES: usize = 24 * 1024;
 /// and until now it existed only in a memory-only 2000-line ring that a
 /// restart wipes - which is exactly what happened to the 31 Jul job whose
 /// diagnosis had to be reconstructed by re-probing the servers by hand.
+///
+/// EMPTY ON WINDOWS, and that is a platform gap rather than a quiet job.
+/// `logtee`'s capture installs under `#[cfg(unix)]` - it works by
+/// dup2'ing the process's own stdout through a pipe, which has no
+/// Windows twin here - so `RING` is never set there and `since` answers
+/// an empty `Vec`. A failed job's detail block is then blank, as is the
+/// log excerpt in the job report (`nzbfast-api`'s `report`) and
+/// `postproc`'s `log_end`. Nothing is wrong at the call sites and none
+/// of them needs a guard; the evidence simply does not exist on that
+/// platform, and a Windows user's failed job carries the verdict alone.
 pub fn fail_detail_snapshot(mark: u64) -> String {
     let lines = nzbkit::logtee::since(mark, FAIL_DETAIL_LINES);
     if lines.is_empty() {

@@ -465,9 +465,17 @@ pub(super) async fn adopt_from_donors(
             regained += 1;
         }
         out.by_file[fi] = true;
-        out.bytes = out
-            .bytes
-            .saturating_add(nzb.files[fi].segments.iter().map(|s| s.bytes).sum::<u64>());
+        // The inner sum saturates too, not just the outer add: these
+        // are NZB-DECLARED segment sizes, the N6-11 class the rest of
+        // this crate saturates everywhere (`plan.rs`, `Nzb::bytes()`),
+        // so a broken or hostile NZB declaring sizes near `u64::MAX`
+        // panicked under overflow checks and wrapped in release.
+        out.bytes = out.bytes.saturating_add(
+            nzb.files[fi]
+                .segments
+                .iter()
+                .fold(0u64, |acc, s| acc.saturating_add(s.bytes)),
+        );
         out.placed.push((fi, d.name, d.length));
     }
     if out.any() {

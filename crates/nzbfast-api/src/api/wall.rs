@@ -677,6 +677,11 @@ fn m_wall_refresh(
             // under the index write mutex, which is not a thing to start
             // while a download is using it.
             if !d.db_maintenance_ok() {
+                // KEYED for i18n: this exact sentence is an `err.` key in
+                // web/i18n/extract.js and all 27 catalogues (census 16 Sep 2026,
+                // research/API-ERROR-KEY-CENSUS-2026-09-16.md). tErr() matches the
+                // WHOLE string, so rewording it here silently un-translates 27
+                // locales with every gate green. Change both sides together.
                 return Some(json!({
                     "status": false,
                     "error": "busy - try again when nothing is downloading"

@@ -104,6 +104,11 @@ Options: (all uses)
   -t<n>    : Number of threads used for main processing ({n} detected)
   -T<n>    : Number of files hashed in parallel
              (default: one per core, capped at the file count)
+  --digest-cache
+           : Remember the checksums of files of 256 MB and up in your user
+             cache folder. A repeat create or --slow check of an unchanged
+             file re-checks its contents on every core, then skips its
+             slowest pass
   --       : Treat all following arguments as filenames
 Options: (verify or repair)
   -p       : Purge backup files and par files on successful recovery or

@@ -668,6 +668,16 @@ on:
       - '*.md'
       - '**/*.sh'
       - '**/*.zsh'
+      # For `ps1-parse-gate`, and this one is LOAD-BEARING in the same way
+      # `research/CLAIMS.jsonl` above is: until 16 Sep 2026 this filter
+      # named no PowerShell file AT ALL - not `.ps1`, and the directories
+      # the drivers live in are not `crates/`, `web/`, `website/` or
+      # `packaging/` - so a push that touched ONLY a Windows measurement
+      # driver ran not one gate in this workflow. That is how a
+      # merge-resolved driver that does not parse reached main and stayed
+      # there. Check the TRIGGER, not the job.
+      - '**/*.ps1'
+      - 'tools/ps1-parse-gate.py'
       - 'tools/iface-excess-gate.py'
       - 'tools/stall-mark-gate.py'
       - 'tools/rig-selftest-gate.py'
@@ -910,9 +920,16 @@ jobs:
       # The one gate here whose subject is a platform nobody in this fleet
       # builds on: unix-only symbols in code Windows also compiles. Four
       # fix commits over two days of red windows-build / windows-clippy,
-      # 21-23 Aug 2026. `--selftest` first, same reason as the gates above
-      # - the exemption logic is the whole gate, and a refactor that
-      # over-exempts still prints a green line.
+      # 21-23 Aug 2026. Since 16 Sep 2026 it also carries the RUNTIME half
+      # of that subject - a `Command::new("<tool>")` naming a program
+      # Windows does not have, reached through a cfg like
+      # `not(target_os = "linux")` that silently means "and Windows too".
+      # That arm's incident is the opposite shape and worse for it: the
+      # code COMPILES on every target, both Windows CI jobs were green,
+      # and the only thing red was a NIGHTLY test job (364d5b746).
+      # `--selftest` first, same reason as the gates above - the exemption
+      # logic is the whole gate, and a refactor that over-exempts still
+      # prints a green line.
       - name: windows portability gate
         # Run even when an earlier gate in this group failed - a
         # persistent red in one gate must not mask the verdicts of
@@ -1160,8 +1177,9 @@ jobs:
       # `cfg(test)` compiles on every target, which is why it is not an
       # exemption here. Neither neighbour covers it: `cfg-safety-gate` is
       # about the SAFETY comment above a cfg arm, and
-      # `win-portability-gate` only scans `libc::` and `std::os::unix`,
-      # so it was green on the tree that was red.
+      # `win-portability-gate` only scans `libc::`, `std::os::unix` and
+      # spawned program names - none of which is a cfg-exclusive item
+      # reference - so it was green on the tree that was red.
       # Belongs on the AUTHOR's own push rather than on main, and the
       # reason is coordination rather than compile time: that one defect
       # minted FIVE separate red claims across lanes and two were still
@@ -1830,6 +1848,84 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/rig-selftest-gate.py --selftest && tools/rig-selftest-gate.py --paths
+      # ---- ps1-parse-gate ------------------------------------------
+      # Every Windows measurement round on this fleet is a PowerShell
+      # script and until 16 Sep 2026 nothing in this repository parsed
+      # one, so a driver could be syntactically broken on main
+      # indefinitely. One did: the window-combine driver, produced by a
+      # MERGE RESOLUTION that joined a status line to the statement after
+      # it - content no side of the merge had and no reviewer reads - and
+      # a parse error is fatal to the WHOLE file, so every phase of every
+      # round on that script died at launch for 42 minutes. The gate's
+      # own header carries the provenance and the dialect limit.
+      #
+      # UBUNTU, NOT A WINDOWS RUNNER, and that was checked rather than
+      # assumed: GitHub's ubuntu images ship PowerShell Core as `pwsh` on
+      # PATH, so the parse costs this job a couple of seconds instead of a
+      # Windows runner's 10x billed minutes. It is a parse and nothing
+      # more - no dot-source, no execution, no profile. Measured over the
+      # whole roster on an aarch64 Mac: 281 files, 1.92 MB, 2.3 s.
+      #
+      # The gate REFUSES rather than skipping when pwsh is absent here,
+      # because GITHUB_ACTIONS is set: a runner image that dropped
+      # PowerShell must red instead of going quiet. On a developer box it
+      # says it could not answer and exits 0, which is why this step is
+      # the one that matters.
+      - name: PowerShell parse gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/ps1-parse-gate.py --selftest && tools/ps1-parse-gate.py
+      # ---- script-parse-gate ---------------------------------------
+      # The same argument as the gate above, applied to the two languages
+      # that carry far more of this repository: 1,259 tracked Python files
+      # and 469 shell files, none of which anything here read a line of for
+      # syntax until 17 Sep 2026. A grep for py_compile, compileall,
+      # `bash -n`, `zsh -n` or shellcheck across the workflows, the gates
+      # and the hooks returned ONE hit, and it was a shellcheck-disable
+      # COMMENT. The gates under tools/ were implicitly compiled because
+      # preflight runs them - about 4% of the population, and none of the
+      # harness reducers or round drivers, which is the family the
+      # PowerShell incident belonged to.
+      #
+      # THE INTERPRETER COMES FROM THE SHEBANG, NEVER THE EXTENSION, and
+      # that is the whole design. Running `bash -n` over all 469 shell
+      # files reports 119 failures and every one is a false positive: they
+      # are zsh scripts, including the deployed bench shell library, and
+      # bash has no grammar for them. The census is 239 zsh, 106 bash, 90
+      # sh, 23 env-bash and 11 with no shebang at all. A gate that read the
+      # extension would either red 119 clean files or invite somebody to
+      # rewrite a working zsh library into bash - the `fix the SITE, never
+      # the gate` rule inverted into real damage.
+      #
+      # No new `paths:` entry: `**/*.py`, `**/*.sh` and `**/*.zsh` above
+      # are already triggers and are exactly the files this reads, and the
+      # gate's own script is caught by `**/*.py`. That was CHECKED rather
+      # than assumed - it is the one thing the PowerShell gate needed and
+      # this one does not.
+      #
+      # Build-free. Measured over the committed tree on an aarch64 Mac:
+      # 1,729 scripts, 14.93 MB, 2.5 s - the Python arm in-process at
+      # 0.95 s, the shell arm on a thread pool at 1.49 s against 5.7 s
+      # serial. It never skips and never fails open: python3 is already
+      # running it and the shells are on every box and runner here.
+      - name: Ensure zsh for the script parse gate
+        # 239 of the shell files are zsh and the gate REFUSES rather than
+        # skipping when an interpreter it needs is absent - which is the
+        # right behaviour and would red this job on a runner image that
+        # does not carry zsh. A no-op when it is already present, so this
+        # costs nothing and removes the doubt.
+        if: ${{ !cancelled() }}
+        run: command -v zsh >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq zsh)
+      - name: Script parse gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/script-parse-gate.py --selftest && tools/script-parse-gate.py
   roster-gates:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -2381,6 +2477,9 @@ jobs:
       # which the job below already runs. It is wired anyway rather than
       # waived on that ground: what this step adds is that the WRAPPER still
       # dispatches, which is the half a direct call to the python cannot see.
+      # parfast-rigs.sh is the same shape and is here for the same reason -
+      # its wrapper `exec`s the parser's selftest before it reads a roster
+      # or opens an ssh, so the arm is hermetic and costs nothing.
       #
       # `packaging/scan-release-assets.sh --self-test` is NOT here and that
       # is measured, not stylistic: it is `#!/bin/zsh`, and ubuntu-latest has
@@ -2431,6 +2530,7 @@ jobs:
       - name: shell selftests
         run: |
           .claude/tools/bench-accounts.sh --selftest
+          .claude/tools/parfast-rigs.sh --selftest
           packaging/freebsd/smoke.sh --self-test
           tools/publish-site.sh --self-test
           packaging/android/build-release-apk.sh --self-test
@@ -3104,6 +3204,23 @@ jobs:
       # clean over a corpus it never opened. Pure python, no network, ~0.1 s.
       - name: jcross arm-order audit
         run: tools/jcross-position-audit.py --selftest
+      # The NTT crossover reducer for the 1 MiB NTT_MIN_PRESENT rounds
+      # (research/NTT-MIN-PRESENT-1MIB-X86-2026-09-16.md). It is the file a
+      # later lane will reduce those legs with, and two of its rules are
+      # easy to get silently wrong. `feed+fold+solve` is the ENCLOSING
+      # stage on BOTH arms and CONTAINS the syndrome pass on the forced
+      # one, so comparing `syn_s` against the fold's `ffs_s` prices a part
+      # against a whole and yields a crossover that is wrong rather than
+      # absent; and a plan file's extra forced arms (`force-w1024` and
+      # friends) share ONE fold arm, so a reader that assumes two arms
+      # silently drops them. Its arm pins both by reproducing the stage
+      # column PUBLISHED in research/NTT-MIN-WORK-SMALL-SETS-2026-09-14.md
+      # - 378k/373k/352k/350k/453k at m=256/320/448/640/1,024 - from that
+      # round's committed legs, so a reducer that stops agreeing with a
+      # published figure says so here rather than in the next write-up.
+      # Pure python over a committed .jsonl, no network, ~0.1 s.
+      - name: NTT crossover reducer
+        run: research/parfast-ntt-min-present-1mib-2026-09-16/legread.py --selftest
       # Names the POLLUTER in a cross-test pollution failure. NOTE: its
       # "real libtest" pin - that `--exact` takes many filters and that
       # libtest sorts the filtered set by name - needs rustc, and this
@@ -3183,6 +3300,38 @@ jobs:
         run: .claude/tools/memory-write.py --selftest
       - name: bench accounts parse
         run: .claude/tools/bench-accounts-parse.py --selftest
+      # The parfast RIG reader's half of the same pair, added 16 Sep 2026.
+      # Its selftest is the deliverable for the same reason the box gate's
+      # is: it is safety-ASYMMETRIC code, where a false HELD costs a lane a
+      # second look and a false FREE puts a 16-thread build on a box
+      # somebody is measuring on - which happened three times in one
+      # afternoon before this existed. The refusal cases are the point (an
+      # unreachable box, a signal that reached zero lines, a lock whose
+      # bytes and whose readability disagree), and so is the pid check's
+      # SECOND half: a live pid younger than the lock it names is a
+      # recycled number, which parses fine and looks fixed. It imports
+      # bench-accounts-parse.py's marker vocabulary rather than spelling a
+      # second copy, so a reclassification there reddens here too. No
+      # network, no box, ~0.3 s.
+      - name: parfast rig status parse
+        run: .claude/tools/parfast-rigs-parse.py --selftest
+      # The fleet's one box gate, and the reason its selftest is the
+      # deliverable rather than a courtesy: it is subject-locating code, and
+      # the three failures it reproduces are all a gate that could not see its
+      # subject. A lane that posted QUEUED and never ran blocked the lane
+      # behind it for 213 minutes through a free box; a `pgrep` for the bare
+      # string `repairteam` matched two idle `tail -F` watchers and left a
+      # 32-core box idle for five hours; and read-then-append let two lanes
+      # claim 20 seconds apart and both time on a contended box. All three are
+      # fixtures here - case (b) spawns a REAL `tail`, because the defect is in
+      # how a command line is read and a string cannot test that half. The
+      # cases that pin the marker vocabulary reach into
+      # `.claude/tools/bench-accounts-parse.py`'s roster on purpose: this gate
+      # imports that roster rather than spelling a second copy, so a
+      # reclassification of QUEUED there reddens here. No network, no box, no
+      # round; ~2 s.
+      - name: bench box gate
+        run: tools/bench-box-gate.py --selftest
       # The leak scan over the bytes tools/publish-site.sh pushes to
       # gh-pages, split into raw container bytes and the content they
       # carry. It runs at the WORST moment in a release - after the

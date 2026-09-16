@@ -60,7 +60,9 @@ fn a_sized_fast_pair_suggests_then_auto_applies() {
 
     // Suggest-only: the walk stores the candidate, the release
     // itself stays untouched.
-    let (examined, suggested, applied) = ix.predb_corr_backlog(100, 0, false, 5000).unwrap();
+    let (examined, suggested, applied) = ix
+        .predb_corr_backlog(100, 0, false, 5000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!((examined, suggested, applied), (1, 1, 0));
     let r = &ix.search("", 10).unwrap()[0];
     assert_eq!(r.pre_title, "", "suggest-only must not name anything");
@@ -246,7 +248,9 @@ fn a_repack_sibling_blocks_auto() {
         5000,
     )
     .unwrap();
-    let (_, suggested, applied) = ix.predb_corr_backlog(100, 0, true, 5000).unwrap();
+    let (_, suggested, applied) = ix
+        .predb_corr_backlog(100, 0, true, 5000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!(applied, 0, "sibling pres must never auto-apply");
     assert_eq!(suggested, 1);
     assert_eq!(ix.search("", 10).unwrap()[0].pre_title, "");
@@ -288,7 +292,9 @@ fn a_crowded_window_blocks_auto() {
         5000,
     )
     .unwrap();
-    let (_, suggested, applied) = ix.predb_corr_backlog(100, 0, true, 5000).unwrap();
+    let (_, suggested, applied) = ix
+        .predb_corr_backlog(100, 0, true, 5000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!(applied, 0, "a crowded window must never auto-apply");
     assert_eq!(suggested, 1);
     teardown(&d, ix);
@@ -337,7 +343,9 @@ fn a_lone_candidate_window_never_auto_applies() {
             5000,
         )
         .unwrap();
-        let (_, suggested, applied) = ix.predb_corr_backlog(100, 0, true, 5000).unwrap();
+        let (_, suggested, applied) = ix
+            .predb_corr_backlog(100, 0, true, 5000, std::time::Duration::MAX)
+            .unwrap();
         let runner: i64 = ix
             .db
             .query_row("SELECT runner_up FROM pre_corr", [], |r| r.get(0))
@@ -389,7 +397,9 @@ fn a_sizeless_pre_cannot_auto_apply() {
         5000,
     )
     .unwrap();
-    let (_, suggested, applied) = ix.predb_corr_backlog(100, 0, true, 5000).unwrap();
+    let (_, suggested, applied) = ix
+        .predb_corr_backlog(100, 0, true, 5000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!(applied, 0);
     assert_eq!(suggested, 1, "fast + agreeing still suggests");
     teardown(&d, ix);
@@ -526,9 +536,15 @@ fn corr_backlog_walks_once_until_a_seed_lands() {
         5000,
     )
     .unwrap();
-    assert_eq!(ix.predb_corr_backlog(100, 0, false, 5000).unwrap().0, 1);
     assert_eq!(
-        ix.predb_corr_backlog(100, 0, false, 5000).unwrap(),
+        ix.predb_corr_backlog(100, 0, false, 5000, std::time::Duration::MAX)
+            .unwrap()
+            .0,
+        1
+    );
+    assert_eq!(
+        ix.predb_corr_backlog(100, 0, false, 5000, std::time::Duration::MAX)
+            .unwrap(),
         (0, 0, 0),
         "the cursor must not re-walk a dry backlog"
     );
@@ -546,11 +562,14 @@ fn corr_backlog_walks_once_until_a_seed_lands() {
     )
     .unwrap();
     ix.kv_set("predb_seed_gen", "1").unwrap();
-    let (examined, suggested, _) = ix.predb_corr_backlog(100, 0, false, 6000).unwrap();
+    let (examined, suggested, _) = ix
+        .predb_corr_backlog(100, 0, false, 6000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!(examined, 1);
     assert_eq!(suggested, 1, "the seeded pre now names the backlog row");
     assert_eq!(
-        ix.predb_corr_backlog(100, 0, false, 6000).unwrap(),
+        ix.predb_corr_backlog(100, 0, false, 6000, std::time::Duration::MAX)
+            .unwrap(),
         (0, 0, 0)
     );
     teardown(&d, ix);
@@ -588,7 +607,9 @@ fn revoke_undoes_and_reject_never_nags() {
     )
     .unwrap();
     let rid = ix.search("", 10).unwrap()[0].id;
-    let (_, _, applied) = ix.predb_corr_backlog(100, 0, true, 5000).unwrap();
+    let (_, _, applied) = ix
+        .predb_corr_backlog(100, 0, true, 5000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!(applied, 1);
     assert_eq!(
         ix.search("Named.Film", 10).unwrap().len(),
@@ -618,7 +639,9 @@ fn revoke_undoes_and_reject_never_nags() {
     // must never suggest it again.
     ix.pre_reject(rid, 6000).unwrap();
     ix.kv_set("predb_seed_gen", "2").unwrap(); // force a re-walk
-    let (_, suggested, applied) = ix.predb_corr_backlog(100, 0, true, 6000).unwrap();
+    let (_, suggested, applied) = ix
+        .predb_corr_backlog(100, 0, true, 6000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!((suggested, applied), (0, 0), "a rejected row is settled");
     let status: String = ix
         .db
@@ -821,7 +844,12 @@ fn an_oracle_settles_a_correlation_both_ways() {
     )
     .unwrap();
     let rid = ix.search("", 10).unwrap()[0].id;
-    assert_eq!(ix.predb_corr_backlog(100, 0, true, 5000).unwrap().2, 1);
+    assert_eq!(
+        ix.predb_corr_backlog(100, 0, true, 5000, std::time::Duration::MAX)
+            .unwrap()
+            .2,
+        1
+    );
 
     // srrdb answers the SAME name (different separators, canonical
     // case): confirmed, and the pre row now carries the proven
@@ -881,7 +909,12 @@ fn an_oracle_settles_a_correlation_both_ways() {
     )
     .unwrap();
     let rid2 = ix2.search("", 10).unwrap()[0].id;
-    assert_eq!(ix2.predb_corr_backlog(100, 0, true, 5000).unwrap().2, 1);
+    assert_eq!(
+        ix2.predb_corr_backlog(100, 0, true, 5000, std::time::Duration::MAX)
+            .unwrap()
+            .2,
+        1
+    );
     let v = ix2
         .pre_corr_verdict(
             "zX9cV4bN7mK.part01.rar",
@@ -2097,7 +2130,9 @@ fn a_folded_session_correlates_by_its_true_size() {
             .unwrap();
         }
     }
-    let (examined, suggested, _) = ix.predb_corr_backlog(100, 0, false, 5_000).unwrap();
+    let (examined, suggested, _) = ix
+        .predb_corr_backlog(100, 0, false, 5_000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!(
         (examined, suggested),
         (5, 0),
@@ -2107,7 +2142,9 @@ fn a_folded_session_correlates_by_its_true_size() {
     let (sessions, folded, done) = ix.session_fold(30_000, WALK).unwrap();
     assert_eq!((sessions, folded), (1, 4));
     assert!(done);
-    let (examined, suggested, applied) = ix.predb_corr_backlog(100, 0, false, 5_000).unwrap();
+    let (examined, suggested, applied) = ix
+        .predb_corr_backlog(100, 0, false, 5_000, std::time::Duration::MAX)
+        .unwrap();
     assert_eq!(
         (examined, suggested, applied),
         (1, 1, 0),
@@ -2122,4 +2159,101 @@ fn a_folded_session_correlates_by_its_true_size() {
     assert_eq!(hints[0].1, "Some.Show.S01E01.1080p.WEB.H264-GRP");
     assert_eq!(hints[0].5, "suggested", "suggest-only, per the house rules");
     teardown(&d, ix);
+}
+
+/// The hold bound's sharpest case, and the one that is deterministic:
+/// a bound of ZERO examines no rows at all, and - the property that
+/// matters - it must not move the cursor, because a walk that parked
+/// past rows it never looked at loses them until the next seed
+/// generation. The unbounded call that follows still sees all five.
+///
+/// Added 16 Sep 2026 with the bound itself. Before it this leg had only
+/// a row budget, and 400 rows held the daemon's index mutex for a
+/// median of 4.7 s on the live 125 GB index - see the comment on
+/// `CORR_BACKLOG_BUDGET` in `tasks::enrich`.
+#[test]
+fn a_zero_hold_bound_examines_nothing_and_skips_nothing() {
+    let (d, mut ix) = corr_hold_fixture("corr-hold-zero", 5);
+    let before = ix.kv_get("predb_corr_cursor");
+    assert_eq!(
+        ix.predb_corr_backlog(100, 0, false, 5000, std::time::Duration::ZERO)
+            .unwrap(),
+        (0, 0, 0),
+        "a zero bound must do no work"
+    );
+    assert_eq!(
+        ix.kv_get("predb_corr_cursor"),
+        before,
+        "a walk that examined nothing must leave the cursor where it was"
+    );
+    let (examined, _, _) = ix
+        .predb_corr_backlog(100, 0, false, 5000, std::time::Duration::MAX)
+        .unwrap();
+    assert_eq!(examined, 5, "every row must still be reachable");
+    teardown(&d, ix);
+}
+
+/// A slice LOOP under a small hold bound covers the same population a
+/// single unbounded walk does: every row considered, none twice, none
+/// stepped over. This is the caller's shape in `tasks::enrich` - the
+/// row budget is spent across slices so the write mutex is released
+/// between them, rather than in one hold nothing bounded.
+///
+/// WHERE a slice stops is wall-clock and therefore not assertable; the
+/// invariant is. So this asserts coverage rather than the split, and it
+/// tolerates a slice that gets no row at all (the clock beating the
+/// first `corr_consider` is a legitimate outcome of a real bound, and
+/// the loop simply retries). The bound is 50 ms against a setup cost of
+/// tens of microseconds, so the loop makes progress on any box this
+/// repo runs on.
+#[test]
+fn a_bounded_slice_loop_covers_the_whole_walk_exactly_once() {
+    let (d, mut ix) = corr_hold_fixture("corr-hold-slices", 12);
+    let mut total = 0usize;
+    for _ in 0..30 {
+        let (n, _, _) = ix
+            .predb_corr_backlog(100, 0, false, 5000, std::time::Duration::from_millis(50))
+            .unwrap();
+        total += n;
+        if total >= 12 {
+            break;
+        }
+    }
+    assert_eq!(
+        total, 12,
+        "the slices together must examine every row exactly once"
+    );
+    // Parked: the walk is done, so a further slice finds nothing. This
+    // is what proves none were left behind rather than merely counted.
+    assert_eq!(
+        ix.predb_corr_backlog(100, 0, false, 5000, std::time::Duration::MAX)
+            .unwrap(),
+        (0, 0, 0),
+        "the walk must be parked, not still holding unexamined rows"
+    );
+    teardown(&d, ix);
+}
+
+/// `n` obfuscated, sized, junk>=70 releases with no pre to match, which
+/// is all the hold-bound tests need: every row reaches `corr_consider`
+/// and costs a full evaluation, and none of them suggests anything, so
+/// the counts under test are the WALK's and not the scorer's.
+fn corr_hold_fixture(name: &str, n: usize) -> (std::path::PathBuf, Index) {
+    let d = dir(name);
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    for i in 0..n {
+        let stem = format!("q7kx9zzp0aa4{i:02}bb2cc31");
+        ix.ingest(
+            "alt.binaries.x264",
+            &[overd(
+                &format!("\"{stem}.part01.rar\" yEnc (1/1)"),
+                &stem,
+                5_000_000_000,
+                4600 + i as i64,
+            )],
+            5000,
+        )
+        .unwrap();
+    }
+    (d, ix)
 }

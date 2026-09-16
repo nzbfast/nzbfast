@@ -2304,6 +2304,12 @@ mod store_tests {
     /// Deliberately a shell-out rather than a crate: `ps -o rss=` is
     /// spelled the same on macOS and Linux, and the measuring stick is
     /// not worth a dependency.
+    ///
+    /// Split unix / not-unix exactly as `peak_rss_kb` below is, rather
+    /// than spawning a `ps` that Windows does not have and reading the
+    /// NotFound back as "no answer". Same contract either way - the
+    /// callers already print a None.
+    #[cfg(unix)]
     fn rss_kb() -> Option<u64> {
         let out = std::process::Command::new("ps")
             .args(["-o", "rss=", "-p"])
@@ -2311,6 +2317,11 @@ mod store_tests {
             .output()
             .ok()?;
         String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
+
+    #[cfg(not(unix))]
+    fn rss_kb() -> Option<u64> {
+        None
     }
 
     /// The process's PEAK resident set in kB - the high-water mark, which

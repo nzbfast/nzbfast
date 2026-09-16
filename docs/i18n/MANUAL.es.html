@@ -885,8 +885,8 @@ sobre el archivo entero, y esa es una sola lectura en un núcleo por muchos núc
 tenga la máquina. Con esto activado, cada archivo se prueba con las sumas de comprobación
 por bloque del conjunto PAR2, y esas corren en todos los núcleos a la vez. Mucho más rápido
 en un disco local veloz, y de poco valor en una carpeta de red o un disco de platos, donde
-el disco ya es el límite. Está apagada mientras no la pidas, y esto es lo que aceptas
-cuando lo haces: un conjunto PAR2 puede llevar dos registros que describen archivos
+el disco ya es el límite. Está activada a menos que la apagues, y esto es lo que aceptas
+al dejarla activada: un conjunto PAR2 puede llevar dos registros que describen archivos
 distintos, y par2cmdline y las demás herramientas llaman dañado a un conjunto así donde
 nzbfast lo llama entonces limpio. Ningún conjunto construido por software normal se parece
 a eso, una comprobación de los primeros 16 KiB sigue rechazando cualquier versión

@@ -23,6 +23,10 @@ unused_must_use = "deny"
 ratio-lab = []
 fast = []
 parallel = ["dep:rayon"]
+# Probe-only: lets `RARS_STRIPED_FOLD_MIN_WINDOW` move the striped repair
+# fold's team gate, so a bench can reach windows the shipped gate refuses.
+# NEVER enabled by a shipped build; see `recovery/rar5.rs`.
+fold-team-probe = []
 
 [dependencies]
 aes = { version = "0.9", features = ["zeroize"] }

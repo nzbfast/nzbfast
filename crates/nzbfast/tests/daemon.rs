@@ -132,7 +132,7 @@ mod stream_live;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -272,9 +272,30 @@ fn raw(port: u16, request: &[u8]) -> Vec<u8> {
     panic!("daemon on :{port} never answered {line:?}: {last}");
 }
 
+/// One connection, one request, everything the daemon sent back.
+///
+/// A WRITE that fails is not by itself a refusal. A gateway that
+/// truncates a body at its declared limit stops reading there and may
+/// answer and close while the rest of the request is still going out -
+/// `daemon_authkey` POSTs a 2 MiB body at server_save's 1 MiB limit on
+/// purpose - and the peer's close turns the unsent tail into EPIPE (or
+/// ECONNRESET) on our write with the answer already on its way back. So a
+/// failed write shuts our side down and reads anyway: a write failure
+/// with an answer behind it is an answer. Only a connection that produced
+/// no bytes at all is no answer, and returns the write error if there was
+/// one, else the read error, else UnexpectedEof. Until 15 Sep 2026 the
+/// write was `?`'d, so that one request read as "never served" on all
+/// five retries under load (memory topic `nzbfast-daemon-test-flake`,
+/// sightings 1-6). Confirmed by instrumenting this function on a loaded
+/// box: 33 of 120 runs of that test failed the write with EPIPE and
+/// still read a 212-byte answer, and the read then ENDED in ECONNRESET -
+/// which is why the bytes decide, and not the read's result.
 fn raw_once(port: u16, request: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut s = TcpStream::connect(("127.0.0.1", port))?;
-    s.write_all(request)?;
+    let wrote = s.write_all(request);
+    if wrote.is_err() {
+        let _ = s.shutdown(Shutdown::Write);
+    }
     let mut out = Vec::new();
     // Zero bytes back is a refusal to serve, however the peer
     // phrased it: an RST (Err) when our request was never read off
@@ -285,7 +306,7 @@ fn raw_once(port: u16, request: &[u8]) -> std::io::Result<Vec<u8>> {
     // truncated body must never be retried away.
     let read = s.read_to_end(&mut out);
     if out.is_empty() {
-        return Err(read.err().unwrap_or_else(|| {
+        return Err(wrote.err().or(read.err()).unwrap_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "closed without answering",
@@ -7361,6 +7382,42 @@ fn rar_can_create() -> bool {
     ok
 }
 
+/// Whether a `zip` on PATH can CREATE an archive, not merely start.
+///
+/// The same probe as `rar_can_create` above, one tool over, and for the
+/// same reason: "the binary is on PATH" is not the question a fixture
+/// builder is asking. It also closes a narrower hole that was live until
+/// 16 Sep 2026 - the nested-zip test below guarded on `rar_can_create()`
+/// alone and then `.unwrap()`ed on `Command::new("zip")`, so a box with
+/// rar and no zip PANICKED on a NotFound rather than skipping
+/// (research/WIN-RUNTIME-TOOL-CFG-CENSUS-2026-09-16.md; the mechanical
+/// half is the zip arm of tools/par2-gate.py).
+fn zip_can_create() -> bool {
+    let dir = std::env::temp_dir().join(format!(
+        "nzbfast-zipprobe-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let ok = std::fs::write(dir.join("probe.txt"), b"probe\n").is_ok()
+        && Command::new("zip")
+            .current_dir(&dir)
+            .args(["-0", "-q", "-j", "probe.zip", "probe.txt"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        && dir.join("probe.zip").is_file();
+    let _ = std::fs::remove_dir_all(&dir);
+    ok
+}
+
 /// Nested zip through the DAEMON, on a REAL archive pair.
 ///
 /// The unit and e2e coverage for the depth lift builds its containers
@@ -7371,13 +7428,18 @@ fn rar_can_create() -> bool {
 /// in through `addfile` and comes out of the history the way a job from
 /// Sonarr does.
 ///
-/// Skips when `rar` is absent - it is not in CI's image, and the same
-/// shape is covered without it by `zip_nested_in_store_rar_extracts_one_pass`
-/// (nzbkit) and `store_rar_wrapped_zip_extracts_one_pass` (e2e).
+/// Skips when EITHER `rar` or `zip` is absent - neither is in CI's image,
+/// and the same shape is covered without them by
+/// `zip_nested_in_store_rar_extracts_one_pass` (nzbkit) and
+/// `store_rar_wrapped_zip_extracts_one_pass` (e2e).
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_zip_in_a_real_store_rar_extracts_through_the_daemon() {
     if !rar_can_create() {
         eprintln!("skipping: no rar that can create an archive");
+        return;
+    }
+    if !zip_can_create() {
+        eprintln!("skipping: no zip that can create an archive");
         return;
     }
     let dir = std::env::temp_dir().join(format!("nzbfast-nestedzip-{}", std::process::id()));

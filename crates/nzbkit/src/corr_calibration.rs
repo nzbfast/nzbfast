@@ -381,7 +381,7 @@ fn run_corpus(
     // walked too - they are junk-scored, unnamed rows like any other.
     let n_rows = N_PAIRS + N_EXTRA_RELEASES;
     let (examined, _, _) = ix
-        .predb_corr_backlog(n_rows as u32 * 2, 0, true, now)
+        .predb_corr_backlog(n_rows as u32 * 2, 0, true, now, std::time::Duration::MAX)
         .unwrap();
     assert_eq!(
         examined, n_rows,

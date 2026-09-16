@@ -161,6 +161,10 @@ impl PairCoeff {
 /// is every full leaf of a big create or repair, took the dense kernel
 /// with nothing saying so. The cap follows `w` now; `SCRATCH_CAP` is
 /// the 512-word floor the accounting and the tests keep.
+/// That 1,024 is narrower since 16 Sep 2026 - the create takes it only
+/// below the additive leaf's gate, where the paired kernel is the one
+/// running - but it is not gone, and a skewed plan can still reach this
+/// cap at a full leaf, so the cap must keep following `w`.
 /// `NZBFAST_NTT_PAIRED_CAPW=<words>` pins it (the A/B arm: 512 is the
 /// shipped-until-now behaviour).
 pub(super) const SCRATCH_CAP: usize = 257 * 512 * 2;

@@ -25,31 +25,10 @@ pub(super) struct Scanned {
     /// per spec. Empty for a 0-byte file - a real creator emits no IFSC
     /// packet for one, and neither do we.
     pub(super) blocks: Vec<([u8; 16], u32)>,
-}
-
-/// Identity and change time of the source descriptor pinned for a fused pass.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct SourceStamp {
-    pub(super) length: u64,
-    #[cfg(unix)]
-    pub(super) identity: (u64, u64, i64, i64),
-}
-
-impl SourceStamp {
-    pub(super) fn of(metadata: &std::fs::Metadata) -> SourceStamp {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-        SourceStamp {
-            length: metadata.len(),
-            #[cfg(unix)]
-            identity: (
-                metadata.dev(),
-                metadata.ino(),
-                metadata.ctime(),
-                metadata.ctime_nsec(),
-            ),
-        }
-    }
+    /// The store change this member's digest-cache pass owes
+    /// (`crate::digest_cache::Pending`), committed only once the whole set
+    /// is written - never for a create that fails or is cancelled.
+    pub(super) digest: Option<crate::digest_cache::Pending>,
 }
 
 /// Ordered checksum state for the sole member of a fused pass: the whole-file
@@ -73,7 +52,12 @@ pub(super) struct FusedScan {
 pub(super) struct FusedMemberState {
     /// Index into the caller's `members`.
     pub(super) member: usize,
-    pub(super) stamp: SourceStamp,
+    /// The pinned source's identity and change stamps, the digest cache's
+    /// own `Identity`: one read of them per platform, so the Windows arm
+    /// carries the volume, file index and change time and not the length
+    /// alone (it did until 15 Sep 2026, and a same-length in-place write
+    /// during the fold passed `finish_all`).
+    pub(super) stamp: crate::disk::Identity,
     pub(super) expected_head: [u8; 16],
     pub(super) whole: Md5,
     /// The whole-file digest once a lane finalised it (lane path); the
@@ -83,6 +67,12 @@ pub(super) struct FusedMemberState {
     pub(super) head: Md5,
     pub(super) head_left: usize,
     pub(super) blocks: Vec<([u8; 16], u32)>,
+    /// This member's digest-cache pass: a record being validated, or the
+    /// member being enrolled, beside the chain (`crate::digest_cache`).
+    pub(super) digest: crate::digest_cache::MemberDigest,
+    /// The scalar chain stopped because a record validated. Only ever set
+    /// off the lanes: eight chains in lockstep are left to finish.
+    pub(super) chain_skipped: bool,
 }
 
 impl FusedScan {
@@ -90,6 +80,9 @@ impl FusedScan {
     /// length, head MD5, file id)`). None when any member is not a regular
     /// file - pipes and devices have no stable positional snapshot
     /// contract, and the ordinary scanner is the fallback for them.
+    ///
+    /// Each member's digest-cache pass starts here, against the store the
+    /// calling thread's entry point made active.
     pub(super) fn open_all(
         heads: &[(usize, u64, [u8; 16], [u8; 16])],
         members: &[Member],
@@ -97,6 +90,7 @@ impl FusedScan {
     ) -> Result<Option<FusedScan>, Par2GenError> {
         let mut files = Vec::with_capacity(heads.len());
         let mut state = Vec::with_capacity(heads.len());
+        let digest_cache = crate::digest_cache::active();
         for &(mi, length, expected_head, _) in heads {
             let member = &members[mi];
             let file = std::fs::File::open(&member.path).map_err(io(&member.path))?;
@@ -104,13 +98,24 @@ impl FusedScan {
             if !metadata.is_file() {
                 return Ok(None);
             }
-            let stamp = SourceStamp::of(&metadata);
-            if stamp.length != length {
+            // No identity to pin (a platform with neither arm) means no
+            // snapshot contract either: the ordinary scanner.
+            let Ok(stamp) = crate::disk::Identity::of(&file) else {
+                return Ok(None);
+            };
+            if stamp.length() != length {
                 return Err(Par2GenError::Other(format!(
                     "{} changed length while the PAR2 set was being built",
                     member.path.display()
                 )));
             }
+            let digest = crate::digest_cache::MemberDigest::begin(
+                digest_cache.as_ref(),
+                &file,
+                &member.path,
+                length,
+                crate::digest_cache::FLAG_CREATE,
+            );
             files.push(file);
             state.push(FusedMemberState {
                 member: mi,
@@ -121,6 +126,8 @@ impl FusedScan {
                 head: Md5::new(),
                 head_left: scan_head_len(length),
                 blocks: Vec::with_capacity(length.div_ceil(block_size) as usize),
+                digest,
+                chain_skipped: false,
             });
         }
         // Lanes pay off with members to fill them: a lone member would run
@@ -145,23 +152,26 @@ impl FusedScan {
         let mut out = Vec::with_capacity(self.state.len());
         for (file, st) in self.files.iter().zip(self.state) {
             let member = &members[st.member];
-            let handle_now = file.metadata().map_err(io(&member.path))?;
-            let path_now = std::fs::metadata(&member.path).map_err(io(&member.path))?;
-            if SourceStamp::of(&handle_now) != st.stamp || SourceStamp::of(&path_now) != st.stamp {
+            if !st.stamp.still_holds(file, &member.path) {
                 return Err(Par2GenError::Other(format!(
                     "{} changed while the PAR2 set was being built",
                     member.path.display()
                 )));
             }
-            let whole = st
-                .whole_digest
-                .unwrap_or_else(|| st.whole.finalize().into());
+            // A record that validated stopped the scalar chain; the digest
+            // pass hands back its MD5, or takes the chain's own.
+            let chain = (!st.chain_skipped).then(|| {
+                st.whole_digest
+                    .unwrap_or_else(|| st.whole.finalize().into())
+            });
+            let (whole, pending) = st.digest.resolve(chain).map_err(Par2GenError::Other)?;
             let actual = finish_scan(
                 member,
-                st.stamp.length,
+                st.stamp.length(),
                 whole,
                 st.head.finalize().into(),
                 st.blocks,
+                pending,
             );
             if actual.md5_16k != st.expected_head {
                 return Err(Par2GenError::Other(format!(
@@ -210,11 +220,16 @@ pub(super) fn read_exact_or_short(
 /// the remaining cores for block-parallel hashing - the split
 /// `par2repair::verify_all_targets` uses, for the same reason: one big
 /// file on a wide box gets every lane instead of one.
+///
+/// `lane_cap` is [`apriori_scan_lane_width`]'s answer, decided by the
+/// caller before anything here spawns and `None` where the caller has no
+/// fold running beside this scan to hand cores back to.
 pub(super) fn scan_all(
     members: &[Member],
     sizes: &[u64],
     block_size: u64,
     scan_pool: u64,
+    lane_cap: Option<usize>,
     control: &CreateControl,
 ) -> Result<Vec<Scanned>, Par2GenError> {
     debug_assert_eq!(members.len(), sizes.len());
@@ -223,6 +238,16 @@ pub(super) fn scan_all(
     let queue = std::sync::Mutex::new(order);
     let machine = crate::mem::cpu_workers().max(1);
     let (outer, inner) = scan_pool_geometry(sizes, block_size, machine, scan_pool);
+    // The cap lands HERE and not inside the geometry, and it binds only
+    // `inner`: the OUTER fan-out is what makes a many-member set's
+    // chains run beside each other, which is the quantity both a-priori
+    // widths are derived against (`super::chain_pass_bytes`), so moving
+    // it would move the ground under them. Narrowing after the search
+    // only ever spends LESS than the budget the search admitted.
+    let inner = lane_cap.map_or(inner, |cap| inner.min(cap.max(1)));
+    // Resolved on the entry point's thread (`CreateControl`), because this
+    // may itself be running on a thread the create spawned.
+    let digest_cache = control.digest_cache();
     let mut per_thread: Vec<Result<Vec<(usize, Scanned)>, Par2GenError>> = Vec::new();
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..outer)
@@ -238,7 +263,14 @@ pub(super) fn scan_all(
                         control.gate()?;
                         out.push((
                             i,
-                            scan_at_length(&members[i], sizes[i], block_size, inner, control)?,
+                            scan_at_length(
+                                &members[i],
+                                sizes[i],
+                                block_size,
+                                inner,
+                                control,
+                                digest_cache,
+                            )?,
                         ));
                     }
                 })
@@ -341,8 +373,12 @@ pub(super) fn source_fusion_shape_admitted(
 /// sitting far below the NTT's 320-row crossover, so an input count alone is
 /// the wrong gate: 8 GiB at 1 MiB slices and 1% recovery is 8,193 inputs and
 /// only 82 rows, and its only arithmetic route is the fold either way.
-pub(super) fn source_fusion_rows_admitted(n_slices: usize, n_recovery: usize) -> bool {
-    !ntt_range::rows_and_present_admitted(n_slices, n_recovery)
+pub(super) fn source_fusion_rows_admitted(
+    block_size: usize,
+    n_slices: usize,
+    n_recovery: usize,
+) -> bool {
+    !ntt_range::rows_and_present_admitted(block_size, n_slices, n_recovery)
 }
 
 pub(super) fn scan_pool_budget(process_budget: u64) -> u64 {
@@ -629,6 +665,160 @@ pub(super) fn scan_pool_geometry(
     unreachable!("one scan worker is always admitted")
 }
 
+/// The block-digest lanes' a-priori width rule, ON by default since
+/// 16 Sep 2026; `NZBFAST_CREATE_SCAN_LANE_PACING=0` is the A/B arm, and
+/// `NZBFAST_CREATE_SCAN_LANES=<n>` pins the width for a research sweep
+/// (it is how the shape of the rule below was chosen, and it overrides
+/// the rule rather than the geometry's own ceiling).
+///
+/// Separate from the fold's two knobs for the same reason they are
+/// separate from each other: the three were measured apart and reach
+/// their widths by different means.
+fn create_scan_lane_pacing_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NZBFAST_CREATE_SCAN_LANE_PACING").is_none_or(|v| v != "0"))
+}
+
+/// A research pin for the block-digest lane width, or `None`.
+fn forced_scan_lane_width() -> Option<usize> {
+    static N: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("NZBFAST_CREATE_SCAN_LANES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0)
+    })
+}
+
+/// Payload passes ONE block-digest lane completes while the whole-file
+/// MD5 chain makes ONE pass over the same bytes, in PER MILLE - the one
+/// machine input the lane width needs, and `None` on a box where the
+/// quantity that could move it is not known to be present.
+///
+/// # Why this is a bound and not a measurement
+///
+/// A member's block digests and its whole-file chain are the SAME MD5
+/// over the SAME bytes (`scan_mapped` and `scan_parallel_positional`
+/// both run the chain on the file-level worker while the lanes hash that
+/// worker's own member), so the payload and the member length both
+/// cancel out of the ratio exactly as the payload cancels out of
+/// [`super::fold_rows_per_worker_per_chain_pass`]. What is left is one
+/// lane's cost against one chain's, and a lane does the chain's MD5 plus
+/// a CRC32 over the same bytes - so the ratio is at MOST 1000 on any
+/// box, structurally, and the only way it falls much below is a CRC32
+/// running out of a table rather than off the hardware instruction.
+/// That is what this is keyed on, and it is a far wider gate than the
+/// fold rule's, deliberately: the fold's constant compares two DIFFERENT
+/// kernels whose rates diverge by several times, this one compares MD5
+/// with itself.
+///
+/// 950 is that bound with a CRC32 charged the ~5% it costs beside MD5,
+/// and the width it produces is insensitive to it: every value from 625
+/// to 1000 gives the same [`scan_lane_keep_up_width`] of 2.
+///
+/// # What is deliberately NOT priced in
+///
+/// A lane hashes up to [`scan_lane_blocks`] blocks per `md5_many` pass,
+/// and at eight of them the vector kernel is several times the scalar
+/// chain - so a finely sliced set's lane is worth several lanes of this.
+/// Taking that would ask for ONE lane, and the speedup is both
+/// architecture- and lane-count-dependent (four NEON lanes measure 1.58x
+/// the scalar chain, eight AVX2 lanes far more), which is the kind of
+/// constant the fold pacers got wrong in the dangerous direction. Every
+/// lane is therefore priced at the SCALAR rate: a set whose digests
+/// vectorise simply finishes them early, and under-narrowing costs the
+/// gain and never the wall. The block size is why this rule has no block
+/// size term.
+fn block_digest_lane_per_mille_of_chain() -> Option<u64> {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("sse4.2") && is_x86_feature_detected!("pclmulqdq") {
+        return Some(950);
+    }
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("crc") {
+        return Some(950);
+    }
+    None
+}
+
+/// The fewest block-digest lanes whose work still lands INSIDE the
+/// chain's wall, at the same 80% target `super::paced_width` aims at:
+/// `lanes >= (1 / 0.8) / (per-mille / 1000)`, which is `1250 / per_mille`.
+fn scan_lane_keep_up_width(per_mille: u64) -> usize {
+    (1250u64.div_ceil(per_mille.max(1))).max(1) as usize
+}
+
+/// The block-digest lane width a create decides BEFORE [`scan_all`]
+/// spawns anything, from the fold width decided in the same breath.
+///
+/// `None` means "do not narrow" - an unmeasured box, or the knob off.
+/// See [`apriori_scan_lane_width_for`] for the rule and
+/// [`block_digest_lane_per_mille_of_chain`] for the one constant in it.
+pub(super) fn apriori_scan_lane_width(
+    fold_width: usize,
+    scan_outer: usize,
+    max: usize,
+) -> Option<usize> {
+    if let Some(pinned) = forced_scan_lane_width() {
+        return Some(pinned);
+    }
+    if !create_scan_lane_pacing_enabled() {
+        return None;
+    }
+    let keep_up = scan_lane_keep_up_width(block_digest_lane_per_mille_of_chain()?);
+    Some(apriori_scan_lane_width_for(
+        fold_width, scan_outer, keep_up, max,
+    ))
+}
+
+/// [`apriori_scan_lane_width`]'s arithmetic with the machine constant
+/// already reduced to `keep_up` - split out so the RULE can be pinned by
+/// a test on every box in the fleet, exactly as
+/// [`super::apriori_fold_width_for`] is.
+///
+/// # The rule, and why it is ONE decision with the fold's and not two
+///
+/// The block digests are a fixed amount of MD5 work over the payload
+/// that must finish before the set can be written, and the chain is one
+/// sequential MD5 pass over the same bytes. Lanes handed back to the
+/// chain pay for themselves exactly while the digests still land inside
+/// the chain's wall - which is `keep_up` lanes, a number with no box in
+/// it. But a lane narrowed BELOW what the box would otherwise have spent
+/// idle buys nothing at all, so the rule sheds only what the box is
+/// actually short of: `scan_all` runs `outer` chains and `outer * inner`
+/// digest lanes beside the fold's workers, so what is left for the lanes
+/// is `max - fold - outer`, and that is the width - never fewer than
+/// `keep_up`, never more than the box.
+///
+/// **This is the whole coupling between the two a-priori widths, and it
+/// is why they are decided together.** Two rules that each believed they
+/// were the only narrowing could shed together until neither's work fits
+/// its own target - which is how the two feedback pacers failed without
+/// either of them containing a feedback term over the other. Here the
+/// fold width is an INPUT: the lane width is what the box has left after
+/// the fold has been paid, so the two can only ever sum to the box, and
+/// on a box with cores to spare the lane rule declines to narrow at all
+/// (a 32-core host running one member keeps every lane the geometry
+/// gave it).
+///
+/// The floor is `keep_up` and not `super::PACED_WIDTH_FLOOR`: the
+/// dangerous direction here is making the DIGESTS the pole, and the
+/// number that bounds that is the one derived from the chain, not the
+/// fold's floor. It is the binding term on a small box - four cores with
+/// a four-wide fold have nothing left, and the lanes still get two.
+pub(super) fn apriori_scan_lane_width_for(
+    fold_width: usize,
+    scan_outer: usize,
+    keep_up: usize,
+    max: usize,
+) -> usize {
+    let outer = scan_outer.max(1);
+    let max = max.max(1);
+    let keep_up = keep_up.clamp(1, max);
+    let spare = max.saturating_sub(fold_width).saturating_sub(outer);
+    (spare / outer).clamp(keep_up, max)
+}
+
 /// Per-block (MD5, CRC32) for `[first, last)` blocks of `f`, each block
 /// zero-padded to `block_size` exactly as the serial scan pads it.
 #[allow(clippy::too_many_arguments)]
@@ -724,10 +914,11 @@ pub(super) fn scan_parallel_positional(
     n_blocks: usize,
     workers: usize,
     control: &CreateControl,
-) -> Result<([u8; 16], [u8; 16], Vec<([u8; 16], u32)>), Par2GenError> {
+    digest: &crate::digest_cache::MemberDigest,
+) -> Result<(Option<[u8; 16]>, [u8; 16], Vec<([u8; 16], u32)>), Par2GenError> {
     let mut blocks = vec![([0u8; 16], 0); n_blocks];
     let per = n_blocks.div_ceil(workers);
-    let whole = std::thread::scope(|s| -> Result<([u8; 16], [u8; 16]), Par2GenError> {
+    let whole = std::thread::scope(|s| -> Result<(Option<[u8; 16]>, [u8; 16]), Par2GenError> {
         let handles: Vec<_> = blocks
             .chunks_mut(per)
             .enumerate()
@@ -770,17 +961,28 @@ pub(super) fn scan_parallel_positional(
         let mut head_left = 16384usize;
         let mut buf = vec![0u8; 1 << 20];
         let mut left = length;
+        let mut skipped = false;
         while left > 0 {
-            // Cancel only, and NO progress step: the block lanes above
-            // already count every byte of this member once, and the
-            // whole-file chain is a second pass over the same bytes.
-            // Per MiB, on the one lane that is this member's serial
-            // cost - without it a cancelled create would still hash
-            // the whole file out.
+            // Cancel only, and NO `CreatePhase::Verify` step: the block
+            // lanes above already count every byte of this member once,
+            // and the whole-file chain is a second pass over the same
+            // bytes. The CHAIN counter below is a different question
+            // (how far along is THIS lane) and is stepped per MiB, as
+            // `scan_mapped` explains. Per MiB, on the one lane that is
+            // this member's serial cost - without it a cancelled create
+            // would still hash the whole file out.
             control.check()?;
+            // A digest record validated (`crate::digest_cache`): the chain's
+            // answer is known, and once the head is done this lane reads for
+            // nothing else.
+            if head_left == 0 && digest.chain_abandoned() {
+                skipped = true;
+                break;
+            }
             let want = left.min(buf.len() as u64) as usize;
             read_exact_or_short(&mut reader, &mut buf[..want], path)?;
             whole.update(&buf[..want]);
+            control.chain_step(want as u64);
             if head_left > 0 {
                 let n = head_left.min(want);
                 head.update(&buf[..n]);
@@ -788,10 +990,16 @@ pub(super) fn scan_parallel_positional(
             }
             left -= want as u64;
         }
+        // The member's remaining chain work, credited as this lane
+        // leaves - see `scan_mapped`'s own tail credit.
+        control.chain_step(left);
         for h in handles {
             h.join().expect("par2gen block hasher panicked")?;
         }
-        Ok((whole.finalize().into(), head.finalize().into()))
+        Ok((
+            (!skipped).then(|| whole.finalize().into()),
+            head.finalize().into(),
+        ))
     })?;
     Ok((whole.0, whole.1, blocks))
 }
@@ -870,7 +1078,8 @@ pub(super) fn scan_mapped(
     n_blocks: usize,
     workers: usize,
     control: &CreateControl,
-) -> ([u8; 16], [u8; 16], Vec<([u8; 16], u32)>) {
+    digest: &crate::digest_cache::MemberDigest,
+) -> (Option<[u8; 16]>, [u8; 16], Vec<([u8; 16], u32)>) {
     map.prefetch();
     let data = map.bytes();
     let length = data.len();
@@ -916,16 +1125,41 @@ pub(super) fn scan_mapped(
         }
         let mut whole = Md5::new();
         let mut head = Md5::new();
+        let mut skipped = false;
+        // No `CreatePhase::Verify` step - the block lanes above count
+        // these bytes once (see `scan_parallel_positional`'s sequential
+        // lane) - but the CHAIN counter is this lane's own, and stepping
+        // it here is the whole point of it: the block lanes run
+        // `workers`-way parallel and finish long before this sequential
+        // pass, so a pacer that read their progress as the chain's would
+        // see a chain that had already finished. It did, and was a
+        // measured no-op for it (`CreateControl::chain_step`).
+        let mut chained = 0u64;
         for chunk in data.chunks(1 << 20) {
-            // Cancel only, no step - the block lanes count these bytes
-            // (see `scan_parallel_positional`'s sequential lane).
             if control.cancelled() {
                 break;
             }
+            // A validated digest record answers for the chain.
+            if digest.chain_abandoned() {
+                skipped = true;
+                break;
+            }
             whole.update(chunk);
+            chained += chunk.len() as u64;
+            control.chain_step(chunk.len() as u64);
         }
+        // Whatever this member's chain did NOT hash - abandoned to a
+        // digest record, or cut short by a cancel - is work that will
+        // never happen, so it is credited as the lane leaves. Without
+        // this the counter would stall below its whole on the digest-hit
+        // path and a pacer would hold a narrowed fold open for a chain
+        // that is not running.
+        control.chain_step(length as u64 - chained);
         head.update(&data[..length.min(16384)]);
-        (whole.finalize().into(), head.finalize().into())
+        (
+            (!skipped).then(|| whole.finalize().into()),
+            head.finalize().into(),
+        )
     });
     (whole, head, blocks)
 }
@@ -945,7 +1179,8 @@ pub(super) fn scan_parallel_streamed(
     n_blocks: usize,
     piece_bytes: usize,
     control: &CreateControl,
-) -> Result<([u8; 16], [u8; 16], Vec<([u8; 16], u32)>), Par2GenError> {
+    digest: &crate::digest_cache::MemberDigest,
+) -> Result<(Option<[u8; 16]>, [u8; 16], Vec<([u8; 16], u32)>), Par2GenError> {
     let mut blocks = vec![([0u8; 16], 0); n_blocks];
     let mut free: Vec<ScanPiece> = (0..2)
         .map(|_| ScanPiece {
@@ -959,7 +1194,7 @@ pub(super) fn scan_parallel_streamed(
         .collect();
     let (jobs_tx, jobs_rx) = std::sync::mpsc::sync_channel::<ScanPiece>(1);
     let (done_tx, done_rx) = std::sync::mpsc::channel::<ScanPiece>();
-    let mut reader_result: Option<Result<([u8; 16], [u8; 16]), Par2GenError>> = None;
+    let mut reader_result: Option<Result<(Option<[u8; 16]>, [u8; 16]), Par2GenError>> = None;
     let mut finished = 0usize;
 
     std::thread::scope(|s| {
@@ -988,6 +1223,7 @@ pub(super) fn scan_parallel_streamed(
 
         reader_result = Some((|| {
             let mut whole = Md5::new();
+            let mut skipped = false;
             let mut head = Md5::new();
             let mut head_left = 16384usize;
             let mut file_left = length;
@@ -1006,7 +1242,13 @@ pub(super) fn scan_parallel_streamed(
                     let mut piece = free.pop().expect("the scan reader owns a free piece");
                     let take = block_left.min(piece_bytes);
                     read_exact_or_short(f, &mut piece.bytes[..take], path)?;
-                    whole.update(&piece.bytes[..take]);
+                    // This reader also feeds the block hasher, so it keeps
+                    // reading; only the chain stops, once a digest record
+                    // validated.
+                    skipped = skipped || digest.chain_abandoned();
+                    if !skipped {
+                        whole.update(&piece.bytes[..take]);
+                    }
                     if head_left > 0 {
                         let n = head_left.min(take);
                         head.update(&piece.bytes[..n]);
@@ -1029,6 +1271,15 @@ pub(super) fn scan_parallel_streamed(
                 }
                 file_left -= block_data as u64;
                 control.step(CreatePhase::Verify, block_data as u64);
+                // This arm's reader IS its chain lane, so the two
+                // counters move together here - unlike the mapped and
+                // positional arms, where they are different lanes. Both
+                // are stepped anyway: a create whose members take
+                // DIFFERENT arms (a huge member mapped, a small one
+                // streamed) needs one chain counter that covers all of
+                // them, or the pacer's estimate is short by whatever the
+                // other arms hashed.
+                control.chain_step(block_data as u64);
             }
             while free.len() < 2 {
                 recycle_scan_piece(&done_rx, &mut blocks, &mut finished, &mut free)?;
@@ -1039,7 +1290,10 @@ pub(super) fn scan_parallel_streamed(
                     "PAR2 streaming block hasher returned {finished} of {n_blocks} checksums"
                 )));
             }
-            Ok((whole.finalize().into(), head.finalize().into()))
+            Ok((
+                (!skipped).then(|| whole.finalize().into()),
+                head.finalize().into(),
+            ))
         })());
         drop(jobs_tx);
         worker
@@ -1057,6 +1311,7 @@ pub(super) fn scan_at_length(
     block_size: u64,
     threads: usize,
     control: &CreateControl,
+    digest_cache: Option<&std::sync::Arc<crate::digest_cache::DigestCache>>,
 ) -> Result<Scanned, Par2GenError> {
     let mut f = std::fs::File::open(&m.path).map_err(io(&m.path))?;
     let length = f.metadata().map_err(io(&m.path))?.len();
@@ -1069,6 +1324,15 @@ pub(super) fn scan_at_length(
     let n_blocks = length.div_ceil(block_size) as usize;
     let block_size_usize = usize::try_from(block_size)
         .map_err(|_| Par2GenError::Other("PAR2 block size does not fit this platform".into()))?;
+    // The digest cache's pass for this member, on the handle every arm
+    // below reads (`crate::digest_cache::MemberDigest`).
+    let digest = crate::digest_cache::MemberDigest::begin(
+        digest_cache,
+        &f,
+        &m.path,
+        length,
+        crate::digest_cache::FLAG_CREATE,
+    );
     // Both scan products off a mapping of the member - no read pass -
     // for every member the parallel plans would take (see
     // `MappedMember`); the tiny-file serial plan and any member that
@@ -1086,20 +1350,20 @@ pub(super) fn scan_at_length(
                 _ => threads.min(n_blocks).max(1),
             };
             let (md5_whole, md5_16k, blocks) =
-                scan_mapped(&map, block_size_usize, n_blocks, workers, control);
+                scan_mapped(&map, block_size_usize, n_blocks, workers, control, &digest);
             // The mapped arm's lanes return nothing, so the cancel is
             // read here rather than propagated out of them: the
             // half-hashed member is dropped with this error.
             control.check()?;
-            return Ok(finish_scan(m, length, md5_whole, md5_16k, blocks));
+            return finish_digested(m, length, md5_whole, md5_16k, blocks, digest);
         }
     }
     match scan_plan(length, block_size, threads) {
         ScanPlan::Positional { workers } => {
             let (md5_whole, md5_16k, blocks) = scan_parallel_positional(
-                &f, &m.path, length, block_size, n_blocks, workers, control,
+                &f, &m.path, length, block_size, n_blocks, workers, control, &digest,
             )?;
-            Ok(finish_scan(m, length, md5_whole, md5_16k, blocks))
+            finish_digested(m, length, md5_whole, md5_16k, blocks, digest)
         }
         ScanPlan::Streamed { piece_bytes } => {
             let (md5_whole, md5_16k, blocks) = scan_parallel_streamed(
@@ -1110,12 +1374,14 @@ pub(super) fn scan_at_length(
                 n_blocks,
                 piece_bytes,
                 control,
+                &digest,
             )?;
-            Ok(finish_scan(m, length, md5_whole, md5_16k, blocks))
+            finish_digested(m, length, md5_whole, md5_16k, blocks, digest)
         }
         ScanPlan::Serial { scratch_bytes } => {
             let mut r = std::io::BufReader::new(f);
             let mut whole = Md5::new();
+            let mut skipped = false;
             let mut head = Md5::new();
             let mut head_left = 16384usize;
             let mut blocks = Vec::with_capacity(n_blocks);
@@ -1132,7 +1398,10 @@ pub(super) fn scan_at_length(
                 while block_left > 0 {
                     let take = block_left.min(buf.len());
                     read_exact_or_short(&mut r, &mut buf[..take], &m.path)?;
-                    whole.update(&buf[..take]);
+                    skipped = skipped || digest.chain_abandoned();
+                    if !skipped {
+                        whole.update(&buf[..take]);
+                    }
                     block_md5.update(&buf[..take]);
                     block_crc.update(&buf[..take]);
                     if head_left > 0 {
@@ -1153,14 +1422,18 @@ pub(super) fn scan_at_length(
                 ));
                 left -= block_data as u64;
                 control.step(CreatePhase::Verify, block_data as u64);
+                // One lane does both products here, so this is the same
+                // bytes twice into two counters that ask different
+                // questions - see the streamed arm above.
+                control.chain_step(block_data as u64);
             }
-            let md5_whole: [u8; 16] = whole.finalize().into();
+            let md5_whole: Option<[u8; 16]> = (!skipped).then(|| whole.finalize().into());
             // A file SHORTER than 16 KiB has md5_16k == the whole-file MD5,
             // because the "first 16k" is all of it. For a 0-byte file both are
             // the MD5 of the empty string, which is exactly what a real creator
             // stores and what `e2e_norar`'s empty-FileDesc patch writes.
             let md5_16k: [u8; 16] = head.finalize().into();
-            Ok(finish_scan(m, length, md5_whole, md5_16k, blocks))
+            finish_digested(m, length, md5_whole, md5_16k, blocks, digest)
         }
     }
 }
@@ -1168,7 +1441,74 @@ pub(super) fn scan_at_length(
 #[cfg(test)]
 pub(super) fn scan(m: &Member, block_size: u64, threads: usize) -> Result<Scanned, Par2GenError> {
     let length = std::fs::metadata(&m.path).map_err(io(&m.path))?.len();
-    scan_at_length(m, length, block_size, threads, &CreateControl::default())
+    scan_at_length(
+        m,
+        length,
+        block_size,
+        threads,
+        &CreateControl::default(),
+        None,
+    )
+}
+
+/// [`finish_scan`] for an arm whose whole-file chain ran beside a digest
+/// pass: the pass turns what the chain produced (`None` where a validated
+/// record stopped it) into the member's MD5 and the store change it owes.
+pub(super) fn finish_digested(
+    m: &Member,
+    length: u64,
+    md5_whole: Option<[u8; 16]>,
+    md5_16k: [u8; 16],
+    blocks: Vec<([u8; 16], u32)>,
+    digest: crate::digest_cache::MemberDigest,
+) -> Result<Scanned, Par2GenError> {
+    let (md5_whole, pending) = digest.resolve(md5_whole).map_err(Par2GenError::Other)?;
+    Ok(finish_scan(m, length, md5_whole, md5_16k, blocks, pending))
+}
+
+/// A lone member with a digest record waiting: the create takes the split
+/// scan for it rather than the fused pass (see
+/// `crate::digest_cache::has_record` for the measurement). Asked last in
+/// the fusion decision, so no other shape ever opens the store here.
+pub(super) fn a_digest_record_is_waiting(
+    control: &CreateControl,
+    members: &[Member],
+    lengths: &[u64],
+) -> bool {
+    members.len() == 1
+        && crate::digest_cache::has_record(control.digest_cache(), &members[0].path, lengths[0])
+}
+
+/// Commit every store change a create's members owe. Called only once the
+/// set is completely written, so a failed or cancelled create changes no
+/// record.
+pub(super) fn commit_digests(scanned: &mut [Scanned]) {
+    for s in scanned {
+        if let Some(pending) = s.digest.take() {
+            pending.commit();
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Unit tests reach the fused arm on sets far under its size floors
+    /// through this, on their own thread, so no other test's create is
+    /// forced onto it (the env knob would reach every create in the
+    /// process).
+    pub(super) static FUSE_FOR_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `NZBFAST_PAR2GEN_FUSE=1` for the calling thread's create, in a unit test.
+pub(super) fn fusion_forced_for_tests() -> bool {
+    #[cfg(test)]
+    {
+        FUSE_FOR_TESTS.with(|f| f.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
 }
 
 pub(super) fn scan_head_len(length: u64) -> usize {
@@ -1336,6 +1676,7 @@ pub(super) fn finish_scan(
     md5_whole: [u8; 16],
     md5_16k: [u8; 16],
     blocks: Vec<([u8; 16], u32)>,
+    digest: Option<crate::digest_cache::Pending>,
 ) -> Scanned {
     let name_padded = pad4(m.name.as_bytes().to_vec());
     // File id = MD5(md5_16k | length | name), over the name WITHOUT its
@@ -1378,5 +1719,295 @@ pub(super) fn finish_scan(
         md5_16k,
         length,
         blocks,
+        digest,
+    }
+}
+
+/// Every arm's CHAIN lane accounts for its member on the chain counter.
+///
+/// This is the other half of the 16 Sep fix (the pacer half is
+/// `super::batch_fold_pacer_tests`): the pacer can read the right
+/// counter and still learn nothing if the lane never steps it, which is
+/// precisely what shipped - `scan_mapped`'s and
+/// `scan_parallel_positional`'s chain lanes stepped NOTHING, by design,
+/// because the block lanes already counted those bytes for the progress
+/// bar. Each arm is called directly rather than through `scan_at_length`
+/// so no environment knob decides which one runs, and so a new arm added
+/// tomorrow without a chain step fails a test that names it.
+#[cfg(test)]
+mod chain_counter_tests {
+    use super::*;
+
+    fn watched() -> CreateControl {
+        CreateControl::new(None, Some(crate::par2repair::PauseGate::new()))
+    }
+
+    struct Tmp(std::path::PathBuf);
+    impl Tmp {
+        fn new(tag: &str) -> Tmp {
+            let p = std::env::temp_dir().join(format!(
+                "nzbfast-scan-chain-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            Tmp(p)
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Nine MiB, so the parallel arms' own 8 MiB floor is cleared and
+    /// the mapped arm has several `1 << 20` chain chunks plus a short
+    /// last one to credit.
+    const LEN: usize = 9 << 20;
+    const BS: usize = 64 << 10;
+
+    /// An inert digest pass, in a spelling that compiles with the
+    /// `digest-cache` feature either way: `begin` with no store is the
+    /// one constructor both `digest_cache.rs` and `digest_cache_off.rs`
+    /// publish (`MemberDigest::off` is the ON build's only).
+    fn inert_digest(path: &std::path::Path) -> crate::digest_cache::MemberDigest {
+        let f = std::fs::File::open(path).unwrap();
+        let len = f.metadata().unwrap().len();
+        crate::digest_cache::MemberDigest::begin(
+            None,
+            &f,
+            path,
+            len,
+            crate::digest_cache::FLAG_CREATE,
+        )
+    }
+
+    fn fixture(t: &Tmp, name: &str) -> std::path::PathBuf {
+        let path = t.0.join(name);
+        let data: Vec<u8> = (0..LEN)
+            .map(|i| (i as u32).wrapping_mul(2654435761) as u8)
+            .collect();
+        std::fs::write(&path, &data).unwrap();
+        path
+    }
+
+    #[test]
+    fn the_mapped_arm_steps_the_chain_counter_for_its_whole_member() {
+        let t = Tmp::new("mapped");
+        let path = fixture(&t, "m.bin");
+        let Ok(Some(map)) = crate::par2gen::MappedMember::open(&path, LEN as u64) else {
+            // A box that cannot map is the serial arm's business.
+            return;
+        };
+        let control = watched();
+        let n_blocks = LEN.div_ceil(BS);
+        let (whole, _head, blocks) =
+            scan_mapped(&map, BS, n_blocks, 4, &control, &inert_digest(&path));
+        assert!(whole.is_some());
+        assert_eq!(blocks.len(), n_blocks);
+        assert_eq!(
+            control.chain_done(),
+            LEN as u64,
+            "the mapped arm's sequential chain lane accounted for nothing - \
+             the pacer over it can only read the block lanes' progress"
+        );
+    }
+
+    #[test]
+    fn the_positional_arm_steps_the_chain_counter_for_its_whole_member() {
+        let t = Tmp::new("positional");
+        let path = fixture(&t, "p.bin");
+        let f = std::fs::File::open(&path).unwrap();
+        let control = watched();
+        let n_blocks = LEN.div_ceil(BS);
+        let (whole, _head, blocks) = scan_parallel_positional(
+            &f,
+            &path,
+            LEN as u64,
+            BS as u64,
+            n_blocks,
+            4,
+            &control,
+            &inert_digest(&path),
+        )
+        .expect("positional scan");
+        assert!(whole.is_some());
+        assert_eq!(blocks.len(), n_blocks);
+        assert_eq!(control.chain_done(), LEN as u64);
+    }
+
+    #[test]
+    fn the_streamed_arm_steps_the_chain_counter_for_its_whole_member() {
+        let t = Tmp::new("streamed");
+        let path = fixture(&t, "s.bin");
+        let mut f = std::fs::File::open(&path).unwrap();
+        let control = watched();
+        let n_blocks = LEN.div_ceil(BS);
+        let (whole, _head, blocks) = scan_parallel_streamed(
+            &mut f,
+            &path,
+            LEN as u64,
+            BS,
+            n_blocks,
+            BS.min(SCAN_STREAM_PIECE_BYTES as usize),
+            &control,
+            &inert_digest(&path),
+        )
+        .expect("streamed scan");
+        assert!(whole.is_some());
+        assert_eq!(blocks.len(), n_blocks);
+        assert_eq!(control.chain_done(), LEN as u64);
+    }
+
+    /// And the serial arm, reached where it really is reached - through
+    /// `scan_at_length` with one thread on a member under the parallel
+    /// floor, which is the only arm that plan picks there.
+    #[test]
+    fn the_serial_arm_steps_the_chain_counter_for_its_whole_member() {
+        let t = Tmp::new("serial");
+        let path = t.0.join("tiny.bin");
+        let small = 3usize << 20;
+        std::fs::write(&path, vec![7u8; small]).unwrap();
+        let control = watched();
+        let m = Member {
+            name: "tiny.bin".into(),
+            path: path.clone(),
+        };
+        let scanned =
+            scan_at_length(&m, small as u64, BS as u64, 1, &control, None).expect("serial scan");
+        assert_eq!(scanned.length, small as u64);
+        assert_eq!(control.chain_done(), small as u64);
+    }
+}
+
+#[cfg(test)]
+mod apriori_scan_lane_width_tests {
+    use super::{
+        apriori_scan_lane_width, apriori_scan_lane_width_for, block_digest_lane_per_mille_of_chain,
+        scan_lane_keep_up_width, scan_pool_geometry,
+    };
+
+    /// **The constant is a bound, not a calibration, and the width it
+    /// produces does not depend on where in that bound the box sits.**
+    /// A block-digest lane runs the chain's own MD5 over the chain's own
+    /// bytes plus a CRC32, so it can never be FASTER than the chain
+    /// (1000 per mille) and a hardware CRC32 cannot make it much slower.
+    /// Every ratio across that whole band asks for the same two lanes -
+    /// which is why this rule needs no per-box measurement and the fold
+    /// rule does.
+    #[test]
+    fn every_ratio_in_the_bound_asks_for_the_same_two_lanes() {
+        for per_mille in 625..=1000 {
+            assert_eq!(
+                scan_lane_keep_up_width(per_mille),
+                2,
+                "per mille {per_mille} should still want two lanes"
+            );
+        }
+        // Only a lane FASTER than the chain - which is the vector kernel
+        // this rule deliberately declines to price in - reaches one.
+        assert_eq!(scan_lane_keep_up_width(1_250), 1);
+        assert_eq!(scan_lane_keep_up_width(8_000), 1);
+        // And a lane far slower than the chain asks for more of them,
+        // rather than letting the digests become the pole.
+        assert_eq!(scan_lane_keep_up_width(300), 5);
+    }
+
+    /// **The lanes are shed to what the box has LEFT, which is the whole
+    /// coupling between this rule and the fold's.** The measured shape:
+    /// eight vCPUs, a four-wide fold chosen by `apriori_fold_width`, one
+    /// member and so one chain. Three lanes is what remains, and the box
+    /// is then exactly spoken for - a rule that sheds a width without
+    /// asking what else is running is the failure this one is built to
+    /// avoid.
+    #[test]
+    fn the_lanes_take_what_the_fold_and_the_chains_leave() {
+        assert_eq!(apriori_scan_lane_width_for(4, 1, 2, 8), 3);
+        assert_eq!(4 + 3 + 1, 8);
+        // A wider fold leaves fewer, in step.
+        assert_eq!(apriori_scan_lane_width_for(6, 1, 2, 8), 2);
+        // A narrower one leaves more.
+        assert_eq!(apriori_scan_lane_width_for(2, 1, 2, 8), 5);
+    }
+
+    /// **On a wide box the rule takes back the OVERSUBSCRIPTION and
+    /// nothing more**, which is the property that stops two independent
+    /// narrowings over-shedding together. The same member and the same
+    /// four-wide fold on 32 vCPUs: the geometry would hand one member
+    /// all 32 lanes, five more threads than the box has once the fold
+    /// and the chain are paid, and the rule sheds exactly those five.
+    /// What is left is thirteen times the keep-up width - so the lanes
+    /// are nowhere near the floor, and the shedding is bounded by the
+    /// box rather than by any estimate of the digests' cost.
+    #[test]
+    fn a_wide_box_sheds_only_what_it_is_short_of() {
+        let (outer, inner) = scan_pool_geometry(&[8_858_370_048], 4_429_188, 32, 320 << 20);
+        assert_eq!((outer, inner), (1, 32));
+        let wide = apriori_scan_lane_width_for(4, outer, 2, 32);
+        assert_eq!(wide, 32 - 4 - outer);
+        assert_eq!(inner - wide, 5);
+        assert!(wide > 2 * 2, "a wide box is nowhere near the keep-up floor");
+    }
+
+    /// **The floor is the keep-up width and it is the binding term on a
+    /// small box.** Four cores with a four-wide fold have nothing left
+    /// at all, and the lanes still get two: the dangerous direction here
+    /// is making the DIGESTS the pole, and this is what bounds it. The
+    /// width is never zero, on any box.
+    #[test]
+    fn the_keep_up_floor_holds_when_nothing_is_left() {
+        assert_eq!(apriori_scan_lane_width_for(4, 1, 2, 4), 2);
+        assert_eq!(apriori_scan_lane_width_for(8, 1, 2, 8), 2);
+        assert_eq!(apriori_scan_lane_width_for(1, 1, 2, 1), 1);
+        for max in 1..=64 {
+            for fold in 1..=max {
+                for outer in 1..=4 {
+                    let w = apriori_scan_lane_width_for(fold, outer, 2, max);
+                    assert!(w >= 1 && w <= max, "max {max} fold {fold} outer {outer}");
+                }
+            }
+        }
+    }
+
+    /// **Many members are a schedule, not a sum.** `scan_all` runs
+    /// `outer` chains beside each other and gives each of them `inner`
+    /// lanes, so what one member may take is what is left DIVIDED by the
+    /// chains - and the geometry has usually divided the box already, so
+    /// on a many-member set this rule mostly finds nothing to shed.
+    #[test]
+    fn many_members_divide_what_is_left_between_their_chains() {
+        // Eight cores, four chains, a two-wide fold: two spare between
+        // four members is nothing each, so the floor answers.
+        assert_eq!(apriori_scan_lane_width_for(2, 4, 2, 8), 2);
+        // And the geometry that produced those four chains has already
+        // handed each member two lanes, so the cap binds nothing.
+        let sizes = [4u64 << 30, 4 << 30, 4 << 30, 4 << 30];
+        let (outer, inner) = scan_pool_geometry(&sizes, 4_429_188, 8, 320 << 20);
+        assert_eq!((outer, inner), (4, 2));
+        assert_eq!(inner.min(apriori_scan_lane_width_for(2, outer, 2, 8)), 2);
+    }
+
+    /// **A box whose ratio is not known declines to narrow**, the same
+    /// refusal `fold_rows_per_worker_per_chain_pass` makes and for the
+    /// same reason - except that this gate is far wider, because it asks
+    /// only that the CRC32 beside the digests runs on the hardware
+    /// instruction rather than out of a table. On a box that answers, the
+    /// rule is the arithmetic above with the bound's own keep-up width.
+    #[test]
+    fn an_unmeasured_box_declines_to_narrow() {
+        match block_digest_lane_per_mille_of_chain() {
+            Some(per_mille) => {
+                assert!(
+                    (625..=1000).contains(&per_mille),
+                    "{per_mille} is outside the bound"
+                );
+                assert_eq!(
+                    apriori_scan_lane_width(4, 1, 8),
+                    Some(apriori_scan_lane_width_for(4, 1, 2, 8))
+                );
+            }
+            None => assert_eq!(apriori_scan_lane_width(4, 1, 8), None),
+        }
     }
 }

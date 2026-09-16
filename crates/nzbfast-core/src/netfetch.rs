@@ -698,11 +698,30 @@ pub fn redact_url_creds(s: &str) -> String {
         let authority = &after[..end];
         // Userinfo (user:pass@host) is a credential too.
         let host = authority.rsplit('@').next().unwrap_or(authority);
-        out.push_str(&url[..scheme_len]);
-        out.push_str(host);
         // Anything else attached to the URL is dropped, up to whitespace.
         let tail = &after[end..];
         let stop = tail.find(char::is_whitespace).unwrap_or(tail.len());
+        // ...unless the DROPPED part still holds an `@`, in which case
+        // the authority ended early because the PASSWORD contains a
+        // '/', '?' or '#'. Unescaped that is malformed by RFC 3986 - the
+        // authority really does end at the delimiter - but a redactor
+        // that leaks on malformed input is not a redactor: for
+        // `http://user:pa/ss@host/p` the rule above yields a "host" of
+        // `user:pa`, so the username and the head of the password went
+        // into the log line under the name of a host.
+        //
+        // Ambiguous means redact everything: there is no way to tell
+        // which side of that `@` is the credential without deciding
+        // whose parser is right, and this function's whole job is that
+        // nothing sensitive survives it.
+        if tail[..stop].contains('@') {
+            out.push_str(&url[..scheme_len]);
+            out.push_str("...");
+            rest = &tail[stop..];
+            continue;
+        }
+        out.push_str(&url[..scheme_len]);
+        out.push_str(host);
         if stop > 0 {
             out.push_str("/...");
         }

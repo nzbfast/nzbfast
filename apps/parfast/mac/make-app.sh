@@ -25,6 +25,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 REPO="$(cd ../../.. && pwd)"
 
+# DEPLOYMENT TARGET, matching LSMinimumSystemVersion below and
+# `.macOS(.v14)` in Package.swift. Unset, cc-rs compiles the staticlib's
+# C objects (aws-lc, rapidyenc, blake3) for the build host's SDK default,
+# and the Swift link printed 732 "built for newer 'macOS' version (27.0)
+# than being linked (14.0)" warnings on the dev Mac. Same rule, same
+# reason and the measurement: macapp/make-app.sh and
+# research/MAC-DEPLOYMENT-TARGET-2026-09-15.md.
+export MACOSX_DEPLOYMENT_TARGET=14.0
+
 # Version tracks nzbfast's, per SPEC-PARFAST-PUBLICATION D3.
 VERSION=$(grep '^version' "$REPO/crates/nzbfast/Cargo.toml" | head -1 | cut -d'"' -f2)
 ARCH="${ARCH:-universal}"
@@ -45,18 +54,39 @@ elif [ -f "$FFI_WS" ]; then
         "$REPO/apps/parfast/target/aarch64-apple-darwin/release/libparfast_ffi.a" \
         "$REPO/apps/parfast/target/x86_64-apple-darwin/release/libparfast_ffi.a"
     lipo -info vendor/lib/libparfast_ffi.a
+    # The export above does NOT reach an object a warm target/ already
+    # holds: blake3's build.rs turns off cc's env tracking and reruns only
+    # on CC/CFLAGS, so after this pin landed a warm tree still linked five
+    # blake3 assembly objects at 27.0 (measured 15 Sep 2026). ld only
+    # warns, so refuse here instead. The remedy is a cold build of the
+    # crate that went stale.
+    NEWER=$(otool -l vendor/lib/libparfast_ffi.a | awk -v max="$MACOSX_DEPLOYMENT_TARGET" '
+        function v(s,  p) { split(s, p, "."); return p[1] * 10000 + p[2] * 100 + p[3] }
+        $1 == "minos" && v($2) > v(max) { n[$2]++ }
+        END { for (k in n) printf "%s (%d objects) ", k, n[k] }')
+    [ -z "$NEWER" ] || {
+        echo "libparfast_ffi.a holds objects built for macOS $NEWER- newer than $MACOSX_DEPLOYMENT_TARGET." >&2
+        echo "A warm target/ kept them: cargo clean --manifest-path $FFI_WS --release, then rerun." >&2
+        exit 1; }
 else
     echo "== no $FFI_WS: building the MockCore demo"
 fi
 
 # --- the Swift app ----------------------------------------------------
+# Both branches ASK SwiftPM for the product folder rather than spelling it:
+# the universal one moved from .build/apple/Products/Release (Swift 6.3) to
+# .build/out/Products/Release (6.4), and a checkout that built on the old
+# toolchain still holds a stale binary at the old spelling for a literal
+# path to copy in silence. macapp/make-app.sh carries the same guard.
 if [ "$ARCH" = "universal" ]; then
     swift build -c release --arch arm64 --arch x86_64
-    BINARY=.build/apple/Products/Release/Parfast
+    BINARY=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/Parfast
 else
     swift build -c release --arch "$ARCH"
     BINARY=$(swift build -c release --arch "$ARCH" --show-bin-path)/Parfast
 fi
+[ -f "$BINARY" ] || {
+    echo "swift build reported no binary at $BINARY" >&2; exit 1; }
 
 APP=build/parfast.app
 rm -rf "$APP"

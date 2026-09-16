@@ -8,8 +8,11 @@
 //! - [`chain`] is the coefficient chain the plan has always used: one
 //!   root at a time, `O(m^2)` field multiplies, no allocation past the
 //!   answer itself. It is what runs when [`super::joint_gate`] says no -
-//!   an x86 build with no `--fast`, or any build that asked for the
-//!   shipped solve.
+//!   a build that asked for the shipped solve
+//!   (`NZBFAST_FORNEY_JOINT=0`), or one on a kernel class the default
+//!   does not yet cover. Every class this fleet has measured is covered
+//!   since 12 Sep 2026, so on those parts this arm is the OPT-OUT
+//!   rather than the default.
 //! - The product tree in [`build`] splits the roots into [`LEAF`]-sized
 //!   chunks, expands each by the same chain, and merges pairwise through
 //!   [`super::poly::Context::multiply`] - `O(m log^2 m)` instead, at the

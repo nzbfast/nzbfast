@@ -184,6 +184,9 @@ indexer = ["nzbkit-base/indexer", "dep:rusqlite"]
 # a pure forward. ci-private's `ktls-check` job still says
 # `-p nzbkit --features ktls` and still reaches the code.
 ktls = ["nzbkit-base/ktls"]
+# The validated digest cache, a pure forward: the module and its BLAKE3
+# dependency are base's. parfast turns it on; the daemon never does.
+digest-cache = ["nzbkit-base/digest-cache"]
 # Build-gate for the [[test]] targets at the bottom of this file
 # (TODO 116b): the two elapsed-time suites and, since 1 Sep 2026, the
 # three hand-run allocator rigs. EMPTY on purpose - it compiles no code

@@ -370,6 +370,55 @@ behind the reader. It exists for a device class whose only representative
 has no compiler and a libc older than any host we build on: `cc -static`
 and it runs there.
 
+## Making a payload COLD without root, on either platform
+
+Two tools, one per platform, because the mechanism does not cross. Both
+print the same four columns - `<resident_before> <resident_after>
+<total_pages> <path>` - so a round reads the same either side, and both
+take their counts from `mincore(2)`, the same instrument `resident.c`
+uses. **Do not assume either one worked: read the second number.** A
+filesystem that ignores the advice, or a file somebody else holds dirty
+or mapped, reports a nonzero `after`, and the leg should be refused
+rather than averaged in.
+
+- **`uncache.c` is LINUX.** `POSIX_FADV_DONTNEED` over a whole file,
+  which needs no privilege - which is what the storage-appliance class of
+  box has, an ordinary login with no passwordless sudo.
+  `cc -O2 -static -o uncache uncache.c`.
+- **`uncache-macos.py` is the MAC.** macOS has no `posix_fadvise` at all,
+  so `uncache.c` does not help there. This is a `PROT_READ` / `MAP_SHARED`
+  mapping plus `msync(MS_INVALIDATE)`, which on Darwin reaches
+  `ubc_msync(..., UBC_INVALIDATE)` and drops the file's clean pages. No
+  compiler needed, which matters on a Mac that may not have one
+  configured, and it is importable (`evict`, `residency`, `resident`)
+  because that is how the round drivers use it.
+
+**`sudo purge` is NOT an option on this fleet's Macs, so do not plan a
+round around it.** Plain `purge` answers `Unable to purge disk buffers:
+Operation not permitted`, and `sudo` asks for a password on **every
+Apple box in the fleet** (`sudo -n` refuses; the only NOPASSWD entries
+anywhere are the bench shaper's `dnctl` and `pfctl`). There is no
+`drop_caches` either. Establish this BEFORE building a multi-GB fixture,
+not after. Per-file eviction is better scoped than `drop_caches` anyway: it makes
+ONE payload cold and leaves every other lane's working set alone, which
+is what you want on a box a dozen sessions share.
+
+**`uncache-macos.py --selftest` before you trust a cold reading**, and
+this is the point rather than a nicety: a probe that always reads zero is
+indistinguishable from a perfect eviction. It writes its own temp file,
+asserts ~100% resident, evicts, asserts exactly 0.00%, reads it back,
+asserts ~100% again, and exits non-zero on any leg. Never weaken one of
+those assertions to make it pass - a real failure there is a finding
+about the platform. The same three readings are on record from the round
+that established the method, on an M3 Ultra and an M1 Ultra
+(`research/DESIGN-DIGEST-CACHE-2026-09-15.md` section 9b-3b), with a cold
+`dd` at 6.5-6.9 GB/s against ~21 GB/s warm as an independent second
+instrument: a "cold" leg running at warm speed is not cold.
+
+The macOS tool was added 16 Sep 2026 because three separate lanes wrote
+it from scratch within hours of each other that day, two of them
+near-identical. It is one tool now, here, beside the Linux one.
+
 ## Running the recovery-record race
 
 `rr-build.sh <root> <payload> <rar> [sizes]` then

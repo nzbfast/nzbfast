@@ -58,6 +58,9 @@ struct CaseVolume {
 
 impl Drop for CaseVolume {
     fn drop(&mut self) {
+        // win-portability-gate: `hdiutil` is macOS-only, and so is every
+        // `CaseVolume` - `attach_case_sensitive` returns None off macOS, so
+        // this Drop never runs there. The result is discarded regardless.
         let _ = Command::new("hdiutil")
             .args(["detach", "-quiet", "-force"])
             .arg(&self.mount)
@@ -75,6 +78,9 @@ fn attach_case_sensitive(dir: &Path) -> Option<CaseVolume> {
     }
     let vol = format!("NZBFASTCS{}", std::process::id());
     let image = dir.join(format!("{vol}.dmg"));
+    // win-portability-gate: `hdiutil` is macOS-only and so is this whole
+    // helper - the `cfg!(target_os = "macos")` above returns None before
+    // reaching here on every other platform, and the test then SKIPS.
     let ok = Command::new("hdiutil")
         .args([
             "create",
@@ -92,6 +98,8 @@ fn attach_case_sensitive(dir: &Path) -> Option<CaseVolume> {
         return None;
     }
     let mount = PathBuf::from("/Volumes").join(&vol);
+    // win-portability-gate: unreachable off macOS for the reason on the
+    // `create` call above, and a failure here is answered with None.
     let att = Command::new("hdiutil")
         .args(["attach", "-nobrowse", "-quiet"])
         .arg(&image)

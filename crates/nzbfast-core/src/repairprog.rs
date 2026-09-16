@@ -42,8 +42,10 @@
 //! # Cost
 //!
 //! Nothing in this module is on a hot path and no hook of its own is
-//! added to one. The engine's rate limit is what makes that true: four
-//! relaxed stores and a `fetch_max` per sink call, and the sink is
+//! added to one. The engine's rate limit is what makes that true: two
+//! relaxed stores and a `fetch_max` per sink call (it was four stores
+//! and a `fetch_max` until the phase and the per-mille became one
+//! word - see [`RepairProgress::bar`]), and the sink is
 //! reached at most `control::STEPS` times per phase however many
 //! batches there were (pinned by
 //! `a_million_steps_reach_the_sink_at_most_steps_times`). The per-batch
@@ -56,7 +58,7 @@
 //! and a compare per fed block and per fold unit, which is a bound
 //! rather than a measurement.
 
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The four phases, as the token the dashboard maps to a sentence.
 ///
@@ -65,6 +67,10 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 /// SECTION - the recovery-volume side-fetches included - and only part
 /// of that section is inside the engine.
 const PHASE_NONE: u8 = 0;
+
+/// [`RepairProgress::route`] values - see [`band`].
+const ROUTE_DISK: u64 = 0;
+const ROUTE_MAPPED: u64 = 1;
 
 /// One job's live repair progress, as both the sink the engine writes
 /// to and the value the queue payload reads.
@@ -75,20 +81,129 @@ const PHASE_NONE: u8 = 0;
 /// remember to publish.
 #[derive(Default, Debug)]
 pub struct RepairProgress {
-    /// `PHASE_NONE`, or 1-4 for Verify/Fold/Solve/Write.
-    phase: AtomicU8,
+    /// THE BAR: the phase code in the high 32 bits, the whole repair's
+    /// per-mille in the low 32, as ONE value. `0` is `PHASE_NONE` and
+    /// no repair inside the engine.
+    ///
+    /// ONE WORD RATHER THAN TWO BECAUSE A READER READS BOTH. Every
+    /// caller that draws this draws the pair - the queue payload's
+    /// `{"phase": .., "pct": ..}` is one object - and two atomics
+    /// cannot be read as a pair: a reader descheduled between the two
+    /// loads gets a phase from before a boundary and a percentage from
+    /// after it. The boundary that matters is [`clear`](Self::clear),
+    /// which is `RepairRun`'s drop and `restart`'s whole job, so the
+    /// torn pair is `("write", 0.0%)` - a bar that says the last phase
+    /// of a repair at nought per cent, which is the "reads as a
+    /// restart" this module exists to refuse. Measured 15 Sep 2026 on
+    /// a reader polling the two-atomic version across 2,000 runs:
+    /// 3 torn reads in 576,051 samples idle, and 1 in 12,782 under 36
+    /// spinners on 18 cores - ~15x the per-sample rate, which is why
+    /// it was a LOADED sweep that caught it.
+    ///
+    /// A packed `fetch_max` is also what makes the LABEL monotone: the
+    /// sink is called from worker threads (`control::ProgressSink`),
+    /// and a straggler from earlier in the repair publishes a smaller
+    /// word, so it cannot pull the label back.
+    ///
+    /// THE FIGURE IS MAJOR AND THE PHASE IS MINOR, and until 16 Sep
+    /// 2026 it was the other way round. Phase-major worked only while
+    /// ordering the word by phase and ordering it by per-mille were the
+    /// same order, which held because the four bands were contiguous
+    /// and rising. Per-SWEEP bands break that (see [`band`]): sweep 2's
+    /// fold sits above sweep 1's solve, so a phase-major word would
+    /// hold at the earlier phase's higher code and swallow every later
+    /// sweep - which is the very freeze the split exists to remove.
+    /// Ordering by the figure a reader DRAWS is the rule that survives
+    /// both layouts.
+    ///
+    /// The sweep index sits between them so that two publishes at the
+    /// same per-mille still resolve in the order the engine made them:
+    /// a sweep boundary is exactly such a tie (sweep `i`'s solve ends
+    /// on the per-mille sweep `i+1`'s fold opens at), and without it
+    /// the label would read `solve` until the new fold's first bucket
+    /// crossed - up to 1/256th of a sweep, which on the repairs that
+    /// slab is not a moment.
+    bar: AtomicU64,
+    /// Which sweep of the payload the engine is in: `(index << 32) | of`.
+    ///
+    /// NOT part of the bar, because it is not drawn: it is the FRAME
+    /// the phases are weighed in, read by [`band`] on the sink's own
+    /// thread and never by a poller. Zero - the default, and what
+    /// [`clear`](Self::clear) restores - is `of == 0`, which [`band`]
+    /// reads as the one-sweep repair; that is the correct reading both
+    /// before any sweep is announced and for a repair with no blocks to
+    /// rebuild, which announces none.
+    ///
+    /// Written by the driver thread alone, once per sweep, before that
+    /// sweep's first `progress` and never concurrently with one
+    /// (`par2repair::control::ProgressSink::slab` states the contract),
+    /// so a relaxed store is enough.
+    slab: AtomicU64,
+    /// Which route announced itself through [`ProgressSink::route`] -
+    /// [`ROUTE_DISK`] or [`ROUTE_MAPPED`]. Read by [`band`] on the
+    /// sink's own thread, same as `slab`, and for the same reason not
+    /// part of the bar: it is the FRAME the phases are placed in, not a
+    /// thing a poller draws. [`ROUTE_DISK`] is the default and what
+    /// [`RepairProgress::clear`] restores, so a driver that never calls
+    /// `route` - every disk call site there is - gets the table it
+    /// always had.
+    route: AtomicU64,
     /// The current phase's own `(done, total)`, in ITS units - bytes for
     /// Verify, Fold and Write, fold units or matrix columns for Solve
     /// (see `par2repair::RepairPhase`). Published for a caller that
     /// wants to say more than a percentage, and for the tests.
+    ///
+    /// NOT part of the bar and not read with it: these are about the
+    /// PHASE, in units that change with it, and a caller draws them as
+    /// a detail line beside the percentage rather than as the bar. A
+    /// poll that catches them a phase out of step shows one stale
+    /// number for one frame; the pair above is what must never be torn.
     done: AtomicU64,
     total: AtomicU64,
-    /// The whole repair's progress in per-mille, banded (see [`band`])
-    /// and monotone for the life of one [`RepairRun`].
-    permille: AtomicU64,
+    /// Every published `(phase code, permille)`, as a reader would see
+    /// it the instant after each sink call. Test builds only.
+    ///
+    /// A watcher thread sampling the atomics sees only what the
+    /// scheduler lets it see, and on a loaded box that is NOTHING: at
+    /// load ~70 on 32 cores the four-phases test's watcher caught `[]`
+    /// in four runs of ten, because the whole repair ran inside one of
+    /// its timeslices (15 Sep 2026). The control carries this value as
+    /// its one sink, so the record has to live on the value itself.
+    #[cfg(test)]
+    trace: std::sync::Mutex<Vec<(u8, u64)>>,
+    /// A one-shot park at the first Fold publish, so a test's watcher
+    /// presses Cancel while the fold is DEFINITELY running rather than
+    /// whenever the scheduler lets it look. Test builds only; unarmed
+    /// it does nothing. See [`RepairProgress::hold_at_first_fold`].
+    #[cfg(test)]
+    fold_hold: FoldHold,
 }
 
-/// `(bar offset, bar span)` for a phase.
+/// The states of [`RepairProgress::fold_hold`], in the order they go.
+#[cfg(test)]
+const HOLD_UNARMED: u8 = 0;
+#[cfg(test)]
+const HOLD_ARMED: u8 = 1;
+#[cfg(test)]
+const HOLD_PARKED: u8 = 2;
+#[cfg(test)]
+const HOLD_RELEASED: u8 = 3;
+
+/// How long either side of the fold hold waits for the other. Bounded,
+/// so a side that never arrives ends the test with a readable
+/// assertion rather than hanging a shard (the wedge-that-exits-0 shape
+/// CLAUDE.md warns about); the repair it holds is milliseconds.
+#[cfg(test)]
+const HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(test)]
+#[derive(Default, Debug)]
+struct FoldHold {
+    state: std::sync::Mutex<u8>,
+    wake: std::sync::Condvar,
+}
+
+/// `(bar offset, bar span)` for a phase, inside sweep `slab` of `of`.
 ///
 /// THE SAME WEIGHTS `parfast_session::runner::RepairProgress` TOOK, and
 /// deliberately so: the engine refuses to weigh its four phases, so
@@ -100,23 +215,145 @@ pub struct RepairProgress {
 /// is a LABELLING choice rather than a prediction: a bar honest about
 /// which phase is running and monotone within it beats one that lies
 /// smoothly.
-fn band(phase: nzbkit::par2repair::RepairPhase) -> (f64, f64) {
+///
+/// # THE SLAB SPLIT IS BY SWEEP, NOT BY PHASE, and that is the whole
+/// subtlety
+///
+/// A repair whose solve window does not fit the memory budget sweeps
+/// the payload once per slab, so the engine runs Fold, Solve, Fold,
+/// Solve, ... `of` times (`par2repair::control::ProgressSink::slab`).
+/// The obvious split - give phase Fold the `i`th slice of `[0.45,
+/// 0.85)` and phase Solve the `i`th slice of `[0.85, 0.95)` - is WRONG,
+/// and wrong in the exact way that leaves the defect in place: sweep
+/// 1's solve would end above sweep 2's fold, so a monotone bar would
+/// swallow every later fold just as it does today.
+///
+/// So the whole of `[0.45, 0.95)` is cut into `of` equal SWEEP
+/// segments, and the 40/10 weighting lives INSIDE each segment. The
+/// bands then run contiguously in the order the engine actually enters
+/// them - fold, solve, fold, solve - and nothing is ever published
+/// below something published before it. At `of == 1` the arithmetic is
+/// the pre-slab split exactly, to the per-mille, which is what keeps
+/// the ordinary repair's bar unchanged.
+///
+/// Measured before the split, on a real slabbed repair: the bar froze
+/// at the literal pair `("solve", 950)` for 41.5% / 70.3% / 64.2% of
+/// the wall at 2 / 4 / 8 slabs
+/// (`research/REPAIR-SLABBED-BAR-2026-09-16.md`).
+///
+/// # Why `route` moves `Verify` rather than adding a phase
+///
+/// The mapped in-stream driver has no pre-fold verify pass - its
+/// present-block ledger was earned off the wire - so its only proof of
+/// the patch is the self-prove reread AFTER `Write`
+/// (`nzbkit::par2repair::RepairRoute`). Published at the disk driver's
+/// `[0.0, 0.45)` that reading arrives behind a `Write` that already
+/// reached 1,000, and [`RepairProgress::bar`]'s `fetch_max` simply
+/// discards it - the exact `Repairing, 100%, timeleft 0:00:00` freeze
+/// this whole module exists to remove. So [`RepairRoute::Mapped`] gets
+/// the SAME four weights (45/40/10/5), reordered to the sequence that
+/// route actually runs: `Fold`, `Solve`, `Write`, then `Verify` last,
+/// carrying the 45% a pre-fold pass would have spent. `Verify`'s own
+/// band is simply never reached on this route's OTHER phases, and the
+/// disk route's table - the one every pinned band-value test in this
+/// file was written against - is untouched.
+fn band(
+    phase: nzbkit::par2repair::RepairPhase,
+    slab: u32,
+    of: u32,
+    route: nzbkit::par2repair::RepairRoute,
+) -> (f64, f64) {
     use nzbkit::par2repair::RepairPhase as P;
-    match phase {
-        P::Verify => (0.0, 0.45),
-        P::Fold => (0.45, 0.40),
-        P::Solve => (0.85, 0.10),
-        P::Write => (0.95, 0.05),
+    use nzbkit::par2repair::RepairRoute as R;
+    // Never zero and never past the end: the pair is read from an
+    // atomic a worker thread may see mid-update, and a division here is
+    // not the place to find out.
+    let of = f64::from(of.max(1));
+    let i = f64::from(slab).min(of - 1.0);
+    // One sweep's share of the fold+solve region, and where this one
+    // starts - `[0.45, 0.95)` on the disk route, `[0.0, 0.50)` on the
+    // mapped one, which is the same width shifted to make room for a
+    // pre-fold `Verify` that this route does not have.
+    let seg = 0.50 / of;
+    match route {
+        R::Disk => {
+            let at = 0.45 + seg * i;
+            match phase {
+                P::Verify => (0.0, 0.45),
+                P::Fold => (at, 0.40 / of),
+                P::Solve => (at + 0.40 / of, 0.10 / of),
+                P::Write => (0.95, 0.05),
+            }
+        }
+        R::Mapped => {
+            let at = seg * i;
+            match phase {
+                // The self-prove: AFTER `Write`, not before `Fold`, and
+                // carrying the 45% a pre-fold pass would have spent.
+                // Neither re-enters nor slabs, so unlike the other three
+                // this reading does not depend on `slab`/`of` at all.
+                P::Verify => (0.55, 0.45),
+                P::Fold => (at, 0.40 / of),
+                P::Solve => (at + 0.40 / of, 0.10 / of),
+                P::Write => (0.50, 0.05),
+            }
+        }
     }
 }
 
-fn code(phase: nzbkit::par2repair::RepairPhase) -> u8 {
+/// The packed word's low byte: NOT just the phase, because the word's
+/// tie-break at a shared per-mille is "the larger code wins"
+/// ([`pack`]'s own doc), which only resolves FORWARD in time when the
+/// codes rise in the order the phases actually run. On the disk route
+/// that is true of `RepairPhase` as written (Verify < Fold < Solve <
+/// Write, its own chronology) and needed no thought; on the mapped
+/// route `Verify` runs LAST, so encoding it as `1` made the tie at the
+/// Write/Verify boundary - both publish 550 exactly, `Write`'s `finish`
+/// and `Verify`'s opening `(0, total)` - resolve BACKWARD: `("write",
+/// 550)`, the very freeze this route-aware band table exists to
+/// remove, caught by
+/// `the_mapped_route_reports_verify_after_write_and_lands_on_full`. So
+/// the mapped route's self-prove gets a code of its own, past every
+/// other phase's, and [`token`] maps it back to the same label.
+fn code(phase: nzbkit::par2repair::RepairPhase, route: nzbkit::par2repair::RepairRoute) -> u8 {
     use nzbkit::par2repair::RepairPhase as P;
-    match phase {
-        P::Verify => 1,
-        P::Fold => 2,
-        P::Solve => 3,
-        P::Write => 4,
+    use nzbkit::par2repair::RepairRoute as R;
+    match (route, phase) {
+        (R::Mapped, P::Verify) => 5,
+        (_, P::Verify) => 1,
+        (_, P::Fold) => 2,
+        (_, P::Solve) => 3,
+        (_, P::Write) => 4,
+    }
+}
+
+/// How many slabs the published word can order by. 24 bits, which is
+/// four orders past any plan a real budget produces: the narrowest
+/// legal slab is one `u16` word, so `plan.slabs` tops out at
+/// `block_size / 2` and a 16 MiB block - four times the largest any
+/// poster uses - is 8.4 million. Clamped rather than masked, so a
+/// figure past it degrades to "the last sweep" instead of wrapping to
+/// the first.
+const SLAB_CEILING: u64 = 0xFF_FFFF;
+
+/// The published word: per-mille major, then the sweep, then the phase.
+/// See [`RepairProgress::bar`].
+fn pack(code: u8, slab: u32, permille: u64) -> u64 {
+    (permille << 32) | (u64::from(slab).min(SLAB_CEILING) << 8) | u64::from(code)
+}
+
+/// The token for a phase code, or None for `PHASE_NONE`.
+///
+/// Two codes read as `"verify"` - see [`code`] for why the mapped
+/// route's self-prove needs a code of its own that still means the same
+/// phase to a reader.
+fn token(code: u8) -> Option<&'static str> {
+    match code {
+        1 | 5 => Some("verify"),
+        2 => Some("fold"),
+        3 => Some("solve"),
+        4 => Some("write"),
+        _ => None,
     }
 }
 
@@ -131,13 +368,23 @@ impl RepairProgress {
     /// the bare word for those, which is what it said before any of
     /// this existed.
     pub fn phase(&self) -> Option<&'static str> {
-        match self.phase.load(Ordering::Relaxed) {
-            1 => Some("verify"),
-            2 => Some("fold"),
-            3 => Some("solve"),
-            4 => Some("write"),
-            _ => None,
-        }
+        self.bar().map(|(ph, _)| ph)
+    }
+
+    /// THE PAIR A CALLER DRAWS, from one load: the phase token and the
+    /// whole repair's per-mille, or None when no repair is inside the
+    /// engine.
+    ///
+    /// Use this and not [`phase`](Self::phase) with
+    /// [`permille`](Self::permille) whenever both go into the same
+    /// frame - which is every drawing caller there is. The two
+    /// accessors are each one load of the same word, so reading them
+    /// separately is two loads of a value that moves between them; see
+    /// the field's own note for the torn pair that produces and how
+    /// often.
+    pub fn bar(&self) -> Option<(&'static str, u64)> {
+        let w = self.bar.load(Ordering::Relaxed);
+        token((w & 0xFF) as u8).map(|ph| (ph, w >> 32))
     }
 
     /// The current phase's `done`, in that phase's own units.
@@ -152,7 +399,7 @@ impl RepairProgress {
 
     /// The whole repair, 0-1000. Monotone for one [`RepairRun`].
     pub fn permille(&self) -> u64 {
-        self.permille.load(Ordering::Relaxed)
+        self.bar.load(Ordering::Relaxed) >> 32
     }
 
     /// Arm reporting for one repair call, and disarm it when the guard
@@ -192,10 +439,21 @@ impl RepairProgress {
     }
 
     fn clear(&self) {
-        self.phase.store(PHASE_NONE, Ordering::Relaxed);
         self.done.store(0, Ordering::Relaxed);
         self.total.store(0, Ordering::Relaxed);
-        self.permille.store(0, Ordering::Relaxed);
+        // Back to the one-sweep reading: the next engine call's verify
+        // pass runs before it announces a sweep of its own, and a call
+        // that rebuilds nothing never announces one at all.
+        self.slab.store(0, Ordering::Relaxed);
+        // Back to the disk table: a mapped attempt that self-proves and
+        // then falls back to the disk driver must not leave the NEXT
+        // engine call reading its `Verify` off the mapped route's band.
+        self.route.store(ROUTE_DISK, Ordering::Relaxed);
+        // LAST, and ONE store: the bar going back to `PHASE_NONE` and
+        // the percentage going back to nought are the same write, so
+        // there is no instant at which a poller can read a phase with a
+        // cleared percentage beside it.
+        self.bar.store(pack(PHASE_NONE, 0, 0), Ordering::Relaxed);
     }
 }
 
@@ -209,31 +467,130 @@ impl Drop for RepairRun<'_> {
     }
 }
 
+#[cfg(test)]
+impl RepairProgress {
+    /// Arm a one-shot park: the next Fold publish waits, with the
+    /// published phase reading `fold`, until
+    /// [`release_fold`](Self::release_fold) or [`HOLD_LIMIT`].
+    ///
+    /// WHY IT IS SAFE TO PARK THERE. The first Fold publish is
+    /// `RepairControl::begin`, on the repair's DRIVER thread and before
+    /// any fold worker exists, holding only that phase meter's own
+    /// `reported` lock - which nothing else can want until the workers
+    /// it is about to start. So the park holds no work another thread
+    /// could take, and the one thing the watcher does meanwhile,
+    /// `SideCancel::cancel`, takes the pause gate's lock and the pool
+    /// queue's, neither of which the fold holds (memory topic
+    /// `nzbfast-rayon-scope-owner-must-not-park` is the rule).
+    pub(crate) fn hold_at_first_fold(&self) {
+        *self.fold_hold.state.lock().unwrap() = HOLD_ARMED;
+    }
+
+    /// Wait, bounded, for the repair to park at the fold. True if it
+    /// did.
+    pub(crate) fn wait_parked_at_fold(&self) -> bool {
+        let g = self.fold_hold.state.lock().unwrap();
+        let (g, _) = self
+            .fold_hold
+            .wake
+            .wait_timeout_while(g, HOLD_LIMIT, |s| *s != HOLD_PARKED)
+            .unwrap();
+        *g == HOLD_PARKED
+    }
+
+    /// Let a parked repair go on, and disarm a hold nobody reached.
+    pub(crate) fn release_fold(&self) {
+        *self.fold_hold.state.lock().unwrap() = HOLD_RELEASED;
+        self.fold_hold.wake.notify_all();
+    }
+
+    fn park_if_held(&self, phase: nzbkit::par2repair::RepairPhase) {
+        if phase != nzbkit::par2repair::RepairPhase::Fold {
+            return;
+        }
+        let mut g = self.fold_hold.state.lock().unwrap();
+        if *g != HOLD_ARMED {
+            debug_assert!(*g == HOLD_UNARMED || *g == HOLD_RELEASED);
+            return;
+        }
+        *g = HOLD_PARKED;
+        self.fold_hold.wake.notify_all();
+        let _ = self
+            .fold_hold
+            .wake
+            .wait_timeout_while(g, HOLD_LIMIT, |s| *s == HOLD_PARKED)
+            .unwrap();
+    }
+}
+
 impl nzbkit::par2repair::ProgressSink for RepairProgress {
+    /// Which route is reporting. One relaxed store on the driver thread,
+    /// once, before its first phase; the weighing is [`band`]'s. See
+    /// [`RepairProgress::clear`] for why the default reading is `Disk`.
+    fn route(&self, route: nzbkit::par2repair::RepairRoute) {
+        let r = match route {
+            nzbkit::par2repair::RepairRoute::Disk => ROUTE_DISK,
+            nzbkit::par2repair::RepairRoute::Mapped => ROUTE_MAPPED,
+        };
+        self.route.store(r, Ordering::Relaxed);
+    }
+
+    /// Which sweep of the payload is starting. One relaxed store on the
+    /// driver thread, once per sweep; the weighing is [`band`]'s.
+    fn slab(&self, index: usize, of: usize) {
+        let pair = ((index as u64) << 32) | (of as u64).max(1) & 0xFFFF_FFFF;
+        self.slab.store(pair, Ordering::Relaxed);
+    }
+
     fn progress(&self, phase: nzbkit::par2repair::RepairPhase, done: u64, total: u64) {
-        let (base, span) = band(phase);
+        // The sweep this phase belongs to, read once. Published by the
+        // driver before this sweep's first `progress` and not touched
+        // again until the next sweep's, so every worker in a sweep
+        // weighs against the same frame.
+        let sw = self.slab.load(Ordering::Relaxed);
+        let (slab, of) = ((sw >> 32) as u32, (sw & 0xFFFF_FFFF) as u32);
+        let route = match self.route.load(Ordering::Relaxed) {
+            ROUTE_MAPPED => nzbkit::par2repair::RepairRoute::Mapped,
+            _ => nzbkit::par2repair::RepairRoute::Disk,
+        };
+        let (base, span) = band(phase, slab, of, route);
         let frac = if total == 0 {
             0.0
         } else {
             (done as f64 / total as f64).clamp(0.0, 1.0)
         };
-        // The phase and its pair are stored plainly: they are ABOUT the
-        // phase, so a later phase's smaller `done` is correct rather
-        // than a step backwards. Only the whole-repair figure has to be
-        // monotone, and `fetch_max` is what makes it so without taking
-        // a lock the engine has already taken for ordering.
-        self.phase.store(code(phase), Ordering::Relaxed);
+        // The phase pair is stored plainly: it is ABOUT the phase, so a
+        // later phase's smaller `done` is correct rather than a step
+        // backwards. BEFORE the bar, so a poller that has just seen a
+        // new phase finds that phase's own numbers beside it rather
+        // than the previous one's.
         self.done.store(done, Ordering::Relaxed);
         self.total.store(total, Ordering::Relaxed);
+        // One `fetch_max` publishes the phase AND the figure: monotone
+        // without the lock the engine has already taken for ordering,
+        // and atomic as a pair because that is what a reader reads.
         let pm = ((base + span * frac) * 1000.0).round() as u64;
-        self.permille.fetch_max(pm.min(1000), Ordering::Relaxed);
+        let mine = pack(code(phase, route), slab, pm.min(1000));
+        // Underscored because only the test build reads it back: the
+        // word AFTER this call, which is this call's own unless a later
+        // phase had already got there.
+        let _published = self.bar.fetch_max(mine, Ordering::Relaxed).max(mine);
+        #[cfg(test)]
+        self.trace
+            .lock()
+            .unwrap()
+            .push((((_published & 0xFF) as u8), _published >> 32));
+        // After the stores, so a reader of the published value sees
+        // `fold` for the whole of the park.
+        #[cfg(test)]
+        self.park_if_held(phase);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nzbkit::par2repair::{ProgressSink, RepairPhase};
+    use nzbkit::par2repair::{ProgressSink, RepairPhase, RepairRoute};
 
     #[test]
     fn nothing_is_reported_until_a_phase_arrives() {
@@ -308,6 +665,183 @@ mod tests {
             assert_eq!(p.phase(), Some("verify"));
             assert_eq!(p.permille(), 45, "not 450 carried over from the probe");
         }
+    }
+
+    /// EVERY READING OF THE BAR IS A PAIR THAT WAS PUBLISHED TOGETHER,
+    /// while a repair enters, runs and leaves under a reader.
+    ///
+    /// The property is checked WITHOUT history, on each sample alone:
+    /// a per-mille always lies inside its own phase's band (see
+    /// [`band`]), so a pair assembled from two moments shows up as a
+    /// percentage its phase cannot produce - `("write", 0)`, the end of
+    /// an engine call read across [`RepairProgress::clear`], being the
+    /// one that a poller draws as a bar that fell to nought while still
+    /// naming the last phase. That is what a reader taking two loads
+    /// does, and it is why this hammers rather than arranges: the
+    /// window is the distance between two instructions. Against the
+    /// two-atomic version it trips in milliseconds (4,369 torn samples
+    /// in 19,018 over 20,000 runs, 15 Sep 2026); against one word it
+    /// cannot trip at all, which is the point.
+    ///
+    /// # THE READER'S PARTICIPATION IS A PRECONDITION, NOT A HOPE
+    ///
+    /// A sample only exists while a repair is inside the window, and
+    /// the whole hammer is a few milliseconds of relaxed stores, so
+    /// "spawn a reader and run the loop" asks the scheduler for a
+    /// favour. On the 4 vCPU Windows runner it refused: shard 2/6 of
+    /// `windows-unit` failed this test's `samples > 0` guard on
+    /// 426505e8 with `the reader never caught the bar at all`,
+    /// deterministically, on both nextest attempts (run 35047098102,
+    /// 16 Sep 2026) - the reader thread had not been scheduled once
+    /// before the writer finished all 20,000 runs and set `stop`. That
+    /// is the same starvation the `trace` field and
+    /// [`RepairProgress::hold_at_first_fold`] were added for a day
+    /// earlier, and it cannot be answered the same way: tearing is a
+    /// property of a READ, so a record of what was published cannot
+    /// stand in for a reader that looked.
+    ///
+    /// So both halves are arranged rather than timed, and neither is a
+    /// widened tolerance:
+    ///
+    /// 1. A [`std::sync::Barrier`] holds the writer until the reader
+    ///    thread has RUN. Spawn latency can no longer swallow the
+    ///    window.
+    /// 2. The reader counts its samples into a shared word, and the
+    ///    writer keeps the window open past its 20,000 runs until that
+    ///    count reaches [`MIN_SAMPLES`] - so the run ends when the
+    ///    reader has proved it looked, not when the writer got bored.
+    ///
+    /// The surviving assertion is therefore `samples >= MIN_SAMPLES`,
+    /// which is strictly stronger than the `samples > 0` it replaces:
+    /// at the measured 23% per-sample tear rate of the two-atomic
+    /// version (4,369 in 19,018), 1,000 samples is a floor that
+    /// version cannot clear, where a single sample had a three in four
+    /// chance of missing it. The extension is bounded by
+    /// [`READER_LIMIT`] so a reader that never runs at all ends the
+    /// test with a readable assertion rather than a hung shard, and on
+    /// a box where the reader keeps up it runs zero extra iterations,
+    /// so the hammer is the same 20,000 it was.
+    ///
+    /// BOTH HALVES ARE LOAD-BEARING, against different starvations.
+    /// Measured on the dev Mac by injecting the latency the runner had,
+    /// as a sleep in the reader - the CI red reproduces here as
+    /// `caught 0` once the sleep outlasts the hammer (~300 ms in this
+    /// debug build, ~40 ms in the archive build that failed):
+    ///
+    /// ```text
+    ///                     reader delayed    reader delayed
+    ///                     BEFORE the gate   AFTER the gate
+    ///   old shape         FAIL, 0 samples   FAIL, 0 samples
+    ///   barrier only      pass              FAIL, 0 samples
+    ///   extension only    pass              pass
+    ///   SHIPPED (both)    pass              pass
+    /// ```
+    ///
+    /// And the surviving band assertion still has its teeth: pointed at
+    /// a mutant `bar()` that takes two loads and recombines them - the
+    /// two-atomic reader this module replaced - it trips with 16,954 of
+    /// 18,999 readings outside their band, `("write", 0)` among them.
+    #[test]
+    fn the_published_bar_is_one_value_and_never_a_pair_of_moments() {
+        /// Readings the reader must take INSIDE the window before the
+        /// run may end. See the note above for why 1,000.
+        const MIN_SAMPLES: u64 = 1_000;
+        /// The measured hammer, unchanged.
+        const RUNS: u32 = 20_000;
+        /// How long the writer will hold the window open waiting for a
+        /// reader that is not being scheduled. Only ever reached on the
+        /// way to a failure.
+        const READER_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let p = std::sync::Arc::new(RepairProgress::default());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::new(AtomicU64::new(0));
+        let bad = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, u64)>::new()));
+        // Two parties: the writer does not publish until the reader is
+        // past this, so the reader thread has demonstrably run.
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let reader = {
+            let (p, stop, seen, bad, gate) = (
+                p.clone(),
+                stop.clone(),
+                seen.clone(),
+                bad.clone(),
+                gate.clone(),
+            );
+            std::thread::spawn(move || {
+                gate.wait();
+                while !stop.load(Ordering::Relaxed) {
+                    if let Some((ph, pm)) = p.bar() {
+                        seen.fetch_add(1, Ordering::Relaxed);
+                        // One sweep: this hammer publishes phases
+                        // directly and announces no slab, so the bands
+                        // are the pre-slab ones and the reading must
+                        // lie in the phase's own.
+                        let disk = nzbkit::par2repair::RepairRoute::Disk;
+                        let (base, span) = match ph {
+                            "verify" => band(RepairPhase::Verify, 0, 1, disk),
+                            "fold" => band(RepairPhase::Fold, 0, 1, disk),
+                            "solve" => band(RepairPhase::Solve, 0, 1, disk),
+                            "write" => band(RepairPhase::Write, 0, 1, disk),
+                            other => panic!("unknown phase {other}"),
+                        };
+                        let (lo, hi) = ((base * 1000.0) as u64, ((base + span) * 1000.0) as u64);
+                        if pm < lo || pm > hi {
+                            bad.lock().unwrap().push((ph.to_string(), pm));
+                        }
+                    }
+                    std::thread::yield_now();
+                }
+            })
+        };
+        let one_run = || {
+            let run = p.enter();
+            for phase in [
+                RepairPhase::Verify,
+                RepairPhase::Fold,
+                RepairPhase::Solve,
+                RepairPhase::Write,
+            ] {
+                p.progress(phase, 0, 4);
+                p.progress(phase, 4, 4);
+            }
+            drop(run);
+            // The record is per REPAIR CALL here, not per test: 20,000
+            // runs of eight publishes is 160,000 entries otherwise, for
+            // a test that never reads it.
+            p.trace.lock().unwrap().clear();
+        };
+        gate.wait();
+        for _ in 0..RUNS {
+            one_run();
+        }
+        // The window stays open until the reader has proved it looked.
+        // Zero iterations whenever it kept up, which is every box that
+        // schedules it at all; the clock is only consulted here, off
+        // the measured hammer, and only bounds a failure.
+        let deadline = std::time::Instant::now() + READER_LIMIT;
+        while seen.load(Ordering::Relaxed) < MIN_SAMPLES && std::time::Instant::now() < deadline {
+            one_run();
+        }
+        stop.store(true, Ordering::Relaxed);
+        reader.join().expect("reader");
+        let samples = seen.load(Ordering::Relaxed);
+        let bad = bad.lock().unwrap();
+        // Failing to find is failing: a reader starved off the box
+        // proves nothing, and the assertion below would pass on zero.
+        assert!(
+            samples >= MIN_SAMPLES,
+            "the reader caught {samples} of the {MIN_SAMPLES} readings this \
+             property needs, in {READER_LIMIT:?} past {RUNS} runs - it was not \
+             being scheduled, so nothing below was actually tested"
+        );
+        assert!(
+            bad.is_empty(),
+            "{} of {samples} readings carried a per-mille from outside their own \
+             phase's band - the bar was assembled from two moments: {:?}",
+            bad.len(),
+            &bad[..bad.len().min(8)]
+        );
     }
 
     /// A damaged recovery set in a scratch dir, and the id of the set
@@ -398,7 +932,9 @@ mod tests {
         // not available - the control carries one. So the phases are
         // read the way the QUEUE PAYLOAD reads them, off the published
         // value, from a watcher thread: that is the surface this whole
-        // change exists to fill, so it is the surface asserted.
+        // change exists to fill, so it is the surface asserted - for the
+        // properties any sample of it must keep. What a sample cannot
+        // promise to contain is asserted on the value's own record.
         let watch = {
             let seen = seen.clone();
             let prog = sc.repair_progress().clone();
@@ -406,9 +942,17 @@ mod tests {
             let stop2 = stop.clone();
             let h = std::thread::spawn(move || {
                 while !stop2.load(Ordering::Relaxed) {
-                    if let Some(ph) = prog.phase() {
+                    // ONE load, through `bar()`. Read as `phase()` and
+                    // then `permille()` this samples a value that moves
+                    // between the two loads, and the reading it invents
+                    // at the end of the run is `("write", 0)` - the
+                    // `RepairRun` guard's clear caught in the middle.
+                    // That is a fall, so the ordering assertion below
+                    // was a coin the box tossed under load rather than
+                    // a property of the bar (15 Sep 2026; see the
+                    // `bar` field).
+                    if let Some((ph, pm)) = prog.bar() {
                         let mut g = seen.lock().unwrap();
-                        let pm = prog.permille();
                         if g.last().map(|l| (l.0.as_str(), l.1)) != Some((ph, pm)) {
                             g.push((ph.to_string(), pm));
                         }
@@ -459,37 +1003,64 @@ mod tests {
              a wedge, which is the complaint this whole change answers"
         );
 
-        let seen = seen.lock().unwrap().clone();
-        // IT MOVED, and it never went backwards, and the phase it spent
-        // its time in is the FOLD - the dominant phase of a real repair
-        // and the one the queue row could not see at all.
+        // IT NEVER WENT BACKWARDS AND THE PHASES ONLY ADVANCED, on two
+        // readers: the watcher, which reads the published value the way
+        // the queue payload does, and the value's own record of every
+        // publish. Both properties hold for ANY subset of the readings,
+        // so they are asserted on whatever the watcher caught.
         let order = ["verify", "fold", "solve", "write"];
-        let mut last = 0u64;
-        let mut at = 0usize;
-        for (ph, pm) in &seen {
+        let ordered = |who: &str, readings: &[(String, u64)]| {
+            let mut last = 0u64;
+            let mut at = 0usize;
+            for (ph, pm) in readings {
+                assert!(
+                    *pm >= last,
+                    "{who}: the bar fell: {last} -> {pm} in {ph}, {readings:?}"
+                );
+                last = *pm;
+                let Some(i) = order.iter().position(|o| o == ph) else {
+                    panic!("{who}: unknown phase {ph} in {readings:?}");
+                };
+                assert!(
+                    i >= at,
+                    "{who}: phase {ph} came after {} in {readings:?} - the four only ever advance",
+                    order[at]
+                );
+                at = i;
+            }
+        };
+        let seen = seen.lock().unwrap().clone();
+        ordered("watcher", &seen);
+
+        // IT MOVED, and the FOLD was on the bar - the dominant phase of
+        // a real repair and the one the queue row could not see at all.
+        // Asserted on the COMPLETE record of publishes rather than on
+        // the watcher: which readings a sampling thread catches is a
+        // property of the scheduler, and on a loaded box it caught none
+        // (`RepairProgress::trace`). The record is every value a reader
+        // could have read, so this is the watcher's question with the
+        // sampling taken out, and all four phases can be demanded of it.
+        let mut published: Vec<(String, u64)> = Vec::new();
+        for &(code, pm) in sc.repair_progress().trace.lock().unwrap().iter() {
+            let ph = order
+                .get(usize::from(code).wrapping_sub(1))
+                .unwrap_or_else(|| panic!("phase code {code} published"))
+                .to_string();
+            if published.last() != Some(&(ph.clone(), pm)) {
+                published.push((ph, pm));
+            }
+        }
+        ordered("published", &published);
+        for ph in order {
             assert!(
-                *pm >= last,
-                "the bar fell: {last} -> {pm} in {ph}, {seen:?}"
+                published.iter().any(|(p, _)| p == ph),
+                "the {ph} phase was never published: {published:?}"
             );
-            last = *pm;
-            let Some(i) = order.iter().position(|o| o == ph) else {
-                panic!("unknown phase {ph} in {seen:?}");
-            };
-            assert!(
-                i >= at,
-                "phase {ph} came after {} in {seen:?} - the four only ever advance",
-                order[at]
-            );
-            at = i;
         }
         assert!(
-            seen.iter().any(|(ph, _)| ph == "fold"),
-            "the fold was never visible: {seen:?}"
-        );
-        assert!(
-            seen.len() >= 4,
-            "{} distinct readings is not a bar that moves: {seen:?}",
-            seen.len()
+            published.len() >= 4,
+            "{} distinct readings is not a bar that moves: {published:?}",
+            published.len()
         );
         // And it is CLEARED when the engine leaves, so the recovery
         // fetches between two passes do not keep showing a stale phase.
@@ -506,12 +1077,14 @@ mod tests {
     /// that function's own doc said "A repair already patching bytes
     /// runs to its end and parks".
     ///
-    /// WHAT THIS DOES AND DOES NOT PROVE. It presses the button once
+    /// WHAT THIS DOES AND DOES NOT PROVE. It presses the button while
     /// the published phase says `fold`, which is the earliest moment a
-    /// watcher on the daemon's own side can know the engine is folding.
-    /// On a set this small the fold is microseconds, so the press may
-    /// land at the next driver boundary rather than block-by-block
-    /// inside the fold - and that is fine here, because the
+    /// watcher on the daemon's own side can know the engine is folding,
+    /// and the repair is held at the fold's first publish until it has
+    /// (`RepairProgress::hold_at_first_fold`), so the press lands before
+    /// the first fold batch on any box at any load. That is the fold's
+    /// DOOR, not block-by-block inside it - and that is fine here,
+    /// because the
     /// DISCRIMINATING test for the in-fold check is the engine's
     /// (`control_tests::a_cancel_raised_mid_fold_ends_the_repair_
     /// before_it_writes`, which trips from inside the sink and asserts
@@ -527,28 +1100,31 @@ mod tests {
             .map(|(n, _)| std::fs::read(dir.join(n)).unwrap())
             .collect();
         let sc = std::sync::Arc::new(crate::streamhub::SideCancel::new());
-        // Pressed from a watcher the moment the FOLD is running, which
-        // is where a timer would be a race on a box of another speed.
+        // Pressed from a watcher while the FOLD is running, which is
+        // where a timer would be a race on a box of another speed. The
+        // repair PARKS at its first Fold publish until the watcher has
+        // pressed: a watcher that merely polled for `fold` lost the
+        // whole repair to one timeslice on a loaded box and saw it come
+        // back `Repaired` (4 of 15 at load ~70 on 32 cores, 15 Sep
+        // 2026).
         let pressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        sc.repair_progress().hold_at_first_fold();
         let h = {
             let sc = sc.clone();
             let pressed = pressed.clone();
             std::thread::spawn(move || {
-                // BOUNDED, so a poller that never sees the fold ends
-                // the test with a readable assertion rather than
-                // hanging a shard - the wedge-that-exits-0 shape
-                // CLAUDE.md warns about. The repair on this set is
-                // milliseconds; the bound is three orders of magnitude
-                // over it.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                while std::time::Instant::now() < deadline {
-                    if sc.repair_progress().phase() == Some("fold") {
-                        sc.cancel();
-                        pressed.store(true, Ordering::Relaxed);
-                        return;
-                    }
-                    std::thread::yield_now();
+                // BOUNDED (see `HOLD_LIMIT`), and released on every
+                // path, so a fold that never arrives ends the test with
+                // a readable assertion rather than a hung shard. The
+                // button is pressed on what the daemon can SEE - the
+                // published phase - not on the hold's word alone.
+                if sc.repair_progress().wait_parked_at_fold()
+                    && sc.repair_progress().phase() == Some("fold")
+                {
+                    sc.cancel();
+                    pressed.store(true, Ordering::Relaxed);
                 }
+                sc.repair_progress().release_fold();
             })
         };
         let err = {
@@ -627,6 +1203,207 @@ mod tests {
         let sc = crate::streamhub::SideCancel::new();
         assert!(sc.repair_control().is_attended());
         assert!(sc.repair_control().is_active());
+    }
+
+    /// ONE SWEEP IS THE PRE-SLAB SPLIT, TO THE PER-MILLE. The slab
+    /// split is only allowed to change what a SLABBED repair draws, and
+    /// almost no repair slabs - so the ordinary DISK-route bar is pinned
+    /// against the four figures it had before 16 Sep 2026 rather than
+    /// left to be re-derived from [`band`]'s new arithmetic. The route
+    /// split (16 Sep 2026, for the mapped self-prove) must leave this
+    /// table exactly where it was too, which is what passing
+    /// `RepairRoute::Disk` explicitly - rather than a new default -
+    /// pins.
+    #[test]
+    fn a_repair_that_does_not_slab_keeps_the_bar_it_always_had() {
+        let disk = nzbkit::par2repair::RepairRoute::Disk;
+        for of in [0u32, 1] {
+            // `0` is the value before any sweep is announced, and a
+            // repair with no blocks to rebuild announces none at all.
+            for (phase, top) in [
+                (RepairPhase::Verify, 450.0),
+                (RepairPhase::Fold, 850.0),
+                (RepairPhase::Solve, 950.0),
+                (RepairPhase::Write, 1000.0),
+            ] {
+                let (base, span) = band(phase, 0, of, disk);
+                assert_eq!(
+                    ((base + span) * 1000.0).round(),
+                    top,
+                    "{phase:?} at of={of} no longer tops out where it did"
+                );
+            }
+        }
+    }
+
+    /// THE MAPPED ROUTE'S HEADLINE: `Verify` runs LAST, after `Write`,
+    /// carries the 45% a pre-fold pass would have spent, and lands the
+    /// bar on full. Until 16 Sep 2026 this route's post-patch self-prove
+    /// reported nothing at all - `nzbkit::par2repair::RepairRoute`'s own
+    /// doc has the incident this answers.
+    #[test]
+    fn the_mapped_route_reports_verify_after_write_and_lands_on_full() {
+        let p = RepairProgress::default();
+        let _run = p.enter();
+        p.route(RepairRoute::Mapped);
+        let mut last = 0;
+        for (phase, tok, top) in [
+            (RepairPhase::Fold, "fold", 400),
+            (RepairPhase::Solve, "solve", 500),
+            (RepairPhase::Write, "write", 550),
+            (RepairPhase::Verify, "verify", 1000),
+        ] {
+            p.progress(phase, 0, 100);
+            assert_eq!(p.phase(), Some(tok));
+            for done in [25u64, 50, 75, 100] {
+                p.progress(phase, done, 100);
+                assert!(
+                    p.permille() >= last,
+                    "{tok} at {done}: {} went below {last}",
+                    p.permille()
+                );
+                last = p.permille();
+            }
+            assert_eq!(p.permille(), top, "{tok} lands on the top of its band");
+        }
+    }
+
+    /// A repair that never calls [`ProgressSink::route`] - every disk
+    /// call site, and this daemon's own default - reads the disk table,
+    /// unchanged by the mapped route existing at all. This is the other
+    /// half of the pin above: the DEFAULT must still be `Disk`.
+    #[test]
+    fn a_repair_that_never_announces_a_route_reads_the_disk_table() {
+        let p = RepairProgress::default();
+        let _run = p.enter();
+        p.progress(RepairPhase::Verify, 100, 100);
+        assert_eq!(
+            p.permille(),
+            450,
+            "verify still tops out where the disk route always put it"
+        );
+    }
+
+    /// ROUTE RESETS WHEN THE ENGINE LEAVES, exactly as `slab` does: a
+    /// mapped attempt whose self-prove fails falls back to the disk
+    /// driver through a FRESH [`RepairProgress::enter`], and that call
+    /// must not read the previous attempt's mapped table.
+    #[test]
+    fn route_resets_to_disk_when_the_engine_leaves() {
+        let p = RepairProgress::default();
+        {
+            let _run = p.enter();
+            p.route(RepairRoute::Mapped);
+            p.progress(RepairPhase::Write, 100, 100);
+            assert_eq!(
+                p.permille(),
+                550,
+                "write topped out inside the mapped table"
+            );
+        }
+        let _run = p.enter();
+        p.progress(RepairPhase::Verify, 100, 100);
+        assert_eq!(
+            p.permille(),
+            450,
+            "a fresh engine call read the previous call's mapped table instead of resetting to disk"
+        );
+    }
+
+    /// THE HEADLINE OF THE SLAB SPLIT. The sequence a 4-slab engine
+    /// repair really publishes - recorded from `nzbkit-base`'s own
+    /// control tests under `ForcedSlabWidth`, and replayed here through
+    /// the daemon's value exactly as the engine makes it - must move the
+    /// bar through EVERY sweep.
+    ///
+    /// Until 16 Sep 2026 it did not: the bands were per repair, so
+    /// sweep 1's solve reached 950 and every later sweep was swallowed
+    /// by the `fetch_max`. A poller read the literal pair
+    /// `("solve", 950)` for 41.5% to 70.3% of the repair's wall
+    /// (`research/REPAIR-SLABBED-BAR-2026-09-16.md`), which is the
+    /// `Repairing, 100%, timeleft 0:00:00` shape this module exists to
+    /// remove.
+    ///
+    /// The discriminating assertion is the per-sweep one: a bar that
+    /// merely rose and landed would pass on the old bands too, because
+    /// the verify half and the write half moved it either way.
+    #[test]
+    fn every_sweep_of_a_slabbed_repair_moves_the_bar() {
+        const SLABS: usize = 4;
+        let p = RepairProgress::default();
+        let _run = p.enter();
+        let mut last = 0u64;
+        let check = |p: &RepairProgress, last: &mut u64, what: &str| {
+            let (_, pm) = p.bar().expect("a repair is inside the engine");
+            assert!(pm >= *last, "the bar fell at {what}: {last} -> {pm}");
+            *last = pm;
+            pm
+        };
+        p.progress(RepairPhase::Verify, 10_240, 10_240);
+        assert_eq!(check(&p, &mut last, "verify"), 450);
+        for si in 0..SLABS {
+            p.slab(si, SLABS);
+            let opened = {
+                p.progress(RepairPhase::Fold, 0, 2496);
+                check(&p, &mut last, &format!("sweep {si} fold begin"))
+            };
+            assert_eq!(
+                p.phase(),
+                Some("fold"),
+                "sweep {si} opened its fold and the label did not follow"
+            );
+            p.progress(RepairPhase::Fold, 2496, 2496);
+            let folded = check(&p, &mut last, &format!("sweep {si} fold end"));
+            p.progress(RepairPhase::Solve, 0, 4);
+            p.progress(RepairPhase::Solve, 4, 4);
+            let solved = check(&p, &mut last, &format!("sweep {si} solve end"));
+            // THE DISCRIMINATING PAIR: this sweep's fold moved the bar,
+            // and so did its solve. On the pre-split bands both were
+            // flat for every `si > 0`.
+            assert!(
+                folded > opened,
+                "sweep {si}'s fold did not move the bar: {opened} -> {folded}"
+            );
+            assert!(
+                solved > folded,
+                "sweep {si}'s solve did not move the bar: {folded} -> {solved}"
+            );
+        }
+        // The last sweep hands over exactly where the write band starts,
+        // so the four sweeps between them spent the whole of [450, 950).
+        assert_eq!(last, 950, "the sweeps did not fill their span");
+        p.progress(RepairPhase::Write, 256, 256);
+        assert_eq!(p.permille(), 1000);
+        assert_eq!(p.phase(), Some("write"));
+    }
+
+    /// A SWEEP BOUNDARY IS A TIE ON THE PER-MILLE - sweep `i`'s solve
+    /// ends on the figure sweep `i+1`'s fold opens at - and the label
+    /// must resolve it forwards.
+    ///
+    /// This is what the sweep index in the packed word buys, and it is
+    /// asserted apart from the test above because the cost of getting
+    /// it wrong is invisible in a bar that is only read for its number:
+    /// the row would say `solve` until the new fold crossed its first
+    /// bucket, which is up to 1/256th of a sweep, and on a repair that
+    /// slabs a sweep is not a moment.
+    #[test]
+    fn the_label_crosses_a_sweep_boundary_without_waiting_for_a_bucket() {
+        let p = RepairProgress::default();
+        let _run = p.enter();
+        p.slab(0, 2);
+        p.progress(RepairPhase::Solve, 4, 4);
+        let (ph, at) = p.bar().unwrap();
+        assert_eq!(ph, "solve");
+        p.slab(1, 2);
+        // The opening publish of the next sweep, and nothing else: no
+        // batch has been folded, so the per-mille has not moved.
+        p.progress(RepairPhase::Fold, 0, 2496);
+        assert_eq!(
+            p.bar(),
+            Some(("fold", at)),
+            "the label did not cross the sweep boundary on the tie"
+        );
     }
 
     /// A phase whose total was an estimate must not report over 100%.

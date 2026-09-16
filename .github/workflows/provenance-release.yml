@@ -231,6 +231,10 @@ jobs:
         env:
           CARGO_INCREMENTAL: "0"
           RUSTFLAGS: "--remap-path-prefix=${{ runner.os == 'Linux' && '/home/runner' || '/Users/runner' }}=/build"
+          # Read only by apple targets. The mac CLI floor; unset, cc-rs
+          # compiles the C for the runner's own macOS
+          # (research/MAC-DEPLOYMENT-TARGET-2026-09-15.md).
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: cargo build --release --locked -p nzbfast --target ${{ matrix.target }}
 
       # Deterministic packaging: pin the entry mtime to the commit time,

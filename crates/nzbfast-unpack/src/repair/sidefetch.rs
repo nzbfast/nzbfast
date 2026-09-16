@@ -1168,11 +1168,16 @@ impl LossSpelling {
 /// * ALL ZERO (an empty file included) - the preallocated placeholder an
 ///   attempt that never landed its first article leaves behind.
 ///
-/// STATED LIMIT: a payload file whose first 72 bytes are zero would pass
-/// the second arm. Nothing this pipeline publishes has that shape - RAR,
+/// STATED LIMIT: a payload file whose first 72 bytes are zero passes the
+/// second arm. Nothing this pipeline PUBLISHES has that shape - RAR,
 /// ZIP, 7z, MKV and MP4 all carry a non-zero magic in their first bytes,
-/// and a yEnc-decoded member starts at the poster's own first byte - and
-/// the arm cannot be dropped without refusing the refetch above. An
+/// and a yEnc-decoded member starts at the poster's own first byte - but
+/// a file in flight can: the extractor PREALLOCATES its outputs, so a
+/// payload whose offset-0 article has not landed (a head hole waiting on
+/// PAR2) is all zero over exactly this window while the repair that
+/// would heal it is still to come. A name collision between such a file
+/// and a recovery volume is the shape to hold in mind, and the arm
+/// cannot be dropped without refusing the refetch above. An
 /// unreadable destination is REFUSED rather than assumed free: a head
 /// that cannot be read decides nothing, and the safe direction here is
 /// to keep the bytes.

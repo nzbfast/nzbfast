@@ -16,6 +16,66 @@ const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT + LENGTH
 const MAX_HISTORY: usize = 4 * 1024 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
 const MAX_VM_FILTER_BLOCK_SIZE: usize = 128 * 1024;
+// nzbfast: ceiling on a DECODED RAR 3 VM filter block, which the wire
+// declares as a bare u32 with no cap of its own
+// (`MAX_VM_FILTER_BLOCK_SIZE` above bounds only what the ENCODER emits).
+//
+// A filter holds output back: `safe_flush_end` will not flush past a
+// filter's start until its end is decoded, and `trim_history` keeps
+// `keep_from <= flushed`, so nothing drains either. A crafted member
+// declaring `block_start = 0` and a 2 GiB block therefore grew
+// `self.output` to the whole member's output, and `filtered_range` then
+// copied that block again for the VM - about 4 GiB of peak from a few MB
+// of packed input, with no analogue of RAR5's `add_filter` bail.
+//
+// 8 MiB is RAR5's `STREAM_FILTER_HOLD_LIMIT`, kept deliberately
+// identical. It is enormous headroom for RAR 3: a real filter block runs
+// inside RARVM memory, whose global address is 0x3c000 (~240 KiB, the
+// value regs[3] is seeded with below), and unrar itself declines to
+// filter a block larger than that.
+const MAX_VM_FILTER_HOLD: usize = 8 * 1024 * 1024;
+// nzbfast: the packed-input window `decode_member_from_reader` holds, and
+// the margin below which it refuses to begin a decode excursion.
+// (nzbfast-local change, 16 Sep 2026; re-apply on the next rars re-sync,
+// see `vendor/rars/VENDORING.md`.)
+//
+// Until 2026-09-16 that entry point drained the whole packed member into
+// the bit reader before decoding a byte, so an 8 GB -m3 RAR4 member cost
+// its packed size in heap whatever any budget said. It now refills from
+// the reader as it decodes, and `compact()` drops what has been consumed,
+// so the retained input is `STREAM_INPUT_WINDOW` plus whatever tail the
+// member carries past its last decoded byte.
+//
+// The bit reader has no mid-symbol rollback: a `NeedMoreInput` raised
+// part-way through a symbol has already consumed bits and mutated
+// decoder state, and resuming from there is a corrupt-output bug, which
+// is worse than the allocation. So the refill is PROACTIVE - the decoder
+// pauses at a clean symbol boundary while more input can still arrive,
+// and never starts an excursion that could outrun the buffer. The margin
+// must therefore exceed the input any single excursion can consume:
+//
+//   * `read_tables`: 2 bits + 20 x 8 (level lengths) + TABLE_COUNT (404)
+//     symbols of at most 15 + 7 bits = under 1.2 KiB.
+//   * one `decode_lz` outer iteration past the literal burst: a main
+//     symbol (<= 15 bits) plus its arm. The widest arm is 257,
+//     `read_vm_code`, whose length field is a bare 16-bit count read
+//     BEFORE `MAX_VM_CODE_SIZE` is checked, so it reads at most
+//     65535 + 3 bytes. Every other arm is under 16 bytes.
+//   * `Ppmd::decode_init` out of `read_tables`: a header byte and the
+//     range coder's four-byte prime.
+//
+// 128 KiB clears the worst of those (64 KiB + slop) by 2x. The literal
+// burst loop needs no margin of its own: it stops on a failed `peek_bits`,
+// which consumes nothing, so draining the window inside it is safe.
+//
+// PPMd blocks are NOT streamed. A PPMd symbol's input cost is bounded
+// only by the model's escape chain, and `read_vm_code_ppmd` can spend
+// 65539 symbols, so no margin this side of tens of megabytes is provable.
+// `decode_until` therefore absorbs the rest of the reader the moment a
+// block selects PPMd and decodes it exactly as before - the old peak, on
+// a shape that is rare in the wild and was never better than this.
+const STREAM_INPUT_WINDOW: usize = 1024 * 1024;
+const STREAM_INPUT_MARGIN: usize = 128 * 1024;
 // The standard AUDIO bytecode uses separate input/output regions inside RARVM
 // memory. Keep generated blocks below the overlap boundary accepted by period
 // decoders.
@@ -75,7 +135,7 @@ const RAR3_DELTA_FILTER_BYTECODE: &[u8] = &[
     0x2f, 0x01, 0x9a, 0x41, 0x80, 0xec, 0x27, 0x48, 0x2f, 0x09, 0x76, 0x6d, 0xd3, 0xea, 0x41, 0x5b,
     0x59, 0x44, 0xe8, 0x17, 0x5c, 0xe1, 0x6c, 0x91, 0x4c, 0x4e, 0x3f, 0x77, 0x00,
 ];
-const RAR3_ITANIUM_FILTER_BYTECODE: &[u8] = &[
+pub(crate) const RAR3_ITANIUM_FILTER_BYTECODE: &[u8] = &[
     0x46, 0x9e, 0x08, 0x08, 0x0c, 0x0c, 0x00, 0x00, 0x0e, 0x0e, 0x08, 0x08, 0x00, 0x00, 0x08, 0x08,
     0x00, 0x00, 0x6c, 0x11, 0x5a, 0x04, 0xac, 0x0c, 0xc4, 0xcc, 0x5c, 0x08, 0x18, 0x46, 0x24, 0x08,
     0xf9, 0xa0, 0x44, 0x25, 0x12, 0x12, 0x45, 0x85, 0x99, 0x0c, 0x14, 0x00, 0x26, 0x25, 0x58, 0x99,
@@ -190,11 +250,52 @@ struct FilteredMembers {
     records: Vec<OwnedVmFilterRecord>,
 }
 
+/// The furthest a RAR 3 x86 filter block may end, in member-relative bytes.
+///
+/// SPEC C Part 3.2: the RAR 3 x86 transform forms `o = F + p + 1` with no
+/// reduction, where `F` is the block's member-relative start and `p` the
+/// position of the trigger byte inside it. Encode is the inverse of decode
+/// only while `o <= 2^31`; past that the pair is not invertible for every
+/// operand value, and the transform must not be "repaired", because its
+/// decode side has to agree with every other RAR 3 reader.
+///
+/// A block `[s, e)` reaches at most `o = e - 4`, because a trigger byte
+/// needs four operand bytes behind it and so sits at most at `e - 5`.
+const MAX_RAR3_X86_FILTER_END: usize = (1 << 31) + 4;
+
+/// The shortest x86 block that can convert anything: one trigger byte and
+/// its four operand bytes.
+const MIN_RAR3_X86_FILTER_LEN: usize = 5;
+
+const RAR3_X86_PAST_BOUNDARY: &str =
+    "RAR 2.9 x86 filter range reaches past the 2 GiB round-trip boundary";
+
 fn split_large_filter(input_len: usize, filter: Rar29FilterSpec) -> Result<Vec<Rar29FilterSpec>> {
     let range = filter.range.clone().unwrap_or(0..input_len);
     if range.start >= range.end || range.end > input_len {
         return Err(Error::InvalidData("RAR 2.9 VM filter range is invalid"));
     }
+
+    // SPEC C Part 7 item 1, settled 16 Sep 2026: the writer gives up the
+    // coverage it cannot encode reversibly rather than refusing the member.
+    // The safe side of a large member is still filtered in full; only the
+    // tail past 2 GiB goes out unfiltered, which costs ratio and never
+    // correctness. Refusing was the spec's other option and was rejected:
+    // `FilterPolicy::Auto` offers a whole-member x86 filter for every
+    // member it compresses, so a refusal here would turn every RAR 2.9
+    // write of a member over 2 GiB into a hard error.
+    let mut clipped = false;
+    let range = if matches!(filter.kind, Rar29FilterKind::E8 | Rar29FilterKind::E8E9) {
+        let end = range.end.min(MAX_RAR3_X86_FILTER_END);
+        clipped = end != range.end;
+        if end.saturating_sub(range.start) < MIN_RAR3_X86_FILTER_LEN {
+            // Nothing left that a filter record could convert.
+            return Ok(Vec::new());
+        }
+        range.start..end
+    } else {
+        range
+    };
 
     let chunk_size = match filter.kind {
         Rar29FilterKind::Delta { channels } => {
@@ -226,7 +327,11 @@ fn split_large_filter(input_len: usize, filter: Rar29FilterSpec) -> Result<Vec<R
         }
     };
     if range.len() <= chunk_size {
-        return Ok(vec![filter]);
+        return Ok(vec![if clipped {
+            Rar29FilterSpec::range(filter.kind, range)
+        } else {
+            filter
+        }]);
     }
     if chunk_size == 0 {
         return Err(Error::InvalidData(
@@ -334,6 +439,15 @@ struct FilteredMember {
 
 fn filtered_member(input: &[u8], filter: &Rar29FilterSpec) -> Result<FilteredMember> {
     let range = filter.range.clone().unwrap_or(0..input.len());
+    if matches!(filter.kind, Rar29FilterKind::E8 | Rar29FilterKind::E8E9)
+        && range.end > MAX_RAR3_X86_FILTER_END
+    {
+        // `split_large_filter` is the only way in and clips this away, so
+        // reaching here is a writer bug rather than bad caller input. Refuse
+        // rather than emit a record that will not round trip. Checked before
+        // the length arm below so the two cannot be confused.
+        return Err(Error::InvalidData(RAR3_X86_PAST_BOUNDARY));
+    }
     if range.start >= range.end || range.end > input.len() {
         return Err(Error::InvalidData("RAR 2.9 VM filter range is invalid"));
     }
@@ -1686,6 +1800,45 @@ pub struct Unpack29 {
     last_filter: usize,
     base_offset: usize,
     output: Vec<u8>,
+    /// Refill the packed input from the reader as decoding proceeds
+    /// (`decode_member_from_reader` only; the slice entry points own their
+    /// whole input already and clear it).
+    stream_refill: bool,
+    /// The reader has answered 0 - nothing more can arrive, so a short
+    /// buffer is a truncated member rather than a reason to pause.
+    stream_eof: bool,
+    /// A block selected PPMd, which is not streamable; the caller must
+    /// absorb the rest of the reader before decoding continues.
+    stream_needs_full: bool,
+    /// Unread packed bytes the refill aims to hold. Must stay above
+    /// `stream_margin`, or a refill could never clear the pause it just
+    /// took; `set_stream_bounds` is the only thing that moves it and only
+    /// tests call it.
+    stream_window: usize,
+    /// Packed bytes below which no decode excursion may start.
+    stream_margin: usize,
+}
+
+/// See `Unpack29::state_digest`.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Rar29State {
+    current_pos: usize,
+    consumed_bits: usize,
+    in_lz_block: bool,
+    block_mode: BlockMode,
+    levels: u32,
+    old_offsets: [usize; 4],
+    last_offset: usize,
+    last_length: usize,
+    last_low_offset: usize,
+    low_offset_repeats: usize,
+    pending_match: Option<(usize, usize)>,
+    last_filter: usize,
+    filters: usize,
+    programs: usize,
+    history_len: usize,
+    history: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1758,6 +1911,73 @@ impl Unpack29 {
             last_filter: 0,
             base_offset: 0,
             output: Vec::new(),
+            stream_refill: false,
+            stream_eof: false,
+            stream_needs_full: false,
+            stream_window: STREAM_INPUT_WINDOW,
+            stream_margin: STREAM_INPUT_MARGIN,
+        }
+    }
+
+    /// Shrink the refill window so a small member crosses it many times.
+    ///
+    /// Sound only when no excursion in the member under test can consume
+    /// `margin` bytes - i.e. the member declares no VM filter, since
+    /// `read_vm_code` alone can spend 64 KiB (see `STREAM_INPUT_MARGIN`).
+    /// Every caller asserts `filters` stayed empty.
+    #[cfg(test)]
+    fn set_stream_bounds(&mut self, window: usize, margin: usize) {
+        assert!(window > margin, "a refill must be able to clear the pause");
+        self.stream_window = window;
+        self.stream_margin = margin;
+    }
+
+    /// High-water mark of packed input retained for the member being
+    /// decoded, in bytes. Reset by each `decode_member*` entry point that
+    /// installs a fresh bit reader; the streaming bound is asserted
+    /// against it.
+    pub fn peak_packed_input(&self) -> usize {
+        self.bits.peak_input
+    }
+
+    /// Everything a LATER member can read out of this decoder, reduced to
+    /// a comparable value.
+    ///
+    /// Byte-identical output is not evidence on its own: a shared model
+    /// can be wrong in a band nothing reads and every output byte still
+    /// matches (the rar15 census recorded exactly that, 1.25 M steps on a
+    /// wrong state with identical bytes). So this covers the carried
+    /// state - the Huffman levels, the offset and length memory, the
+    /// pending match, the filter and program tables, the block cursor -
+    /// plus the retained history a solid successor matches against, and
+    /// the absolute count of bits consumed off the packed stream.
+    ///
+    /// `base_offset` and `output.len()` are deliberately NOT in it: the
+    /// buffered and streaming paths flush in different-sized spans, so
+    /// `trim_history` fires at different moments and the retained length
+    /// legitimately differs. The history is compared over its last
+    /// `MAX_HISTORY` bytes instead, which is the part either path
+    /// guarantees and the only part a successor can reach.
+    #[cfg(test)]
+    fn state_digest(&self) -> Rar29State {
+        let retained = self.output.len().min(MAX_HISTORY);
+        Rar29State {
+            current_pos: self.current_pos(),
+            consumed_bits: self.bits.absolute_position(),
+            in_lz_block: self.in_lz_block,
+            block_mode: self.block_mode,
+            levels: crc32(&self.levels),
+            old_offsets: self.old_offsets,
+            last_offset: self.last_offset,
+            last_length: self.last_length,
+            last_low_offset: self.last_low_offset,
+            low_offset_repeats: self.low_offset_repeats,
+            pending_match: self.pending_match,
+            last_filter: self.last_filter,
+            filters: self.filters.len(),
+            programs: self.programs.len(),
+            history_len: retained,
+            history: crc32(&self.output[self.output.len() - retained..]),
         }
     }
 
@@ -1791,6 +2011,7 @@ impl Unpack29 {
     }
 
     pub fn decode_member(&mut self, input: &[u8], output_size: usize) -> Result<Vec<u8>> {
+        self.stream_refill = false;
         let start = self.current_pos();
         let target = start
             .checked_add(output_size)
@@ -1818,6 +2039,7 @@ impl Unpack29 {
         output_size: usize,
         out: &mut impl Write,
     ) -> Result<()> {
+        self.stream_refill = false;
         let start = self.current_pos();
         let final_target = start
             .checked_add(output_size)
@@ -1873,26 +2095,26 @@ impl Unpack29 {
         out: &mut impl Write,
     ) -> Result<()> {
         self.bits = BitReader::new();
+        self.stream_refill = true;
+        self.stream_eof = false;
+        self.stream_needs_full = false;
         let start = self.current_pos();
         let final_target = start
             .checked_add(output_size)
             .ok_or(Error::InvalidData("RAR 2.9 output size overflows"))?;
         let mut flushed = start;
         let mut target = start.saturating_add(STREAM_CHUNK).min(final_target);
-        // Read the packed stream straight into the bit reader's buffer —
-        // the reader has no mid-sequence rollback, so the whole member must
-        // be present before decoding, but there is no reason to stage it in
-        // a second Vec first (that doubled peak memory on large members).
-        let appended = self
-            .bits
-            .append_from_reader(input)
-            .map_err(|_| Error::InvalidData("RAR 2.9 input read failed"))?;
+        // Fill the window rather than the member: see STREAM_INPUT_WINDOW.
+        // The reader is still drained to EOF by `stream_finish` below, so
+        // callers that read the decoder's position out of a chained reader
+        // (the chase's consumption watermark) see what they always saw.
+        let primed = self.stream_fill(input)?;
         // Empty members in solid mode still carry their own block init bytes
         // (typically the (esc, 0) end-of-block marker + 4-byte range coder
         // flush). When output_size is zero, decode_until skips its loop body
         // and never reads tables, so do the init here so finish_member can
         // observe the block end.
-        if final_target == start && !self.in_lz_block && appended != 0 {
+        if final_target == start && !self.in_lz_block && primed != 0 {
             self.read_tables().map_err(|error| match error {
                 Error::NeedMoreInput => Error::InvalidData("RAR 2.9 bitstream is truncated"),
                 error => error,
@@ -1901,51 +2123,127 @@ impl Unpack29 {
         }
 
         while flushed < final_target {
+            self.stream_fill(input)?;
             self.decode_until(target).map_err(|error| match error {
                 Error::NeedMoreInput => Error::InvalidData("RAR 2.9 bitstream is truncated"),
                 error => error,
             })?;
-
-            let safe_end = self.safe_flush_end(flushed, target, final_target)?;
-            if safe_end <= flushed {
-                if target == final_target {
-                    return Err(Error::InvalidData(
-                        "RAR 2.9 VM filter extends beyond output",
-                    ));
-                }
-                target = self
-                    .current_pos()
-                    .saturating_add(STREAM_CHUNK)
-                    .min(final_target);
+            if self.stream_needs_full {
+                // A PPMd block: absorb the rest and decode it buffered.
+                self.stream_absorb_rest(input)?;
                 continue;
             }
 
-            if self.range_has_filters(flushed, safe_end) {
-                let decoded = self.filtered_range(flushed, safe_end, start)?;
-                out.write_all(&decoded)
-                    .map_err(|_| Error::InvalidData("RAR 2.9 output write failed"))?;
-            } else {
-                // Common case: no VM filter in this span — write straight
-                // from the retained window, no per-chunk buffer.
-                out.write_all(self.raw_range(flushed, safe_end)?)
-                    .map_err(|_| Error::InvalidData("RAR 2.9 output write failed"))?;
+            // `decode_until` may stop short of `target` when the window ran
+            // low, so flush against what was actually decoded - never
+            // against the goal.
+            let decoded = self.current_pos().min(target);
+            let stalled_on_input = decoded < target && self.stream_refill && !self.stream_eof;
+            if decoded > flushed {
+                let safe_end = self.safe_flush_end(flushed, decoded, final_target)?;
+                if safe_end > flushed {
+                    if self.range_has_filters(flushed, safe_end) {
+                        let filtered = self.filtered_range(flushed, safe_end, start)?;
+                        out.write_all(&filtered)
+                            .map_err(|_| Error::InvalidData("RAR 2.9 output write failed"))?;
+                    } else {
+                        // Common case: no VM filter in this span — write
+                        // straight from the retained window, no per-chunk
+                        // buffer.
+                        out.write_all(self.raw_range(flushed, safe_end)?)
+                            .map_err(|_| Error::InvalidData("RAR 2.9 output write failed"))?;
+                    }
+                    flushed = safe_end;
+                    self.trim_history(flushed, self.current_pos());
+                    target = self
+                        .current_pos()
+                        .saturating_add(STREAM_CHUNK)
+                        .min(final_target);
+                    continue;
+                }
             }
-            flushed = safe_end;
-            self.trim_history(flushed, self.current_pos());
+
+            if stalled_on_input {
+                // Nothing flushable yet and more input can still arrive:
+                // top the window up and decode on. Each turn either reads a
+                // byte or sets `stream_eof`, so this cannot spin.
+                continue;
+            }
+            if target == final_target {
+                return Err(Error::InvalidData(
+                    "RAR 2.9 VM filter extends beyond output",
+                ));
+            }
             target = self
                 .current_pos()
                 .saturating_add(STREAM_CHUNK)
                 .min(final_target);
         }
-        self.finish_member().map_err(|error| match error {
-            Error::NeedMoreInput => Error::InvalidData("RAR 2.9 bitstream is truncated"),
-            error => error,
-        })?;
+        self.stream_finish(input)?;
+        self.finish_member()?;
+        self.stream_refill = false;
         Ok(())
+    }
+
+    /// Top the packed-input window back up to `STREAM_INPUT_WINDOW`
+    /// unread bytes. Returns the bytes read this call.
+    fn stream_fill(&mut self, input: &mut impl Read) -> Result<usize> {
+        if !self.stream_refill || self.stream_eof {
+            return Ok(0);
+        }
+        if self.bits.available_bits() >= self.stream_window * 8 {
+            return Ok(0);
+        }
+        let (read, eof) = self
+            .bits
+            .fill_from_reader(input, self.stream_window)
+            .map_err(|_| Error::InvalidData("RAR 2.9 input read failed"))?;
+        if eof {
+            self.stream_eof = true;
+        }
+        Ok(read)
+    }
+
+    /// Absorb everything the reader still holds and stop streaming. Used
+    /// for the two shapes the window cannot serve: a PPMd block, and the
+    /// member tail `finish_member` walks (which `remaining_bits_are_zero`
+    /// reads whole). For a well-formed member the tail is a handful of
+    /// padding bytes; for a crafted one it is the packed size, which is
+    /// exactly what this path cost before.
+    fn stream_absorb_rest(&mut self, input: &mut impl Read) -> Result<()> {
+        self.bits
+            .append_from_reader(input)
+            .map_err(|_| Error::InvalidData("RAR 2.9 input read failed"))?;
+        self.stream_refill = false;
+        self.stream_eof = true;
+        self.stream_needs_full = false;
+        Ok(())
+    }
+
+    fn stream_finish(&mut self, input: &mut impl Read) -> Result<()> {
+        if !self.stream_refill || self.stream_eof {
+            return Ok(());
+        }
+        self.stream_absorb_rest(input)
+    }
+
+    /// True while a decode excursion could outrun the buffer: streaming,
+    /// more input can still arrive, and less than the margin is held.
+    fn stream_low(&self) -> bool {
+        self.stream_refill
+            && !self.stream_eof
+            && self.bits.available_bits() < self.stream_margin * 8
     }
 
     fn decode_until(&mut self, target: usize) -> Result<()> {
         while self.current_pos() < target {
+            // Never begin an excursion the window cannot cover; the caller
+            // refills and comes straight back. Placed at the loop top so a
+            // pause returned by `decode_lz` leaves here too rather than
+            // re-entering it on the same empty buffer.
+            if self.stream_low() {
+                return Ok(());
+            }
             self.drain_pending_match(target)?;
             if self.current_pos() >= target {
                 break;
@@ -1956,7 +2254,17 @@ impl Unpack29 {
             }
             match self.block_mode {
                 BlockMode::Lz => self.decode_lz(target)?,
-                BlockMode::Ppmd => self.decode_ppmd(target)?,
+                BlockMode::Ppmd => {
+                    // Not streamable - see STREAM_INPUT_MARGIN. The test is
+                    // here rather than after `read_tables` because a solid
+                    // member can OPEN inside a PPMd block the previous one
+                    // started.
+                    if self.stream_refill {
+                        self.stream_needs_full = true;
+                        return Ok(());
+                    }
+                    self.decode_ppmd(target)?
+                }
             }
         }
         Ok(())
@@ -2073,6 +2381,13 @@ impl Unpack29 {
             }
             if self.current_pos() >= output_size {
                 break;
+            }
+            // The burst above stops on a failed peek, which consumes
+            // nothing, so it may leave the window all but empty. This is
+            // the boundary that matters: everything below can consume up to
+            // `read_vm_code`'s 64 KiB and has no way back.
+            if self.stream_low() {
+                return Ok(());
             }
             let symbol = self.main.decode(&mut self.bits)?;
             match symbol {
@@ -2369,6 +2684,15 @@ impl Unpack29 {
         if first_byte & 0x20 != 0 {
             block_size = vm.read_encoded_u32()? as usize;
         }
+        // nzbfast: refuse the declaration itself - see MAX_VM_FILTER_HOLD.
+        // Checked here rather than at use, because the block is held from
+        // the moment the filter is RECORDED, and a reuse of a stored
+        // program (the `else` arm below) re-declares it just as freely.
+        if block_size > MAX_VM_FILTER_HOLD {
+            return Err(Error::InvalidData(
+                "RAR 2.9 VM filter block is too large to hold",
+            ));
+        }
 
         let mut regs = [0u32; 7];
         regs[3] = 0x3c000;
@@ -2447,7 +2771,16 @@ impl Unpack29 {
     fn range_has_filters(&self, start: usize, end: usize) -> bool {
         self.filters
             .iter()
-            .any(|filter| filter.start >= start && filter.start + filter.size <= end)
+            // nzbfast: `saturating_add`, as in `filtered_range` and
+            // `trim_history`. `block_start` is `current_pos()` plus a
+            // wire u32 and `block_size` is a wire u32, so on a 32-bit
+            // target the sum overflows - and the BUFFERED decode path
+            // reaches here without the checked `safe_flush_end` that
+            // covers the streaming one. Saturating is also the right
+            // answer: a filter whose end runs past the address space
+            // cannot be inside any range, which is what `<= end` then
+            // says.
+            .any(|filter| filter.start >= start && filter.start.saturating_add(filter.size) <= end)
     }
 
     fn filtered_range(&mut self, start: usize, end: usize, member_start: usize) -> Result<Vec<u8>> {
@@ -2458,7 +2791,9 @@ impl Unpack29 {
             .iter()
             .enumerate()
             .filter_map(|(index, filter)| {
-                (filter.start >= start && filter.start + filter.size <= end).then_some(index)
+                // Saturating for the reason at `range_has_filters`.
+                (filter.start >= start && filter.start.saturating_add(filter.size) <= end)
+                    .then_some(index)
             })
             .collect();
         for filter_index in filters {
@@ -2480,7 +2815,7 @@ impl Unpack29 {
             }
             out.extend_from_slice(self.raw_range(pos, filter_start)?);
             let mut block = self
-                .raw_range(filter_start, filter_start + filter_size)?
+                .raw_range(filter_start, filter_start.saturating_add(filter_size))?
                 .to_vec();
             let file_offset = filter_start
                 .checked_sub(member_start)
@@ -2512,7 +2847,7 @@ impl Unpack29 {
                 }
             }
             out.extend_from_slice(&block);
-            pos = filter_start + filter_size;
+            pos = filter_start.saturating_add(filter_size);
         }
         out.extend_from_slice(self.raw_range(pos, end)?);
         Ok(out)
@@ -2560,6 +2895,27 @@ impl Unpack29 {
                 .last()
                 .ok_or(Error::InvalidData("RAR 2.9 match distance is out of range"))?;
             self.output.resize(self.output.len() + copy_len, byte);
+            return Ok(());
+        }
+
+        // Short matches are most matches, and `extend_from_within` pays a
+        // memmove libcall and a capacity check per call for a few bytes of
+        // copy. At a distance of at least 16 every 16-byte stride reads bytes
+        // that are already final, so the window grows by a fixed 80 bytes (a
+        // constant-size store the compiler inlines), the match is copied in
+        // 16-byte strides, and the slack past it is dropped - the shape of
+        // rar50's `flat_stride_copy`. (nzbfast-local change, 14 Sep 2026;
+        // see VENDORING.md.)
+        if copy_len <= 64 && offset >= 16 {
+            let start = self.output.len();
+            self.output.extend_from_slice(&[0u8; 80]);
+            let mut done = 0;
+            while done < copy_len {
+                let src = start + done - offset;
+                self.output.copy_within(src..src + 16, start + done);
+                done += 16;
+            }
+            self.output.truncate(start + copy_len);
             return Ok(());
         }
 
@@ -2654,7 +3010,9 @@ impl Unpack29 {
         self.output.drain(..drain);
         self.base_offset = keep_from;
         self.filters
-            .retain(|filter| filter.start + filter.size > self.base_offset);
+            // Saturating for the reason at `range_has_filters`; a
+            // filter whose end overflows is certainly past the base.
+            .retain(|filter| filter.start.saturating_add(filter.size) > self.base_offset);
     }
 }
 
@@ -3010,6 +3368,14 @@ struct BitReader {
     byte_pos: usize,
     cache: u64,
     cache_bits: u32,
+    /// High-water mark of `input.len()`, which is what the streaming
+    /// bound is asserted against.
+    peak_input: usize,
+    /// Bits `compact()` has dropped off the front. `position()` is
+    /// relative to the buffer, which compaction moves, so this is what
+    /// makes an absolute consumed-bit count available - and that count is
+    /// the state check the streaming path is held to.
+    drained_bits: usize,
 }
 
 impl BitReader {
@@ -3019,6 +3385,8 @@ impl BitReader {
             byte_pos: 0,
             cache: 0,
             cache_bits: 0,
+            peak_input: 0,
+            drained_bits: 0,
         }
     }
 
@@ -3028,7 +3396,15 @@ impl BitReader {
             byte_pos: 0,
             cache: 0,
             cache_bits: 0,
+            peak_input: input.len(),
+            drained_bits: 0,
         }
+    }
+
+    /// Bits consumed since the reader was created, across compactions.
+    #[cfg(test)]
+    fn absolute_position(&self) -> usize {
+        self.drained_bits + self.position()
     }
 
     /// Absolute position in bits from the start of the buffer.
@@ -3065,13 +3441,55 @@ impl BitReader {
     fn append(&mut self, input: &[u8]) {
         self.compact();
         self.input.extend_from_slice(input);
+        self.peak_input = self.peak_input.max(self.input.len());
     }
 
     /// Append the reader's remaining bytes directly into the buffer,
     /// avoiding an intermediate staging Vec. Returns the byte count read.
     fn append_from_reader(&mut self, input: &mut impl std::io::Read) -> std::io::Result<usize> {
         self.compact();
-        input.read_to_end(&mut self.input)
+        let read = input.read_to_end(&mut self.input)?;
+        self.peak_input = self.peak_input.max(self.input.len());
+        Ok(read)
+    }
+
+    /// Drop what has been consumed, then read until `want` unread bytes are
+    /// buffered or the reader answers 0. Returns `(bytes read, hit EOF)`.
+    ///
+    /// This is the whole memory story: the buffer holds the window and
+    /// nothing else, because `compact()` runs first every time.
+    fn fill_from_reader(
+        &mut self,
+        input: &mut impl std::io::Read,
+        want: usize,
+    ) -> std::io::Result<(usize, bool)> {
+        self.compact();
+        let mut read = 0usize;
+        let mut eof = false;
+        while self.input.len() - self.byte_pos < want {
+            let need = want - (self.input.len() - self.byte_pos);
+            let at = self.input.len();
+            self.input.resize(at + need, 0);
+            let got = match input.read(&mut self.input[at..]) {
+                Ok(got) => got,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    self.input.truncate(at);
+                    continue;
+                }
+                Err(error) => {
+                    self.input.truncate(at);
+                    return Err(error);
+                }
+            };
+            self.input.truncate(at + got);
+            if got == 0 {
+                eof = true;
+                break;
+            }
+            read += got;
+        }
+        self.peak_input = self.peak_input.max(self.input.len());
+        Ok((read, eof))
     }
 
     fn compact(&mut self) {
@@ -3081,6 +3499,7 @@ impl BitReader {
         }
         self.input.drain(..bytes);
         self.byte_pos -= bytes;
+        self.drained_bits += bytes * 8;
     }
 
     fn align_byte(&mut self) {
@@ -3442,16 +3861,154 @@ mod tests {
         }
         incremental.append(&data[7..]);
         let mut step = 1u8;
-        loop {
-            match reference.read_bits(step) {
-                Ok(expected) => assert_eq!(incremental.read_bits(step).unwrap(), expected),
-                Err(_) => break,
-            }
+        while let Ok(expected) = reference.read_bits(step) {
+            assert_eq!(incremental.read_bits(step).unwrap(), expected);
             step = step % 24 + 1;
         }
         // Positions are buffer-relative and append() compacts, so compare
         // exhaustion instead: both readers must fail the next read.
         assert!(incremental.read_bits(step).is_err());
+    }
+
+    // SPEC C Part 3.2 / Part 7 item 1. The RAR 3 x86 filter computes
+    // `o = F + p + 1` with no reduction, where `F` is the block's
+    // member-relative start and `p` the position of the trigger byte.
+    // Encode and decode are exact inverses only while `o <= 2^31`; past
+    // that the pair is not invertible for every operand value, and the
+    // transform must not be "repaired", because its decode side has to
+    // match what other RAR 3 readers do. So the writer must not plan a
+    // block that can reach the region at all.
+    //
+    // The largest `o` a block `[s, e)` can produce is `e - 4`: the
+    // trigger byte sits at most at `e - 5` and `o = F + p + 1`.
+    const TWO_GIB: usize = 1 << 31;
+
+    #[test]
+    fn the_block_the_planner_gives_up_is_the_one_that_does_not_round_trip() {
+        // Why the clip is where it is, stated at the writer's own entry
+        // point. 128 KiB divides 2 GiB exactly, so before the guard the
+        // whole-member planner put a block start on 0x8000_0000 itself.
+        let first_unsafe_start = TWO_GIB;
+        assert_eq!(first_unsafe_start % MAX_VM_FILTER_BLOCK_SIZE, 0);
+
+        let file_offset = u32::try_from(first_unsafe_start).unwrap();
+        let original = [0xe8u8, 0xff, 0xff, 0xff, 0x00];
+
+        let mut encoded = original.to_vec();
+        filters::encode_in_place(
+            FilterOp::E8,
+            &mut encoded,
+            file_offset,
+            rar29_delta_messages(),
+        )
+        .unwrap();
+        assert_eq!(
+            encoded, original,
+            "neither encode arm holds, so it is a no-op"
+        );
+
+        let mut decoded = encoded.clone();
+        filters::decode_in_place(
+            FilterOp::E8,
+            &mut decoded,
+            file_offset,
+            rar29_delta_messages(),
+        )
+        .unwrap();
+        assert_ne!(
+            decoded, original,
+            "a record covering this block would not round trip"
+        );
+    }
+
+    #[test]
+    fn filtered_member_refuses_an_x86_range_past_the_boundary() {
+        // Defence in depth: `split_large_filter` is the only way in and
+        // clips, so this arm answers a writer bug, not caller input. The
+        // buffer is a stub - the check runs before it is read.
+        let member = vec![0u8; 64];
+        let result = super::filtered_member(
+            &member,
+            &Rar29FilterSpec::range(Rar29FilterKind::E8, 0..TWO_GIB + 8),
+        );
+        let err = match result {
+            Ok(_) => panic!("an x86 range past the boundary must be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, Error::InvalidData(message) if message == RAR3_X86_PAST_BOUNDARY),
+            "the boundary arm answers, not the length arm"
+        );
+    }
+
+    #[test]
+    fn split_large_filter_clips_x86_coverage_at_the_two_gib_boundary() {
+        // A member big enough that a whole-member x86 filter would
+        // otherwise plan blocks on both sides of the boundary. The
+        // 128 KiB chunking divides 2 GiB exactly, so the unguarded
+        // planner put a block start on 0x8000_0000 itself - the `F` of
+        // the non-inverse vector above.
+        let member_len = TWO_GIB + 4 * 1024 * 1024;
+        for kind in [Rar29FilterKind::E8, Rar29FilterKind::E8E9] {
+            let filters = split_large_filter(member_len, Rar29FilterSpec::whole(kind)).unwrap();
+            let last = filters.last().expect("coverage below the boundary is kept");
+            let last_end = last.range.clone().unwrap().end;
+            assert!(
+                last_end <= TWO_GIB + 4,
+                "{kind:?} planned a block ending at {last_end}, past the inverse boundary"
+            );
+            for filter in &filters {
+                let range = filter.range.clone().unwrap();
+                assert!(
+                    range.end.saturating_sub(4) <= TWO_GIB,
+                    "{kind:?} block {range:?} can reach an operand offset past 2^31"
+                );
+            }
+            // The safe side is still covered in full: the planner only
+            // gives up the tail it cannot encode reversibly.
+            assert_eq!(filters.first().unwrap().range.clone().unwrap().start, 0);
+            assert!(last_end >= TWO_GIB - MAX_VM_FILTER_BLOCK_SIZE);
+        }
+    }
+
+    #[test]
+    fn split_large_filter_drops_an_x86_range_that_lies_wholly_past_two_gib() {
+        let member_len = TWO_GIB + 4 * 1024 * 1024;
+        let filters = split_large_filter(
+            member_len,
+            Rar29FilterSpec::range(Rar29FilterKind::E8, TWO_GIB + 16..member_len),
+        )
+        .unwrap();
+        assert!(
+            filters.is_empty(),
+            "nothing in this range can be filtered reversibly, so no record is emitted"
+        );
+    }
+
+    #[test]
+    fn split_large_filter_leaves_non_x86_kinds_and_small_members_alone() {
+        // The clip is an x86 writer policy, not a size rule: a member
+        // under the boundary is planned exactly as before, and the
+        // kinds that do not take a file offset are never clipped.
+        let filters =
+            split_large_filter(300 * 1024, Rar29FilterSpec::whole(Rar29FilterKind::E8)).unwrap();
+        assert_eq!(filters.len(), 3);
+        assert_eq!(
+            filters.last().unwrap().range.clone().unwrap().end,
+            300 * 1024
+        );
+
+        let member_len = TWO_GIB + 4 * 1024 * 1024;
+        let delta = split_large_filter(
+            member_len,
+            Rar29FilterSpec::whole(Rar29FilterKind::Delta { channels: 3 }),
+        )
+        .unwrap();
+        assert_eq!(
+            delta.last().unwrap().range.clone().unwrap().end,
+            member_len,
+            "the delta filter reads no file offset, so the boundary does not apply"
+        );
     }
 
     #[test]
@@ -3493,16 +4050,19 @@ mod tests {
 
     use super::{
         apply_standard_filter, audio_encode, best_match, encode_ppmd_tokens,
-        encode_table_level_tokens, encode_tokens, encoded_filter_records, insert_match_position,
-        itanium_decode, itanium_encode, should_lazy_emit_literal, split_large_filter,
+        encode_table_level_tokens, encode_tokens, encoded_filter_records, filters,
+        insert_match_position, itanium_decode, itanium_encode, rar29_delta_messages,
+        should_lazy_emit_literal, split_large_filter,
         unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd,
         unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter, BitReader, BitWriter,
-        EncodeOptions, EncodeToken, EncoderMatchState, Error, Huffman, LevelToken,
+        EncodeOptions, EncodeToken, EncoderMatchState, Error, FilterOp, Huffman, LevelToken,
         OwnedVmFilterRecord, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result,
-        StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram, VmProgramKind, MAIN_COUNT,
+        BlockMode, Rar29State, StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram,
+        VmProgramKind, MAIN_COUNT,
         MATCH_HASH_BUCKETS, MAX_MATCH_CANDIDATES, MAX_VM_AUDIO_FILTER_BLOCK_SIZE,
         MAX_VM_DELTA_FILTER_BLOCK_SIZE, MAX_VM_FILTER_BLOCK_SIZE, RAR3_AUDIO_FILTER_BYTECODE,
-        TABLE_COUNT,
+        STREAM_INPUT_MARGIN, STREAM_INPUT_WINDOW,
+        RAR3_DELTA_FILTER_BYTECODE, RAR3_RGB_FILTER_BYTECODE, RAR3_X86_PAST_BOUNDARY, TABLE_COUNT,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -4003,6 +4563,35 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         }
     }
 
+    /// The 16-byte stride path (distance 16 and up, length 64 and down)
+    /// against the byte loop, at every stride edge and every overlap the
+    /// strides can meet, with window content after the match so a stride
+    /// that scribbled past its end would show.
+    #[test]
+    fn copy_match_short_stride_path_matches_bytewise_oracle() {
+        for distance in [16usize, 17, 31, 32, 33, 47, 48, 63, 64, 65, 1000] {
+            for length in 2..=64usize {
+                let seed: Vec<u8> = (0..distance + 5)
+                    .map(|index| ((index * 53 + 7) % 251) as u8)
+                    .collect();
+                let mut expected = seed.clone();
+                for _ in 0..length {
+                    let byte = expected[expected.len() - distance];
+                    expected.push(byte);
+                }
+                expected.push(0xEE);
+
+                let mut decoder = Unpack29::new();
+                decoder.output = seed.clone();
+                decoder
+                    .copy_match(length, distance, seed.len() + length)
+                    .unwrap();
+                decoder.output.push(0xEE);
+                assert_eq!(decoder.output, expected, "distance={distance} length={length}");
+            }
+        }
+    }
+
     #[test]
     fn copy_match_period_doubling_preserves_pending_remainder() {
         let mut decoder = Unpack29::new();
@@ -4353,6 +4942,67 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     }
 
     #[test]
+    fn delta_filter_bytecode_matches_builtin_transform() {
+        for channels in [1usize, 3, 4] {
+            let input: Vec<u8> = (0..4099)
+                .map(|index| (index * 5 + index / channels + index / 131) as u8)
+                .collect();
+            let mut encoded = input.clone();
+            super::filters::encode_in_place(
+                super::FilterOp::Delta { channels },
+                &mut encoded,
+                0,
+                super::rar29_delta_messages(),
+            )
+            .unwrap();
+            assert_ne!(encoded, input);
+            let mut native = encoded.clone();
+            let regs = [channels as u32, 0, 0, 0, 0, 0, 0];
+            apply_standard_filter(StandardFilter::Delta, &mut native, 0, &regs).unwrap();
+            let result = Program::parse(RAR3_DELTA_FILTER_BYTECODE)
+                .unwrap()
+                .execute(super::rarvm::Invocation {
+                    input: &encoded,
+                    regs,
+                    global_data: &[],
+                    file_offset: 0,
+                    exec_count: 0,
+                })
+                .unwrap();
+
+            assert_eq!(native, input, "channels={channels}");
+            assert_eq!(result.output, input, "channels={channels}");
+        }
+    }
+
+    #[test]
+    fn rgb_filter_bytecode_matches_builtin_transform() {
+        for (width, pos_r) in [(3usize, 0usize), (12, 1), (30, 2)] {
+            let input: Vec<u8> = (0..3000)
+                .map(|index| (index * 3 + index / width + index / 97) as u8)
+                .collect();
+            let encoded = super::rgb_encode(&input, width, pos_r).unwrap();
+            assert_ne!(encoded, input);
+            let mut native = encoded.clone();
+            let regs = [width as u32 + 3, pos_r as u32, 0, 0, 0, 0, 0];
+            apply_standard_filter(StandardFilter::Rgb, &mut native, 0, &regs).unwrap();
+            let result = Program::parse(RAR3_RGB_FILTER_BYTECODE)
+                .unwrap()
+                .execute(super::rarvm::Invocation {
+                    input: &encoded,
+                    regs,
+                    global_data: &[],
+                    file_offset: 0,
+                    exec_count: 0,
+                })
+                .unwrap();
+
+            assert_eq!(native, input, "width={width} pos_r={pos_r}");
+            assert_eq!(result.output, input, "width={width} pos_r={pos_r}");
+        }
+    }
+
+    #[test]
     fn large_audio_filters_are_split_into_rarvm_safe_blocks() {
         let filters = split_large_filter(
             MAX_VM_FILTER_BLOCK_SIZE * 2 + 123,
@@ -4502,6 +5152,364 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             decoder.decode_member(&second_packed, second.len()).unwrap(),
             second
         );
+    }
+
+    // --- mid-stream refill (item 10 of the 16 Sep 2026 sweep) ---------
+    //
+    // `decode_member_from_reader` used to drain the whole packed member
+    // into the bit reader before decoding a byte. These hold the refill
+    // that replaced it to the buffered path it has to be identical to,
+    // in OUTPUT and in carried STATE, and hold its retained input to the
+    // window.
+
+    /// A reader that hands out at most `chunk` bytes per call, so the
+    /// refill never gets what it asked for in one go.
+    struct ChunkyReader<'a> {
+        input: &'a [u8],
+        chunk: usize,
+    }
+
+    impl std::io::Read for ChunkyReader<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let len = self.input.len().min(out.len()).min(self.chunk);
+            out[..len].copy_from_slice(&self.input[..len]);
+            self.input = &self.input[len..];
+            Ok(len)
+        }
+    }
+
+    /// Mixed literal/match content that does not collapse under LZ, so the
+    /// packed member is big enough to cross a refill window several times.
+    fn refill_corpus(bytes: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(bytes + 8192);
+        let mut x = 0x1234_5678u32;
+        while data.len() < bytes {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            data.extend_from_slice(&x.to_le_bytes());
+            if x % 97 == 0 {
+                let end = data.len();
+                let at = end.saturating_sub(4096);
+                data.extend_from_within(at..end);
+            }
+        }
+        data
+    }
+
+    fn decode_buffered(packed: &[u8], size: usize) -> (Vec<u8>, Rar29State) {
+        let mut decoder = Unpack29::new();
+        let mut out = Vec::new();
+        decoder.decode_member_to(packed, size, &mut out).unwrap();
+        let state = decoder.state_digest();
+        (out, state)
+    }
+
+    fn decode_streamed(
+        packed: &[u8],
+        size: usize,
+        bounds: Option<(usize, usize)>,
+        chunk: usize,
+    ) -> (Vec<u8>, Rar29State, usize) {
+        let mut decoder = Unpack29::new();
+        if let Some((window, margin)) = bounds {
+            decoder.set_stream_bounds(window, margin);
+        }
+        let mut reader = ChunkyReader {
+            input: packed,
+            chunk,
+        };
+        let mut out = Vec::new();
+        decoder
+            .decode_member_from_reader(&mut reader, size, &mut out)
+            .unwrap();
+        assert!(
+            decoder.filters.is_empty(),
+            "the shrunken margin is only sound for a member with no VM filter"
+        );
+        let state = decoder.state_digest();
+        let peak = decoder.peak_packed_input();
+        (out, state, peak)
+    }
+
+    #[test]
+    fn streaming_refill_matches_the_buffered_decode_in_bytes_and_in_state() {
+        let data = refill_corpus(2 * 1024 * 1024);
+        let packed = Unpack29Encoder::new().encode_member(&data).unwrap();
+        // Many refills: a 32 KiB window over a ~240 KiB packed member.
+        let window = 32 * 1024;
+        let margin = 8 * 1024;
+        assert!(packed.len() > 6 * window, "packed {}", packed.len());
+
+        let (buffered, buffered_state) = decode_buffered(&packed, data.len());
+        let (streamed, streamed_state, peak) =
+            decode_streamed(&packed, data.len(), Some((window, margin)), 7000);
+
+        assert_eq!(buffered, data);
+        assert_eq!(streamed, buffered);
+        assert_eq!(streamed_state, buffered_state);
+        assert!(
+            peak <= window + margin + 4096,
+            "retained {peak} packed bytes against a {window} byte window"
+        );
+    }
+
+    #[test]
+    fn streaming_refill_holds_the_window_at_the_shipped_bounds() {
+        // The knobbed tests above prove the boundary; this one proves the
+        // SHIPPED constants bound a member whose packed size is past them,
+        // with no knob in the way.
+        let data = refill_corpus(12 * 1024 * 1024);
+        let packed = Unpack29Encoder::new().encode_member(&data).unwrap();
+        assert!(
+            packed.len() > STREAM_INPUT_WINDOW + STREAM_INPUT_MARGIN,
+            "packed {} does not cross the shipped window",
+            packed.len()
+        );
+
+        let (buffered, buffered_state) = decode_buffered(&packed, data.len());
+        let (streamed, streamed_state, peak) =
+            decode_streamed(&packed, data.len(), None, usize::MAX);
+
+        assert_eq!(streamed, buffered);
+        assert_eq!(streamed_state, buffered_state);
+        assert!(
+            peak <= STREAM_INPUT_WINDOW + STREAM_INPUT_MARGIN + 4096,
+            "retained {peak} of {} packed bytes",
+            packed.len()
+        );
+    }
+
+    #[test]
+    fn the_state_digest_sees_a_decoder_that_stopped_somewhere_else() {
+        // A negative control for the check above: a digest that cannot
+        // tell two states apart proves nothing when it matches. Same
+        // output prefix, different carried state.
+        let data = refill_corpus(256 * 1024);
+        let packed = Unpack29Encoder::new().encode_member(&data).unwrap();
+        let (_, whole) = decode_buffered(&packed, data.len());
+
+        let mut decoder = Unpack29::new();
+        let mut out = Vec::new();
+        decoder
+            .decode_member_to(&packed, data.len(), &mut out)
+            .unwrap();
+        let same = decoder.state_digest();
+        assert_eq!(same, whole);
+
+        let mut partial = Unpack29::new();
+        let mut short = Vec::new();
+        partial
+            .decode_member_to(&packed, data.len() - 4096, &mut short)
+            .unwrap_err();
+        let stopped = partial.state_digest();
+        assert_ne!(stopped, whole);
+        assert_ne!(stopped.consumed_bits, whole.consumed_bits);
+        assert_ne!(stopped.history, whole.history);
+    }
+
+    #[test]
+    fn streaming_refill_carries_solid_history_into_the_next_member() {
+        // The state that a refill boundary could plausibly corrupt is the
+        // state a LATER member reads. Decode two solid members both ways
+        // and compare after each.
+        let first = refill_corpus(1024 * 1024);
+        let mut second = first[4096..8192].repeat(48);
+        second.extend_from_slice(&refill_corpus(64 * 1024));
+        let mut encoder = Unpack29Encoder::new();
+        let first_packed = encoder.encode_member(&first).unwrap();
+        let second_packed = encoder.encode_member(&second).unwrap();
+
+        let mut buffered = Unpack29::new();
+        let mut buffered_out = Vec::new();
+        buffered
+            .decode_member_to(&first_packed, first.len(), &mut buffered_out)
+            .unwrap();
+        let buffered_between = buffered.state_digest();
+        buffered
+            .decode_member_to(&second_packed, second.len(), &mut buffered_out)
+            .unwrap();
+
+        let mut streamed = Unpack29::new();
+        streamed.set_stream_bounds(32 * 1024, 8 * 1024);
+        let mut streamed_out = Vec::new();
+        streamed
+            .decode_member_from_reader(
+                &mut ChunkyReader {
+                    input: &first_packed,
+                    chunk: 5000,
+                },
+                first.len(),
+                &mut streamed_out,
+            )
+            .unwrap();
+        assert_eq!(streamed.state_digest(), buffered_between);
+        streamed.set_stream_bounds(32 * 1024, 8 * 1024);
+        streamed
+            .decode_member_from_reader(
+                &mut ChunkyReader {
+                    input: &second_packed,
+                    chunk: 5000,
+                },
+                second.len(),
+                &mut streamed_out,
+            )
+            .unwrap();
+
+        let mut whole = first.clone();
+        whole.extend_from_slice(&second);
+        assert_eq!(buffered_out, whole);
+        assert_eq!(streamed_out, buffered_out);
+        assert_eq!(streamed.state_digest(), buffered.state_digest());
+        assert!(streamed.filters.is_empty());
+    }
+
+    #[test]
+    fn streaming_refill_decodes_a_filtered_member_at_the_shipped_margin() {
+        // A VM filter is the one excursion the margin is sized for
+        // (`read_vm_code` reads its length before `MAX_VM_CODE_SIZE` is
+        // checked), and `filtered_range` is the one flush the streaming
+        // loop reaches differently. No knob here: the shipped margin is
+        // the claim under test.
+        let data = refill_corpus(18 * 1024 * 1024);
+        let packed = encode_with_filter(&data, Rar29FilterKind::E8).unwrap();
+        assert!(
+            packed.len() > STREAM_INPUT_WINDOW,
+            "packed {} does not cross the shipped window",
+            packed.len()
+        );
+
+        let mut buffered = Unpack29::new();
+        let mut buffered_out = Vec::new();
+        buffered
+            .decode_member_to(&packed, data.len(), &mut buffered_out)
+            .unwrap();
+
+        let mut streamed = Unpack29::new();
+        let mut streamed_out = Vec::new();
+        streamed
+            .decode_member_from_reader(
+                &mut ChunkyReader {
+                    input: &packed,
+                    chunk: 100_000,
+                },
+                data.len(),
+                &mut streamed_out,
+            )
+            .unwrap();
+
+        assert_eq!(streamed_out, buffered_out);
+        assert_eq!(streamed.state_digest(), buffered.state_digest());
+        assert!(
+            streamed.peak_packed_input()
+                <= STREAM_INPUT_WINDOW + STREAM_INPUT_MARGIN + 4096,
+            "retained {} of {} packed bytes",
+            streamed.peak_packed_input(),
+            packed.len()
+        );
+    }
+
+    #[test]
+    fn a_ppmd_block_falls_back_to_buffering_and_decodes_identically() {
+        let mut input = b"rar29 ppmd literal text payload alpha beta gamma\n".repeat(64);
+        input.extend_from_slice(&[2, 2, 2, b'e', b's', b'c']);
+        let packed = unpack29_encode_ppmd_literals(&input).unwrap();
+
+        let mut buffered = Unpack29::new();
+        let mut buffered_out = Vec::new();
+        buffered
+            .decode_member_to(&packed, input.len(), &mut buffered_out)
+            .unwrap();
+
+        let mut streamed = Unpack29::new();
+        let mut streamed_out = Vec::new();
+        streamed
+            .decode_member_from_reader(
+                &mut ChunkyReader {
+                    input: &packed,
+                    chunk: 3,
+                },
+                input.len(),
+                &mut streamed_out,
+            )
+            .unwrap();
+
+        assert_eq!(buffered_out, input);
+        assert_eq!(streamed_out, buffered_out);
+        assert_eq!(streamed.state_digest(), buffered.state_digest());
+        assert_eq!(streamed.block_mode, BlockMode::Ppmd);
+        // The fallback is what makes it correct: streaming is off by the
+        // end, because PPMd cannot be paused at a provable boundary.
+        assert!(!streamed.stream_refill);
+    }
+
+    #[test]
+    fn a_truncated_streamed_member_is_refused_rather_than_padded() {
+        let data = refill_corpus(512 * 1024);
+        let packed = Unpack29Encoder::new().encode_member(&data).unwrap();
+        let cut = &packed[..packed.len() / 2];
+
+        let mut decoder = Unpack29::new();
+        decoder.set_stream_bounds(32 * 1024, 8 * 1024);
+        let mut out = Vec::new();
+        let error = decoder
+            .decode_member_from_reader(
+                &mut ChunkyReader {
+                    input: cut,
+                    chunk: 1000,
+                },
+                data.len(),
+                &mut out,
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            Error::InvalidData("RAR 2.9 bitstream is truncated"),
+            "a short reader must read as truncation, never as EOF padding"
+        );
+    }
+
+    #[test]
+    fn the_streamed_reader_is_still_drained_to_eof() {
+        // The chase publishes its consumption watermark off this reader,
+        // so the member must leave it where `read_to_end` used to.
+        struct CountingReader<'a> {
+            input: &'a [u8],
+            eof_reads: usize,
+        }
+
+        impl std::io::Read for CountingReader<'_> {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if self.input.is_empty() {
+                    self.eof_reads += 1;
+                    return Ok(0);
+                }
+                let len = self.input.len().min(out.len()).min(1024);
+                out[..len].copy_from_slice(&self.input[..len]);
+                self.input = &self.input[len..];
+                Ok(len)
+            }
+        }
+
+        let data = refill_corpus(512 * 1024);
+        let mut packed = Unpack29Encoder::new().encode_member(&data).unwrap();
+        // Trailing filler past the member, exactly what read_to_end used
+        // to swallow.
+        packed.extend_from_slice(&[0u8; 8192]);
+
+        let mut decoder = Unpack29::new();
+        decoder.set_stream_bounds(32 * 1024, 8 * 1024);
+        let mut reader = CountingReader {
+            input: &packed,
+            eof_reads: 0,
+        };
+        let mut out = Vec::new();
+        decoder
+            .decode_member_from_reader(&mut reader, data.len(), &mut out)
+            .unwrap();
+
+        assert_eq!(out, data);
+        assert!(reader.input.is_empty(), "the reader was left unread");
+        assert!(reader.eof_reads >= 1);
     }
 
     #[test]
@@ -4689,6 +5697,61 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         );
     }
 
+    /// nzbfast: a RAR 3 VM filter block is declared as a bare u32 on the
+    /// wire, and a filter HOLDS output: `safe_flush_end` will not flush
+    /// past a filter's start until its end is decoded, and `trim_history`
+    /// keeps `keep_from <= flushed`, so nothing drains either. A member
+    /// declaring `block_start = 0` and a 2 GiB block grew `self.output`
+    /// to the whole member's output, and `filtered_range` then copied
+    /// that block AGAIN for the VM: about 4 GiB of peak from a few MB of
+    /// packed input. RAR5 refuses the equivalent in `add_filter`; RAR3
+    /// had no bail and no buffered fallback.
+    ///
+    /// NEGATIVE CONTROL, run: remove the `MAX_VM_FILTER_HOLD` check from
+    /// `parse_vm_code` and this test fails with `Ok(())`.
+    #[test]
+    fn vm_filter_block_size_is_capped_before_it_can_hold_the_member() {
+        let oversized = |declared: u32| {
+            let mut decoder = Unpack29::new();
+            let mut data = BitWriter::default();
+            data.write_encoded_u32(0); // program index (0 = a fresh one)
+            data.write_encoded_u32(0); // block start
+            data.write_encoded_u32(declared); // block size
+            // 0x80: new program; 0x20: the block size is declared here.
+            decoder.parse_vm_code(0x80 | 0x20, data.finish())
+        };
+
+        assert_eq!(
+            oversized((super::MAX_VM_FILTER_HOLD + 1) as u32),
+            Err(Error::InvalidData(
+                "RAR 2.9 VM filter block is too large to hold"
+            ))
+        );
+        assert_eq!(
+            oversized(u32::MAX),
+            Err(Error::InvalidData(
+                "RAR 2.9 VM filter block is too large to hold"
+            ))
+        );
+        // A block at the ceiling is NOT refused for its size - it runs on
+        // into the code-size parse and fails there for want of input, so
+        // the cap is what it says and not a lower one.
+        assert_ne!(
+            oversized(super::MAX_VM_FILTER_HOLD as u32),
+            Err(Error::InvalidData(
+                "RAR 2.9 VM filter block is too large to hold"
+            ))
+        );
+        // And a real filter block, which lives inside RARVM memory
+        // (0x3c000), is nowhere near it.
+        assert_ne!(
+            oversized(0x3c000),
+            Err(Error::InvalidData(
+                "RAR 2.9 VM filter block is too large to hold"
+            ))
+        );
+    }
+
     #[test]
     fn vm_code_size_is_capped_before_allocation() {
         let mut decoder = Unpack29::new();
@@ -4764,3 +5827,4 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         "Hello, RAR 3.x fixture world.\n".repeat(80).into_bytes()
     }
 }
+

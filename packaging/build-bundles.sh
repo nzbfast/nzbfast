@@ -46,8 +46,9 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$DIST"
 
 echo "== 1. Build binaries =="
-cargo build --release --target aarch64-apple-darwin -p nzbfast
-cargo build --release --target x86_64-apple-darwin  -p nzbfast
+# 11.0: the mac CLI floor (research/MAC-DEPLOYMENT-TARGET-2026-09-15.md).
+MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --target aarch64-apple-darwin -p nzbfast
+MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --target x86_64-apple-darwin  -p nzbfast
 # The static link-arg lives in .cargo/config.toml alongside the
 # --remap-path-prefix. Do NOT reintroduce CARGO_TARGET_*_RUSTFLAGS here:
 # the env var REPLACES the config flags rather than adding to them, so it

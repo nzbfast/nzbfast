@@ -881,7 +881,14 @@ mod app {
             f.read_to_end(&mut body)
                 .map_err(|e| format!("read {}: {e}", path.display()))?;
         }
-        let head = body.len() - size as usize;
+        // `saturating_sub`: `size` is the length the metadata reported
+        // BEFORE the read, and an NZB a browser is still writing can be
+        // shorter by the time it is read. A plain subtraction underflows
+        // there and panics the tray's message loop over a file that is
+        // merely early. Saturating means the delimiter scan below covers
+        // the WHOLE body rather than the payload alone, which is the
+        // safe direction: it can only refuse more, never less.
+        let head = body.len().saturating_sub(size as usize);
         if crate::probe_body::find_bytes(&body[head..], format!("--{boundary}").as_bytes())
             .is_some()
         {

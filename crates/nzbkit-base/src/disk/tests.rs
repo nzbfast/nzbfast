@@ -2565,3 +2565,63 @@ fn release_hands_back_the_handle_even_when_the_sync_fails() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// [`FileWriter::out_name_rel`] memoizes the out_dir-relative CREATION
+/// name, and every way of getting a stale or wrong answer out of that
+/// memo is checked here rather than assumed - a wrong answer does not
+/// fail anything loudly, it silently mis-maps a seek
+/// (research/FILEWRITER-RELNAME-CACHE-2026-09-16.md).
+///
+/// Three arms, each of which fails on a different mis-implementation:
+/// caching the BARE name rather than the tree-relative one; ignoring the
+/// `root` the question was asked about; and following
+/// [`FileWriter::note_renamed`], which the callers of this deliberately
+/// do NOT want (they compare against the creation path, and the one
+/// that wants the live path asks `current_path`).
+#[test]
+fn out_name_rel_memo_answers_what_out_name_of_would() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-relname-{}", std::process::id()));
+    let other = dir.join("elsewhere");
+    std::fs::create_dir_all(dir.join("VIDEO_TS")).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let created = dir.join("VIDEO_TS").join("x.vob");
+    let w = FileWriter::create(&created, 8).unwrap();
+
+    // Tree-preserved, not the bare leaf - and the same answer twice, so
+    // the memoized read is checked and not only the resolving one.
+    assert_eq!(w.out_name_rel(&dir), "VIDEO_TS/x.vob");
+    assert_eq!(w.out_name_rel(&dir), "VIDEO_TS/x.vob");
+    // A different root is a different question. Answering it from a memo
+    // keyed on the first root would hand back "VIDEO_TS/x.vob" here.
+    assert_eq!(
+        w.out_name_rel(&other),
+        crate::disk::out_name_of(&other, &created)
+    );
+    // ...and asking the memoized root again still answers correctly.
+    assert_eq!(w.out_name_rel(&dir), "VIDEO_TS/x.vob");
+
+    // A published rename moves the FILE, not the creation path, and this
+    // accessor answers about the creation path by contract.
+    let published = dir.join("VIDEO_TS").join("real.vob");
+    std::fs::rename(&created, &published).unwrap();
+    w.note_renamed(published.clone());
+    assert_eq!(w.current_path(), published);
+    assert_eq!(w.out_name_rel(&dir), "VIDEO_TS/x.vob");
+    assert_eq!(
+        w.out_name_rel(&dir),
+        crate::disk::out_name_of(&dir, &w.path)
+    );
+
+    // ...and the same for a writer whose FIRST ask comes after the
+    // rename, so the answer is resolved rather than replayed. Without
+    // this arm a memo built from `current_path` passes the whole test:
+    // above, the memo was populated while the two paths still agreed.
+    let late_created = dir.join("VIDEO_TS").join("late.vob");
+    let late_published = dir.join("VIDEO_TS").join("late-real.vob");
+    let lw = FileWriter::create(&late_created, 8).unwrap();
+    std::fs::rename(&late_created, &late_published).unwrap();
+    lw.note_renamed(late_published);
+    assert_eq!(lw.out_name_rel(&dir), "VIDEO_TS/late.vob");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

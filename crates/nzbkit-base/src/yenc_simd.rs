@@ -61,7 +61,7 @@ unsafe extern "C" {
     fn rapidyenc_crc_unzero(init_crc: u32, length: u64) -> u32;
     fn rapidyenc_decode_kernel() -> c_int;
     fn rapidyenc_crc_kernel() -> c_int;
-    /// Ours, not rapidyenc's: `crates/nzbkit/csrc/yenc_kernel_pin.cc`.
+    /// Ours, not rapidyenc's: `crates/nzbkit-base/csrc/yenc_kernel_pin.cc`.
     /// Latches the kernel rapidyenc's own CPU detection chose. Must be
     /// called before any pin, or it latches the pinned level instead.
     fn nzbfast_rapidyenc_latch_detected_kernel() -> c_int;
@@ -538,6 +538,12 @@ pub(crate) fn decode_into_integrity_opts(
     verify_crc: bool,
     enc_ok: bool,
 ) -> Result<(Meta, DecodeIntegrity), YencError> {
+    // M4-78: a UTF-8 BOM glued to the first header, stripped at the start of
+    // the body only. Same rule, same one function, same PLACE as the oracle:
+    // once per decode at the entry point, so the END_NONE fallback below can
+    // hand the oracle's framed pass the bytes this path already holds without
+    // either side taking a second BOM off (see yenc::decode_checked_opts).
+    let body = crate::yenc::strip_bom(body);
     match decode_framed(body, out, verify_crc, enc_ok) {
         // M4-76: the same CR-framed retry the oracle does, on the same two
         // errors and for the same reasons - see yenc::decode_checked. Both
@@ -562,9 +568,7 @@ fn decode_framed(
 ) -> Result<(Meta, DecodeIntegrity), YencError> {
     init();
     out.clear();
-    // M4-78: a UTF-8 BOM glued to the first header, stripped at the start of
-    // the body only. Same rule, same one function, as the oracle.
-    let body = crate::yenc::strip_bom(body);
+    // No BOM strip here: `decode_into_integrity_opts` took it off once.
 
     let mut name = String::new();
     let mut file_size: u64 = 0;
@@ -846,7 +850,13 @@ fn decode_framed(
                     // both guards. A well-formed CRLF article never reaches
                     // here, so the hot path keeps the SIMD speed.
                     debug_assert_eq!(pos, body.len());
-                    let (d, crc_verified) = crate::yenc::decode_checked_opts(body, enc_ok)?;
+                    // The oracle's FRAMED pass, never its entry point: this
+                    // body is already BOM-stripped (and already reframed, on
+                    // the CR retry), and re-entering `decode_checked_opts`
+                    // stripped a second BOM that the oracle proper reads as
+                    // payload - `DuplicateBegin` here, `Ok` there, for the
+                    // same bytes (fuzz run 34931238885).
+                    let (d, crc_verified) = crate::yenc::decode_framed(body, enc_ok)?;
                     data.clear();
                     data.extend_from_slice(&d.data);
                     // The scalar oracle enforced length + CRC itself. Report

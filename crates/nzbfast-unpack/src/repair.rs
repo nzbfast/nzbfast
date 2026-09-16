@@ -368,6 +368,45 @@ pub fn reextract_dir_outcome(
     if let Some(why) = bomb_fallback(rep.fallbacks.iter().map(|(_, w)| w.as_str())) {
         return Ok(Err(Some(why)));
     }
+    // Some groups extracted and others did not, so the directory now
+    // holds this pass's OUTPUT beside the volumes of the sets that
+    // demoted - and `try_unrar_outcome` below walks every `.rar` group it
+    // finds, including the ones already done. `publish_into` refuses to
+    // overwrite, so that set's payload landed a SECOND time as
+    // `extracted-1-<name>`: two full copies of the feature on disk, a
+    // whole extra write, and `rename_movie`/`nameless_video` then saw two
+    // videos and declined to name the release at all.
+    //
+    // So spend the extracted groups' volumes first, exactly as the
+    // all-extracted arm above spends all of them: the payload beside them
+    // IS their content. Keyed through `slot_group`, because the group key
+    // is the canonicalized INNER file name and not the volume stem, so
+    // the volume-side grouping cannot answer this. A slot whose headers
+    // never parsed answers `None` and is left alone - unknown is not
+    // extracted, and the unrar rung is exactly what such a volume is for.
+    if !rep.extracted.is_empty() {
+        let demoted: std::collections::HashSet<&str> =
+            rep.fallbacks.iter().map(|(g, _)| g.as_str()).collect();
+        let mut spent = 0usize;
+        for (si, path) in rars.iter().enumerate() {
+            let Some(group) = ex.slot_group(si) else {
+                continue;
+            };
+            if demoted.contains(group.as_str()) {
+                continue;
+            }
+            if std::fs::remove_file(path).is_ok() {
+                spent += 1;
+            }
+        }
+        if spent > 0 {
+            info!(
+                target: "extract",
+                "removed {spent} volume file(s) of the {} group(s) that extracted, before the unrar rung",
+                rep.extracted.len()
+            );
+        }
+    }
     info!(target: "extract", "falling back to unrar on the verified volumes…");
     // A successful disk unpack spends the volumes exactly like the clean
     // path above - leaving them behind doubled a job's disk footprint
@@ -1607,7 +1646,7 @@ pub async fn try_mapped_repair(
     // recovery fetch below - see [`crate::lanegate::HeavyCpu`].
     cpu: &mut crate::lanegate::HeavyCpu,
 ) -> Result<bool> {
-    use nzbkit::par2repair::{VolumeIo, repair_mapped_catalog_resumed};
+    use nzbkit::par2repair::{VolumeIo, repair_mapped_catalog_resumed_controlled};
     let bs = set.block_size as usize;
     // Every set file classified, or a decline - see [`plan_mapped_repair`],
     // which went out of line on 31 Aug 2026, when this function sat at 469
@@ -1795,7 +1834,34 @@ pub async fn try_mapped_repair(
     // never be satisfied. Unset (the only production state) is a no-op.
     wait_for_the_decode_to_reach_the_damage(extractor, &chased_damage).await;
     let pause = extractor.pause_chase_reads();
-    match repair_mapped_catalog_resumed(
+    // THE CONTROLLED DOOR, since 16 Sep 2026 (claim
+    // `repair-control-two-censused-sites-16sep`). This call held the
+    // owner's `SideCancel` for its recovery FETCHES from the day it was
+    // written and handed the engine nothing, which is what the census on
+    // `par2repair::set_unattended_unstructured_ceiling` named it for:
+    // the in-stream route is the one a big job actually takes, and a
+    // mapped repair is the longest silent stretch left in the pipeline.
+    // Same repair semantics as the uncontrolled
+    // `repair_mapped_catalog_resumed` this replaced, argument for
+    // argument; the control adds the four phases the queue row draws and
+    // the cancel the fold polls. `None` (a CLI run, the unit rigs)
+    // builds an INERT control, which is the call this was, branch for
+    // branch.
+    //
+    // `_run` is the reporting WINDOW and its scope is load-bearing: it
+    // opens HERE, past the recovery fetch above, because that fetch is
+    // network work under the same `repairing` word and a row still
+    // showing a phase through it would be the static-word failure this
+    // mechanism exists to remove. Its `Drop` says "no repair is inside
+    // the engine" on the decline paths below as well as on success.
+    //
+    // No per-set supplier and no `restart()`: this is ONE set by
+    // construction (`set.recovery_set_id`), so there is no set boundary
+    // to put a bar back at - the shape `get::latesets` has, not the
+    // directory walk's.
+    let control = cancel.map(SideCancel::repair_control).unwrap_or_default();
+    let _run = cancel.map(|c| c.repair_progress().enter());
+    match repair_mapped_catalog_resumed_controlled(
         &files,
         bs,
         &mut cat,
@@ -1803,6 +1869,7 @@ pub async fn try_mapped_repair(
         &io,
         full_verify,
         &prefixes,
+        &control,
     ) {
         Ok(n) => {
             // Did any rewrite land on bytes a chase had already decoded?
@@ -1870,6 +1937,22 @@ pub async fn try_mapped_repair(
                 t0.elapsed(),
             );
             Ok(true)
+        }
+        // THE USER'S CANCEL IS NOT A DECLINE, and this arm sits ahead of
+        // the one below for the reason `NativeVerdict::Cancelled` and
+        // `nested_par2_repair`'s cancelled arm do: that arm would warn
+        // that a perfectly healthy set refused to repair, over a job
+        // that is being deleted. It still returns `Ok(false)`, because
+        // there is no third answer here and the caller's next step -
+        // `fetch_and_repair` and its controlled `nativepass` - polls the
+        // SAME gate and stops on it at once.
+        Err(nzbkit::par2repair::RepairError::Cancelled) => {
+            info!(
+                target: "repair",
+                "mapped repair stopped - the job was cancelled (no file was renamed in, and \
+                 any block already patched is one that was missing)"
+            );
+            Ok(false)
         }
         Err(e) => {
             let lost = if fetch_failures > 0 {
@@ -2488,3 +2571,84 @@ mod shortfall_gate_tests;
 // ceiling when this subject came out, and it is its own.
 #[cfg(test)]
 mod password_chain_tests;
+
+/// THE MAPPED DRIVER'S WIRE, pinned by reading the source (16 Sep 2026,
+/// claim `repair-control-two-censused-sites-16sep`).
+///
+/// Source-scanning for the same reason [`crate::unpack`]'s nested pins
+/// are behavioural and this one is not: driving [`try_mapped_repair`]
+/// to an actual solve needs a live [`nzbkit::extract::Extractor`] with
+/// fed slots, a plan that survives every gate in
+/// `plan_mapped_repair`, and a server list - and every rig in
+/// `repair_tests` stops at one of those gates by design, because that
+/// is what those rigs are for. The engine half is pinned where it can
+/// be driven, over a real damaged set through the real door
+/// (`nzbkit_base::par2repair::unit_tests::control_tests::
+/// the_mapped_driver_reports_a_rising_fraction_through_all_four_phases`
+/// and `a_cancel_raised_mid_fold_ends_the_mapped_repair_before_it_
+/// writes`).
+///
+/// What is left is the half those cannot see, and it is the half that
+/// was wrong until 16 Sep 2026: this call held the owner's
+/// `SideCancel` for its recovery FETCHES and handed the ENGINE nothing.
+/// That is a defect no byte comparison can find - the repair is
+/// identical either way - so it is read rather than run.
+#[cfg(test)]
+mod mapped_control_wire_tests {
+    const REPAIR: &str = include_str!("repair.rs");
+
+    /// The driver is entered through the CONTROLLED door, and the
+    /// uncontrolled one is not named as a call any more.
+    #[test]
+    fn the_mapped_driver_is_entered_through_the_controlled_door() {
+        assert!(
+            REPAIR.contains("match repair_mapped_catalog_resumed_controlled("),
+            "the mapped driver must be entered through the controlled door - the \
+             uncontrolled entry compiles, repairs identically and reports nothing, \
+             which is the state this call was in until 16 Sep 2026"
+        );
+        // Assembled at runtime, not written out: a literal spelling of
+        // the uncontrolled call here is itself a hit on this file, so
+        // the test would fail on its own text. Same device, and the
+        // same reason, as the twin pin in
+        // `nzbfast_engine::get::settle::noset::control_wire_tests`.
+        let uncontrolled = format!("match repair_mapped_catalog{}", "_resumed(");
+        assert!(
+            !REPAIR.contains(&uncontrolled),
+            "the uncontrolled call is back: it hands the engine a default control and \
+             nothing anywhere says so"
+        );
+    }
+
+    /// The control is built from the JOB'S OWN handle - the same
+    /// `SideCancel` this function already held for its fetches - and
+    /// the reporting window is opened. A `RepairControl::default()`
+    /// argument satisfies the signature and honours nothing, so the
+    /// door alone is not the pin.
+    #[test]
+    fn the_control_is_built_from_the_jobs_own_side_cancel() {
+        assert!(
+            REPAIR.contains("cancel.map(SideCancel::repair_control)"),
+            "the control must come off the handle this call already holds for its \
+             recovery fetches - that it held one and passed the engine nothing is \
+             exactly what the census named this site for"
+        );
+        assert!(
+            REPAIR.contains("cancel.map(|c| c.repair_progress().enter())"),
+            "the reporting window must be opened, or the four phases land on a row \
+             that publishes nothing"
+        );
+    }
+
+    /// A cancelled repair is matched as a CANCEL. Without the arm it
+    /// falls into the decline arm below it, which warns that a
+    /// perfectly healthy set refused to repair.
+    #[test]
+    fn a_cancelled_mapped_repair_is_not_reported_as_a_decline() {
+        assert!(
+            REPAIR.contains("Err(nzbkit::par2repair::RepairError::Cancelled) => {"),
+            "the cancel arm is gone: a user's Cancel would be logged as a mapped \
+             repair that declined"
+        );
+    }
+}

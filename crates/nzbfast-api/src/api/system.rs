@@ -402,15 +402,27 @@ fn m_fs_mkdir(
     Some({
         let parent = params.get("path").map(String::as_str).unwrap_or("");
         let name = params.get("value").map(|s| s.trim()).unwrap_or("");
+        // `:` is on the list because of Windows: `join` REPLACES the
+        // parent when the joined component carries a drive prefix, so a
+        // DRIVE-RELATIVE name like `C:foo` - which holds no separator
+        // and is not `..`, so the three tests below let it through -
+        // created the directory somewhere else entirely.
+        let target = PathBuf::from(parent).join(name);
         if parent.is_empty()
             || name.is_empty()
             || name == ".."
             || name.contains('/')
             || name.contains('\\')
+            || name.contains(':')
+            // The invariant those tests exist to serve, stated once
+            // rather than inferred from a list of forbidden shapes: the
+            // new directory is a CHILD of the folder that was asked for.
+            // Whatever a platform's `join` does with the name, this is
+            // what has to come out of it.
+            || target.parent() != Some(std::path::Path::new(parent))
         {
             json!({"status": false, "error": "invalid folder name"})
         } else {
-            let target = PathBuf::from(parent).join(name);
             match std::fs::create_dir(&target) {
                 Ok(()) => json!({"status": true, "path": target.to_string_lossy()}),
                 Err(e) => json!({"status": false, "error": e.to_string()}),
@@ -1042,6 +1054,11 @@ fn m_sysbench(
         // concurrently - the runs distorted each other's numbers and
         // doubled the compute/disk/provider traffic.
         let Some(_running) = d.bench_begin() else {
+            // KEYED for i18n: this exact sentence is the `err.` key in
+            // web/i18n/extract.js and all 27 catalogues (census 16 Sep 2026,
+            // research/API-ERROR-KEY-CENSUS-2026-09-16.md). tErr() matches the
+            // WHOLE string, so rewording it here silently un-translates 27
+            // locales with every gate green. Change both sides together.
             return Some(json!({
                 "status": false,
                 "error": "a system benchmark is already running - wait for it to finish",

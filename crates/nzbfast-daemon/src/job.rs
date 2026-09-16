@@ -1263,6 +1263,48 @@ fn retire_deferred_journal(out_dir: &Path) {
     let _ = std::fs::remove_file(out_dir.join(nzbkit::journal::JOURNAL_LEAF));
 }
 
+/// Should a FAILED job's output be probed for a locked archive?
+///
+/// The predicate of `finalize_completed_gen`'s `locked_probe`, out of
+/// line so it can be asserted directly: what it answers decides whether a
+/// ladder of every stored password is spent on the blocking pool, and
+/// whether `password_required` is stamped on the record.
+///
+/// Asked only of a failure that could BE a locked archive: `Local`, with
+/// no other remedy already named. The flag is not cosmetic -
+/// `auto_retry_eligible` refuses a job carrying it and `post_job_plan`
+/// then calls the failure final - so raising it on every failed job that
+/// happens to hold an encrypted volume took the automatic retry away from
+/// the ordinary encrypted release whose download hit a connection blip,
+/// and reported a live post to the indexer as failed. The disk-full and
+/// damaged-article failures are `Local` too and already carry their own
+/// remedy; a password answers neither.
+///
+/// And NEVER of a demoted job. The slow-job watchdog aborts the pipeline
+/// with `bail!("stopped by user")`, which records exactly the shape above
+/// - Failed, Local, no hint, not disk-full - over a PARTIAL download, and
+/// `park_gen`'s demote arm then requeues the row deferred. That arm
+/// clears `fail_message`, `fail_code` and `demote`; the only writer of
+/// `password_required = false` is an unlock winner, so the flag survived
+/// onto a QUEUED row. The drawer then answered "password" for a job that
+/// has none, and because `auto_retry_eligible` refuses a job carrying it,
+/// the next ordinary transport blip on the rerun became a final failure
+/// reported to the *arr instead of an automatic retry. Every stored
+/// password was also spent, per demotion, against a set that cannot
+/// unpack because it is not all there yet.
+pub(super) fn locked_failure_probe(
+    failed: bool,
+    demoted: bool,
+    kind: FailKind,
+    fail_message: &str,
+) -> bool {
+    failed
+        && !demoted
+        && kind == FailKind::Local
+        && fail_hint(fail_message).is_empty()
+        && !disk_full_failure(fail_message)
+}
+
 /// [`finalize_completed`], fenced to the round of the record's life the
 /// caller started on (`Daemon::record_generation`).
 ///
@@ -1300,6 +1342,11 @@ pub(super) async fn finalize_completed_gen(
                 // to keep.
                 j.state == JobState::Completed && !j.tombstone,
                 j.state == JobState::Failed && !j.tombstone,
+                // Set by the slow-job watchdog just before it aborts the
+                // pipeline: `park_gen` is going to REQUEUE this record,
+                // not file it. `locked_probe` below is what reads it -
+                // see there.
+                j.demote,
                 j.fail_message.clone(),
                 // TODO 307 item 1: the job's own classification, taken
                 // here beside the sentence rather than re-derived from
@@ -1324,6 +1371,7 @@ pub(super) async fn finalize_completed_gen(
     let Some((
         done_ok,
         failed,
+        demoted2,
         fail2,
         kind2,
         out2,
@@ -1364,10 +1412,7 @@ pub(super) async fn finalize_completed_gen(
     // connection blip, and reported a live post to the indexer as failed.
     // The disk-full and damaged-article failures are `Local` too and
     // already carry their own remedy; a password answers neither.
-    let locked_probe = failed
-        && kind2 == FailKind::Local
-        && fail_hint(&fail2).is_empty()
-        && !disk_full_failure(&fail2);
+    let locked_probe = locked_failure_probe(failed, demoted2, kind2, &fail2);
     if locked_probe
         && settle_locked_failure(
             d,

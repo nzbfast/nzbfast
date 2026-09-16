@@ -322,64 +322,7 @@ pub(super) fn build_rig(
     if let Some(ledger) = nzbkit::extract::process_ledger() {
         extractor.join_holds_ledger(&ledger);
     }
-    // One-pass zip, split sets: a byte-split zip cannot be sized from
-    // its own bytes (no part carries a container-sizing header, unlike
-    // 7z), so the NZB's file list - which we have and the extractor
-    // does not - declares each set's part count. Declared only when the
-    // indices run exactly 1..=n: a set the NZB itself has a hole in can
-    // never stream, and not declaring it keeps every part on the
-    // phase-1 disk path.
-    {
-        let mut sets: HashMap<String, Vec<u32>> = HashMap::new();
-        for s in slots.iter().filter(|s| !s.is_par2_main) {
-            // Bare-numeric sets (`movie.001`, no `.zip.` infix) declare
-            // too - the declaration is speculative (RAR numeric volumes
-            // share the grammar), and that is fine: RAR and 7z magic
-            // classify before the zip split arm is consulted, and a
-            // declared set whose part 1 does not sniff `PK\x03\x04`
-            // forfeits to the disk path exactly as an undeclared one
-            // would have landed there.
-            if let Some((base, idx)) = nzbkit::zip::split_part_name(&s.hint)
-                .or_else(|| nzbkit::zip::numeric_split_part_name(&s.hint))
-            {
-                sets.entry(base).or_default().push(idx);
-            }
-        }
-        for (base, mut idxs) in sets {
-            idxs.sort_unstable();
-            let n = idxs.len() as u32;
-            if idxs.first() == Some(&1)
-                && idxs.last() == Some(&n)
-                && idxs.windows(2).all(|w| w[0] < w[1])
-            {
-                extractor.declare_zip_split(&base, n);
-            }
-        }
-    }
-    // TODO 211 (b): the same declaration for a `.rar.NNN` byte split of
-    // a single `.rar`, for the same reason - no RAR header sizes the
-    // container, so the NZB's part count is what lets the head's mapper
-    // close once every part's exact size is in. Same gapless rule: a
-    // set the NZB has a hole in never maps, and undeclared parts take
-    // the disk path plus the (a) rescue exactly as before.
-    {
-        let mut sets: HashMap<String, Vec<u32>> = HashMap::new();
-        for s in slots.iter().filter(|s| !s.is_par2_main) {
-            if let Some((base, idx)) = nzbkit::extract::rar_split_part_name(&s.hint) {
-                sets.entry(base).or_default().push(idx);
-            }
-        }
-        for (base, mut idxs) in sets {
-            idxs.sort_unstable();
-            let n = idxs.len() as u32;
-            if idxs.first() == Some(&1)
-                && idxs.last() == Some(&n)
-                && idxs.windows(2).all(|w| w[0] < w[1])
-            {
-                extractor.declare_rar_split(&base, n);
-            }
-        }
-    }
+    declare_split_sets(&extractor, slots);
     // An inner file's declared `unpacked_size` is an attacker-controlled
     // RAR header vint, and on Linux preallocation is a real fallocate - so
     // a few-hundred-KB post declaring 8 TB used to genuinely reserve the
@@ -497,6 +440,71 @@ pub(super) fn build_rig(
         resume_map,
         extractor,
         replay,
+    }
+}
+
+/// Declare the NZB's byte-split zip and `.rar.NNN` sets to the extractor,
+/// from the file list the extractor cannot see. Moved verbatim out of
+/// `build_rig` for its 500-line ceiling; it runs at the same point there,
+/// after the holds cap and before the preallocation ceiling.
+fn declare_split_sets(extractor: &nzbkit::extract::Extractor, slots: &[Arc<FileSlot>]) {
+    // One-pass zip, split sets: a byte-split zip cannot be sized from
+    // its own bytes (no part carries a container-sizing header, unlike
+    // 7z), so the NZB's file list - which we have and the extractor
+    // does not - declares each set's part count. Declared only when the
+    // indices run exactly 1..=n: a set the NZB itself has a hole in can
+    // never stream, and not declaring it keeps every part on the
+    // phase-1 disk path.
+    {
+        let mut sets: HashMap<String, Vec<u32>> = HashMap::new();
+        for s in slots.iter().filter(|s| !s.is_par2_main) {
+            // Bare-numeric sets (`movie.001`, no `.zip.` infix) declare
+            // too - the declaration is speculative (RAR numeric volumes
+            // share the grammar), and that is fine: RAR and 7z magic
+            // classify before the zip split arm is consulted, and a
+            // declared set whose part 1 does not sniff `PK\x03\x04`
+            // forfeits to the disk path exactly as an undeclared one
+            // would have landed there.
+            if let Some((base, idx)) = nzbkit::zip::split_part_name(&s.hint)
+                .or_else(|| nzbkit::zip::numeric_split_part_name(&s.hint))
+            {
+                sets.entry(base).or_default().push(idx);
+            }
+        }
+        for (base, mut idxs) in sets {
+            idxs.sort_unstable();
+            let n = idxs.len() as u32;
+            if idxs.first() == Some(&1)
+                && idxs.last() == Some(&n)
+                && idxs.windows(2).all(|w| w[0] < w[1])
+            {
+                extractor.declare_zip_split(&base, n);
+            }
+        }
+    }
+    // TODO 211 (b): the same declaration for a `.rar.NNN` byte split of
+    // a single `.rar`, for the same reason - no RAR header sizes the
+    // container, so the NZB's part count is what lets the head's mapper
+    // close once every part's exact size is in. Same gapless rule: a
+    // set the NZB has a hole in never maps, and undeclared parts take
+    // the disk path plus the (a) rescue exactly as before.
+    {
+        let mut sets: HashMap<String, Vec<u32>> = HashMap::new();
+        for s in slots.iter().filter(|s| !s.is_par2_main) {
+            if let Some((base, idx)) = nzbkit::extract::rar_split_part_name(&s.hint) {
+                sets.entry(base).or_default().push(idx);
+            }
+        }
+        for (base, mut idxs) in sets {
+            idxs.sort_unstable();
+            let n = idxs.len() as u32;
+            if idxs.first() == Some(&1)
+                && idxs.last() == Some(&n)
+                && idxs.windows(2).all(|w| w[0] < w[1])
+            {
+                extractor.declare_rar_split(&base, n);
+            }
+        }
     }
 }
 

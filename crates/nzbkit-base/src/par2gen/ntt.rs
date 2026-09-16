@@ -78,7 +78,10 @@ pub(super) fn mapped_attempt(
                 .map(|(i, &l)| (l, i as crate::par2ntt::SrcId))
                 .collect();
             if let Ok((ntt, out_first)) = ntt_range::plan(&present, first, count) {
-                let (w, threads) = crate::par2repair::ntt_stripe_geometry(bs);
+                let (w, threads) = crate::par2repair::ntt_create_stripe_geometry(
+                    bs,
+                    Some(ntt.median_leaf_kernel()),
+                );
                 let stripes = words.div_ceil(w);
                 ntt_range::note_stripes(stripes);
                 struct Rows(Vec<*mut u16>);
@@ -245,6 +248,17 @@ pub(super) fn mapped_attempt(
     Ok(false)
 }
 
+/// One window's present set, in the (log, slot) form the planner takes -
+/// the slot index is the window-relative one, which is what the corpus
+/// slot and `src_of` agree on.
+fn window_present(logs: &[u32], w0: usize, w1: usize) -> Vec<(u32, crate::par2ntt::SrcId)> {
+    logs[w0..w1]
+        .iter()
+        .enumerate()
+        .map(|(i, &l)| (l, i as crate::par2ntt::SrcId))
+        .collect()
+}
+
 /// The copied-window attempt: the transform over resident windows of
 /// the payload, outputs XORed together. `Ok(true)` means `acc` holds the
 /// finished rows; on `Ok(false)` its rows have been zeroed again for the
@@ -266,7 +280,26 @@ pub(super) fn windowed_attempt(
         ..
     } = a;
     let t_ntt = std::time::Instant::now();
-    let (w, threads) = crate::par2repair::ntt_stripe_geometry(bs);
+    // THE WIDTH IS FIXED ACROSS EVERY WINDOW AND THE PLAN IS PER WINDOW,
+    // so the first window's plan is built HERE, decides the width, and is
+    // then handed to the first pass of the loop rather than built twice.
+    // The create's width reads the plan's median leaf kernel on the x86
+    // nibble arm (`default_stripe_words`), and this arm has to name one
+    // plan for all of them: every full window carries the same source
+    // count, so the first is the representative the geometry wants.
+    //
+    // An `Err` is deliberately dropped rather than reported here. The
+    // loop builds this same plan on its first pass and reports the
+    // refusal in the one place that reports it; the width then falls
+    // back to the block-size rule for a transform that will not run.
+    let first_w1 = ntt_window.min(n_slices);
+    let mut pending = (first_w1 > 0)
+        .then(|| ntt_range::plan(&window_present(logs, 0, first_w1), first, count).ok())
+        .flatten();
+    let (w, threads) = crate::par2repair::ntt_create_stripe_geometry(
+        bs,
+        pending.as_ref().map(|(p, _)| p.median_leaf_kernel()),
+    );
     let stripes = words.div_ceil(w);
     let mut corpus = vec![0u8; ntt_window * bs];
     // The check: row `first` again, by the fold, over the same
@@ -294,14 +327,16 @@ pub(super) fn windowed_attempt(
             false,
             create_readers(false),
         )?;
-        let present: Vec<(u32, crate::par2ntt::SrcId)> = logs[w0..w1]
-            .iter()
-            .enumerate()
-            .map(|(i, &l)| (l, i as crate::par2ntt::SrcId))
-            .collect();
-        let Ok((ntt, out_first)) = ntt_range::plan(&present, first, count) else {
-            ok = false;
-            break;
+        let (ntt, out_first) = match pending.take() {
+            Some(built) => built,
+            None => {
+                let present = window_present(logs, w0, w1);
+                let Ok(built) = ntt_range::plan(&present, first, count) else {
+                    ok = false;
+                    break;
+                };
+                built
+            }
         };
         ntt_range::note_stripes(stripes);
         struct Rows(Vec<*mut u16>);

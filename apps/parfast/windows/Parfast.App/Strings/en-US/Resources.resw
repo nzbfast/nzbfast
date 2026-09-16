@@ -342,7 +342,7 @@
     <value>Drop files or folders here</value>
   </data>
   <data name="empty_queue_body" xml:space="preserve">
-    <value>Jobs you start appear here, and run one at a time unless you raise the limit in Settings.</value>
+    <value>Jobs you start appear here, and run one at a time unless you raise the limit in Settings. When this computer has room for both, two large single-file creates can run side by side.</value>
   </data>
   <data name="empty_queue_title" xml:space="preserve">
     <value>The queue is empty</value>
@@ -605,6 +605,21 @@
   <data name="settings_default_scheme" xml:space="preserve">
     <value>Default volume scheme</value>
   </data>
+  <data name="settings_digest_cache" xml:space="preserve">
+    <value>Remember checksums of large files</value>
+  </data>
+  <data name="settings_digest_cache_clear" xml:space="preserve">
+    <value>Clear remembered checksums</value>
+  </data>
+  <data name="settings_digest_cache_clear_confirm" xml:space="preserve">
+    <value>Forget every remembered checksum? The next create or full check of each large file takes the usual time again.</value>
+  </data>
+  <data name="settings_digest_cache_cleared" xml:space="preserve">
+    <value>Remembered checksums cleared</value>
+  </data>
+  <data name="settings_digest_cache_note" xml:space="preserve">
+    <value>A repeat create or full check of an unchanged file over 256 MB skips its slowest step. parfast keeps a small checksum record for each such file in your user cache folder, and re-checks the file&apos;s contents before trusting it.</value>
+  </data>
   <data name="settings_fast_solver" xml:space="preserve">
     <value>Fast solver</value>
   </data>
@@ -661,6 +676,12 @@
   </data>
   <data name="settings_on_open_verify" xml:space="preserve">
     <value>Verify it</value>
+  </data>
+  <data name="settings_pair_large_creates" xml:space="preserve">
+    <value>Run two large single-file creates at once, so a queue of large files finishes sooner</value>
+  </data>
+  <data name="settings_pair_large_creates_note" xml:space="preserve">
+    <value>No single job gets faster. A second create starts beside a running one only when this computer has the cores and memory for both. On a spinning disk it gains nothing, because the two creates share the disk&apos;s speed, so you can turn it off there.</value>
   </data>
   <data name="settings_performance" xml:space="preserve">
     <value>Performance</value>

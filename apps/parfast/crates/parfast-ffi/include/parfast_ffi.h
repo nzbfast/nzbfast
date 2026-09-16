@@ -270,6 +270,17 @@ char *pf_settings_get(struct pf_session *s);
 int32_t pf_settings_set(struct pf_session *s, const char *settings_json);
 
 /**
+ * "Clear remembered checksums": delete every record in the per-user
+ * digest store that `performance.digest_cache` fills. Answers how many
+ * files went (0 where there is no store), or `PF_ERR_REFUSED` with the
+ * folder and the reason in [`pf_last_error`]. Safe while a job runs.
+ *
+ * # Safety
+ * `s` is a live session.
+ */
+int32_t pf_digest_cache_clear(struct pf_session *s);
+
+/**
  * `{"code":"...","message":"..."}` for the last failure on this
  * session, or `{}`. Reading it does not clear it; the next failure
  * replaces it.

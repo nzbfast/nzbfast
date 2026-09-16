@@ -5,9 +5,13 @@
 //! `parfast::run_with` in-process, which is what `src/main.rs` exists to
 //! keep possible.
 //!
-//! Scratch lives under `CARGO_TARGET_TMPDIR` rather than `$TMPDIR`, so
-//! the crate's copy of the `ScratchDir` guard is not needed here - cargo
-//! owns that directory and `cargo clean` takes it.
+//! Scratch lives under `CARGO_TARGET_TMPDIR` rather than `$TMPDIR`,
+//! because cargo owns that directory and `cargo clean` takes it. That
+//! used to be the whole story and it was not enough: the path was fixed
+//! for all time and opened by removing it, so two concurrent runs of
+//! this binary deleted each other's working directory mid-run. It comes
+//! from `crate::scratch` now, which scopes it to the process and removes
+//! it on the way out - the reasoning is in that module's header.
 //!
 //! UNIX ONLY, and the `#[cfg(unix)]` is on the `mod` line in `main.rs`
 //! rather than on the test below: the fold is reached by making a
@@ -16,14 +20,7 @@
 //! module leaves `scratch` and `arg` with no caller there - which
 //! `-D warnings` refuses.
 
-use std::path::{Path, PathBuf};
-
-fn scratch(tag: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(tag);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
-}
+use crate::scratch::scratch;
 
 fn arg(s: &str) -> String {
     s.to_string()
@@ -116,5 +113,4 @@ fn an_engine_fold_before_the_survey_is_an_exit_code_not_a_panic() {
     );
 
     let _ = std::fs::set_permissions(&vol, std::fs::Permissions::from_mode(0o644));
-    let _ = std::fs::remove_dir_all(&dir);
 }

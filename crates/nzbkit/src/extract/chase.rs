@@ -113,7 +113,20 @@ impl Extractor {
                 // it cannot fingerprint the plaintext, and a header-
                 // encrypted archive never reaches here at all, which is
                 // precisely the `-hp` case the oracle cannot serve.
-                if let (false, Some(crc)) = (e.encrypted, e.file_crc) {
+                //
+                // `!split_after` is the other half of the contract, and
+                // NOT redundant with the first-writer-wins latch: on a
+                // split piece the stored CRC32 is that VOLUME's data
+                // area, not the file's (`FileEntry::file_crc` says so),
+                // and part 1 is the piece that normally parses first, so
+                // every multi-volume set - the scene shape srrdb exists
+                // to catalog - was latched under a fragment CRC. That is
+                // silent: `archive-crc:<fragment>` matches no SRR, so
+                // the oracle simply never fired, and a chance 32-bit
+                // collision would have named the job from someone else's
+                // release and logged it CONFIRMED. `settle`'s `hdr` and
+                // `crypto_decrypt`'s tail map each gate on the same fact.
+                if let (false, false, Some(crc)) = (e.encrypted, e.split_after, e.file_crc) {
                     self.shape.note_crc(&e.name, crc);
                 }
             }
@@ -238,7 +251,9 @@ impl Extractor {
             inner.slots[slot].group = Some(key.clone());
             let grp = inner.groups.entry(key.clone()).or_insert_with(Group::new);
             grp.slots.push(slot);
-            if grp.fallback {
+            let fallback = grp.fallback;
+            self.hand_over_preclaims(inner, &key);
+            if fallback {
                 // Joined a group that already fell back.
                 self.fallback_slot(inner, slot)?;
                 if matches!(inner.slots[slot].mode, SlotMode::Discard) {
@@ -387,6 +402,7 @@ impl Extractor {
         grp.slots.push(slot);
         inner.slots[slot].group = Some(key.clone());
         inner.slots[slot].mode = SlotMode::RarChase;
+        self.hand_over_preclaims(inner, &key);
         let buf = Arc::new(FrontierBuffer::new_gated(
             size,
             self.chase_gate(inner, slot),
