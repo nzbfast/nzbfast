@@ -13,14 +13,14 @@ fn numeric_dir(tag: &str) -> PathBuf {
 }
 
 /// One store-mode payload split across two real RAR5 volumes.
-fn two_volumes(total: &[u8]) -> [Vec<u8>; 2] {
+fn two_volumes(total: &[u8]) -> Vec<Vec<u8>> {
     use nzbkit::rar::fixtures;
     let n = total.len() as u64;
     let half = total.len() / 2;
-    [
-        fixtures::rar5_volume_n(&[("film.mkv", n, &total[..half], false, true)], 0),
-        fixtures::rar5_volume_n(&[("film.mkv", n, &total[half..], true, false)], 1),
-    ]
+    fixtures::rar5_volume_set(&[
+        &[("film.mkv", n, &total[..half], false, true)],
+        &[("film.mkv", n, &total[half..], true, false)],
+    ])
 }
 
 fn payload() -> Vec<u8> {

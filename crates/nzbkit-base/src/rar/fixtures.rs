@@ -179,9 +179,209 @@ pub fn rar5_volume_n_continued(
     rar5_volume_inner(&with_crc, Some(vol_no), &[], next_volume)
 }
 
+/// How a RAR5 volume set's FIRST volume spells its own volume number,
+/// which the two writers this repo meets disagree about.
+///
+/// The RAR5 spec makes the main header's volume-number field optional on
+/// the first volume ("present for all volumes except first"), and WinRAR
+/// takes the option: its volume 0 carries archive flag `0x01` (this
+/// archive is a volume) and no number field at all. This repo's own
+/// `Rar50VolumeWriter` writes the field on EVERY volume, so its volume 0
+/// carries flags `0x03` and an explicit `vint(0)` - one byte more header,
+/// and one byte less payload for the same volume size.
+///
+/// Both are well-formed and both occur in the wild, so a fixture has to
+/// say which it is modelling. `VolumeMapper` normalises them to the same
+/// `volume_number == Some(0)`, which is why the distinction is invisible
+/// anywhere downstream that only reads the number - and why
+/// `ArchiveMap::resolve_arithmetic`, which reasons about the field's
+/// BYTE LENGTH, is not one of those places.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Rar5Head {
+    /// Archive flag `0x01`, no volume-number field: what WinRAR writes.
+    #[default]
+    Numberless,
+    /// Archive flags `0x03` and an explicit `vint(0)`: what this repo's
+    /// own `Rar50VolumeWriter` writes, on every volume of every set.
+    NumberedZero,
+}
+
+/// A whole RAR5 volume set, with each volume's end-of-archive record
+/// stamped the way a real archiver stamps it: flag `0x0001` ("another
+/// volume of this set follows") on every volume but the last, `0` on the
+/// last one alone.
+///
+/// This is the set-aware answer to the hazard on [`rar5_volume_n`]'s
+/// sibling [`rar5_volume_n_continued`]: a per-volume builder cannot know
+/// whether it is building the last volume of its set, so every call site
+/// that reached for `rar5_volume_n` in a loop or an array literal built a
+/// set in which EVERY volume claimed to be the last one. That shape does
+/// not exist - no archiver produces it - and it is the only evidence of
+/// continuity across a volume boundary that falls between whole members
+/// (nothing there is split, so no split flag says the set goes on). Pass
+/// the whole set here and the flags follow from its length.
+///
+/// One `&[(name, total_size, piece, split_before, split_after)]` slice
+/// per volume, in volume order; volumes are numbered 0..n-1. Carries no
+/// data CRC - read the warning on [`rar5_volume_n`] before using this
+/// under a test that damages bytes, and reach for
+/// [`rar5_volume_set_crc`] when the test needs checksums.
+pub fn rar5_volume_set(volumes: &[&[(&str, u64, &[u8], bool, bool)]]) -> Vec<Vec<u8>> {
+    rar5_volume_set_head(volumes, Rar5Head::default())
+}
+
+/// [`rar5_volume_set`] with the first volume's head layout named - see
+/// [`Rar5Head`], and reach for this whenever the test is about how a set
+/// HEAD is recognised rather than about what it contains.
+pub fn rar5_volume_set_head(
+    volumes: &[&[(&str, u64, &[u8], bool, bool)]],
+    head: Rar5Head,
+) -> Vec<Vec<u8>> {
+    let owned: Vec<Vec<(&str, u64, &[u8], bool, bool, Option<u32>)>> = volumes
+        .iter()
+        .map(|v| {
+            v.iter()
+                .map(|&(n, t, p, b, a)| (n, t, p, b, a, None))
+                .collect()
+        })
+        .collect();
+    let refs: Vec<&[(&str, u64, &[u8], bool, bool, Option<u32>)]> =
+        owned.iter().map(|v| v.as_slice()).collect();
+    rar5_volume_set_crc_head(&refs, head)
+}
+
+/// [`rar5_volume_set`] with a stored data CRC32 per piece, the way
+/// [`rar5_volume_n_crc`] writes one.
+pub fn rar5_volume_set_crc(
+    volumes: &[&[(&str, u64, &[u8], bool, bool, Option<u32>)]],
+) -> Vec<Vec<u8>> {
+    rar5_volume_set_crc_head(volumes, Rar5Head::default())
+}
+
+/// [`rar5_volume_set_crc`] with the first volume's head layout named.
+pub fn rar5_volume_set_crc_head(
+    volumes: &[&[(&str, u64, &[u8], bool, bool, Option<u32>)]],
+    head: Rar5Head,
+) -> Vec<Vec<u8>> {
+    let last = volumes.len().saturating_sub(1);
+    volumes
+        .iter()
+        .enumerate()
+        .map(|(i, pieces)| {
+            let vol_no = if i == 0 && head == Rar5Head::NumberedZero {
+                VolNum::ExplicitZero
+            } else {
+                VolNum::Implied(i as u64)
+            };
+            rar5_volume_inner_at(pieces, vol_no, &[], i < last)
+        })
+        .collect()
+}
+
+/// The end-of-archive block a [`rar5_volume_n`]-family volume ends with,
+/// for the given "another volume follows" flag. Both flag values encode
+/// as a one-byte vint, so the two blocks are the same length - which is
+/// what lets [`rar5_seal_set`] swap one for the other in place.
+fn rar5_end_block(next_volume: bool) -> Vec<u8> {
+    let mut end_body = Vec::new();
+    vint(u64::from(next_volume), &mut end_body);
+    let mut out = Vec::new();
+    block_v5(5, 0, &end_body, &[], &mut out);
+    out
+}
+
+/// Stamp an already-built run of volumes as one set: every volume but
+/// the last gets the end-of-archive "another volume follows" flag, the
+/// last one keeps `0`.
+///
+/// The after-the-fact form of [`rar5_volume_set`], for the call sites
+/// that grow their set in a loop whose length is not known until the
+/// loop ends (a season pack cut by member, say). Build the volumes with
+/// [`rar5_volume_n`] as before and call this once on the finished run.
+///
+/// PANICS if a volume does not end in the flagless end-of-archive block
+/// this fixture family writes - which is the point: a volume built some
+/// other way (a hostile fixture with no end block, a hand-poked one)
+/// must not be sealed silently, because the seal would be a lie about
+/// bytes nobody checked.
+pub fn rar5_seal_set(vols: &mut [Vec<u8>]) {
+    let flagless = rar5_end_block(false);
+    let continued = rar5_end_block(true);
+    let last = vols.len().saturating_sub(1);
+    for (i, v) in vols.iter_mut().enumerate() {
+        if i == last {
+            continue;
+        }
+        let at = v
+            .len()
+            .checked_sub(flagless.len())
+            .expect("a sealed volume is at least an end-of-archive block long");
+        assert_eq!(
+            &v[at..],
+            &flagless[..],
+            "volume {i} does not end in the plain end-of-archive block, so \
+             sealing it would claim something about bytes this fixture did \
+             not write"
+        );
+        v[at..].copy_from_slice(&continued);
+    }
+}
+
+/// One volume of a set whose LENGTH the call site knows: volume
+/// `vol_no` of `of` volumes, with the end-of-archive "another volume
+/// follows" flag derived from the pair rather than remembered.
+///
+/// The loop-shaped sibling of [`rar5_volume_set`], for the call sites
+/// that build their set with `(0..n).map(..)` and cannot hand over a
+/// slice of slices. Same rule, same reason - see [`rar5_volume_set`].
+pub fn rar5_volume_n_of(
+    pieces: &[(&str, u64, &[u8], bool, bool)],
+    vol_no: u64,
+    of: u64,
+) -> Vec<u8> {
+    let with_crc: Vec<_> = pieces
+        .iter()
+        .map(|&(n, t, p, b, a)| (n, t, p, b, a, None))
+        .collect();
+    rar5_volume_inner(&with_crc, Some(vol_no), &[], vol_no + 1 < of)
+}
+
+/// [`rar5_volume_n_of`] carrying the per-piece data CRC32
+/// [`rar5_volume_n_crc`] writes.
+pub fn rar5_volume_n_crc_of(
+    pieces: &[(&str, u64, &[u8], bool, bool, Option<u32>)],
+    vol_no: u64,
+    of: u64,
+) -> Vec<u8> {
+    rar5_volume_inner(pieces, Some(vol_no), &[], vol_no + 1 < of)
+}
+
+/// How `rar5_volume_inner_at` spells a volume's number: absent entirely
+/// (a bare .rar), volume `n` in the layout [`Rar5Head::Numberless`]
+/// describes, or the explicit zero of [`Rar5Head::NumberedZero`].
+#[derive(Clone, Copy)]
+enum VolNum {
+    None,
+    Implied(u64),
+    ExplicitZero,
+}
+
 fn rar5_volume_inner(
     pieces: &[(&str, u64, &[u8], bool, bool, Option<u32>)],
     vol_no: Option<u64>,
+    service: &[u8],
+    next_volume: bool,
+) -> Vec<u8> {
+    let n = match vol_no {
+        Some(n) => VolNum::Implied(n),
+        None => VolNum::None,
+    };
+    rar5_volume_inner_at(pieces, n, service, next_volume)
+}
+
+fn rar5_volume_inner_at(
+    pieces: &[(&str, u64, &[u8], bool, bool, Option<u32>)],
+    vol_no: VolNum,
     service: &[u8],
     next_volume: bool,
 ) -> Vec<u8> {
@@ -189,14 +389,20 @@ fn rar5_volume_inner(
     out.extend_from_slice(super::SIG5);
     // Main archive header (type 1): archive flags vint; volume sets
     // carry 0x01 (volume) and, past the first volume, 0x02 + number.
+    // `ExplicitZero` is the first volume written the way this repo's own
+    // `Rar50VolumeWriter` writes it - see [`Rar5Head`].
     let mut main_body = Vec::new();
     match vol_no {
-        Some(0) => vint(0x01, &mut main_body),
-        Some(n) => {
+        VolNum::Implied(0) => vint(0x01, &mut main_body),
+        VolNum::Implied(n) => {
             vint(0x03, &mut main_body);
             vint(n, &mut main_body);
         }
-        None => vint(0x00, &mut main_body),
+        VolNum::ExplicitZero => {
+            vint(0x03, &mut main_body);
+            vint(0, &mut main_body);
+        }
+        VolNum::None => vint(0x00, &mut main_body),
     }
     block_v5(1, 0, &main_body, &[], &mut out);
     for &(name, total, piece, before, after, crc) in pieces {

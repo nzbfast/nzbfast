@@ -1311,26 +1311,17 @@ mod tests {
     fn mapped_repair_reads_a_paged_span() {
         let dir = tmpdir("holds-paged-readat");
         let total = payload(30_000_000, 13);
-        let vols = [
-            fixtures::rar5_volume_n(
-                &[("film.mkv", 30_000_000, &total[..7_000_000], false, true)],
-                0,
-            ),
-            fixtures::rar5_volume_n(
-                &[(
-                    "film.mkv",
-                    30_000_000,
-                    &total[7_000_000..22_000_000],
-                    true,
-                    true,
-                )],
-                1,
-            ),
-            fixtures::rar5_volume_n(
-                &[("film.mkv", 30_000_000, &total[22_000_000..], true, false)],
-                2,
-            ),
-        ];
+        let vols = fixtures::rar5_volume_set(&[
+            &[("film.mkv", 30_000_000, &total[..7_000_000], false, true)],
+            &[(
+                "film.mkv",
+                30_000_000,
+                &total[7_000_000..22_000_000],
+                true,
+                true,
+            )],
+            &[("film.mkv", 30_000_000, &total[22_000_000..], true, false)],
+        ]);
         let ex = Extractor::new(&dir, 3, true);
         ex.set_holds_cap(1); // floors at 8 MB - part2's data area exceeds it
         let feed_seq = |slot: usize, name: &str, vol: &[u8]| {
@@ -1380,26 +1371,17 @@ mod tests {
     fn scratch_ceiling_demotes_with_the_unchanged_reason() {
         let dir = tmpdir("holds-paged-ceiling");
         let total = payload(30_000_000, 13);
-        let vols = [
-            fixtures::rar5_volume_n(
-                &[("film.mkv", 30_000_000, &total[..7_000_000], false, true)],
-                0,
-            ),
-            fixtures::rar5_volume_n(
-                &[(
-                    "film.mkv",
-                    30_000_000,
-                    &total[7_000_000..22_000_000],
-                    true,
-                    true,
-                )],
-                1,
-            ),
-            fixtures::rar5_volume_n(
-                &[("film.mkv", 30_000_000, &total[22_000_000..], true, false)],
-                2,
-            ),
-        ];
+        let vols = fixtures::rar5_volume_set(&[
+            &[("film.mkv", 30_000_000, &total[..7_000_000], false, true)],
+            &[(
+                "film.mkv",
+                30_000_000,
+                &total[7_000_000..22_000_000],
+                true,
+                true,
+            )],
+            &[("film.mkv", 30_000_000, &total[22_000_000..], true, false)],
+        ]);
         let ex = Extractor::new(&dir, 3, true);
         ex.set_holds_cap(1); // floors at 8 MB
         ex.set_holds_scratch_cap(2 << 20); // far below part2's window

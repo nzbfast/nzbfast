@@ -2059,8 +2059,15 @@ impl Index {
 /// generation, and nothing would ever say so. Three cases, and only the
 /// first two existed before the bound (16 Sep 2026):
 ///
-/// - `None` - nothing was examined, so the cursor must not move at all.
-///   Moving it would step over the whole stride.
+/// - An EMPTY selection - the stride holds no matching row, so it is
+///   exhausted and the cursor advances to its floor. This is the case
+///   that separates "found nothing" from "did nothing", and getting it
+///   wrong stalls the walk: parking here would re-select the same
+///   100,000 ids every tick, forever. It is also why the empty case is
+///   tested rather than assumed.
+/// - `None` - rows were selected and NONE was examined, which can only
+///   be the clock. The cursor must not move at all; moving it would
+///   step over the whole stride.
 /// - Stopped short of the selection (the clock) - park just below the
 ///   last id actually CONSIDERED, so the rest of the stride is
 ///   re-selected next call.
@@ -2071,6 +2078,9 @@ impl Index {
 ///
 /// `ids` is descending, as the selection orders it.
 fn corr_next_cursor(ids: &[i64], examined: usize, budget: u32, lo: i64) -> Option<i64> {
+    if ids.is_empty() {
+        return Some(lo);
+    }
     if examined == 0 {
         return None;
     }
@@ -2116,12 +2126,24 @@ mod corr_cursor_tests {
         }
     }
 
-    /// Examining nothing must move nothing. A cursor nudged here would
-    /// step over the entire stride for a call that did no work.
+    /// Examining nothing when there WAS something must move nothing: a
+    /// cursor nudged here steps over the whole stride for a call that did
+    /// no work.
     #[test]
     fn examining_nothing_leaves_the_cursor_alone() {
         assert_eq!(corr_next_cursor(&[900, 880], 0, 5, 800), None);
-        assert_eq!(corr_next_cursor(&[], 0, 5, 800), None);
+    }
+
+    /// ...but an EMPTY selection is the opposite case and must ADVANCE.
+    /// A stride with no matching row is exhausted, and parking on it
+    /// re-selects the same 100,000 ids every tick for ever - the walk
+    /// stops walking. This is the one case where "examined nothing" and
+    /// "do nothing" are not the same answer, and it is the regression the
+    /// hold bound could most easily have introduced, because the bound's
+    /// own guard is also `examined == 0`.
+    #[test]
+    fn an_empty_stride_still_advances_the_cursor() {
+        assert_eq!(corr_next_cursor(&[], 0, 400, 800), Some(800));
     }
 
     /// The two pre-existing cases, unchanged by the bound: a FILLED row

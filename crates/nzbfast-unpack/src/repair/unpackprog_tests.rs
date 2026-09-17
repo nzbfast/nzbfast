@@ -27,14 +27,14 @@ fn dir_for(tag: &str) -> PathBuf {
 /// A two-volume RAR5 set holding one member split across both. Same
 /// shape as `repair_tests::reex_vols` and duplicated rather than shared
 /// because these two modules are siblings, not a parent and a child.
-fn rar_pair(member: &str, total: &[u8]) -> [Vec<u8>; 2] {
+fn rar_pair(member: &str, total: &[u8]) -> Vec<Vec<u8>> {
     use nzbkit::rar::fixtures;
     let n = total.len() as u64;
     let half = total.len() / 2;
-    [
-        fixtures::rar5_volume_n(&[(member, n, &total[..half], false, true)], 0),
-        fixtures::rar5_volume_n(&[(member, n, &total[half..], true, false)], 1),
-    ]
+    fixtures::rar5_volume_set(&[
+        &[(member, n, &total[..half], false, true)],
+        &[(member, n, &total[half..], true, false)],
+    ])
 }
 
 /// A single-volume RAR5 archive holding `member` whole.

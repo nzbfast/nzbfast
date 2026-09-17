@@ -326,7 +326,45 @@ build_mac() {
 # is why this was found the first time anyone ran it (the mac arm has no
 # equivalent hop and was fine). One hop, and `$env:USERPROFILE` is
 # expanded exactly once, by the shell that owns it.
-rsh() { ssh "$REMOTE" "$1"; }
+#
+# AND THE BARE FORM ASSUMED THE DEFAULT SHELL IS POWERSHELL, WHICH IS NOT
+# TRUE OF EVERY WINDOWS BUILD BOX (16 Sep 2026). `sshd`'s DefaultShell is
+# PowerShell on the box this arm was written against and **cmd.exe on the
+# second one it was pointed at**, so the plain text above reached cmd,
+# which answered `The filename, directory name, or volume label syntax is
+# incorrect.` at the very first hop and took the build down with it -
+# correctly, via `set -e`, but with an error that says nothing about the
+# cause. The cmd.exe box is not the odd one: cmd.exe is the OpenSSH
+# default, and PowerShell is the thing somebody configured. So assume
+# NEITHER; the machine roster in the maintainer notes says which is which.
+#
+# `-EncodedCommand` is the one spelling that serves both, and it is the
+# same conclusion `.claude/tools/parfast-rigs.sh` reached for the same
+# fleet - read its `windows_probe` header, which names this exact split.
+# The payload is base64 of UTF-16LE, so it is opaque to whichever shell
+# unwraps it: cmd has nothing to mangle, and PowerShell has no `$` to
+# expand early, which is what the double-hop paragraph above is about. The
+# single-expansion property that paragraph earned is therefore KEPT, not
+# traded away - the argument is preserved, its assumption is not.
+#
+# Do not "simplify" this back to `powershell -NoProfile -Command "$1"`:
+# that is the double hop, and it is the bug this comment's first half
+# documents.
+#
+# `$ProgressPreference` is set in the payload rather than left alone
+# because `-EncodedCommand` turns every progress record into a CLIXML
+# blob on stderr - `Compress-Archive` alone emitted 160 KB of
+# `<Obj S="progress">` into the build log on the first run of this form.
+# It is prepended, so the caller's own last statement is still the last
+# statement and an `rsh` used for its VALUE (the `$env:USERPROFILE` hop
+# below) returns exactly what it did before. stdout is untouched either
+# way; this only stops the log being unreadable.
+rsh() {
+    local b64
+    b64=$(printf '%s' "\$ProgressPreference='SilentlyContinue'; $1" \
+        | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')
+    ssh "$REMOTE" "powershell -NoProfile -EncodedCommand $b64"
+}
 
 build_win() {
     [ -n "$REMOTE" ] || { echo "✗ windows-x64 needs --remote HOST" >&2; exit 1; }

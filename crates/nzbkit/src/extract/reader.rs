@@ -1941,16 +1941,10 @@ mod tests {
         let inner_arch = fixtures::rar5_volume(&[("A.mkv", 220_000, &a, false, false)]);
         let n = inner_arch.len();
         let cut = n / 2;
-        let vols: Vec<Vec<u8>> = vec![
-            fixtures::rar5_volume_n(
-                &[("inner.rar", n as u64, &inner_arch[..cut], false, true)],
-                0,
-            ),
-            fixtures::rar5_volume_n(
-                &[("inner.rar", n as u64, &inner_arch[cut..], true, false)],
-                1,
-            ),
-        ];
+        let vols: Vec<Vec<u8>> = fixtures::rar5_volume_set(&[
+            &[("inner.rar", n as u64, &inner_arch[..cut], false, true)],
+            &[("inner.rar", n as u64, &inner_arch[cut..], true, false)],
+        ]);
         let dir = tmpdir("nestedreadat");
         let ex = Extractor::new(&dir, 2, true);
         feed(&ex, 0, "x.part1.rar", &vols[0], 6000, 31);

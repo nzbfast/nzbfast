@@ -612,7 +612,10 @@
     <value>Clear remembered checksums</value>
   </data>
   <data name="settings_digest_cache_clear_confirm" xml:space="preserve">
-    <value>Forget every remembered checksum? The next create or full check of each large file takes the usual time again.</value>
+    <value>Forget every remembered checksum?</value>
+  </data>
+  <data name="settings_digest_cache_clear_confirm_body" xml:space="preserve">
+    <value>The next create or full check of each large file takes the usual time again.</value>
   </data>
   <data name="settings_digest_cache_cleared" xml:space="preserve">
     <value>Remembered checksums cleared</value>

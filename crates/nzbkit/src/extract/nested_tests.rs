@@ -48,14 +48,11 @@ use super::testutil::*;
 #[test]
 fn promoted_plain_child_writes_each_byte_exactly_once() {
     let e01 = payload(350_000, 21);
-    let vols: Vec<Vec<u8>> = vec![
-        fixtures::rar5_volume_n(&[("E01.mkv", 350_000, &e01[..120_000], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("E01.mkv", 350_000, &e01[120_000..240_000], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("E01.mkv", 350_000, &e01[240_000..], true, false)], 2),
-    ];
+    let vols: Vec<Vec<u8>> = fixtures::rar5_volume_set(&[
+        &[("E01.mkv", 350_000, &e01[..120_000], false, true)],
+        &[("E01.mkv", 350_000, &e01[120_000..240_000], true, true)],
+        &[("E01.mkv", 350_000, &e01[240_000..], true, false)],
+    ]);
     let dir = tmpdir("f4promote");
     let ex = Extractor::new(&dir, 3, true);
     for (vi, vol) in vols.iter().enumerate() {
@@ -113,20 +110,11 @@ fn two_level_store_set_extracts_one_pass() {
     let n = inner_arch.len();
     // WinRAR-true: vol 0's piece is one byte longer than vol 1's.
     let (c1, c2) = (n / 3 + 1, n / 3 + 1 + n / 3);
-    let vols: Vec<Vec<u8>> = vec![
-        fixtures::rar5_volume_n(
-            &[("inner.rar", n as u64, &inner_arch[..c1], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[("inner.rar", n as u64, &inner_arch[c1..c2], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[("inner.rar", n as u64, &inner_arch[c2..], true, false)],
-            2,
-        ),
-    ];
+    let vols: Vec<Vec<u8>> = fixtures::rar5_volume_set(&[
+        &[("inner.rar", n as u64, &inner_arch[..c1], false, true)],
+        &[("inner.rar", n as u64, &inner_arch[c1..c2], true, true)],
+        &[("inner.rar", n as u64, &inner_arch[c2..], true, false)],
+    ]);
     for (t, order) in [[0usize, 1, 2], [2, 1, 0], [1, 2, 0]].iter().enumerate() {
         let dir = tmpdir(&format!("nested2l{t}"));
         let ex = Extractor::new(&dir, 3, true);
@@ -187,34 +175,28 @@ fn two_level_store_set_extracts_one_pass() {
 #[test]
 fn nested_split_chain() {
     let f = payload(400_000, 83);
-    let iv1 = fixtures::rar5_volume_n(&[("F.mkv", 400_000, &f[..200_000], false, true)], 0);
-    let iv2 = fixtures::rar5_volume_n(&[("F.mkv", 400_000, &f[200_000..], true, false)], 1);
+    let iv1 = fixtures::rar5_volume_n_of(&[("F.mkv", 400_000, &f[..200_000], false, true)], 0, 2);
+    let iv2 = fixtures::rar5_volume_n_of(&[("F.mkv", 400_000, &f[200_000..], true, false)], 1, 2);
     let cut = iv2.len() / 2;
-    let vols: Vec<Vec<u8>> = vec![
-        fixtures::rar5_volume_n(
-            &[
-                ("inner.part1.rar", iv1.len() as u64, &iv1, false, false),
-                (
-                    "inner.part2.rar",
-                    iv2.len() as u64,
-                    &iv2[..cut],
-                    false,
-                    true,
-                ),
-            ],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
+    let vols: Vec<Vec<u8>> = fixtures::rar5_volume_set(&[
+        &[
+            ("inner.part1.rar", iv1.len() as u64, &iv1, false, false),
+            (
                 "inner.part2.rar",
                 iv2.len() as u64,
-                &iv2[cut..],
-                true,
+                &iv2[..cut],
                 false,
-            )],
-            1,
-        ),
-    ];
+                true,
+            ),
+        ],
+        &[(
+            "inner.part2.rar",
+            iv2.len() as u64,
+            &iv2[cut..],
+            true,
+            false,
+        )],
+    ]);
     for (t, order) in [[0usize, 1], [1, 0]].iter().enumerate() {
         let dir = tmpdir(&format!("nestedsplit{t}"));
         let ex = Extractor::new(&dir, 2, true);
@@ -260,36 +242,27 @@ fn nested_split_chain() {
 fn a_reused_article_crc_extracts_the_same_as_hashing() {
     let f = payload(400_000, 86);
     let whole = crc32fast::hash(&f);
-    let iv = [
+    let iv = fixtures::rar5_volume_set_crc(&[
         // WinRAR-true geometry: volume 0 carries one byte more (its
         // main header has no volume-number field).
-        fixtures::rar5_volume_n_crc(
-            &[(
-                "F.mkv",
-                400_000,
-                &f[..150_001],
-                false,
-                true,
-                Some(crc32fast::hash(&f[..150_001])),
-            )],
-            0,
-        ),
-        fixtures::rar5_volume_n_crc(
-            &[(
-                "F.mkv",
-                400_000,
-                &f[150_001..300_001],
-                true,
-                true,
-                Some(crc32fast::hash(&f[150_001..300_001])),
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n_crc(
-            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
-            2,
-        ),
-    ];
+        &[(
+            "F.mkv",
+            400_000,
+            &f[..150_001],
+            false,
+            true,
+            Some(crc32fast::hash(&f[..150_001])),
+        )],
+        &[(
+            "F.mkv",
+            400_000,
+            &f[150_001..300_001],
+            true,
+            true,
+            Some(crc32fast::hash(&f[150_001..300_001])),
+        )],
+        &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+    ]);
     let outer = fixtures::rar5_volume(&[
         ("i.part1.rar", iv[0].len() as u64, &iv[0], false, false),
         ("i.part2.rar", iv[1].len() as u64, &iv[1], false, false),
@@ -363,36 +336,27 @@ fn a_wrong_article_crc_is_not_taken_on_trust() {
 fn nested_store_with_crcs_extracts_clean() {
     let f = payload(400_000, 86);
     let whole = crc32fast::hash(&f);
-    let iv = [
+    let iv = fixtures::rar5_volume_set_crc(&[
         // WinRAR-true geometry: volume 0 carries one byte more (its
         // main header has no volume-number field).
-        fixtures::rar5_volume_n_crc(
-            &[(
-                "F.mkv",
-                400_000,
-                &f[..150_001],
-                false,
-                true,
-                Some(crc32fast::hash(&f[..150_001])),
-            )],
-            0,
-        ),
-        fixtures::rar5_volume_n_crc(
-            &[(
-                "F.mkv",
-                400_000,
-                &f[150_001..300_001],
-                true,
-                true,
-                Some(crc32fast::hash(&f[150_001..300_001])),
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n_crc(
-            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
-            2,
-        ),
-    ];
+        &[(
+            "F.mkv",
+            400_000,
+            &f[..150_001],
+            false,
+            true,
+            Some(crc32fast::hash(&f[..150_001])),
+        )],
+        &[(
+            "F.mkv",
+            400_000,
+            &f[150_001..300_001],
+            true,
+            true,
+            Some(crc32fast::hash(&f[150_001..300_001])),
+        )],
+        &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+    ]);
     let outer = fixtures::rar5_volume(&[
         ("i.part1.rar", iv[0].len() as u64, &iv[0], false, false),
         ("i.part2.rar", iv[1].len() as u64, &iv[1], false, false),
@@ -421,36 +385,27 @@ fn nested_store_with_crcs_extracts_clean() {
 fn nested_store_data_damage_demotes_on_crc() {
     let f = payload(400_000, 87);
     let whole = crc32fast::hash(&f);
-    let mut iv = [
+    let mut iv = fixtures::rar5_volume_set_crc(&[
         // WinRAR-true geometry: volume 0 carries one byte more (its
         // main header has no volume-number field).
-        fixtures::rar5_volume_n_crc(
-            &[(
-                "F.mkv",
-                400_000,
-                &f[..150_001],
-                false,
-                true,
-                Some(crc32fast::hash(&f[..150_001])),
-            )],
-            0,
-        ),
-        fixtures::rar5_volume_n_crc(
-            &[(
-                "F.mkv",
-                400_000,
-                &f[150_001..300_001],
-                true,
-                true,
-                Some(crc32fast::hash(&f[150_001..300_001])),
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n_crc(
-            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
-            2,
-        ),
-    ];
+        &[(
+            "F.mkv",
+            400_000,
+            &f[..150_001],
+            false,
+            true,
+            Some(crc32fast::hash(&f[..150_001])),
+        )],
+        &[(
+            "F.mkv",
+            400_000,
+            &f[150_001..300_001],
+            true,
+            true,
+            Some(crc32fast::hash(&f[150_001..300_001])),
+        )],
+        &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+    ]);
     // Poster damage: flip bytes in the middle of i.part2.rar - deep
     // inside its 150 KB data area, nowhere near the headers.
     let mid = iv[1].len() / 2;
@@ -753,36 +708,27 @@ fn nested_prevalence_counts_grouped_demote() {
     let before = nested_prevalence();
     let f = payload(400_000, 177);
     let whole = crc32fast::hash(&f);
-    let mut iv = [
+    let mut iv = fixtures::rar5_volume_set_crc(&[
         // WinRAR-true geometry: volume 0 carries one byte more (its
         // main header has no volume-number field).
-        fixtures::rar5_volume_n_crc(
-            &[(
-                "F.mkv",
-                400_000,
-                &f[..150_001],
-                false,
-                true,
-                Some(crc32fast::hash(&f[..150_001])),
-            )],
-            0,
-        ),
-        fixtures::rar5_volume_n_crc(
-            &[(
-                "F.mkv",
-                400_000,
-                &f[150_001..300_001],
-                true,
-                true,
-                Some(crc32fast::hash(&f[150_001..300_001])),
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n_crc(
-            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
-            2,
-        ),
-    ];
+        &[(
+            "F.mkv",
+            400_000,
+            &f[..150_001],
+            false,
+            true,
+            Some(crc32fast::hash(&f[..150_001])),
+        )],
+        &[(
+            "F.mkv",
+            400_000,
+            &f[150_001..300_001],
+            true,
+            true,
+            Some(crc32fast::hash(&f[150_001..300_001])),
+        )],
+        &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+    ]);
     // Poster damage deep in volume 2's data area -> the CRC gate demotes
     // the whole store group at finish.
     let mid = iv[1].len() / 2;
@@ -1301,11 +1247,11 @@ fn nested_many_siblings_wide() {
     let inner1 = fixtures::rar5_volume(&entries);
     let n = inner1.len();
     let (c1, c2) = (n / 3, 2 * n / 3);
-    let vols: Vec<Vec<u8>> = vec![
-        fixtures::rar5_volume_n(&[("inner1.rar", n as u64, &inner1[..c1], false, true)], 0),
-        fixtures::rar5_volume_n(&[("inner1.rar", n as u64, &inner1[c1..c2], true, true)], 1),
-        fixtures::rar5_volume_n(&[("inner1.rar", n as u64, &inner1[c2..], true, false)], 2),
-    ];
+    let vols: Vec<Vec<u8>> = fixtures::rar5_volume_set(&[
+        &[("inner1.rar", n as u64, &inner1[..c1], false, true)],
+        &[("inner1.rar", n as u64, &inner1[c1..c2], true, true)],
+        &[("inner1.rar", n as u64, &inner1[c2..], true, false)],
+    ]);
     for (t, order) in [[0usize, 1, 2], [2, 0, 1]].iter().enumerate() {
         let dir = tmpdir(&format!("nestedwide{t}"));
         let ex = Extractor::new(&dir, 3, true);

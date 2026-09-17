@@ -509,14 +509,14 @@ fn outer_hold_restores_and_removes_itself_when_it_can() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn reex_vols(total: &[u8]) -> [Vec<u8>; 2] {
+fn reex_vols(total: &[u8]) -> Vec<Vec<u8>> {
     use nzbkit::rar::fixtures;
     let n = total.len() as u64;
     let half = total.len() / 2;
-    [
-        fixtures::rar5_volume_n(&[("film.mkv", n, &total[..half], false, true)], 0),
-        fixtures::rar5_volume_n(&[("film.mkv", n, &total[half..], true, false)], 1),
-    ]
+    fixtures::rar5_volume_set(&[
+        &[("film.mkv", n, &total[..half], false, true)],
+        &[("film.mkv", n, &total[half..], true, false)],
+    ])
 }
 
 /// The nest lift-back must merge produced subdirs into pre-existing
@@ -849,14 +849,15 @@ fn reextract_dir_armed_eats_volumes_as_it_goes() {
     let b: Vec<u8> = (0..70_000u32)
         .map(|i| (i as u8).wrapping_mul(11).wrapping_add(7))
         .collect();
-    let v0 = fixtures::rar5_volume_n(&[("a.bin", a.len() as u64, &a, false, false)], 0);
+    let v0 = fixtures::rar5_volume_n_of(&[("a.bin", a.len() as u64, &a, false, false)], 0, 2);
     // A stored CRC that does not match the bytes: the headers parse,
     // the first volume extracts, and the SECOND member fails when it
     // is verified - which is the only moment that can tell the two
     // routes apart from outside.
-    let v1 = fixtures::rar5_volume_n_crc(
+    let v1 = fixtures::rar5_volume_n_crc_of(
         &[("b.bin", b.len() as u64, &b, false, false, Some(0xDEAD_BEEF))],
         1,
+        2,
     );
     std::fs::write(dir.join("x.part1.rar"), &v0).unwrap();
     std::fs::write(dir.join("x.part2.rar"), &v1).unwrap();
@@ -1426,14 +1427,14 @@ fn nested_prevalence_classifies_and_counts_disk_layer() {
 
 /// `reex_vols` with a chosen member name - the alias fixtures below
 /// need the archived member to be named after a source volume.
-fn reex_vols_named(total: &[u8], member: &str) -> [Vec<u8>; 2] {
+fn reex_vols_named(total: &[u8], member: &str) -> Vec<Vec<u8>> {
     use nzbkit::rar::fixtures;
     let n = total.len() as u64;
     let half = total.len() / 2;
-    [
-        fixtures::rar5_volume_n(&[(member, n, &total[..half], false, true)], 0),
-        fixtures::rar5_volume_n(&[(member, n, &total[half..], true, false)], 1),
-    ]
+    fixtures::rar5_volume_set(&[
+        &[(member, n, &total[..half], false, true)],
+        &[(member, n, &total[half..], true, false)],
+    ])
 }
 
 /// Sweep finding 8: a member named exactly like the FIRST source
@@ -1505,15 +1506,12 @@ fn failed_native_extraction_publishes_nothing() {
         .collect();
     let n = total.len() as u64;
     let half = total.len() / 2;
-    let vols = [
-        fixtures::rar5_volume_n_crc(&[("x.rar", n, &total[..half], false, true, None)], 0),
+    let vols = fixtures::rar5_volume_set_crc(&[
+        &[("x.rar", n, &total[..half], false, true, None)],
         // Wrong plaintext CRC on the last piece - extraction writes
         // every byte, then rejects the entry.
-        fixtures::rar5_volume_n_crc(
-            &[("x.rar", n, &total[half..], true, false, Some(0xDEAD_BEEF))],
-            1,
-        ),
-    ];
+        &[("x.rar", n, &total[half..], true, false, Some(0xDEAD_BEEF))],
+    ]);
     std::fs::write(dir.join("x.rar"), &vols[0]).unwrap();
     std::fs::write(dir.join("x.r00"), &vols[1]).unwrap();
     assert!(
@@ -2274,10 +2272,10 @@ fn failed_obfuscated_extraction_keeps_every_volume() {
     // Both volumes parse and group into ONE set (so both are in the
     // extractor's source list), but the member name escapes the output
     // directory, so `write_archives_to` fails after the set is bound.
-    let vols = [
-        fixtures::rar5_volume_n(&[("../escape.mkv", n, &total[..half], false, true)], 0),
-        fixtures::rar5_volume_n(&[("../escape.mkv", n, &total[half..], true, false)], 1),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("../escape.mkv", n, &total[..half], false, true)],
+        &[("../escape.mkv", n, &total[half..], true, false)],
+    ]);
     for depth in [0usize, 1] {
         let dir = reex_dir(&format!("obf-failkeep-{depth}"));
         std::fs::write(dir.join("c41d8fa9f00b204e98009980"), &vols[0]).unwrap();

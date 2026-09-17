@@ -25,11 +25,31 @@ those unless an ENDARC block says another volume follows: unrar 7.23
 wrote one member out of three before that flag was added. So this row
 is a chaining test as much as a member-count one.
 
-Three files and not one on purpose, and the sizes are picked so the
-members do NOT align with the volume cut: the middle file straddles a
-boundary and the sidecar starts mid-volume. A set whose members each
-happened to fill a volume would pass without a split flag ever being
-written.
+Three files and not one on purpose, so the row reaches the plural
+emitter rather than the single-member one. WHERE the cuts fall was
+misdescribed here until 16 Sep 2026, in a sentence this row inherited
+from its RAR5 twin and which CONTRADICTED the paragraph above it: it
+claimed the members do not align with the volume cut, that the middle
+file straddles a boundary and that a member-aligned set would carry no
+split flag. Read out of the emitted RAR4 block headers, `volume_bytes`
+is the PAYLOAD budget per volume with headers counted on top, so 24000
+bytes of legacy-feature.bin fill the first three volumes to the byte:
+
+  .rar  legacy-feature.bin  8000 of 24000  CONT_NEXT
+  .r00  legacy-feature.bin  8000 of 24000  CONT_PREV, CONT_NEXT
+  .r01  legacy-feature.bin  8000 of 24000  CONT_PREV         <- the cut
+  .r02  legacy-sample.bin   3000 of  3000  whole
+        legacy-notes.txt     300 of   300  whole
+
+The paragraph above is the accurate one, and this is the shape it
+describes: `.r01` ends on a complete member with no continuation flag,
+which is exactly the volume a reader stops at unless the ENDARC block
+says another follows. Split flags are written regardless, on
+legacy-feature.bin, so the row exercises the plural split-store arm too.
+It passes over the member-aligned cut because its volume names are
+descriptive; the opaque-named variant, where that cut is load bearing
+and no name can group the set, is
+`c6-c2-opaque-volumes-over-three-members`.
 
 The end state is the three payload files and the PAR2 index. The
 volumes are spent by the unpack and a clean run never fetches the

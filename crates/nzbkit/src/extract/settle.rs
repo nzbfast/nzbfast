@@ -1552,14 +1552,11 @@ mod tests {
     fn materializing_for_repair_abandons_the_extracted_output() {
         let dir = tmpdir("demoteabandon");
         let total = payload(600_000, 5);
-        let vols: Vec<Vec<u8>> = vec![
-            fixtures::rar5_volume_n(&[("movie.mkv", 600_000, &total[..200_000], false, true)], 0),
-            fixtures::rar5_volume_n(
-                &[("movie.mkv", 600_000, &total[200_000..400_000], true, true)],
-                1,
-            ),
-            fixtures::rar5_volume_n(&[("movie.mkv", 600_000, &total[400_000..], true, false)], 2),
-        ];
+        let vols: Vec<Vec<u8>> = fixtures::rar5_volume_set(&[
+            &[("movie.mkv", 600_000, &total[..200_000], false, true)],
+            &[("movie.mkv", 600_000, &total[200_000..400_000], true, true)],
+            &[("movie.mkv", 600_000, &total[400_000..], true, false)],
+        ]);
         let ex = Extractor::new(&dir, 3, true);
         for (i, vol) in vols.iter().enumerate() {
             feed(
@@ -2265,36 +2262,27 @@ mod tests {
     fn nested_crc_gate_survives_mapped_repair() {
         let f = payload(400_000, 97);
         let whole = crc32fast::hash(&f);
-        let iv = [
+        let iv = fixtures::rar5_volume_set_crc(&[
             // WinRAR-true geometry: volume 0 carries one byte more (its
             // main header has no volume-number field).
-            fixtures::rar5_volume_n_crc(
-                &[(
-                    "F.mkv",
-                    400_000,
-                    &f[..150_001],
-                    false,
-                    true,
-                    Some(crc32fast::hash(&f[..150_001])),
-                )],
-                0,
-            ),
-            fixtures::rar5_volume_n_crc(
-                &[(
-                    "F.mkv",
-                    400_000,
-                    &f[150_001..300_001],
-                    true,
-                    true,
-                    Some(crc32fast::hash(&f[150_001..300_001])),
-                )],
-                1,
-            ),
-            fixtures::rar5_volume_n_crc(
-                &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
-                2,
-            ),
-        ];
+            &[(
+                "F.mkv",
+                400_000,
+                &f[..150_001],
+                false,
+                true,
+                Some(crc32fast::hash(&f[..150_001])),
+            )],
+            &[(
+                "F.mkv",
+                400_000,
+                &f[150_001..300_001],
+                true,
+                true,
+                Some(crc32fast::hash(&f[150_001..300_001])),
+            )],
+            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+        ]);
         // Outer entries carry CRCs too, so the level-0 gate composes
         // the inner-archive files alongside the child's payload gate.
         let outer = fixtures::rar5_volume_n_crc(

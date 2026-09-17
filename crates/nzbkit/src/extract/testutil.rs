@@ -218,6 +218,9 @@ pub(super) fn uniform_store_set(
         )],
         n_full as u64,
     ));
+    // Every volume but the last says another follows, as an archiver
+    // stamps it - see `fixtures::rar5_seal_set`.
+    fixtures::rar5_seal_set(&mut vols);
     let names = (0..vols.len())
         .map(|k| format!("{:06x}NoDotGarbage{k}", (k as u64 * 2654435761) & 0xffffff))
         .collect();

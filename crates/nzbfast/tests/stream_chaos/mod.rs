@@ -270,11 +270,11 @@ fn record_stream(port: u16, path: &str, wall_cap: f64, idle_cap: f64) -> Arrival
 fn movie_corpus(size: usize) -> (String, HashMap<String, Vec<u8>>, Vec<u8>) {
     let inner = payload(size, 7);
     let (a, b) = (size / 3, 2 * size / 3);
-    let vols = [
-        fixtures::rar5_volume_n(&[("movie.mkv", size as u64, &inner[..a], false, true)], 0),
-        fixtures::rar5_volume_n(&[("movie.mkv", size as u64, &inner[a..b], true, true)], 1),
-        fixtures::rar5_volume_n(&[("movie.mkv", size as u64, &inner[b..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", size as u64, &inner[..a], false, true)],
+        &[("movie.mkv", size as u64, &inner[a..b], true, true)],
+        &[("movie.mkv", size as u64, &inner[b..], true, false)],
+    ]);
     let mut articles = HashMap::new();
     let mut xml = String::from(
         "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",

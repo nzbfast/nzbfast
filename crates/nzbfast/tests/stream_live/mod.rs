@@ -36,26 +36,17 @@ async fn stream_while_downloading() {
     let _scratch = scratch::ScratchDir::attach(&dir);
 
     let inner = payload(24_000_000, 7); // 24 MB "movie"
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 24_000_000, &inner[..8_000_000], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "movie.mkv",
-                24_000_000,
-                &inner[8_000_000..16_000_000],
-                true,
-                true,
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 24_000_000, &inner[16_000_000..], true, false)],
-            2,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 24_000_000, &inner[..8_000_000], false, true)],
+        &[(
+            "movie.mkv",
+            24_000_000,
+            &inner[8_000_000..16_000_000],
+            true,
+            true,
+        )],
+        &[("movie.mkv", 24_000_000, &inner[16_000_000..], true, false)],
+    ]);
     let mut articles = HashMap::new();
     let mut xml = String::from(
         "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
@@ -338,26 +329,17 @@ async fn stream_seek_promotes_and_tail_bursts() {
     // are sized well above the promote window's 4 MB PRE_ROLL so a
     // mid-volume seek still provably enters the volume mid-way.
     let inner = payload(48_000_000, 11);
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 48_000_000, &inner[..16_000_000], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "movie.mkv",
-                48_000_000,
-                &inner[16_000_000..32_000_000],
-                true,
-                true,
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 48_000_000, &inner[32_000_000..], true, false)],
-            2,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 48_000_000, &inner[..16_000_000], false, true)],
+        &[(
+            "movie.mkv",
+            48_000_000,
+            &inner[16_000_000..32_000_000],
+            true,
+            true,
+        )],
+        &[("movie.mkv", 48_000_000, &inner[32_000_000..], true, false)],
+    ]);
     let mut articles = HashMap::new();
     let mut xml = String::from(
         "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
@@ -546,26 +528,17 @@ async fn stream_promote_preempts_deep_windows() {
     let _scratch = scratch::ScratchDir::attach(&dir);
 
     let inner = payload(48_000_000, 13);
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 48_000_000, &inner[..16_000_000], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "movie.mkv",
-                48_000_000,
-                &inner[16_000_000..32_000_000],
-                true,
-                true,
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 48_000_000, &inner[32_000_000..], true, false)],
-            2,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 48_000_000, &inner[..16_000_000], false, true)],
+        &[(
+            "movie.mkv",
+            48_000_000,
+            &inner[16_000_000..32_000_000],
+            true,
+            true,
+        )],
+        &[("movie.mkv", 48_000_000, &inner[32_000_000..], true, false)],
+    ]);
     let mut articles = HashMap::new();
     let mut xml = String::from(
         "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",

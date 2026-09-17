@@ -228,20 +228,11 @@ async fn a_late_head_on_a_damaged_volume_still_repairs_one_pass() {
     // Odd split points so no boundary aligns with articles or blocks.
     let v1end = (6 << 20) + 137;
     let v2end = (86 << 20) + 1234;
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", total as u64, &inner[..v1end], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", total as u64, &inner[v1end..v2end], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", total as u64, &inner[v2end..], true, false)],
-            2,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", total as u64, &inner[..v1end], false, true)],
+        &[("movie.mkv", total as u64, &inner[v1end..v2end], true, true)],
+        &[("movie.mkv", total as u64, &inner[v2end..], true, false)],
+    ]);
     let names = ["r.part1.rar", "r.part2.rar", "r.part3.rar"];
     for (name, vol) in names.iter().zip(&vols) {
         fx.add_file(name, vol, 512_000);
@@ -382,14 +373,11 @@ async fn damage_in_a_plain_set_member_leaves_the_volumes_one_pass() {
     }
     let mut fx = Fixture::new("plain-damage-onepass");
     let inner = payload(900_000, 7);
-    let vols = [
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[..350_001], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[700_001..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 900_000, &inner[..350_001], false, true)],
+        &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
+        &[("movie.mkv", 900_000, &inner[700_001..], true, false)],
+    ]);
     let vol_names = ["r.part1.rar", "r.part2.rar", "r.part3.rar"];
     for (name, vol) in vol_names.iter().zip(&vols) {
         fx.add_file(name, vol, 60_000);
@@ -685,14 +673,11 @@ async fn an_unservable_recovery_set_declines_as_short_not_malformed() {
 fn recovery_starved_release(tag: &str) -> (Fixture, Vec<u8>) {
     let mut fx = Fixture::new(tag);
     let inner = payloads::unique_payload(900_000, 0x0000_0282);
-    let vols = [
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[..350_001], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[700_001..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 900_000, &inner[..350_001], false, true)],
+        &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
+        &[("movie.mkv", 900_000, &inner[700_001..], true, false)],
+    ]);
     let names = ["r.part1.rar", "r.part2.rar", "r.part3.rar"];
     // 12 kB payload articles rather than `rar_release`'s 60 kB, so that
     // losing two of them is ~2.5% of the post and not 12%. §282 item

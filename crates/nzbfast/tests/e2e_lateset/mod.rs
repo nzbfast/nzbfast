@@ -356,25 +356,52 @@ async fn x5_24_control_a_foreign_set_must_never_be_assigned() {
     )
     .await;
 
+    // EVERY ASSERTION HERE NAMES ITSELF, and that is not decoration
+    // (16 Sep 2026, claim `e2e-x5-24-signature2-recreate-16sep`). The
+    // three grade three different things, and the run log carries the
+    // X5-24 decline message a few lines above whichever one panics, so
+    // a reader reaches for the nearest sentence. The 3 Sep handoff did
+    // exactly that: it read a `left: 0, right: 180000` from the SECOND
+    // assertion as the first one's, recorded "the declined file is in
+    // the output directory anyway" as a second engine defect, and a
+    // claim was minted to chase something that was never there.
+    // Nothing is weakened - a tag is prepended to each message and the
+    // predicates are the ones this probe has always had.
     assert!(
         !out.join("Not.Ours.bin").exists(),
-        "a recovery set for a file this post never offers was \
-         materialised\n{log}"
+        "[X5-24 FOREIGN] a recovery set for a file this post never offers was \
+         materialised AND LEFT ON DISK - the gate either did not run or did \
+         not remove the file\n{log}"
     );
     // The honest half, beside the foreign one: option A was ruled FIRST,
     // so a foreign set in the same post must not cost the assignable
     // member its rebuild. A gate that declined on a bare count of
     // leftover sets against incomplete slots would pass the assertion
     // above and fail these two.
+    //
+    // THIS IS THE ONE THAT FLAKES, and it is not about the foreign set
+    // at all: the in-stream deferral cancels the tail articles of the
+    // leftover sets' own recovery volumes, these fixtures carry exactly
+    // 100% parity, and one cancelled article leaves `setx2` a block
+    // short of rebuilding `Charlie.Three.bin` (measured `needed=18
+    // have=17`). 1-2% here, and the sibling probe above - which has no
+    // foreign set at all - flakes the same way for the same reason. It
+    // closes when the refetch gap does; both are written up in
+    // `research/E2E-X5-24-SIGNATURE-2-IS-A-MISREAD-2026-09-16.md`.
     assert_eq!(
         std::fs::read(out.join("Charlie.Three.bin"))
             .unwrap_or_default()
             .len(),
         180_000,
-        "the foreign set cost the uniquely assignable member its \
-         rebuild\n{log}"
+        "[X5-24 ASSIGNABLE] the uniquely assignable member was not rebuilt - \
+         this is NOT the foreign file surviving, which the assertion above \
+         has already cleared; look for a leftover set that came up short of \
+         its own parity\n{log}"
     );
-    assert!(ok, "the assignable rebuild was not credited\n{log}");
+    assert!(
+        ok,
+        "[X5-24 VERDICT] the assignable rebuild was not credited\n{log}"
+    );
 }
 
 /// X5-24 (ambiguous control): TWO wholly missing members of EQUAL

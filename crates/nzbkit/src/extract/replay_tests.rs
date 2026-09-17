@@ -42,8 +42,10 @@ fn payload_sources_name_each_archives_own_volumes() {
 fn payload_sources_name_every_volume_of_a_split_file() {
     let dir = tmpdir("provenance-split");
     let data = payload(300_000, 7);
-    let v1 = fixtures::rar5_volume_n(&[("big.bin", 300_000, &data[..150_000], false, true)], 0);
-    let v2 = fixtures::rar5_volume_n(&[("big.bin", 300_000, &data[150_000..], true, false)], 1);
+    let v1 =
+        fixtures::rar5_volume_n_of(&[("big.bin", 300_000, &data[..150_000], false, true)], 0, 2);
+    let v2 =
+        fixtures::rar5_volume_n_of(&[("big.bin", 300_000, &data[150_000..], true, false)], 1, 2);
     let ex = Extractor::new(&dir, 2, true);
     feed(&ex, 0, "s.part1.rar", &v1, 7000, 3);
     feed(&ex, 1, "s.part2.rar", &v2, 7000, 4);
@@ -189,8 +191,16 @@ fn a_preclaimed_source_is_adopted_when_a_later_volume_parses_first() {
     let inner = "movie.mkv";
     let half = 150_000usize;
     let data = payload(2 * half, 23);
-    let v1 = fixtures::rar5_volume_n(&[(inner, data.len() as u64, &data[..half], false, true)], 0);
-    let v2 = fixtures::rar5_volume_n(&[(inner, data.len() as u64, &data[half..], true, false)], 1);
+    let v1 = fixtures::rar5_volume_n_of(
+        &[(inner, data.len() as u64, &data[..half], false, true)],
+        0,
+        2,
+    );
+    let v2 = fixtures::rar5_volume_n_of(
+        &[(inner, data.len() as u64, &data[half..], true, false)],
+        1,
+        2,
+    );
     let ex = Arc::new(Extractor::with_resume(&dir, 2, true, true));
     ex.anchor();
     // What the replay does for the one seeded volume: its own name and
@@ -242,7 +252,7 @@ fn a_replayed_store_set_places_only_in_volume_order_and_only_with_its_head() {
     let data = payload(total, 41);
     let vols: Vec<Vec<u8>> = (0..n_vols)
         .map(|k| {
-            fixtures::rar5_volume_n(
+            fixtures::rar5_volume_n_of(
                 &[(
                     inner,
                     total as u64,
@@ -251,6 +261,7 @@ fn a_replayed_store_set_places_only_in_volume_order_and_only_with_its_head() {
                     k < n_vols - 1,
                 )],
                 k as u64,
+                n_vols as u64,
             )
         })
         .collect();
@@ -553,9 +564,10 @@ fn materialized_span_on_disk_vouches_for_written_ranges_only() {
             } else {
                 &inner[half..]
             };
-            fixtures::rar5_volume_n(
+            fixtures::rar5_volume_n_of(
                 &[("F.mkv", inner.len() as u64, part, i > 0, i == 0)],
                 i as u64,
+                2,
             )
         })
         .collect();

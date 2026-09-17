@@ -321,10 +321,13 @@ public sealed partial class SettingsPage : UserControl
 
     private async void OnClearDigestCache(object sender, RoutedEventArgs e)
     {
+        // Title is the question and the body is the consequence, matching the
+        // mac dialog and QueuePage's. The title used to repeat the button's
+        // own label while the question sat in the body.
         var confirmed = await Dialogs.ConfirmAsync(
             this,
-            Strings.SettingsDigestCacheClear,
             Strings.SettingsDigestCacheClearConfirm,
+            Strings.SettingsDigestCacheClearConfirmBody,
             Strings.SettingsDigestCacheClear,
             Strings.CommonCancel);
         if (!confirmed)

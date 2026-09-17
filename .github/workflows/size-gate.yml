@@ -2845,6 +2845,16 @@ jobs:
       # says every log is published beside it, so a directory that has
       # stopped matching the roster is a page making a false claim.
       #
+      # The exporter carries a `--selftest` of its own since 16 Sep 2026,
+      # and it runs in front of the real export because the real export
+      # is the thing it is guarding: main() used to empty
+      # website/parfast-bench/ BEFORE running the scrub, so a scrub that
+      # refused deleted 456 committed files while printing "nothing is
+      # published". The export is staged and swapped now, and that arm's
+      # load-bearing case asserts the published directory is
+      # byte-for-byte unchanged across a refusal. It is hermetic, runs
+      # against a fixture research/ and costs no measurable time.
+      #
       # The scrubber's `--selftest` FIRST, and it is the load-bearing
       # half. That script is what stands between a bench log's `host=`
       # line and the public site, and its one failure mode is the family
@@ -2876,6 +2886,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           python3 tools/scrub-bench-logs.py --selftest
+          python3 website/tools/export_parfast_evidence.py --selftest
           python3 website/tools/build_parfast_page.py --check
           python3 website/tools/build_parfast_data_page.py --check
           python3 website/tools/export_parfast_evidence.py

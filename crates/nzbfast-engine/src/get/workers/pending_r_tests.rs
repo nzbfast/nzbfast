@@ -134,9 +134,10 @@ fn parked_articles_journal_off_a_materialized_volume_with_no_placements() {
             } else {
                 &inner[half..]
             };
-            nzbkit::rar::fixtures::rar5_volume_n(
+            nzbkit::rar::fixtures::rar5_volume_n_of(
                 &[("movie.mkv", inner.len() as u64, part, i > 0, i == 0)],
                 i as u64,
+                2,
             )
         })
         .collect();

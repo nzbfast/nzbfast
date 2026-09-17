@@ -537,14 +537,11 @@ async fn damaged_jobs_repair_overlaps_clean_download_byte_identical() {
     // A 3-volume store RAR of one 900 kB file, with a 20% par2 set -
     // the e2e suite's rar_release geometry.
     let inner = payload(900_000, 7);
-    let vols = [
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[..350_001], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[700_001..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 900_000, &inner[..350_001], false, true)],
+        &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
+        &[("movie.mkv", 900_000, &inner[700_001..], true, false)],
+    ]);
     let vol_names = ["r.part1.rar", "r.part2.rar", "r.part3.rar"];
     let fxdir = dir.join("fixture");
     std::fs::create_dir_all(&fxdir).unwrap();

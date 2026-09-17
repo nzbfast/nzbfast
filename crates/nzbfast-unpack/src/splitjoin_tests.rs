@@ -106,10 +106,10 @@ fn a_numeric_set_carrying_rar_magic_routes_to_the_rar_arm() {
     // ever reaching the magic gate.
     let half = total.len() / 2 + 1;
     let n = total.len() as u64;
-    let vols = [
-        fixtures::rar5_volume_n(&[("film.mkv", n, &total[..half], false, true)], 0),
-        fixtures::rar5_volume_n(&[("film.mkv", n, &total[half..], true, false)], 1),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("film.mkv", n, &total[..half], false, true)],
+        &[("film.mkv", n, &total[half..], true, false)],
+    ]);
     std::fs::write(dir.join("film.001"), &vols[0]).unwrap();
     std::fs::write(dir.join("film.002"), &vols[1]).unwrap();
     assert!(
@@ -775,12 +775,12 @@ fn a_head_past_part_one_refuses_the_container_reading() {
     // A real two-volume set, sized so only the head rule can refuse it.
     std::fs::write(
         dir.join("film.001"),
-        fixtures::rar5_volume_n(&[("film.mkv", n, &total[..half], false, true)], 0),
+        fixtures::rar5_volume_n_of(&[("film.mkv", n, &total[..half], false, true)], 0, 2),
     )
     .unwrap();
     std::fs::write(
         dir.join("film.002"),
-        fixtures::rar5_volume_n(&[("film.mkv", n, &total[half..], true, false)], 1),
+        fixtures::rar5_volume_n_of(&[("film.mkv", n, &total[half..], true, false)], 1, 2),
     )
     .unwrap();
     assert!(

@@ -110,15 +110,15 @@ fn a_real_disk_unpack_puts_a_byte_lane_on_the_row() {
             .collect();
         let half = payload.len() / 2;
         let n = payload.len() as u64;
-        use nzbkit::rar::fixtures::rar5_volume_n;
+        use nzbkit::rar::fixtures::rar5_volume_n_of;
         std::fs::write(
             dir.join("x.rar"),
-            rar5_volume_n(&[("film.mkv", n, &payload[..half], false, true)], 0),
+            rar5_volume_n_of(&[("film.mkv", n, &payload[..half], false, true)], 0, 2),
         )
         .unwrap();
         std::fs::write(
             dir.join("x.r00"),
-            rar5_volume_n(&[("film.mkv", n, &payload[half..], true, false)], 1),
+            rar5_volume_n_of(&[("film.mkv", n, &payload[half..], true, false)], 1, 2),
         )
         .unwrap();
 

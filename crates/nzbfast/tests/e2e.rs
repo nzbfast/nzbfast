@@ -548,14 +548,11 @@ fn rar_release_r(tag: &str, redundancy: Option<u32>) -> (Fixture, Vec<u8>, Vec<S
     // WinRAR-true geometry: volume 0 (no volume-number field in its main
     // header) carries one byte more data than volume 1.
     let inner = payload(900_000, 7);
-    let vols = [
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[..350_001], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[700_001..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 900_000, &inner[..350_001], false, true)],
+        &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
+        &[("movie.mkv", 900_000, &inner[700_001..], true, false)],
+    ]);
     let names = ["r.part1.rar", "r.part2.rar", "r.part3.rar"];
     for (name, vol) in names.iter().zip(&vols) {
         fx.add_file(name, vol, 60_000);
@@ -646,6 +643,9 @@ async fn obfuscated_uniform_store_set_one_pass_shuffled_order() {
         )],
         n_full as u64,
     ));
+    // Every volume but the last says another follows, as an archiver
+    // stamps it - see `fixtures::rar5_seal_set`.
+    fixtures::rar5_seal_set(&mut vols);
     let names: Vec<String> = (0..vols.len())
         .map(|k| format!("{:06x}fDakqqryd{k}", (k as u64 * 2654435761) & 0xffffff))
         .collect();
@@ -735,38 +735,29 @@ async fn holds_over_the_cap_page_to_scratch_and_stay_one_pass() {
     let mut fx = Fixture::new("holds-page");
     let total_len = 6_000_000 + 36_000_000 + 5_000_000;
     let film = payload(total_len, 83);
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[(
-                "bigfilm.mkv",
-                total_len as u64,
-                &film[..6_000_000],
-                false,
-                true,
-            )],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "bigfilm.mkv",
-                total_len as u64,
-                &film[6_000_000..42_000_000],
-                true,
-                true,
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "bigfilm.mkv",
-                total_len as u64,
-                &film[42_000_000..],
-                true,
-                false,
-            )],
-            2,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[(
+            "bigfilm.mkv",
+            total_len as u64,
+            &film[..6_000_000],
+            false,
+            true,
+        )],
+        &[(
+            "bigfilm.mkv",
+            total_len as u64,
+            &film[6_000_000..42_000_000],
+            true,
+            true,
+        )],
+        &[(
+            "bigfilm.mkv",
+            total_len as u64,
+            &film[42_000_000..],
+            true,
+            false,
+        )],
+    ]);
     // NZB order: the 36 MB middle volume FIRST, the anchors after - the
     // middle bytes are all landed before anything can place them.
     fx.add_file("x.part2.rar", &vols[1], 60_000);
@@ -932,38 +923,29 @@ async fn obfuscated_subjects_rotated_multivolume_one_pass() {
     // WinRAR-true geometry: volume 0 carries one byte more data.
     let total_len = 12_000_001 + 12_000_000 + 11_500_000;
     let film = payload(total_len, 59);
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[(
-                "realfilm.mkv",
-                total_len as u64,
-                &film[..12_000_001],
-                false,
-                true,
-            )],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "realfilm.mkv",
-                total_len as u64,
-                &film[12_000_001..24_000_001],
-                true,
-                true,
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "realfilm.mkv",
-                total_len as u64,
-                &film[24_000_001..],
-                true,
-                false,
-            )],
-            2,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[(
+            "realfilm.mkv",
+            total_len as u64,
+            &film[..12_000_001],
+            false,
+            true,
+        )],
+        &[(
+            "realfilm.mkv",
+            total_len as u64,
+            &film[12_000_001..24_000_001],
+            true,
+            true,
+        )],
+        &[(
+            "realfilm.mkv",
+            total_len as u64,
+            &film[24_000_001..],
+            true,
+            false,
+        )],
+    ]);
     let yenc_names = [
         "realpost.part1.rar",
         "realpost.part2.rar",
@@ -1432,22 +1414,16 @@ async fn multi_file_store_set_extracts_both_files() {
     let mut fx = Fixture::new("multifile");
     let e01 = payload(500_000, 11);
     let e02 = payload(300_000, 12);
-    let vols = [
+    let vols = fixtures::rar5_volume_set(&[
         // WinRAR-true: volume 0's piece is one byte longer than volume 1's.
-        fixtures::rar5_volume_n(&[("E01.mkv", 500_000, &e01[..200_001], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("E01.mkv", 500_000, &e01[200_001..400_001], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[
-                ("E01.mkv", 500_000, &e01[400_001..], true, false),
-                ("E02.mkv", 300_000, &e02[..100_000], false, true),
-            ],
-            2,
-        ),
-        fixtures::rar5_volume_n(&[("E02.mkv", 300_000, &e02[100_000..], true, false)], 3),
-    ];
+        &[("E01.mkv", 500_000, &e01[..200_001], false, true)],
+        &[("E01.mkv", 500_000, &e01[200_001..400_001], true, true)],
+        &[
+            ("E01.mkv", 500_000, &e01[400_001..], true, false),
+            ("E02.mkv", 300_000, &e02[..100_000], false, true),
+        ],
+        &[("E02.mkv", 300_000, &e02[100_000..], true, false)],
+    ]);
     let names = ["s.part1.rar", "s.part2.rar", "s.part3.rar", "s.part4.rar"];
     for (name, vol) in names.iter().zip(&vols) {
         fx.add_file(name, vol, 60_000);
@@ -1510,34 +1486,28 @@ async fn store_rar_in_rar_denests_inner_payload() {
     // Outer store set: inner volume files as entries, one boundary INSIDE
     // an outer volume (multivol.part2.rar spans both) - the season-pack
     // shape, with the payload files being a RAR set of their own.
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[
-                ("multivol.part1.rar", i1.len() as u64, &i1[..], false, false),
-                (
-                    "multivol.part2.rar",
-                    i2.len() as u64,
-                    &i2[..cut],
-                    false,
-                    true,
-                ),
-            ],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[
-                (
-                    "multivol.part2.rar",
-                    i2.len() as u64,
-                    &i2[cut..],
-                    true,
-                    false,
-                ),
-                ("multivol.part3.rar", i3.len() as u64, &i3[..], false, false),
-            ],
-            1,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[
+            ("multivol.part1.rar", i1.len() as u64, &i1[..], false, false),
+            (
+                "multivol.part2.rar",
+                i2.len() as u64,
+                &i2[..cut],
+                false,
+                true,
+            ),
+        ],
+        &[
+            (
+                "multivol.part2.rar",
+                i2.len() as u64,
+                &i2[cut..],
+                true,
+                false,
+            ),
+            ("multivol.part3.rar", i3.len() as u64, &i3[..], false, false),
+        ],
+    ]);
     let names = ["o.part1.rar", "o.part2.rar"];
     for (name, vol) in names.iter().zip(&vols) {
         fx.add_file(name, vol, 1500);
@@ -1589,34 +1559,28 @@ async fn store_rar_in_rar_chases_compressed_inner() {
     let i2 = std::fs::read(fixdir.join("multivol.part2.rar")).unwrap();
     let i3 = std::fs::read(fixdir.join("multivol.part3.rar")).unwrap();
     let cut = i2.len() / 2;
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[
-                ("multivol.part1.rar", i1.len() as u64, &i1[..], false, false),
-                (
-                    "multivol.part2.rar",
-                    i2.len() as u64,
-                    &i2[..cut],
-                    false,
-                    true,
-                ),
-            ],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[
-                (
-                    "multivol.part2.rar",
-                    i2.len() as u64,
-                    &i2[cut..],
-                    true,
-                    false,
-                ),
-                ("multivol.part3.rar", i3.len() as u64, &i3[..], false, false),
-            ],
-            1,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[
+            ("multivol.part1.rar", i1.len() as u64, &i1[..], false, false),
+            (
+                "multivol.part2.rar",
+                i2.len() as u64,
+                &i2[..cut],
+                false,
+                true,
+            ),
+        ],
+        &[
+            (
+                "multivol.part2.rar",
+                i2.len() as u64,
+                &i2[cut..],
+                true,
+                false,
+            ),
+            ("multivol.part3.rar", i3.len() as u64, &i3[..], false, false),
+        ],
+    ]);
     let names = ["o.part1.rar", "o.part2.rar"];
     for (name, vol) in names.iter().zip(&vols) {
         fx.add_file(name, vol, 1500);
@@ -3331,9 +3295,10 @@ async fn kill9_resume_direct_extract_refetches_little() {
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let name = format!("r.part{}.rar", i + 1);
         fx.add_file(&name, &vol, 25_000);
@@ -4421,57 +4386,45 @@ async fn nested_three_level_triple_damage_repairs_in_stream() {
     let inner2 = fixtures::rar5_volume(&[("final.bin", 200_000, &final_payload, false, false)]);
     // Level 1: three volumes splitting that archive.
     let (t1, t2) = (inner2.len() / 3, 2 * inner2.len() / 3);
-    let m = [
-        fixtures::rar5_volume_n(
-            &[(
-                "inner2.rar",
-                inner2.len() as u64,
-                &inner2[..t1],
-                false,
-                true,
-            )],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "inner2.rar",
-                inner2.len() as u64,
-                &inner2[t1..t2],
-                true,
-                true,
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "inner2.rar",
-                inner2.len() as u64,
-                &inner2[t2..],
-                true,
-                false,
-            )],
-            2,
-        ),
-    ];
+    let m = fixtures::rar5_volume_set(&[
+        &[(
+            "inner2.rar",
+            inner2.len() as u64,
+            &inner2[..t1],
+            false,
+            true,
+        )],
+        &[(
+            "inner2.rar",
+            inner2.len() as u64,
+            &inner2[t1..t2],
+            true,
+            true,
+        )],
+        &[(
+            "inner2.rar",
+            inner2.len() as u64,
+            &inner2[t2..],
+            true,
+            false,
+        )],
+    ]);
     // Level 0: two outer volumes; m.part2.rar spans the outer boundary.
     let cut = m[1].len() / 2;
-    let o1 = fixtures::rar5_volume_n(
+    let outer = fixtures::rar5_volume_set(&[
         &[
             ("m.part1.rar", m[0].len() as u64, &m[0][..], false, false),
             ("m.part2.rar", m[1].len() as u64, &m[1][..cut], false, true),
         ],
-        0,
-    );
-    let o2 = fixtures::rar5_volume_n(
         &[
             ("m.part2.rar", m[1].len() as u64, &m[1][cut..], true, false),
             ("m.part3.rar", m[2].len() as u64, &m[2][..], false, false),
         ],
-        1,
-    );
+    ]);
+    let (o1, o2) = (&outer[0], &outer[1]);
     let art = 1500usize;
-    fx.add_file("o.part1.rar", &o1, art);
-    fx.add_file("o.part2.rar", &o2, art);
+    fx.add_file("o.part1.rar", o1, art);
+    fx.add_file("o.part2.rar", o2, art);
     assert!(
         fx.add_par2(30, &["o.part1.rar", "o.part2.rar"], art),
         "par2 create failed"
@@ -4481,27 +4434,27 @@ async fn nested_three_level_triple_damage_repairs_in_stream() {
     // of o1's second entry DATA - the second "inner2.rar" occurrence in
     // o1 (the first is m1's header copy). The same article also carries
     // the outer entry header directly in front of it. Never article 0.
-    let ih = find_nth(&o1, b"inner2.rar", 1).expect("m2 header in o1");
+    let ih = find_nth(o1, b"inner2.rar", 1).expect("m2 header in o1");
     assert!(
         ih / art > 0,
         "inner-header victim must not be the sniff article"
     );
     // (iii) outer header: o2's second entry header (the only place the
     // string m.part3.rar appears in o2).
-    let oh = find_nth(&o2, b"m.part3.rar", 0).expect("entry header in o2");
+    let oh = find_nth(o2, b"m.part3.rar", 0).expect("entry header in o2");
     assert!(
         oh / art > 0,
         "outer-header victim must not be the sniff article"
     );
     // (i) innermost data: a payload slice that lands in o2's data area.
     let marker = &final_payload[120_000..120_048];
-    let dm = find_nth(&o2, marker, 0).expect("payload marker in o2");
+    let dm = find_nth(o2, marker, 0).expect("payload marker in o2");
     assert!(
-        find_nth(&o2, marker, 1).is_none(),
+        find_nth(o2, marker, 1).is_none(),
         "marker must be unique in o2"
     );
     assert!(
-        find_nth(&o1, marker, 0).is_none(),
+        find_nth(o1, marker, 0).is_none(),
         "marker must not appear in o1"
     );
     assert!(dm / art > 0, "data victim must not be the sniff article");
@@ -4571,14 +4524,11 @@ async fn nested_inner_par2_repairs_poster_damaged_layer() {
     }
     let mut fx = Fixture::new("nestinnerpar");
     let show = payload(300_000, 55);
-    let iv = [
-        fixtures::rar5_volume_n(&[("show.mkv", 300_000, &show[..100_000], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("show.mkv", 300_000, &show[100_000..200_000], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("show.mkv", 300_000, &show[200_000..], true, false)], 2),
-    ];
+    let iv = fixtures::rar5_volume_set(&[
+        &[("show.mkv", 300_000, &show[..100_000], false, true)],
+        &[("show.mkv", 300_000, &show[100_000..200_000], true, true)],
+        &[("show.mkv", 300_000, &show[200_000..], true, false)],
+    ]);
     // The inner par2 set is created over the INTACT volumes...
     let scratch = fx.dir.join("innerset");
     std::fs::create_dir_all(&scratch).unwrap();
@@ -4684,34 +4634,25 @@ async fn nested_inner_par2_repairs_data_damaged_store_layer() {
     // volume is allowed to be short, as in any real set.
     const DL: usize = 100_000;
     let (a, b) = (DL + 1, DL + 1 + DL);
-    let mut iv = [
-        fixtures::rar5_volume_n_crc(
-            &[(
-                "show.mkv",
-                300_000,
-                &show[..a],
-                false,
-                true,
-                Some(crc32fast::hash(&show[..a])),
-            )],
-            0,
-        ),
-        fixtures::rar5_volume_n_crc(
-            &[(
-                "show.mkv",
-                300_000,
-                &show[a..b],
-                true,
-                true,
-                Some(crc32fast::hash(&show[a..b])),
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n_crc(
-            &[("show.mkv", 300_000, &show[b..], true, false, Some(whole))],
-            2,
-        ),
-    ];
+    let mut iv = fixtures::rar5_volume_set_crc(&[
+        &[(
+            "show.mkv",
+            300_000,
+            &show[..a],
+            false,
+            true,
+            Some(crc32fast::hash(&show[..a])),
+        )],
+        &[(
+            "show.mkv",
+            300_000,
+            &show[a..b],
+            true,
+            true,
+            Some(crc32fast::hash(&show[a..b])),
+        )],
+        &[("show.mkv", 300_000, &show[b..], true, false, Some(whole))],
+    ]);
     // The premise above, checked rather than assumed: if the fixture helper
     // ever changes its header layout this must fail loudly here, not turn
     // back into a timing-dependent assertion further down.
@@ -5392,14 +5333,11 @@ async fn store_set_wholly_missing_volume_recreated_one_pass() {
     }
     let mut fx = Fixture::new("parsrc-miss");
     let inner = payload(900_000, 7);
-    let vols = [
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[..350_001], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[700_001..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 900_000, &inner[..350_001], false, true)],
+        &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
+        &[("movie.mkv", 900_000, &inner[700_001..], true, false)],
+    ]);
     let names = ["r.part1.rar", "r.part2.rar", "r.part3.rar"];
     for (name, vol) in names.iter().zip(&vols) {
         fx.add_file(name, vol, 60_000);
@@ -5464,14 +5402,11 @@ async fn store_set_missing_plus_damaged_volumes_one_pass() {
     }
     let mut fx = Fixture::new("parsrc-mixed");
     let inner = payload(900_000, 8);
-    let vols = [
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[..350_001], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[700_001..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 900_000, &inner[..350_001], false, true)],
+        &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
+        &[("movie.mkv", 900_000, &inner[700_001..], true, false)],
+    ]);
     let names = ["r.part1.rar", "r.part2.rar", "r.part3.rar"];
     for (name, vol) in names.iter().zip(&vols) {
         fx.add_file(name, vol, 60_000);

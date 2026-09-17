@@ -154,23 +154,17 @@ fn nested_zip_split_across_outer_volumes_waits_for_the_gap() {
     let parts = split_zip(&arch, 3);
     let cut = parts[1].len() / 2;
     let p2 = parts[1].len() as u64;
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[
-                whole("inner.zip.001", &parts[0]),
-                ("inner.zip.002", p2, &parts[1][..cut], false, true),
-            ],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[
-                ("inner.zip.002", p2, &parts[1][cut..], true, false),
-                whole("inner.zip.003", &parts[2]),
-            ],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[whole("readme.txt", &readme)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[
+            whole("inner.zip.001", &parts[0]),
+            ("inner.zip.002", p2, &parts[1][..cut], false, true),
+        ],
+        &[
+            ("inner.zip.002", p2, &parts[1][cut..], true, false),
+            whole("inner.zip.003", &parts[2]),
+        ],
+        &[whole("readme.txt", &readme)],
+    ]);
     let dir = tmpdir("zip-nested-split-vols");
     let ex = Arc::new(Extractor::new(&dir, 3, true));
     ex.anchor();

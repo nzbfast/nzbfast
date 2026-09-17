@@ -1048,20 +1048,11 @@ async fn an_external_repair_of_a_volume_set_still_admits_the_child() {
     // par2 slice.
     let cut1 = 4_000_003;
     let cut2 = 8_000_005;
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", SIZE as u64, &inner[..cut1], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", SIZE as u64, &inner[cut1..cut2], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", SIZE as u64, &inner[cut2..], true, false)],
-            2,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", SIZE as u64, &inner[..cut1], false, true)],
+        &[("movie.mkv", SIZE as u64, &inner[cut1..cut2], true, true)],
+        &[("movie.mkv", SIZE as u64, &inner[cut2..], true, false)],
+    ]);
     let names = ["r.part1.rar", "r.part2.rar", "r.part3.rar"];
     for (name, vol) in names.iter().zip(&vols) {
         std::fs::write(stage.join(name), vol).unwrap();

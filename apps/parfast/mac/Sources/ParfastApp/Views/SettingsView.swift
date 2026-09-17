@@ -117,12 +117,19 @@ struct SettingsView: View {
                 // stay on disk after it is turned off, and this is how they go.
                 HStack(spacing: 8) {
                     Button(S.settingsDigestCacheClear) { confirmingClear = true }
+                        // Title is the question, explanation goes in `message`,
+                        // the same split ProgressSheet's cancel dialog uses. A
+                        // confirmationDialog renders its title in bold and has
+                        // nowhere else to put a second sentence, so carrying
+                        // both in the title gave a two-line bold heading.
                         .confirmationDialog(S.settingsDigestCacheClearConfirm,
                                             isPresented: $confirmingClear) {
                             Button(S.settingsDigestCacheClear, role: .destructive) {
                                 digestCacheCleared = app.clearDigestCache()
                             }
                             Button(S.commonCancel, role: .cancel) {}
+                        } message: {
+                            Text(S.settingsDigestCacheClearConfirmBody)
                         }
                     if digestCacheCleared {
                         Text(S.settingsDigestCacheCleared)

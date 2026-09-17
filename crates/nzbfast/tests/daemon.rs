@@ -4836,16 +4836,10 @@ async fn archive_shape_is_live_in_the_queue_and_kept_in_history() {
     let _scratch = scratch::ScratchDir::attach(&dir);
 
     let inner = payload(12_000_000, 11);
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 12_000_000, &inner[..6_000_000], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 12_000_000, &inner[6_000_000..], true, false)],
-            1,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 12_000_000, &inner[..6_000_000], false, true)],
+        &[("movie.mkv", 12_000_000, &inner[6_000_000..], true, false)],
+    ]);
     let mut articles = HashMap::new();
     let mut xml = String::from(
         "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",

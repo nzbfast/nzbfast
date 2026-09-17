@@ -612,10 +612,7 @@ fn chase_multi_volume_patched_spans_complete() {
     for (i, v) in vols.iter().enumerate().skip(2) {
         o2_entries.push((names[i].as_str(), v.len() as u64, v, false, false));
     }
-    let outers = [
-        fixtures::rar5_volume_n(&o1_entries, 0),
-        fixtures::rar5_volume_n(&o2_entries, 1),
-    ];
+    let outers = fixtures::rar5_volume_set(&[&o1_entries, &o2_entries]);
     // Lose one article deep inside each outer volume's first data
     // area - packed LZ bitstream bytes, not envelope.
     let art = 1000usize;

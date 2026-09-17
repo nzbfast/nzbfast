@@ -245,8 +245,10 @@ fn bases_resolve_from_headers_alone_not_completeness() {
     // behind every volume's last article). Volume 2's base must still
     // resolve from vol 1's parsed piece length.
     let total = payload(200_000, 6);
-    let v1 = fixtures::rar5_volume_n(&[("m.mkv", 200_000, &total[..120_000], false, true)], 0);
-    let v2 = fixtures::rar5_volume_n(&[("m.mkv", 200_000, &total[120_000..], true, false)], 1);
+    let v1 =
+        fixtures::rar5_volume_n_of(&[("m.mkv", 200_000, &total[..120_000], false, true)], 0, 2);
+    let v2 =
+        fixtures::rar5_volume_n_of(&[("m.mkv", 200_000, &total[120_000..], true, false)], 1, 2);
     let mut m1 = VolumeMapper::new(v1.len() as u64);
     m1.feed(0, &v1[..4096]); // header only
     assert!(!m1.complete && m1.entries.len() == 1);
@@ -732,14 +734,11 @@ fn data_area_past_the_volume_end_is_corrupt() {
 #[test]
 fn an_understated_volume_declaration_refuses_every_volume_of_a_healthy_set() {
     let total = payload(250_000, 9);
-    let vols: Vec<Vec<u8>> = vec![
-        fixtures::rar5_volume_n(&[("film.mkv", 250_000, &total[..100_000], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("film.mkv", 250_000, &total[100_000..200_000], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("film.mkv", 250_000, &total[200_000..], true, false)], 2),
-    ];
+    let vols: Vec<Vec<u8>> = fixtures::rar5_volume_set(&[
+        &[("film.mkv", 250_000, &total[..100_000], false, true)],
+        &[("film.mkv", 250_000, &total[100_000..200_000], true, true)],
+        &[("film.mkv", 250_000, &total[200_000..], true, false)],
+    ]);
     // At the length the volumes really are, every one of them maps.
     for (i, v) in vols.iter().enumerate() {
         let mut m = VolumeMapper::new(v.len() as u64);
@@ -844,14 +843,11 @@ fn a_v5_data_area_that_wraps_the_cursor_is_corrupt() {
 #[test]
 fn volume_bound_leaves_real_split_sets_alone() {
     let total = payload(300_000, 4);
-    let vols = [
-        fixtures::rar5_volume_n(&[("f.mkv", 300_000, &total[..100_000], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("f.mkv", 300_000, &total[100_000..200_000], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("f.mkv", 300_000, &total[200_000..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("f.mkv", 300_000, &total[..100_000], false, true)],
+        &[("f.mkv", 300_000, &total[100_000..200_000], true, true)],
+        &[("f.mkv", 300_000, &total[200_000..], true, false)],
+    ]);
     let mappers: Vec<VolumeMapper> = vols
         .iter()
         .map(|v| {
@@ -1790,4 +1786,146 @@ fn the_encrypted_v4_parse_bounds_the_header_but_leaves_the_data_area_to_the_mapp
     let mut unknown = VolumeMapper::new(0);
     assert!(unknown.advance_to(next));
     assert!(unknown.blocker.is_none());
+}
+
+/// The two RAR5 set-head layouts both parse as volume 0, which is the
+/// whole reason the distinction between them stays invisible: the spec
+/// makes the main header's volume-number field optional on the first
+/// volume, WinRAR omits it, this repo's own `Rar50VolumeWriter` writes
+/// an explicit `vint(0)` - and `VolumeMapper` normalises both to
+/// `Some(0)`.
+#[test]
+fn both_set_head_layouts_read_as_volume_zero() {
+    let body = payload(4_096, 7);
+    let pieces: &[(&str, u64, &[u8], bool, bool)] = &[("v.bin", 8_192, &body, false, true)];
+    let tail: &[(&str, u64, &[u8], bool, bool)] = &[("v.bin", 8_192, &body, true, false)];
+    for head in [
+        fixtures::Rar5Head::Numberless,
+        fixtures::Rar5Head::NumberedZero,
+    ] {
+        let vols = fixtures::rar5_volume_set_head(&[pieces, tail], head);
+        let mut m = VolumeMapper::new(vols[0].len() as u64);
+        m.feed(0, &vols[0]);
+        assert_eq!(m.volume_number, Some(0), "{head:?} head is volume 0");
+    }
+    // ...and the explicit field costs exactly the byte it encodes in.
+    let n = fixtures::rar5_volume_set_head(&[pieces, tail], fixtures::Rar5Head::Numberless);
+    let z = fixtures::rar5_volume_set_head(&[pieces, tail], fixtures::Rar5Head::NumberedZero);
+    assert_eq!(z[0].len(), n[0].len() + 1, "the vint(0) field is one byte");
+    assert_eq!(z[1].len(), n[1].len(), "only the HEAD layout differs");
+}
+
+/// FINDING, 16 Sep 2026: the arithmetic placement gate models WinRAR's
+/// set head and only WinRAR's, so a set written by this repo's own
+/// `Rar50VolumeWriter` never reaches [`ArithGate::Place`].
+///
+/// `volnum_field_len(0)` answers 0 - "volume 0 spends no bytes on a
+/// volume-number field" - which is true of a [`fixtures::Rar5Head::
+/// Numberless`] head and false of a [`fixtures::Rar5Head::NumberedZero`]
+/// one, and `VolumeMapper` hands the gate the same `Some(0)` for both.
+/// So volume 0's `off_base` comes out one byte above every other
+/// volume's, the header-base consistency check sees a geometry
+/// contradiction, and the gate reports `Numbers`.
+///
+/// The consequence is a LOST FAST PATH, not a wrong placement: `Numbers`
+/// with no provisional placements falls through to chain resolution,
+/// which places such a set correctly (`an_obfuscated_set_whose_head_
+/// numbers_itself_zero_still_groups` in nzbfast-unpack extracts one end
+/// to end). What it costs is the one-pass obfuscated-store path - the
+/// gate that keeps a 143-volume remux off the holds budget - for every
+/// set this project itself produces.
+///
+/// Fixing it needs `VolumeMapper` to report the field's BYTE LENGTH
+/// rather than only its value, and needs an answer for the case where
+/// volume 0 has not parsed yet (the closure identity can solve for the
+/// head's length, at the cost of admitting two hypotheses where one is
+/// admitted today). That is a production change whose error direction is
+/// a wrongly placed byte rather than a visible failure, so it wants its
+/// own sitting with the WinRAR arm kept as a control. This test pins
+/// today's behaviour so that fix is visible as a change to it.
+#[test]
+fn the_arithmetic_gate_refuses_a_set_whose_head_numbers_itself_zero() {
+    let dl = 60_000usize;
+    let data = payload(3 * dl, 19);
+    let piece = |a: usize, b: usize, sb: bool, sa: bool| (a, b, sb, sa);
+    let cuts = [
+        piece(0, dl, false, true),
+        piece(dl, 2 * dl, true, true),
+        piece(2 * dl, 3 * dl, true, false),
+    ];
+
+    // A NumberedZero set is uniform with EQUAL pieces: every volume's
+    // header is the same size, so a constant volume size leaves every
+    // volume the same payload. (The Numberless head is one byte
+    // shorter, which is why `uniform_store_set` gives volume 0 one byte
+    // more payload - see `volume_zero_header_is_one_byte_shorter_than_
+    // the_rest`.)
+    let owned: Vec<Vec<(&str, u64, &[u8], bool, bool)>> = cuts
+        .iter()
+        .map(|&(a, b, sb, sa)| vec![("u.bin", 3 * dl as u64, &data[a..b], sb, sa)])
+        .collect();
+    let refs: Vec<&[(&str, u64, &[u8], bool, bool)]> = owned.iter().map(|v| v.as_slice()).collect();
+    let vols = fixtures::rar5_volume_set_head(&refs, fixtures::Rar5Head::NumberedZero);
+    let ms: Vec<VolumeMapper> = vols
+        .iter()
+        .map(|v| {
+            let mut m = VolumeMapper::new(v.len() as u64);
+            m.feed(0, v);
+            m
+        })
+        .collect();
+    let refs: Vec<&VolumeMapper> = ms.iter().collect();
+    assert!(
+        matches!(ArchiveMap::resolve_arithmetic(&refs), ArithGate::Numbers),
+        "a NumberedZero head is expected to contradict the gate's WinRAR \
+         geometry model today - if this now places, the finding is fixed \
+         and this test is the thing to rewrite"
+    );
+    // And the chain path, which is what actually carries such a set,
+    // resolves every base correctly regardless.
+    let map = ArchiveMap::resolve(&refs);
+    assert_eq!(map.bases[&(0, 0)], 0);
+    assert_eq!(map.bases[&(1, 0)], dl as u64);
+    assert_eq!(map.bases[&(2, 0)], 2 * dl as u64);
+}
+
+/// `rar5_seal_set` rewrites an end-of-archive block that `rar5_volume_set`
+/// would have written in the first place, so the two routes must produce
+/// the same bytes - otherwise the loop-built call sites are testing a
+/// slightly different container from the slice-built ones, which is the
+/// class of divergence the whole set-aware family exists to remove.
+#[test]
+fn sealing_a_built_run_matches_building_the_set_directly() {
+    let data = payload(90_000, 61);
+    let dl = 30_000usize;
+    let cuts: Vec<Vec<(&str, u64, &[u8], bool, bool)>> = (0..3)
+        .map(|k| {
+            vec![(
+                "s.bin",
+                90_000u64,
+                &data[k * dl..(k + 1) * dl],
+                k > 0,
+                k < 2,
+            )]
+        })
+        .collect();
+    let refs: Vec<&[(&str, u64, &[u8], bool, bool)]> = cuts.iter().map(|v| v.as_slice()).collect();
+    let direct = fixtures::rar5_volume_set(&refs);
+    let mut sealed: Vec<Vec<u8>> = refs
+        .iter()
+        .enumerate()
+        .map(|(k, pieces)| fixtures::rar5_volume_n(pieces, k as u64))
+        .collect();
+    // Before sealing, every volume claims to be the last - the shape
+    // this family replaced.
+    assert_ne!(sealed[0], direct[0], "the unsealed run must differ");
+    fixtures::rar5_seal_set(&mut sealed);
+    assert_eq!(sealed, direct, "sealed and directly-built sets must agree");
+    // ...and `rar5_volume_n_of` is the third route to the same bytes.
+    let by_of: Vec<Vec<u8>> = refs
+        .iter()
+        .enumerate()
+        .map(|(k, pieces)| fixtures::rar5_volume_n_of(pieces, k as u64, 3))
+        .collect();
+    assert_eq!(by_of, direct, "the loop-shaped route must agree too");
 }

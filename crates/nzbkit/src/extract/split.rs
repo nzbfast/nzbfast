@@ -995,10 +995,10 @@ mod tests {
     fn signed_part_two_refuses_the_split_and_maps_as_volumes() {
         let dir = tmpdir("rarsplit-signed");
         let total = payload(400_000, 19);
-        let vols = [
-            fixtures::rar5_volume_n(&[("film.mkv", 400_000, &total[..200_000], false, true)], 0),
-            fixtures::rar5_volume_n(&[("film.mkv", 400_000, &total[200_000..], true, false)], 1),
-        ];
+        let vols = fixtures::rar5_volume_set(&[
+            &[("film.mkv", 400_000, &total[..200_000], false, true)],
+            &[("film.mkv", 400_000, &total[200_000..], true, false)],
+        ]);
         let ex = Extractor::new(&dir, 2, true);
         ex.declare_rar_split("stage.rar", 2);
         for i in [0, 1] {

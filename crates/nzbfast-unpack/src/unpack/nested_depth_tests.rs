@@ -371,13 +371,15 @@ fn a_multi_volume_store_set_is_proven_by_every_volume() {
     let dir = tmpdir("multivol");
     let total = payload(120_000, 3);
     let half = total.len() / 2;
-    let v1 = fixtures::rar5_volume_n(
+    let v1 = fixtures::rar5_volume_n_of(
         &[("film.mkv", total.len() as u64, &total[..half], false, true)],
         0,
+        2,
     );
-    let v2 = fixtures::rar5_volume_n(
+    let v2 = fixtures::rar5_volume_n_of(
         &[("film.mkv", total.len() as u64, &total[half..], true, false)],
         1,
+        2,
     );
     std::fs::write(dir.join("s.part01.rar"), &v1).unwrap();
     std::fs::write(dir.join("s.part02.rar"), &v2).unwrap();

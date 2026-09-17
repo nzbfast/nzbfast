@@ -140,9 +140,10 @@ async fn kill9_resume_map_resumes_into_one_pass() {
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let name = format!("r.part{}.rar", i + 1);
         fx.add_file(&name, &vol, 25_000);
@@ -294,9 +295,10 @@ async fn the_in_place_kill_switch_writes_the_replay_back() {
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let name = format!("r.part{}.rar", i + 1);
         fx.add_file(&name, &vol, 25_000);
@@ -628,9 +630,10 @@ async fn a_resumed_run_places_its_replay_instead_of_holding_it() {
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let name = format!("r.part{}.rar", i + 1);
         fx.add_file(&name, &vol, 25_000);
@@ -840,9 +843,10 @@ async fn the_kill_switch_puts_a_resumed_job_back_on_the_disk_path() {
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let name = format!("r.part{}.rar", i + 1);
         fx.add_file(&name, &vol, 25_000);
@@ -972,9 +976,10 @@ async fn a_retry_over_materialized_volumes_fetches_only_the_missing_article() {
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let name = format!("r.part{}.rar", i + 1);
         fx.add_file(&name, &vol, 25_000);
@@ -1192,9 +1197,10 @@ async fn a_resumed_run_rejournals_the_articles_it_replays() {
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let name = format!("r.part{}.rar", i + 1);
         fx.add_file(&name, &vol, 25_000);
@@ -1664,9 +1670,10 @@ async fn a_shortened_partial_output_says_its_articles_are_fetched_again() {
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let name = format!("r.part{}.rar", i + 1);
         fx.add_file(&name, &vol, 25_000);
@@ -1860,9 +1867,10 @@ async fn a_mapped_resume_keeps_the_member_name_when_a_later_volume_heads_first()
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let name = format!("r.part{}.rar", i + 1);
         fx.add_file(&name, &vol, 25_000);
@@ -2023,9 +2031,10 @@ async fn a_volume_the_set_rebuilt_leaves_no_donor_behind() {
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let real = format!("r.part{}.rar", i + 1);
         let posted = format!("e3a71dc01c012541063a60e0066c219f.{}", 10 + i);
@@ -2142,9 +2151,10 @@ async fn a_volume_left_at_its_posted_name_does_not_outlive_the_finish() {
         };
         let part = &inner[pos..pos + len];
         pos += len;
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
             i as u64,
+            n_vols as u64,
         );
         let name = format!("e3a71dc01c012541063a60e0066c219f.{}", 10 + i);
         fx.add_file(&name, &vol, 25_000);

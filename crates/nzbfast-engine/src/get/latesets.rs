@@ -600,11 +600,48 @@ pub(super) fn apply_nonactivated_disk_sets(
                     denied.insert(id);
                     late_shortfall = crate::repair::blocks_over_set(needed, have, id, true);
                 }
-                Ok(nzbkit::par2repair::RepairStatus::Unrepairable { partial, .. }) => {
+                // THE ARITHMETIC IS SAID HERE TOO, since 16 Sep 2026,
+                // and the three numbers were thrown away until then.
+                // "matched nothing here - ignored" is true of the
+                // ORDINARY shape - a leftover set for somebody else's
+                // release, whose members are not on disk and never will
+                // be - and it is the whole story only when there was
+                // nothing this set could have done. It is not the whole
+                // story when the set found one of its members wholly
+                // missing, set out to rebuild it, and came up a block
+                // short of its own parity - which reads identically
+                // from outside and is the thing a reader of this log
+                // most needs told apart.
+                //
+                // MEASURED, and the cost of the silence is the reason
+                // this line moved: `needed=18 have=17` is the entire
+                // finding behind claim
+                // `e2e-x5-24-signature2-recreate-16sep`, where the
+                // in-stream deferral had cancelled one article of one
+                // of a deferred set's own recovery volumes and left it
+                // holed. Two sessions read this line, took "matched
+                // nothing" at face value, and looked at the X5-24 gate
+                // instead (`research/E2E-X5-24-SIGNATURE-2-IS-A-MISREAD-2026-09-16.md`).
+                //
+                // The PREFIX is unchanged deliberately: it is pinned by
+                // `e2e_norar::repairpins`, which asserts on it to prove
+                // the second set was consulted at all.
+                //
+                // `info!` and not `warn!`, unchanged: nothing vouches
+                // for this set, so its shortfall is not this job's
+                // failure and must not read like one.
+                Ok(nzbkit::par2repair::RepairStatus::Unrepairable {
+                    needed,
+                    have,
+                    adopted,
+                    partial,
+                }) => {
                     if said.insert(id) {
                         info!(
                             target: "par2",
-                            "a non-activated recovery set on disk matched nothing here - ignored{}",
+                            "a non-activated recovery set on disk matched nothing here - \
+                             ignored: it found {needed} block(s) of damage with {have} \
+                             recovery block(s) on hand ({adopted} adopted){}",
                             nzbkit::par2repair::published_clause(&partial)
                         );
                     }
@@ -1944,6 +1981,9 @@ mod par2_window_tests;
 // bound, and the latch's polarity. Its own file, one subject per file.
 #[cfg(test)]
 mod cancel_tests;
+
+#[cfg(test)]
+mod foreign_tests;
 
 #[cfg(test)]
 mod tests {

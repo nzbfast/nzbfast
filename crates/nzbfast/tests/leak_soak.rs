@@ -417,11 +417,11 @@ fn store_volumes(inner_name: &str, inner: &[u8]) -> Vec<Vec<u8>> {
     let n = inner.len();
     let a = n / 3 + 1;
     let b = a + n / 3;
-    vec![
-        fixtures::rar5_volume_n(&[(inner_name, n as u64, &inner[..a], false, true)], 0),
-        fixtures::rar5_volume_n(&[(inner_name, n as u64, &inner[a..b], true, true)], 1),
-        fixtures::rar5_volume_n(&[(inner_name, n as u64, &inner[b..], true, false)], 2),
-    ]
+    fixtures::rar5_volume_set(&[
+        &[(inner_name, n as u64, &inner[..a], false, true)],
+        &[(inner_name, n as u64, &inner[a..b], true, true)],
+        &[(inner_name, n as u64, &inner[b..], true, false)],
+    ])
 }
 
 /// A single-volume encrypted store RAR5 over one inner file.

@@ -2207,7 +2207,18 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Forget every remembered checksum? The next create or full check of each large file takes the usual time again."
+            "value": "Forget every remembered checksum?"
+          }
+        }
+      }
+    },
+    "settings.digest_cache_clear_confirm_body": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The next create or full check of each large file takes the usual time again."
           }
         }
       }

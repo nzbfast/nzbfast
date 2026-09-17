@@ -33,8 +33,16 @@ and every file header and end-of-archive block in a volume set carries
 its own salt: at 700 bytes per volume this row was twelve volumes, ~24
 derivations and 57 seconds of oracle time, against about 16 at two
 volumes. The straddling member is still here - the second one crosses
-the cut - and the three-member straddle that a plural writer has to get
-right is c2-rar4-split-set-of-three-files, which costs a second.
+the cut - and the three-member set a plural writer has to get right is
+c2-rar4-split-set-of-three-files, which costs a second. That row was
+described here as a three-member STRADDLE until 16 Sep 2026 and is not
+one: its headers put one member across three volumes and the other two
+whole in the last, so what it actually tests beside the plural writer is
+a cut BETWEEN members and the ENDARC chaining that carries a reader over
+it. The straddle claim above, about this row's own second member, is the
+compressed-size arithmetic and not a header read: header encryption
+hides these blocks from an offline dump, so it is stated as the reason
+the sizes were chosen rather than as something measured here.
 
 The password reaches the client through the NZB meta, as in every other
 encrypted row here - see c4-encrypted-rar5-data for why that is the

@@ -161,10 +161,10 @@ mod tests {
         use nzbkit::rar::fixtures;
         let n = total.len() as u64;
         let half = total.len() / 2;
-        let vols = [
-            fixtures::rar5_volume_n(&[("film.mkv", n, &total[..half], false, true)], 0),
-            fixtures::rar5_volume_n(&[("film.mkv", n, &total[half..], true, false)], 1),
-        ];
+        let vols = fixtures::rar5_volume_set(&[
+            &[("film.mkv", n, &total[..half], false, true)],
+            &[("film.mkv", n, &total[half..], true, false)],
+        ]);
         let paths = vec![dir.join("set.part1.rar"), dir.join("set.part2.rar")];
         for (p, v) in paths.iter().zip(vols.iter()) {
             std::fs::write(p, v).unwrap();

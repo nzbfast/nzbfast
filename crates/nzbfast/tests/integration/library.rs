@@ -296,26 +296,17 @@ async fn stream_of_library_job_triggers_download() {
     let _scratch = scratch::ScratchDir::attach(&dir);
 
     let inner = payload(6_000_000, 7);
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 6_000_000, &inner[..2_000_000], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "movie.mkv",
-                6_000_000,
-                &inner[2_000_000..4_000_000],
-                true,
-                true,
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 6_000_000, &inner[4_000_000..], true, false)],
-            2,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 6_000_000, &inner[..2_000_000], false, true)],
+        &[(
+            "movie.mkv",
+            6_000_000,
+            &inner[2_000_000..4_000_000],
+            true,
+            true,
+        )],
+        &[("movie.mkv", 6_000_000, &inner[4_000_000..], true, false)],
+    ]);
     let mut articles = HashMap::new();
     let mut xml = String::from(
         "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
@@ -550,16 +541,10 @@ async fn stream_of_a_finished_download_serves_it_from_disk() {
     let _scratch = scratch::ScratchDir::attach(&dir);
 
     let inner = payload(2_000_000, 11);
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 2_000_000, &inner[..1_000_000], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 2_000_000, &inner[1_000_000..], true, false)],
-            1,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 2_000_000, &inner[..1_000_000], false, true)],
+        &[("movie.mkv", 2_000_000, &inner[1_000_000..], true, false)],
+    ]);
     let mut articles = HashMap::new();
     let mut xml = String::from(
         "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",

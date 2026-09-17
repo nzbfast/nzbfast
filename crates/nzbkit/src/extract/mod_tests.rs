@@ -605,14 +605,11 @@ fn oversized_data_area_never_ships_a_sparse_file() {
 #[test]
 fn an_understated_posted_size_demotes_a_healthy_set_on_every_volume() {
     let total = payload(250_000, 11);
-    let vols = [
-        fixtures::rar5_volume_n(&[("film.mkv", 250_000, &total[..100_000], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("film.mkv", 250_000, &total[100_000..200_000], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("film.mkv", 250_000, &total[200_000..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("film.mkv", 250_000, &total[..100_000], false, true)],
+        &[("film.mkv", 250_000, &total[100_000..200_000], true, true)],
+        &[("film.mkv", 250_000, &total[200_000..], true, false)],
+    ]);
     let names = ["v.part1.rar", "v.part2.rar", "v.part3.rar"];
 
     // Control: the same bytes at their true declared length extract
@@ -785,8 +782,16 @@ fn legitimate_split_set_still_extracts_one_pass() {
 fn obfuscated_names_group_by_inner_file() {
     let dir = tmpdir("obf");
     let total = payload(300_000, 5);
-    let v1 = fixtures::rar5_volume_n(&[("real.mkv", 300_000, &total[..150_000], false, true)], 0);
-    let v2 = fixtures::rar5_volume_n(&[("real.mkv", 300_000, &total[150_000..], true, false)], 1);
+    let v1 = fixtures::rar5_volume_n_of(
+        &[("real.mkv", 300_000, &total[..150_000], false, true)],
+        0,
+        2,
+    );
+    let v2 = fixtures::rar5_volume_n_of(
+        &[("real.mkv", 300_000, &total[150_000..], true, false)],
+        1,
+        2,
+    );
     let ex = Extractor::new(&dir, 2, true);
     // Hash-garbage yEnc names; sorted order of names is WRONG (b < a).
     feed(&ex, 0, "bbbb1234.bin", &v1, 8000, 7);
@@ -809,17 +814,14 @@ fn multi_file_store_set_extracts_across_file_boundary() {
     let dir = tmpdir("multifile");
     let e01 = payload(350_000, 21);
     let e02 = payload(250_000, 22);
-    let vols = [
-        fixtures::rar5_volume_n(&[("E01.mkv", 350_000, &e01[..200_000], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[
-                ("E01.mkv", 350_000, &e01[200_000..], true, false),
-                ("E02.mkv", 250_000, &e02[..50_000], false, true),
-            ],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("E02.mkv", 250_000, &e02[50_000..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("E01.mkv", 350_000, &e01[..200_000], false, true)],
+        &[
+            ("E01.mkv", 350_000, &e01[200_000..], true, false),
+            ("E02.mkv", 250_000, &e02[..50_000], false, true),
+        ],
+        &[("E02.mkv", 250_000, &e02[50_000..], true, false)],
+    ]);
     // Obfuscated volume names; feed the continuation-only volume FIRST
     // so its group forms before the boundary volume can link it.
     let ex = Extractor::new(&dir, 3, true);
@@ -958,29 +960,17 @@ fn case_only_name_collision_keeps_both_outputs() {
 fn multi_file_store_set_survives_all_feed_orders() {
     let e01 = payload(350_000, 21);
     let e02 = payload(250_000, 22);
-    let vols: Vec<Vec<u8>> = vec![
-        fixtures::rar5_volume_n(&[("E01.mkv", 350_000, &e01[..100_000], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("E01.mkv", 350_000, &e01[100_000..200_000], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[("E01.mkv", 350_000, &e01[200_000..300_000], true, true)],
-            2,
-        ),
-        fixtures::rar5_volume_n(
-            &[
-                ("E01.mkv", 350_000, &e01[300_000..], true, false),
-                ("E02.mkv", 250_000, &e02[..50_000], false, true),
-            ],
-            3,
-        ),
-        fixtures::rar5_volume_n(
-            &[("E02.mkv", 250_000, &e02[50_000..150_000], true, true)],
-            4,
-        ),
-        fixtures::rar5_volume_n(&[("E02.mkv", 250_000, &e02[150_000..], true, false)], 5),
-    ];
+    let vols: Vec<Vec<u8>> = fixtures::rar5_volume_set(&[
+        &[("E01.mkv", 350_000, &e01[..100_000], false, true)],
+        &[("E01.mkv", 350_000, &e01[100_000..200_000], true, true)],
+        &[("E01.mkv", 350_000, &e01[200_000..300_000], true, true)],
+        &[
+            ("E01.mkv", 350_000, &e01[300_000..], true, false),
+            ("E02.mkv", 250_000, &e02[..50_000], false, true),
+        ],
+        &[("E02.mkv", 250_000, &e02[50_000..150_000], true, true)],
+        &[("E02.mkv", 250_000, &e02[150_000..], true, false)],
+    ]);
     for (t, order) in [
         [0usize, 1, 2, 3, 4, 5],
         [4, 5, 0, 1, 2, 3],
@@ -1198,6 +1188,9 @@ fn uniform_store_set_with_odd_mid_volume_demotes_whole() {
         )],
         n_full as u64,
     ));
+    // Every volume but the last says another follows, as an archiver
+    // stamps it - see `fixtures::rar5_seal_set`.
+    fixtures::rar5_seal_set(&mut vols);
     let ex = Extractor::new(&dir, vols.len(), true);
     // Everything but the odd volume first (volume 0 late, so the
     // gate engages with provisional placements), the odd one last.
@@ -1278,20 +1271,17 @@ fn provisional_placements_confirmed_by_chain_survive_multifile_reveal() {
     // WinRAR-true: volume 0 carries one byte more (see uniform_store_set).
     let a = payload(450_001, 41); // spans vols 0..=4, boundary in vol 4
     let b = payload(120_000, 42); // head 50k in vol 4, final 70k in vol 5
-    let vols = [
-        fixtures::rar5_volume_n(&[("A.mkv", 450_001, &a[..100_001], false, true)], 0),
-        fixtures::rar5_volume_n(&[("A.mkv", 450_001, &a[100_001..200_001], true, true)], 1),
-        fixtures::rar5_volume_n(&[("A.mkv", 450_001, &a[200_001..300_001], true, true)], 2),
-        fixtures::rar5_volume_n(&[("A.mkv", 450_001, &a[300_001..400_001], true, true)], 3),
-        fixtures::rar5_volume_n(
-            &[
-                ("A.mkv", 450_001, &a[400_001..], true, false),
-                ("B.mkv", 120_000, &b[..50_000], false, true),
-            ],
-            4,
-        ),
-        fixtures::rar5_volume_n(&[("B.mkv", 120_000, &b[50_000..], true, false)], 5),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("A.mkv", 450_001, &a[..100_001], false, true)],
+        &[("A.mkv", 450_001, &a[100_001..200_001], true, true)],
+        &[("A.mkv", 450_001, &a[200_001..300_001], true, true)],
+        &[("A.mkv", 450_001, &a[300_001..400_001], true, true)],
+        &[
+            ("A.mkv", 450_001, &a[400_001..], true, false),
+            ("B.mkv", 120_000, &b[..50_000], false, true),
+        ],
+        &[("B.mkv", 120_000, &b[50_000..], true, false)],
+    ]);
     let ex = Extractor::new(&dir, 6, true);
     for vi in [2usize, 3, 5, 0, 1, 4] {
         feed(
@@ -1338,20 +1328,17 @@ fn a_big_second_file_now_places_instead_of_mis_betting() {
     let dir = tmpdir("arith-contradict");
     let f1 = payload(30_000, 43); // wholly inside vol 0
     let f2 = payload(520_000, 44); // 50k in vol 0, then 4 x 100k, tail 70k
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[
-                ("f1.bin", 30_000, &f1, false, false),
-                ("f2.bin", 520_000, &f2[..50_000], false, true),
-            ],
-            0,
-        ),
-        fixtures::rar5_volume_n(&[("f2.bin", 520_000, &f2[50_000..150_000], true, true)], 1),
-        fixtures::rar5_volume_n(&[("f2.bin", 520_000, &f2[150_000..250_000], true, true)], 2),
-        fixtures::rar5_volume_n(&[("f2.bin", 520_000, &f2[250_000..350_000], true, true)], 3),
-        fixtures::rar5_volume_n(&[("f2.bin", 520_000, &f2[350_000..450_000], true, true)], 4),
-        fixtures::rar5_volume_n(&[("f2.bin", 520_000, &f2[450_000..], true, false)], 5),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[
+            ("f1.bin", 30_000, &f1, false, false),
+            ("f2.bin", 520_000, &f2[..50_000], false, true),
+        ],
+        &[("f2.bin", 520_000, &f2[50_000..150_000], true, true)],
+        &[("f2.bin", 520_000, &f2[150_000..250_000], true, true)],
+        &[("f2.bin", 520_000, &f2[250_000..350_000], true, true)],
+        &[("f2.bin", 520_000, &f2[350_000..450_000], true, true)],
+        &[("f2.bin", 520_000, &f2[450_000..], true, false)],
+    ]);
     let ex = Extractor::new(&dir, 6, true);
     // Vols 3+4 first: the gate engages and places them at 300k/400k
     // (true bases 250k/350k). Vol 0 reveals the second entry; the
@@ -1459,6 +1446,9 @@ fn store_set_crossing_the_volnum_vint_band_still_one_passes() {
         )],
         n_full as u64,
     ));
+    // Every volume but the last says another follows, as an archiver
+    // stamps it - see `fixtures::rar5_seal_set`.
+    fixtures::rar5_seal_set(&mut vols);
     let names: Vec<String> = (0..vols.len()).map(|k| format!("bx{k:03}NoDot")).collect();
     let ex = Extractor::new(&dir, vols.len(), true);
     for vi in shuffled_zero_last(vols.len(), 0xBAD5EED) {
@@ -1537,6 +1527,9 @@ fn obfuscated_season_pack_streams_one_pass_with_volume_zero_last() {
         vol_no += 1;
         at = end;
     }
+    // Every volume but the last says another follows, as an archiver
+    // stamps it - see `fixtures::rar5_seal_set`.
+    fixtures::rar5_seal_set(&mut vols);
     assert!(
         vols.len() >= 55,
         "expected a season-pack-scale set, got {}",
@@ -1573,20 +1566,17 @@ fn a_mid_set_island_resolves_without_volume_zero() {
     let a = payload(400_000, 61);
     let b = payload(300_000, 62);
     // A ends in volume 3; B starts there and ends in volume 5.
-    let vols = [
-        fixtures::rar5_volume_n(&[("A.mkv", 400_000, &a[..100_000], false, true)], 0),
-        fixtures::rar5_volume_n(&[("A.mkv", 400_000, &a[100_000..200_000], true, true)], 1),
-        fixtures::rar5_volume_n(&[("A.mkv", 400_000, &a[200_000..300_000], true, true)], 2),
-        fixtures::rar5_volume_n(
-            &[
-                ("A.mkv", 400_000, &a[300_000..], true, false),
-                ("B.mkv", 300_000, &b[..50_000], false, true),
-            ],
-            3,
-        ),
-        fixtures::rar5_volume_n(&[("B.mkv", 300_000, &b[50_000..150_000], true, true)], 4),
-        fixtures::rar5_volume_n(&[("B.mkv", 300_000, &b[150_000..], true, false)], 5),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("A.mkv", 400_000, &a[..100_000], false, true)],
+        &[("A.mkv", 400_000, &a[100_000..200_000], true, true)],
+        &[("A.mkv", 400_000, &a[200_000..300_000], true, true)],
+        &[
+            ("A.mkv", 400_000, &a[300_000..], true, false),
+            ("B.mkv", 300_000, &b[..50_000], false, true),
+        ],
+        &[("B.mkv", 300_000, &b[50_000..150_000], true, true)],
+        &[("B.mkv", 300_000, &b[150_000..], true, false)],
+    ]);
     // Feed ONLY volumes 3-5: an island with no path back to volume 0.
     let ex = Extractor::new(&dir, 6, true);
     for vi in [4usize, 5, 3] {
@@ -1626,12 +1616,12 @@ fn a_mid_set_island_resolves_without_volume_zero() {
 fn a_self_contradictory_chain_demotes_with_its_own_reason() {
     let dir = tmpdir("chain-contradict");
     let f = payload(300_000, 71);
-    let vols = [
-        fixtures::rar5_volume_n(&[("f.bin", 300_000, &f[..100_000], false, true)], 0),
+    let vols = fixtures::rar5_volume_set(&[
+        &[("f.bin", 300_000, &f[..100_000], false, true)],
         // Overlaps: claims 150 KB where 100 KB fits.
-        fixtures::rar5_volume_n(&[("f.bin", 300_000, &f[..150_000], true, true)], 1),
-        fixtures::rar5_volume_n(&[("f.bin", 300_000, &f[200_000..], true, false)], 2),
-    ];
+        &[("f.bin", 300_000, &f[..150_000], true, true)],
+        &[("f.bin", 300_000, &f[200_000..], true, false)],
+    ]);
     let ex = Extractor::new(&dir, 3, true);
     for vi in [0usize, 1, 2] {
         feed(
@@ -1694,6 +1684,9 @@ fn protect_sources_arithmetic_demote_discards() {
         &[(inner, total, &data[pos..pos + 40_000], true, false)],
         5,
     ));
+    // Every volume but the last says another follows, as an archiver
+    // stamps it - see `fixtures::rar5_seal_set`.
+    fixtures::rar5_seal_set(&mut vols);
     let names: Vec<String> = (0..6).map(|k| format!("src{k}NoDot")).collect();
     for (n, v) in names.iter().zip(&vols) {
         std::fs::write(dir.join(n), v).unwrap();
@@ -1807,10 +1800,10 @@ fn encrypted_headers_fall_back_to_materialized_volume() {
 fn protect_sources_happy_path_extracts_normally() {
     let dir = tmpdir("protect-ok");
     let total = payload(300_000, 12);
-    let vols = [
-        fixtures::rar5_volume_n(&[("film.mkv", 300_000, &total[..150_000], false, true)], 0),
-        fixtures::rar5_volume_n(&[("film.mkv", 300_000, &total[150_000..], true, false)], 1),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("film.mkv", 300_000, &total[..150_000], false, true)],
+        &[("film.mkv", 300_000, &total[150_000..], true, false)],
+    ]);
     let ex = Extractor::new(&dir, 2, true);
     ex.set_protect_sources();
     feed(&ex, 0, "x.part1.rar", &vols[0], 8000, 41);
@@ -1837,26 +1830,17 @@ fn protect_sources_fallback_never_touches_source_files() {
     // tail anchoring places final pieces on sight. (The arithmetic
     // gate also stays out: the sizes are not uniform.)
     let total = payload(30_000_000, 13);
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[("film.mkv", 30_000_000, &total[..7_000_000], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "film.mkv",
-                30_000_000,
-                &total[7_000_000..22_000_000],
-                true,
-                true,
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[("film.mkv", 30_000_000, &total[22_000_000..], true, false)],
-            2,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("film.mkv", 30_000_000, &total[..7_000_000], false, true)],
+        &[(
+            "film.mkv",
+            30_000_000,
+            &total[7_000_000..22_000_000],
+            true,
+            true,
+        )],
+        &[("film.mkv", 30_000_000, &total[22_000_000..], true, false)],
+    ]);
     // The volume files exist on disk, as in reextract_dir.
     std::fs::write(dir.join("x.part1.rar"), &vols[0]).unwrap();
     std::fs::write(dir.join("x.part2.rar"), &vols[1]).unwrap();
@@ -1909,26 +1893,17 @@ fn protect_sources_fallback_never_touches_source_files() {
 fn protect_sources_paged_holds_reextract_one_pass() {
     let dir = tmpdir("protect-paged");
     let total = payload(30_000_000, 13);
-    let vols = [
-        fixtures::rar5_volume_n(
-            &[("film.mkv", 30_000_000, &total[..7_000_000], false, true)],
-            0,
-        ),
-        fixtures::rar5_volume_n(
-            &[(
-                "film.mkv",
-                30_000_000,
-                &total[7_000_000..22_000_000],
-                true,
-                true,
-            )],
-            1,
-        ),
-        fixtures::rar5_volume_n(
-            &[("film.mkv", 30_000_000, &total[22_000_000..], true, false)],
-            2,
-        ),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("film.mkv", 30_000_000, &total[..7_000_000], false, true)],
+        &[(
+            "film.mkv",
+            30_000_000,
+            &total[7_000_000..22_000_000],
+            true,
+            true,
+        )],
+        &[("film.mkv", 30_000_000, &total[22_000_000..], true, false)],
+    ]);
     std::fs::write(dir.join("x.part1.rar"), &vols[0]).unwrap();
     std::fs::write(dir.join("x.part2.rar"), &vols[1]).unwrap();
     std::fs::write(dir.join("x.part3.rar"), &vols[2]).unwrap();
@@ -2237,8 +2212,11 @@ fn a_split_sets_crc_key_is_the_final_fragments_whole_file_value() {
     );
 
     // Part 2 ends the file, so its header carries the whole-file value.
-    let v2 =
-        fixtures::rar5_volume_n_crc(&[("movie.mkv", 200_000, tail, true, false, Some(whole))], 1);
+    let v2 = fixtures::rar5_volume_n_crc_of(
+        &[("movie.mkv", 200_000, tail, true, false, Some(whole))],
+        1,
+        2,
+    );
     feed(&ex, 1, "v.part2.rar", &v2, 7000, 3);
     ex.finish().unwrap();
     assert_eq!(ex.inner_crc(), Some(("movie.mkv".to_string(), whole)));
@@ -2495,5 +2473,54 @@ fn slot_group_separates_an_extracted_set_from_a_demoted_one() {
         "the demoted slot must never share the extracted slot's group, or its \
          volume is spent before unrar has had it"
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The other RAR5 set-head layout, end to end through the extractor.
+///
+/// Every fixture in this tree models a head with NO volume-number field
+/// - WinRAR's spelling, and what the spec calls the optional case. This
+/// repo's own `Rar50VolumeWriter` takes the other option and stamps an
+/// explicit `vint(0)`, and until bug-sweep item 51 nothing here had ever
+/// fed such a head to anything: the obfuscated partition read "head" as
+/// "has no number" and cut a real set into singletons
+/// (`an_obfuscated_set_whose_head_numbers_itself_zero_still_groups` in
+/// nzbfast-unpack). That fix proved the partition; this proves settle -
+/// grouping, chain base resolution and one-pass extraction - over the
+/// same head, with obfuscated names so nothing but the headers orders
+/// the set.
+///
+/// The arithmetic gate is the one place that does NOT treat the two
+/// heads alike, and deliberately so today: see
+/// `the_arithmetic_gate_refuses_a_set_whose_head_numbers_itself_zero` in
+/// nzbkit-base. The chain path this test exercises is what carries such
+/// a set, and it is indifferent to the distinction.
+#[test]
+fn a_zero_numbered_set_head_extracts_through_settle() {
+    let dir = tmpdir("head0-settle");
+    let dl = 150_000usize;
+    let total = payload(3 * dl, 29);
+    let cuts: Vec<Vec<(&str, u64, &[u8], bool, bool)>> = (0..3)
+        .map(|k| {
+            vec![(
+                "real.mkv",
+                3 * dl as u64,
+                &total[k * dl..(k + 1) * dl],
+                k > 0,
+                k < 2,
+            )]
+        })
+        .collect();
+    let refs: Vec<&[(&str, u64, &[u8], bool, bool)]> = cuts.iter().map(|v| v.as_slice()).collect();
+    let vols = fixtures::rar5_volume_set_head(&refs, fixtures::Rar5Head::NumberedZero);
+    let names = ["zzz9.bin", "mmm5.bin", "aaa1.bin"]; // lexical order is the REVERSE
+    let ex = Extractor::new(&dir, vols.len(), true);
+    // Head last, so the set has to stay open on header evidence alone.
+    for vi in [2usize, 1, 0] {
+        feed(&ex, vi, names[vi], &vols[vi], 8_000, 40 + vi as u64);
+    }
+    let rep = ex.finish().unwrap();
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(std::fs::read(dir.join("real.mkv")).unwrap(), total);
     std::fs::remove_dir_all(&dir).unwrap();
 }

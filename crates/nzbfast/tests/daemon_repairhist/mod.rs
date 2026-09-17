@@ -75,14 +75,11 @@ fn damaged_rar_release(build: &Path) -> (HashMap<String, Vec<u8>>, String, Vec<u
     // window, and the recovery set did one block of work. Both rows
     // here would have stayed green with the parity empty.
     let inner = payloads::unique_payload(900_000, 7);
-    let vols = [
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[..350_001], false, true)], 0),
-        fixtures::rar5_volume_n(
-            &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
-            1,
-        ),
-        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[700_001..], true, false)], 2),
-    ];
+    let vols = fixtures::rar5_volume_set(&[
+        &[("movie.mkv", 900_000, &inner[..350_001], false, true)],
+        &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
+        &[("movie.mkv", 900_000, &inner[700_001..], true, false)],
+    ]);
     let names = ["r.part1.rar", "r.part2.rar", "r.part3.rar"];
     let mut articles: HashMap<String, Vec<u8>> = HashMap::new();
     let mut nzb_files: Vec<(String, Vec<(String, u64, u32)>)> = Vec::new();

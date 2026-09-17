@@ -618,8 +618,11 @@ public static class Strings
     /// <summary>Clear remembered checksums</summary>
     public const string SettingsDigestCacheClear = "Clear remembered checksums";
 
-    /// <summary>Forget every remembered checksum? The next create or full check of each large file takes the usual time again.</summary>
-    public const string SettingsDigestCacheClearConfirm = "Forget every remembered checksum? The next create or full check of each large file takes the usual time again.";
+    /// <summary>Forget every remembered checksum?</summary>
+    public const string SettingsDigestCacheClearConfirm = "Forget every remembered checksum?";
+
+    /// <summary>The next create or full check of each large file takes the usual time again.</summary>
+    public const string SettingsDigestCacheClearConfirmBody = "The next create or full check of each large file takes the usual time again.";
 
     /// <summary>Remembered checksums cleared</summary>
     public const string SettingsDigestCacheCleared = "Remembered checksums cleared";
@@ -1147,7 +1150,8 @@ public static System.Collections.Generic.IReadOnlyDictionary<string, string> All
             ["settings.default_scheme"] = "Default volume scheme",
             ["settings.digest_cache"] = "Remember checksums of large files",
             ["settings.digest_cache_clear"] = "Clear remembered checksums",
-            ["settings.digest_cache_clear_confirm"] = "Forget every remembered checksum? The next create or full check of each large file takes the usual time again.",
+            ["settings.digest_cache_clear_confirm"] = "Forget every remembered checksum?",
+            ["settings.digest_cache_clear_confirm_body"] = "The next create or full check of each large file takes the usual time again.",
             ["settings.digest_cache_cleared"] = "Remembered checksums cleared",
             ["settings.digest_cache_note"] = "A repeat create or full check of an unchanged file over 256 MB skips its slowest step. parfast keeps a small checksum record for each such file in your user cache folder, and re-checks the file's contents before trusting it.",
             ["settings.fast_solver"] = "Fast solver",

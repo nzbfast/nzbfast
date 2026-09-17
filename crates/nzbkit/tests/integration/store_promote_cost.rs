@@ -88,9 +88,10 @@ fn leg(tag: &str, art: usize, data: &[u8]) {
     for vi in 0..VOLS {
         let b0 = Instant::now();
         let piece = &data[vi * VOL_BYTES..(vi + 1) * VOL_BYTES];
-        let vol = fixtures::rar5_volume_n(
+        let vol = fixtures::rar5_volume_n_of(
             &[("BIG.mkv", TOTAL as u64, piece, vi > 0, vi + 1 < VOLS)],
             vi as u64,
+            VOLS as u64,
         );
         build += b0.elapsed().as_secs_f64();
         let name = format!("obf{vi:04}.bin");

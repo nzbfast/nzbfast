@@ -410,7 +410,9 @@ public enum S {
     /// settings.digest_cache_clear
     public static let settingsDigestCacheClear = "Clear remembered checksums"
     /// settings.digest_cache_clear_confirm
-    public static let settingsDigestCacheClearConfirm = "Forget every remembered checksum? The next create or full check of each large file takes the usual time again."
+    public static let settingsDigestCacheClearConfirm = "Forget every remembered checksum?"
+    /// settings.digest_cache_clear_confirm_body
+    public static let settingsDigestCacheClearConfirmBody = "The next create or full check of each large file takes the usual time again."
     /// settings.digest_cache_cleared
     public static let settingsDigestCacheCleared = "Remembered checksums cleared"
     /// settings.digest_cache_note
