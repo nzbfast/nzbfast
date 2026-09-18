@@ -15,6 +15,13 @@
 //!    that grows with a declared length rather than with real elements
 //!    is the shape of an allocation attack.
 //!
+//! The REMUX layout scan is fuzzed alongside the probe, and it is a
+//! second reader over the same bytes rather than a subset of the first:
+//! [`probe`] stops at the first Cluster and never chases a SeekHead for
+//! Tracks or Cues, so a target that called only `probe` left
+//! `samples::mkv_layout`'s chase - a worklist over attacker-supplied
+//! offsets, which is the classic non-termination shape - unreached.
+//!
 //! Run with the rss limit - it is what actually enforces the
 //! "never allocate from an untrusted length" rule:
 //!
@@ -49,4 +56,31 @@ fuzz_target!(|data: &[u8]| {
             known_size: None,
         },
     );
+
+    // The remuxer's own walk over the same bytes. It has to terminate
+    // and it has to agree with itself; a SeekHead chain naming itself
+    // is a two-element file, so this is exactly what a fuzzer finds.
+    let src = nzbkit::mediaprobe::source::MemSource(data.to_vec());
+    let now = std::time::Duration::ZERO;
+    let a = nzbkit::mediaprobe::samples::mkv_layout(&src, now);
+    let b = nzbkit::mediaprobe::samples::mkv_layout(&src, now);
+    match (a, b) {
+        (Ok(a), Ok(b)) => {
+            assert_eq!(a.cues_off, b.cues_off, "mkv_layout disagreed");
+            // The track list is `pub(crate)`, so it is read through the
+            // selector rather than by widening the API for a fuzzer.
+            let pick = |l| nzbkit::mediaprobe::samples::select_mkv(l, None).map(|v| v.len());
+            match (pick(&a), pick(&b)) {
+                (Ok(x), Ok(y)) => {
+                    assert_eq!(x, y, "mkv_layout disagreed");
+                    assert!(x <= 64, "track list is unbounded");
+                }
+                (Err(_), Err(_)) => {}
+                _ => panic!("mkv_layout was non-deterministic"),
+            }
+        }
+        (Err(_), Err(_)) => {}
+        _ => panic!("mkv_layout was non-deterministic"),
+    }
+    let _ = nzbkit::mediaprobe::samples::mp4_layout(&src, now);
 });

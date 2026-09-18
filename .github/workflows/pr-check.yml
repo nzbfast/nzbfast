@@ -217,8 +217,12 @@ jobs:
         # Same flags as the pass above on purpose - only the filter and
         # the env differ - so this step compiles nothing.
         run: cargo nextest run --locked --features nzbkit/heavy-tests,nzbfast/heavy-tests --no-fail-fast -E 'package(nzbfast)'
+      # Pinned against CLAUDE.md's documented fmt line by
+      # tools/claude-clippy-gate.py's `pr-check-fmt` pair - this is the
+      # pre-split package list until 17 Sep 2026, when it drifted alone
+      # because that gate only pinned ci-private.yml's copy.
       - name: fmt
-        run: cargo fmt -p nzbkit -p nzbfast -p nzbtray --check
+        run: cargo fmt -p nzbkit-base -p nzbkit -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbfast -p postfast -p parfast -p nzbtray -p nzbfast-ffi --check
       # Parity with ci-private.yml; see TODO 102b for why this is a script
       # rather than clippy's disallowed-methods.
       - name: lock gate
@@ -281,7 +285,15 @@ jobs:
         # crate root compiles to nothing and its two `#![expect(...)]`
         # waivers are never judged. `crates` ships whole, so a public
         # contributor can break that root; this is the gate that says so.
-        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray -p nzbfast-ffi --all-targets --no-deps -- -D warnings
+        #
+        # The full fourteen-package list and `--locked`, matching
+        # ci-private.yml's `check` job: until 17 Sep 2026 this named the
+        # pre-split four packages with no `--locked`, so a pull request
+        # linted four of fourteen workspace crates and could re-resolve
+        # the dependency graph. Pinned against CLAUDE.md's documented
+        # host clippy line by tools/claude-clippy-gate.py's
+        # `pr-check-clippy` pair.
+        run: cargo clippy -p nzbkit-base -p nzbkit -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbfast -p postfast -p parfast -p nzbtray -p nzbfast-ffi --locked --all-targets --no-deps --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
 
   # Windows, x64. The workspace suite had NEVER run on Windows on any
   # architecture until a Windows-on-ARM build probe added a job that ran
@@ -468,8 +480,14 @@ jobs:
       # `-p nzbfast-ffi` for the reason the Linux clippy step above
       # gives; verified clean against x86_64-pc-windows-gnu on 23 Aug
       # 2026 before it was added to any gate.
+      #
+      # The full fourteen-package list, `--locked` and the heavy-tests
+      # features, matching ci-private.yml's `windows-clippy` job: until
+      # 17 Sep 2026 this named the pre-split four packages with none of
+      # those. Pinned against CLAUDE.md's documented windows clippy line
+      # by tools/claude-clippy-gate.py's `pr-check-clippy-windows` pair.
       - name: clippy
-        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray -p nzbfast-ffi --all-targets --no-deps --keep-going -- -D warnings
+        run: cargo clippy -p nzbkit-base -p nzbkit -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbfast -p postfast -p parfast -p nzbtray -p nzbfast-ffi --locked --all-targets --no-deps --keep-going --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
       # The ARM64 gate. `cargo clippy --target` runs in check mode - it
       # never links - so an x64 runner covers aarch64-pc-windows-msvc with
       # nothing installed but the rust target, and the ARM64 MSVC linker
@@ -498,6 +516,27 @@ jobs:
       # and the two bins, and pulling the test targets in would compile a
       # second copy of the dependency graph for a target we do not run
       # tests on. Runs last, so a lint here cannot cost us the suites.
+      #
+      # STATED LIMIT, AUDITED 17 Sep 2026: running in check mode means
+      # this cannot see the `known_panics` LINT FAMILY
+      # (`arithmetic_overflow`, `unconditional_panic` - a const-folded
+      # overflow, a const out-of-bounds index, a const division by zero),
+      # because clippy is a check-shaped driver that never codegens and
+      # is exactly as blind as `cargo check` there. Converting it to a
+      # build was priced and DECLINED: both Windows targets are 64-bit,
+      # so windows-build's `cargo nextest archive` already codegens every
+      # const this triple would except behind a `target_arch` cfg, and a
+      # census found exactly one such cfg across nzbfast and nzbtray. The
+      # full reasoning, the census and the numbers live at the twin step
+      # in ci-private.yml's `windows-arm64` job, and at greater length in
+      # the 16 Sep 2026 armv7 local-probe note - which is in the private
+      # tree, so it is not named here, this file being published
+      # verbatim. Keep the two steps in step if either changes.
+      #
+      # This step's own package list is deliberately NOT the fourteen
+      # above: it is `-p nzbfast -p nzbtray` only, matching the ARM64
+      # cross-check twin in ci-private.yml's `windows-arm64` job rather
+      # than the full workspace clippy step.
       - name: cross-check aarch64-pc-windows-msvc (ARM64 beta target)
         run: |
           rustup target add aarch64-pc-windows-msvc

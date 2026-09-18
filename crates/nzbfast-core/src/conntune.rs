@@ -1187,10 +1187,14 @@ fn bucket_entry(buckets: &mut Vec<Bucket>, idx: u8) -> &mut Bucket {
 pub fn local_hour() -> u8 {
     #[cfg(unix)]
     {
+        // `as _` and NOT `as libc::time_t`: that alias is deprecated on
+        // musl and named nowhere in this repo any more. The reasoning,
+        // and why hardcoding a width is wrong in both directions, is at
+        // the twin site in `localtime::local_civil_now`.
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() as libc::time_t;
+            .as_secs() as _;
         // SAFETY: `libc::tm` is a plain C struct of integers and a
         // pointer, so an all-zero bit pattern is a valid (if meaningless)
         // value for it - and it is overwritten wholesale below before

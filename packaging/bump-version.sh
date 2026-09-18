@@ -11,12 +11,26 @@
 #   crates/nzbfast-tasks/Cargo.toml (serve's background lanes, split out 2 Sep 2026)
 #   crates/nzbfast-api/Cargo.toml (serve's request layer, split out 2 Sep 2026)
 #   crates/nzbtray/Cargo.toml   (installer stamps both exes)
-#   crates/parfast/Cargo.toml   (tracks the nzbfast version, but PRE-RELEASE:
-#                                it takes <new>-beta.1, a fresh beta series per
-#                                version. Added 10 Sep 2026 when parfast was moved
-#                                off its own 0.90.x line to match nzbfast. It is
-#                                here so the next bump cannot leave it behind - a
-#                                version that tracks another one by hand drifts.)
+#   crates/parfast/Cargo.toml   (tracks the nzbfast version. Added 10 Sep 2026
+#                                when parfast was moved off its own 0.90.x line
+#                                to match nzbfast. It carried a `-beta.N` suffix
+#                                and a bump_toml_beta of its own until 1.6.0,
+#                                when it shipped stable and joined the plain
+#                                list above - which is the state its own header
+#                                asked for. It is here so the next bump cannot
+#                                leave it behind: a version that tracks another
+#                                one by hand drifts.)
+#   apps/parfast/crates/parfast-session/Cargo.toml
+#   apps/parfast/crates/parfast-ffi/Cargo.toml
+#                               (the desktop GUI's two Rust crates. Their NUMBER
+#                                tracks the CLI's - parfast-ffi's is what the
+#                                app footer shows - while the GUI's own STAGE
+#                                does not and lives in GUI_STAGE in
+#                                apps/parfast/packaging/build-parfast-gui-bundles.sh.
+#                                They are a DETACHED workspace the root manifest
+#                                never names, so their lock needs its own
+#                                --manifest-path; `tools/detached-lock-gate.py`
+#                                is what refuses a bump that forgot it.)
 #   website/download*.html      (16 locales, version-pinned button URLs)
 #   (NOT the homebrew formula - see bump-tap.sh, it needs published shas)
 #   Cargo.lock                  (via cargo, if available)
@@ -62,24 +76,37 @@ bump_toml "$ROOT/crates/nzbfast-tasks/Cargo.toml"
 bump_toml "$ROOT/crates/nzbfast-api/Cargo.toml"
 bump_toml "$ROOT/crates/nzbtray/Cargo.toml"
 
-# parfast is PRE-RELEASE and carries a beta suffix, so it cannot go through
-# bump_toml (and $NEW is validated as dotted numerals, deliberately - the
-# suffix is this script's to add, not the operator's to pass in). A version
-# bump starts a FRESH beta series: 1.5.0-beta.1, then 1.6.0-beta.1. A
-# hand-set -beta.N within one version is not preserved across a bump,
-# because a beta count carried onto a new version means nothing.
-# When parfast ships stable, move it to bump_toml above and delete this.
-bump_toml_beta() {
-    awk -v new="$NEW-beta.1" '!done && /^version = "/ { sub(/"[^"]*"/, "\"" new "\""); done=1 } { print }' \
-        "$1" > "$1.tmp" && mv "$1.tmp" "$1"
-}
-bump_toml_beta "$ROOT/crates/parfast/Cargo.toml"
-# Assert the POSITIVE, as the download-page arm below does: a parfast whose
-# [package] version line was restructured would rewrite to nothing and pass.
-if ! grep -q "^version = \"$NEW-beta.1\"" "$ROOT/crates/parfast/Cargo.toml"; then
-    echo "REFUSING: crates/parfast/Cargo.toml did not move to $NEW-beta.1" >&2
-    exit 1
-fi
+# parfast SHIPPED STABLE AT 1.6.0 and goes through bump_toml like everything
+# else. Until then it was PRE-RELEASE and had a bump_toml_beta of its own that
+# rewrote it to `$NEW-beta.1`, a fresh beta series per version - the thing that
+# function's own last line asked to be deleted the day this happened. What is
+# kept from it is the POSITIVE ASSERTION below, which is not about the suffix:
+# a Cargo.toml whose [package] version line was restructured rewrites to
+# nothing and passes silently, and that is as true of a stable version as of a
+# beta one. The same reason the download-page arm asserts rather than trusts.
+bump_toml "$ROOT/crates/parfast/Cargo.toml"
+
+# The desktop GUI's two crates, in the DETACHED workspace at
+# apps/parfast/Cargo.toml. Their number tracks the CLI's (parfast-ffi's is what
+# `pf_capabilities` reports and the app footer prints beside the stage); the
+# GUI's STAGE is separate and lives in GUI_STAGE in
+# apps/parfast/packaging/build-parfast-gui-bundles.sh, which is why this bump
+# does not touch it. They are here rather than left to the operator for this
+# script's whole reason: they tracked the CLI by hand from 12 Sep 2026 and had
+# already drifted a beta behind it by the time anyone looked.
+GUI_CRATES="$ROOT/apps/parfast/crates/parfast-session/Cargo.toml $ROOT/apps/parfast/crates/parfast-ffi/Cargo.toml"
+for f in $GUI_CRATES; do
+    [ -f "$f" ] || { echo "REFUSING: $f is missing - the GUI workspace moved" >&2; exit 1; }
+    bump_toml "$f"
+done
+
+# Assert the POSITIVE for all three, for the reason given above.
+for f in "$ROOT/crates/parfast/Cargo.toml" $GUI_CRATES; do
+    if ! grep -q "^version = \"$NEW\"" "$f"; then
+        echo "REFUSING: $f did not move to $NEW" >&2
+        exit 1
+    fi
+done
 
 # The Homebrew formula is NOT bumped here. It needs the sha256 of each
 # published archive, which does not exist until the release is uploaded, and a
@@ -89,6 +116,19 @@ fi
 
 if command -v cargo >/dev/null 2>&1; then
     (cd "$ROOT" && cargo update -q -p nzbfast -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbtray -p parfast 2>/dev/null) || true
+    # And the DETACHED workspace's own lock, which the line above cannot
+    # reach: `[patch]` and package resolution both apply from a workspace
+    # ROOT, and apps/parfast has one of its own. Every cargo line for that
+    # tree carries `--locked`, so a bump that moved those two [package]
+    # versions and left this lock behind dies at RESOLUTION on the next
+    # push - on `parfast-gui.yml` and `fuzz-gate`, whose names say nothing
+    # about a version bump. That is the 12 Sep 2026 lock-drift incident
+    # exactly, and `tools/detached-lock-gate.py` is what catches it before
+    # the push; this line is what stops it happening.
+    if [ -f "$ROOT/apps/parfast/Cargo.toml" ]; then
+        (cd "$ROOT" && cargo update -q --manifest-path apps/parfast/Cargo.toml \
+            -p parfast-session -p parfast-ffi 2>/dev/null) || true
+    fi
 fi
 
 # Website download buttons are version-pinned (asset filenames inside
@@ -97,7 +137,11 @@ fi
 # no partial failure mode: the whole page breaks at once, in all sixteen
 # locales, the instant the new release becomes `latest`.
 TOUCHED="crates/nzbfast/Cargo.toml crates/nzbfast-core/Cargo.toml crates/nzbfast-unpack/Cargo.toml crates/nzbfast-meta/Cargo.toml crates/nzbfast-engine/Cargo.toml crates/nzbfast-daemon/Cargo.toml crates/nzbfast-tasks/Cargo.toml crates/nzbfast-api/Cargo.toml crates/nzbtray/Cargo.toml crates/parfast/Cargo.toml"
+TOUCHED="$TOUCHED apps/parfast/crates/parfast-session/Cargo.toml apps/parfast/crates/parfast-ffi/Cargo.toml"
 [ -f "$ROOT/Cargo.lock" ] && TOUCHED="$TOUCHED Cargo.lock"
+# The detached workspace COMMITS its lock, unlike crates/nzbkit/fuzz, so it
+# is staged with the manifests it describes and not left for the next lane.
+[ -f "$ROOT/apps/parfast/Cargo.lock" ] && TOUCHED="$TOUCHED apps/parfast/Cargo.lock"
 pages=0
 bad=0
 for f in "$ROOT"/website/download*.html; do
@@ -134,7 +178,7 @@ fi
 
 echo ""
 echo "bumped to $NEW ($STAGED):"
-grep -Hn '^version' "$ROOT/crates/nzbfast/Cargo.toml" "$ROOT/crates/nzbfast-core/Cargo.toml" "$ROOT/crates/nzbfast-unpack/Cargo.toml" "$ROOT/crates/nzbfast-meta/Cargo.toml" "$ROOT/crates/nzbfast-engine/Cargo.toml" "$ROOT/crates/nzbfast-daemon/Cargo.toml" "$ROOT/crates/nzbfast-tasks/Cargo.toml" "$ROOT/crates/nzbfast-api/Cargo.toml" "$ROOT/crates/nzbtray/Cargo.toml"
+grep -Hn '^version' "$ROOT/crates/nzbfast/Cargo.toml" "$ROOT/crates/nzbfast-core/Cargo.toml" "$ROOT/crates/nzbfast-unpack/Cargo.toml" "$ROOT/crates/nzbfast-meta/Cargo.toml" "$ROOT/crates/nzbfast-engine/Cargo.toml" "$ROOT/crates/nzbfast-daemon/Cargo.toml" "$ROOT/crates/nzbfast-tasks/Cargo.toml" "$ROOT/crates/nzbfast-api/Cargo.toml" "$ROOT/crates/nzbtray/Cargo.toml" "$ROOT/crates/parfast/Cargo.toml" $GUI_CRATES
 echo "  website/download*.html      $pages locale page(s) -> nzbfast-$NEW-*"
 echo ""
 echo "These are ONE commit. The website pages are version-pinned download"

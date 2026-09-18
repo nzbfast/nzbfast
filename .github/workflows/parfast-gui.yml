@@ -269,6 +269,13 @@ jobs:
       #     C ABI, with a C compiler reading that header. It builds its
       #     sets with the ENGINE and not with an external par2, which is
       #     why it needs no `have_par2()` guard.
+      #   * `tests/knobs.rs` runs two jobs in one process and asserts
+      #     that the second, on Auto, runs at the ENGINE's thread and
+      #     memory defaults rather than at the first job's explicit
+      #     limits (`runner::apply_knobs`, 17 Sep 2026). It is here and
+      #     not in parfast-session's unit tests because it reads a
+      #     process-global knob back, and that crate's units share one
+      #     process by design - its own header says so at length.
       #
       # HERE rather than in ci-private.yml because a detached workspace
       # is reached by no `-p` list there, and this is the job that

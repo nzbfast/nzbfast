@@ -262,6 +262,10 @@ required-features = ["indexer"]
 name = "sidecar_fold_walk"
 required-features = ["indexer"]
 
+[[example]]
+name = "fold_hold_probe"
+required-features = ["indexer"]
+
 # Landed 3 Sep 2026 (bf6d69922) WITHOUT this gate, which took slim-check
 # leg 2 red on main until it was found by chip 13 running the acceptance
 # suite. `index_open_bench` names `nzbkit::index`, which does not exist

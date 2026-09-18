@@ -17,9 +17,11 @@ use super::*;
 /// [`super::FoldWindows`] is one.
 pub(super) struct BatchVolumes<'a> {
     pub(super) control: &'a CreateControl,
-    /// Every volume this batch creates is noted here BEFORE its
-    /// `File::create`, so a cancel taken in this batch or any later one
-    /// removes it - see `control::CreateTrail`.
+    /// Every volume this batch creates is opened THROUGH this and
+    /// noted the moment the open succeeds, so a cancel taken in this
+    /// batch or any later one removes it - and a volume the trail
+    /// REFUSED (no-clobber over a file that is already there) is never
+    /// noted and so never removed. See `control::CreateTrail`.
     pub(super) trail: &'a CreateTrail,
     pub(super) dir: &'a Path,
     pub(super) base: &'a str,
@@ -76,9 +78,6 @@ pub(super) fn write_batch(
     // one the trail never has to name.
     control.check()?;
     let seals = recovery_seals(set_id, first, slices);
-    for name in &names {
-        trail.note(name);
-    }
     std::thread::scope(|wsc| {
         for ((&(vfirst, count), name), slot) in layout.iter().zip(&names).zip(written.iter_mut()) {
             let critical = ready_critical.unwrap_or(critical_shape);
@@ -97,7 +96,12 @@ pub(super) fn write_batch(
                 }
                 let path = dir.join(name);
                 let result = (|| -> std::io::Result<CriticalPatch> {
-                    let file = std::fs::File::create(&path)?;
+                    // Opened and noted in one call. A no-clobber trail
+                    // answers `AlreadyExists` here rather than
+                    // truncating a file this run does not own, and the
+                    // error reaches the caller through this closure's
+                    // own `io(&path)` mapping like any other.
+                    let file = trail.create(dir, name)?;
                     // Fine-sliced sets feed many 4 KiB packets, so
                     // coalesce their small writes; a large slice
                     // bypasses the buffer and streams straight out

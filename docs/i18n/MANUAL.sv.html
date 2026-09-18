@@ -368,6 +368,7 @@ sedan länge är borta.</li>
 <li>Märken visar specialtillstånd: <i>försökt, lagt åt sidan</i>, <i>prefetchar</i>,
 <i>pausad</i> (se <a href="#performance">Prestandaverktyg</a>).</li>
 <li>Ett nedräkningsdiagram spårar totalt GB kvar i hela kön.</li>
+<li><b>Avbryta går att ångra.</b> Att stoppa en nedladdning, eller tömma hela kön, frågar inte längre först: det görs, och meddelandet om det bär ett <b>Ångra</b>. I tio minuter behåller nzbfast sin egen kopia av NZB-filen, så raden kommer tillbaka med sin kategori, sin prioritet och allt som redan hämtats. En nedladdning som packas upp medan den kommer in frågar fortfarande, eftersom den redan hämtade delen inte kan ges tillbaka.</li>
 </ul>
 <h3 id="dash-browse">Bläddra i indexet</h3>
 <p>Sök i allt den inbyggda indexeraren katalogiserat från dina bevakade grupper
@@ -404,6 +405,7 @@ sig. Bara historikposten tas bort - de nedladdade filerna ligger kvar exakt där
 är. Åldersregeln tar bara färdiga nedladdningar, så en misslyckad väntar tills du
 försöker igen eller själv tar bort den; längdgränsen räknar varje post, oavsett hur
 det gick för den.</p>
+<p><b>Att ta bort en post ur historiken går att ångra.</b> Att rensa de slutförda eller de misslyckade nedladdningarna ur listan, och att ta bort ett urval, frågar inte längre först: det görs, och meddelandet om det bär ett <b>Ångra</b>. I tio minuter behåller nzbfast varje borttagen posts egen kopia av NZB-filen, så raden kommer tillbaka där den stod och erbjuder fortfarande <b>Försök igen</b>. Att ta bort en post och radera dess filer frågar fortfarande, eftersom raderade filer inte kan ges tillbaka.</p>
 <h3 id="dash-usage">Dataförbrukning</h3>
 <p>Dagliga staplar per provider och Idag / 7-dagars / 30-dagars totaler - nödvändigt för mätade
 konton och blockkonton. Blockkonton visar livstidsförbrukning mot sin storlek.</p>
@@ -632,6 +634,7 @@ för affisch och handling, allt ur ditt eget index.</li>
 under. Öppna den med <b>&#9656;</b> eller genom att klicka på raden; kryssrutan på
 titeln väljer de releaser som visas. Gruppering gäller bara <b>Detta index</b>; väljer
 du <b>Indexerare</b> eller <b>Båda</b> blir tabellen platt igen, och säger det.</li>
+<li><b>En diskussionsgrupp i taget.</b> Klicka på gruppnamnet under en release, så smalnar sidan av till de releaser som lagts upp där; en pillerknapp ovanför tabellen namnger gruppen tills du rensar den. Den smalnar av både väggen och tabellen, så att växla mellan dem behåller den. Den andra vägen in är Inställningar &rarr; Ordning &rarr; <b>Indexering</b> &rarr; <b>Grupper att skanna</b> &rarr; <b>Hitta…</b>: öppna en grupp du redan skannar och tryck <b>Indexerade releaser</b>.</li>
 <li><b>Varje release av en titel</b> listas när du öppnar dess kort, med upplösning,
 codec, ljudformat och dynamiskt omfång (Dolby Vision, HDR10) utläst ur releasenamnet,
 plus storlek, ålder och om varje del finns kvar hos din leverantör. Ställ in

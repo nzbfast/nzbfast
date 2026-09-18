@@ -45,8 +45,44 @@
 //! to `memgauge::Sub::WriteStage` so they appear in the mem-floor
 //! attribution rather than as the unattributed remainder round 14 spent
 //! a whole lane chasing.
+//!
+//! **RUN BUFFERS COME FROM A FREE LIST ([`RunPool`]), AND THAT IS WHAT
+//! LETS A RUN RESERVE ITS WHOLE SIZE UP FRONT.**
+//! `research/SMALL-ARTICLE-MEMCPY-2026-09-16.md` profiled a 128 KB-article
+//! download and found this module twice in the mem-op stacks: 3.78% of
+//! on-CPU samples in the staging copy itself, which is what the window
+//! IS, and a further **2.03%** in `offer -> RawVec::finish_grow ->
+//! realloc -> memmove`, which is not. The second one was the opening
+//! capacity: a run used to open at `run_cap.min(data.len() * 4)`, so a
+//! 128 KB article opened a 512 KiB run, grew past it and copied half of
+//! every run's bytes a second time for nothing. Isolated on the x86 rig
+//! it was worth **28% of the window's mem-op cycles**, and the
+//! allocation churn underneath it (one `malloc` and one `free` per run,
+//! each first touch a page fault) showed up as an **87% swing in minor
+//! faults**.
+//!
+//! Reserving [`Caps::run`] at the open would have fixed the realloc and
+//! broken the accounting, which is why the note filed a pool rather than
+//! a one-line change: [`charge`] accounts the STAGED BYTES and not the
+//! capacity, so runs opened at their full size would have under-reported
+//! the memory floor by up to 4x. The pool answers both halves at once.
+//! A buffer is minted at [`Caps::run`] + [`Caps::max_article`] - the
+//! largest a run can reach before [`WriteStage::offer`] takes it out, so
+//! the normal path never reallocs at all - and it is minted against a
+//! ceiling of its own ([`run_pool_cap`]), which is the bound the
+//! reserved bytes now have and did not have before. The slack is
+//! reported rather than hidden: `memgauge::Sub::WriteStage` still
+//! carries the staged bytes, exactly as the two caps bound them, and
+//! `memgauge::Sub::WriteStageReserve` carries `capacity - len` over
+//! every buffer the pool owns, the same split `HoldsReserve` makes for
+//! the extractor's holds and for the same reason.
+//!
+//! At the ceiling the pool hands back nothing and [`WriteStage::offer`]
+//! declines to open a run, so the article takes its own positioned write
+//! - the same answer as the three bounds above it, and never a failure.
 
 use crate::memgauge;
+use crate::sync::MutexExt;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -55,8 +91,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// and every article takes the unchanged one-article-one-`pwrite` path,
 /// which is what the control arm of every measurement below is.
 ///
-/// **THE DEFAULT IS 4 MiB - THE WINDOW SHIPS ON SINCE ROUND 42, AND
-/// ROUND 41 IS WHY IT DID NOT BEFORE.** Round 41 built the window,
+/// **THE DEFAULT IS 0 AGAIN SINCE 17 SEP 2026 - THE WINDOW SHIPS OFF,
+/// AND THE FORTNIGHT IT SHIPPED ON IS THE HISTORY BELOW.** It shipped
+/// off at 0 from round 41, ON at 4 MiB from round 44, and off again
+/// once the measurement reached a filesystem that is not RAM. Round 41
+/// built the window,
 /// measured a real and large lever, and shipped it OFF at 0 because the
 /// only version that kept `Extractor::write`'s postcondition captured
 /// about a third of that lever at 100 KB articles and almost none at
@@ -72,13 +111,38 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// `disk::tests::an_unfed_writer_still_answers_a_by_path_read_after_one_article`
 /// executes as a sentence.
 ///
-/// 4 MiB per file, [`COALESCE_TOTAL_DEFAULT`] across the process, and
-/// [`STAGE_MAX_AGE_DEFAULT`] in time - and it is that third bound that
-/// makes turning this on by default safe rather than merely profitable,
-/// because it degenerates the window to the old write path in exactly
-/// the regime (a real line, one article per file per bound) where round
-/// 23 found the write call nowhere near the critical path.
-pub const COALESCE_CAP_DEFAULT: usize = 4 << 20;
+/// When it is armed at all it is bounded three ways - the per-file
+/// window here, [`COALESCE_TOTAL_DEFAULT`] across the process, and
+/// [`STAGE_MAX_AGE_DEFAULT`] in time - and it was that third bound,
+/// plus round 44's arming rule, that made ON look safe rather than
+/// merely profitable: both degenerate the window to the old write path
+/// in exactly the regime (a real line, one article per file per bound)
+/// where round 23 found the write call nowhere near the critical path.
+///
+/// **WHY IT IS 0 AGAIN.** Round 44 shipped it on against a CALL COUNT
+/// and a CONTENTION result and said so in terms - "wall and system time
+/// did not move ... must not be reported as a wall win" - and round 45
+/// called the feature CPU-only on the wall clock. Neither could see
+/// otherwise: their ladders were 1 GiB into a box with tens of GB of
+/// RAM, so the writes never reached a device inside the leg. Round 43
+/// (`research/WSTAGE-REAL-FILESYSTEM-2026-09-17.md`) put the bytes on
+/// ext4 on a device and found a wall LOSS at every article size from
+/// 20 KB to 360 KB; the round after it
+/// (`research/WSTAGE-WINDOW-DEFAULT-2026-09-17.md`) re-ran that on a
+/// binary carrying [`RunPool`] and on a SECOND filesystem - twelve
+/// spinning disks under btrfs - and the loss holds on both:
+/// `unstaged/staged` wall 0.712 and 0.807 on the SSD at 128 KB and
+/// 250 KB articles (the pool is worth 22-28% of the staged arm and
+/// none of the sign), 0.940 and 0.933 on the rotational array, against
+/// A/A floors of 1.013, 1.091, 1.007 and 0.978. **No configuration
+/// anybody has measured is a win**, which is why this is 0 rather than
+/// a smaller number or a rule keyed on the medium: the medium-adaptive
+/// escape points the window at `Storage::Rotational`, which is the box
+/// it was just measured losing on. What the call count buys is real and
+/// unchanged - 64,000 positioned writes become 14,861 at 128 KB, worth
+/// 18% of cycles on ext4 - so a CPU-bound box may still want
+/// `NZBFAST_WRITE_COALESCE_KB=4096`, which restores this exactly.
+pub const COALESCE_CAP_DEFAULT: usize = 0;
 
 /// How large ONE run grows before it is written. The win is entirely in
 /// the CALL COUNT - round 23's fit is flat in bytes to about 700 KB - so
@@ -100,6 +164,42 @@ pub const RUN_CAP_DEFAULT: usize = 1 << 20;
 /// (0.64 -> 0.65) - the calls saved stop paying for the copy well before
 /// the calls run out. 256 KiB is the round number between the last rung
 /// that wins and the first that does not.
+///
+/// **THAT LADDER IS RETIRED INSTRUCTIONS ON A RAM DISK, AND BOTH HALVES
+/// OF THAT ARE NOW KNOWN TO BE THE WRONG INSTRUMENT FOR IT.** Round 42
+/// (`research/SMALL-ARTICLE-MEMCPY-2026-09-16.md`) measured the staging
+/// copy costing 15 G cycles while moving instructions 1.3%, so the
+/// column this ladder is quoted in cannot see the copy; and its "system
+/// seconds flat" is flat because a `pwrite` to tmpfs is nearly free, so
+/// the rig priced the copy honestly and the CALLS IT SAVES at
+/// approximately zero. Round 43
+/// (`research/WSTAGE-REAL-FILESYSTEM-2026-09-17.md`) put the bytes on
+/// ext4 on a device and walked the bound in both directions on one
+/// binary: unstaged/staged WALL reads 0.791, 0.642, 0.520, 0.526,
+/// 0.545, 0.550, 0.539 at 20, 50, 80, 110, 128, 190 and 250 KB, and
+/// staging a 360 KB article by RAISING this bound costs 1.827x - the
+/// same contrast from the other side. **It does not cross anywhere in
+/// the population**, so no value of this constant is the right one, and
+/// 256 KiB is kept only because the value that expresses that finding
+/// is 0, which is a decision about [`COALESCE_CAP_DEFAULT`] and not
+/// about a bound - **and that decision was taken on 17 Sep 2026, in the
+/// direction this paragraph pointed**
+/// (`research/WSTAGE-WINDOW-DEFAULT-2026-09-17.md`): the window ships
+/// off, so this bound now sizes an arm somebody turns on deliberately
+/// rather than the shipped write path. That round also rules out the two explanations a
+/// reader reaches for first: an arm with 2.8x MORE writes and 22% fewer
+/// cycles than the shipped one reads the same wall, so the cost is
+/// neither the call count nor the copy's cycles - it is that a staged
+/// article's write is DEFERRED, under the per-file `flush_lock`, with
+/// the article's gate entry still held. Its binary PREDATES the run
+/// buffer pool below, and it argued from that arm that the pool could
+/// not move it - an arm that already removes the churn buys no wall.
+/// **Measured on the pool, that argument is wrong on magnitude and
+/// right on sign**: the same two cells re-run on a post-pool binary
+/// read 0.712 and 0.807 rather than 0.545 and 0.539, all of the
+/// movement being the staged arm getting 22-28% cheaper. Do not re-tune
+/// this number against either ladder without a rig where the write can
+/// block.
 pub const STAGE_MAX_ARTICLE_DEFAULT: usize = 256 << 10;
 
 /// How many disjoint runs one file may hold. Sixteen because sixteen is
@@ -114,6 +214,37 @@ pub const MAX_RUNS: usize = 16;
 /// rather than extended, which is exactly the old behaviour and never a
 /// failure.
 pub const COALESCE_TOTAL_DEFAULT: u64 = 64 << 20;
+
+/// Ceiling on the run-buffer CAPACITY [`RunPool`] may own at once,
+/// across the free list and every buffer out on loan.
+///
+/// The same 64 MiB as [`COALESCE_TOTAL_DEFAULT`], and deliberately the
+/// same number: this is the process's write-window budget said in the
+/// bytes that are actually resident instead of in the bytes that happen
+/// to be staged. It is not an increase. Before the pool a run's buffer
+/// was as large as the run had grown and nothing bounded the SUM of
+/// them - [`COALESCE_TOTAL_DEFAULT`] bounds staged bytes, and sixteen
+/// nearly-empty runs on each of a job's thousands of writers is a large
+/// number of buffers holding almost nothing - so the worst case was
+/// several times this and was reported nowhere.
+///
+/// `NZBFAST_WRITE_COALESCE_POOL_MB` sets it. 0 disables the pool, which
+/// disables staging with it (no buffer, no run), and is therefore a
+/// second spelling of the `NZBFAST_WRITE_COALESCE_KB=0` control arm
+/// rather than a configuration worth shipping.
+pub const RUN_POOL_DEFAULT: u64 = COALESCE_TOTAL_DEFAULT;
+
+/// How many buffers the free list retains. Past it a returned buffer is
+/// freed rather than kept, so a job that briefly opened many runs does
+/// not pin their memory for the rest of the process.
+///
+/// 64 because [`RUN_POOL_DEFAULT`] over a default-sized buffer
+/// ([`RUN_CAP_DEFAULT`] + [`STAGE_MAX_ARTICLE_DEFAULT`] = 1.25 MiB) is
+/// 51, so the slot count is not the binding constraint at the shipped
+/// sizes - the byte ceiling is, which is the bound worth stating - while
+/// it still bounds a pool of very small buffers (a many-member job whose
+/// [`Caps::for_file`] clamps every run down) to something countable.
+const RUN_POOL_SLOTS: usize = 64;
 
 /// The longest a staged byte may sit in RAM, and it is 100 ms because
 /// that is `journal::BATCH_AGE` - the SAME constant, chosen for the same
@@ -199,6 +330,11 @@ pub fn stage_max_article() -> usize {
 /// all, which is a benchmark arm and not a shippable configuration -
 /// see [`STAGE_MAX_AGE_DEFAULT`] for the invariant it would give up.
 pub fn max_age() -> std::time::Duration {
+    // env-default-gate: the 100 ms the doc row states is
+    // [`STAGE_MAX_AGE_DEFAULT`], reached as `.as_millis() as u64` - a
+    // METHOD CALL on a `Duration` const, which is not an expression the
+    // const folder evaluates. The sibling `NZBFAST_WRITE_COALESCE_TOTAL_MB`
+    // pairs because its const is a plain integer expression.
     static V: OnceLock<std::time::Duration> = OnceLock::new();
     *V.get_or_init(|| {
         std::time::Duration::from_millis(env_bytes(
@@ -221,26 +357,240 @@ pub fn coalesce_total_cap() -> u64 {
     })
 }
 
+/// The run pool's own ceiling ([`RUN_POOL_DEFAULT`]). Latched on first
+/// use like every other knob here, for the same reason.
+pub fn run_pool_cap() -> u64 {
+    // env-default-gate: the 64 the doc row states is [`RUN_POOL_DEFAULT`],
+    // which is [`COALESCE_TOTAL_DEFAULT`] (`64 << 20`) divided by this
+    // call's own `1 << 20` unit - the same arithmetic that pairs the
+    // TOTAL_MB row twelve lines up. What defeats the resolver here is
+    // only the SPELLING: that one is a multi-line `env_bytes(..)` call
+    // and this one sits on one line inside the `get_or_init` closure,
+    // which the chain walk does not step into.
+    static V: OnceLock<u64> = OnceLock::new();
+    *V.get_or_init(|| env_bytes("NZBFAST_WRITE_COALESCE_POOL_MB", 1 << 20, RUN_POOL_DEFAULT))
+}
+
 /// Bytes held by every open run in this process, right now. The gauge
 /// (`memgauge::Sub::WriteStage`) carries the same figure for the
 /// mem-floor report; this one exists so the admission test is a relaxed
 /// load rather than a gauge lookup.
+///
+/// STAGED BYTES and not buffer capacity, which is the whole of the
+/// accounting decision the pool forced. This is the quantity
+/// [`coalesce_cap`] and [`coalesce_total_cap`] bound, the quantity a
+/// SIGKILL loses, and the quantity whose caps round 41 and round 44
+/// calibrated; making it a capacity would silently retune all three. The
+/// capacity those caps do NOT see is
+/// `memgauge::Sub::WriteStageReserve`'s, bounded by [`run_pool_cap`].
 static OUTSTANDING: AtomicU64 = AtomicU64::new(0);
 
 pub fn outstanding() -> u64 {
     OUTSTANDING.load(Ordering::Relaxed)
 }
 
-fn charge(n: u64) {
-    OUTSTANDING.fetch_add(n, Ordering::Relaxed);
-    memgauge::add(memgauge::Sub::WriteStage, n);
+/// Say ONCE, on the first file in this process whose window arms, that
+/// the window is doing something.
+///
+/// **A SUMMARY AT THE END OF A RUN CANNOT ANSWER THIS FOR A RUN THAT IS
+/// SIGKILLED**, and a SIGKILL with bytes in the window is precisely the
+/// case round 44 found a defect in - a staged byte is in RAM while the
+/// journal has already landed a record naming it, which is what the
+/// per-file arming rule exists to bound. A test that kills run 1 and
+/// then grades the resume has no end-of-run line to read, so without
+/// this it can only infer that run 1 armed, and an inference is exactly
+/// what `e2e_wstage`'s header refuses. This line is IN the killed run's
+/// own log.
+///
+/// One relaxed compare-and-swap on the first arming of the process and a
+/// relaxed load on every one after, and only ever reached when the
+/// window is configured on at all.
+fn announce_first_arming(run_cap: usize) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SAID.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tracing::info!(
+        target: "write-window",
+        "write window ARMED on a file: it took a run's worth of bytes ({} KB) inside one age bound",
+        run_cap / 1024,
+    );
 }
 
+/// Spans ever staged, runs ever taken out, and bytes ever staged - the
+/// CUMULATIVE counters, which is what separates them from
+/// [`outstanding`] and from `memgauge::Sub::WriteStage`.
+///
+/// **THESE EXIST TO MAKE "THE WINDOW ARMED" OBSERVABLE FROM OUTSIDE THE
+/// PROCESS**, and that is a correctness need rather than an instrument.
+/// The window ships OFF ([`COALESCE_CAP_DEFAULT`] = 0) and arms itself
+/// per file only on a file proved fast enough, so a test that sets
+/// `NZBFAST_WRITE_COALESCE_KB` and downloads a handful of articles can
+/// run the UNSTAGED path from end to end and pass - a green line over
+/// nothing, which is CLAUDE.md's "failing to find is failing". Every
+/// other reading of the window is a LEVEL that returns to zero the
+/// moment the last run lands ([`outstanding`], the gauge) or is
+/// `#[cfg(test)]` and so unreachable from an integration test
+/// (`FileWriter::staged_bytes`, [`pool_mints`]). A monotone count of
+/// spans that took the staged path is the one figure a test can read
+/// AFTER the job and still tell the two paths apart.
+///
+/// Three relaxed adds on the staged path only; the unstaged path - the
+/// shipped one - touches none of them.
+static EVER_SPANS: AtomicU64 = AtomicU64::new(0);
+static EVER_RUNS: AtomicU64 = AtomicU64::new(0);
+static EVER_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Spans staged, runs written out of the window, and bytes staged since
+/// the process started. `(0, 0, 0)` is the exact statement "this process
+/// never coalesced a byte" - see [`EVER_SPANS`] for why a level cannot
+/// say that.
+pub fn staged_totals() -> (u64, u64, u64) {
+    (
+        EVER_SPANS.load(Ordering::Relaxed),
+        EVER_RUNS.load(Ordering::Relaxed),
+        EVER_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+/// `n` bytes are now STAGED in a pool-owned buffer: they come out of
+/// that buffer's slack and into the window's charge.
+fn charge(n: u64) {
+    OUTSTANDING.fetch_add(n, Ordering::Relaxed);
+    EVER_SPANS.fetch_add(1, Ordering::Relaxed);
+    EVER_BYTES.fetch_add(n, Ordering::Relaxed);
+    memgauge::add(memgauge::Sub::WriteStage, n);
+    memgauge::sub(memgauge::Sub::WriteStageReserve, n);
+}
+
+/// The reverse, and the PRECONDITION of [`RunPool::give`]: after this
+/// the buffer's whole capacity is accounted as slack, whatever
+/// `buf.len()` still says, so `give` has one thing to do rather than two.
 fn release(n: u64) {
     let _ = OUTSTANDING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
         Some(v.saturating_sub(n))
     });
     memgauge::sub(memgauge::Sub::WriteStage, n);
+    memgauge::add(memgauge::Sub::WriteStageReserve, n);
+}
+
+/// The process's run buffers: a free list, a byte ceiling, and nothing
+/// else. See the module header for why it exists.
+///
+/// The gauge invariant, which every method here keeps and which is the
+/// reason the arithmetic is worth reading: **`WriteStageReserve` is the
+/// sum of `capacity - len` over every buffer this pool owns** - the ones
+/// on the free list (cleared, so all slack), the ones in open runs, and
+/// the ones in runs whose `pwrite` has not returned. `WriteStage` is the
+/// `len` half. The two together are the window's resident bytes, exactly.
+struct RunPool {
+    free: std::sync::Mutex<Vec<Vec<u8>>>,
+    /// Capacity bytes this pool owns: free list plus everything on loan.
+    /// Kept beside the gauge rather than read out of it because the
+    /// ceiling test is on the hot path and the gauge is a report.
+    owned: AtomicU64,
+    /// How many buffers have been ALLOCATED, ever. The reuse this module
+    /// exists for is a statement about this counter and about nothing
+    /// else: `owned` is a net figure and reads the same whether a run
+    /// took a buffer off the free list or minted one and freed the last.
+    mints: AtomicU64,
+}
+
+static RUN_POOL: RunPool = RunPool {
+    free: std::sync::Mutex::new(Vec::new()),
+    owned: AtomicU64::new(0),
+    mints: AtomicU64::new(0),
+};
+
+impl RunPool {
+    /// A cleared buffer of at least `want` capacity, or `None` at the
+    /// ceiling - which is not an error: the caller declines to stage and
+    /// the article takes the positioned write it would have taken
+    /// anyway.
+    fn take(&self, want: usize) -> Option<Vec<u8>> {
+        {
+            // First fit rather than the last slot, because
+            // [`Caps::for_file`] clamps a small member's run cap and the
+            // free list can therefore hold a mix of sizes. The list is
+            // bounded by [`RUN_POOL_SLOTS`] and this runs once per run -
+            // once per ~1 MiB of download at the shipped caps.
+            let mut free = self.free.lock_ok();
+            if let Some(i) = free.iter().position(|b| b.capacity() >= want) {
+                return Some(free.swap_remove(i));
+            }
+        }
+        let cap = run_pool_cap();
+        // Minting is the only place the ceiling is tested, because it is
+        // the only place the pool's owned bytes go up.
+        self.owned
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                (v + want as u64 <= cap).then_some(v + want as u64)
+            })
+            .ok()?;
+        self.mints.fetch_add(1, Ordering::Relaxed);
+        let buf = Vec::<u8>::with_capacity(want);
+        // `with_capacity` may hand back more than was asked for, and the
+        // pool owns every byte of what it actually got.
+        let extra = buf.capacity() as u64 - want as u64;
+        self.owned.fetch_add(extra, Ordering::Relaxed);
+        memgauge::add(memgauge::Sub::WriteStageReserve, buf.capacity() as u64);
+        Some(buf)
+    }
+
+    /// Hand a buffer back. `charged` is the capacity it left the pool
+    /// with; the caller has already [`release`]d its bytes, so the whole
+    /// of `charged` is currently accounted as slack.
+    ///
+    /// A buffer whose capacity has MOVED since it was taken is not the
+    /// buffer the pool minted - only a merge across a hole can do that,
+    /// and [`WriteStage::extend`] resyncs the charge when it does - so
+    /// the equality below is a consistency check as much as a policy.
+    fn give(&self, mut buf: Vec<u8>, charged: usize) {
+        buf.clear();
+        if buf.capacity() == charged {
+            let mut free = self.free.lock_ok();
+            if free.len() < RUN_POOL_SLOTS {
+                free.push(buf);
+                return;
+            }
+        }
+        self.retire(charged as u64);
+    }
+
+    /// Stop owning `n` bytes of capacity: the buffer is being freed
+    /// rather than kept.
+    fn retire(&self, n: u64) {
+        let _ = self
+            .owned
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(n))
+            });
+        memgauge::sub(memgauge::Sub::WriteStageReserve, n);
+    }
+
+    /// A buffer on loan reallocated under a merge. The extra capacity is
+    /// extra slack, and it is NOT tested against the ceiling: growing a
+    /// run the pool has already admitted is not a new admission, and
+    /// refusing it here would mean losing bytes that are already staged.
+    fn regrew(&self, old: usize, new: usize) {
+        let d = new.saturating_sub(old) as u64;
+        self.owned.fetch_add(d, Ordering::Relaxed);
+        memgauge::add(memgauge::Sub::WriteStageReserve, d);
+    }
+}
+
+/// Capacity bytes the run pool owns right now - the free list plus every
+/// buffer on loan. The tests' door onto [`RUN_POOL`]; production reads
+/// the same figure out of `memgauge::Sub::WriteStageReserve` plus
+/// [`outstanding`].
+pub fn pool_owned() -> u64 {
+    RUN_POOL.owned.load(Ordering::Relaxed)
+}
+
+/// Run buffers allocated since the process started. See [`RunPool::mints`].
+#[cfg(test)]
+pub(crate) fn pool_mints() -> u64 {
+    RUN_POOL.mints.load(Ordering::Relaxed)
 }
 
 /// One contiguous span of held bytes.
@@ -257,6 +607,11 @@ struct Run {
     /// This run absorbed another - a hole closed from below. See
     /// [`StagedRun::merged`] for why that is not just bookkeeping.
     merged: bool,
+    /// The capacity `buf` left [`RUN_POOL`] with, which is what the
+    /// pool is owed back. Equal to `buf.capacity()` at all times -
+    /// [`WriteStage::extend`] is what keeps it so across the one
+    /// realloc a merge can still cause.
+    charged: usize,
 }
 
 impl Run {
@@ -284,6 +639,9 @@ pub struct StagedRun {
     /// `chase_tests::a_backfilled_hole_is_contiguous_but_never_extends_the_mark`
     /// caught. So a merged run freezes the hash instead of advancing it.
     pub merged: bool,
+    /// The capacity [`RUN_POOL`] is owed back when this run dies. See
+    /// [`Run::charged`].
+    charged: usize,
 }
 
 impl StagedRun {
@@ -296,7 +654,11 @@ impl Drop for StagedRun {
     fn drop(&mut self) {
         // The charge follows the bytes: a run in flight is still held,
         // and it is released exactly when the Vec that holds it dies.
+        // The BUFFER, though, does not die - it goes back on the free
+        // list, which is the whole point of the pool: a run costs one
+        // `malloc` on the first ~1 MiB of a job and none afterwards.
         release(self.buf.len() as u64);
+        RUN_POOL.give(std::mem::take(&mut self.buf), self.charged);
     }
 }
 
@@ -381,14 +743,45 @@ impl WriteStage {
         self.runs.iter().map(|r| r.buf.len()).sum()
     }
 
+    /// Append to a run's buffer, keeping [`Run::charged`] and the
+    /// reserve gauge exact across the one realloc a merge can still
+    /// cause. The normal path never reallocs - a pooled buffer is minted
+    /// at the largest a run can reach before [`Self::offer`] takes it
+    /// out - which is the 2.03% of on-CPU samples the pool exists to
+    /// remove.
+    fn extend(run: &mut Run, data: &[u8]) {
+        let before = run.buf.capacity();
+        run.buf.extend_from_slice(data);
+        if run.buf.capacity() != before {
+            RUN_POOL.regrew(before, run.buf.capacity());
+            run.charged = run.buf.capacity();
+        }
+    }
+
+    /// Absorb `tail` into `run` - a hole closed - and give its buffer
+    /// back.
+    ///
+    /// The bytes stay STAGED, so neither [`charge`] nor [`release`] runs
+    /// here: the slack `run` loses is exactly the slack the emptied
+    /// `tail` gains, so [`RunPool::give`]'s precondition holds with no
+    /// arithmetic at all.
+    fn absorb(run: &mut Run, tail: Run) {
+        Self::extend(run, &tail.buf);
+        run.born_at = run.born_at.min(tail.born_at);
+        run.merged = true;
+        RUN_POOL.give(tail.buf, tail.charged);
+    }
+
     /// Take one run out by index; it becomes in-flight until
     /// [`Self::landed`] retires it.
     fn take_at(&mut self, i: usize) -> StagedRun {
         let r = self.runs.remove(i);
+        EVER_RUNS.fetch_add(1, Ordering::Relaxed);
         let run = StagedRun {
             start: r.start,
             buf: r.buf,
             merged: r.merged,
+            charged: r.charged,
         };
         self.inflight.push((run.start, run.end()));
         run
@@ -452,6 +845,26 @@ impl WriteStage {
     ///
     /// Nothing else cared which order they went in, and ascending is if
     /// anything the friendlier order for the device.
+    ///
+    /// **NOTHING ABOVE THE UNIT LEVEL REDS IF YOU DELETE THIS SORT, and
+    /// that is measured, not a licence** (17 Sep 2026,
+    /// `research/WSTAGE-TAKEALL-ORDER-INTEGRATION-2026-09-17.md`): with
+    /// it reverted to birth order the whole e2e suite passes 457/457
+    /// with the window forced ON, and so do this crate's 1,629 lib
+    /// tests. The reason is that the only reader of a prefix hash is
+    /// `extract::resume::settle_resume_ledger`, whose writers are all
+    /// `ChaseSink`s driven by `io::copy` - strictly ascending, so one
+    /// open run and no order to get wrong. The e2e suite DOES build
+    /// windows of out-of-order runs on prefix-hashed writers (mapped and
+    /// routed members, three fixtures), and not one of them is ever
+    /// asked for its mark. The sort is insurance for the day one is.
+    /// The single test that separates the two orders is
+    /// `disk::tests::a_window_of_disjoint_runs_is_flushed_low_first_so_the_mark_survives`.
+    ///
+    /// The 7z attribution above is narrower than it reads: that leg's
+    /// sink is sequential, so it holds one run and both orders are the
+    /// same order on it - what took it red was the other half of the
+    /// same fix, `prefix_hash` not flushing. The RULE is unchanged.
     pub fn take_all(&mut self) -> Vec<StagedRun> {
         self.runs.sort_by_key(|r| r.start);
         let mut out = Vec::with_capacity(self.runs.len());
@@ -510,6 +923,7 @@ impl WriteStage {
                 return (out, false);
             }
             self.armed = true;
+            announce_first_arming(run_cap);
         }
         // Too big to be worth a copy - see `stage_max_article`, which is
         // where the measurement that chose the bound lives.
@@ -523,6 +937,19 @@ impl WriteStage {
         // Make room inside this file: evict the oldest run until the
         // incoming span fits under the per-file cap and there is a run
         // slot free for it.
+        //
+        // OLDEST-BORN IS A VICTIM RULE, NOT A WRITE ORDER, and the two
+        // were conflated once. `born` picks the run least likely to
+        // grow, which is what makes the window coalesce at all; the
+        // age BOUND is `take_expired`'s and not this loop's. What order
+        // these reach disk in is settled downstream, where the whole
+        // batch is one list: `FileWriter::flush_runs` sorts it ascending
+        // for `PrefixHash`'s sake, which it must, because the run this
+        // method appends AFTER the loop (the one the incoming article
+        // closed) is frequently lower than everything the loop
+        // displaced. Do not re-derive an offset-ordered victim here -
+        // it would cost the coalescing this loop exists to protect and
+        // still leave the composite batch unsorted.
         while self.open_bytes() + data.len() > cap
             || (self.runs.len() >= MAX_RUNS && !self.runs.iter().any(|r| r.end() == offset))
         {
@@ -539,7 +966,7 @@ impl WriteStage {
         }
         match self.runs.iter().position(|r| r.end() == offset) {
             Some(mut i) => {
-                self.runs[i].buf.extend_from_slice(data);
+                Self::extend(&mut self.runs[i], data);
                 charge(data.len() as u64);
                 // A gap filled late makes two runs one write. `remove`
                 // SHIFTS every later index down, so `i` is corrected
@@ -554,33 +981,47 @@ impl WriteStage {
                     if j < i {
                         i -= 1;
                     }
-                    self.runs[i].buf.extend_from_slice(&tail.buf);
-                    self.runs[i].born_at = self.runs[i].born_at.min(tail.born_at);
-                    self.runs[i].merged = true;
+                    Self::absorb(&mut self.runs[i], tail);
                 }
                 if self.runs[i].buf.len() >= run_cap {
                     out.push(self.take_at(i));
                 }
             }
             None => {
+                // A run buffer is minted at the largest a run can REACH,
+                // not at the size it is taken out at: `offer` takes a run
+                // once it is at or past `run_cap`, and the article that
+                // pushes it there can be `max_art - 1` bytes, so this is
+                // the capacity at which the normal path never reallocs.
+                // Before the pool the opening capacity was
+                // `run_cap.min(data.len() * 4)` and a 128 KB article
+                // therefore copied half of every run's bytes a second
+                // time - see the module header.
+                let want = run_cap.saturating_add(max_art).max(data.len());
+                // Nothing left in the pool's budget: decline, exactly as
+                // the three bounds above do, and the article takes its
+                // own positioned write.
+                let Some(buf) = RUN_POOL.take(want) else {
+                    return (out, false);
+                };
                 self.seq += 1;
+                let charged = buf.capacity();
                 let mut run = Run {
                     start: offset,
-                    buf: Vec::with_capacity(run_cap.min(data.len() * 4)),
+                    buf,
                     born: self.seq,
                     born_at: std::time::Instant::now(),
                     merged: false,
+                    charged,
                 };
-                run.buf.extend_from_slice(data);
+                Self::extend(&mut run, data);
                 charge(data.len() as u64);
                 // The incoming span may itself close a gap from the
                 // front, which is the other half of the merge above.
                 let end = run.end();
                 if let Some(j) = self.runs.iter().position(|r| r.start == end) {
                     let tail = self.runs.remove(j);
-                    run.buf.extend_from_slice(&tail.buf);
-                    run.born_at = run.born_at.min(tail.born_at);
-                    run.merged = true;
+                    Self::absorb(&mut run, tail);
                 }
                 self.runs.push(run);
                 let i = self.runs.len() - 1;
@@ -597,6 +1038,23 @@ impl WriteStage {
         let mut v: Vec<(u64, u64)> = self.runs.iter().map(|r| (r.start, r.end())).collect();
         v.sort_unstable();
         v
+    }
+}
+
+impl Drop for WriteStage {
+    fn drop(&mut self) {
+        // A window dropped with runs still open is not a shipped path -
+        // `FileWriter` writes them out at every door and on its own
+        // `Drop` - but a caller driving `offer` directly can do it, and
+        // both of the window's process-wide counters would otherwise
+        // carry those bytes for the rest of the run. Returning them here
+        // makes the leak impossible rather than merely unusual; the
+        // BYTES are still lost, which is the caller's business and not
+        // this module's.
+        for r in self.runs.drain(..) {
+            release(r.buf.len() as u64);
+            RUN_POOL.give(r.buf, r.charged);
+        }
     }
 }
 

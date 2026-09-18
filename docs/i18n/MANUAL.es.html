@@ -370,6 +370,7 @@ original ya no está.</li>
 <li>Las insignias muestran estados especiales: <i>probado, apartado</i>, <i>precargando</i>,
 <i>en pausa</i> (ver <a href="#performance">Herramientas de rendimiento</a>).</li>
 <li>Un gráfico de cuenta atrás sigue los GB totales restantes en toda la cola.</li>
+<li><b>Cancelar se puede deshacer.</b> Detener una descarga, o vaciar toda la cola, ya no pregunta antes: actúa, y el aviso que lo dice lleva un <b>Deshacer</b>. Durante diez minutos nzbfast guarda su propia copia del NZB, así que la fila vuelve con su categoría, su prioridad y todo lo que ya se había descargado. Una descarga que se descomprime según llega sigue preguntando, porque la parte ya obtenida no se puede devolver.</li>
 </ul>
 <h3 id="dash-browse">Explorar índice</h3>
 <p>Busca en todo lo que el indexador integrado ha catalogado de tus grupos vigilados
@@ -407,6 +408,7 @@ elimina la entrada del historial: los archivos descargados se quedan exactamente
 donde están. La regla de antigüedad solo toma descargas completadas, así que una
 fallida espera a que la reintentes o la borres tú; el límite de longitud cuenta
 todas las entradas, sea cual sea su resultado.</p>
+<p><b>Quitar una entrada del historial se puede deshacer.</b> Borrar de la lista las descargas terminadas o las fallidas, y quitar una selección, ya no preguntan antes: actúan, y el aviso que lo dice lleva un <b>Deshacer</b>. Durante diez minutos nzbfast conserva la copia del NZB de cada entrada quitada, así que la fila vuelve a su sitio y sigue ofreciendo <b>Reintentar</b>. Quitar una entrada y borrar sus archivos sigue preguntando, porque los archivos borrados no se pueden devolver.</p>
 <h3 id="dash-usage">Uso de datos</h3>
 <p>Barras diarias por proveedor y totales de Hoy / 7 días / 30 días - esencial para cuentas medidas
 y de bloque. Las cuentas de bloque muestran el uso acumulado contra su tamaño.</p>
@@ -644,6 +646,7 @@ lanzamientos debajo. Ábrela con <b>&#9656;</b> o pulsando la fila; la casilla d
 título selecciona los lanzamientos mostrados. La agrupación solo vale para <b>Este
 índice</b>; elige <b>Indexadores</b> o <b>Ambos</b> y la tabla vuelve a ser plana, y
 lo dice.</li>
+<li><b>Un grupo cada vez.</b> Pulsa el nombre del grupo bajo una release y la página se reduce a las releases publicadas ahí; una píldora sobre la tabla nombra el grupo hasta que la quites. Reduce el muro y la tabla por igual, así que cambiar entre ellos la conserva. La otra entrada es Ajustes &rarr; Organización &rarr; <b>Indexación</b> &rarr; <b>Grupos a escanear</b> &rarr; <b>Buscar…</b>: abre un grupo que ya escanees y pulsa <b>Releases indexadas</b>.</li>
 <li><b>Todos los lanzamientos de un título</b> se listan al abrir su ficha, con la
 resolución, el códec, el formato de audio y el rango dinámico (Dolby Vision, HDR10)
 leídos del nombre del lanzamiento, más el tamaño, la antigüedad y si todas las partes

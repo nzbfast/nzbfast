@@ -361,9 +361,11 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
         SetTitleBar(TitleStrip);
         // THE STAGE IS IN THE TITLE because it is the only surface this app has
         // for it: there is no About box and no version anywhere in the Windows
-        // UI, so without this a tester who installed the alpha has nothing on
-        // screen telling them so. It also reaches the taskbar and the window
-        // switcher, which is where somebody actually looks.
+        // UI, so without this a tester who installed a pre-release has nothing
+        // on screen telling them so. It also reaches the taskbar and the window
+        // switcher, which is where somebody actually looks. Stage-neutral on
+        // purpose: it reads Strings.AppStage, so alpha -> beta at 1.6.0 needed
+        // no edit here and neither will the next move.
         //
         // The window title only - NOT Strings.AppName itself, which names the
         // product in a dozen other places (the drop caption below, the

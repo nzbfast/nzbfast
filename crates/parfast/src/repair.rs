@@ -147,6 +147,13 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
         tx_report: std::sync::mpsc::Sender<ScanReport>,
         tx_members: std::sync::mpsc::Sender<Vec<MemberSurvey>>,
         rx_action: std::sync::mpsc::Receiver<(AfterSurvey, BackupBatch)>,
+        /// The extra-file scan's result, and the main thread's
+        /// acknowledgement that it has PRINTED it. Both halves are
+        /// needed: the printing thread must get the lines out before
+        /// the fold's meter starts writing to the same terminal, and
+        /// only a blocking handshake can promise that.
+        tx_extra: std::sync::mpsc::Sender<Vec<par2repair::ExtraFileMatch>>,
+        rx_extra_ack: std::sync::mpsc::Receiver<()>,
         pending: BackupBatch,
         /// The watch's, taken once on the main thread before the engine
         /// thread is spawned - the trait's contract is that it is the
@@ -175,6 +182,14 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
                 Err(_) => AfterSurvey::Stop,
             }
         }
+        fn extra_files_scanned(&mut self, matches: &[par2repair::ExtraFileMatch]) {
+            // A dead receiver is a main thread that is no longer
+            // printing - it refused, or it failed. Nothing to wait for.
+            if self.tx_extra.send(matches.to_vec()).is_err() {
+                return;
+            }
+            let _ = self.rx_extra_ack.recv();
+        }
         fn before_write(&mut self) {
             join_backups(std::mem::take(&mut self.pending));
         }
@@ -202,6 +217,8 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
         let (tx_report, rx_report) = std::sync::mpsc::channel::<ScanReport>();
         let (tx_members, rx_members) = std::sync::mpsc::channel::<Vec<MemberSurvey>>();
         let (tx_action, rx_action) = std::sync::mpsc::channel::<(AfterSurvey, BackupBatch)>();
+        let (tx_extra, rx_extra) = std::sync::mpsc::channel::<Vec<par2repair::ExtraFileMatch>>();
+        let (tx_extra_ack, rx_extra_ack) = std::sync::mpsc::channel::<()>();
         let edir = dir.clone();
         // The bare arguments AFTER the recovery-set name. par2cmdline
         // takes them as extra data files / donor directories to scan,
@@ -222,6 +239,8 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
                 tx_report,
                 tx_members,
                 rx_action,
+                tx_extra,
+                rx_extra_ack,
                 pending: BackupBatch::default(),
                 control,
             };
@@ -237,6 +256,9 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
 
         let mut action = AfterSurvey::Stop;
         let mut backups = BackupBatch::default();
+        // Is the announcement's tail waiting on the engine's extra-file
+        // answer? See the deferral comment in `announce`.
+        let mut deferred_tail = false;
         // The engine's scan report, or the old whole-read load when there
         // is none coming: the A/B arm, or an engine that failed before its
         // scan completed (the sender dropped with the worker's observer).
@@ -296,8 +318,8 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
                                 if survey.damaged() {
                                     survey.recovery_blocks = verify::ensure_recovery(&mut loaded);
                                 }
-                                (action, backups) =
-                                    announce(&loaded, opts, &survey, sink, &mut stopped);
+                                (action, backups, deferred_tail) =
+                                    announce(&loaded, opts, &survey, sink, &mut stopped, true);
                                 // The caller's refusal, after `announce`
                                 // so the survey it sees is the one the
                                 // reference would have printed, and
@@ -319,6 +341,33 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
             }
         }
         let _ = tx_action.send((action, backups));
+        // THE SECOND HANDSHAKE, and it is answered on every run rather
+        // than only on a deferred one: the engine BLOCKS on the
+        // acknowledgement, so a main thread that took the answer and
+        // said nothing would park the repair. A `recv` error is the
+        // engine having finished or failed before the adoption pass -
+        // our own `Stop`, a clean set, a cancel - and then there is
+        // nobody to acknowledge and nothing to print but the tail we
+        // were holding.
+        let scanned = rx_extra.recv();
+        if deferred_tail {
+            let matches: &[par2repair::ExtraFileMatch] = scanned.as_deref().unwrap_or(&[]);
+            let (Some(loaded), Some(survey)) = (loaded_slot.as_ref(), surveyed.as_ref()) else {
+                // Unreachable: `deferred_tail` is only ever set by the
+                // `announce` call above, which runs with both in hand
+                // and fills both slots in the same arm.
+                unreachable!("a deferred tail always has the load and the survey behind it")
+            };
+            let mut ignored = None;
+            let verdict = announce_tail(loaded, opts, survey, matches, sink, &mut ignored);
+            debug_assert!(
+                matches!(verdict, AfterSurvey::Repair) && ignored.is_none(),
+                "the tail is only deferred where its verdict cannot be a stop"
+            );
+        }
+        if scanned.is_ok() {
+            let _ = tx_extra_ack.send(());
+        }
         worker.join().expect("engine survey thread panicked")
     });
     join_backups(leftover);
@@ -398,7 +447,8 @@ fn announce(
     survey: &Survey,
     sink: &mut Sink,
     stopped: &mut Option<Stopped>,
-) -> (AfterSurvey, BackupBatch) {
+    defer: bool,
+) -> (AfterSurvey, BackupBatch, bool) {
     verify::print_targets(survey, sink);
     if !survey.damaged() {
         sink.line(Level::Terse, "");
@@ -407,10 +457,58 @@ fn announce(
             "All files are correct, repair is not required.",
         );
         *stopped = Some(Stopped::Clean);
-        return (AfterSurvey::Stop, BackupBatch::default());
+        return (AfterSurvey::Stop, BackupBatch::default(), false);
     }
     sink.line(Level::Terse, "");
-    verify::print_extra_scan(loaded, survey, sink);
+    // HOLD THE REST BACK WHEN THE ENGINE IS ABOUT TO SAY WHICH EXTRA
+    // FILES FED WHICH MEMBER. The reference scans the extra files HERE,
+    // between the `Target:` table and "Repair is required.", and prints
+    // a result line per donor under the section header; our adoption
+    // pass runs inside the engine, after this observer has answered. So
+    // the section and everything after it waits for
+    // `SurveyObserver::extra_files_scanned`, and the caller prints it
+    // from there - which is also the reference's own TIMELINE, the scan
+    // being what the pause between the table and the verdict is.
+    //
+    // It matters because SABnzbd stops reading rename announcements at
+    // "Repair is required." (`newsunpack.py`'s `verified` flag): a
+    // donor named after that line is a donor it never hears about, and
+    // then it keeps the obfuscated names, ships the consumed originals
+    // to the completed folder as junk, and reads a joined rar as a
+    // phantom set. See `research/SAB-PARFAST-METER-DROPIN-2026-09-17.md`
+    // addendum A.
+    //
+    // Only where a deferred verdict is certain to be `Repair`: `-O`
+    // stops here with its own block, and the "Repair is not possible."
+    // arm below needs the candidate list to be EMPTY, which is the one
+    // case with nothing to wait for anyway.
+    if defer && !opts.rename_only && !extra_candidates(loaded, survey).is_empty() {
+        return (AfterSurvey::Repair, back_up_damaged(loaded, survey), true);
+    }
+    let action = announce_tail(loaded, opts, survey, &[], sink, stopped);
+    let backups = match action {
+        AfterSurvey::Repair => back_up_damaged(loaded, survey),
+        AfterSurvey::Stop => BackupBatch::default(),
+    };
+    (action, backups, false)
+}
+
+/// Everything `announce` prints from the extra-file scan onwards, and
+/// the verdict it reaches - split out because on the surveying route it
+/// is printed LATER, once the engine has said which extra files it
+/// adopted from. See the deferral comment in [`announce`].
+///
+/// `matches` is empty on every route that has no engine answer, and an
+/// empty list prints what this printed before the deferral existed.
+fn announce_tail(
+    loaded: &Loaded,
+    opts: &Options,
+    survey: &Survey,
+    matches: &[par2repair::ExtraFileMatch],
+    sink: &mut Sink,
+    stopped: &mut Option<Stopped>,
+) -> AfterSurvey {
+    verify::print_extra_scan(loaded, survey, matches, sink);
     sink.line(Level::Terse, "Repair is required.");
     verify::print_damage_detail(survey, sink);
     // The block-count gate may only refuse when there is NOTHING for the
@@ -442,7 +540,7 @@ fn announce(
             ),
         );
         *stopped = Some(Stopped::NotPossible);
-        return (AfterSurvey::Stop, BackupBatch::default());
+        return AfterSurvey::Stop;
     }
     sink.line(Level::Terse, "Repair is possible.");
     print_plan(survey, sink);
@@ -454,12 +552,12 @@ fn announce(
     // directory - the same reason `-p` is deferred to there.
     if opts.rename_only {
         *stopped = Some(Stopped::RenameOnly);
-        return (AfterSurvey::Stop, BackupBatch::default());
+        return AfterSurvey::Stop;
     }
 
     sink.line(Level::Terse, "");
     print_solve_detail(sink);
-    (AfterSurvey::Repair, back_up_damaged(loaded, survey))
+    AfterSurvey::Repair
 }
 
 /// The exit code for a run that stopped before the fold, plus the one
@@ -543,17 +641,30 @@ fn rename_only(loaded: &Loaded, survey: &Survey, sink: &mut Sink) -> u8 {
             continue;
         };
         let src = candidates.remove(pos);
+        let from_name = src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
         match std::fs::rename(&src, &dest) {
             Ok(()) => {
                 renamed += 1;
-                let from = src
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                sink.line(Level::Terse, &format!("Renamed \"{from}\" to \"{name}\"."));
+                sink.line(
+                    Level::Terse,
+                    &format!("Renamed \"{from_name}\" to \"{name}\"."),
+                );
             }
-            Err(e) => sink.err(&format!("Could not rename to \"{name}\": {e}")),
+            // THE REFERENCE'S OWN SENTENCE, unquoted and without the
+            // errno, because a caller MATCHES it: SABnzbd fails the job
+            // with any line containing " cannot be renamed to " as the
+            // reason it shows (`newsunpack.py`), and par2cmdline's
+            // `DiskFile::Rename` prints exactly
+            // `<from> cannot be renamed to <to>` (diskfile.cpp, v1.3.0).
+            // "Could not rename to ..." reached no branch of it and was
+            // a second spelling of a line the dialect already has. The
+            // errno goes with it, which is the price of the dialect -
+            // the reference does not print one either.
+            Err(_) => sink.err(&format!("{from_name} cannot be renamed to {name}")),
         }
     }
     // Everything the set was missing is now at its own name and nothing
@@ -581,7 +692,9 @@ fn rename_only(loaded: &Loaded, survey: &Survey, sink: &mut Sink) -> u8 {
 fn run_resurveying(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> u8 {
     let survey = verify::survey(loaded, opts, sink);
     let mut stopped: Option<Stopped> = None;
-    let (action, backups) = announce(loaded, opts, &survey, sink, &mut stopped);
+    // No observer on this entry point, so nothing can deliver an
+    // extra-file answer and the tail prints in place.
+    let (action, backups, _) = announce(loaded, opts, &survey, sink, &mut stopped, false);
     if action == AfterSurvey::Stop {
         return stop_code(loaded, opts, stopped, Some(&survey), sink);
     }
@@ -612,13 +725,36 @@ fn run_resurveying(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> u8 {
 /// shortfall it is the names the engine actually published - so a
 /// shortfall that published nothing returns `None` and prints no line,
 /// rather than claiming the payload.
-fn wrote_bytes(damaged: &[(String, u64)], published: Option<&[String]>) -> Option<u64> {
+///
+/// `renamed` is `RepairReport::files_renamed`: a member whose complete
+/// bytes were already on disk under a hash name is landed by a
+/// directory operation, so none of its length was written. Counting it
+/// is what made the ordinary obfuscated post read "Wrote 600000 bytes
+/// to disk" where the reference says 300000, and it is subtracted here
+/// rather than at the call site because this is the function the test
+/// can reach.
+fn wrote_bytes(
+    damaged: &[(String, u64)],
+    published: Option<&[String]>,
+    renamed: &[String],
+) -> Option<u64> {
     let bytes: u64 = damaged
         .iter()
         .filter(|(n, _)| published.is_none_or(|p| p.contains(n)))
+        .filter(|(n, _)| !renamed.contains(n))
         .map(|(_, len)| len)
         .sum();
     if published.is_some() && bytes == 0 {
+        return None;
+    }
+    // The reference prints this line from INSIDE its write, so a repair
+    // that entered no write at all prints nothing. Measured 17 Sep 2026
+    // on a two-member set with both members whole-matched under hash
+    // names: par2cmdline goes straight from "Repair is possible." to
+    // "Repair complete.". The degenerate `damaged.is_empty()` zero below
+    // is a different case and is unchanged - nothing was renamed there
+    // either.
+    if bytes == 0 && !renamed.is_empty() {
         return None;
     }
     Some(bytes)
@@ -709,7 +845,14 @@ fn finish(
                     .map(|f| (n.clone(), f.length))
             })
             .collect();
-        if let Some(bytes) = wrote_bytes(&damaged, published) {
+        // A renamed member wrote nothing; `RepairReport::files_renamed`
+        // is the only surface that says so, and it exists only on the
+        // `Repaired` verdict (a shortfall never renames).
+        let renamed: &[String] = match &status {
+            Ok(RepairStatus::Repaired(r)) => &r.files_renamed,
+            _ => &[],
+        };
+        if let Some(bytes) = wrote_bytes(&damaged, published, renamed) {
             sink.line(Level::Normal, &format!("Wrote {bytes} bytes to disk"));
         }
         if let Ok(RepairStatus::Repaired(report)) = &status {
@@ -802,9 +945,40 @@ fn finish(
             crate::EXIT_REPAIR_NOT_POSSIBLE
         }
         Err(e) => {
-            sink.err(&format!("Repair failed: {e}"));
+            sink.err(&format!("Repair failed: {}", failure_reason(&e)));
             crate::EXIT_REPAIR_FAILED
         }
+    }
+}
+
+/// What a failed repair says went wrong, with ONE substitution: a full
+/// disk says so in the reference's words.
+///
+/// SABnzbd has a "Repairing failed, Disk full" verdict and reaches it on
+/// any line containing "There is not enough space on the disk"
+/// (`newsunpack.py`). That string is par2cmdline's WINDOWS spelling -
+/// `DiskFile::ErrorMessage` is `FormatMessage`, while the POSIX arm of
+/// the same `Could not write ...` line prints `strerror`, which is "No
+/// space left on device" and matches nothing. So the branch is one the
+/// reference itself cannot reach on a Mac or a Linux box, and a full
+/// disk reads there as an unexplained repair failure.
+///
+/// We print the Windows spelling on every platform, deliberately: the
+/// message is TRUE wherever the error kind is `StorageFull`, it is the
+/// dialect a par2 caller parses, and "the disk is full" is the one
+/// repair failure a user can actually do something about. It is NOT
+/// dressed up as the reference's whole `Could not write N bytes to X at
+/// offset Y:` line - the byte count, the name and the offset are the
+/// engine's and do not reach here, and inventing them would be three
+/// false facts bought for no branch. It also keeps the line clear of
+/// `Could not write ... at offset 0:`, which is an EARLIER arm of SAB's
+/// chain (the joinables special case) and would swallow it.
+fn failure_reason(e: &par2repair::RepairError) -> String {
+    match e {
+        par2repair::RepairError::Io(io) if io.kind() == std::io::ErrorKind::StorageFull => {
+            "There is not enough space on the disk.".to_string()
+        }
+        other => other.to_string(),
     }
 }
 
@@ -1061,6 +1235,30 @@ fn print_solve_detail(sink: &mut Sink) {
 
 #[cfg(test)]
 mod tests {
+    /// A full disk says so in the words SABnzbd's "Repairing failed,
+    /// Disk full" verdict matches, on every platform - see
+    /// [`super::failure_reason`] for why that is the Windows spelling
+    /// and why it is deliberate. Everything else is reported verbatim.
+    #[test]
+    fn a_full_disk_is_reported_in_the_dialect_and_nothing_else_is() {
+        let full = nzbkit::par2repair::RepairError::Io(std::io::Error::from(
+            std::io::ErrorKind::StorageFull,
+        ));
+        assert_eq!(
+            super::failure_reason(&full),
+            "There is not enough space on the disk."
+        );
+        let other = nzbkit::par2repair::RepairError::Io(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ));
+        assert_ne!(
+            super::failure_reason(&other),
+            "There is not enough space on the disk."
+        );
+        let short = nzbkit::par2repair::RepairError::RecoveryShort { have: 1, need: 9 };
+        assert_eq!(super::failure_reason(&short), short.to_string());
+    }
+
     /// Nothing adopted prints nothing: the plan line already told the
     /// whole truth, and a "0 block(s) recovered" line would put a new
     /// sentence under every ordinary repair for no information.
@@ -1109,7 +1307,7 @@ mod tests {
     #[test]
     fn a_shortfall_that_published_nothing_claims_no_write() {
         let damaged = vec![("d.bin".to_string(), 2_147_483_648u64)];
-        assert_eq!(wrote_bytes(&damaged, Some(&[])), None);
+        assert_eq!(wrote_bytes(&damaged, Some(&[]), &[]), None);
     }
 
     /// A shortfall that DID publish a member counts that member, and
@@ -1118,7 +1316,7 @@ mod tests {
     fn a_shortfall_counts_only_what_it_published() {
         let damaged = vec![("a.bin".to_string(), 10u64), ("b.bin".to_string(), 32u64)];
         let published = ["b.bin".to_string()];
-        assert_eq!(wrote_bytes(&damaged, Some(&published)), Some(32));
+        assert_eq!(wrote_bytes(&damaged, Some(&published), &[]), Some(32));
     }
 
     /// A whole-set repair keeps the reference's reading: every damaged
@@ -1126,9 +1324,27 @@ mod tests {
     #[test]
     fn a_completed_repair_counts_every_damaged_member() {
         let damaged = vec![("a.bin".to_string(), 10u64), ("b.bin".to_string(), 32u64)];
-        assert_eq!(wrote_bytes(&damaged, None), Some(42));
+        assert_eq!(wrote_bytes(&damaged, None, &[]), Some(42));
         // ...including the degenerate "nothing was damaged" case, which
         // is a zero the caller still prints.
-        assert_eq!(wrote_bytes(&[], None), Some(0));
+        assert_eq!(wrote_bytes(&[], None, &[]), Some(0));
+    }
+
+    /// A member landed by RENAMING its hash-named twin wrote none of
+    /// its bytes, and the line must say so - this is the ordinary
+    /// obfuscated post, where the reference does a directory operation
+    /// per file and writes nothing at all.
+    #[test]
+    fn a_renamed_member_is_not_counted_as_written() {
+        let damaged = vec![("a.bin".to_string(), 10u64), ("b.bin".to_string(), 32u64)];
+        let renamed = ["a.bin".to_string()];
+        assert_eq!(wrote_bytes(&damaged, None, &renamed), Some(32));
+        // Every member a rename: the reference's "Wrote 0 bytes to
+        // disk", which it still prints.
+        // Every member a rename is the whole obfuscated post, and the
+        // reference prints NO line for it - it never enters the write
+        // its "Wrote" comes from.
+        let all = ["a.bin".to_string(), "b.bin".to_string()];
+        assert_eq!(wrote_bytes(&damaged, None, &all), None);
     }
 }

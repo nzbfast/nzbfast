@@ -547,6 +547,11 @@ fn hms(d: Duration) -> String {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "multi-hour; run from the nightly workflow or with --ignored"]
 async fn mixed_queue_soak_holds_resources_flat() {
+    // env-default-gate: this harness is the only reader of NZBFAST_SOAK_MINUTES,
+    // _SETTLE_SECS and _WARMUP_CYCLES, and it is under `crates/*/tests`, outside
+    // the `crates/*/src` population docs/ENVIRONMENT.md's own header names - so
+    // the gate cannot reach these three defaults. They are the `env_num` second
+    // arguments here (20, 90, 5) and the doc rows must be checked against them.
     let minutes: u64 = env_num("NZBFAST_SOAK_MINUTES", 20);
     // Must exceed the daemon's idle trim (60 s after the last download,
     // checked on a 15 s tick) or every RSS reading is "whatever the

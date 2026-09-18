@@ -717,12 +717,10 @@ impl Index {
             // index that has not caught up. Reading the flag closes the
             // upgrade window in which a fresh repost could still adopt
             // and overwrite an unrelated generation (H2, 10 Aug sweep).
-            let converged: bool = self
-                .db
-                .prepare_cached(
-                    "SELECT EXISTS(SELECT 1 FROM kv WHERE k='msgid_map_fill' AND v='1')",
-                )?
-                .query_row([], |r| r.get(0))?;
+            // One definition of "the fill has finished", shared with the
+            // maintenance lap: this site asked it in its own SQL until
+            // 17 Sep 2026, which was a second copy of the predicate.
+            let converged = self.msgid_map_complete();
             if keyed || converged {
                 poster_key = format!("{poster}{POSTER_GEN_MARK}{}", &set_key[..GEN_HEX]);
                 warn!(

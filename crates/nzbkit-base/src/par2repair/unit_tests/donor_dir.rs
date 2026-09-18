@@ -584,7 +584,7 @@ fn adoption_and_recovery_slices_compose_on_one_file() {
 }
 
 #[test]
-fn a_wholly_renamed_copy_is_adopted_and_reported_consumed() {
+fn a_wholly_renamed_copy_is_landed_by_renaming_the_copy() {
     let dir = tmpdir("adopt");
     let a = payload(200, 7);
     let files: &[(&str, &[u8])] = &[("a.bin", &a)];
@@ -609,11 +609,23 @@ fn a_wholly_renamed_copy_is_adopted_and_reported_consumed() {
     };
     assert_eq!(report.blocks_adopted, 4, "every slice found in the copy");
     assert_eq!(report.files_created, ["a.bin"]);
-    assert_eq!(
-        report.consumed_sources,
-        [dir.join("0f9a7c")],
-        "the donor is a proven byte-for-byte copy, so the caller may sweep it"
+    // A PROVEN BYTE-FOR-BYTE COPY IS RENAMED, NOT COPIED AND SWEPT,
+    // since 17 Sep 2026 (claim `sab-whole-match-rename-not-rewrite`).
+    // This row used to pin the sweep, and the folder it describes is the
+    // same either way - one file, under the declared name - but the
+    // route to it is not: the copy wrote the whole payload a second
+    // time and needed the caller to delete the original, and the
+    // reference has always done a directory operation and written
+    // nothing. So the sweep's `consumed_sources` is now EMPTY here, and
+    // what is asserted instead is the outcome that matters: the hash
+    // name is gone and the declared name carries the bytes.
+    assert_eq!(report.files_renamed, ["a.bin"]);
+    assert!(
+        report.consumed_sources.is_empty(),
+        "a renamed donor has no path left for the caller to sweep: {:?}",
+        report.consumed_sources
     );
+    assert!(!dir.join("0f9a7c").exists());
     assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), a);
     // With the payload landed, the plain entry point now sees the set
     // and reports it clean.

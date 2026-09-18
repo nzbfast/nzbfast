@@ -1348,6 +1348,8 @@ fn build_daemon(
         watch_failed: Mutex::new(std::collections::HashMap::new()),
         delete_kept: Mutex::new(std::collections::VecDeque::new()),
         deleted_recent: Mutex::new(std::collections::VecDeque::new()),
+        cancel_undo: Mutex::new(std::collections::VecDeque::new()),
+        hist_undo: Mutex::new(std::collections::VecDeque::new()),
         auth_fails: Mutex::new(std::collections::HashMap::new()),
         #[cfg(feature = "indexer")]
         enrich_hot: Mutex::new(std::collections::VecDeque::new()),
@@ -1483,16 +1485,31 @@ mod bind_grace_tests {
     #[test]
     fn any_other_bind_failure_is_reported_at_once() {
         let calls = AtomicUsize::new(0);
-        let started = Instant::now();
         let got = bind_past_a_closing_predecessor("127.0.0.1", 1, || {
             calls.fetch_add(1, Ordering::Relaxed);
             Err::<(), _>(
                 Box::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied)) as BindError,
             )
         });
-        assert!(got.is_err());
+        // "At once" is `calls == 1`, and that is the whole claim rather
+        // than half of it: the sleep in `bind_past_a_closing_predecessor`
+        // is the LAST statement of its loop body, so the only way to
+        // reach it is to go round and call `attempt` again. One call
+        // therefore means no sleep, and a wall clock asserting the same
+        // thing (this was `elapsed() < 500 ms` until 16 Sep 2026) added
+        // no coverage - it only measured how busy the box was, on a
+        // crate that is a leg of nightly's `one-process-loaded` matrix.
+        // Classify EADDRINUSE wrongly and the loop retries, which this
+        // sees as `calls == 2`.
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert!(started.elapsed() < Duration::from_millis(500));
+        // And the operator's own error is what comes back, not a
+        // substitute: the point of reporting at once is reporting THIS.
+        let e = got.expect_err("a PermissionDenied bind is refused");
+        assert_eq!(
+            e.downcast_ref::<std::io::Error>().map(|io| io.kind()),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "the bind failure was not propagated verbatim: {e}"
+        );
     }
 
     /// End to end through tiny_http, because the retry hinges on its

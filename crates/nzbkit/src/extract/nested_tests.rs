@@ -242,27 +242,31 @@ fn nested_split_chain() {
 fn a_reused_article_crc_extracts_the_same_as_hashing() {
     let f = payload(400_000, 86);
     let whole = crc32fast::hash(&f);
-    let iv = fixtures::rar5_volume_set_crc(&[
-        // WinRAR-true geometry: volume 0 carries one byte more (its
-        // main header has no volume-number field).
-        &[(
-            "F.mkv",
-            400_000,
-            &f[..150_001],
-            false,
-            true,
-            Some(crc32fast::hash(&f[..150_001])),
-        )],
-        &[(
-            "F.mkv",
-            400_000,
-            &f[150_001..300_001],
-            true,
-            true,
-            Some(crc32fast::hash(&f[150_001..300_001])),
-        )],
-        &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
-    ]);
+    let iv = fixtures::rar5_volume_set_crc_layout(
+        &[
+            // WinRAR-true geometry: volume 0 carries one byte more (its
+            // main header has no volume-number field).
+            &[(
+                "F.mkv",
+                400_000,
+                &f[..150_001],
+                false,
+                true,
+                Some(crc32fast::hash(&f[..150_001])),
+            )],
+            &[(
+                "F.mkv",
+                400_000,
+                &f[150_001..300_001],
+                true,
+                true,
+                Some(crc32fast::hash(&f[150_001..300_001])),
+            )],
+            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+        ],
+        fixtures::Rar5Head::default(),
+        fixtures::Rar5Crc::FinalFragment,
+    );
     let outer = fixtures::rar5_volume(&[
         ("i.part1.rar", iv[0].len() as u64, &iv[0], false, false),
         ("i.part2.rar", iv[1].len() as u64, &iv[1], false, false),
@@ -328,35 +332,43 @@ fn a_wrong_article_crc_is_not_taken_on_trust() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Store inner volumes carrying real header CRCs (last piece = whole
-/// file, earlier pieces = their own bytes, like real archivers write):
-/// intact data one-pass extracts with NO demotion in any feed order -
-/// the in-stream CRC gate must never false-positive on clean sets.
+/// Store inner volumes carrying real header CRCs in the placement an
+/// archiver uses: the whole unpacked file's CRC32 on the FINAL fragment
+/// and none on the split fragments before it, which is the only one
+/// unrar verifies. Intact data one-pass extracts with NO demotion in
+/// any feed order - the in-stream CRC gate must never false-positive on
+/// clean sets. (The gate only ever reads the final piece's value
+/// anyway: `hdr` is `None` wherever `split_after` is set. That is why
+/// this set can be built the realistic way without weakening it.)
 #[test]
 fn nested_store_with_crcs_extracts_clean() {
     let f = payload(400_000, 86);
     let whole = crc32fast::hash(&f);
-    let iv = fixtures::rar5_volume_set_crc(&[
-        // WinRAR-true geometry: volume 0 carries one byte more (its
-        // main header has no volume-number field).
-        &[(
-            "F.mkv",
-            400_000,
-            &f[..150_001],
-            false,
-            true,
-            Some(crc32fast::hash(&f[..150_001])),
-        )],
-        &[(
-            "F.mkv",
-            400_000,
-            &f[150_001..300_001],
-            true,
-            true,
-            Some(crc32fast::hash(&f[150_001..300_001])),
-        )],
-        &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
-    ]);
+    let iv = fixtures::rar5_volume_set_crc_layout(
+        &[
+            // WinRAR-true geometry: volume 0 carries one byte more (its
+            // main header has no volume-number field).
+            &[(
+                "F.mkv",
+                400_000,
+                &f[..150_001],
+                false,
+                true,
+                Some(crc32fast::hash(&f[..150_001])),
+            )],
+            &[(
+                "F.mkv",
+                400_000,
+                &f[150_001..300_001],
+                true,
+                true,
+                Some(crc32fast::hash(&f[150_001..300_001])),
+            )],
+            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+        ],
+        fixtures::Rar5Head::default(),
+        fixtures::Rar5Crc::FinalFragment,
+    );
     let outer = fixtures::rar5_volume(&[
         ("i.part1.rar", iv[0].len() as u64, &iv[0], false, false),
         ("i.part2.rar", iv[1].len() as u64, &iv[1], false, false),
@@ -385,27 +397,31 @@ fn nested_store_with_crcs_extracts_clean() {
 fn nested_store_data_damage_demotes_on_crc() {
     let f = payload(400_000, 87);
     let whole = crc32fast::hash(&f);
-    let mut iv = fixtures::rar5_volume_set_crc(&[
-        // WinRAR-true geometry: volume 0 carries one byte more (its
-        // main header has no volume-number field).
-        &[(
-            "F.mkv",
-            400_000,
-            &f[..150_001],
-            false,
-            true,
-            Some(crc32fast::hash(&f[..150_001])),
-        )],
-        &[(
-            "F.mkv",
-            400_000,
-            &f[150_001..300_001],
-            true,
-            true,
-            Some(crc32fast::hash(&f[150_001..300_001])),
-        )],
-        &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
-    ]);
+    let mut iv = fixtures::rar5_volume_set_crc_layout(
+        &[
+            // WinRAR-true geometry: volume 0 carries one byte more (its
+            // main header has no volume-number field).
+            &[(
+                "F.mkv",
+                400_000,
+                &f[..150_001],
+                false,
+                true,
+                Some(crc32fast::hash(&f[..150_001])),
+            )],
+            &[(
+                "F.mkv",
+                400_000,
+                &f[150_001..300_001],
+                true,
+                true,
+                Some(crc32fast::hash(&f[150_001..300_001])),
+            )],
+            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+        ],
+        fixtures::Rar5Head::default(),
+        fixtures::Rar5Crc::FinalFragment,
+    );
     // Poster damage: flip bytes in the middle of i.part2.rar - deep
     // inside its 150 KB data area, nowhere near the headers.
     let mid = iv[1].len() / 2;
@@ -708,27 +724,31 @@ fn nested_prevalence_counts_grouped_demote() {
     let before = nested_prevalence();
     let f = payload(400_000, 177);
     let whole = crc32fast::hash(&f);
-    let mut iv = fixtures::rar5_volume_set_crc(&[
-        // WinRAR-true geometry: volume 0 carries one byte more (its
-        // main header has no volume-number field).
-        &[(
-            "F.mkv",
-            400_000,
-            &f[..150_001],
-            false,
-            true,
-            Some(crc32fast::hash(&f[..150_001])),
-        )],
-        &[(
-            "F.mkv",
-            400_000,
-            &f[150_001..300_001],
-            true,
-            true,
-            Some(crc32fast::hash(&f[150_001..300_001])),
-        )],
-        &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
-    ]);
+    let mut iv = fixtures::rar5_volume_set_crc_layout(
+        &[
+            // WinRAR-true geometry: volume 0 carries one byte more (its
+            // main header has no volume-number field).
+            &[(
+                "F.mkv",
+                400_000,
+                &f[..150_001],
+                false,
+                true,
+                Some(crc32fast::hash(&f[..150_001])),
+            )],
+            &[(
+                "F.mkv",
+                400_000,
+                &f[150_001..300_001],
+                true,
+                true,
+                Some(crc32fast::hash(&f[150_001..300_001])),
+            )],
+            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+        ],
+        fixtures::Rar5Head::default(),
+        fixtures::Rar5Crc::FinalFragment,
+    );
     // Poster damage deep in volume 2's data area -> the CRC gate demotes
     // the whole store group at finish.
     let mid = iv[1].len() / 2;

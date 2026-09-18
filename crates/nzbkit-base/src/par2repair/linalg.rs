@@ -758,28 +758,60 @@ pub(crate) fn fold_parallel(
         false,
         gauge,
         &crate::par2repair::control::RepairControl::default(),
+        GridReport::SolveUnits,
     )
+}
+
+/// WHICH PHASE A TILED FOLD'S UNIT GRID IS A PIECE OF.
+///
+/// The same scheduler runs two unrelated stretches of a repair, and a
+/// bar cannot be told which from inside: the dense back-substitution,
+/// where the grid IS the solve, and the syndrome fold, where the grid
+/// is one merged batch of a `Fold` phase the DRIVER already sized in
+/// bytes. Passing the phase in is what lets the syndrome pass report
+/// without re-sizing the host's solve bar every time it folds.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GridReport {
+    /// The dense back-substitution: re-size
+    /// [`RepairPhase::Solve`](crate::par2repair::control::RepairPhase::Solve)
+    /// to this grid - which is finer than the `m` the caller opened it
+    /// with - and count one unit each.
+    SolveUnits,
+    /// The syndrome fold: this call folds that many BYTES of a
+    /// [`RepairPhase::Fold`](crate::par2repair::control::RepairPhase::Fold)
+    /// phase somebody else opened, so it re-sizes nothing and
+    /// apportions those bytes across its own units.
+    FoldBytes(u64),
 }
 
 /// [`fold_parallel`] that reports its unit grid's progress and can be
 /// called off inside it.
 ///
-/// TWO CALLERS, and only the first reports. The dense back-substitution
-/// passes the repair's control. The syndrome pass ([`fold_batches`])
-/// passes `RepairControl::cancel_only`: it is not the stretch a user
-/// waits on, so it reports nothing, but it DOES stop. Until 15 Sep 2026
-/// it went through [`fold_parallel`] with an inert control, on the
-/// reasoning that nobody may cancel it half-done - and a half-done
-/// syndrome pass is exactly as harmless as a half-done
-/// back-substitution, because the driver refuses both before the patch.
-/// What that rule bought was a cancel waiting out a whole merged fold. The
-/// creator's folds still go through [`fold_parallel`] inert.
+/// TWO CALLERS, AND BOTH REPORT - into different phases, which is what
+/// [`GridReport`] carries. The dense back-substitution passes the
+/// repair's control and counts units into `Solve`. The syndrome pass
+/// ([`fold_batches`]) passes `RepairControl::reporting_only(Fold)` and
+/// apportions the bytes it is folding across the same grid. Until
+/// 15 Sep 2026 the syndrome pass went through [`fold_parallel`] with an
+/// inert control, on the reasoning that nobody may cancel it half-done
+/// - and a half-done syndrome pass is exactly as harmless as a
+/// half-done back-substitution, because the driver refuses both before
+/// the patch. What that rule bought was a cancel waiting out a whole
+/// merged fold. It then took the cancel alone until 17 Sep 2026, which
+/// left the `Fold` bar to be filled by the hand-over that FEEDS this
+/// call rather than by this call. The creator's folds still go through
+/// [`fold_parallel`] inert.
 ///
 /// The grain is the UNIT - one cache-sized cell of the destination grid,
 /// which is what the drain below already deals in - and never the row.
 /// A relaxed add per row at `m` rows times `words` columns is the
 /// instrumentation that shows up as a benchmark regression; per unit it
 /// is one add against a `MIN_COL_WORDS`-wide fold, measured as noise.
+/// It is also the CEILING on how finely the fold can be reported: a
+/// grid of one unit - few enough rows to share a chunk and a column
+/// narrower than `MIN_COL_WORDS`, which means small blocks - says its
+/// bytes once, at the end. That is a set whose whole fold is
+/// milliseconds.
 pub(crate) fn fold_parallel_controlled(
     dsts: &mut [Vec<u16>],
     srcs: &[&[u8]],
@@ -787,7 +819,15 @@ pub(crate) fn fold_parallel_controlled(
     gauge: Option<crate::memgauge::Sub>,
     control: &crate::par2repair::control::RepairControl,
 ) {
-    fold_parallel_opts(dsts, srcs, coeff, false, gauge, control)
+    fold_parallel_opts(
+        dsts,
+        srcs,
+        coeff,
+        false,
+        gauge,
+        control,
+        GridReport::SolveUnits,
+    )
 }
 
 /// Whether [`fold_parallel_opts`] prepares its coefficients once for the
@@ -863,6 +903,7 @@ pub(crate) fn fold_parallel_prepacked(
         true,
         gauge,
         &crate::par2repair::control::RepairControl::default(),
+        GridReport::SolveUnits,
     )
 }
 
@@ -873,6 +914,7 @@ fn fold_parallel_opts(
     prepacked: bool,
     gauge: Option<crate::memgauge::Sub>,
     control: &crate::par2repair::control::RepairControl,
+    report: GridReport,
 ) {
     let rows = dsts.len();
     if rows == 0 || srcs.is_empty() {
@@ -1127,6 +1169,10 @@ fn fold_parallel_opts(
         col_off: usize,
     }
     let mut units: Vec<Unit> = Vec::with_capacity(col_splits * row_threads);
+    // `Unit`s are pushed here and popped by the workers below, so the
+    // order they are BUILT in is the only place a per-unit share of a
+    // `FoldBytes` call can be handed out exactly once.
+    let mut unit_bytes: Vec<u64> = Vec::with_capacity(col_splits * row_threads);
     for (ci, col) in cols.into_iter().enumerate() {
         let mut row_base = 0usize;
         // ONE LINEAR PASS, and it has to stay one. `split_off(take)` read
@@ -1152,19 +1198,44 @@ fn fold_parallel_opts(
                 row_base,
                 col_off: ci * col_chunk,
             });
+            unit_bytes.push(0);
             row_base += take;
         }
     }
-    // The grid is the denominator: it is known exactly here, it is the
-    // same thing the drain counts down, and it costs nothing to say.
-    // Re-sizing the phase the caller opened is deliberate - the dense
-    // back-substitution's `Solve` bar is this grid, and the `m` the
-    // caller sized it with was the best it had before the grid existed.
-    control.begin(
-        crate::par2repair::control::RepairPhase::Solve,
-        units.len() as u64,
-    );
-    let units = std::sync::Mutex::new(units);
+    // WHAT THE DRAIN REPORTS, and it is not the same phase in both
+    // callers - see `GridReport`.
+    let phase = match report {
+        GridReport::SolveUnits => {
+            // The grid is the denominator: it is known exactly here, it
+            // is the same thing the drain counts down, and it costs
+            // nothing to say. Re-sizing the phase the caller opened is
+            // deliberate - the dense back-substitution's `Solve` bar is
+            // this grid, and the `m` the caller sized it with was the
+            // best it had before the grid existed.
+            control.begin(
+                crate::par2repair::control::RepairPhase::Solve,
+                units.len() as u64,
+            );
+            unit_bytes.fill(1);
+            crate::par2repair::control::RepairPhase::Solve
+        }
+        GridReport::FoldBytes(bytes) => {
+            // NO `begin`: the `Fold` phase is the whole feed and this
+            // call is one merged batch of it, opened and sized by the
+            // driver before the first block was read. The shares below
+            // sum to `bytes` EXACTLY whatever the unit count, so the
+            // phase's counter tracks bytes folded and not a rounding of
+            // them - and each unit is popped exactly once, so no share
+            // is spent twice.
+            let n = (unit_bytes.len() as u64).max(1);
+            for (i, b) in unit_bytes.iter_mut().enumerate() {
+                let i = i as u64;
+                *b = bytes * (i + 1) / n - bytes * i / n;
+            }
+            crate::par2repair::control::RepairPhase::Fold
+        }
+    };
+    let units = std::sync::Mutex::new(units.into_iter().zip(unit_bytes).collect::<Vec<_>>());
     let workers = cores.min(row_threads * col_splits);
     std::thread::scope(|s| {
         for _ in 0..workers {
@@ -1176,14 +1247,20 @@ fn fold_parallel_opts(
                     // patch opens a destination, so blocks this grid did
                     // not finish are never written. A future caller of
                     // this entry that does NOT re-check before acting on
-                    // `dsts` would be writing rubbish - the check before
-                    // `before_write` in `repair_dir_set_inner` is the
-                    // one that makes this legal.
+                    // `dsts` would be writing rubbish - and that is not
+                    // hypothetical: `repair_mapped_inner` was such a
+                    // caller until 17 Sep 2026 and wrote this grid's
+                    // zeros into a live extractor slot. BOTH production
+                    // drivers hold the rule now, each with a `gate` at
+                    // the head of its patch: `repair_dir_set_inner`'s
+                    // before `before_write`, and the mapped driver's
+                    // between `finish_owned_reported` and its write
+                    // loop.
                     if control.cancelled() {
                         return;
                     }
                     let unit = units.lock_ok().pop();
-                    let Some(unit) = unit else { return };
+                    let Some((unit, add)) = unit else { return };
                     // Each unit sees only its own bytes of every source;
                     // a source that ends before this range contributes
                     // nothing (PAR2 tail slices are zero-padded).
@@ -1206,7 +1283,7 @@ fn fold_parallel_opts(
                         prepacked,
                         prepared_table.map(|table| CoeffTable { table, stride }),
                     );
-                    control.step(crate::par2repair::control::RepairPhase::Solve, 1);
+                    control.step(phase, add);
                 }
             });
         }
@@ -1422,9 +1499,18 @@ impl ArenaPool {
 /// row sweep for the whole set, however many feeder batches it arrived
 /// as.
 /// Fold `batches` into the syndrome rows. `control` is the repair's
-/// [`cancel_only`](crate::par2repair::control::RepairControl::cancel_only)
-/// view (or the inert default): polled per unit, so a cancel stops the
-/// call instead of waiting for every row of a merged batch.
+/// [`reporting_only`](crate::par2repair::control::RepairControl::reporting_only)
+/// view of [`RepairPhase::Fold`](crate::par2repair::control::RepairPhase::Fold)
+/// (or the inert default): polled per unit, so a cancel stops the call
+/// instead of waiting for every row of a merged batch, and STEPPED per
+/// unit, so the phase counts the bytes this call actually folds.
+///
+/// The figure is derived here rather than passed in because this
+/// function IS the syndrome fold - there is no caller of it that folds
+/// anything else - and because the fed bytes are what the drivers sized
+/// the phase with, so the two agree by construction: every byte handed
+/// to the worker lands in exactly one batch arena, and every batch is
+/// folded exactly once.
 pub(super) fn fold_batches(
     exponents: &[u32],
     syndromes: &mut [Vec<u16>],
@@ -1436,21 +1522,25 @@ pub(super) fn fold_batches(
     }
     let mut srcs: Vec<&[u8]> = Vec::new();
     let mut logs: Vec<u32> = Vec::new();
+    let mut bytes = 0u64;
     for b in batches {
         for &(k, off, len) in &b.slices {
             srcs.push(&b.arena[off..off + len]);
             logs.push(k);
+            bytes += len as u64;
         }
     }
     if srcs.is_empty() {
         return;
     }
-    fold_parallel_controlled(
+    fold_parallel_opts(
         syndromes,
         &srcs,
         &|j, i| gf16::pow2(logs[i] as u64 * exponents[j] as u64),
+        false,
         Some(crate::memgauge::Sub::RepairWork),
         control,
+        GridReport::FoldBytes(bytes),
     );
 }
 

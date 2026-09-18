@@ -21,14 +21,28 @@
 #              (default: the first four; the last two are extras that
 #              need their own toolchains and are built on request)
 #
-# EVERY ASSET WEARS `-beta` IN ITS FILENAME, and that is deliberate. It
-# is this repo's existing convention, carried from the armv7 tarball,
-# whose own header states the reason: the release notes are one page a
-# downloader may never read, and an asset list is the thing they
-# actually click. parfast's version tracks nzbfast's (decision D3), so
-# the version string alone cannot say "first release, not yet proven" -
-# the filename has to. Drop the suffix when parfast is no longer beta;
-# see BETA_SUFFIX below, which is the one place it is spelled.
+# NO ASSET WEARS `-beta` ANY MORE, AND THAT IS THE 1.6.0 CHANGE. Until
+# then every filename carried one, for this repo's existing convention,
+# carried from the armv7 tarball, whose own header still states the
+# reason: the release notes are one page a downloader may never read,
+# and an asset list is the thing they actually click. parfast's version
+# tracks nzbfast's (decision D3), so the version string alone could not
+# say "first release, not yet proven" - the filename had to.
+#
+# parfast shipped stable at 1.6.0, so it says nothing of the sort now,
+# and the machinery that spelled it is gone rather than set to an empty
+# string: the `BETA_SUFFIX` case here appended `-beta` to any version
+# WITHOUT a pre-release part, which is precisely what a stable 1.6.0 is,
+# so leaving it in place would have shipped `parfast-1.6.0-macos-
+# universal-beta.tar.gz` off a bump alone. An inert variable that is one
+# `case` arm away from being wrong is worse than no variable.
+#
+# If parfast ever takes a pre-release again, the version string itself
+# carries it (`1.7.0-rc.1`) and lands in `$VERSION` here with no edit -
+# which is what the old case's first arm already did for `-beta.N`. The
+# GUI is the live example: it is a beta at 1.6.0-beta.1 and its own
+# bundler, apps/parfast/packaging/build-parfast-gui-bundles.sh, gets its
+# stage from GUI_STAGE and needs no suffix logic either.
 #
 # Prereqs, by arch:
 #   macos-universal  rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -65,18 +79,6 @@ fi
 VERSION=$(grep -m1 '^version' crates/parfast/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
 [ -n "$VERSION" ] || { echo "cannot read parfast version" >&2; exit 1; }
 
-# BETA in the filename, exactly once. A pre-release version string
-# ("1.5.0-beta.1") already carries it, so appending `-beta` there gives
-# `...-beta.1-macos-universal-beta.tar.gz`, which reads like a mistake
-# and invites the question of which beta is meant. Append the suffix
-# only when the version does NOT already say it, so a plain `1.6.0`
-# during the beta still ships as `1.6.0-...-beta`, and the day parfast
-# leaves beta both halves go quiet on their own.
-case $VERSION in
-    *beta*|*alpha*|*rc*) BETA_SUFFIX="" ;;
-    *)                   BETA_SUFFIX="-beta" ;;
-esac
-
 DIST=${1:-dist-parfast}; shift || true
 ARCHES=${*:-"macos-universal windows-x64 linux-x64 linux-arm64"}
 
@@ -94,7 +96,9 @@ triple_of() {
 
 # The README that ships beside the binary. parfast has no manual and
 # needs none - `parfast --help` is the reference and it is par2cmdline's
-# - so this says what it is, that it is beta, and where to complain.
+# - so this says what it is and where to complain. It said "this is a
+# beta" until 1.6.0; what replaced that paragraph is not silence, it is
+# the repair warning, which was always the half that mattered.
 write_readme() {
     cat > "$1/README.txt" <<README
 parfast $VERSION - PAR2 create, verify and repair
@@ -108,10 +112,9 @@ codes, so a script that calls par2 today can call parfast instead.
     parfast r set.par2                   repair
     parfast --help                       the full reference
 
-THIS IS A BETA. It has a full test suite and is checked command by
-command against par2cmdline-turbo, but it has not been through a
-release before. Please try it and tell us how you get on - hearing that
-it worked is as useful to us as hearing that it did not.
+parfast has a full test suite and is checked command by command against
+par2cmdline-turbo. Please tell us how you get on - hearing that it
+worked is as useful to us as hearing that it did not.
 
 Repairing rewrites files in place, which is what repairing is. Keep a
 copy of anything you cannot lose, the same as with any other such tool.
@@ -150,7 +153,7 @@ for arch in $ARCHES; do
             echo "✗ not a universal binary: $(lipo -info "$inner/parfast")" >&2; exit 1; }
         chmod +x "$inner/parfast"
         stage_common "$inner"
-        asset="parfast-$VERSION-macos-universal$BETA_SUFFIX.tar.gz"
+        asset="parfast-$VERSION-macos-universal.tar.gz"
         COPYFILE_DISABLE=1 tar "${TAR_OWNER[@]}" -czf "$DIST/$asset" -C "$work" "$(basename "$inner")"
         ;;
     windows-x64)
@@ -171,7 +174,7 @@ for arch in $ARCHES; do
         n=$(strings -a "$inner/parfast.exe" 2>/dev/null | grep -c "$HOME" || true)
         [ "$n" = 0 ] || { echo "✗ windows exe carries $n build-host path(s)" >&2; exit 1; }
         stage_common "$inner"
-        asset="parfast-$VERSION-windows-x64$BETA_SUFFIX.zip"
+        asset="parfast-$VERSION-windows-x64.zip"
         ( cd "$work" && zip -q -r -X "$DIST/$asset" "$(basename "$inner")" )
         ;;
     linux-*|freebsd-*)
@@ -193,7 +196,7 @@ for arch in $ARCHES; do
         esac
         cp "$bin" "$inner/parfast"; chmod +x "$inner/parfast"
         stage_common "$inner"
-        asset="parfast-$VERSION-$arch$BETA_SUFFIX.tar.gz"
+        asset="parfast-$VERSION-$arch.tar.gz"
         # COPYFILE_DISABLE=1 is load-bearing on the release Mac: bsdtar
         # stores an AppleDouble `._name` member for any file carrying an
         # xattr, which yields a second top-level entry that breaks

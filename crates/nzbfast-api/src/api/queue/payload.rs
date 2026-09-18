@@ -52,7 +52,7 @@ pub(super) fn mask_spool_from_recovery(g: &mut Job) {
 /// the GH #69 crash shape (a client deserializing
 /// `{status, nzo_ids}` gets an object it has no field for)
 /// sitting on top of a silent no-op.
-fn delete_arm(
+pub(super) fn delete_arm(
     d: &Arc<Daemon>,
     params: &std::collections::HashMap<String, String>,
     op: &str,
@@ -116,6 +116,25 @@ fn delete_arm(
     // See the history arm: spool copies whose fate waits on
     // the file removal.
     let mut nzb_by_dir = std::collections::HashMap::new();
+    // GH #86: the rows this request can put back, captured under the
+    // lock before the delete machinery touches their spool copies.
+    //
+    // ONLY on the files-KEPT arm, and that is not a simplification. With
+    // `del_files=1` the removal can be deferred to `park()` or to the
+    // prefetch drain - `FilesVerdict::pending` - so the daemon has not
+    // settled the files half by the time this answers, and an undo
+    // offered on top of that is a promise nobody has kept yet. It is
+    // also unneeded: the three dialogs the window exists to retire (the
+    // row's stop, Clear queue, the selection bar's Remove) all post no
+    // `del_files`, which
+    // `the_quick_ways_out_of_the_queue_still_keep_the_files` pins.
+    //
+    // A link, not a move: `retain_for_undo` leaves `g.nzb_path` and the
+    // file it names exactly where they were, so every arm below -
+    // `mask_spool_from_recovery`, `park_or_drop_spool`, park's own
+    // unlink - keeps working on the copy it always worked on. The whole
+    // argument is on `Daemon::retain_for_undo`.
+    let mut undo_rows: Vec<nzbfast_daemon::cancelundo::UndoRow> = Vec::new();
     let mut q = d.queue.lock_ok();
     let before = q.len();
     q.retain(|j| {
@@ -155,6 +174,12 @@ fn delete_arm(
             // in the same position and says what goes wrong
             // when it does not.
             custody.plan(d, &mut g, sidecar_owner.as_ref(), del_files);
+            // Before the arms below, for the same reason `custody.plan`
+            // is: the record they are about to rewrite is what an undo
+            // has to put back.
+            if !del_files && let Some(row) = d.retain_for_undo(&g) {
+                undo_rows.push(row);
+            }
             if active {
                 // The pipeline is running - mark it
                 // for silent drop and abort below.
@@ -210,7 +235,14 @@ fn delete_arm(
     // reservations coming back down, the kept-files notices
     // and the handoff to the prefetch drain, in that order
     // and for the reasons on `CustodyBatch::settle`.
-    custody.settle(d, sidecar_owner.as_ref(), &mut nzb_by_dir);
+    let files = custody.settle(d, sidecar_owner.as_ref(), &mut nzb_by_dir);
+    // GH #86: and the undo window, once the row count is settled. ALL OR
+    // NOTHING - `file_cancel_undo` refuses (and unlinks what it holds)
+    // unless every removed row was retained, because an Undo that puts
+    // nine of ten rows back is the same silent downgrade as one that
+    // puts a row back without its NZB: the user presses it, the toast
+    // says it worked, and some of their queue is simply gone.
+    let undo = d.file_cancel_undo(undo_rows, count);
     // Only the job that OWNS the hub may fire its
     // abort. `state == Downloading` is NOT that
     // test: job N stays Downloading through its
@@ -251,7 +283,44 @@ fn delete_arm(
         // `removed` stays: it is ours, it is what the
         // dashboard's bulk toasts count, and nothing here
         // drops a key.
-        json!({"status": true, "removed": count, "nzo_ids": removed_ids})
+        let mut out = json!({"status": true, "removed": count, "nzo_ids": removed_ids});
+        // GH #86: and when the request asked for the FILES too, how
+        // that half went - which `status` has never described. The
+        // record leaves the queue under the lock and is done; the
+        // removal can be refused (the Trash would not take it), or
+        // deferred to `park()` because the pipeline is still writing
+        // into the directory, and a caller told only `true` cannot
+        // tell any of those three apart. The dashboard would then
+        // toast "files deleted" over a folder that is still there -
+        // which is the GH #71 shape exactly, and a notice strip the
+        // user has to notice is not the same as an answer.
+        //
+        // Only present when `del_files` was asked for: an ABSENT key
+        // means the question was never put, where `{"deleted": 0}`
+        // would read as a delete that found nothing. Additive, like
+        // `removed` and `nzo_ids` beside it - SAB answers neither, and
+        // nothing here drops a key.
+        if del_files {
+            out["files"] = json!({
+                "deleted": files.deleted,
+                "kept": files.kept,
+                "pending": files.pending,
+            });
+        }
+        // GH #86: and the way back, when there is one. ABSENT means
+        // there is none - the files half was asked for, a spool copy
+        // could not be held, or the store refused the batch - and the
+        // page must read it that way rather than assuming a window it
+        // was never promised. `secs` travels with the token so the page
+        // never has to hard-code the daemon's window.
+        if let Some((token, rows)) = undo {
+            out["undo"] = json!({
+                "token": token,
+                "rows": rows,
+                "secs": nzbfast_daemon::cancelundo::CANCEL_UNDO_SECS,
+            });
+        }
+        out
     } else {
         // A refusal SAYS SOMETHING. This arm answered
         // `{"status": false, "removed": 0}` with no `error`
@@ -281,6 +350,77 @@ fn delete_arm(
     }
 }
 
+/// GH #86: spend a cancel's undo token and put its rows back.
+///
+/// The other half of the grace window - `delete_arm` above mints the
+/// token, `cancelundo.rs` holds the bytes, and this is the door onto it.
+/// Its own verb rather than a flag on `delete`, because it is the
+/// opposite action and a mode that deletes or restores depending on a
+/// parameter is one typo away from the wrong one.
+///
+/// THE REFUSALS ARE THE INTERESTING HALF and each one says which it is,
+/// because they mean different things to the user: a token the store no
+/// longer holds is a window that closed (or a second click on the same
+/// toast), where a batch whose rows would not come back is a window that
+/// was open and could not deliver - the exact case an undo must never
+/// paper over. A PARTIAL restore is reported as a partial restore:
+/// `restored` and `failed` both travel, so a caller is never handed a
+/// count it could mistake for the whole batch.
+pub(super) fn undelete_arm(d: &Arc<Daemon>, value: &str) -> Value {
+    let Some(batch) = d.take_cancel_undo(value.trim()) else {
+        return json!({"status": false, "restored": 0, "nzo_ids": [],
+            "error": "that undo is no longer available - the window has closed, \
+                      or it has already been used"});
+    };
+    let out = d.spend_cancel_undo(batch);
+    if out.restored.is_empty() {
+        return json!({"status": false, "restored": 0, "nzo_ids": [],
+            "failed": out.failed,
+            "error": "nothing could be put back - what the queue was holding for \
+                      these downloads is no longer readable"});
+    }
+    json!({
+        "status": true,
+        "restored": out.restored.len(),
+        "nzo_ids": out.restored,
+        "failed": out.failed,
+    })
+}
+
+/// GH #86: spend a history delete's undo token and put its rows back.
+///
+/// `undelete_arm`'s twin for the other list, and the refusals carry the
+/// same division for the same reason: a token the store no longer holds
+/// is a window that CLOSED (or a second click on the same toast), where
+/// a batch whose rows would not come back is a window that was open and
+/// could not deliver. A partial restore is reported as a partial
+/// restore - `restored` and `failed` both travel.
+///
+/// What it does NOT do is describe the rows it put back. The page reads
+/// this answer for the count and then re-polls history, which is the
+/// list that knows where each row landed; duplicating the record here
+/// would be a second history payload with its own way of being stale.
+pub(super) fn hist_undelete_arm(d: &Arc<Daemon>, value: &str) -> Value {
+    let Some(batch) = d.take_hist_undo(value.trim()) else {
+        return json!({"status": false, "restored": 0, "nzo_ids": [],
+            "error": "that undo is no longer available - the window has closed, \
+                      or it has already been used"});
+    };
+    let out = d.spend_hist_undo(batch);
+    if out.restored.is_empty() {
+        return json!({"status": false, "restored": 0, "nzo_ids": [],
+            "failed": out.failed,
+            "error": "nothing could be put back - what the list was holding for \
+                      these downloads is no longer readable"});
+    }
+    json!({
+        "status": true,
+        "restored": out.restored.len(),
+        "nzo_ids": out.restored,
+        "failed": out.failed,
+    })
+}
+
 pub(super) fn m_queue(
     d: &Arc<Daemon>,
     req: &mut tiny_http::Request,
@@ -300,6 +440,7 @@ pub(super) fn m_queue(
         let hit = |j: &Arc<Mutex<Job>>| hit_id(&j.lock_ok().nzo_id);
         match params.get("name").map(String::as_str) {
             Some(op @ ("delete" | "purge")) => delete_arm(d, params, op, &value),
+            Some("undelete") => undelete_arm(d, &value),
             Some(op @ ("pause" | "resume")) => {
                 if op == "pause" {
                     // Pausing a job also stops its prefetch.
@@ -536,6 +677,420 @@ pub(super) fn m_queue(
     })
 }
 
+/// The `delete` arm of [`m_history`], as its own function the way the
+/// queue's [`delete_arm`] already is, and for both of that one's
+/// reasons: the 500-line ceiling on `m_history`, and a seam a test can
+/// drive. The body is verbatim - only `value` changed from an owned
+/// `String` to the `&str` a caller already has, and the three early
+/// `return Some(..)`s became plain returns.
+///
+/// The testability half is not incidental here. `m_history` takes a
+/// `&mut tiny_http::Request`, so until this arm came out of it there
+/// was no unit-test door onto the largest destructive handler in the
+/// file at all - which is exactly the door `histundo_tests` needed, for
+/// the reason `cancelundo_tests` states: what is under test is "the
+/// thing the page presses gives the user their download back", and the
+/// daemon helpers alone prove nothing about the wiring.
+pub(super) fn hist_delete_arm(
+    d: &Arc<Daemon>,
+    params: &std::collections::HashMap<String, String>,
+    value: &str,
+) -> Value {
+    let del_files = params.get("del_files").map(String::as_str) == Some("1");
+    // Snapshot the queue's directories BEFORE the
+    // history lock: they are claimants too, and
+    // taking the two locks in this order everywhere
+    // is what keeps them from deadlocking.
+    let queue_dirs: Vec<PathBuf> = d
+        .queue
+        .lock_ok()
+        .iter()
+        .map(|j| j.lock_ok().out_dir.clone())
+        .collect();
+    // And the §96 storage-deleted verdict, which is the
+    // other claimant on this request's patience: only the
+    // two bulk words read it (`plan_history_delete`), and
+    // answering it stats a completed folder that can be on
+    // a share that has gone away. Asked BEFORE the history
+    // lock and only when it will be read, so a single-id
+    // delete pays nothing and a "Clear failed" pays it with
+    // no global lock held - the park, the enqueue dupe
+    // check, `history_publish` and the queue saver all
+    // queue behind that lock (bug sweep 1 Sep 2026, F20).
+    let published =
+        matches!(value, "failed" | "completed").then(|| crate::history::published_failed_map(d));
+    let mut h = d.history.lock_ok();
+    // A recategorize is moving one of these payloads on
+    // disk right now. It snapshotted the record before
+    // the move and writes `out_dir` back afterwards, so
+    // deleting the record (and its files) underneath
+    // leaves the moved data orphaned at a destination
+    // nothing names, or half-deleted across both
+    // folders. Refuse for the whole request rather than
+    // silently skipping one id of a batch. Checked
+    // UNDER the history lock: a recategorize raises its
+    // marker and then re-verifies the record is still
+    // present, so a check outside this lock could pass
+    // just before the marker went up while the move
+    // still proceeded (review H7).
+    let busy: Vec<String> = {
+        let m = d.moving.lock_ok();
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| m.contains(*s))
+            .map(str::to_string)
+            .collect()
+    };
+    if !busy.is_empty() {
+        return json!({"status": false, "removed": 0, "nzo_ids": [],
+                "error": format!(
+                    "{} is having its files moved right now - try again when it settles",
+                    busy.join(", "))});
+    }
+    let before = h.len();
+    let records: Vec<DeleteRecord> = crate::job::delete_records(h.as_slice(), published.as_ref());
+    // Decided in one pass over the WHOLE list, so
+    // the "somebody else still lives here" test sees
+    // the records that survive rather than the ones
+    // about to go (see plan_history_delete).
+    let plan = plan_history_delete(
+        &records,
+        value,
+        search_param(params).as_deref(),
+        &queue_dirs,
+    );
+    // A doomed record whose unlock task is `finalizing`
+    // is mid-extraction/rename/move on disk right now
+    // (review sweep 3 Aug H1) - same refusal as `moving`
+    // above, but checked against the PLAN rather than
+    // the value string, so the `all`/`failed`/
+    // `completed` sweeps hit it too (and a bulk sweep
+    // catching a mid-move id is refused here as well).
+    let busy: Vec<String> = {
+        let m = d.moving.lock_ok();
+        h.iter()
+            .zip(&plan)
+            .filter(|(_, p)| p.doomed)
+            .filter_map(|(j, _)| {
+                let g = j.lock_ok();
+                (g.finalizing || m.contains(&g.nzo_id)).then(|| g.nzo_id.clone())
+            })
+            .collect()
+    };
+    if !busy.is_empty() {
+        return json!({"status": false, "removed": 0, "nzo_ids": [],
+                "error": format!(
+                    "{} is being unlocked or moved right now - \
+                     try again when it settles",
+                    busy.join(", "))});
+    }
+    // Recorded after the history lock is dropped, below.
+    let mut kept: Vec<(String, std::path::PathBuf, String)> = Vec::new();
+    // Spooled NZBs whose fate waits on the removal: kept for
+    // the notice's "download it again" when the files stay,
+    // removed with the record when they go.
+    let mut nzb_by_dir = std::collections::HashMap::new();
+    // And so is the removal itself - see the queue-delete
+    // arm above for why a bounded Trash call must not run
+    // under a global lock, and why the directory is
+    // reserved across the gap.
+    let mut to_remove: Vec<(String, std::path::PathBuf, bool, crate::smart::FiledTail)> =
+        Vec::new();
+    // §296 (sweep S9): destination copies of a job whose
+    // move never settled. Path arithmetic here, unlinked in
+    // the slow half below - the same division the queue arm
+    // makes, and for its reason: with the record gone this
+    // list is the ONLY thing that names those files, so a
+    // restart after this delete orphans them at the
+    // destination forever.
+    let mut early_gone: Vec<std::path::PathBuf> = Vec::new();
+    // GH #86: the rows this request can put back, captured
+    // under each record's own lock before the loop below
+    // stamps it and drops its spool copy.
+    //
+    // ONLY on the files-KEPT arm, the queue arm's rule and
+    // its reason: with `del_files=1` the removal can be
+    // refused or deferred, so the daemon has not settled the
+    // files half when this answers. The two doors that post
+    // it (the row's own 🗑 and the selection bar's
+    // Remove + delete files) keep their dialogs and say
+    // "this cannot be undone", which stays true.
+    let mut undo_rows: Vec<nzbfast_daemon::histundo::HistUndoRow> = Vec::new();
+    // What the user just told us they no longer have. Taken
+    // from the plan rather than from `value`, so the bulk
+    // words (`all`, `failed`, `completed`) and an id list
+    // stamp exactly the records that are leaving - see
+    // `Daemon::note_releases_deleted`.
+    let deleted_names: Vec<String> = h
+        .iter()
+        .zip(&plan)
+        .filter(|(_, p)| p.doomed)
+        .map(|(j, _)| j.lock_ok().name.clone())
+        .collect();
+    // By id, not by position: nzo_ids are unique,
+    // and a positional retain would be one refactor
+    // away from deleting the wrong record.
+    let doomed: std::collections::HashMap<&str, bool> = records
+        .iter()
+        .zip(&plan)
+        .filter(|(_, p)| p.doomed)
+        .map(|(r, p)| (r.nzo_id.as_str(), p.may_remove_files))
+        .collect();
+    // Where each row sat, so a store that refuses the
+    // tombstone below can have every one of them back
+    // exactly as the request found it (P2-1).
+    let mut removed: Vec<(usize, Arc<Mutex<Job>>)> = Vec::new();
+    let mut at = 0usize;
+    h.retain(|j| {
+        let keep = !doomed.contains_key(j.lock_ok().nzo_id.as_str());
+        if keep {
+            at += 1;
+        } else {
+            removed.push((at, j.clone()));
+        }
+        keep
+    });
+    // §129 1a: the store forgets them too, once the lock is
+    // down (below). Also the `nzo_ids` reported back: taken
+    // in history order from the rows that actually left, so
+    // it is the truth rather than an echo of the request.
+    let doomed_ids: Vec<String> = removed
+        .iter()
+        .map(|(_, j)| j.lock_ok().nzo_id.clone())
+        .collect();
+    // A bulk sweep needs to say how much it swept:
+    // "Cleared." over a list that still has rows in
+    // it is indistinguishable from a no-op. `status`
+    // keeps its old meaning for every existing
+    // caller (SAB clients included).
+    let count = before - h.len();
+    drop(h);
+    // NOTHING THIS DELETE DESTROYS MAY GO BEFORE THE
+    // TOMBSTONE IS DURABLE, and until 26 Aug 2026 all of it
+    // did: the early copies, the spool copies and
+    // `remove_job_files` all ran on the way to a tombstone
+    // that came last and whose answer was dropped, under a
+    // `"status": true` this handler had already decided on.
+    // `history_replay` drops a row only when it finds a
+    // `"deleted": true` line, so a store that refused that
+    // append - 0444, or owned by a uid this daemon no longer
+    // runs as, one `sudo nzbfast` being enough - brought the
+    // record back at the next start naming files that had
+    // been destroyed on the strength of the delete (P2-1).
+    if !d.history_tombstone(&doomed_ids) {
+        d.history_restore(removed);
+        // Nothing left, so `removed` is 0 and `nzo_ids` is
+        // empty - and both keys are HERE rather than only on
+        // the two answers below. This arm has five exits, and
+        // an optional key is one a client cannot declare: the
+        // pause arm one screen up carries the same `[]` on its
+        // own refusal for the same reason, and answering three
+        // exits with a shape the other two do not have is the
+        // absent-key class this lane exists to close, made by
+        // hand.
+        return json!({"status": false, "removed": 0, "nzo_ids": [],
+                "error": "the history store could not be written, so the \
+                          records were left exactly as they were - check the \
+                          permissions on the data folder"});
+    }
+    for (at, j) in &removed {
+        let mut g = j.lock_ok();
+        let may_remove_files = doomed.get(g.nzo_id.as_str()).copied().unwrap_or(false);
+        // GH #86: BEFORE the two statements below, because
+        // each of them destroys one of the two things an
+        // undo needs - `early_take` empties the list that is
+        // the only thing naming the destination copies, and
+        // `hold_or_drop_spool(false, ..)` unlinks the NZB a
+        // Retry reads. `retain_hist_for_undo` answers None
+        // for a row carrying early copies, which takes the
+        // whole batch's token with it; `histundo.rs` has the
+        // argument for refusing rather than holding them.
+        if !del_files && let Some(row) = d.retain_hist_for_undo(*at, j, &g) {
+            undo_rows.push(row);
+        }
+        // Not gated on del_files, the queue arm's rule: with
+        // the files kept the payload is still whole in
+        // out_dir, so the destination copies are a partial
+        // duplicate either way.
+        early_gone.extend(d.early_take(&mut g));
+        // A parked move_pending row may still have its Arc
+        // in the mover's queue. The record it would move is
+        // gone as of this request, so the popped Arc must
+        // find nothing to do - without this it re-runs the
+        // whole-job move for a job that no longer exists.
+        g.tombstone = true;
+        // The record is being deleted for good - its spooled
+        // .nzb (kept until now for retry) is now dead
+        // weight. Unless the files half is about to be
+        // attempted: a REFUSED removal leaves the user
+        // holding a folder and a notice, and that NZB is the
+        // only thing that can offer them the download again
+        // from where they are standing. Held back and
+        // decided after the outcome is known, below.
+        hold_or_drop_spool(
+            del_files && may_remove_files,
+            &g.out_dir,
+            &g.nzb_path,
+            &mut nzb_by_dir,
+        );
+        if del_files {
+            if may_remove_files {
+                let tail = delete_tail(&g, || crate::naming::job_suffix(d, filed_stem(&g)));
+                d.reserved.lock_ok().insert(g.out_dir.clone());
+                to_remove.push((filed_stem(&g).to_string(), g.out_dir.clone(), g.filed, tail));
+                // UX §18: a move-completed (or
+                // recategorize) that failed part way
+                // left half the payload at the SOURCE,
+                // and `out_dir` followed the bytes that
+                // did move. Only `move_split` names the
+                // other half - so a delete-with-files
+                // that removes just `out_dir` takes the
+                // record away and orphans those files,
+                // with no row left to reach them by and
+                // no kept-files note either. Both
+                // locations, or neither promise is kept.
+                //
+                // `g.filed` carries over to the source,
+                // and it MUST: for a TV-filed job the
+                // folder `relocate_completed` moves FROM
+                // is the shared season folder (see its
+                // `same_place` comment), so `move_split`
+                // can name a directory full of the
+                // user's other episodes. Hardcoding
+                // `false` here - "the source is always a
+                // job-owned folder" - would have handed
+                // a whole season to `remove_user_dir` on
+                // a single episode's delete. With the
+                // flag it takes the narrow per-episode
+                // path, exactly as the destination side
+                // above already does.
+                let src = std::path::PathBuf::from(&g.move_split);
+                let claimed = || {
+                    queue_dirs.contains(&src)
+                        || records
+                            .iter()
+                            .zip(&plan)
+                            .any(|(o, op)| !op.doomed && o.out_dir == src)
+                };
+                if !g.move_split.is_empty() && src != g.out_dir && !claimed() {
+                    d.reserved.lock_ok().insert(src.clone());
+                    to_remove.push((
+                        filed_stem(&g).to_string(),
+                        src,
+                        g.filed,
+                        delete_tail(&g, || crate::naming::job_suffix(d, filed_stem(&g))),
+                    ));
+                }
+            } else {
+                // A verified re-download published
+                // over this record's directory and
+                // lives there now. Removing the
+                // record is right; removing the
+                // files would destroy the newer job.
+                info!(
+                    target: "history",
+                    "{}: record removed, files kept - {} \
+                             belongs to another job now",
+                    g.nzo_id,
+                    g.out_dir.display()
+                );
+            }
+        }
+    }
+    // Now that no global lock is held: the slow half.
+    // Released after the whole batch - see the queue arm
+    // above. It matters more here: `plan_history_delete`
+    // counts only SURVIVORS as a claimant, so two doomed
+    // records sharing one out_dir both earn
+    // `may_remove_files`, and a set holds that directory
+    // once.
+    let reserved_dirs: Vec<std::path::PathBuf> =
+        to_remove.iter().map(|(_, dir, _, _)| dir.clone()).collect();
+    crate::earlyfile::early_unlink(&early_gone);
+    for (name, dir, filed, tail) in to_remove {
+        // GH #71: this job's own post-completion streaming
+        // handles are the one thing in the daemon that can
+        // still be holding the directory we are about to
+        // remove.
+        d.hub.release_handles_for_dir(&dir);
+        let outcome = remove_job_files(&dir, &name, filed, &tail);
+        if let FilesGone::Kept(why) = outcome {
+            kept.push((name, dir, why));
+        }
+    }
+    {
+        let mut r = d.reserved.lock_ok();
+        for dir in &reserved_dirs {
+            r.remove(dir);
+        }
+    }
+    // "Delete + files" is two promises, and only the
+    // record half is guaranteed. A row the user deleted
+    // to reclaim the disk space, whose files are still
+    // taking it up, is the case this exists for: the row
+    // was their handle on that folder and it has just
+    // gone, so the path has to be handed back.
+    note_kept_files(d, kept, &mut nzb_by_dir);
+    if count > 0 {
+        d.note_releases_deleted(&deleted_names);
+        d.save_queue();
+    }
+    // A class sweep (all/completed/failed) is idempotent:
+    // asking for a state the history is already in is
+    // success, and LunaSea's clear-history dialog reads
+    // false as an error toast (§18). A per-id delete keeps
+    // reporting the miss - an unknown id is diagnosable.
+    let class_sweep = matches!(value, "all" | "completed" | "failed");
+    if count > 0 || class_sweep {
+        // `removed` and `nzo_ids` are both ADDITIVE here:
+        // SAB's `_api_history_delete` answers a bare
+        // `report()`, so `{"status": true}` and nothing
+        // else, and no key of its is dropped. The id list
+        // is worth carrying anyway - it is the same
+        // reconciliation problem the queue arm's `nzo_ids`
+        // solves, and with `search` now narrowing a sweep a
+        // caller cannot predict the set from its request.
+        let mut out = json!({"status": true, "removed": count, "nzo_ids": doomed_ids});
+        // GH #86: and the way back, when there is one.
+        // ABSENT means there is none - the files half was
+        // asked for, a row carried early copies, or a spool
+        // copy could not be held - and the page must read it
+        // that way rather than assuming a window it was
+        // never promised. ALL OR NOTHING: `file_hist_undo`
+        // refuses (and unlinks what it holds) unless every
+        // removed row was retained.
+        if let Some((token, rows)) = d.file_hist_undo(undo_rows, count) {
+            out["undo"] = json!({
+                "token": token,
+                "rows": rows,
+                "secs": nzbfast_daemon::histundo::CANCEL_UNDO_SECS,
+            });
+        }
+        out
+    } else {
+        // ...and a per-id miss says WHY, for the reason the
+        // queue arm above sets out at length: with no `error`
+        // key the dashboard's two bulk history controls take
+        // their SUCCESS branch and land a green "Cleared 0
+        // from the list." over a write that was refused.
+        //
+        // Its own sentence rather than a share of the queue's:
+        // "may have just finished" is true of a queued row and
+        // false of a history row, which by definition finished
+        // long ago - the same reason `bbc5b0f84` would not
+        // reuse `toast.nochange` here. That commit put this
+        // sentence on the PAGE, in `delHist`/`delHistFiles`
+        // only; the bulk pair two controls away had no way to
+        // reach it, so it lives here now and every door onto
+        // this arm inherits it. Also without a plural noun:
+        // one id and a 250-id selection get the same words.
+        json!({"status": false, "removed": 0, "nzo_ids": [],
+            "error": "nothing in your history matched that - it may \
+                      have been removed already"})
+    }
+}
+
 pub(super) fn m_history(
     d: &Arc<Daemon>,
     req: &mut tiny_http::Request,
@@ -613,374 +1168,15 @@ pub(super) fn m_history(
                 // forgot its category on restart.
                 history_change_cat(d, &value, &cat)
             }
-            Some("delete") => {
-                let del_files = params.get("del_files").map(String::as_str) == Some("1");
-                // Snapshot the queue's directories BEFORE the
-                // history lock: they are claimants too, and
-                // taking the two locks in this order everywhere
-                // is what keeps them from deadlocking.
-                let queue_dirs: Vec<PathBuf> = d
-                    .queue
-                    .lock_ok()
-                    .iter()
-                    .map(|j| j.lock_ok().out_dir.clone())
-                    .collect();
-                // And the §96 storage-deleted verdict, which is the
-                // other claimant on this request's patience: only the
-                // two bulk words read it (`plan_history_delete`), and
-                // answering it stats a completed folder that can be on
-                // a share that has gone away. Asked BEFORE the history
-                // lock and only when it will be read, so a single-id
-                // delete pays nothing and a "Clear failed" pays it with
-                // no global lock held - the park, the enqueue dupe
-                // check, `history_publish` and the queue saver all
-                // queue behind that lock (bug sweep 1 Sep 2026, F20).
-                let published = matches!(value.as_str(), "failed" | "completed")
-                    .then(|| crate::history::published_failed_map(d));
-                let mut h = d.history.lock_ok();
-                // A recategorize is moving one of these payloads on
-                // disk right now. It snapshotted the record before
-                // the move and writes `out_dir` back afterwards, so
-                // deleting the record (and its files) underneath
-                // leaves the moved data orphaned at a destination
-                // nothing names, or half-deleted across both
-                // folders. Refuse for the whole request rather than
-                // silently skipping one id of a batch. Checked
-                // UNDER the history lock: a recategorize raises its
-                // marker and then re-verifies the record is still
-                // present, so a check outside this lock could pass
-                // just before the marker went up while the move
-                // still proceeded (review H7).
-                let busy: Vec<String> = {
-                    let m = d.moving.lock_ok();
-                    value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| m.contains(*s))
-                        .map(str::to_string)
-                        .collect()
-                };
-                if !busy.is_empty() {
-                    return Some(json!({"status": false, "removed": 0, "nzo_ids": [],
-                            "error": format!(
-                                "{} is having its files moved right now - try again when it settles",
-                                busy.join(", "))}));
-                }
-                let before = h.len();
-                let records: Vec<DeleteRecord> =
-                    crate::job::delete_records(h.as_slice(), published.as_ref());
-                // Decided in one pass over the WHOLE list, so
-                // the "somebody else still lives here" test sees
-                // the records that survive rather than the ones
-                // about to go (see plan_history_delete).
-                let plan = plan_history_delete(
-                    &records,
-                    &value,
-                    search_param(params).as_deref(),
-                    &queue_dirs,
-                );
-                // A doomed record whose unlock task is `finalizing`
-                // is mid-extraction/rename/move on disk right now
-                // (review sweep 3 Aug H1) - same refusal as `moving`
-                // above, but checked against the PLAN rather than
-                // the value string, so the `all`/`failed`/
-                // `completed` sweeps hit it too (and a bulk sweep
-                // catching a mid-move id is refused here as well).
-                let busy: Vec<String> = {
-                    let m = d.moving.lock_ok();
-                    h.iter()
-                        .zip(&plan)
-                        .filter(|(_, p)| p.doomed)
-                        .filter_map(|(j, _)| {
-                            let g = j.lock_ok();
-                            (g.finalizing || m.contains(&g.nzo_id)).then(|| g.nzo_id.clone())
-                        })
-                        .collect()
-                };
-                if !busy.is_empty() {
-                    return Some(json!({"status": false, "removed": 0, "nzo_ids": [],
-                            "error": format!(
-                                "{} is being unlocked or moved right now - \
-                                 try again when it settles",
-                                busy.join(", "))}));
-                }
-                // Recorded after the history lock is dropped, below.
-                let mut kept: Vec<(String, std::path::PathBuf, String)> = Vec::new();
-                // Spooled NZBs whose fate waits on the removal: kept for
-                // the notice's "download it again" when the files stay,
-                // removed with the record when they go.
-                let mut nzb_by_dir = std::collections::HashMap::new();
-                // And so is the removal itself - see the queue-delete
-                // arm above for why a bounded Trash call must not run
-                // under a global lock, and why the directory is
-                // reserved across the gap.
-                let mut to_remove: Vec<(
-                    String,
-                    std::path::PathBuf,
-                    bool,
-                    crate::smart::FiledTail,
-                )> = Vec::new();
-                // §296 (sweep S9): destination copies of a job whose
-                // move never settled. Path arithmetic here, unlinked in
-                // the slow half below - the same division the queue arm
-                // makes, and for its reason: with the record gone this
-                // list is the ONLY thing that names those files, so a
-                // restart after this delete orphans them at the
-                // destination forever.
-                let mut early_gone: Vec<std::path::PathBuf> = Vec::new();
-                // What the user just told us they no longer have. Taken
-                // from the plan rather than from `value`, so the bulk
-                // words (`all`, `failed`, `completed`) and an id list
-                // stamp exactly the records that are leaving - see
-                // `Daemon::note_releases_deleted`.
-                let deleted_names: Vec<String> = h
-                    .iter()
-                    .zip(&plan)
-                    .filter(|(_, p)| p.doomed)
-                    .map(|(j, _)| j.lock_ok().name.clone())
-                    .collect();
-                // By id, not by position: nzo_ids are unique,
-                // and a positional retain would be one refactor
-                // away from deleting the wrong record.
-                let doomed: std::collections::HashMap<&str, bool> = records
-                    .iter()
-                    .zip(&plan)
-                    .filter(|(_, p)| p.doomed)
-                    .map(|(r, p)| (r.nzo_id.as_str(), p.may_remove_files))
-                    .collect();
-                // Where each row sat, so a store that refuses the
-                // tombstone below can have every one of them back
-                // exactly as the request found it (P2-1).
-                let mut removed: Vec<(usize, Arc<Mutex<Job>>)> = Vec::new();
-                let mut at = 0usize;
-                h.retain(|j| {
-                    let keep = !doomed.contains_key(j.lock_ok().nzo_id.as_str());
-                    if keep {
-                        at += 1;
-                    } else {
-                        removed.push((at, j.clone()));
-                    }
-                    keep
-                });
-                // §129 1a: the store forgets them too, once the lock is
-                // down (below). Also the `nzo_ids` reported back: taken
-                // in history order from the rows that actually left, so
-                // it is the truth rather than an echo of the request.
-                let doomed_ids: Vec<String> = removed
-                    .iter()
-                    .map(|(_, j)| j.lock_ok().nzo_id.clone())
-                    .collect();
-                // A bulk sweep needs to say how much it swept:
-                // "Cleared." over a list that still has rows in
-                // it is indistinguishable from a no-op. `status`
-                // keeps its old meaning for every existing
-                // caller (SAB clients included).
-                let count = before - h.len();
-                drop(h);
-                // NOTHING THIS DELETE DESTROYS MAY GO BEFORE THE
-                // TOMBSTONE IS DURABLE, and until 26 Aug 2026 all of it
-                // did: the early copies, the spool copies and
-                // `remove_job_files` all ran on the way to a tombstone
-                // that came last and whose answer was dropped, under a
-                // `"status": true` this handler had already decided on.
-                // `history_replay` drops a row only when it finds a
-                // `"deleted": true` line, so a store that refused that
-                // append - 0444, or owned by a uid this daemon no longer
-                // runs as, one `sudo nzbfast` being enough - brought the
-                // record back at the next start naming files that had
-                // been destroyed on the strength of the delete (P2-1).
-                if !d.history_tombstone(&doomed_ids) {
-                    d.history_restore(removed);
-                    // Nothing left, so `removed` is 0 and `nzo_ids` is
-                    // empty - and both keys are HERE rather than only on
-                    // the two answers below. This arm has five exits, and
-                    // an optional key is one a client cannot declare: the
-                    // pause arm one screen up carries the same `[]` on its
-                    // own refusal for the same reason, and answering three
-                    // exits with a shape the other two do not have is the
-                    // absent-key class this lane exists to close, made by
-                    // hand.
-                    return Some(json!({"status": false, "removed": 0, "nzo_ids": [],
-                            "error": "the history store could not be written, so the \
-                                      records were left exactly as they were - check the \
-                                      permissions on the data folder"}));
-                }
-                for (_, j) in &removed {
-                    let mut g = j.lock_ok();
-                    let may_remove_files = doomed.get(g.nzo_id.as_str()).copied().unwrap_or(false);
-                    // Not gated on del_files, the queue arm's rule: with
-                    // the files kept the payload is still whole in
-                    // out_dir, so the destination copies are a partial
-                    // duplicate either way.
-                    early_gone.extend(d.early_take(&mut g));
-                    // A parked move_pending row may still have its Arc
-                    // in the mover's queue. The record it would move is
-                    // gone as of this request, so the popped Arc must
-                    // find nothing to do - without this it re-runs the
-                    // whole-job move for a job that no longer exists.
-                    g.tombstone = true;
-                    // The record is being deleted for good - its spooled
-                    // .nzb (kept until now for retry) is now dead
-                    // weight. Unless the files half is about to be
-                    // attempted: a REFUSED removal leaves the user
-                    // holding a folder and a notice, and that NZB is the
-                    // only thing that can offer them the download again
-                    // from where they are standing. Held back and
-                    // decided after the outcome is known, below.
-                    hold_or_drop_spool(
-                        del_files && may_remove_files,
-                        &g.out_dir,
-                        &g.nzb_path,
-                        &mut nzb_by_dir,
-                    );
-                    if del_files {
-                        if may_remove_files {
-                            let tail =
-                                delete_tail(&g, || crate::naming::job_suffix(d, filed_stem(&g)));
-                            d.reserved.lock_ok().insert(g.out_dir.clone());
-                            to_remove.push((
-                                filed_stem(&g).to_string(),
-                                g.out_dir.clone(),
-                                g.filed,
-                                tail,
-                            ));
-                            // UX §18: a move-completed (or
-                            // recategorize) that failed part way
-                            // left half the payload at the SOURCE,
-                            // and `out_dir` followed the bytes that
-                            // did move. Only `move_split` names the
-                            // other half - so a delete-with-files
-                            // that removes just `out_dir` takes the
-                            // record away and orphans those files,
-                            // with no row left to reach them by and
-                            // no kept-files note either. Both
-                            // locations, or neither promise is kept.
-                            //
-                            // `g.filed` carries over to the source,
-                            // and it MUST: for a TV-filed job the
-                            // folder `relocate_completed` moves FROM
-                            // is the shared season folder (see its
-                            // `same_place` comment), so `move_split`
-                            // can name a directory full of the
-                            // user's other episodes. Hardcoding
-                            // `false` here - "the source is always a
-                            // job-owned folder" - would have handed
-                            // a whole season to `remove_user_dir` on
-                            // a single episode's delete. With the
-                            // flag it takes the narrow per-episode
-                            // path, exactly as the destination side
-                            // above already does.
-                            let src = std::path::PathBuf::from(&g.move_split);
-                            let claimed = || {
-                                queue_dirs.contains(&src)
-                                    || records
-                                        .iter()
-                                        .zip(&plan)
-                                        .any(|(o, op)| !op.doomed && o.out_dir == src)
-                            };
-                            if !g.move_split.is_empty() && src != g.out_dir && !claimed() {
-                                d.reserved.lock_ok().insert(src.clone());
-                                to_remove.push((
-                                    filed_stem(&g).to_string(),
-                                    src,
-                                    g.filed,
-                                    delete_tail(&g, || {
-                                        crate::naming::job_suffix(d, filed_stem(&g))
-                                    }),
-                                ));
-                            }
-                        } else {
-                            // A verified re-download published
-                            // over this record's directory and
-                            // lives there now. Removing the
-                            // record is right; removing the
-                            // files would destroy the newer job.
-                            info!(
-                                target: "history",
-                                "{}: record removed, files kept - {} \
-                                         belongs to another job now",
-                                g.nzo_id,
-                                g.out_dir.display()
-                            );
-                        }
-                    }
-                }
-                // Now that no global lock is held: the slow half.
-                // Released after the whole batch - see the queue arm
-                // above. It matters more here: `plan_history_delete`
-                // counts only SURVIVORS as a claimant, so two doomed
-                // records sharing one out_dir both earn
-                // `may_remove_files`, and a set holds that directory
-                // once.
-                let reserved_dirs: Vec<std::path::PathBuf> =
-                    to_remove.iter().map(|(_, dir, _, _)| dir.clone()).collect();
-                crate::earlyfile::early_unlink(&early_gone);
-                for (name, dir, filed, tail) in to_remove {
-                    // GH #71: this job's own post-completion streaming
-                    // handles are the one thing in the daemon that can
-                    // still be holding the directory we are about to
-                    // remove.
-                    d.hub.release_handles_for_dir(&dir);
-                    let outcome = remove_job_files(&dir, &name, filed, &tail);
-                    if let FilesGone::Kept(why) = outcome {
-                        kept.push((name, dir, why));
-                    }
-                }
-                {
-                    let mut r = d.reserved.lock_ok();
-                    for dir in &reserved_dirs {
-                        r.remove(dir);
-                    }
-                }
-                // "Delete + files" is two promises, and only the
-                // record half is guaranteed. A row the user deleted
-                // to reclaim the disk space, whose files are still
-                // taking it up, is the case this exists for: the row
-                // was their handle on that folder and it has just
-                // gone, so the path has to be handed back.
-                note_kept_files(d, kept, &mut nzb_by_dir);
-                if count > 0 {
-                    d.note_releases_deleted(&deleted_names);
-                    d.save_queue();
-                }
-                // A class sweep (all/completed/failed) is idempotent:
-                // asking for a state the history is already in is
-                // success, and LunaSea's clear-history dialog reads
-                // false as an error toast (§18). A per-id delete keeps
-                // reporting the miss - an unknown id is diagnosable.
-                let class_sweep = matches!(value.as_str(), "all" | "completed" | "failed");
-                if count > 0 || class_sweep {
-                    // `removed` and `nzo_ids` are both ADDITIVE here:
-                    // SAB's `_api_history_delete` answers a bare
-                    // `report()`, so `{"status": true}` and nothing
-                    // else, and no key of its is dropped. The id list
-                    // is worth carrying anyway - it is the same
-                    // reconciliation problem the queue arm's `nzo_ids`
-                    // solves, and with `search` now narrowing a sweep a
-                    // caller cannot predict the set from its request.
-                    json!({"status": true, "removed": count, "nzo_ids": doomed_ids})
-                } else {
-                    // ...and a per-id miss says WHY, for the reason the
-                    // queue arm above sets out at length: with no `error`
-                    // key the dashboard's two bulk history controls take
-                    // their SUCCESS branch and land a green "Cleared 0
-                    // from the list." over a write that was refused.
-                    //
-                    // Its own sentence rather than a share of the queue's:
-                    // "may have just finished" is true of a queued row and
-                    // false of a history row, which by definition finished
-                    // long ago - the same reason `bbc5b0f84` would not
-                    // reuse `toast.nochange` here. That commit put this
-                    // sentence on the PAGE, in `delHist`/`delHistFiles`
-                    // only; the bulk pair two controls away had no way to
-                    // reach it, so it lives here now and every door onto
-                    // this arm inherits it. Also without a plural noun:
-                    // one id and a 250-id selection get the same words.
-                    json!({"status": false, "removed": 0, "nzo_ids": [],
-                        "error": "nothing in your history matched that - it may \
-                                  have been removed already"})
-                }
-            }
+            // GH #86: spend a history delete's undo token. Its own
+            // verb, for the reason the queue's `undelete` is one: it is
+            // the opposite action, and a mode that deletes or restores
+            // depending on a parameter is one typo away from the wrong
+            // one. The two verbs share a spelling and NOT a store - a
+            // queue token handed to this arm misses, which is what it
+            // should do.
+            Some("undelete") => hist_undelete_arm(d, &value),
+            Some("delete") => hist_delete_arm(d, params, &value),
             _ => history_json(d, params),
         }
     })

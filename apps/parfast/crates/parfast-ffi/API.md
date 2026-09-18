@@ -48,6 +48,16 @@ the cancel at its next honouring point (below) and the session's own
 memory is released when the last of them lets go. Do not call any other
 `pf_*` function on a session concurrently with freeing it.
 
+Freeing the session also REMOVES the wake, so no worker still winding
+down can ring it. That is not the same as a promise that no callback is
+running: one already inside your function when the free happens keeps
+running to its end. So a host that frees the wake's `ctx` must first
+either remove the wake (`pf_session_set_wake(s, NULL, NULL)`) or free the
+session, and then make sure no callback is still in flight - both shipped
+wrappers clear the callback before the free and marshal the callback onto
+their UI thread, which does exactly that. A `ctx` that outlives the
+process, or one owned by the callback itself, needs none of this.
+
 Settings that do not parse are NOT a refusal to start. A corrupt
 preferences file must be an app that launches and complains, never an
 app that will not launch, so `pf_session_new` falls back to the
@@ -84,7 +94,47 @@ As section 4.5, in full. Notes on what the core does with it:
   members - the reference's own rule.
 - A source that is not on disk is an ERROR (`missing_source`), not a
   silent omission: a job that quietly protects four of five named files
-  is the worst outcome available.
+  is the worst outcome available. A named source that is neither a
+  folder nor an ordinary file - a pipe, a socket, a device - is an
+  ERROR too (`unsupported_source`, **ADDED** 17 Sep 2026): there is
+  nothing there to hash, and opening a fifo for reading blocks until a
+  writer appears, forever, inside a call no Cancel can reach.
+- **A WALK NEVER LEAVES THE FOLDER IT WAS GIVEN** (17 Sep 2026). A link
+  found while walking is not followed and not protected, and neither is
+  anything that is not an ordinary file. That is the reference's own
+  rule, measured: par2cmdline over a folder holding a directory link, a
+  file link and a fifo beside one real file reports
+  `Source file count: 1`. Before this, a `loop -> .` inside a source
+  folder was re-entered until the kernel's symlink limit stopped it -
+  one file became 95 members, 30 of them a file from a folder the user
+  never chose. A source the user NAMED is still followed as spelled,
+  link or not: `/tmp` is a link on macOS and a path somebody typed is a
+  path they meant.
+- **What a walk could not take in is REPORTED, never a refusal.** A
+  folder `read_dir` refuses, a link not followed, an item that is not an
+  ordinary file: each reaches `warnings` on the preview - FIRST in the
+  list, ahead of the arithmetic's own notes - and `result.warnings` on
+  the finished job. Unreadable folders are NAMED, up to three; the other
+  two kinds are counted. It is deliberately not fatal: one unreadable
+  `.Trashes` or `.Spotlight-V100` must not refuse a create over the
+  volume that holds it. Before this the whole subtree vanished and the
+  plan reported success over what was left.
+- **`overwrite:false` PROTECTS THE WHOLE SET, and does it at the open**
+  (17 Sep 2026). Every file of the set is protected, not just the
+  `output` index: a set whose `.par2` had been deleted, or one written
+  under a different `first_recovery_block`, still has its recovery
+  volumes on disk, and those are files a create destroys. A clash is a
+  failed job with `error.code = "exists"` naming the path.
+
+  The guarantee is the ENGINE's, not a look-before-you-write: the create
+  opens every file with `O_EXCL` (`parfast c --no-clobber`, reaching
+  `par2gen::CreatePlan::no_clobber`), so two creates started together on
+  one base cannot both win and a set that appears after the check is
+  refused rather than truncated. A host may rely on it: with
+  `overwrite:false`, a job that reports `done` destroyed nothing.
+  `overwrite:true` is par2cmdline's own behaviour and the default of the
+  `parfast` command line, which is why it is what the CLI does when
+  nothing asks otherwise.
 - `recovery.percent` is rounded to a WHOLE percent, because that is
   what the reference's `-r` takes. The preview says so in `warnings`.
   Use `{"count":n}` for finer control.
@@ -165,6 +215,7 @@ As section 4.5, with these additions:
 | `state: "interrupted"` | **ADDED** enum value | Section 5.5 requires a job that was running when the app quit to come back marked *Interrupted* and re-runnable. Reached only by loading a persisted queue. |
 | `result.checksum.entries` | **ADDED** | One row per checksum entry, in the file's own order: `{"name","expected","actual","status"}` with `status` one of `ok` / `mismatch` / `missing`. Section 5.4's Verify table is *Name \| Expected \| Status* per file and the three counts cannot draw it. `actual` is what the file on disk came to, and is empty for a `missing` row. Omitted for a checksum CREATE, which has nothing to compare. |
 | `result.exit_code` | **ADDED** | The process exit code the equivalent `parfast` line would have returned. The CLI's dialect is the one thing a script user already knows, and a GUI that hides it makes its own behaviour unreproducible from a terminal. |
+| `result.warnings` | **ADDED** (17 Sep 2026) | What the job could not take in: a folder that could not be read, a link a walk did not follow, an item that is not an ordinary file. Omitted when empty. On the RESULT and not only on the preview because the walk happens AGAIN when the job runs, over a tree that may have changed - a folder that became unreadable since the pane was drawn would otherwise reach nobody. Never an error: show it beside Done. It matters most on a checksum CREATE, where what is not in the manifest is not checked and the verify that reads it back reports CLEAN over the gap. |
 | `command` | **ADDED** | The `parfast` command line equivalent to this job, for the Advanced pane's "show the equivalent command". Empty for the two checksum kinds, which have no CLI equivalent. |
 
 `eta_ms`, `rate_bytes_per_s`, `survey`, `result` and `error` are OMITTED
@@ -284,7 +335,7 @@ would be a pane that cannot be filled in from left to right.
 A host HIDES any control whose capability is false.
 
 ```json
-{"version":"1.5.0-beta.1","engine":"nzbkit 1.0.0","cpu":"aarch64",
+{"version":"1.6.0","engine":"nzbkit 1.0.0","cpu":"aarch64",
  "kernel":"neon",
  "std_naming":true,"volume_limit_explicit":true,
  "unicode_policy":false,"comment":true,
@@ -316,7 +367,7 @@ This is the most important paragraph in this file for a UI lane.
 | verify | per member, with ETA and rate | between members | between members |
 | checksum create / verify | per file | between files | between files |
 | repair | **four phases, each a rising fraction that lands on full** | **inside all of them except the solve** | **inside all of them** |
-| create | **hashing and the fold as one rising fraction, then the volume writes** | **inside all of them, to within one transform stripe** | **inside all of them, and it leaves NOTHING on disk** |
+| create | **hashing and the fold as one rising fraction across every fold batch, then the volume writes** | **inside all of them, to within one transform stripe** | **inside all of them, and it leaves NOTHING on disk** |
 
 **The repair row changed on 12 Sep 2026** (plan section 4.2 item 1
 landed). It used to read "to the end of the verify half, then stops
@@ -336,6 +387,24 @@ are how it finds out.
   both onto 0-90% and takes whichever is further; the volume writes are
   the last 10%. `phase` still says which of the two last reported, so a
   host that wants a sentence has one.
+
+  **Two corrections to that span, 17 Sep 2026** (claim
+  `gh88-gui-create-bar-batch-frame`), which change the figures a host
+  draws on a MEMORY-CAPPED create and leave every other create's
+  unchanged. Such a create folds the set a batch of volumes at a time
+  and the engine re-sizes the fold phase at each, so the 0-90% span is
+  now cut into one segment per batch: the fold walks its own segment,
+  and the hashing, which reads the payload once beside the FIRST batch,
+  may not push the bar past the end of that batch. Without both, an
+  18-batch create reached 90% during batch 1 and stayed there.
+  Second, **the volume writes now wait for the fold to finish with the
+  bar.** They genuinely overlap it on two of the engine's arms, and
+  drawing them as they arrived put the bar into the last 10% within the
+  first batch and flipped `phase_text` between *Building the recovery
+  blocks* and *Writing the recovery volumes* for the whole overlap. A
+  host therefore sees the writes once, at the end, and the last tenth
+  can cross quickly on an arm where the writing was done alongside the
+  folding. Nothing was added or removed: the same two fields carry it.
 - **A cancelled create leaves nothing.** Not "nothing since the last
   volume" - nothing: the engine unlinks the index and every volume the
   run wrote. That is the only honest outcome, because a volume is
@@ -380,6 +449,16 @@ them; they are here because the sentence names them.
 Those weights are a LABELLING choice taken once in the session so the
 two apps cannot disagree, not a prediction. The bar is monotone across
 phases as well as within one.
+
+**On a memory-capped repair the middle two shares are PER SWEEP**
+(17 Sep 2026, same claim). Such a repair sweeps the payload once per
+slab and the engine re-enters the fold and the solve at every one, so
+45 - 95% is cut into one segment per sweep and the 40/10 weighting sits
+inside each segment rather than spanning the repair. A repair that does
+not slab, which is the ordinary one, draws exactly the table above.
+Before this the bar read 95% for every sweep after the first while the
+sentence under it went on counting, which is the defect the daemon's
+own bar had until 16 Sep 2026.
 
 **Cancel** is polled per member, per fed block, per fold unit and per
 written block, so it ends a repair from wherever it is. **What a

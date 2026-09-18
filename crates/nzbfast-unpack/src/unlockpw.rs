@@ -46,20 +46,38 @@ pub fn encrypted_rar(dir: &Path) -> Option<PathBuf> {
 /// the log. RAR keeps first claim so the common case pays no extra
 /// probe, and so the name reported to the UI stays the one the existing
 /// copy expects.
+///
+/// # The 7z arm asks the EXTRACTOR what the containers are
+///
+/// It used to scan the directory itself for files whose final extension
+/// was exactly `7z`, and that is not the shape the field posts. A split
+/// set is `set.7z.001`, `set.7z.002`, ... - every part's extension is a
+/// NUMBER, so the loop examined none of them - and an obfuscated
+/// container carries no meaningful extension at all. Both are grouped
+/// perfectly well by [`crate::rarfix::collect_sevenz_archives`], which is
+/// what [`unlock_non_rar`] below already spends a password on, so the
+/// probe and the spend disagreed about what was even in the folder: the
+/// job reported a generic "could not be unpacked", `settle_locked_failure`
+/// returned at the `None` here before setting the password state, and the
+/// one remedy that would have worked was never offered. (N2,
+/// reports/code-audit-2026-09-17.)
+///
+/// The parts are probed as ONE byte space and not one at a time, because
+/// a 7z container's end header - which is what answers the password
+/// question - sits at the END of the set, so part one on its own says
+/// nothing.
 pub fn encrypted_archive(dir: &Path) -> Option<PathBuf> {
     if let Some(rar) = encrypted_rar(dir) {
         return Some(rar);
     }
-    let mut sevenz: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("7z")))
-        .collect();
+    let mut sevenz = crate::rarfix::collect_sevenz_archives(dir).unwrap_or_default();
+    // Stable across a directory read that hands its entries back in any
+    // order: the NAME a job reports is the one the UI shows.
     sevenz.sort();
     if let Some(z) = sevenz
         .into_iter()
-        .find(|p| nzbkit::nameprobe::sevenz_needs_password(p))
+        .find(|parts| crate::rarfix::sevenz_set_needs_password(parts))
+        .and_then(|parts| parts.into_iter().next())
     {
         return Some(z);
     }
@@ -259,4 +277,146 @@ pub fn unlock(dir: &Path, password: &str) -> std::result::Result<(), Option<Stri
         dir.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A header-encrypted 7-Zip container, which is the `-mhe` shape
+    /// posted for a locked release: the file list AND the payload are
+    /// behind the key, so nothing about it can be read without one.
+    fn mhe_bytes(key: &str, data: &[u8]) -> Vec<u8> {
+        use sevenz_rust2::{
+            ArchiveEntry, ArchiveWriter, Password, encoder_options::AesEncoderOptions,
+        };
+        let mut w = ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+        w.set_encrypt_header(true);
+        w.set_content_methods(vec![AesEncoderOptions::new(Password::from(key)).into()]);
+        w.push_archive_entry(ArchiveEntry::new_file("movie.mkv"), Some(data))
+            .unwrap();
+        w.finish().unwrap().into_inner()
+    }
+
+    /// `bytes` cut into `parts` numbered pieces under `stem`, the way
+    /// the field posts a split container: `stem.001`, `stem.002`, ...
+    fn split_as(dir: &Path, bytes: &[u8], parts: usize, stem: &str) -> Vec<PathBuf> {
+        let cut = bytes.len().div_ceil(parts);
+        bytes
+            .chunks(cut)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let p = dir.join(format!("{stem}.{:03}", i + 1));
+                std::fs::write(&p, chunk).unwrap();
+                p
+            })
+            .collect()
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "nzbfast-unlockpw-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// N2 (reports/code-audit-2026-09-17): a SPLIT encrypted 7z set
+    /// reaches the password path.
+    ///
+    /// The probe scanned for files whose final extension was exactly
+    /// `7z`, which every part of `set.7z.001`, `set.7z.002`, ... fails -
+    /// their extensions are numbers. So it examined none of them and
+    /// answered None, `settle_locked_failure` returned at that None
+    /// before setting the password state or trying a single candidate,
+    /// and the job died as a generic "an archive in the output directory
+    /// could not be unpacked" for a release whose entire remedy is a
+    /// password. The unlock ladder beside it had no such blindness - it
+    /// has always grouped these through `collect_sevenz_archives` - so
+    /// the two halves disagreed about what was in the folder.
+    ///
+    /// The set is cut into FOUR parts and the key is in the LAST one,
+    /// which is where a 7z end header lives: a probe that read part one
+    /// and stopped would answer no here.
+    #[test]
+    fn a_split_encrypted_7z_set_is_seen_as_password_protected() {
+        let dir = tmp("split7z");
+        let data: Vec<u8> = (0..150_000u32).map(|i| (i * 7 + 3) as u8).collect();
+        let parts = split_as(&dir, &mhe_bytes("n2-split-key", &data), 4, "set.7z");
+        assert_eq!(parts.len(), 4, "the fixture is a four-part set");
+
+        let found = encrypted_archive(&dir).expect("a split encrypted 7z set is locked");
+        assert!(
+            parts.contains(&found),
+            "{} is not one of the set's parts",
+            found.display()
+        );
+        // The NAME a row would show, which is what the caller reports.
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy(),
+            "set.7z.001",
+            "the first part is the name to show"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// N2's other named shape: the same container posted under a stem
+    /// that says nothing about 7z at all (`hash.001`, `hash.002`, ...),
+    /// which `collect_obfuscated_sevenz_splits` groups by its head
+    /// bytes. The old extension scan could not see this one either.
+    #[test]
+    fn an_obfuscated_split_encrypted_7z_set_is_seen_as_password_protected() {
+        let dir = tmp("obf7z");
+        let data: Vec<u8> = (0..120_000u32).map(|i| (i * 3 + 9) as u8).collect();
+        let parts = split_as(&dir, &mhe_bytes("n2-obf-key", &data), 4, "hash");
+        let found = encrypted_archive(&dir).expect("an obfuscated encrypted set is locked");
+        assert!(
+            parts.contains(&found),
+            "{} is not one of the set's parts",
+            found.display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The control arm, and the one that matters most: a PLAIN split
+    /// 7-Zip set must NOT raise the key.
+    ///
+    /// The probe answers "does this refuse to open without a password",
+    /// not "is this several files" - a job wearing a password
+    /// affordance it cannot use is its own defect, and the cheap fix of
+    /// treating every multi-part set as locked would have shipped one.
+    #[test]
+    fn a_plain_split_7z_set_raises_no_password() {
+        use sevenz_rust2::{ArchiveEntry, ArchiveWriter};
+        let dir = tmp("plain7z");
+        let data: Vec<u8> = (0..90_000u32).map(|i| (i * 5 + 1) as u8).collect();
+        let bytes = {
+            let mut w = ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+            w.push_archive_entry(ArchiveEntry::new_file("movie.mkv"), Some(&data[..]))
+                .unwrap();
+            w.finish().unwrap().into_inner()
+        };
+        split_as(&dir, &bytes, 3, "set.7z");
+        assert_eq!(
+            encrypted_archive(&dir),
+            None,
+            "a plain split set must not ask for a password"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And a single named `.7z`, which is the shape that DID work
+    /// before: the wider discovery must not have lost it.
+    #[test]
+    fn a_single_encrypted_7z_is_still_seen() {
+        let dir = tmp("single7z");
+        let data: Vec<u8> = (0..40_000u32).map(|i| i as u8).collect();
+        let path = dir.join("release.7z");
+        std::fs::write(&path, mhe_bytes("n2-single-key", &data)).unwrap();
+        assert_eq!(encrypted_archive(&dir), Some(path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

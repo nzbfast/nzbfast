@@ -126,6 +126,18 @@ on:
       # repo verbatim.
       - '**/plib.ps1'
       - '**/plib_selftest.ps1'
+      # The deadline watcher, its launcher and its own selftest. The watcher
+      # is the safety mechanism for the borrowed machines in this fleet, and
+      # on 17 Sep 2026 it stood down 32 minutes early on both of them while
+      # printing a line that read like success - so the arm that holds it is
+      # a refusal, and a refusal never runs in normal operation. The launcher
+      # is named here although the selftest does not read it: it is the half
+      # that resolves the round's pid and hands the watcher the round log, so
+      # a change there can break what those cases pin. The wrapper's `--paths`
+      # arm refuses any of the three going unmatched.
+      - '**/deadline.ps1'
+      - '**/deadline_selftest.ps1'
+      - '**/wlaunch.ps1'
       - '.github/workflows/rig-selftest.yml'
   workflow_dispatch:
 
@@ -255,3 +267,9 @@ jobs:
       # selftest and reddens on its own.
       - name: plib selftest
         run: tools/rig-selftest-gate.py --selftest && tools/rig-selftest-gate.py --paths && tools/rig-selftest-gate.py --run-plib
+
+      # The deadline watcher, in the same job rather than a fourth one: it is
+      # the same runner, the same pwsh and the same trigger, and it is ~35 s.
+      # Its own step so a red names which of the two selftests failed.
+      - name: deadline watcher selftest
+        run: tools/rig-selftest-gate.py --run-deadline

@@ -750,6 +750,25 @@ async fn a_kept_files_notice_can_add_the_release_again() {
             None,
         );
         assert!(r.contains("\"status\":true"), "{r}");
+        // GH #86: and the ANSWER says so. `status` describes the record
+        // half and always did - the row left the queue, which is what
+        // was asked for and what worked. A caller told only `true` over
+        // a delete-with-files reports "files deleted" to a user whose
+        // download is still sitting there, which is the GH #71 shape;
+        // the notice strip below is the page's half of the fix and this
+        // is the API's, so a client with no dashboard can tell too.
+        let ans: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(ans["files"]["deleted"], 0, "nothing was removed: {r}");
+        assert_eq!(ans["files"]["pending"], 0, "a paused row defers nothing: {r}");
+        assert_eq!(
+            ans["files"]["kept"].as_array().map(Vec::len),
+            Some(1),
+            "the refusal owes the caller a reason, not just the strip: {r}"
+        );
+        assert!(
+            !ans["files"]["kept"][0].as_str().unwrap_or_default().is_empty(),
+            "an empty reason is the swallowed refusal wearing a key: {r}"
+        );
         std::fs::set_permissions(&out2, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let q = http(port, "/api?mode=queue&output=json", None);

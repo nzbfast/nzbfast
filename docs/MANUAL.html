@@ -382,6 +382,7 @@ is still forming.</li>
 <li>Badges show special states: <i>tried, set aside</i>, <i>prefetching</i>,
 <i>paused</i> (see <a href="#performance">Performance tools</a>).</li>
 <li>A burn-down chart tracks total GB remaining across the queue.</li>
+<li><b>Cancelling is undoable.</b> Stopping a download, or clearing the whole queue, no longer asks first: it acts, and the notice that says so carries an <b>Undo</b>. For ten minutes nzbfast keeps the job's own copy of the NZB, so the row comes back with its category, its priority and whatever it had already downloaded. A download that unpacks as it arrives still asks, because the part it has already fetched cannot be given back.</li>
 </ul>
 <h3 id="dash-browse">Browse index</h3>
 <p>Search everything the built-in indexer has catalogued from your watched groups
@@ -427,6 +428,7 @@ both are set, and 0 turns either one off on its own. Only the History entry is
 removed - the downloaded files stay exactly where they are. The age rule takes
 completed downloads only, so a failed one waits until you retry it or delete it
 yourself; the length limit counts every entry, whatever its outcome.</p>
+<p><b>Removing a History entry is undoable.</b> Clearing the finished or the failed downloads out of the list, and removing a selection, no longer ask first: they act, and the notice that says so carries an <b>Undo</b>. For ten minutes nzbfast keeps each removed entry's own copy of the NZB, so the row comes back where it was, still offering <b>Retry</b>. Removing an entry and deleting its files still asks, because deleted files cannot be given back.</p>
 <h3 id="dash-usage">Data usage</h3>
 <p>Per-provider daily bars and Today / 7-day / 30-day totals, essential for metered
 and block accounts. Block accounts show lifetime usage against their size.</p>
@@ -666,6 +668,7 @@ title row selects the releases it is showing, so a whole title can go to the
 queue in one go. Grouping reads your own index, so it applies to <b>This
 index</b> only; pick <b>Indexers</b> or <b>Both</b> and the table goes flat
 again and says so.</li>
+<li><b>One newsgroup at a time.</b> Click the group name under a release and the page narrows to the releases posted there; a pill above the table names the group until you clear it. It narrows the wall and the table alike, so switching between them keeps it. The other way in is Settings &rarr; Organising &rarr; <b>Indexing</b> &rarr; <b>Groups to scan</b> &rarr; <b>Find…</b>: open a group you already scan and press <b>Indexed releases</b>.</li>
 <li><b>Every release of a title</b> is listed when you open its card, with the
 resolution, the codec, the audio format and the dynamic range (Dolby Vision,
 HDR10) read out of the release name, plus size, age and whether every part is

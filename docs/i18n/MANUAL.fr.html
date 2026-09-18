@@ -395,6 +395,7 @@ le fichier d'origine a disparu depuis longtemps.</li>
 <i>préchargement</i>, <i>en pause</i> (voir <a href="#performance">Outils de
 performance</a>).</li>
 <li>Un graphique de burn-down suit le total de GB restants dans la file.</li>
+<li><b>Annuler se rattrape.</b> Arrêter un téléchargement, ou vider toute la file, ne demande plus de confirmation : l'action est faite, et l'avis qui l'annonce porte un <b>Annuler</b>. Pendant dix minutes, nzbfast conserve sa propre copie du NZB, donc la ligne revient avec sa catégorie, sa priorité et tout ce qui avait déjà été téléchargé. Un téléchargement qui se décompacte au fur et à mesure demande toujours, car la partie déjà récupérée ne peut pas être rendue.</li>
 </ul>
 <h3 id="dash-browse">Parcourir l'index</h3>
 <p>Cherchez tout ce que l'indexeur intégré a catalogué depuis vos groupes surveillés
@@ -439,6 +440,7 @@ téléchargés restent exactement où ils sont. La règle d’âge ne prend que 
 téléchargements terminés : un téléchargement échoué attend que vous le relanciez ou
 le supprimiez vous-même ; la limite de longueur compte toutes les entrées, quel
 qu’ait été leur résultat.</p>
+<p><b>Retirer une entrée de l'historique se rattrape.</b> Effacer de la liste les téléchargements terminés ou ceux qui ont échoué, et retirer une sélection, ne demandent plus de confirmation : l'action est faite, et l'avis qui l'annonce porte un <b>Annuler</b>. Pendant dix minutes, nzbfast conserve la copie du NZB de chaque entrée retirée, donc la ligne revient à sa place et propose toujours <b>Réessayer</b>. Retirer une entrée en supprimant ses fichiers demande toujours, car des fichiers supprimés ne peuvent pas être rendus.</p>
 <h3 id="dash-usage">Consommation</h3>
 <p>Barres quotidiennes par fournisseur et totaux Aujourd'hui / 7 jours / 30 jours -
 indispensable pour les comptes au volume et les comptes à bloc. Les comptes à bloc
@@ -692,6 +694,7 @@ Ouvrez-la avec <b>&#9656;</b> ou en cliquant la ligne ; la case à cocher du tit
 sélectionne les releases affichées. Le regroupement ne vaut que pour <b>Cet index</b>
 ; choisissez <b>Indexeurs</b> ou <b>Les deux</b> et le tableau redevient plat, et il
 le dit.</li>
+<li><b>Un groupe à la fois.</b> Cliquez le nom du groupe sous une release et la page se limite aux releases publiées là ; une pastille au-dessus du tableau nomme le groupe jusqu'à ce que vous l'effaciez. Elle restreint le mur comme le tableau, passer de l'un à l'autre la conserve donc. L'autre entrée est Paramètres &rarr; Organisation &rarr; <b>Indexation</b> &rarr; <b>Groupes à scanner</b> &rarr; <b>Trouver…</b> : ouvrez un groupe que vous scannez déjà et pressez <b>Releases indexées</b>.</li>
 <li><b>Toutes les releases d'un titre</b> apparaissent quand vous ouvrez sa fiche,
 avec la résolution, le codec, le format audio et la plage dynamique (Dolby Vision,
 HDR10) lus dans le nom de la release, plus la taille, l'âge et si toutes les parties

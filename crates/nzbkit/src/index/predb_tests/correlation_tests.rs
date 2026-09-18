@@ -2161,6 +2161,447 @@ fn a_folded_session_correlates_by_its_true_size() {
     teardown(&d, ix);
 }
 
+/// `index_fold_secs` bounds the HOLD, not only the intake.
+///
+/// The three budgeted folds run one slice per `with_index_mut`, so the
+/// budget is a statement about how long the daemon's index write mutex
+/// is held and about nothing else. Until 16 Sep 2026 the loops asked
+/// "is the budget spent?" only AFTER a unit of work, so every slice ran
+/// one whole unit past its deadline. Measured that day on a live
+/// 125 GB index, on an idle 32-core workstation: p50 hold 4,002 ms at a
+/// 4,000 ms budget - the budget, tracked exactly - and p90 4,108 ms, the
+/// overrun being one unit. The overrun is ADDITIVE and not
+/// proportional, which is why scaling a 1 s reading up by four had
+/// missed it.
+///
+/// WHAT THIS ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. It asserts
+/// that the fold's loops actually consult the pacer - every slice below
+/// ends because a unit was declined for want of time - and that the
+/// budget still bounds the work a slice does. It does NOT assert that
+/// the hold landed inside the budget, and that omission is the honest
+/// part: there is no wall-clock assertion about a millisecond-scale
+/// hold that survives this fleet's shared boxes. One fold costs 4.7 ms
+/// alone on the dev Mac and 127 ms with the 8,500-test sweep running
+/// beside it, a 27x dilation, and the slice that pays it is whichever
+/// one the spike lands on.
+///
+/// Four formulations were tried before settling here, and they are
+/// written down so the next person does not walk the same path:
+///
+/// * `held <= budget + one unit` passes on BOTH rules - the paced loop
+///   ends at most one unit early and the unpaced one at most one unit
+///   late, so a one-unit slack covers both. Verified by reverting
+///   `FoldPace::room` and watching it stay green.
+/// * A budget of one and a half units, where the paced loop runs one
+///   unit and the unpaced two, separates them by 1.5x on an idle box -
+///   and reds in the CI sweep, which is where it was caught.
+/// * Counting slices that ended inside their budget, with the budget
+///   recalibrated from the previous slice, survives a steady load and
+///   not a swinging one.
+/// * The budget LEFT when the loop stopped looks sign-clean - zero for
+///   a loop that stops when the budget is gone - but is zero for a
+///   paced loop too, because admitting a unit whenever `left >= worst`
+///   packs a slice right up to its budget.
+///
+/// So the duration property lives where a clock can be trusted: the
+/// admission rule's own arithmetic has deterministic tests in
+/// `foldpace`, and the end-to-end numbers are the live daemon reading
+/// and the two-arm A/B in section 11 of
+/// research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md.
+///
+/// The fixture is sized so that one sub-stride is not free: 48
+/// postings of 300 members, built through real ingest.
+#[test]
+fn a_fold_slice_declines_a_unit_it_has_no_time_for() {
+    /// Foldable units the fixture holds, and it is the WINDOW the
+    /// slice's budget has to land in - see [`UNITS`]. It was 48 until
+    /// 17 Sep 2026, which put the two walls a factor of 8 and a factor
+    /// of 5.6 from the budget, and one fold costing something other
+    /// than the probe measured is a factor either way on a shared box:
+    /// measured at load ~110, 16 at a time, 256 runs, one hit the near
+    /// wall (`slice 0 folded nothing at all`, an 8x fold-cost spike
+    /// between the probe and the slice) and the far one was approached
+    /// to 36 of 45. A hundred puts both walls about a factor of ten
+    /// out, which is what the spread needs.
+    ///
+    /// It is paid for in INGEST and nothing else: measured on the dev
+    /// Mac at load ~110, the fixture build was 2.0-2.3 s of a 2.4 s
+    /// test, so this is close to linear in wall.
+    const STEMS: usize = 100;
+    const MEMBERS: u32 = 300;
+    /// Folds the rate probe needs before it will divide, and it is ONE
+    /// because a bigger number is worse on both axes it trades.
+    ///
+    /// It was three until 17 Sep 2026, on the reading that an average
+    /// over three folds is a better `unit` than one sample. Both halves
+    /// of that are wrong here.
+    ///
+    /// * IT COSTS FIXTURE, UNBOUNDEDLY. A probe round that folds
+    ///   NOTHING leaves the cursor where it was - `shatter_fold` writes
+    ///   `shatter_fold_cursor` only after a whole sub-stride survives
+    ///   the stem loop, and both decline paths `break 'pass` before
+    ///   that - so escalating past a budget that bought zero is FREE.
+    ///   Escalating past one that bought one or two is not: those folds
+    ///   are spent and nothing puts them back. Measured on the dev Mac
+    ///   at load ~90, 36 concurrent runs of this test: rounds of 1 fold,
+    ///   then 2, then a 400 ms round that bought 21, spending 24 of the
+    ///   48 and failing the fixture guard below. Stopping at the FIRST
+    ///   budget that folds anything is the minimum-overshoot stopping
+    ///   rule, and it is the only one of these that spends nothing on
+    ///   the rounds it throws away.
+    /// * AND THE AVERAGE IT BOUGHT IS NOT WORTH IT. What a bigger
+    ///   sample would buy is precision in `held / folds`, and the
+    ///   derivation below does not use that quantity at all: it prices
+    ///   the call's fixed cost separately, for free, and subtracts it.
+    ///   One fold is enough to leave a fold's cost behind after the
+    ///   subtraction, which is all that is wanted.
+    const MEASURE_FOLDS: usize = 1;
+    /// Folds' worth of budget the slice gets ON TOP of the admission
+    /// floor. Since 17 Sep 2026 this is the ONLY term in the budget that
+    /// buys folds, so it is also what the slice's spend out of the
+    /// fixture is proportional to - and that is what fixes its value.
+    ///
+    /// The slice has to fold AT LEAST one posting and FEWER than the
+    /// [`STEMS`] the fixture holds, so the budget has a window of about
+    /// 1 to 45 folds to land in and the only question is where in it.
+    /// Both walls are hit by the same thing - one fold costing something
+    /// other than the probe measured, which on a shared box is a factor
+    /// either way and not an offset - so the safe place is the
+    /// GEOMETRIC middle of the window, `sqrt(1 * STEMS)`, which at
+    /// [`STEMS`] = 100 is ten. That leaves each wall a factor of ten
+    /// out, which is what the measured spread of one fold's cost needs.
+    ///
+    /// It was four until 17 Sep 2026, which is a factor of FOUR from the
+    /// near wall: measured on the dev Mac at load ~140, 160 runs 16 at a
+    /// time, three failed `slice 0 folded nothing at all` when the
+    /// slice's own first fold overran a budget of about four 5 ms folds.
+    /// DO NOT READ THIS AS A NUMBER TO RAISE when it reds again -
+    /// raising it walks towards the other wall, where the slice eats the
+    /// fixture and catches up instead of declining, and both walls are
+    /// the same failure at different ends. The window is what moves:
+    /// [`STEMS`] widens it, and this follows it by square root.
+    const UNITS: u32 = 10;
+    /// ONE slice, and it was four until 17 Sep 2026. The fixture has
+    /// exactly [`STEMS`] foldable units and every pass spends some, so
+    /// the slice count is bounded by arithmetic rather than taste: the
+    /// probe below eats a fold or two, and a slice on a box where a fold
+    /// is cheap relative to the measured one eats a multiple of
+    /// [`UNITS`] (see [`SLICE_SATURATION`], which is measured and not
+    /// assumed). Four slices did not fit in the 48 stems this fixture
+    /// held then and never had; at the local rate it came to about 43 of
+    /// 48, which passed, and on CI it did not. Each pass asserts exactly
+    /// the same two things, so one pass proves the wiring and the others
+    /// only spent fixture.
+    ///
+    /// If the repetition is ever wanted back, the change is STEMS, not
+    /// this - and STEMS is also what sets [`UNITS`], so the two move
+    /// together and the window has to hold `SLICES` slices of it.
+    const SLICES: usize = 1;
+    let d = dir("fold-hold-bound");
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    // How long the whole fixture took to build, which is the only
+    // machine-relative yardstick this test has for "absurdly long" - see
+    // the escalation guard below.
+    let build_t = std::time::Instant::now();
+    for s in 0..STEMS {
+        // A 32-char blob stem per posting, which is what the dark band
+        // wears and what `stem_is_a_name` damns.
+        let stem = format!(
+            "{:032x}",
+            0xe3b0c44298fc1c149afbf4c800000000u128 + s as u128
+        );
+        let subj = format!(r#"[001/003] - "{stem}.par2" yEnc"#);
+        let batch: Vec<_> = (1..=MEMBERS)
+            .map(|p| {
+                over(
+                    &format!("{subj} ({}/6) 4200000", p % 6 + 1),
+                    &format!("r{s}x{p}@h.tld"),
+                    &format!("m{s}x{p}"),
+                    700_000,
+                )
+            })
+            .collect();
+        ix.ingest("alt.binaries.teevee", &batch, 5_000).unwrap();
+    }
+    let built_in = build_t.elapsed();
+    let built: i64 = ix
+        .db
+        .query_row("SELECT COUNT(*) FROM releases", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        built,
+        (STEMS as u32 * MEMBERS) as i64,
+        "the shattered fixture really was built - a fold over nothing \
+         would refuse nothing and assert nothing"
+    );
+
+    // THE CALL'S FIXED COST, MEASURED FOR FREE, and it is measured
+    // separately from a fold's because the budget below needs both and
+    // they behave differently under load.
+    //
+    // A `shatter_fold` call is a sub-stride candidate READ - the pacer's
+    // own first unit, which always runs whatever the clock says (see
+    // `super::super::foldpace`) - and then a run of stem folds, each
+    // admitted only while the time left covers the dearest unit so far.
+    // So a call at a ZERO budget does exactly the read, declines the
+    // first stem, folds nothing, and - because `shatter_fold` writes its
+    // cursor only after a whole sub-stride survives the stem loop -
+    // leaves the fixture untouched. That makes the read's cost free to
+    // sample, and it is sampled more than once because one sample of
+    // anything on a shared box is a lottery ticket.
+    //
+    // Both ends of the spread are kept, and each is used in the
+    // direction where being wrong is safe:
+    //
+    // * `read_hi` sets the admission floor. After the read the pacer's
+    //   worst-unit estimate IS the read, so a slice takes its first stem
+    //   only while `budget - read >= read`, and a budget below twice the
+    //   read folds NOTHING. Taking the dearest sample makes that floor
+    //   generous.
+    // * `read_lo` is what gets SUBTRACTED to leave a fold's own cost
+    //   below. Taking the cheapest sample means the subtraction cannot
+    //   eat the fold it is trying to isolate.
+    const READ_SAMPLES: usize = 3;
+    let (mut read_hi, mut read_lo) = (std::time::Duration::ZERO, std::time::Duration::MAX);
+    for _ in 0..READ_SAMPLES {
+        let t = std::time::Instant::now();
+        let (_, n, done) = ix.shatter_fold(6_000, std::time::Duration::ZERO).unwrap();
+        let held = t.elapsed();
+        assert_eq!(
+            n, 0,
+            "a zero-budget call folded rows, so it is not the fixed cost \
+             this is trying to price - and it spent fixture doing it"
+        );
+        assert!(!done, "the read samples must leave postings for the slice");
+        read_hi = read_hi.max(held);
+        read_lo = read_lo.min(held);
+    }
+
+    // AND A FOLD'S OWN COST, which is the part that has to be bought.
+    // Nothing is asserted about either number; they exist only to size a
+    // budget that admits more than one unit and then runs out.
+    //
+    // WHY THE SUBTRACTION, which is the whole point of the two phases.
+    // `held / folds` stood here until 17 Sep 2026 and is wrong in BOTH
+    // directions, because `held` is `read + folds * fold` and dividing
+    // the lot by `folds` mixes the two:
+    //
+    // * too SMALL when a call bought several folds - it divides the read
+    //   by them too, so `unit * UNITS` can land below twice a read and
+    //   the slice folds nothing. Measured on the dev Mac at load ~160,
+    //   128 concurrent runs: two failed `slice 0 folded nothing at all`,
+    //   both having divided a 50-64 ms `held` by 2-3 folds.
+    // * and too LARGE the moment the call itself is perturbed, which is
+    //   the direction that scales. Taking `held` UNDIVIDED was tried
+    //   first, on 17 Sep 2026, and fixes the first bullet at the cost of
+    //   feeding the read AND the call's own luck into a term that buys
+    //   FOLDS: measured at load ~110, 160 runs 16 at a time, a call that
+    //   overran a 25 ms budget to a 158 ms `held` bought a 634 ms slice
+    //   that folded 40 of the 43 stems left - three short of exhausting
+    //   the fixture and failing the refusal assertion instead of the
+    //   fold count.
+    //
+    // Split, the fixed part moves the `2 * read_hi` term only, which
+    // buys admission and not work, so the slice's spend stays
+    // proportional to [`UNITS`] whatever the box does.
+    let mut probe_folds = 0usize;
+    let fold = {
+        // Starting at twice the dearest read rather than at a constant:
+        // the floor above is exactly where a budget stops folding
+        // nothing, so it is where a search for one that folds something
+        // belongs. The 25 ms that stood here was a guess at a fast box.
+        let mut probe = read_hi * 2;
+        loop {
+            let t = std::time::Instant::now();
+            let (_, n, done) = ix.shatter_fold(6_000, probe).unwrap();
+            let held = t.elapsed();
+            let folds = n / (MEMBERS as usize - 1);
+            probe_folds += folds;
+            assert!(!done, "the probe must leave postings for the slices");
+            if folds >= MEASURE_FOLDS {
+                // The second estimator is the naive rate with the read
+                // counted as one more fold. It is a floor and not a
+                // refinement: when the probe's own read happened to beat
+                // every sample above, the subtraction leaves too little
+                // (or nothing at all) and a budget with no fold in it
+                // parks mid-stem and folds zero.
+                let folds = folds as u32;
+                break (held.saturating_sub(read_lo) / folds).max(held / (folds + 1));
+            }
+            // THE CEILING IS THE FIXTURE BUILD, NOT A CLOCK. One stood
+            // here reading `probe < 8 s`, and eight seconds is an
+            // ABSOLUTE bound on an operation whose speed is the box's:
+            // a box where a fold is dear needs more rounds to buy one,
+            // so the bound tightened exactly where the work was
+            // slowest. It cost a day of red across three jobs on
+            // 17 Sep 2026 in its other form, the constant fold ceiling
+            // this test carried until that day, and the lesson is the
+            // same one - a constant cannot bound a derived quantity.
+            //
+            // A ceiling is still wanted, because the thing this loop
+            // would otherwise do for ever is the interesting regression:
+            // a pacer that refuses units it HAS time for never folds at
+            // any budget, never reaches the top, and so never trips the
+            // `!done` assert above either. `built_in` bounds it in the
+            // box's own units - the probe is looking for the cost of ONE
+            // fold, and a budget past what the whole 100-posting fixture
+            // took to INGEST is not a slow box, it is a fold that will
+            // not fold. Measured on the dev Mac at load ~110: the build
+            // is about 2 s and the probe wants 0.4-30 ms of it, so the
+            // guard sits three orders of magnitude clear of honest use
+            // and scales with whatever the box is.
+            assert!(
+                probe < built_in,
+                "the probe escalated past {built_in:?}, the cost of \
+                 building the whole fixture, without buying a fold - on \
+                 any box that is a fold refusing units it has time for \
+                 rather than a box that is slow"
+            );
+            probe *= 4;
+        }
+    };
+
+    // **THE PROBE'S COST IS NOT BOUNDED, SO SAY SO HERE RATHER THAN LET
+    // THE SLICE BELOW FAIL WEARING A CONFUSING FACE.** The escalation
+    // above makes a NEW `shatter_fold` call per iteration and every call
+    // spends stems PERMANENTLY - the fixture has [`STEMS`] foldable units
+    // and nothing puts one back. So a box where 25 ms buys two folds
+    // spends two, then two more at 100 ms, then two at 400 ms, and then
+    // whatever the call that finally qualifies spends, which on a box
+    // where a fold is cheap relative to a measured unit is a saturating
+    // [`SLICE_SATURATION`]. [`MEASURE_FOLDS`] = 1 makes that the rare
+    // case rather than the common one - a round that folds nothing
+    // spends nothing, and the first round that folds anything is the
+    // last - but it does not make it impossible: the round that
+    // qualifies can still be a big one, which is the 21-fold round in
+    // the measurement at [`MEASURE_FOLDS`]. "The probe costs a fold or
+    // two" is the best case and not the cost: measured over 256 runs
+    // 16 at a time it was 1 on 252 of them and 6 on the worst.
+    //
+    // Without this the next box to exceed the budget fails at
+    // `still had a posting to fold` below, which names the slice and
+    // hides the fixture. This is the repo's "failing to find is failing"
+    // rule: a fixture that can no longer answer the question must report
+    // its own blindness instead of producing a puzzle.
+    /// The most folds one slice has been SEEN to take, and it is an
+    /// OBSERVATION RATHER THAN A CEILING - the distinction matters if
+    /// anyone ever resizes this fixture against it, and it is why this
+    /// guard exists at all.
+    ///
+    /// Nothing bounds a slice's spend above. It folds
+    /// `budget / one fold`, the budget is [`UNITS`] folds as the probe
+    /// measured one, and the probe measuring a fold dearer than the
+    /// slice's own folds turn out to be buys fixture at that ratio.
+    /// Measured on the dev Mac at load ~110, 256 runs 16 at a time: a
+    /// nominal ten folds came out at 81 on the worst run, so the tail is
+    /// about eight times nominal, which is the same factor of eight the
+    /// near wall at [`UNITS`] shows from the other side.
+    ///
+    /// THE OLD NUMBER HERE WAS 27, AND IT IS WORTH KEEPING WHY. All
+    /// three jobs that went red on 17 Sep 2026 - windows-unit
+    /// (run 35173756175), the nightly windows-one-process, and the Linux
+    /// coverage job under llvm-cov (run 35192816668) - read exactly 27,
+    /// on two different platforms. `shatter_fold` paces in SUB_STRIDEs
+    /// of 1,000 ids (`index::maintenance`) and a stem here is
+    /// [`MEMBERS`] = 300 consecutive ids, so one sub-stride is 3.33
+    /// stems and eight of them are ids 1..8,000 = 26 whole stems plus a
+    /// straddle = 27 folds. The sub-stride QUANTISES the tail, which is
+    /// why one integer appeared on two boxes and why a number read off
+    /// one incident looks like a hard cap when it is not one.
+    const SLICE_SATURATION: usize = 81;
+    let left = STEMS.saturating_sub(probe_folds);
+    assert!(
+        left > SLICE_SATURATION,
+        "the rate probe spent {probe_folds} of {STEMS} foldable stems and \
+         left {left}, but one slice has been seen to take \
+         {SLICE_SATURATION} - this \
+         fixture can no longer answer the question on this box. Raise \
+         STEMS. Do NOT lower MEMBERS to pay for it: 300 is what makes one \
+         fold cost enough that a sub-stride is not free, which is the \
+         condition this test was commissioned against."
+    );
+
+    for i in 0..SLICES {
+        let _ = super::super::foldpace::take_refusals();
+        // The admission floor plus [`UNITS`] folds. The two terms are
+        // measured separately and only the second one buys work - see
+        // the derivation above.
+        let budget = read_hi * 2 + fold * UNITS;
+        let (_, n, done) = ix.shatter_fold(6_000, budget).unwrap();
+        let folds = n / (MEMBERS as usize - 1);
+        // `folds > 0` ONLY, and the `!done` that stood beside it is gone
+        // as redundant rather than as inconvenient. In `shatter_fold`
+        // (`index::maintenance`) `done` IS `reached_top`, and
+        // `reached_top` is set on exactly one path - the one that runs
+        // out of ids. Both decline paths `break 'pass` without touching
+        // it. So `take_refusals() > 0` on the next line already implies
+        // `!done`: a call cannot both have declined a unit for lack of
+        // time and have caught up in the same pass. Keeping it cost
+        // nothing in truth and coupled the test to how much fixture was
+        // left, which is the coupling that made this a red.
+        //
+        // `folds > 0` stays and is not redundant: it catches a pacer that
+        // declines the very FIRST unit (0 folds, 1 refusal), and the
+        // `cursor >= top` early return, which answers `(0, 0, true)`
+        // having recorded no refusal at all.
+        let _ = done;
+        assert!(folds > 0, "slice {i} folded nothing at all");
+        assert!(
+            super::super::foldpace::take_refusals() > 0,
+            "slice {i} ended without the pacer declining anything, so it \
+             says nothing about whether the fold consults it"
+        );
+        // THERE IS DELIBERATELY NO UPPER BOUND ON `folds` HERE. One
+        // stood here - `folds <= UNITS * 4` - under a comment claiming
+        // "load only ever pushes this DOWN, so there is nothing here for
+        // a slow box to trip over". That reasoning was wrong and it held
+        // main red for over twelve hours across THREE jobs:
+        // windows-unit on 7c46cf37 (run 35173756175), the nightly
+        // windows-one-process, and - the one whose step name hides it -
+        // the LINUX coverage job (run 35192816668, ubuntu-24.04), whose
+        // step is merely NAMED "nzbkit lib coverage (floor 87, product
+        // files only)" and never reached a percentage because the test
+        // binary exited 101 first. All three read
+        // "slice 0 folded 27 postings on a 4-unit budget" against a
+        // ceiling of 16.
+        //
+        // The defect is that THE BUDGET IS DERIVED AND THE CEILING IS A
+        // CONSTANT. The budget is measured on this box, so anything that
+        // over-measures inflates it while 16 stays put, and `folds` is a
+        // ratio of two independently noisy quantities. The derivation of
+        // the day divided a call's whole `held` by as few as three
+        // folds, so it carried a fixed per-call cost divided by three;
+        // anything that makes that fixed cost dear relative to a fold
+        // inflated it. That is not a platform
+        // property - llvm-cov is the extreme case (that nzbkit lib run
+        // took 690 s) and a contended Windows runner is another - and
+        // the identical 27 on both platforms says it saturates rather
+        // than drifts.
+        //
+        // A bound derived from the slice's own clock is not load-proof
+        // either: one preempted unit blows any duration multiple. The
+        // two assertions above carry this test's value and are load-proof
+        // by construction - a pacer that was ignored outright would fold
+        // everything, which `!done` catches, and would decline nothing,
+        // which `take_refusals` catches. Section 11 of
+        // `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md` lists the
+        // formulations already tried and
+        // `research/RED-FOLD-SLICE-DECLINE-IS-NOT-WINDOWS-2026-09-17.md`
+        // carries the three jobs' logs. Do not re-add a constant ceiling.
+        //
+        // MEASURED WHILE FIXING IT, so the next lane does not repeat it:
+        // a probe that discards its cold first call (foldpace keeps its
+        // unit estimate as a running maximum, per call, never remembered
+        // across calls, and its first unit always runs - so the first
+        // call against a fresh index measures a rate no later slice sees)
+        // is a real improvement to `unit` AND made this test fail more
+        // often, 1 in 8 against 0 in 8 for the unchanged file on the same
+        // box in the same minutes. It spends about three folds of the
+        // fixture's 48 and that was enough to tip `!done` at the last
+        // slice. It is the right idea and it needs STEMS headroom first.
+    }
+    teardown(&d, ix);
+}
 /// The hold bound's sharpest case, and the one that is deterministic:
 /// a bound of ZERO examines no rows at all, and - the property that
 /// matters - it must not move the cursor, because a walk that parked
@@ -2200,20 +2641,27 @@ fn a_zero_hold_bound_examines_nothing_and_skips_nothing() {
 /// between them, rather than in one hold nothing bounded.
 ///
 /// WHERE a slice stops is wall-clock and therefore not assertable; the
-/// invariant is. So this asserts coverage rather than the split, and it
-/// tolerates a slice that gets no row at all (the clock beating the
-/// first `corr_consider` is a legitimate outcome of a real bound, and
-/// the loop simply retries). The bound is 50 ms against a setup cost of
-/// tens of microseconds, so the loop makes progress on any box this
-/// repo runs on.
+/// invariant is. So this asserts coverage rather than the split. It
+/// does NOT tolerate an empty slice: since the first-row guarantee
+/// (see `predb_corr_backlog`'s doc comment) a slice with rows left to
+/// walk examines at least one whatever the clock did during setup, so
+/// "no row at all" is a defect here and not box noise. That is what
+/// makes the 30 a loop bound rather than a retry budget - twelve rows
+/// need at most twelve slices - and it holds under any dilation,
+/// because the guarantee is a count test and not a timing one.
 #[test]
 fn a_bounded_slice_loop_covers_the_whole_walk_exactly_once() {
     let (d, mut ix) = corr_hold_fixture("corr-hold-slices", 12);
     let mut total = 0usize;
-    for _ in 0..30 {
+    for slice in 0..30 {
         let (n, _, _) = ix
             .predb_corr_backlog(100, 0, false, 5000, std::time::Duration::from_millis(50))
             .unwrap();
+        assert!(
+            n >= 1,
+            "slice {slice} examined nothing with {} row(s) still unwalked",
+            12 - total
+        );
         total += n;
         if total >= 12 {
             break;
@@ -2231,6 +2679,40 @@ fn a_bounded_slice_loop_covers_the_whole_walk_exactly_once() {
         (0, 0, 0),
         "the walk must be parked, not still holding unexamined rows"
     );
+    teardown(&d, ix);
+}
+
+/// The first-row guarantee, stated as the deterministic case rather
+/// than the pathological one it exists for: a bound that the call's own
+/// SETUP has already outlasted still examines exactly one row and parks
+/// below it. One nanosecond is a bound no box can complete two kv
+/// reads, a `MIN(id)`, a cursor read and the stride SELECT inside, so
+/// this asserts the guarantee itself and not a race against it.
+///
+/// Without it the answer is (0, 0, 0) with the cursor unmoved, which is
+/// not merely a lost slice: `tasks::enrich` breaks its slice loop on
+/// `n == 0`, so the whole backlog leg would make no progress and the
+/// next tick would ask the identical question. See the module rule in
+/// `crate::index::foldpace`.
+#[test]
+fn a_bound_the_setup_already_outlasted_still_runs_one_row() {
+    let (d, mut ix) = corr_hold_fixture("corr-hold-first-row", 5);
+    let before = ix.kv_get("predb_corr_cursor");
+    let (examined, _, _) = ix
+        .predb_corr_backlog(100, 0, false, 5000, std::time::Duration::from_nanos(1))
+        .unwrap();
+    assert_eq!(examined, 1, "the first row must run however late the clock");
+    assert_ne!(
+        ix.kv_get("predb_corr_cursor"),
+        before,
+        "a walk that examined a row must park below it"
+    );
+    // And the remaining four are still reachable, so the guarantee
+    // bought progress rather than a skip.
+    let (rest, _, _) = ix
+        .predb_corr_backlog(100, 0, false, 5000, std::time::Duration::MAX)
+        .unwrap();
+    assert_eq!(rest, 4, "every unexamined row must still be reachable");
     teardown(&d, ix);
 }
 

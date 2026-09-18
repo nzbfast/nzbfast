@@ -42,6 +42,11 @@ mod e2e_chip6;
 // (sibling dir, size gate).
 mod e2e_containers;
 mod e2e_drop;
+// The one-pass writer's write-coalescing window, ARMED - the coverage
+// that went with `COALESCE_CAP_DEFAULT` going back to 0 on 17 Sep 2026
+// (sibling dir, size gate; its header carries the two round-44 defects
+// these legs stand over).
+mod e2e_wstage;
 // Zero-length FileDescs (VIDEO_TS placeholders) - case 3 of the no-RAR
 // deobfuscation family (sibling dir, size gate).
 mod e2e_emptydesc;
@@ -4612,9 +4617,12 @@ async fn nested_inner_par2_repairs_data_damaged_store_layer() {
     let mut fx = Fixture::new("nestdatapar");
     let show = payload(300_000, 56);
     let whole = crc32fast::hash(&show);
-    // Header CRCs the way real archivers write them: earlier split
-    // pieces carry their own bytes' CRC32, the last carries the whole
-    // unpacked file's (the one the verifier checks).
+    // Header CRCs where an archiver puts them: the whole unpacked
+    // file's CRC32 on the FINAL fragment and none on the split
+    // fragments before it, so the final volume's file header is four
+    // bytes longer than theirs - the real asymmetry. The uniformity
+    // assertion below still holds, because both split volumes lose the
+    // same four bytes.
     // WinRAR-true geometry, and it is load-bearing for what this test
     // asserts: volume 0's main header has no volume-number field, so it is
     // one byte shorter and must carry one byte MORE data for the volume
@@ -4634,25 +4642,29 @@ async fn nested_inner_par2_repairs_data_damaged_store_layer() {
     // volume is allowed to be short, as in any real set.
     const DL: usize = 100_000;
     let (a, b) = (DL + 1, DL + 1 + DL);
-    let mut iv = fixtures::rar5_volume_set_crc(&[
-        &[(
-            "show.mkv",
-            300_000,
-            &show[..a],
-            false,
-            true,
-            Some(crc32fast::hash(&show[..a])),
-        )],
-        &[(
-            "show.mkv",
-            300_000,
-            &show[a..b],
-            true,
-            true,
-            Some(crc32fast::hash(&show[a..b])),
-        )],
-        &[("show.mkv", 300_000, &show[b..], true, false, Some(whole))],
-    ]);
+    let mut iv = fixtures::rar5_volume_set_crc_layout(
+        &[
+            &[(
+                "show.mkv",
+                300_000,
+                &show[..a],
+                false,
+                true,
+                Some(crc32fast::hash(&show[..a])),
+            )],
+            &[(
+                "show.mkv",
+                300_000,
+                &show[a..b],
+                true,
+                true,
+                Some(crc32fast::hash(&show[a..b])),
+            )],
+            &[("show.mkv", 300_000, &show[b..], true, false, Some(whole))],
+        ],
+        fixtures::Rar5Head::default(),
+        fixtures::Rar5Crc::FinalFragment,
+    );
     // The premise above, checked rather than assumed: if the fixture helper
     // ever changes its header layout this must fail loudly here, not turn
     // back into a timing-dependent assertion further down.

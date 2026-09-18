@@ -1456,6 +1456,13 @@ const MAX_RECREATED_FILES: usize = 1000;
 /// soak-era shell profile or bench arm that still exports it is inert
 /// rather than surprising - it never disarmed anything, and after the
 /// flip it asks for what already happens.
+///
+/// env-inventory-gate: the row for `NZBFAST_CHASE_REPAIR` in
+/// docs/ENVIRONMENT.md is deliberate and nothing reads the name, which
+/// is the whole point of it - the row tells an operator who still
+/// exports it that it does nothing. Retire the row and this waiver
+/// together when the accepted-no-op release is behind us; until then a
+/// gate that cannot see a reader is reporting the truth.
 fn chase_repair_on() -> bool {
     chase_repair_on_value(std::env::var("NZBFAST_NO_CHASE_REPAIR").ok().as_deref())
 }

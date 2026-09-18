@@ -651,6 +651,35 @@ mod switch_tests {
         }
     }
 
+    /// `--no-clobber` is accepted on every command, is OFF unless it is
+    /// given, and is not reached by a near-miss spelling.
+    ///
+    /// The default is the load-bearing half: par2cmdline overwrites and
+    /// parfast is a drop-in, so a `parfast c` over an existing set must
+    /// keep replacing it. Accepted on verify and repair for the same
+    /// wrapper reason `--slow` and `--digest-cache` are - one set of
+    /// switches passed to all three commands must not fail on the two
+    /// where it does nothing.
+    #[test]
+    fn no_clobber_is_opt_in_and_accepted_on_every_command() {
+        let parse = |args: &[&str]| {
+            let v: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+            super::cli::parse("parfast", &v)
+        };
+        for cmd in ["c", "v", "r"] {
+            let p = parse(&[cmd, "--no-clobber", "set.par2"]).expect("--no-clobber is accepted");
+            assert!(p.opts.no_clobber, "cmd={cmd}");
+            let p = parse(&[cmd, "set.par2"]).expect("the bare command parses");
+            assert!(!p.opts.no_clobber, "cmd={cmd} must default to overwriting");
+        }
+        for spell in ["--no-clobbe", "--noclobber", "--NO-CLOBBER", "--no_clobber"] {
+            assert!(
+                parse(&["c", spell, "set.par2"]).is_err(),
+                "{spell} must not be taken for --no-clobber"
+            );
+        }
+    }
+
     /// `--comment` parses in BOTH GNU spellings, on every command, and
     /// the text survives the split the parser does on `-<letter><rest>`
     /// - which means an `=` inside the comment itself must reach the

@@ -133,6 +133,10 @@ Options: (create)
   -n<n>    : Number of recovery files (max {maxn}) (don't use both -n and -l)
   -R       : Recurse into subdirectories
              (Be aware of wildcard shell expansion)
+  --no-clobber
+           : Stop rather than write over a file that is already there
+             under one of this set's names. Off by default: creating a
+             set again over the old one is ordinary use
    @       : Process a listing of files specified in text (file) input
              (eg. @filelist.txt, or bare @ to read from stdin)
 

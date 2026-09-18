@@ -13,8 +13,8 @@ public static class Strings
     /// <summary>parfast</summary>
     public const string AppName = "parfast";
 
-    /// <summary>Alpha</summary>
-    public const string AppStage = "Alpha";
+    /// <summary>Beta</summary>
+    public const string AppStage = "Beta";
 
     /// <summary>PAR2 create, verify and repair</summary>
     public const string AppTagline = "PAR2 create, verify and repair";
@@ -949,7 +949,7 @@ public static System.Collections.Generic.IReadOnlyDictionary<string, string> All
     new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal)
     {
             ["app.name"] = "parfast",
-            ["app.stage"] = "Alpha",
+            ["app.stage"] = "Beta",
             ["app.tagline"] = "PAR2 create, verify and repair",
             ["checksums.create"] = "Create",
             ["checksums.expected"] = "Expected",

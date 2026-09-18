@@ -524,6 +524,13 @@ public enum MockPlanner {
             parts.append("--volume-blocks=\(max(1, Int(s / max(1, blockSize + slicePacketOverhead))))")
         }
         if spec.std_naming { parts.append("--std-naming") }
+        // The pane's Overwrite tick, inverted, in `command_args`'s own position - after
+        // `--std-naming` and before `-f`. The engine's line has carried it since
+        // 17 September 2026 and this one did not, which is the same defect that commit
+        // fixed pointing the other way: a pane that protects the set and hands the user a
+        // line that would destroy it. It matters MORE here than there, because the mock
+        // is what draws the pane on a box with no library.
+        if !spec.overwrite { parts.append("--no-clobber") }
         if spec.first_recovery_block != 0 { parts.append("-f\(spec.first_recovery_block)") }
         if let threads = spec.perf.threads { parts.append("-t\(threads)") }
         if let mb = spec.perf.memory_mb { parts.append("-m\(mb)") }

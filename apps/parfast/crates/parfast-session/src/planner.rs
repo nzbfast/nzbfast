@@ -79,9 +79,13 @@ pub struct PlanPreview {
     pub source_files: u64,
 }
 
-/// Why a plan could not be built at all. Only three things can do it,
+/// Why a plan could not be built at all. Only four things can do it,
 /// and each is a state a pane can be in halfway through being filled -
 /// so the host shows the message and keeps the pane open.
+///
+/// `missing_source`, `no_sources`, `unsupported_source` and the block
+/// refusal. What a walk merely could not READ is NOT in here: that is
+/// [`LeftOut`], and it is reported rather than refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanError {
     pub code: &'static str,
@@ -113,35 +117,176 @@ pub struct PlannedMember {
     pub length: u64,
 }
 
+/// Which files a source expansion leaves out. It is a PAR2 question and
+/// not a general one, which is the whole reason this is a parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRules {
+    /// par2cmdline's own: no dot-files, and never a `.par2` - the
+    /// reference does not protect the recovery files of any set,
+    /// including the one it is writing.
+    Par2,
+    /// Everything the user pointed at. A CHECKSUM file is not a PAR2
+    /// set and has no such rule: `md5sum` and `sha256sum` hash what they
+    /// are given, dot-file or not, and a `.par2` is an ordinary file to
+    /// take a digest of - protecting a folder of recovery volumes with a
+    /// SHA-256 manifest is a thing people do.
+    ///
+    /// Sharing `Par2`'s rule was silently wrong in both directions: a
+    /// checksum job over a folder holding a PAR2 set wrote a manifest
+    /// with every `.par2` missing from it, and a dot-file named
+    /// EXPLICITLY as a source was dropped with nothing said. The
+    /// manifest still verified clean, because what is not in it is not
+    /// checked - which is the worst shape a "verified" answer can have.
+    All,
+}
+
+/// What an expansion could not take in, so the caller can SAY so.
+///
+/// The doc on [`expand_sources`] is the whole reason this type exists:
+/// a named source that is not there is an error, because a job that
+/// quietly protects four of five named files is the worst outcome
+/// available - and until 17 Sep 2026 a whole SUBTREE that could not be
+/// enumerated took the opposite route and vanished, with the plan
+/// reporting success over what was left. One unreadable `.Trashes` on
+/// a volume must not refuse a 400 GB create, so this is not a refusal;
+/// it is the count that turns a silent omission into a stated one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeftOut {
+    /// Folders `read_dir` could not enumerate, with the reason the OS
+    /// gave. A folder whose listing failed part-way is in here too: the
+    /// entries before the failure are still members, so this is "not
+    /// complete" rather than "not read".
+    pub dirs: Vec<(PathBuf, String)>,
+    /// Links found during a walk. Never followed - see [`walk`].
+    pub links: u64,
+    /// Entries that are neither a folder nor an ordinary file: fifos,
+    /// sockets, devices.
+    pub special: u64,
+}
+
+impl LeftOut {
+    pub fn is_empty(&self) -> bool {
+        self.dirs.is_empty() && self.links == 0 && self.special == 0
+    }
+
+    /// One line per kind, for a preview's `warnings` and a job's result.
+    ///
+    /// The unreadable folders are NAMED, up to three of them, because
+    /// "1 folder could not be read" is not actionable and the path is
+    /// the whole of the fix. The other two are counted: a folder of
+    /// links is an ordinary shape and thirty paths would bury the
+    /// sentence that matters.
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.dirs.is_empty() {
+            let named: Vec<String> = self
+                .dirs
+                .iter()
+                .take(3)
+                .map(|(p, e)| format!("{} ({e})", p.display()))
+                .collect();
+            let more = self.dirs.len().saturating_sub(named.len());
+            let tail = if more > 0 {
+                format!(", and {more} more")
+            } else {
+                String::new()
+            };
+            out.push(format!(
+                "{} folder(s) could not be read and are NOT protected: {}{tail}",
+                self.dirs.len(),
+                named.join(", ")
+            ));
+        }
+        if self.links > 0 {
+            out.push(format!(
+                "{} link(s) were found and are not protected: a walk never leaves \
+                 the folder you chose. Add what a link points at as its own source.",
+                self.links
+            ));
+        }
+        if self.special > 0 {
+            out.push(format!(
+                "{} item(s) are not ordinary files (a pipe, a socket, a device) \
+                 and are not protected",
+                self.special
+            ));
+        }
+        out
+    }
+}
+
+/// The members a create would protect, and what the expansion could not
+/// take in on the way to them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Expansion {
+    pub members: Vec<PlannedMember>,
+    pub left_out: LeftOut,
+}
+
 /// Expand the spec's sources into the members a create would protect,
 /// in the order the create would see them.
 ///
 /// A directory contributes the files directly in it, or the whole tree
-/// under it when `recursive`. Dot-files and `.par2` files are left out,
-/// which is the reference's own rule (`parfast::create::collect`); a
-/// path that does not exist is an error rather than a silent omission,
-/// because a pane that quietly protects four of five named files is the
-/// worst outcome available.
+/// under it when `recursive`. What is left out is [`SourceRules`]'s to
+/// say; a path that does not exist is an error rather than a silent
+/// omission either way, because a pane that quietly protects four of
+/// five named files is the worst outcome available.
+///
+/// # A NAMED source is the user's spelling; a WALK is not
+///
+/// The two halves deliberately answer differently, and the rule is
+/// whose choice the path was:
+///
+/// * A source the user NAMED is followed as spelled, link or not. `/tmp`
+///   is a symlink on macOS and NAS mounts are full of them; refusing one
+///   because of what it is made of would be refusing the thing the user
+///   pointed at. Only a named path that is neither a folder nor an
+///   ordinary file is refused (`unsupported_source`), because there is
+///   nothing there a create could hash.
+/// * A path the WALK found is taken only when it is an ordinary file or
+///   a real directory. See [`walk`] for what that buys and what it
+///   costs.
+///
+/// Everything the walk declined is in [`Expansion::left_out`], and every
+/// caller is expected to put it in front of the user. It is not an error
+/// and must not become one: an unreadable `.Trashes` or `.Spotlight-V100`
+/// is the ordinary state of a mac volume's root.
 pub fn expand_sources(
     sources: &[Source],
     mode: PathMode,
     base: Option<&Path>,
-) -> Result<Vec<PlannedMember>, PlanError> {
+    rules: SourceRules,
+) -> Result<Expansion, PlanError> {
     let mut out: Vec<PlannedMember> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut left_out = LeftOut::default();
     for src in sources {
         let meta = std::fs::metadata(&src.path).map_err(|e| {
             PlanError::new("missing_source", format!("{}: {e}", src.path.display()))
         })?;
         if meta.is_dir() {
             let mut found = Vec::new();
-            walk(&src.path, src.recursive, &mut found);
+            walk(&src.path, src.recursive, &mut found, &mut left_out);
             found.sort();
             for p in found {
-                add(&mut out, &mut seen, p, mode, base)?;
+                add(&mut out, &mut seen, p, mode, base, rules)?;
             }
+        } else if meta.is_file() {
+            add(&mut out, &mut seen, src.path.clone(), mode, base, rules)?;
         } else {
-            add(&mut out, &mut seen, src.path.clone(), mode, base)?;
+            // A fifo named as a source is the case that makes this a
+            // refusal rather than a skip: `checksum::write_text_watched`
+            // OPENS every member, and opening a fifo for reading blocks
+            // until a writer appears - forever, inside the one call the
+            // cancel gate cannot interrupt. Silently dropping it would
+            // be the four-of-five outcome the doc above refuses.
+            return Err(PlanError::new(
+                "unsupported_source",
+                format!(
+                    "{}: not an ordinary file or folder, so there is nothing here to protect",
+                    src.path.display()
+                ),
+            ));
         }
     }
     if out.is_empty() {
@@ -150,35 +295,147 @@ pub fn expand_sources(
             "no files to protect: add at least one file or a folder that holds one",
         ));
     }
-    Ok(out)
+    Ok(Expansion {
+        members: out,
+        left_out,
+    })
 }
 
-fn walk(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            if recursive {
-                walk(&p, recursive, out);
-            }
-            continue;
+/// Every ordinary file directly under `dir`, or in its whole tree when
+/// `recursive`, with what could not be taken in RECORDED rather than
+/// dropped.
+///
+/// # A walk never leaves the folder it was pointed at
+///
+/// A link found during a walk is not followed and not protected. That
+/// is the reference's own rule, measured rather than read: par2cmdline
+/// 1.2.0 over a folder holding `dirlink -> ../other` and
+/// `filelink -> real.bin` reports `Source file count: 1` and opens only
+/// the real file, and it refuses an explicitly named link outright with
+/// "You must specify a list of files when creating." It lstats, and a
+/// link is never a source.
+///
+/// This walk used to follow them, with three consequences, all of them
+/// found on 17 Sep 2026 by pointing a fixture's `loop` at its own
+/// parent:
+///
+/// * **The walk left the tree.** The link's target is walked as if the
+///   user had chosen it, so a link to `$HOME` in a folder being
+///   protected puts `$HOME` in the recovery set.
+/// * **A loop multiplied the set.** `a/loop -> ../a` is entered again at
+///   each level until the kernel's symlink limit (32 on macOS) makes the
+///   `stat` fail, so one file became 33 members - 33 FileDesc packets
+///   with ONE name, over one file's bytes, in a set 33 times the size it
+///   should be. `add`'s dedupe did not catch it because the 33 spellings
+///   are 33 different paths.
+/// * **A stranger's file could refuse the create.** The escaped walk
+///   reached `$TMPDIR`, found a PowerShell named pipe, and `add` failed
+///   the whole expansion on it - a create refused because of a file in a
+///   folder the user never chose.
+///
+/// A visited-inode set would have fixed the second of those and neither
+/// of the others, which is why the answer is the reference's and not a
+/// cycle guard.
+///
+/// The measurement is the reference's UNIX half. Its windows half
+/// branches on `FILE_ATTRIBUTE_DIRECTORY` alone and may follow a
+/// junction where this does not; see `parfast::create::walk`, which
+/// carries the whole of that note and the leg that would settle it.
+///
+/// # And nothing that is not an ordinary file
+///
+/// A fifo stats as zero length and OPENS by blocking until a writer
+/// appears; a socket and a device are not hashable either. The
+/// reference drops all three during a walk (measured: a `mkfifo`d entry
+/// does not appear in its source count, and not as a "Skipping 0 byte
+/// file" line either - it is gone before that). The PAR2 create's own
+/// `parfast::create::collect` happened to drop a fifo as a zero-byte
+/// file; the CHECKSUM create has no such rule and hashed it, which is
+/// the hang this closes.
+///
+/// # An unreadable folder is reported and never fatal
+///
+/// `read_dir` refusing is the ordinary state of `.Trashes`,
+/// `.Spotlight-V100` and `.fseventsd` on a mac volume, so refusing the
+/// create would make "protect this drive" impossible. It goes in
+/// `left` and every caller states it.
+fn walk(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>, left: &mut LeftOut) {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            left.dirs.push((dir.to_path_buf(), e.to_string()));
+            return;
         }
-        out.push(p);
+    };
+    for e in rd {
+        // An entry the directory could not describe is the same kind of
+        // hole as a directory that could not be opened, and it used to
+        // go the same silent way (`rd.flatten()`).
+        let e = match e {
+            Ok(e) => e,
+            Err(err) => {
+                left.dirs.push((dir.to_path_buf(), err.to_string()));
+                continue;
+            }
+        };
+        // `DirEntry::file_type` does NOT follow a link, which is the
+        // whole point - `Path::is_dir` does, and that was the bug.
+        let ft = match e.file_type() {
+            Ok(ft) => ft,
+            Err(err) => {
+                left.dirs.push((dir.to_path_buf(), err.to_string()));
+                continue;
+            }
+        };
+        if ft.is_symlink() {
+            left.links += 1;
+        } else if ft.is_dir() {
+            if recursive {
+                walk(&e.path(), recursive, out, left);
+            }
+        } else if ft.is_file() {
+            out.push(e.path());
+        } else {
+            left.special += 1;
+        }
     }
 }
 
-/// The reference skips dot-files and never protects a `.par2`.
-fn skipped(path: &Path) -> bool {
+/// The reference skips dot-files and never protects a `.par2`. See
+/// [`SourceRules`] for why this asks which rule is in force rather than
+/// applying that one to everything.
+fn skipped(path: &Path, rules: SourceRules) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        // A name this process cannot even spell is left out under either
+        // rule: nothing downstream could record it.
         return true;
     };
+    if rules == SourceRules::All {
+        return false;
+    }
     name.starts_with('.')
         || path
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("par2"))
+}
+
+/// The key two spellings of ONE file share, so the set cannot carry the
+/// same bytes twice under two names.
+///
+/// The CANONICAL PATH and deliberately not dev+ino, which is the other
+/// obvious answer and is wrong here: two HARD LINKS are one inode and
+/// two real names, and a create asked to protect both is being asked
+/// for both - PAR2 protects names. `realpath` collapses exactly the
+/// aliasing a symlink creates and leaves a hard link alone, which is
+/// also what par2cmdline dedupes on (its own `GetCanonicalPathname`,
+/// lexically).
+///
+/// Falls back to the path as given when it cannot be resolved, so a
+/// path that vanished between the walk and here is still deduped
+/// against itself rather than silently against everything.
+fn identity(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn add(
@@ -187,8 +444,9 @@ fn add(
     path: PathBuf,
     mode: PathMode,
     base: Option<&Path>,
+    rules: SourceRules,
 ) -> Result<(), PlanError> {
-    if skipped(&path) || !seen.insert(path.clone()) {
+    if skipped(&path, rules) || !seen.insert(identity(&path)) {
         return Ok(());
     }
     let length = std::fs::metadata(&path)
@@ -243,6 +501,13 @@ pub fn options_for(
         threads: spec.perf.threads,
         mem_mb: spec.perf.memory_mb,
         std_naming: spec.std_naming,
+        // The pane's Overwrite tick, inverted: unticked means the
+        // engine must refuse a file already under one of the set's
+        // names rather than truncate it. Resolved HERE, with every
+        // other switch, because this is the one translation the runner
+        // and the copied command line both read - see `command_args`,
+        // which spells it.
+        no_clobber: !spec.overwrite,
         ..Default::default()
     };
     if spec.path_mode == PathMode::Relative {
@@ -402,13 +667,24 @@ fn apply_scheme(
 
 /// Everything the Create pane shows, for one spec.
 pub fn preview(spec: &CreateSpec) -> Result<PlanPreview, PlanError> {
-    let members = expand_sources(&spec.sources, spec.path_mode, spec.base_path.as_deref())?;
+    let Expansion { members, left_out } = expand_sources(
+        &spec.sources,
+        spec.path_mode,
+        spec.base_path.as_deref(),
+        SourceRules::Par2,
+    )?;
     // EVERYTHING the create is told is in here, and nothing is added to
     // it below: `runner::run_create` builds its argv from this same
     // call, so a switch this pane resolved on its own would be a switch
     // the create never gets. That is not hypothetical - see
     // [`options_for`].
-    let (o, mut warnings) = options_for(spec, &members)?;
+    let (o, translation_warnings) = options_for(spec, &members)?;
+    // WHAT IS NOT COVERED GOES FIRST, ahead of the translation's own
+    // rounding notes. It is the only line here that changes whether a
+    // user should press Create at all, and a pane that shows it fourth
+    // under three notes about `-r` has published it without saying it.
+    let mut warnings = left_out.lines();
+    warnings.extend(translation_warnings);
     let lengths: Vec<u64> = members.iter().map(|m| m.length).collect();
     let (block_size, block_count, _raised) = grid(&o, &lengths);
     let recovery = parfast::create::recovery_blocks(&o, block_count, block_size);
@@ -643,6 +919,14 @@ pub fn command_args(
     if o.std_naming {
         a.push("--std-naming".to_string());
     }
+    // And the third, which is the pane's Overwrite tick turned off.
+    // It has to be ON THE LINE and not set on the far side of the
+    // re-parse: the line is what the pane SHOWS, and a create the pane
+    // says is protected whose copied command silently overwrites is the
+    // pane lying about the one thing that tick is for.
+    if o.no_clobber {
+        a.push("--no-clobber".to_string());
+    }
     if o.first_block != 0 {
         a.push(format!("-f{}", o.first_block));
     }
@@ -812,7 +1096,9 @@ mod tests {
         );
         assert!(with.command.contains("--comment="));
 
-        let members = expand_sources(&spec.sources, spec.path_mode, None).expect("members");
+        let members = expand_sources(&spec.sources, spec.path_mode, None, SourceRules::Par2)
+            .expect("members")
+            .members;
         let (o, _) = options_for(&spec, &members).expect("options");
         assert_eq!(o.comment.as_deref(), Some("a comment worth some bytes"));
 
@@ -890,7 +1176,15 @@ mod tests {
                 // naming switch is independent of every other field on
                 // the line, so one arm of each is the whole property.
                 spec.std_naming = recovery.is_none();
-                let members = expand_sources(&spec.sources, spec.path_mode, None).expect("members");
+                // The Overwrite tick, flipped across the sweep for the
+                // same reason and with the OTHER parity, so both arms
+                // of both switches are reached and the two are not
+                // accidentally tested only together.
+                spec.overwrite = recovery.is_some();
+                let members =
+                    expand_sources(&spec.sources, spec.path_mode, None, SourceRules::Par2)
+                        .expect("members")
+                        .members;
                 // The WHOLE translation, scheme included - `options_for`
                 // is what the runner gets, so it is what this must spell.
                 let (o, _) = options_for(&spec, &members).expect("options");
@@ -929,6 +1223,16 @@ mod tests {
                     "{args:?}: volume plan"
                 );
                 assert_eq!(b.std_naming, o.std_naming, "{args:?}: volume naming");
+                // The one switch on this line that decides whether a
+                // file survives, so the round trip is the whole of its
+                // guarantee: a pane that says the set is protected and
+                // hands over a line that overwrites has told the user
+                // the opposite of the truth.
+                assert_eq!(b.no_clobber, o.no_clobber, "{args:?}: no-clobber");
+                assert_eq!(
+                    o.no_clobber, !spec.overwrite,
+                    "{args:?}: the Overwrite tick is what sets it"
+                );
                 assert_eq!(b.volume_blocks, o.volume_blocks, "{args:?}: volume ceiling");
                 assert_eq!(b.threads, o.threads, "{args:?}");
                 assert_eq!(b.comment, o.comment, "{args:?}: comment");
@@ -943,6 +1247,43 @@ mod tests {
     /// left as a bare comment so the round trip cannot quietly grow a
     /// second application later.
     fn apply_scheme_is_not_reapplied(_o: &mut parfast::cli::Options, _w: &mut Vec<String>) {}
+
+    /// The pane SHOWS a command line, and with Overwrite unticked that
+    /// line must carry `--no-clobber`.
+    ///
+    /// `round_trips` above proves the argv parses back; this proves the
+    /// switch reaches the string a user can actually select and paste,
+    /// which is a different claim and the one a user is hurt by. It was
+    /// wrong for the first hour of `--no-clobber`'s life: the runner set
+    /// the field on the far side of the re-parse, so the create WAS
+    /// protected and the line the pane displayed beside it would have
+    /// overwritten the set if anyone ran it.
+    #[test]
+    fn the_copied_line_carries_the_overwrite_decision() {
+        let d = tmp("cmdclobber");
+        let mut spec = spec_over(&d, &[("a.bin", 40_000)]);
+        spec.block = Some(BlockSpec::Size { size: 2_048 });
+        spec.recovery = Some(RecoverySpec::Count { count: 2 });
+
+        spec.overwrite = false;
+        let guarded = preview(&spec).expect("preview");
+        assert!(
+            guarded.command.contains("--no-clobber"),
+            "the pane protects the set and its own line does not: {}",
+            guarded.command
+        );
+
+        // And the control arm: ticking Overwrite takes it back off,
+        // rather than the switch being unconditional.
+        spec.overwrite = true;
+        let plain = preview(&spec).expect("preview");
+        assert!(
+            !plain.command.contains("--no-clobber"),
+            "Overwrite is ticked and the line still refuses: {}",
+            plain.command
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     /// A path with a space survives the paste, and a plain one is not
     /// dressed up in quotes nobody needs.
@@ -1191,10 +1532,14 @@ mod tests {
             }],
             PathMode::Basename,
             None,
+            SourceRules::Par2,
         )
         .expect("flat");
         assert_eq!(
-            flat.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            flat.members
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["a.bin"]
         );
         let deep = expand_sources(
@@ -1204,9 +1549,10 @@ mod tests {
             }],
             PathMode::Relative,
             Some(&d),
+            SourceRules::Par2,
         )
         .expect("deep");
-        let mut names: Vec<&str> = deep.iter().map(|m| m.name.as_str()).collect();
+        let mut names: Vec<&str> = deep.members.iter().map(|m| m.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["a.bin", "sub/b.bin"]);
         let _ = std::fs::remove_dir_all(&d);
@@ -1221,9 +1567,290 @@ mod tests {
             }],
             PathMode::Basename,
             None,
+            SourceRules::Par2,
         )
         .expect_err("a missing source refuses");
         assert_eq!(e.code, "missing_source");
+    }
+
+    #[cfg(unix)]
+    fn mkfifo_at(p: &Path) {
+        unsafe extern "C" {
+            #[link_name = "mkfifo"]
+            fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
+        }
+        let c = std::ffi::CString::new(p.to_string_lossy().as_bytes()).expect("cstr");
+        // SAFETY: `c` is a NUL-terminated C string that outlives the
+        // call, which is all `mkfifo(2)` asks of its argument.
+        assert_eq!(unsafe { mkfifo(c.as_ptr(), 0o644) }, 0, "mkfifo {p:?}");
+    }
+
+    /// The sentences a user actually reads, spelled out - the three are
+    /// built with `\` line continuations, and the classic slip there is
+    /// a word joined to the next with no space. A `contains` assertion
+    /// cannot see it.
+    #[test]
+    fn the_coverage_lines_read_as_sentences() {
+        let l = LeftOut {
+            dirs: vec![
+                (PathBuf::from("/vol/.Trashes"), "Permission denied".into()),
+                (PathBuf::from("/vol/a"), "Permission denied".into()),
+                (PathBuf::from("/vol/b"), "Permission denied".into()),
+                (PathBuf::from("/vol/c"), "Permission denied".into()),
+            ],
+            links: 2,
+            special: 1,
+        };
+        assert_eq!(
+            l.lines(),
+            vec![
+                "4 folder(s) could not be read and are NOT protected: \
+                 /vol/.Trashes (Permission denied), /vol/a (Permission denied), \
+                 /vol/b (Permission denied), and 1 more"
+                    .to_string(),
+                "2 link(s) were found and are not protected: a walk never leaves \
+                 the folder you chose. Add what a link points at as its own source."
+                    .to_string(),
+                "1 item(s) are not ordinary files (a pipe, a socket, a device) \
+                 and are not protected"
+                    .to_string(),
+            ]
+        );
+        assert!(LeftOut::default().is_empty());
+        assert!(LeftOut::default().lines().is_empty());
+    }
+
+    /// A WALK NEVER LEAVES THE FOLDER IT WAS POINTED AT, and `loop -> .`
+    /// is the shape that proved it did.
+    ///
+    /// Before 17 Sep 2026 this walked the link, and then walked it
+    /// again from inside itself, until macOS's 32-link `stat` limit
+    /// stopped it: one file, 33 members, 33 FileDesc packets carrying
+    /// ONE name. `add`'s path dedupe cannot see it - the 33 spellings
+    /// are 33 different paths.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_points_back_up_the_tree_does_not_multiply_the_set() {
+        let d = tmp("loop");
+        std::fs::write(d.join("f.bin"), vec![3u8; 10]).expect("fixture");
+        std::os::unix::fs::symlink(".", d.join("loop")).expect("symlink");
+        let got = expand_sources(
+            &[Source {
+                path: d.clone(),
+                recursive: true,
+            }],
+            PathMode::Basename,
+            None,
+            SourceRules::Par2,
+        )
+        .expect("expand");
+        let names: Vec<&str> = got.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["f.bin"], "one file, protected once");
+        assert_eq!(got.left_out.links, 1, "and the link is STATED: {got:?}");
+        assert!(
+            got.left_out.lines().iter().any(|w| w.contains("link")),
+            "{:?}",
+            got.left_out.lines()
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The same defect's other half, and the worse one: a link in a
+    /// source folder used to put its TARGET in the recovery set. The
+    /// first fixture written for the test above pointed at the system
+    /// temp directory by accident and the walk protected it.
+    #[cfg(unix)]
+    #[test]
+    fn a_walk_never_protects_what_is_outside_the_folder_it_was_given() {
+        let d = tmp("escape");
+        let inside = d.join("chosen");
+        let outside = d.join("elsewhere");
+        std::fs::create_dir_all(&inside).expect("inside");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(inside.join("mine.bin"), vec![3u8; 10]).expect("fixture");
+        std::fs::write(outside.join("theirs.bin"), vec![4u8; 10]).expect("fixture");
+        std::os::unix::fs::symlink(&outside, inside.join("out")).expect("symlink");
+        let got = expand_sources(
+            &[Source {
+                path: inside.clone(),
+                recursive: true,
+            }],
+            PathMode::Basename,
+            None,
+            SourceRules::Par2,
+        )
+        .expect("expand");
+        let names: Vec<&str> = got.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["mine.bin"], "the link's target is not ours");
+        assert_eq!(got.left_out.links, 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A fifo stats as a zero-length file and OPENS by blocking until a
+    /// writer appears. `checksum::write_text_watched` opens every
+    /// member, inside the one call the cancel gate cannot interrupt, so
+    /// a fifo reaching a member list is a hang and not an oddity. It
+    /// reached one until 17 Sep 2026, under `SourceRules::All` - the
+    /// checksum rule, which is exactly the caller that opens.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_the_folder_is_never_a_member() {
+        let d = tmp("fifo");
+        std::fs::write(d.join("f.bin"), vec![3u8; 10]).expect("fixture");
+        mkfifo_at(&d.join("pipe"));
+        let got = expand_sources(
+            &[Source {
+                path: d.clone(),
+                recursive: true,
+            }],
+            PathMode::Basename,
+            None,
+            SourceRules::All,
+        )
+        .expect("expand");
+        let names: Vec<&str> = got.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["f.bin"], "the fifo is not an ordinary file");
+        assert_eq!(got.left_out.special, 1, "and it is STATED: {got:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A fifo NAMED as a source is refused rather than dropped, for the
+    /// reason the missing-source test below gives: what the user
+    /// pointed at is not something the manifest can quietly leave out.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_source_that_is_not_an_ordinary_file_is_refused() {
+        let d = tmp("named-fifo");
+        let pipe = d.join("pipe");
+        mkfifo_at(&pipe);
+        let e = expand_sources(
+            &[Source {
+                path: pipe,
+                recursive: false,
+            }],
+            PathMode::Basename,
+            None,
+            SourceRules::All,
+        )
+        .expect_err("a fifo is not protectable");
+        assert_eq!(e.code, "unsupported_source");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A SUBTREE THAT CANNOT BE ENUMERATED IS REPORTED, NOT DROPPED -
+    /// and not refused either. One unreadable `.Trashes` must not stop
+    /// a create over the volume that holds it, so the walk keeps going
+    /// and the folder's name reaches `warnings`.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_cannot_be_read_is_named_and_the_plan_still_builds() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("unreadable");
+        let shut = d.join("shut");
+        std::fs::create_dir_all(&shut).expect("shut");
+        std::fs::write(shut.join("hidden.bin"), vec![5u8; 10]).expect("fixture");
+        std::fs::write(d.join("seen.bin"), vec![3u8; 10]).expect("fixture");
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        // root reads a 0o000 directory anyway, and then there is nothing
+        // to observe. Say so rather than asserting something false.
+        if std::fs::read_dir(&shut).is_ok() {
+            let _ = std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::remove_dir_all(&d);
+            eprintln!("skipped: this user can read a 0o000 directory");
+            return;
+        }
+        let got = expand_sources(
+            &[Source {
+                path: d.clone(),
+                recursive: true,
+            }],
+            PathMode::Basename,
+            None,
+            SourceRules::Par2,
+        )
+        .expect("an unreadable subtree is not a refusal");
+        let names: Vec<&str> = got.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["seen.bin"]);
+        assert_eq!(got.left_out.dirs.len(), 1, "{got:?}");
+        assert_eq!(got.left_out.dirs[0].0, shut);
+        let said = got.left_out.lines();
+        assert!(
+            said.iter().any(|w| w.contains("shut") && w.contains("NOT")),
+            "the folder is NAMED, because the path is the whole of the fix: {said:?}"
+        );
+
+        // And the pane says it, ahead of the arithmetic's own notes.
+        let spec = CreateSpec {
+            sources: vec![Source {
+                path: d.clone(),
+                recursive: true,
+            }],
+            ..spec_over(&d, &[])
+        };
+        let p = preview(&spec).expect("preview");
+        assert!(
+            p.warnings.first().is_some_and(|w| w.contains("shut")),
+            "coverage comes first: {:?}",
+            p.warnings
+        );
+        assert_eq!(p.source_files, 1);
+
+        let _ = std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Two spellings of ONE file are one member, or the set carries two
+    /// FileDesc packets with the same name over the same bytes.
+    #[cfg(unix)]
+    #[test]
+    fn two_spellings_of_one_file_are_one_member() {
+        let d = tmp("alias");
+        std::fs::create_dir_all(d.join("real")).expect("real");
+        std::fs::write(d.join("real/f.bin"), vec![3u8; 10]).expect("fixture");
+        std::os::unix::fs::symlink("real", d.join("link")).expect("symlink");
+        let got = expand_sources(
+            &[
+                Source {
+                    path: d.join("real/f.bin"),
+                    recursive: false,
+                },
+                Source {
+                    path: d.join("link/f.bin"),
+                    recursive: false,
+                },
+            ],
+            PathMode::Basename,
+            None,
+            SourceRules::Par2,
+        )
+        .expect("expand");
+        assert_eq!(got.members.len(), 1, "one file, one member: {got:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The other half of that rule, and why the key is the canonical
+    /// PATH and not the inode: two HARD LINKS are one inode and two real
+    /// names, and a create asked for both is being asked for both.
+    #[cfg(unix)]
+    #[test]
+    fn two_hard_links_are_two_members_because_par2_protects_names() {
+        let d = tmp("hardlink");
+        std::fs::write(d.join("a.bin"), vec![3u8; 10]).expect("fixture");
+        std::fs::hard_link(d.join("a.bin"), d.join("b.bin")).expect("hard link");
+        let got = expand_sources(
+            &[Source {
+                path: d.clone(),
+                recursive: false,
+            }],
+            PathMode::Basename,
+            None,
+            SourceRules::Par2,
+        )
+        .expect("expand");
+        let mut names: Vec<&str> = got.members.iter().map(|m| m.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["a.bin", "b.bin"]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -2005,6 +2005,43 @@ pub struct CustodyBatch {
     /// half - a destination that has gone offline must not turn a delete
     /// into a stalled queue.
     early_gone: Vec<std::path::PathBuf>,
+    /// Removals this batch handed to `park()` because the pipeline is
+    /// still writing. Counted rather than listed: nothing here can
+    /// report their outcome, and the count is what stops the answer
+    /// claiming a removal that has not been attempted yet.
+    deferred: usize,
+}
+
+/// What the FILES half of a delete achieved, as far as the request that
+/// asked for it can know.
+///
+/// The RECORD half is settled by the time any caller is answered - the
+/// row leaves the queue under the lock, and `removed` counts it. The
+/// files half is not, and it can end three different ways, which is why
+/// a `status: true` describing only the record is not an answer to
+/// "delete the files too".
+///
+/// GH #71 is what not having this costs. A removal the Trash refused was
+/// final, nothing retried it, and the only thing that said so was a
+/// notice strip somebody had to notice - so the window between "the app
+/// told me it deleted them" and "they are still there" was hours rather
+/// than a page refresh. `note_delete_kept` gives the user the folder
+/// back; this gives the CALLER the verdict, including the API clients
+/// that never see a notice strip at all.
+#[derive(Default, Debug)]
+pub struct FilesVerdict {
+    /// Directories this request removed itself.
+    pub deleted: usize,
+    /// Removals this request attempted and could not do, carrying the
+    /// daemon's own reason for each. Every one of these has filed a
+    /// kept-files notice as well - this is the same refusal, said to the
+    /// caller rather than to the page.
+    pub kept: Vec<String>,
+    /// Removals handed on to `park()` or to the prefetch drain, because
+    /// live writers are still inside the directory. There is no outcome
+    /// yet and this request must not invent one; a refusal when it does
+    /// happen files the same notice.
+    pub pending: usize,
 }
 
 impl CustodyBatch {
@@ -2065,6 +2102,7 @@ impl CustodyBatch {
         d.reserved.lock_ok().insert(g.out_dir.clone());
         if matches!(g.state, JobState::Downloading | JobState::Finishing) || g.finalizing {
             g.del_on_drop = true;
+            self.deferred += 1;
             return;
         }
         let stem = filed_stem(g).to_string();
@@ -2089,23 +2127,36 @@ impl CustodyBatch {
     /// records whose removal may be refused - a notice's "download it
     /// again" needs that NZB, and everything still held afterwards
     /// belongs to a directory that went cleanly and so goes.
+    ///
+    /// Returns the [`FilesVerdict`], which is the only place a caller can
+    /// learn how the files half went: the notices below reach the page,
+    /// never the API client, and a refusal that reaches neither is the
+    /// shape GH #71 was made of.
     pub fn settle(
         self,
         d: &Arc<Daemon>,
         sidecar: Option<&(String, Arc<AtomicBool>)>,
         held: &mut std::collections::HashMap<std::path::PathBuf, Vec<std::path::PathBuf>>,
-    ) {
+    ) -> FilesVerdict {
         let reserved_dirs: Vec<std::path::PathBuf> = self
             .doomed
             .iter()
             .map(|(_, dir, _, _)| dir.clone())
             .collect();
         crate::earlyfile::early_unlink(&self.early_gone);
+        let mut verdict = FilesVerdict {
+            pending: self.deferred,
+            ..Default::default()
+        };
         let mut kept: Vec<(String, std::path::PathBuf, String)> = Vec::new();
         for (name, dir, filed, tail) in self.doomed {
             d.hub.release_handles_for_dir(&dir);
-            if let FilesGone::Kept(why) = remove_job_files(&dir, &name, filed, &tail) {
-                kept.push((name, dir, why));
+            match remove_job_files(&dir, &name, filed, &tail) {
+                FilesGone::Kept(why) => {
+                    verdict.kept.push(why.clone());
+                    kept.push((name, dir, why));
+                }
+                FilesGone::Yes(_) => verdict.deleted += 1,
             }
         }
         {
@@ -2124,9 +2175,11 @@ impl CustodyBatch {
         // still ahead of it.
         if let Some((_, target)) = sidecar {
             for (name, dir, filed, tail) in self.pending_sidecar {
+                verdict.pending += 1;
                 d.remove_after_sidecar_drain(target.clone(), name, dir, filed, tail);
             }
         }
+        verdict
     }
 }
 
@@ -2312,6 +2365,49 @@ mod park_custody_tests {
             d.reserved.lock_ok().is_empty(),
             "a directory that is gone must not stay reserved - `dir_claim` would \
              refuse a re-add of the same release forever"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GH #86: the verdict `settle` hands back, which is the only thing
+    /// a CALLER can read about the files half.
+    ///
+    /// Both halves asserted from one batch, because the pair is the
+    /// point: a queued row is removed here and now, and a DOWNLOADING
+    /// one has live writers so its removal is park's. Counting the
+    /// second as `deleted` is the lie this type exists to stop - the
+    /// files are still on disk when the answer goes out, and a page
+    /// that reports "files deleted" over them is GH #71 again.
+    #[test]
+    fn the_verdict_separates_a_removal_from_one_park_still_owes() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-custody-v-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = test_daemon(&dir);
+
+        let now = early_job(&dir, JobState::Queued);
+        let out = now.lock_ok().out_dir.clone();
+        std::fs::create_dir_all(&out).expect("payload dir");
+        std::fs::write(out.join("ep1.mkv"), b"payload").expect("payload");
+        let later = early_job(&dir, JobState::Downloading);
+
+        let mut batch = CustodyBatch::default();
+        batch.plan(&d, &mut now.lock_ok(), None, true);
+        batch.plan(&d, &mut later.lock_ok(), None, true);
+
+        let mut held = std::collections::HashMap::new();
+        let v = batch.settle(&d, None, &mut held);
+
+        assert!(!out.exists(), "the queued row's payload was not removed");
+        assert_eq!(v.deleted, 1, "one directory went: {v:?}");
+        assert!(
+            v.kept.is_empty(),
+            "nothing was refused, so nothing may be reported as kept: {v:?}"
+        );
+        assert_eq!(
+            v.pending, 1,
+            "the running job's removal is park's, and the answer must say so \
+             rather than counting it as done: {v:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

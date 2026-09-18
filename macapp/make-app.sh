@@ -112,7 +112,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
        cannot save us from a second COPY of this app - it only ever
        probes for an engine, not for another wrapper. LaunchServices
        already refuses a plain second launch; this key is what makes
-       `open -n` refuse too, which is the spelling a script or a curious
+       \`open -n\` refuse too, which is the spelling a script or a curious
        user reaches for. -->
   <key>LSMultipleInstancesProhibited</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>

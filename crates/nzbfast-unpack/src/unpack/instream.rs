@@ -330,6 +330,53 @@ pub(crate) enum Elected {
 /// a run in which a foreign set won and its member was materialised
 /// into the download's output directory through the active repair
 /// path, upstream of the gate built to refuse exactly that.
+///
+/// # And no predicate over the CANDIDATE can make it so either
+///
+/// Measured 17 Sep 2026, and it is worse than "a foreign set can win":
+/// this rule PREFERS one. See
+/// `election_tests::a_foreign_sets_index_is_the_volume_this_rule_prefers`
+/// for the byte counts - an index file carries twenty bytes of IFSC per
+/// source block, so it shrinks with its member, and a leftover set over
+/// a smaller file than the release indexes smaller than anything the
+/// release posted.
+///
+/// The obvious answer - refuse a volume whose set the post does not own
+/// - is not available HERE, for two reasons that are both about what a
+/// head is:
+///
+/// * **A head need carry no file information at all.** par2cmdline puts
+///   a whole RecvSlic packet first in every recovery volume, so the
+///   first FileDesc sits one block in (measured: offset 10,160 at
+///   `-s10000`, and a block further at a real block size). Only an
+///   INDEX file names its members at offset 0. Every packet header
+///   carries the recovery set id (bytes 32..48, verified against
+///   par2cmdline output), so the election can always tell two sets
+///   APART; it frequently cannot tell what either one covers.
+/// * **Where a FileDesc is readable, ownership still is not.** A
+///   FileDesc gives (name, length, md5, md5-16k). On the posts this
+///   election exists for the name is no help - they are obfuscated, and
+///   nothing on the wire carries the real one. The md5s would settle it,
+///   but matching one needs 16 KiB of the payload slot on disk, which
+///   the election cannot wait for: it fires on the first sniffed volume,
+///   inside the first round-trips. That leaves LENGTH against
+///   `nzbkit::nzb::File::bytes`, which is the sum of poster-declared,
+///   yEnc-inflated segment counts - a guess, and precisely the
+///   length-uniqueness judgement `get::latesets` makes AFTER a rebuild
+///   exists and can be checked.
+///
+/// The machinery that CAN decide ownership is already here and already
+/// runs later: `matched_deferred` / [`reconcile_deferred_payload`] match
+/// a set's members against slots by md5-16k + length, once an activated
+/// set's definition and some payload are both on disk. It can un-defer a
+/// payload slot; it cannot un-elect a set, because by then bound slots
+/// carry indexes into that set's tables.
+///
+/// So the residue is not fixable in this function, and the fix is the
+/// product question above: should the sniffed path adopt every recovery
+/// set the way the named path does. Full measurement, the driver, and
+/// the seams refused:
+/// `research/LATESET-BOOTSTRAP-ELECTION-FOREIGN-2026-09-17.md`.
 pub(crate) fn elect_bootstrap(
     st: &mut SniffState,
     sidx: usize,
@@ -430,6 +477,52 @@ mod election_tests {
             Elected::Demoted(3)
         ));
         assert_eq!(st.bootstrap, Some(5));
+    }
+
+    /// THE DEFECT, pinned rather than fixed, with the real byte counts.
+    ///
+    /// This asserts what the smallest-wins rule DOES, not what anyone
+    /// wants it to do, and it is here so that a future change to the
+    /// rule has to walk past it. `sidx` is a foreign recovery set's
+    /// index file and `b` is the download's OWN set's index; the rule
+    /// hands the bootstrap to the stranger, and is right to by its own
+    /// terms, because the stranger's index really is the smaller file.
+    ///
+    /// Why it is smaller is structural and not a fixture accident. A
+    /// par2 index file is Main + FileDesc + IFSC + Creator, and IFSC
+    /// carries twenty bytes per source BLOCK - so an index shrinks with
+    /// the size of the member it covers. Measured 17 Sep 2026 with
+    /// par2cmdline 1.3.0 at `-r100 -s10000`, the x5_24 fixture exactly:
+    /// the foreign set over a 90,000-byte member indexes at **588
+    /// bytes**, and the post's own three sets over 100,000 / 140,000 /
+    /// 180,000-byte members index at 612 / 692 / 776. The foreign index
+    /// is the smallest of all twenty volumes in that post. Any leftover
+    /// set over a smaller file than the release - a sample, an nfo set,
+    /// a previous release's sidecar - has the same shape.
+    ///
+    /// So the election does not merely FAIL to exclude a foreign set,
+    /// it PREFERS one, and what keeps that off the wire is only arrival
+    /// order: measured over 180 runs of the `x5_24` probes, 179 chains
+    /// ended at the own set's index and 1 ended at the foreign one -
+    /// the single run in which the foreign index was sniffed before
+    /// `locked` closed the election, where it won as this test says it
+    /// must. Distribution, driver and the argument that no predicate
+    /// available HERE can separate the two:
+    /// `research/LATESET-BOOTSTRAP-ELECTION-FOREIGN-2026-09-17.md`.
+    #[test]
+    fn a_foreign_sets_index_is_the_volume_this_rule_prefers() {
+        // Declared NZB bytes, which is what `fbytes` compares: the
+        // yEnc-encoded sizes of the two index files above. The encoding
+        // inflates both by the same few per cent, so the ordering the
+        // rule sees is the ordering of the raw files.
+        let (foreign, ours) = (588u64, 612u64);
+        let mut st = held_by(3);
+        assert!(matches!(
+            elect_bootstrap(&mut st, 5, |b| (b == 3).then_some(foreign < ours)
+                == Some(true)),
+            Elected::Demoted(3)
+        ));
+        assert_eq!(st.bootstrap, Some(5), "the foreign index takes the set");
     }
 
     /// The negative control for the one above, and the line the removal

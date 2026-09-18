@@ -545,13 +545,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The `unit-one-process` job below carries no list of binaries - it
-      # inventories the archive and runs every workspace-member lib/bin
-      # unit target out of it. nightly's `one-process-loaded`, the only job in
+      # inventories the archive and runs every workspace-member test
+      # binary out of it, unit roots and integration targets alike.
+      # nightly's `one-process-loaded`, the only job in
       # the repo that runs that shape under LOAD, named ONE of the four by
       # hand, which is how a timer-paced flake in the nzbkit LIB root went
       # red twice in 400 main runs while the loaded job campaigned over the
       # nzbfast BIN root (2e4614940). This holds that matrix to the
-      # workspace manifests. Also a job in size-gate.yml, which runs on
+      # workspace manifests - and since 17 Sep 2026 to the integration
+      # targets too, which is what makes the shape-(c) signpost in that
+      # job's own error text true for `nzbkit::integration`.
+      # Also a job in size-gate.yml, which runs on
       # every branch push. Private repo only, like the gates above.
       - name: one process roster
         run: |
@@ -607,6 +611,37 @@ jobs:
         run: |
           python3 tools/layout-coverage.py --selftest
           python3 tools/layout-coverage.py --brief
+  refusing-read-report:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-refusing-read-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # THE SAME SHAPE AS `layout-coverage-selftest` ABOVE, and for the
+      # same reason. `tools/refusing-read-report.py` reports the READ call
+      # sites that cannot tell a refused read from an empty answer, and it
+      # exits 0 on hits ON PURPOSE: some of them are honest degradation -
+      # an absent type-ahead bar claims nothing and self-heals - so the
+      # hits are a judgement and not a verdict. Whether they should go red
+      # is an open question, and the measurement behind it is
+      # REFUSING-READ-CENSUS-2026-09-17.md - the bare filename, because
+      # the directory holding it is stripped out of the published copy of
+      # this file and a surviving path would break the publish.
+      #
+      # What DOES need a runner is the selftest, which pins that the
+      # predicate still bites in every shape it was measured against, and
+      # the bare run, which exits 2 when it REFUSES - a page it cannot
+      # parse, and above all a MODE ROSTER that has drifted from the Rust
+      # in either direction. That last one is the arm with teeth here: a
+      # handler that starts refusing, or stops, reddens this job on the
+      # author's own push whatever the hit count is doing.
+      - name: refusing-read report
+        run: |
+          python3 tools/refusing-read-report.py --selftest
+          python3 tools/refusing-read-report.py
   packaging-tests-roster:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -2840,8 +2875,29 @@ jobs:
                        "empty accept set drops every binary and reads as a pass.")
           by_realpath = {os.path.realpath(m): m for m in members}
 
+          # THE SECOND THING THIS STEP WRITES, since 17 Sep 2026, is the same
+          # selection spelled as `tools/one-process-roster.py` spells a target
+          # (`package:lib`, `package:bin/<name>`, `package:test/<name>`), so a
+          # later step can compare the two derivations of this one population.
+          # It is written HERE and not recomputed there on purpose: the accept
+          # set - "a binary in this archive whose package is a workspace
+          # member" - is decided once, in this loop, and a second copy of that
+          # decision could drift and make the comparison agree over a hole.
+          # The package NAME comes from the member's own manifest rather than
+          # from splitting the binary id, because a package id spells the name
+          # two different ways depending on the cargo version and a parse that
+          # guessed wrong would rename a target rather than fail.
+          package_names = {}
+
+          def package_name(member):
+              if member not in package_names:
+                  with open(os.path.join(member, "Cargo.toml"), "rb") as handle:
+                      package_names[member] = tomllib.load(handle)["package"]["name"]
+              return package_names[member]
+
           inventory = json.load(open("unit-binaries.json"))["rust-binaries"]
           rows, strangers, vendored, integration = [], [], 0, 0
+          roster_ids, odd_kinds = [], []
           for binary_id, binary in sorted(inventory.items()):
               # EVERY TEST BINARY, `test` INCLUDED, since 16 Sep 2026.
               # This read `kind not in ("lib", "bin") -> skip`, on the
@@ -2903,8 +2959,22 @@ jobs:
                   continue
               if not member.startswith("crates/"):
                   vendored += 1
-              if binary.get("kind") == "test":
+              kind = binary.get("kind")
+              if kind == "test":
                   integration += 1
+              # `lib`, `bin` and `test` are the three kinds a nextest archive
+              # of this workspace holds. A fourth would be a target kind that
+              # arrived without anyone noticing, which is exactly what the
+              # un-filtered accept set above is for - so it is an ERROR here
+              # rather than a quiet drop that would make the comparison below
+              # pass over it.
+              if kind == "lib":
+                  roster_ids.append(f"{package_name(member)}:lib")
+              elif kind in ("bin", "test"):
+                  roster_ids.append(
+                      f"{package_name(member)}:{kind}/{binary['binary-name']}")
+              else:
+                  odd_kinds.append((binary_id, kind))
               rows.append((binary_id, binary["binary-path"]))
 
           # FAILING TO FIND IS FAILING, both ways round. A unit binary
@@ -2949,10 +3019,22 @@ jobs:
                        "every test its own process. If those targets were genuinely "
                        "dropped or re-split, drop this arm in the same commit and say "
                        "so - do not leave it passing over nothing.")
+          for binary_id, kind in odd_kinds:
+              print(f"::error::{binary_id}: target kind {kind!r} is not one of "
+                    f"lib/bin/test.", file=sys.stderr)
+          if odd_kinds:
+              sys.exit("::error::the archive holds a target kind this selection "
+                       "cannot name as a roster id. Teach it the kind - do not "
+                       "drop the binary, which would take it out of the "
+                       "cross-check below as well as out of this list.")
+          with open("archive-targets.txt", "w", encoding="utf-8") as handle:
+              for target in sorted(set(roster_ids)):
+                  handle.write(target + "\n")
           for row in rows:
               print(*row, sep="\t")
           PY
           cat unit-binaries.tsv
+          cat archive-targets.txt
       # THE ONE LINE THIS JOB EXISTS TO PUT IN THE LOG, and it needs a
       # step of its own for a reason that is the finding itself. The
       # loop below runs each binary BARE, so libtest captures the output
@@ -3021,11 +3103,59 @@ jobs:
               # annotation's properties at the first `::` it finds, so
               # an id in the title truncates it and swallows the
               # message. In the message body a `::` is just text.
-              echo "::error title=A test binary failed with its tests sharing one process::$id failed when every one of its tests ran in a single process. If linux-tests is green on this same commit then no individual test is broken IN ISOLATION - but there are THREE shapes here and only ONE of them has a polluter, so do not reach for the bisect first. (a) POLLUTION: an earlier test left process-global state that this one read; visible even serially. (b) A CONCURRENT RACE on a process-global: two tests on different THREADS raced a counter - this job invokes the binary bare, so libtest is PARALLEL and can see it, and '-- --test-threads=1' structurally CANNOT reproduce it. (c) NO POLLUTER AT ALL: the test depends on a wall-clock duration it never sets - a window that rolls, a token that expires - and slow setup on a loaded box overran it. THE TELL, and it costs one run: re-run the failing test ALONE with the box busy. If it STILL fails there is no neighbour to find - that is (c), so read the test for a duration it depends on but never sets, and fix the TEST, never the production constant. If it passes alone and fails only in company it is (a) or (b). Reproduce with 'cargo test' - never nextest - on that target: 'cargo test -p <crate> --lib' for a lib/bin id, 'cargo test -p <crate> --test <name>' for an integration one (the id's second half names it). libtest names the VICTIM and never the polluter: 'tools/pollution-bisect.py -p <crate> <the failing test>' names the polluter for (a) in minutes, but do NOT hand it a FLAKY victim - it refuses one that fails alone, and otherwise converges on an innocent neighbour and prints it with the confidence of a real answer. Never add '--test-threads=1' to make a red go away; that deletes the (b) coverage. nightly.yml's 'one-process-loaded' runs this same binary tens of times under load and reports a RATE, which is where (c) shows up on its own."
+              echo "::error title=A test binary failed with its tests sharing one process::$id failed when every one of its tests ran in a single process. If linux-tests is green on this same commit then no individual test is broken IN ISOLATION - but there are THREE shapes here and only ONE of them has a polluter, so do not reach for the bisect first. (a) POLLUTION: an earlier test left process-global state that this one read; visible even serially. (b) A CONCURRENT RACE on a process-global: two tests on different THREADS raced a counter - this job invokes the binary bare, so libtest is PARALLEL and can see it, and '-- --test-threads=1' structurally CANNOT reproduce it. (c) NO POLLUTER AT ALL: the test depends on a wall-clock duration it never sets - a window that rolls, a token that expires - and slow setup on a loaded box overran it. THE TELL, and it costs one run: re-run the failing test ALONE with the box busy. If it STILL fails there is no neighbour to find - that is (c), so read the test for a duration it depends on but never sets, and fix the TEST, never the production constant. If it passes alone and fails only in company it is (a) or (b). Reproduce with 'cargo test' - never nextest - on that target: 'cargo test -p <crate> --lib' for a lib/bin id, 'cargo test -p <crate> --test <name>' for an integration one (the id's second half names it). libtest names the VICTIM and never the polluter: 'tools/pollution-bisect.py -p <crate> <the failing test>' names the polluter for (a) in minutes, but do NOT hand it a FLAKY victim - it refuses one that fails alone, and otherwise converges on an innocent neighbour and prints it with the confidence of a real answer. Never add '--test-threads=1' to make a red go away; that deletes the (b) coverage. nightly.yml's 'one-process-loaded' runs this same binary tens of times under load and reports a RATE, which is where (c) shows up on its own - true for every lib/bin root and, since 17 Sep 2026, for the nzbkit, nzbfast and tiny_http integration binaries; the other six integration targets are excused BY NAME in that job's matrix with a reason each, so read the excuse before concluding a rate exists."
             fi
             echo "::endgroup::"
           done < unit-binaries.tsv
           exit "$rc"
+      # -----------------------------------------------------------------
+      # THE TWO DERIVATIONS OF THIS ONE POPULATION, COMPARED. Added
+      # 17 Sep 2026 under claim `one-process-derivations-never-compared`.
+      #
+      # "Every test binary this job runs" is derived TWICE in this repo,
+      # by two different means. The step above reads the nextest
+      # ARCHIVE's own inventory, which is ground truth because it is the
+      # list the run loop then runs. `tools/one-process-roster.py` reads
+      # the MANIFESTS - `[[test]]` entries plus cargo's auto-discovery,
+      # with a small hand-written feature resolver - because it runs in
+      # the build-free gate set with no archive and no toolchain, and it
+      # holds nightly's `one-process-loaded` matrix to what it derives.
+      # Until this step they had never been compared.
+      #
+      # THE FAILURE IS ONE-SIDED AND READS AS COVERAGE. That resolver
+      # errs wide on purpose, but a feature it CANNOT see turns a
+      # `required-features` target from "gated out" into a live binary
+      # in this archive - and then this job runs it, the matrix owes it
+      # a leg or an excuse, the roster asks for neither, and both gates
+      # are green over the hole. Eleven targets sit behind
+      # `required-features` today, so the mechanism is live rather than
+      # hypothetical.
+      #
+      # THE ARCHIVE IS GROUND TRUTH, and the script's refusal text says
+      # so: a disagreement is the roster's manifest derivation being
+      # wrong until shown otherwise. The fix is never to widen that
+      # resolver until the sets match - that is the same edit as
+      # deleting the gate.
+      #
+      # AFTER THE RUN LOOP AND `!cancelled()`, both deliberately. This
+      # costs about a tenth of a second and proves nothing about the
+      # tests, so it must not pre-empt the ~20 minutes of one-process
+      # coverage this job exists for; and a red run loop must not hide
+      # it, because the two verdicts are independent and a reader wants
+      # both on one page.
+      #
+      # THE CALL SITE IS HELD FROM THE OTHER END TOO: the roster's
+      # ordinary gate - which runs on every push in size-gate.yml -
+      # refuses if this job stops naming `--compare-archive`. A
+      # comparison that lives in one step is one deleted line away from
+      # never running again, and it would go quiet rather than red.
+      # -----------------------------------------------------------------
+      - name: cross-check the roster's derivation against the archive
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/one-process-roster.py --compare-archive=archive-targets.txt
 
 
   # ===================================================================
@@ -4309,6 +4439,40 @@ jobs:
       # --locked, as at every other cargo gate in this file: the graph
       # this cross-check compiles must be the committed one, because the
       # committed one is what release.yml builds the ARM64 package from.
+      #
+      # STATED LIMIT, AUDITED 17 Sep 2026: this runs in CHECK MODE (the
+      # twin step in pr-check.yml says so in those words), and a
+      # check-shaped driver cannot see the `known_panics` LINT FAMILY -
+      # `arithmetic_overflow` and `unconditional_panic`, a const-folded
+      # overflow, a const out-of-bounds index, a const division by zero.
+      # `cargo clippy` is exactly as blind as `cargo check` here, because
+      # clippy never reaches codegen either: measured check 0 / clippy 0
+      # / build 3 for each lint, in the 16 Sep 2026 armv7 local-probe
+      # note - which is in the private tree, so it is not named here,
+      # this file being published verbatim. The absence of
+      # `--all-targets` widens that to the test targets, which
+      # for this triple are neither checked nor built anywhere.
+      #
+      # CONVERTING TO A BUILD IS DECLINED, and the exposure is the
+      # reason rather than the cost. The family is sensitive to POINTER
+      # WIDTH, and both Windows targets are 64-bit, so `windows-build`'s
+      # `cargo nextest archive` - a real BUILD on x86_64-pc-windows-msvc
+      # - already codegens every const this triple would, except behind a
+      # `target_arch` cfg. Census of `-p nzbfast -p nzbtray` on 17 Sep
+      # 2026: ONE `target_arch` cfg in either crate, the
+      # `any(target_arch = "x86_64", target_arch = "aarch64")` arm at
+      # crates/nzbfast/src/main.rs:39, and no `cfg!(target_arch)` at all.
+      # So the arch-only population this step uniquely covers is
+      # effectively empty. The PRODUCTION half is separately BUILT for
+      # this triple at release time - release.yml and sign-windows.yml
+      # both run `cargo build --release --target aarch64-pc-windows-msvc
+      # -p nzbfast -p nzbtray` - so a member of the family in shipped
+      # code reds a release rather than shipping silently. Late, not
+      # invisible, and that is the trade taken here deliberately.
+      #
+      # Re-run that census before quoting this: it is a dated fact about
+      # two crates, and a new `#[cfg(target_arch)]` in either one reopens
+      # the question.
       - name: cross-check aarch64-pc-windows-msvc (ARM64 beta target)
         run: |
           rustup target add aarch64-pc-windows-msvc
@@ -4433,12 +4597,35 @@ jobs:
   # do, and why the three items above got a `cfg` on the ITEM instead.
   #
   # SO READ THE PRECONDITION AS A DATED MEASUREMENT AND NEVER AS A
-  # STANDING FACT. It passes as this is written, on 28 Aug 2026, and that
-  # is the whole of what is known. NOTHING holds it there: this step is
-  # `cargo check` with no `-D warnings`, which is exactly how three items
-  # accumulated in three days with every gate in the repo green. Re-run
-  # the line before quoting it: ~83s cold, far less warm, against the
-  # session that quoting it instead has already cost.
+  # STANDING FACT. It passed when this was written, on 28 Aug 2026.
+  # NOTHING holds it there: this step is `cargo check` with no
+  # `-D warnings`, which is exactly how three items accumulated in three
+  # days with every gate in the repo green. Re-run the line before
+  # quoting it: ~83s cold, far less warm, against the session that
+  # quoting it instead has already cost.
+  #
+  # RE-RUN 17 SEP 2026 AND STILL CLEAN: exit 0, zero warnings, on the tip
+  # at the time (~1m56s at load 161, so the ~83s figure above is a quiet
+  # box and this is the loaded end of the same spread). Two footnotes,
+  # both of which matter more than the pass:
+  #
+  #   * IT ACCUMULATED A FOURTH TIME IN BETWEEN, exactly as this
+  #     paragraph says it silently does. `holdstat` was re-exported
+  #     unconditionally in nzbfast-daemon on 16 Sep (2078be7e2) while its
+  #     only consumer sits behind `indexer`, so every indexer-off build
+  #     warned for a day with every gate green. It was found from a
+  #     lane's own build output, not by CI, and by TWO lanes
+  #     independently within the hour (58cfcb0f4 landed it). So the
+  #     benefit side of the trade below now has four incidents on it, not
+  #     three, and the one-a-month-ish rate the first three suggested is
+  #     holding.
+  #   * THE THREE `rars` WARNINGS THIS NOTE SAYS YOU WILL STILL SEE DID
+  #     NOT APPEAR, and that is not a change in the vendored crate - it
+  #     is the warm-target trap: cargo does not reprint a warning for a
+  #     unit it considers fresh, so a second run of an invocation that
+  #     genuinely warns reads clean. That trap cost two lanes a wrong
+  #     scope for `holdstat` on 17 Sep. `touch` the file, or wipe the
+  #     unit, before every arm when you re-measure any of this.
   #
   # The tightening is still declined, and NOT on the precondition. It is
   # declined on the same measurement that bought `--all-targets`, run the
@@ -4469,6 +4656,52 @@ jobs:
   # is needed.
   #
   # `--locked`, as at every other cargo gate in this file.
+  #
+  # STATED LIMIT, AUDITED 17 Sep 2026: A `cargo check` CANNOT SEE THE
+  # `known_panics` LINT FAMILY, so neither step below can - and it is the
+  # one class `--all-targets` does NOT buy back. `arithmetic_overflow`
+  # and `unconditional_panic` (a const-folded overflow, a const
+  # out-of-bounds index, a const division by zero) are raised by a MIR
+  # pass in the CODEGEN pipeline that `cargo check` stops short of, and
+  # `cargo clippy` is exactly as blind because it is a check-shaped
+  # driver that never codegens: measured check 0 / clippy 0 / build 3 for
+  # each lint, and against 4c1f4869f a `check --all-targets` is GREEN
+  # over a const overflow a canary proves it REACHES. Both measurements
+  # are in the 16 Sep 2026 armv7 local-probe note, which is in the
+  # private tree, so it is not named here - this file is published
+  # verbatim. So the tightening to clippy that the paragraph above
+  # weighs would not close this half either; only a build would.
+  #
+  # CONVERTING TO A BUILD WAS PRICED AND DECLINED, on this ground: the
+  # slim TEST targets are a strict SUBSET of the default ones. Nothing in
+  # crates/nzbfast/tests, crates/nzbkit/tests or either package's
+  # examples and benches carries a `cfg(not(feature = ...))` arm or a
+  # `cfg!(feature ...)` - checked 17 Sep 2026 - so every target this job
+  # compiles is also compiled, and genuinely CODEGENNED, by `check`'s
+  # nextest archive and by the shards on the same push. The blindness is
+  # therefore structurally EMPTY rather than merely empty today, and it
+  # reopens the day a slim-only `cfg(not(...))` arm appears in a test
+  # file. Re-run that grep before quoting this. (Confirmed empirically
+  # the same day as well as by census: `cargo build -p nzbkit` and
+  # `-p nzbfast`, both `--no-default-features --locked --all-targets`,
+  # are green - the first time the slim test targets had ever been
+  # codegenned by anybody.)
+  #
+  # THE PRICE, recorded so the argument above does not have to be
+  # re-derived if that grep ever stops being clean. Measured on the dev
+  # Mac into an ISOLATED cold CARGO_TARGET_DIR, `-p nzbkit
+  # --no-default-features --locked --all-targets`: the check cost 68.0s
+  # wall / 87.3 CPU-s, a BUILD on top of that finished tree a further
+  # 62.8s wall / 168.1 CPU-s, and the tree grew to 1.5 GB against the
+  # ~276 MB of check-mode artifacts this job's own note above records.
+  # So a cold build is about 2.9x the check in CPU and ~5x on disk.
+  # THE WALL FIGURES ARE PRINTED ONLY TO SAY THEY ARE UNUSABLE: the box
+  # carried load1 94-104 on 18 cores throughout (~5.5x oversubscription),
+  # which is exactly why the BUILD leg's wall (62.8s) came out LOWER than
+  # the check's (68.0s) while costing twice the CPU - under contention
+  # wall measures what the scheduler handed back, not work done. CPU is
+  # the robust metric and is itself 12-24% inflated by load (section 3 of
+  # that note). The RATIO transfers; neither absolute does.
   slim-check:
     needs: changes
     if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
@@ -4499,6 +4732,230 @@ jobs:
       # dependency graph being shared with it.
       - name: check --no-default-features --all-targets (nzbkit, indexer off)
         run: cargo check -p nzbkit --no-default-features --locked --all-targets
+
+      # ...AND THE COMBINATION BETWEEN THE TWO, added 17 Sep 2026, which
+      # is the one CLAUDE.md actually tells people to run: "Anything
+      # driving a slim engine through its pages wants
+      # `--no-default-features --features dashboard`". That line did not
+      # compile. `nzbfast-api/src/lib.rs` gated `use std::path::Path` on
+      # `indexer` while `assets.rs`'s `user_css(&Path)` is gated on
+      # `dashboard`, and because `indexer` FORWARDS to `dashboard` the
+      # two are separable in one direction only - so
+      # dashboard-WITHOUT-indexer is the single configuration that
+      # reaches it, and it is the one no job selected. The two steps
+      # above turn `dashboard` OFF with `indexer`; everywhere else in
+      # this file workspace feature unification resolves `indexer` ON.
+      # Same class as the detached-workspace gaps CLAUDE.md lists, in a
+      # different axis: not a workspace no `-p` list reaches, but a
+      # feature combination no job selects.
+      #
+      # `cargo check` and no `-D warnings`, matching the two steps
+      # beside it. When this step landed the reason given was a
+      # pre-existing `unused import: holdstat` that a clippy arm would
+      # red on - CORRECTED the same day: that warning was never specific
+      # to this combination, it fired in EVERY indexer-off build of
+      # nzbfast-daemon (its only consumer, `Daemon::with_index_mut`, is
+      # itself `#[cfg(feature = "indexer")]`), and it is fixed at the
+      # site now by giving the import its consumer's cfg. The import and
+      # its fix carry the detail at their own site. (An earlier revision
+      # of this comment explained the two wrong readings by a warm target
+      # directory not reprinting warnings. That was wrong and is
+      # retracted - cargo replays a cached diagnostic on a fresh unit.)
+      #
+      # The `cargo check` choice STANDS on the two steps beside it rather
+      # than on that warning, which is the better reason anyway: this job
+      # asks "does the slim configuration still compile", and clippy is
+      # the `check` job's business.
+      #
+      # `-p nzbfast` only. nzbkit has no `dashboard` feature at all, so
+      # there is no sibling line to add ("the package 'nzbkit' does not
+      # contain this feature: dashboard").
+      - name: check --no-default-features --features dashboard (indexer off, pages on)
+        run: cargo check -p nzbfast --no-default-features --features dashboard --locked --all-targets
+
+      # ...AND THE SET THE RELEASE ACTUALLY SHIPS, added 17 Sep 2026,
+      # which is the OPPOSITE end of this job's axis from the three
+      # steps above: they turn features OFF to reach the phone
+      # configurations, and this one turns NOTHING off and is still a
+      # configuration no host job compiled. `cargo build -p nzbfast`
+      # resolves `nzbkit-base [indexer]`, `nzbfast-core [indexer]` and
+      # `nzbfast-unpack []` - no `digest-cache`, no `test-support`.
+      # Every OTHER per-push host job that compiles nzbfast does so
+      # through DEV-DEPENDENCY edges (the archive, `check`, the clippy
+      # gate, `heavy-build` and every shard all build test targets),
+      # and those edges turn both features on below. So the code that
+      # exists ONLY in the shipped set was reached per push by nothing
+      # but the Android cross build and the iOS staticlib, which have
+      # `indexer` off as well:
+      #
+      #   * `crates/nzbkit-base/src/digest_cache_off.rs`, the inert stub
+      #     the `#[cfg(not(feature = "digest-cache"))]` module swap at
+      #     `nzbkit-base/src/lib.rs:31` selects;
+      #   * the two `#[cfg(not(any(test, feature = "test-support")))]`
+      #     arms in `nzbfast-core` - `persist.rs:68` (`skip_fsync =
+      #     false`) and `netfetch.rs:304` (the pass-through
+      #     `deny_test_callout`).
+      #
+      # A break in any of those reached main, waited for nightly, and
+      # reddened a release build if nightly was already red for another
+      # reason - which on the day this landed it was.
+      # (FEATURE-COMBINATION-COVERAGE-2026-09-17.md section 4.5 - the
+      # bare filename, because the directory holding it is stripped out
+      # of the published copy of this file and a surviving path would
+      # break the publish.)
+      #
+      # NO `--all-targets` AND NO SECOND `-p`, AND THAT IS THE WHOLE
+      # STEP. `--all-targets` builds the test targets, which is exactly
+      # what pulls the dev-dependency edges that carry `test-support`
+      # and `digest-cache` - so an `--all-targets` spelling here
+      # resolves the same set `check` already compiles and this step
+      # becomes a duplicate that proves nothing. A second `-p` is the
+      # same trap one axis over: `-p parfast` brings `digest-cache` in
+      # by its own dependency edge, and any package whose test targets
+      # get built brings `test-support`. Verify what you actually
+      # resolved before "improving" this line:
+      #
+      #   cargo tree --locked -e normal,build -f "{p} [{f}]" -p nzbfast
+      #
+      # It is deliberately a `cargo check` with no `-D warnings`,
+      # matching the three steps beside it: this job asks "does the
+      # configuration still compile", and linting is `check`'s business.
+      #
+      # WHAT IT COSTS. Measured on the dev Mac in a fresh target dir:
+      # 127 CPU-seconds, against 141 for this job's three existing steps
+      # together, so it roughly doubles the job - about 2.4 min to a
+      # little under 5 on the runner, still half of `check` and well
+      # inside the 20-minute cap. It shares nothing with the steps above
+      # because the whole point is that it resolves a different feature
+      # set. (Wall figures from that round are not quoted: the box's
+      # load1 had risen to 23.8 against a load15 of 13.1 by the end of
+      # it, which CLAUDE.md's pointer-width section says is the reading
+      # to distrust. CPU-seconds are the comparison.)
+      - name: check the host release feature set (no dev edges)
+        run: cargo check -p nzbfast --locked
+
+      # ...AND A FIFTH CONFIGURATION NOBODY COMPILED, added 17 Sep 2026,
+      # which is this job's subject in the OTHER direction: the three
+      # steps above turn default features OFF and the fourth turns
+      # nothing off, and this one turns an OPTIONAL feature ON.
+      # `postfast`'s `live-post` gates the posting tool's whole network
+      # half plus the one test in the tree that
+      # drives the posting path against `nzbkit::mock::MockServer`, and
+      # a `grep -rn live-post` over every workflow, tool, packaging
+      # script, bench driver and session skill in the repo found no
+      # selector at all (the private trees among those are named in the
+      # census rather than here, because a surviving private path would
+      # break the publish of this file) - so the code behind the flag was
+      # type-checked by nobody, on any push.
+      #
+      # WHAT THAT COST, measured rather than feared. `Args` grew a
+      # `dictionary` field in `9ba75893e` (7 Sep 2026, the RAR5 32 MiB
+      # dictionary commit); the gated test's `Args { .. }` literal was
+      # last edited in `944647064` the same morning on a different
+      # branch; the merge `3aee9d037` joined them, and main carried
+      # `error[E0063]: missing field dictionary` for TEN DAYS with every
+      # job green, because the lane that added the field had no reason to
+      # build a feature no job passes. Found by the census in
+      # FEATURE-COMBINATION-COVERAGE-2026-09-17.md section 4.2 - the bare
+      # filename, because the directory holding it is stripped out of the
+      # published copy of this file and a surviving path would break the
+      # publish. The class is memory topic
+      # `nzbfast-default-off-feature-is-untested`.
+      #
+      # `--all-targets` is LOAD-BEARING and must not be dropped: the red
+      # was in the lib TEST target, and a plain check cannot see it. That
+      # is the first slim step's own lesson, in a different feature axis -
+      # and note it is the exact OPPOSITE of the release-set step above,
+      # where `--all-targets` is what would make the step meaningless.
+      # The two are not in tension: that step is about which dependency
+      # EDGES resolve, this one about which TARGETS get compiled.
+      #
+      # `cargo check` and no `-D warnings`, matching the four steps
+      # beside it: this job asks "does the configuration still compile",
+      # and clippy is the `check` job's business. It is NOT a test run -
+      # the gated test needs a tokio runtime and a loopback mock, which
+      # is a different job's price; what this step buys is that the
+      # feature cannot silently stop compiling again.
+      - name: check -p postfast --features live-post --all-targets (the gated posting half)
+        run: cargo check -p postfast --features live-post --locked --all-targets
+
+  # ===================================================================
+  # THE THREE SETS A PHONE STORE ACTUALLY SHIPS, LINTED, added 17 Sep
+  # 2026. This is slim-check's subject with a different verb: that job
+  # asks "does the slim configuration still COMPILE", and until this one
+  # existed nothing anywhere asked "is it CLEAN". The fourteen-package
+  # clippy gate in `check` names `-p nzbfast` and `-p nzbfast-ffi` in ONE
+  # line, which unifies `indexer`, `dashboard` and `ffi` all ON, so the
+  # only lint in the repo over these crates ran over a configuration no
+  # phone ships. The three sets here are exactly the three phone-store
+  # binaries: the Android engine and the iOS store engine (slim), the
+  # iOS harness (slim + dashboard) and the iOS store staticlib (ffi).
+  #
+  # A `cfg`-gated import whose only consumer sits behind `indexer` is an
+  # `unused import` in all three and in none of the linted sets - the
+  # `58cfcb0f4` shape with the roles reversed, the narrow configuration
+  # being the SHIPPED one here. That is a warning nobody reads rather
+  # than a red, which is why this job ranks below a compile hole and is
+  # still worth having: nothing else will ever print it.
+  # (FEATURE-COMBINATION-COVERAGE-2026-09-17.md section 4.1 - the
+  # bare filename, because the directory holding it is stripped out
+  # of the published copy of this file and a surviving path would
+  # break the publish.)
+  #
+  # MEASURED CLEAN on the day it landed, in a fresh target directory, so
+  # it goes green on arrival and there is no fix bundled with it.
+  #
+  # PRICED BEFORE IT LANDED, which is why it is a job and not a wish.
+  # On the dev Mac (18 cores, load1 5.4 against load15 11.5, i.e.
+  # drained, which is the window CLAUDE.md's pointer-width section says
+  # to measure in), each arm in a FRESH target dir, two rounds:
+  # the three arms together cost 93 and 94 CPU-seconds against `check`'s
+  # own clippy step at 161 and 173 in the same rounds - about 56% of it,
+  # and 26 and 29 s of wall against 30 and 36 s. The wall figures are this
+  # box's and do not transfer to a 4 vCPU runner; the RATIO is the
+  # answer to "does this cost more than the gate it sits beside", and it
+  # does not. It is cheap for a structural reason worth keeping: the
+  # slim graph has no `indexer`, so rusqlite and `image` are not in it
+  # at all.
+  #
+  # NO CACHE, DELIBERATELY, AND THREE STEPS IN THIS ORDER. A `--no-deps`
+  # clippy compiles the packages it is NOT linting as lint-capped units,
+  # and a later clippy naming one of those as a `-p` package replays the
+  # capped unit's empty diagnostics as its answer - about a second, zero
+  # `Checking` lines, exit 0, a green line over nothing. Measured while
+  # the census was written, and a `touch` does not defend against it.
+  # The defences here are that EVERY arm names all ten layer crates, so
+  # they are lint units in every one of them and never dependencies, and
+  # that the job restores no cache, so nothing can hand it a narrower
+  # lint's artifacts. If you add a cache to this job, that is the
+  # property to preserve; if you split an arm into a narrower `-p` list,
+  # you have re-armed the trap.
+  #
+  # The two arms after the first are nearly free (3.6 and 6.7 s, then
+  # 1.1 and 2.0 s locally) and that is CORRECT rather than a replay:
+  # only the crates
+  # whose feature set changed - `nzbfast` and `nzbfast-api` for
+  # dashboard, `nzbfast` and `nzbfast-ffi` for ffi - recompile, and
+  # every crate below them resolves identically and was linted for real
+  # by the first arm.
+  phone-sets-clippy:
+    needs: changes
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-phone-sets-clippy-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+      - name: clippy the slim set (Android engine, iOS store engine)
+        run: cargo clippy -p nzbkit-base -p nzbkit -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbfast --no-default-features --locked --no-deps -- -D warnings
+      - name: clippy the slim + dashboard set (iOS harness)
+        run: cargo clippy -p nzbkit-base -p nzbkit -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbfast --no-default-features --locked --no-deps --features nzbfast/dashboard -- -D warnings
+      - name: clippy the ffi set (iOS store staticlib)
+        run: cargo clippy -p nzbkit-base -p nzbkit -p nzbfast-core -p nzbfast-unpack -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks -p nzbfast-api -p nzbfast -p nzbfast-ffi --no-default-features --locked --no-deps --features nzbfast/ffi -- -D warnings
 
   # ===================================================================
   # THE OTHER CONFIGURATION NOBODY BUILDS, added 29 Aug 2026, and it is
@@ -4555,6 +5012,56 @@ jobs:
   # not a claim that the feature is worth having - it is the guard that
   # keeps it COMPILING while that question is open, which is the whole of
   # what was missing.
+  #
+  # STATED LIMIT, AUDITED 17 Sep 2026, AND THIS IS THE CONFIGURATION
+  # WHERE IT BITES HARDEST: a `cargo check` cannot see the `known_panics`
+  # LINT FAMILY - `arithmetic_overflow` and `unconditional_panic`, which
+  # is a const-folded overflow, a const out-of-bounds index, or a const
+  # division by zero. They are raised by a MIR pass in the CODEGEN
+  # pipeline that `cargo check` stops short of, and `cargo clippy` is
+  # exactly as blind because it is a check-shaped driver that never
+  # codegens: measured check 0 / clippy 0 / build 3 for each lint, and
+  # against 4c1f4869f a `check --all-targets` is GREEN over a const
+  # overflow a canary proves it REACHES. Both measurements are in the
+  # 16 Sep 2026 armv7 local-probe note, which is in the private tree, so
+  # it is not named here - this file is published verbatim. Every
+  # other configuration in this repo has some other job that BUILDS it;
+  # `ktls` has none, by the paragraph above. So a member of that family
+  # behind this feature would sit undetected for as long as the feature
+  # stays off, which is indefinitely.
+  #
+  # CONVERTING THIS STEP TO A BUILD IS DECLINED, on a census AND on a
+  # build, not on a guess. The whole of the feature's code is 337 lines
+  # in crates/nzbkit-base/src/nntp/ktls.rs plus four `cfg` arms in
+  # nntp.rs and nntp/tls.rs. Its only constants are seven small protocol
+  # numbers (`SOL_TLS`, the record and handshake types), there is no
+  # const indexing and no const division anywhere in it, and there is NO
+  # `#[cfg(test)]` code behind the feature at all - so `--all-targets`
+  # here reaches no ktls test target whatever (the code is in
+  # nzbkit-base, which this job compiles as a dependency LIB). The
+  # exposure is empty. It was then confirmed rather than argued: on
+  # 17 Sep 2026 `cargo zigbuild -p nzbkit --features ktls --locked
+  # --all-targets --target x86_64-unknown-linux-gnu` from the dev Mac is
+  # GREEN, which is the first time ktls.rs has been codegenned anywhere
+  # by anyone.
+  #
+  # THE PRICE, for whoever revisits this when ktls.rs grows. That build
+  # cost 271.8 CPU-s and left a 7.0 GB target tree, against this job's
+  # own recorded check cost of ~22s warm and about a minute cold on a
+  # linux box. The check baseline was NOT re-measured on the dev Mac and
+  # cannot easily be: cargo-zigbuild has no `check` subcommand, and a
+  # bare `cargo check --target x86_64-unknown-linux-gnu` dies in cc-rs
+  # for want of a cross C toolchain, exactly as the paragraph above
+  # records. The multiple to assume is therefore the one measured for
+  # slim-check below on the same box and in the same hour - about 2.9x
+  # the check in CPU and ~5x on disk for a cold build. The wall figures
+  # from that session are deliberately not quoted: the box carried load1
+  # 75-147 on 18 cores throughout (4x to 8x oversubscription) and wall
+  # under that contention measures the scheduler, not work.
+  #
+  # RE-AUDIT THE CENSUS, DO NOT QUOTE IT. "No const arithmetic in
+  # ktls.rs" is a dated fact about a 337-line file, and the file is the
+  # only thing keeping this decline correct.
   ktls-check:
     needs: changes
     if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
@@ -4624,8 +5131,46 @@ jobs:
   # the produced file bytes row by row. The reference's answers are
   # committed as fixtures under tools/conformance/expected/ and its own
   # help screen under tools/conformance/inventory/, so this job needs
-  # only the reference plus those files. It is the mechanical form of
-  # "our par2 is a drop-in": a claim about a file, not about a manual.
+  # only the reference plus those files.
+  #
+  # TWO STEPS, TWO DIFFERENT CLAIMS, and they are named apart at the
+  # bottom of this job because conflating them is what went wrong here:
+  #
+  #   table freshness  reference against reference. Both sides are the
+  #                    par2cmdline v1.3.0 this job just built, so a red
+  #                    means expected/ and inventory/ have stopped
+  #                    describing the pin. It says nothing about us.
+  #   drop-in          `parfast` against that same committed table. THIS
+  #                    is the mechanical form of "our par2 is a drop-in":
+  #                    a claim about a file, not about a manual.
+  #
+  # THE SECOND STEP IS NEW ON 17 Sep 2026 AND THE FIRST WAS ALONE HERE
+  # FOR TWO WEEKS. From 993666c66 (3 Sep) this job built the reference
+  # and then diffed it against itself: it never built `parfast`, never
+  # named it and never ran it, while this header called that "the
+  # mechanical form of our par2 is a drop-in". run.py's own README says
+  # why that reads as coverage and is not - "a table pair agrees on what
+  # the reference does and says nothing about what a drop-in owes".
+  #
+  # WHAT THE ABSENCE COST, measured rather than argued. f9f50300f gave
+  # `parfast c` a no-self-overwrite guard holding `opts.par2`; under `-a`
+  # the output is the ARCHIVE and the first bare argument is an ordinary
+  # MEMBER, so the guard read that member as the file about to be
+  # written. `parfast c -q -aout2.par2 -b32 text.txt rand.bin` then
+  # protected `rand.bin` alone and exited 0 - a named source file
+  # silently absent from the recovery set, reported as success - and this
+  # job was GREEN on it (c23bd32d, run 35255182197), because it was
+  # comparing par2cmdline against par2cmdline. The harness names it in
+  # one line when pointed at our binary, and a lane found it by hand on a
+  # Mac (fixed in ad99635fa). The full record is the 17 Sep 2026 handoff
+  # on this job, in the private tree; the harness's own README carries
+  # the short form beside its leg table.
+  #
+  # IT IS A STEP AND NOT A SECOND JOB, deliberately: tools/ci-verdict.py
+  # carries a job roster and a new JOB has to be added to it by hand,
+  # while a step rides the job already judged there. The cost is that a
+  # red step and a red job are one row on the summary - which is the
+  # right trade here, because both steps are this job's own subject.
   #
   # IT INSTALLS NOTHING VIA apt FOR par2, AND THAT IS THE POINT.
   # Ubuntu's package is par2cmdline 0.8.1, which miscounts identical
@@ -4703,9 +5248,86 @@ jobs:
             tools/conformance/expected/par2-1.3.0-linux.json
             tools/conformance/inventory/par2-1.3.0-linux.txt
           if-no-files-found: error
-      - name: par2cmdline v1.3.0 against its committed table
+      # ---------------------------------------------------------------
+      # STEP ONE OF TWO: IS THE COMMITTED TABLE STILL THE REFERENCE'S?
+      # Both sides of this comparison are the pinned par2cmdline the job
+      # just built, so what it asserts is that expected/ and inventory/
+      # still describe v1.3.0 - a table-freshness guard that reddens when
+      # the pin moves and the fixtures do not. It asserts NOTHING about
+      # parfast, which is step two. It was the only step here from
+      # 3 Sep 2026 (993666c66) until 17 Sep 2026, under a name that read
+      # like the drop-in claim; what that cost is in the block above the
+      # job.
+      # ---------------------------------------------------------------
+      - name: table freshness - par2cmdline v1.3.0 against its own committed table
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.conformance_capture) }}
         run: tools/conformance/run.py par2 --reference ~/par2ref/par2 --candidate ~/par2ref/par2
+      # ---------------------------------------------------------------
+      # STEP TWO OF TWO: IS OUR par2 A DROP-IN? This is the claim the
+      # job's name makes and the one it did not check for two weeks.
+      #
+      # `!cancelled()` and not a bare guard, for the reason the note
+      # above the cheap gates gives: a red step one must not be able to
+      # skip step two, or a stale table hides a live divergence in our
+      # binary - which is the strictly worse of the two reds.
+      #
+      # NO TARGET-DIR CACHE, and that is the deliberate half. This
+      # repository sits at 11.85 GB against GitHub's 10 GB per-repo cache
+      # limit with LRU eviction ACTIVE, so a `target/` cache here would
+      # evict what `check` and the four Windows jobs restore from - the
+      # same trade `fuzz-gate` and `mobile-targets.yml` already take, and
+      # the reason is in the paragraph above `fuzz-gate`. Read that
+      # paragraph before adding one.
+      #
+      # DEBUG, NOT `--release`, and it was measured rather than assumed:
+      # every row here is a behaviour comparison and not one of them is
+      # timed, so the only thing `--release` buys is a slower job.
+      # MEASURED on the 4-vCPU runner, cold, with no cargo cache of any
+      # kind, both profiles in one matrix on a throwaway probe branch
+      # (17 Sep 2026, run 35264080182, branch deleted after):
+      #
+      #   build parfast   debug 171 s   release 193 s
+      #   the harness     debug 1.4 s   release 0.5 s
+      #   whole job       debug 191 s   release 210 s
+      #
+      # Both legs reported `par2 1.3.0 linux: 71 rows, 15 waived, 0
+      # divergence(s)` with full coverage, so the profile is free to be
+      # the cheap one. The reference itself was a cache HIT on both legs
+      # - the `build par2cmdline` step above skipped - which is what this
+      # job sees on main too.
+      #
+      # WHAT THAT COSTS IN VERDICTS, said rather than left to be found.
+      # Over the last 65 `ci` runs on main (17 Sep 2026) this job was
+      # skipped 41 times by the `changes` gate above, cancelled 13 and
+      # green 10, and the ten green ones ran in 10-17 s. Three minutes of
+      # `cargo build` where there were sixteen seconds means a smaller
+      # share of pushes reaches a verdict, because a grouped job holds
+      # only ONE pending run and the next push displaces it. That is the
+      # arithmetic the long note above `env:` sets out, and it is
+      # accepted here rather than bought off: a job that answers the
+      # drop-in question on some pushes beats one that answered a
+      # different question on all of them, `tools/ci-verdict.py` is what
+      # reads a displaced verdict, and a lane can run the same line
+      # locally in five seconds. Dropping the concurrency group - the
+      # shape `suites-ran` below takes for this exact reason - is the
+      # lever if that trade ever stops being the right one; it costs a
+      # full job per build-carrying push.
+      #
+      # `--reference` AND `--candidate`, never `--version`: with the
+      # reference on the box the input shapes are built BY the reference
+      # and nothing is declined, which is the strongest mode the harness
+      # has. The `--version` arm exists for a box with no pinned binary,
+      # and it blanks the entries the candidate built.
+      # ---------------------------------------------------------------
+      - name: toolchain
+        if: ${{ !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.conformance_capture) }}
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: build parfast (the drop-in under test)
+        if: ${{ !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.conformance_capture) }}
+        run: cargo build --locked -p parfast
+      - name: drop-in - parfast against the same committed table
+        if: ${{ !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.conformance_capture) }}
+        run: tools/conformance/run.py par2 --reference ~/par2ref/par2 --candidate "$PWD/target/debug/parfast"
 
   fuzz-gate:
     needs: changes

@@ -690,6 +690,13 @@ impl Daemon {
             info!(target: "queue", "recovered {adopted} job(s) from orphaned spool files");
         }
         self.sweep_spool_sidecars();
+        // GH #86: and the cancel-undo store, for the same reason and in
+        // the same place - it is spool hygiene that only a START can do.
+        // Its index is in memory, so after a restart nothing names those
+        // copies and no token can reach them; they are cleared rather
+        // than adopted, because a release the user cancelled must not
+        // come back by itself. See `cancelundo.rs`.
+        self.purge_cancel_undo();
         adopted
     }
 

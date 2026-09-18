@@ -251,7 +251,9 @@ pub fn rar5_volume_set_head(
 }
 
 /// [`rar5_volume_set`] with a stored data CRC32 per piece, the way
-/// [`rar5_volume_n_crc`] writes one.
+/// [`rar5_volume_n_crc`] writes one. See [`Rar5Crc`] before reaching
+/// for this: per-piece is NOT what an archiver writes, and the
+/// difference is a header-size one.
 pub fn rar5_volume_set_crc(
     volumes: &[&[(&str, u64, &[u8], bool, bool, Option<u32>)]],
 ) -> Vec<Vec<u8>> {
@@ -263,6 +265,58 @@ pub fn rar5_volume_set_crc_head(
     volumes: &[&[(&str, u64, &[u8], bool, bool, Option<u32>)]],
     head: Rar5Head,
 ) -> Vec<Vec<u8>> {
+    rar5_volume_set_crc_layout(volumes, head, Rar5Crc::EveryPiece)
+}
+
+/// Where a split member's stored data CRC32 rides, which the fixture
+/// family and every real archiver disagree about.
+///
+/// RAR5 verifies a split member against its FINAL fragment, so
+/// `rar a -v` - and this repo's own `Rar50VolumeWriter`, at
+/// `(!split_after).then(|| crc32(entry.data))` - stamps the whole
+/// member's CRC32 on that fragment alone and leaves file flag `0x04`
+/// clear on every earlier one. The fixture family has always taken a
+/// CRC per piece and every call site has always passed one, so every
+/// file header in a fixture set is the same size.
+///
+/// That uniformity is not cosmetic. A fragment carrying a CRC spends
+/// four more header bytes than one without, so in a real set the FINAL
+/// volume's file header is four bytes longer than every split
+/// fragment's and its data area starts four bytes later - measured
+/// against `Rar50VolumeWriter` output (300,000 bytes over a 120,000
+/// payload cap): `off_base` 47 on the two split volumes and 51 on the
+/// final one. `ArchiveMap::resolve_arithmetic` used to require the
+/// final volume's `off_base` to match the shared one, which refused
+/// every set this project's own writer produces; that comparison was
+/// dropped on 16 Sep 2026. Re-applying it left EVERY fixture test in
+/// the tree green when this arm landed, because no fixture set then
+/// had an asymmetric final header to notice; the sets migrated onto
+/// this arm since are what changed that, and five now fail with it
+/// re-applied. Reach for [`Rar5Crc::FinalFragment`] whenever the set
+/// is meant to model what an archiver wrote.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Rar5Crc {
+    /// A CRC on every piece the call site supplies one for: the
+    /// fixture family's historical shape, uniform header sizes, and
+    /// what a test wants when it damages an interior fragment and
+    /// needs a checksum over THAT fragment to notice.
+    #[default]
+    EveryPiece,
+    /// A CRC on final fragments only - every piece whose `split_after`
+    /// is clear keeps the CRC the call site supplied, and every piece
+    /// that continues into the next volume loses it. What an archiver
+    /// writes.
+    FinalFragment,
+}
+
+/// [`rar5_volume_set_crc_head`] with the CRC placement named too - the
+/// full form, for a set that has an opinion about both. See
+/// [`Rar5Crc`].
+pub fn rar5_volume_set_crc_layout(
+    volumes: &[&[(&str, u64, &[u8], bool, bool, Option<u32>)]],
+    head: Rar5Head,
+    crc: Rar5Crc,
+) -> Vec<Vec<u8>> {
     let last = volumes.len().saturating_sub(1);
     volumes
         .iter()
@@ -273,9 +327,26 @@ pub fn rar5_volume_set_crc_head(
             } else {
                 VolNum::Implied(i as u64)
             };
-            rar5_volume_inner_at(pieces, vol_no, &[], i < last)
+            let placed: Vec<(&str, u64, &[u8], bool, bool, Option<u32>)> = pieces
+                .iter()
+                .map(|&(n, t, p, b, a, c)| (n, t, p, b, a, place_crc(crc, a, c)))
+                .collect();
+            rar5_volume_inner_at(&placed, vol_no, &[], i < last)
         })
         .collect()
+}
+
+/// The one copy of the CRC placement rule both set builders apply:
+/// under [`Rar5Crc::FinalFragment`] a piece whose `split_after` is set
+/// continues into the next volume, so it is not the fragment unrar
+/// verifies and carries no checksum - `Rar50VolumeWriter`'s own rule,
+/// spelled there as `(!split_after).then(|| crc32(entry.data))`.
+fn place_crc(crc: Rar5Crc, split_after: bool, supplied: Option<u32>) -> Option<u32> {
+    match crc {
+        Rar5Crc::EveryPiece => supplied,
+        Rar5Crc::FinalFragment if split_after => None,
+        Rar5Crc::FinalFragment => supplied,
+    }
 }
 
 /// The end-of-archive block a [`rar5_volume_n`]-family volume ends with,
@@ -347,13 +418,38 @@ pub fn rar5_volume_n_of(
 }
 
 /// [`rar5_volume_n_of`] carrying the per-piece data CRC32
-/// [`rar5_volume_n_crc`] writes.
+/// [`rar5_volume_n_crc`] writes - i.e. [`Rar5Crc::EveryPiece`], which
+/// is not what an archiver writes. See
+/// [`rar5_volume_n_crc_of_layout`].
 pub fn rar5_volume_n_crc_of(
     pieces: &[(&str, u64, &[u8], bool, bool, Option<u32>)],
     vol_no: u64,
     of: u64,
 ) -> Vec<u8> {
-    rar5_volume_inner(pieces, Some(vol_no), &[], vol_no + 1 < of)
+    rar5_volume_n_crc_of_layout(pieces, vol_no, of, Rar5Crc::EveryPiece)
+}
+
+/// [`rar5_volume_n_crc_of`] with the CRC placement named - the
+/// loop-shaped sibling of [`rar5_volume_set_crc_layout`], and the same
+/// judgement applies: a set that means to model an archiver's output
+/// asks for [`Rar5Crc::FinalFragment`]. See [`Rar5Crc`].
+///
+/// The placement is derived from each PIECE's `split_after`, never from
+/// the volume index, because a member can end mid-set: the final
+/// fragment of the first member of a season pack sits in an interior
+/// volume and carries the CRC, while a later member's fragment in that
+/// same volume does not.
+pub fn rar5_volume_n_crc_of_layout(
+    pieces: &[(&str, u64, &[u8], bool, bool, Option<u32>)],
+    vol_no: u64,
+    of: u64,
+    crc: Rar5Crc,
+) -> Vec<u8> {
+    let placed: Vec<_> = pieces
+        .iter()
+        .map(|&(n, t, p, b, a, c)| (n, t, p, b, a, place_crc(crc, a, c)))
+        .collect();
+    rar5_volume_inner(&placed, Some(vol_no), &[], vol_no + 1 < of)
 }
 
 /// How `rar5_volume_inner_at` spells a volume's number: absent entirely

@@ -170,10 +170,10 @@ fn fused_butterfly_enabled() -> bool {
 /// The history, kept because it is why the flip is trustworthy:
 /// **it was OFF, and that was not caution for its own sake.** Until 11 Sep 2026 the reason was that neither had ever
 /// executed: no box on this fleet was known to have GFNI while the
-/// Zenbook was down, and a GitHub x86-64 runner has it only by luck of
-/// the draw (the fleet mixes Zen 3 without and Ice Lake with, which is
-/// how `forney::joint`'s kernel assertions flapped on 10 Sep). Their
-/// multiply core is [`xor_mul_multi_gfni_n`] with one source,
+/// Core Ultra 9 box was down, and a GitHub x86-64 runner has it only
+/// by luck of the draw (the fleet mixes Zen 3 without and Ice Lake with,
+/// which is how `forney::joint`'s kernel assertions flapped on 10 Sep).
+/// Their multiply core is [`xor_mul_multi_gfni_n`] with one source,
 /// transcribed, and their XOR ordering is the same as
 /// [`butterfly_avx2`] and [`butterfly_neon`], both differential-
 /// tested on real hardware - so they were very likely right. "Very
@@ -617,9 +617,9 @@ unsafe fn butterfly_avx2(u: &mut [u16], v: &mut [u16], c: &FoldCoeff, inverse: b
 /// [`butterfly`] on a GFNI part: [`xor_mul_multi_gfni_n`]'s affine2x
 /// body with one source and the pair's second row updated in the same
 /// 32-byte chunk pass. UNMEASURED on this fleet - no box here has GFNI
-/// (the Zenbook is down) - so it is written to the same shape as the
-/// AVX2 arm above and covered by the same differential, and the leaf's
-/// x86 numbers in the handoff are the i5's nibble arm.
+/// (the Core Ultra 9 box is down) - so it is written to the same shape
+/// as the AVX2 arm above and covered by the same differential, and the
+/// leaf's x86 numbers in the handoff are the i5's nibble arm.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "gfni,avx2")]
 unsafe fn butterfly_gfni(u: &mut [u16], v: &mut [u16], c: u16, inverse: bool) -> usize {

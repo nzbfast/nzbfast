@@ -741,9 +741,12 @@ pub(super) fn verify_pass1_retaining(
     // buffer streams through DRAM twice, a 256 KiB one is filled at
     // cache speed - the i5-10600KF's verify phase 201-213 ms -> 174-191
     // (4 Sep 2026). A reader thread ahead of the hash was built and
-    // measured on the same box: no better than the serial 256 KiB loop,
-    // so it ships OFF (`ChunkSource::readahead_enabled`). Knobs:
-    // `NZBFAST_VERIFY_READAHEAD=1`, `NZBFAST_VERIFY_CHUNK` (bytes).
+    // measured on the same box: no better than the serial 256 KiB loop
+    // at 51 MB members, so it ships off BELOW 2 GiB and on above it
+    // (`ChunkSource::readahead_enabled`, which has the sizes and the
+    // three parts). Knobs: `NZBFAST_VERIFY_READAHEAD=1`,
+    // `NZBFAST_VERIFY_CHUNK` (bytes) - and the chunk reaches this loop
+    // ONLY, which is not the default tier any more: see `chunk_bytes`.
     let mut source = ChunkSource::open(f, scan, bs, limit);
     let mut pos = 0u64;
     while pos < limit {
@@ -1100,6 +1103,51 @@ impl ChunkSource {
         // on a Core Ultra 9 (2 MB L2) the three are within noise of each
         // other. The old `bs.clamp(1 MiB, 8 MiB)` was sized for syscall
         // amortisation on a serial loop that no longer exists past 8 MiB.
+        //
+        // CHECKED ON APPLE SILICON 17 Sep 2026, WHERE THE SIGN IS THE
+        // OTHER WAY AND THE CONSTANT STAYS ANYWAY (research/VERIFY-CHUNK-
+        // APPLE-SILICON-2026-09-16.md). The two rounds above are both
+        // x86, and `research/PER-WINDOW-COST-2026-09-16.md` section 5
+        // then priced a warm `pread` at 0.8-1.9 us a call on Apple
+        // silicon against zero or less on Broadwell (the axis is the OS
+        // and not the ISA: that note's Linux-aarch64 cell puts the dear
+        // file-syscall path on DARWIN, with Linux/aarch64 the cheapest
+        // part of five, so iOS inherits this and Android does not) - so
+        // an L2-sized chunk is the cheap end of the x86 curve and the
+        // dear end of the macOS one. M1 Ultra, one 2.5 GiB member,
+        // warm, n=20, `--slow`: 1 MiB beats this 256 KiB by 0.66% of wall with the
+        // reader on (3914/3918 ms against 3940/3943, min/median) and
+        // 0.49% serial, monotone in the chunk over four rounds, against
+        // an A/A floor of 0.005%. Real, and an order of magnitude under
+        // the ~13% the i5 pays for 1 MiB in the SAME serial shape
+        // (201-213 against 174-191), which is why nothing moves: a
+        // constant better on one part and worse on the other must not be
+        // moved to fit one of them. 512 KiB is the worse trade of the
+        // two (61% of the Apple win, 6-10% off the i5). On the 21-member
+        // set the same rungs are inside the A/A floor, because eleven MD5
+        // chains hide each other's reads - the read is 4.0-4.5% of the
+        // phase's CPU and the MD5 chain 96%, so 6% of the read path is
+        // half a percent of a phase. A size-keyed chunk (1 MiB above
+        // `READAHEAD_MIN_BYTES`) is the one option the numbers support,
+        // and it is not a call a measurement gets to make on its own: it
+        // buys 0.66% on a tier that is no longer the default, and the
+        // x86 cell that would decide it - an i5-class part at a SINGLE
+        // large member - has never been taken. Every x86 chunk figure in
+        // the record is at 51 MB members.
+        //
+        // AND IT IS NO LONGER ON THE DEFAULT PATH, which is the first
+        // thing to know before spending a round on it. `verify_pass1_
+        // tiered` tries `fast_pass1` first, and the fast tier defaults ON
+        // (`parfast` 13 Sep 2026 unless `--slow`, the daemon's
+        // `fast_final_check` 15 Sep), so a stock `parfast v` or daemon
+        // reaches none of this: a libc-boundary interposer counts 1,073
+        // reads at EVERY chunk size there, against 1,073 / 4,284 / 8,567
+        // for 1 MiB / 256 / 128 KiB under `--slow` over byte-identical
+        // traffic. What still arrives here is `--slow`, `nzbfast verify`
+        // without `--fast`, an operator who saved `fast_final_check:
+        // false`, and any set whose IFSC does not cover every block -
+        // where `fast_pass1` declines whatever the tier says, which is
+        // what a partially retrieved recovery set looks like.
         let _ = bs;
         knob.unwrap_or(256 << 10)
     }
@@ -1129,6 +1177,19 @@ impl ChunkSource {
     /// VERIFY_READAHEAD=1` forces the thread for every member above the
     /// parallel floor, `0` keeps every member serial (research/PARFAST-
     /// SINGLE-FILE-MD5-HEADROOM-2026-09-13.md).
+    ///
+    /// THE THRESHOLD ITSELF is now measured on Apple silicon and not just
+    /// far above it (17 Sep 2026, M1 Ultra, `--slow`, warm, n=20,
+    /// research/VERIFY-CHUNK-APPLE-SILICON-2026-09-16.md). At 2.5 GiB -
+    /// just over this bound, where the 13 Sep arms were 8.86 GB - the
+    /// reader wins 2.83% of wall at the shipped chunk (4056/4058 ms
+    /// serial against 3940/3943), and the win holds at every chunk from
+    /// 4 MiB down to 128 KiB. Below the bound, at 51 MB members on the
+    /// same part, it is a clear loss: system time 203-241 ms against
+    /// 90-102 serial and `nivcsw` 4,010-7,348 against 142-366, which is
+    /// the channel handing three buffers back and forth, for a wall flat
+    /// to 3% worse. So the crossing is on the right side of this constant
+    /// on a third part, at both ends of it.
     fn readahead_enabled(limit: u64) -> bool {
         static KNOB: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
         match *KNOB.get_or_init(|| {
@@ -1143,10 +1204,12 @@ impl ChunkSource {
         }
     }
 
-    /// The member size from which the reader thread pays on Windows
-    /// (see [`Self::readahead_enabled`]): flat at 1 GiB members, -12..-20%
-    /// at 10 GiB; the threshold sits at the smallest size on the
-    /// measured winning side of the gap.
+    /// The member size from which the reader thread pays (see
+    /// [`Self::readahead_enabled`], which applies it on every platform
+    /// since 13 Sep 2026, not just the Windows box it was found on):
+    /// flat at 1 GiB members, -12..-20% at 10 GiB; the threshold sits at
+    /// the smallest size on the measured winning side of the gap, and
+    /// -2.8% at 2.5 GiB on an M1 Ultra is the one arm taken AT it.
     const READAHEAD_MIN_BYTES: u64 = 2 << 30;
 
     fn open(mut f: File, scan: crate::disk::ScanCache, bs: usize, limit: u64) -> ChunkSource {

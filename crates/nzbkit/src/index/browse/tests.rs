@@ -2071,3 +2071,153 @@ fn a_card_with_no_complete_copy_still_names_the_newest() {
     assert_eq!(c.rep_stem, "The.Film.2019.2160p.WEB.x265-NEW");
     teardown(&dir, ix);
 }
+
+/// GH #76: the newsgroup filter, on BOTH renderings of the browse query.
+///
+/// The flat list and the card list are what the Releases surface's
+/// "Group by title" toggle switches between, so a filter carried by only
+/// one of them is a toggle that silently widens the answer - the shape
+/// `hide_adult` shipped broken in (see the `q.hide_adult` arm in
+/// `browse_once`). Both are asserted here, over one corpus, for that
+/// reason.
+///
+/// The cross-posted release is the case that decides what "in a group"
+/// means: it is one release announced in two groups, so it must survive a
+/// filter naming EITHER of them and be counted once under each.
+#[test]
+fn the_group_filter_narrows_to_one_newsgroup() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-browse-grp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut ix = Index::open(&dir.join("index.db")).unwrap();
+    // Two groups, and one title posted to both.
+    ix.ingest(
+        "alt.binaries.moovee",
+        &[
+            dated_entry(
+                "\"Solo.Film.2019.1080p.BluRay.x264-GRP.mkv\" yEnc (1/1)",
+                "m1",
+                1_700_000_100,
+            ),
+            dated_entry(
+                "\"Both.Film.2020.1080p.WEB.x264-GRP.mkv\" yEnc (1/1)",
+                "m2",
+                1_700_000_200,
+            ),
+        ],
+        1_000,
+    )
+    .unwrap();
+    ix.ingest(
+        "alt.binaries.teevee",
+        &[
+            dated_entry(
+                "\"Only.Here.2021.1080p.WEB.x264-GRP.mkv\" yEnc (1/1)",
+                "t1",
+                1_700_000_300,
+            ),
+            // The SAME post, announced in the second group too.
+            dated_entry(
+                "\"Both.Film.2020.1080p.WEB.x264-GRP.mkv\" yEnc (1/1)",
+                "t2",
+                1_700_000_200,
+            ),
+        ],
+        1_000,
+    )
+    .unwrap();
+
+    let names = |g: Option<&str>| -> Vec<String> {
+        let (rows, total) = ix
+            .browse(&BrowseQuery {
+                group: g.map(str::to_string),
+                ..Default::default()
+            })
+            .unwrap();
+        // `total` describes the same list the page does, filter and all -
+        // the invariant `browse_total_sql` exists for.
+        assert_eq!(total, rows.len() as u64, "total disagreed with the page");
+        let mut v: Vec<String> = rows.iter().map(|r| r.stem.clone()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        names(None),
+        vec![
+            "Both.Film.2020.1080p.WEB.x264-GRP.mkv",
+            "Only.Here.2021.1080p.WEB.x264-GRP.mkv",
+            "Solo.Film.2019.1080p.BluRay.x264-GRP.mkv",
+        ],
+        "unfiltered must still be everything"
+    );
+    assert_eq!(
+        names(Some("alt.binaries.moovee")),
+        vec![
+            "Both.Film.2020.1080p.WEB.x264-GRP.mkv",
+            "Solo.Film.2019.1080p.BluRay.x264-GRP.mkv",
+        ],
+    );
+    assert_eq!(
+        names(Some("alt.binaries.teevee")),
+        vec![
+            "Both.Film.2020.1080p.WEB.x264-GRP.mkv",
+            "Only.Here.2021.1080p.WEB.x264-GRP.mkv",
+        ],
+        "the cross-posted release belongs to both groups"
+    );
+    // Exact, never a prefix: the two names above share nine characters
+    // and a caller that passed a stem of one must not get the other.
+    assert!(names(Some("alt.binaries")).is_empty());
+    assert!(names(Some("ALT.BINARIES.MOOVEE")).is_empty());
+    assert!(names(Some("alt.binaries.nothing")).is_empty());
+
+    // ...and the card rendering agrees, title for title.
+    let keys = |g: Option<&str>| -> Vec<String> {
+        let (cards, total) = ix
+            .browse_cards(
+                &BrowseQuery {
+                    group: g.map(str::to_string),
+                    ..Default::default()
+                },
+                CardSort::Latest,
+                false,
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            total,
+            cards.len() as u64,
+            "card total disagreed with the page"
+        );
+        let mut v: Vec<String> = cards.iter().map(|c| c.title_key.clone()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(keys(None).len(), 3);
+    assert_eq!(
+        keys(Some("alt.binaries.teevee")),
+        vec!["m:both film:2020", "m:only here:2021"],
+    );
+    // And the representative pick is taken from the SURVIVING rows: a
+    // card whose only release in this group is the cross-post must name
+    // that release, not the group-filtered-out one.
+    let (cards, _) = ix
+        .browse_cards(
+            &BrowseQuery {
+                group: Some("alt.binaries.teevee".into()),
+                ..Default::default()
+            },
+            CardSort::Latest,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+    let both = cards
+        .iter()
+        .find(|c| c.title_key == "m:both film:2020")
+        .unwrap();
+    assert_eq!(both.rep_grp, "alt.binaries.teevee");
+    teardown(&dir, ix);
+}

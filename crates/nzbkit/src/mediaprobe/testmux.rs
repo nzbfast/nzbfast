@@ -55,6 +55,7 @@ const EBML_HEADER: &[u8] = &[0x1A, 0x45, 0xDF, 0xA3];
 const SEEK_HEAD_ID: &[u8] = &[0x11, 0x4D, 0x9B, 0x74];
 const CHAPTERS_ID: &[u8] = &[0x10, 0x43, 0xA7, 0x70];
 const TAGS_ID: &[u8] = &[0x12, 0x54, 0xC3, 0x67];
+const TRACKS_ID: &[u8] = &[0x16, 0x54, 0xAE, 0x6B];
 const SEGMENT: &[u8] = &[0x18, 0x53, 0x80, 0x67];
 
 fn ebml_head(doctype: &str) -> Vec<u8> {
@@ -431,6 +432,114 @@ pub fn mkv_seekhead_self_loop() -> Vec<u8> {
         let mut me = seek_entry(SEEK_HEAD_ID, tail);
         me.extend(seek_entry(CHAPTERS_ID, chapters));
         (seek_entry(SEEK_HEAD_ID, tail), me)
+    })
+}
+
+/// A Matroska whose TRACKS and CUES are BOTH behind a second SeekHead:
+/// `[front][Info][Cluster][tail][Tracks][Cues]`. The linear pass stops
+/// at the Cluster and the front index names nothing but the tail one,
+/// so `mkv_layout` comes back with an empty track list and no Cues
+/// offset unless it chases the chain - and an empty track list is a
+/// preview that does not build, which is the severity this shape
+/// carries that the probe's half did not.
+///
+/// The counts have to be known before the offsets can be: see
+/// [`seek_head_len`]. Both indexes are asserted against what the caller
+/// actually returned.
+fn mkv_layout_chained_seekheads(
+    front_n: usize,
+    tail_n: usize,
+    entries: impl Fn(u64, u64, u64, u64) -> (Vec<u8>, Vec<u8>),
+) -> Vec<u8> {
+    let info_el = info(60_000.0, None);
+    let tracks_el = tracks(&[remux_video_track()]);
+    let cluster = el(CLUSTER_ID, &uint(&[0xE7], 0));
+
+    // Every offset is relative to the segment's DATA start, which is
+    // what a SeekPosition carries and where the front index begins.
+    let front_at = 0u64;
+    let cluster_at = (seek_head_len(front_n) + info_el.len()) as u64;
+    let tail_at = cluster_at + cluster.len() as u64;
+    let tracks_at = tail_at + seek_head_len(tail_n) as u64;
+    let cues_at = tracks_at + tracks_el.len() as u64;
+
+    // One CuePoint at the only cluster there is, so the Cues element is
+    // a real one rather than an empty master.
+    let mut pos = uint(&[0xF7], 1); // CueTrack
+    pos.extend(uint(&[0xF1], cluster_at)); // CueClusterPosition
+    let mut pt = uint(&[0xB3], 0); // CueTime
+    pt.extend(el(&[0xB7], &pos));
+    let cues_el = el(CUES_ID, &el(&[0xBB], &pt));
+
+    let (front_entries, tail_entries) = entries(front_at, tail_at, tracks_at, cues_at);
+    let front = el(SEEK_HEAD_ID, &front_entries);
+    let tail = el(SEEK_HEAD_ID, &tail_entries);
+    assert_eq!(front.len(), seek_head_len(front_n), "front index size");
+    assert_eq!(tail.len(), seek_head_len(tail_n), "tail index size");
+
+    let mut seg = front;
+    seg.extend(info_el);
+    seg.extend(cluster);
+    seg.extend(tail);
+    seg.extend(tracks_el);
+    seg.extend(cues_el);
+    let mut out = ebml_head("matroska");
+    out.extend(el(SEGMENT, &seg));
+    out
+}
+
+/// The deferred-index shape over the REMUX layout: a front SeekHead
+/// naming only a second SeekHead in the tail, which is the one that
+/// names the Tracks and the Cues.
+pub fn mkv_layout_seekhead_chained() -> Vec<u8> {
+    mkv_layout_chained_seekheads(1, 2, |_front, tail, tracks_at, cues_at| {
+        let mut back = seek_entry(TRACKS_ID, tracks_at);
+        back.extend(seek_entry(CUES_ID, cues_at));
+        (seek_entry(SEEK_HEAD_ID, tail), back)
+    })
+}
+
+/// Two SeekHeads naming EACH OTHER, with the Tracks and Cues reachable
+/// only through the second. The cycle control for the layout chase:
+/// the resolved-offset set is what stops it, and both must still be
+/// found exactly once.
+pub fn mkv_layout_seekhead_cycle() -> Vec<u8> {
+    mkv_layout_chained_seekheads(1, 3, |front, tail, tracks_at, cues_at| {
+        let mut back = seek_entry(SEEK_HEAD_ID, front);
+        back.extend(seek_entry(TRACKS_ID, tracks_at));
+        back.extend(seek_entry(CUES_ID, cues_at));
+        (seek_entry(SEEK_HEAD_ID, tail), back)
+    })
+}
+
+/// The degenerate cycle: the tail SeekHead's first entry names ITSELF.
+/// The shortest hostile file that exists, and it does not go through a
+/// second offset on the way round.
+pub fn mkv_layout_seekhead_self_loop() -> Vec<u8> {
+    mkv_layout_chained_seekheads(1, 3, |_front, tail, tracks_at, cues_at| {
+        let mut me = seek_entry(SEEK_HEAD_ID, tail);
+        me.extend(seek_entry(TRACKS_ID, tracks_at));
+        me.extend(seek_entry(CUES_ID, cues_at));
+        (seek_entry(SEEK_HEAD_ID, tail), me)
+    })
+}
+
+/// The BARREN cycle: two SeekHeads naming each other and NOTHING else,
+/// with the Tracks and Cues in the file but indexed by neither.
+///
+/// This is the shape that makes the resolved-offset set load-bearing.
+/// In [`mkv_layout_seekhead_cycle`] the chase stops on its own the
+/// moment both targets are found, because a SeekHead is only worth
+/// chasing while something is still missing - so that fixture
+/// terminates with the guard removed and cannot prove the guard does
+/// anything. Here nothing is ever found, the chase never satisfies
+/// itself, and only the offset set stops it.
+pub fn mkv_layout_seekhead_barren_cycle() -> Vec<u8> {
+    mkv_layout_chained_seekheads(1, 1, |front, tail, _tracks_at, _cues_at| {
+        (
+            seek_entry(SEEK_HEAD_ID, tail),
+            seek_entry(SEEK_HEAD_ID, front),
+        )
     })
 }
 
@@ -1224,6 +1333,16 @@ pub fn all() -> Vec<(&'static str, Vec<u8>)> {
         ("mkv_seekhead_chained", mkv_seekhead_chained()),
         ("mkv_seekhead_cycle", mkv_seekhead_cycle()),
         ("mkv_seekhead_self_loop", mkv_seekhead_self_loop()),
+        ("mkv_layout_seekhead_chained", mkv_layout_seekhead_chained()),
+        ("mkv_layout_seekhead_cycle", mkv_layout_seekhead_cycle()),
+        (
+            "mkv_layout_seekhead_barren_cycle",
+            mkv_layout_seekhead_barren_cycle(),
+        ),
+        (
+            "mkv_layout_seekhead_self_loop",
+            mkv_layout_seekhead_self_loop(),
+        ),
         ("mkv_disabled_track", mkv_disabled_track()),
         ("mkv_vfw_xvid", mkv_vfw_xvid()),
         ("webm", webm()),

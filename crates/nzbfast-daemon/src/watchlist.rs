@@ -2215,7 +2215,9 @@ mod settle_tests {
         // ...and takes it over once it verifies, which is the moment two
         // history records start naming one directory.
         assert_eq!(
-            publish_over_previous(&fresh, &canon).as_deref(),
+            publish_over_previous(&fresh, &canon)
+                .map(|p| p.commit())
+                .as_deref(),
             Some(canon.as_path()),
             "the verified re-download publishes over the canonical path"
         );

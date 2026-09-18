@@ -479,6 +479,17 @@ impl Frag {
 /// the offset-0 sniff established the store mapper was fully written by
 /// the drain yet never journaled, so every crash/ENOSPC resume
 /// refetched it for no reason.
+///
+/// `Held` is ALSO the verdict for a span whose bytes ARE on disk but
+/// whose fragments may not be spoken (the post-write RAR-fallback
+/// re-route in [`Extractor::write`], 17 Sep 2026): there the whole span
+/// has just been rewritten verbatim into the materialized volume and
+/// the placements composed for it name inner files the fallback may
+/// have unlinked, so it carries NO fragments and the drain completes it
+/// off the volume's own coverage map instead
+/// ([`Extractor::materialized_span_on_disk`]). The distinction that
+/// matters to a caller is unchanged and is the whole point: `No` is
+/// dropped on the floor, `Held` is parked and re-asked.
 pub enum Persist {
     No,
     Placed(Vec<Frag>),
@@ -2261,19 +2272,46 @@ impl Extractor {
         // the jobs targeted - so the materialized volume is missing this
         // span. Re-route it through the slot's current mode: duplicate
         // writes are harmless, a lost span is silent corruption. The
-        // journal skips the article (Persist::No) - its fragments may
-        // name just-deleted inner files, and a refetch on resume is the
-        // safe outcome for a span that raced a fallback. Forwards to the
-        // child already re-resolved their destination in deliver_routed;
-        // the whole-span rewrite here duplicates their bytes into the
-        // materialized volume, which is harmless (identical offsets,
-        // identical bytes).
+        // fragments this span composed cannot be journaled - they may
+        // name just-deleted inner files - so NONE of them go out.
+        // Forwards to the child already re-resolved their destination in
+        // deliver_routed; the whole-span rewrite here duplicates their
+        // bytes into the materialized volume, which is harmless
+        // (identical offsets, identical bytes).
+        //
+        // PARKED, NOT ABANDONED (17 Sep 2026). This returned
+        // `Persist::No` from 19 Jul 2026 (`f688e101d`) to here, and
+        // `Persist::No` is the one verdict that neither journals an
+        // article NOR parks it: `record_placement` drops it on the
+        // floor, so `flush_pending_r` never sees it and the next run
+        // refetches it for the life of the job. TODO 252 (23 Aug 2026)
+        // built exactly the oracle this span wants -
+        // `materialized_span_on_disk`, the volume file's own coverage
+        // map - but wired it into the PARKED path only, and named THIS
+        // route in its own write-up as one of the two that "surface
+        // nothing". An article that takes this route is not parked, so
+        // the widening arm could never reach it. `Held(vec![])` is the
+        // whole fix: no fragments (there are none this span may claim),
+        // but an entry in `pending_r`, so the drain asks the volume
+        // whether it holds these bytes - which it does, `plain_span`
+        // having just written the entire span there verbatim at its
+        // final offsets, under this lock. A byte of the span unwritten
+        // still answers `None` and the article still refetches, so the
+        // safe direction is unchanged; this only stops discarding a
+        // record the destination can vouch for.
+        //
+        // MEASURED: the e2e resume rig's
+        // `a_retry_over_materialized_volumes_fetches_only_the_missing_article`
+        // failed 11 of 40 on origin/main under four concurrent loops on
+        // 17 Sep 2026 and 5 of 40 here, always on the LAST volume's
+        // offset-0 article taking this route - the one article of a
+        // 124-article post still in flight when the group demotes.
         if routed_rar && (!jobs.is_empty() || !fwd.is_empty()) {
             let mut g = self.inner.lock_ok();
             let inner = &mut *g;
             if matches!(inner.slots[slot].mode, SlotMode::RarFallback) {
                 self.plain_span(inner, slot, offset, data)?;
-                return Ok(Persist::No);
+                return Ok(Persist::Held(Vec::new()));
             }
         }
         Ok(Self::compose_persist(

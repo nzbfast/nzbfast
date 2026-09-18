@@ -1971,6 +1971,162 @@ pub(super) fn unfetched_recovery_files(nzb: &Nzb, slot_file: &[usize]) -> Vec<us
         .collect()
 }
 
+/// How much of a holed deferred volume is read looking for the set
+/// DEFINITION it names. Same subject and the same reasoning as
+/// `settle::SET_DEF_HEAD`, and deliberately its own constant rather
+/// than a re-export: this read runs over a volume KNOWN to be holed, so
+/// what it is sizing is "how far in can the critical packets be and
+/// still be reachable before the hole", not "how much of a whole volume
+/// is it affordable to parse". The number is the same because the
+/// packets are in the same place; the question is not.
+const HOLED_DEF_HEAD: usize = 16 << 20;
+
+/// The deferred recovery volumes the late-set pass is about to need,
+/// as NZB file indexes for [`crate::repair::fetch_volumes`].
+///
+/// # The gap this closes (claim `lateset-deferred-parity-refetch-16sep`)
+///
+/// `unpack::instream`'s deferral keeps a sniffed volume's HEAD article
+/// and cancels its still-queued TAIL articles. That is a real bandwidth
+/// saving and is not the defect. What IS the defect is that a
+/// multi-article volume then lands on disk at its full declared length
+/// with a ZERO HOLE where the cancelled articles were - so the recovery
+/// packets inside the hole are gone - and the only path that ever buys
+/// them back is the repair's exact-fit fetch, which is built per LIVE
+/// set that took damage. When the live set is CLEAN there is no
+/// `SetPlan`, nothing reads `sniff.deferred_files()`, and
+/// [`apply_nonactivated_disk_sets`] then repairs a set off a holed
+/// volume and answers `Unrepairable` with the missing blocks sitting on
+/// the server.
+///
+/// MEASURED, not inferred, on 16 Sep 2026: `setx2.vol07+8` on disk at
+/// 83,336 bytes with zeros from offset 40,000, and the pass reporting
+/// `needed=18 have=17` - ONE cancelled article, because those sets
+/// carry exactly 100% parity and so have no margin at all
+/// (`research/E2E-X5-24-SIGNATURE-2-IS-A-MISREAD-2026-09-16.md`).
+///
+/// # What this may and may not buy
+///
+/// These are articles THIS job planned to fetch and then chose not to,
+/// for a pass that now turns out to need them. Re-buying them is not
+/// the same decision as adopting a stranger's parity from scratch -
+/// that is the OTHER open item of the 3 Sep handoff, a product question
+/// about whose recovery data a download may spend bandwidth on, and
+/// nothing here crosses into it: a volume with no deferred articles is
+/// never fetched, a volume this job never sniffed is never fetched, and
+/// a set already ACTIVE is left to the exact-fit path that owns it.
+///
+/// # The four doors, and why each one is where the negative control sits
+///
+/// 1. `all_good` - a job with nothing outstanding buys nothing. The
+///    deferral is a measured saving and a refetch that fires on the
+///    healthy path would be a regression wearing a fix's name.
+/// 2. [`has_unclaimed`] - the pass's OWN door, asked here rather than
+///    copied, so a directory the pass will return from before its first
+///    census cannot cost a byte.
+/// 3. The volume is a recovery volume whose set is NOT among `sets`.
+///    An active set's parity is the exact-fit fetch's business and
+///    buying it twice is what `already` exists to prevent.
+/// 4. The set names a member that is not whole on disk - so a set with
+///    nothing left to do is not bought. Read off the head, and FAILING
+///    OPEN: a definition that will not parse out of what landed is
+///    exactly the volume `settle::activate_deferred_sets` reports as
+///    undefined, and fetching it is the only way anything reaches it.
+///
+/// Door 4 does NOT separate this post's sets from a genuinely foreign
+/// one - a foreign set's member is missing on disk too, and telling
+/// them apart is the length-uniqueness judgement X5-24 makes AFTER a
+/// rebuild exists. So a short job carrying a leftover release's holed
+/// parity does buy it. That is a cost and it is stated rather than
+/// hidden; it is also strictly narrower than the shipped precedent one
+/// seam over, where `settle::noset`'s disk fallback fetches EVERY
+/// deferred volume with no per-set test at all ("this is the rare
+/// fallback where correctness outranks bandwidth").
+///
+/// # What it costs on the shapes where it fires
+///
+/// One whole NZB file per selected volume, because
+/// [`crate::repair::fetch_volumes`] fetches by file index and re-buys
+/// the head article this job already has. So the charge is the volume's
+/// declared size, not the hole's: at the x5_24 fixtures' 40,000-byte
+/// articles that is ~83 KB to recover a 43 KB hole. On a real post a
+/// deferred volume is tens of MB and the head is one article of it, so
+/// the over-buy is a percent or two of the volume - and it is paid only
+/// by a job that has already failed to complete.
+pub(super) fn holed_deferred_volumes(
+    out_dir: &Path,
+    sets: &[Arc<nzbkit::par2::Par2Set>],
+    holed: &[(usize, PathBuf)],
+    all_good: bool,
+) -> Vec<usize> {
+    // Door 1, and it is FIRST because it is the only one that costs
+    // nothing to ask: a complete download never reads a byte off disk
+    // for this.
+    if all_good || holed.is_empty() {
+        return Vec::new();
+    }
+    let named: std::collections::HashSet<String> = sets
+        .iter()
+        .flat_map(|s| s.files.iter())
+        .map(|f| nzbkit::disk::sanitize_out_name(&f.name).to_lowercase())
+        .collect();
+    // Door 2. The pass returns on this same test before its first
+    // census, so anything bought past it would be bought for nobody.
+    if !has_unclaimed(out_dir, &named) {
+        return Vec::new();
+    }
+    let active: std::collections::HashSet<[u8; 16]> =
+        sets.iter().map(|s| s.recovery_set_id).collect();
+    let mut want: Vec<usize> = Vec::new();
+    for (fi, path) in holed {
+        let Some(bytes) = std::fs::File::open(path).ok().and_then(|f| {
+            use std::io::Read as _;
+            let mut buf = Vec::new();
+            f.take(HOLED_DEF_HEAD as u64).read_to_end(&mut buf).ok()?;
+            Some(buf)
+        }) else {
+            continue;
+        };
+        // Door 3. No readable set id is not a recovery volume - the
+        // sniff's magic test can be wrong about that, and a payload file
+        // must never be refetched from here.
+        let Some(id) = nzbkit::par2::Par2Set::set_id_of(&bytes) else {
+            continue;
+        };
+        if active.contains(&id) {
+            continue;
+        }
+        // Door 4, failing open on an unparseable definition.
+        let has_work = match nzbkit::live::pick_sets(&[bytes.as_slice()]) {
+            Ok(parsed) => parsed
+                .iter()
+                .flat_map(|s| s.files.iter())
+                .any(|f| !member_is_whole(out_dir, &f.name, f.length)),
+            Err(_) => true,
+        };
+        if has_work && !want.contains(fi) {
+            want.push(*fi);
+        }
+    }
+    want
+}
+
+/// Is the set member `name` on disk at the length its FileDesc
+/// declares?
+///
+/// LENGTH ONLY, never a hash. This decides whether to spend WIRE, and
+/// the alternative - MD5 the member - is the whole-file read the repair
+/// is about to do anyway, charged twice. A member present at the right
+/// length but with the wrong BYTES answers true here and the set is not
+/// bought; that is the W4-01B denial shape, where the set's job is to
+/// SAY the bytes are wrong rather than to rebuild them, and it needs no
+/// parity beyond what it already has to say it. A member absent, short
+/// or long is the shape that needs blocks.
+fn member_is_whole(out_dir: &Path, name: &str, length: u64) -> bool {
+    std::fs::metadata(out_dir.join(nzbkit::disk::sanitize_out_name(name)))
+        .is_ok_and(|m| m.is_file() && m.len() == length)
+}
+
 #[cfg(test)]
 mod shape_tests;
 
@@ -1984,6 +2140,12 @@ mod cancel_tests;
 
 #[cfg(test)]
 mod foreign_tests;
+
+// The refetch gap: which holed deferred volumes are bought back before
+// the pass reads them, and - the half that matters as much - which are
+// not. One subject per file.
+#[cfg(test)]
+mod refetch_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2051,6 +2213,7 @@ mod tests {
             adopted_from: from,
             files_patched: vec!["proved.vob".to_string()],
             files_created: Vec::new(),
+            files_renamed: Vec::new(),
             consumed_sources: Vec::new(),
             per_file: vec![FileRepair {
                 name: "proved.vob".to_string(),
@@ -2461,6 +2624,7 @@ mod tests {
             adopted_from: Vec::new(),
             files_patched: vec!["m.bin".to_string()],
             files_created: vec!["m.bin".to_string()],
+            files_renamed: Vec::new(),
             consumed_sources: Vec::new(),
             per_file: vec![fr("m.bin", 8, 0)],
         };
@@ -2583,6 +2747,7 @@ mod tests {
             // ever carried - and here both names sanitize to `m.bin`.
             files_patched: vec!["m.bin".to_string(), "m.bin.".to_string()],
             files_created: vec!["m.bin".to_string(), "m.bin.".to_string()],
+            files_renamed: Vec::new(),
             consumed_sources: Vec::new(),
             per_file: vec![
                 FileRepair {

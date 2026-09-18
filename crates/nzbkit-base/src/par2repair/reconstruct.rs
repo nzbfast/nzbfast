@@ -1177,12 +1177,27 @@ impl Reconstructor {
     /// [`finish_blocks_reported`](Self::finish_blocks_reported). Both
     /// take the control from here. See `par2repair::control`.
     ///
-    /// The FOLD WORKER does not: it is spawned below and outlives this
-    /// call, and the fold's own progress is reported by the FEEDERS,
-    /// which is both the earlier fact and the one a user is waiting on
-    /// (bytes read off disk, not bytes XORed after they arrived). It
-    /// takes the CANCEL alone (`RepairControl::cancel_only`), polled
-    /// inside every fold call and transform stripe.
+    /// The FOLD WORKER is neither: it is spawned below and outlives
+    /// this call, and it reports `RepairPhase::Fold` from inside the
+    /// pass itself - per unit of each fold's grid, per stripe of each
+    /// transform window - through
+    /// `RepairControl::reporting_only(Fold)`, which is the repair's own
+    /// sink and gate narrowed so nothing it polls can move any OTHER
+    /// phase's bar.
+    ///
+    /// UNTIL 17 SEP 2026 THE FEEDERS REPORTED IT INSTEAD, on the
+    /// reasoning that bytes read off disk are both the earlier fact and
+    /// the one a user is waiting on. That is true only while a disk is
+    /// the thing setting the pace. Where the verify pass RETAINED the
+    /// corpus the feed is a few memcpys into a bounded channel, so the
+    /// bar emptied at hand-over speed and the Galois-field work it was
+    /// meant to be measuring ran afterwards, unreported: 1.96 s of a
+    /// 3.45 s fold on a 384 MB set, and 40-80 ms whatever the payload
+    /// on the sets that fitted the channel
+    /// (`research/SAB-PARFAST-METER-DROPIN-2026-09-17.md`). Bytes
+    /// FOLDED trail bytes read by at most the batches in flight, so the
+    /// streaming path keeps the pacing it had and the retained path
+    /// gets one.
     pub fn new_controlled<D: AsRef<[u8]>>(
         block_size: usize,
         n_inputs: usize,
@@ -1433,16 +1448,17 @@ impl Reconstructor {
         let merge_cap = feed.merge_bytes;
         let worker_pool = pool.clone();
         let fold_trace = std::env::var_os("NZBFAST_FOLD_TRACE").is_some();
-        // The one thing the worker takes from the control: the cancel
-        // (`cancel_only`, so nothing it polls can move the host's bar).
-        // It reports nothing - the FEEDERS report the fold, because
-        // bytes read off disk is both the earlier fact and the one a
-        // user is waiting on - but it must stop DOING the work, or a
+        // What the worker takes from the control: the cancel, and the
+        // FOLD PHASE AND NOTHING ELSE (`reporting_only`, so the tiled
+        // fold's own `Solve` accounting cannot reach the host's solve
+        // bar from in here). It must stop DOING the work, or a
         // cancelled repair still pays for every XOR that was already
-        // queued. Polled between batches below AND inside each fold call
-        // and transform window, which is where a merged call spends its
-        // time (see `RepairControl::cancel_only`).
-        let worker_control = control.cancel_only();
+        // queued - polled between batches below AND inside each fold
+        // call and transform window, which is where a merged call
+        // spends its time. And it must SAY how far the fold has got,
+        // because nothing else can: the feed that hands it these
+        // batches is not the work (see `new_controlled`).
+        let worker_control = control.reporting_only(control::RepairPhase::Fold);
         let worker = std::thread::spawn(move || {
             let exponents = worker_exponents;
             let pool = worker_pool;
@@ -1778,6 +1794,14 @@ impl Reconstructor {
                 if retained.is_empty() { "empty" } else { "transformed above" }
             );
         }
+        // THE FOLD IS OVER HERE AND NOWHERE EARLIER. The worker has
+        // been joined and the retained tail transformed, so every byte
+        // that was going to be folded has been - which is the claim the
+        // drivers used to make one `finish` earlier, at the end of the
+        // feed, with the whole of this still to run. `finish_begun`
+        // rather than `finish` because a direct caller of the public
+        // `finish()` may never have opened a `Fold` phase at all.
+        self.control.finish_begun(control::RepairPhase::Fold);
         // The retained corpus is dead the moment the syndromes are
         // computed, and it is the single biggest live allocation on the
         // NTT path - it must not still be resident while the m x
@@ -1940,7 +1964,7 @@ impl Reconstructor {
             syndromes,
             retained,
             self.ntt_fault,
-            &self.control.cancel_only(),
+            &self.control.reporting_only(control::RepairPhase::Fold),
         )
     }
 }
@@ -2093,6 +2117,24 @@ fn ntt_syndromes_into(
         // the default only when the arenas did not fit the budget.
         let (w, threads) = super::fastpar::ntt_stripe_geometry_capped(block_size, stripe_cap);
         let stripes = words.div_ceil(w);
+        // THIS WINDOW'S SHARE OF THE FOLD PHASE, apportioned across the
+        // stripes below so `RepairPhase::Fold` counts transformed bytes
+        // at the same grain a folded window is counted at. The fed
+        // bytes are what the drivers sized the phase with, and every
+        // byte reaches exactly one window; a stripe is claimed exactly
+        // once, so the shares are spent once each and sum to the
+        // window's bytes exactly. A fallback below folds instead and
+        // `fold_batches` does its own apportioning, so the two arms
+        // never both count the same window.
+        let window_bytes: u64 = retained
+            .iter()
+            .flat_map(|b| b.slices.iter())
+            .map(|&(_, _, len)| len as u64)
+            .sum();
+        let per_stripe = |c: usize| {
+            let (c, n) = (c as u64, stripes.max(1) as u64);
+            window_bytes * (c + 1) / n - window_bytes * c / n
+        };
         struct SynPtrs(Vec<*mut u16>, Vec<usize>);
         // SAFETY: raw pointers into the syndrome rows; workers XOR
         // into disjoint column ranges only (one stripe per atomic
@@ -2126,6 +2168,7 @@ fn ntt_syndromes_into(
             let syn = &syn;
             let table = &table;
             let next = &next;
+            let per_stripe = &per_stripe;
             for _ in 0..threads {
                 s.spawn(move || {
                     let mut scratch = plan.new_scratch(w);
@@ -2167,6 +2210,11 @@ fn ntt_syndromes_into(
                                 *d ^= *s;
                             }
                         }
+                        // AFTER the stripe, not before it: the phase
+                        // counts work done, which is the whole reason
+                        // this reports from in here rather than from
+                        // the feed.
+                        control.step(control::RepairPhase::Fold, per_stripe(c));
                     }
                 });
             }
@@ -2300,7 +2348,7 @@ mod cancel_tests {
 
         let gate = control::PauseGate::new();
         gate.cancel();
-        let cancel = control::RepairControl::new(None, Some(gate)).cancel_only();
+        let cancel = control::RepairControl::new(None, Some(gate));
         let mut rows = fresh();
         fold_batches(&exps, &mut rows, &batches, &cancel);
         assert_eq!(rows, fresh(), "a cancelled fold still wrote syndrome rows");

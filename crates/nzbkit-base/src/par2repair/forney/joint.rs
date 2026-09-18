@@ -854,7 +854,7 @@ fn factor_gate(m: usize) -> bool {
 /// held arm against the kernel arm, positive = the HELD arm faster:
 ///
 /// ```text
-///   m        i5 (Nibble)    Zenbook (Gfni256)
+///   m        i5 (Nibble)    Core Ultra 9 (Gfni256)
 ///   2048       +5.6%  3/3       +0.5%  wash
 ///   4096      +11.5%  3/3       +1.5%  wash
 ///   5120      +19.0%  3/3       +6.2%  3/3
@@ -878,13 +878,12 @@ fn factor_gate(m: usize) -> bool {
 /// # Which way to be wrong: bias HIGH
 ///
 /// 16,384 is the kernel's first measured win on either class (+3.9% of
-/// the repair on the i5, +1.6% inside its floor on the Zenbook) and
+/// the repair on the i5, +1.6% inside its floor on the Core Ultra 9) and
 /// 12,288 the Hankel's last (+13.4% and +7.3%). The crossing is between
-/// them and unresolved; the constant sits on the kernel's own win, so
-/// a part where the crossing is lower forgoes a few percent of one
-/// stage over one rung, and a part where it is higher pays nothing
-/// this gate can see. On an unmeasured x86 part take this number or a
-/// higher one.
+/// them and unresolved; the constant sits on the kernel's own win, so a
+/// part where the crossing is lower forgoes a few percent of one stage
+/// over one rung, and a part where it is higher pays nothing this gate
+/// can see. On an unmeasured x86 part take this number or a higher one.
 ///
 /// # Which classes, and which not
 ///

@@ -440,6 +440,18 @@ fn m_get_config(
         // restart" note, so a saved-but-not-yet-applied change is
         // never invisible. (Live settings can't diverge like this;
         // mem_limit already surfaces its saved value directly.)
+        //
+        // mem_limit stays out of this on purpose and cannot simply join
+        // it: `mem_limit` and `mem_budget_total` are DIFFERENT
+        // QUANTITIES rather than one quantity in two states - 0 means
+        // "size it from this machine's RAM", which has no figure to put
+        // in the field at all - so the live-in-field, saved-in-note
+        // shape the rows above use does not fit it. It is the mirror
+        // image instead: the field carries the SAVED figure and the row
+        // renders `mem_budget_total` beside it as the figure in force
+        // now (`s_mem_inforce` in web/dashboard.html). Until 17 Sep 2026
+        // that second half did not exist and the running budget was on
+        // no surface at all.
         let staged = load_settings(&d.settings_path);
         let mut pending = serde_json::Map::new();
         let active_port = json!(d.port);

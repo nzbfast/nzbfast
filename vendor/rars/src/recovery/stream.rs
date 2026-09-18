@@ -27,16 +27,74 @@ use super::rar5::{
 use crate::error::{Error, Result};
 
 /// Copy/CRC buffer size, for the paths that stream a range straight through:
-/// `read_chunk_at`'s CRC64, `damaged_shards`, the per-shard CRC buffers, and
-/// the copy helpers. These read sequentially with the buffer AS the stride, so
-/// every byte read is a byte wanted and a larger buffer is simply fewer
-/// syscalls. Large enough that sequential reads stay cheap, small enough to be
-/// irrelevant next to any budget we accept.
+/// `crc32_of`, `copy_file_verified`, `copy_range`, `read_chunk_at`'s CRC64,
+/// `damaged_shards` and the per-shard CRC buffers. These read sequentially with
+/// the buffer AS the stride, so every byte read is a byte wanted.
+///
+/// **"A larger buffer is simply fewer syscalls" was the reasoning here until
+/// 16 Sep 2026 and it is WRONG on both parts that have now been measured.** A
+/// larger buffer is fewer syscalls AND two costs that grow: the anonymous pages
+/// behind it, faulted and zero-filled once per call-site ENTRY (these paths
+/// allocate per call, and `crc32_of` is entered once per volume, so a 17-volume
+/// scan pays it 17 times), and the cache footprint of one iteration, because
+/// every one of these loops FILLS the buffer and then READS IT BACK to checksum
+/// or copy it. A pure-read ladder has neither term - it allocates once and never
+/// reads its buffer back - so a read-syscall argument sizes this constant from a
+/// quantity the real callers do not have.
+///
+/// **256 KiB RE-CHECKED IN SITU ON THREE PARTS AND KEPT, because it is the only
+/// rung that is not a measurable loss on one of them.** The original sizing was
+/// an M5 Max pure-read ladder; these three are new.
+///
+/// Warm survivor scan, ratio to 256 KiB, over 1.000 meaning slower, against
+/// A/A floors of 0.995 and 1.000:
+///
+/// | `IO_BUF` | Xeon D-1531 Broadwell | M3 Ultra | M1 Ultra |
+/// |---|---|---|---|
+/// | 64 KiB | 0.931 | 1.529 | 1.502 |
+/// | 128 KiB | 0.952 | 1.073 | 1.074 |
+/// | **256 KiB** | **1.000** | **1.000** | **1.000** |
+/// | 512 KiB | 1.047 | 0.991 | 0.982 |
+/// | 1024 KiB | 1.176 | 1.009 | 0.996 |
+/// | 2048 KiB | 1.812 | 1.130 | 1.092 |
+///
+/// The parts disagree about the SIGN in both directions, so the best case for
+/// moving - 512 KiB - hands Broadwell +4.7% to buy an M3 Ultra -0.9% and an M1
+/// -1.8%. The in-situ number for a raise is nothing: the two Apple parts' read
+/// halves prefer 1 MiB by 6.9% and 2.9%, a 2.4x spread, and in the real loop
+/// both measure inside their own A/A band. Broadwell's L2 is 256 KB per core
+/// exactly, which is the same argument that chose the `NZBFAST_VERIFY_CHUNK`
+/// default - a good fit rather than a controlled result, since no arm varied a
+/// cache size (limits, that note). **Do not raise this from one part's read
+/// ladder.** `research/IO-BUF-ALLOCATION-COST-2026-09-16.md`.
+///
+/// It also costs memory nothing admits: these buffers are outside `MemBudget`,
+/// and the survivor scan holds `rev_scan_width` of them at once (16, or 4 on
+/// rotational storage) while `shard_group_crcs` holds one per shard in flight on
+/// the rayon pool. That is 4 MiB at 256 KiB and would be 16 MiB at 1 MiB - the
+/// whole `repair_cap()` of a 64 MiB budget, untracked (section 7 there).
+///
+/// **The lever, if anyone wants the read-side win: hoist the buffer, do not
+/// raise it.** `crc32_of` allocating once per worker rather than once per file
+/// deletes the fault term outright; it is worth 12.8% of the scan at 1 MiB on
+/// Broadwell and nothing at 256 KiB, which is why it has not been done.
 ///
 /// This must stay at or above one recovery chunk: below it, `read_chunk_at`'s
 /// CRC64 read splits into several, which on a per-read-open source multiplies
 /// the `open()` count (measured 2.49x at 4 KiB -
-/// `research/RARS-RR-SCAN-COST-2026-09-16.md` section 4.3).
+/// `research/RARS-RR-SCAN-COST-2026-09-16.md` section 4.3). Nothing in the table
+/// above reaches that floor (~43.6 KB on a 16 MiB volume), and the 64 KiB rung's
+/// 0.931 on Broadwell is NOT a proposal - it is 1.529 on the M3 Ultra.
+///
+/// **THE SEVEN SITES WERE CENSUSED BY FREQUENCY ON 17 Sep 2026 and only one of
+/// them was per-record**: `read_chunk_at`'s CRC64 buffer, which allocated a full
+/// `IO_BUF` once per candidate `{RB}` record and now right-sizes to the record
+/// (`research/READ-CHUNK-AT-CRC-BUFFER-2026-09-17.md` section 5). The other six
+/// allocate once per CALL and stream a range with the buffer AS the stride, so
+/// every byte of the buffer is a byte wanted - the shape this constant is sized
+/// for. Do not read the right-sizing there as a licence to sprinkle it here:
+/// away from a per-record loop it buys nothing, which is why `crc32_of` above
+/// is still declined.
 const IO_BUF: usize = 256 * 1024;
 
 /// Marker-search window for the `{RB}` scan, and NOT the same job as
@@ -49,12 +107,69 @@ const IO_BUF: usize = 256 * 1024;
 /// so a 256 KiB window traverses the record region about six times over: 23.87
 /// MB moved to validate a 3.49 MB record, 85% of it re-read.
 ///
-/// 64 KiB rather than smaller because the OTHER caller of this loop is the raw
-/// fallback, which slides across a whole file finding no marker at all; there
-/// a too-small window costs syscalls (measured 1.20x at 4 KiB, 0.986 at 64
-/// KiB - i.e. free). 64 KiB takes essentially all of the win in the arm that
-/// matters and costs nothing in the arm that does not.
-/// `research/RARS-RR-SCAN-COST-2026-09-16.md` sections 3 and 5.
+/// **CHECKED ON THREE PARTS, 17 Sep 2026** - M1 Ultra, M3 Ultra and a Xeon
+/// D-1531 - after this value had rested entirely on one ladder taken on a
+/// build box at a 6x oversubscription with 0% idle. It survives: the rungs
+/// below and above it are both a measurable loss on at least one part, and
+/// 64 KiB is a loss on none.
+/// `research/SCAN-WINDOW-SECOND-PART-2026-09-17.md`.
+///
+/// **IT FAVOURS THE RARE CALLER, and that is the thing to know before moving
+/// it.** There are three call sites, not the two the paragraph below describes:
+/// the parsed-archive scan over the recovery block's range (`rar50.rs`, ONE
+/// handle since the open fix), the whole-file raw fallback, taken only when
+/// header parsing FAILS, and a `MemorySource` scan of a compressed or encrypted
+/// record, whose reads are `memcpy` and which therefore argues DOWN with no
+/// counter-term at all. 64 KiB hands the raw fallback 100% of its available win
+/// and the common parsed arm about 90% of its own.
+///
+/// **The callers are not opposed - one CONTAINS the other**, which is what the
+/// byte counts show and the reasoning below missed. Per 16-volume set of
+/// 20,266,596-byte volumes, counted exactly (calls, then bytes read):
+///
+/// | window | record arm | raw arm |
+/// |---|---|---|
+/// | 4 KiB | 5,136 / 63.20 MB | 70,720 / 331.83 MB |
+/// | 16 KiB | 5,136 / 78.92 MB | 21,520 / 347.36 MB |
+/// | **64 KiB** | **5,136 / 141.11 MB** | **9,232 / 409.55 MB** |
+/// | 256 KiB | 5,136 / 381.86 MB | 6,160 / 650.29 MB |
+/// | 1 MiB | 5,136 / 1,202.31 MB | 5,392 / 1,470.74 MB |
+///
+/// The raw arm is the record arm plus a fixed 268.4 MB prefix sweep whose call
+/// count is exactly `268,435,456 / W`. **The record arm's call count does not
+/// move at all** - the loop's stride is a record, not a window - so it has no
+/// syscall term to trade against and argues down at every rung. The whole case
+/// for a larger window is the prefix sweep's calls.
+///
+/// Which makes the per-call read cost the thing that sets this constant, and
+/// the two architectures price it 12x apart. Ratio to 64 KiB, warm, min/min,
+/// over 1.000 slower; four rounds on each raw-arm cell:
+///
+/// | | record 16 KiB | record 256 KiB | raw 16 KiB | raw 4 KiB |
+/// |---|---|---|---|---|
+/// | M1 Ultra | 0.955 | 1.161 | **1.014-1.018** | **1.147** |
+/// | M3 Ultra | 0.951-0.976 | 1.176 | **1.025-1.033** | **1.153** |
+/// | Xeon D-1531 | 0.977-0.979 | 1.101 | 0.991-0.995 | 1.011 |
+///
+/// **16 KiB is the only real candidate and it is refused on the same rule
+/// `IO_BUF` survived by**: it wins the common arm on every part (2.1-5%) and
+/// costs the raw arm 1.6% on the M1 and 2.8% on the M3 while costing x86
+/// nothing. The Apple penalty is a family fact, reproduced on two generations,
+/// and the two order as the per-call term predicts. A lane that ESTABLISHES how
+/// often the raw fallback is actually taken has a real case for 16 KiB; nothing
+/// measures that today, so the conservative rung stays.
+///
+/// Do NOT raise it: 256 KiB is a loss on all three parts in both arms (10-18%
+/// record, 3-6% raw), and no rung at or below 64 KiB shows any cache-blocking
+/// signature - they all fit the smallest L2 on the fleet, and the 256 KiB rung
+/// costs an M3 with a 12 MiB L2 more than a Broadwell whose L2 is 256 KB
+/// exactly, which is the opposite ordering from a cache story.
+///
+/// The paragraph this replaces read "64 KiB rather than smaller because the
+/// OTHER caller ... a too-small window costs syscalls (measured 1.20x at 4 KiB,
+/// 0.986 at 64 KiB - i.e. free)". Directionally right; "free" was measured on
+/// one loaded Apple part, and on a quiet x86 part one rung down is free too.
+/// `research/RARS-RR-SCAN-COST-2026-09-16.md` sections 3 and 5 for the original.
 const SCAN_WINDOW: usize = 64 * 1024;
 
 /// Fixed part of a `{RB}` inline recovery chunk header.
@@ -431,11 +546,37 @@ fn read_chunk_at(
     // is incurred so a test can assert the budget instead of a stopwatch.
     crate::recovery::workgauge::charge_scanned_bytes(total_size - 0x0c);
     let mut state = CRC64_XZ_SEED;
-    let mut buf = vec![0u8; IO_BUF];
+    // RIGHT-SIZED, not `IO_BUF`: this runs once per CANDIDATE RECORD inside the
+    // `{RB}` scan loop - 1,280 times over a 16-volume set - and the loop below
+    // never reads more than `total_size - 0x0c` bytes, so a full 256 KiB here
+    // is dead tail on every ordinary record (~43.6 KB on a 16 MiB volume, 17%
+    // of the buffer).
+    //
+    // WHAT IT COSTS, MEASURED ON BOTH PLATFORMS, 17 Sep 2026. On musl
+    // `alloc_zeroed` faults the whole buffer eagerly and the `IO_BUF` spelling
+    // charged 753,588 minor faults a run where this spelling charges 104,038 -
+    // and that is worth **0.378 of the warm record scan** on a Xeon D-1531
+    // (0.3806 on the repeat, against A/A floors of 1.0016 and 1.0002), 0.646 on
+    // the raw fallback. macOS faults lazily and pays NONE of that - `minflt` is
+    // flat at 376-381 - and still gains **0.989** on an M1 Ultra against a
+    // 0.0003 floor, because the kernel-side cost of an allocation scales with
+    // its size even when its pages are never touched. So this is two bills, not
+    // one: the fault term is musl's alone, the size term is on both.
+    // `research/READ-CHUNK-AT-CRC-BUFFER-2026-09-17.md`.
+    //
+    // SAFE ON HOSTILE INPUT, and strictly safer than what it replaces:
+    // `total_size` is attacker-controlled to a `u32`, so `IO_BUF` stays the
+    // ceiling through the `.min`, and the bottom end cannot underflow because
+    // the `header_size` check above rejects any `total_size` below
+    // `CHUNK_FIXED_HEADER` (0x48), which is well past 0x0c.
+    let cap = (total_size - 0x0c).min(IO_BUF as u64) as usize;
+    let mut buf = vec![0u8; cap];
     let mut position = start + 0x0c;
     let end = start + total_size;
     while position < end {
-        let len = (end - position).min(IO_BUF as u64) as usize;
+        // `cap`, not `IO_BUF`: the bound is the buffer's own length, so the
+        // slice below is in range by construction rather than by argument.
+        let len = (end - position).min(cap as u64) as usize;
         src.read_at(position, &mut buf[..len])?;
         state = crc64_update(&buf[..len], state);
         position += len as u64;

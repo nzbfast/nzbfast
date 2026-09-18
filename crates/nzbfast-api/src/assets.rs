@@ -1019,12 +1019,63 @@ mod tests {
     ///
     /// The hidden `Error:` prefix is what makes an error toast an error
     /// for a screen reader (border colour alone is not), and the
-    /// `- details` affordance is a separate node because the live region
-    /// reads `textContent` - without its leading space a screen reader
-    /// hears the last word run into it ("errors- details"). Both live in
+    /// affordance is a separate node because the live region reads
+    /// `textContent` - without its leading space a screen reader hears
+    /// the last word run into it ("errors- details"). Both live in
     /// `toastShow` now, which is the ONE renderer: `toast()` and the run
     /// player both go through it, so a second code path cannot grow
     /// beside it and quietly ship a box with neither.
+    ///
+    /// GH #86 (17 Sep 2026) gave the affordance a LABEL - an undo says
+    /// "Undo", not "- details" - and gave a labelled one a longer
+    /// lifetime to be read and acted on in. Two arms here pinned the old
+    /// SPELLING of lines whose property that change did not touch, and
+    /// went red on `41b4f5a7b` while the box still behaved exactly as
+    /// this test was written to require. So both are now asserted in
+    /// parts, one part per thing that would be wrong if it were missing,
+    /// which is also what tells the next lane WHICH half it broke.
+    ///
+    /// AND THE THREE ARMS THAT CAN ARE COUNTED, not merely found.
+    /// `contains` answers "is this line here", which is two questions
+    /// short of what this test claims: it cannot say WHICH line
+    /// satisfied it (a repair here asserted `go.label` anywhere in the
+    /// renderer and passed with the label removed from the affordance
+    /// TEXT, because `more.className=` still named it), and it cannot
+    /// say HOW MANY did. The second gap is the one that matters most
+    /// here, because this test's whole claim is in its name: under
+    /// `contains`, a SECOND `toastShow` call could grow inside `toast()`
+    /// with its own lifetime and every arm would still pass - which is
+    /// precisely the "second code path beside it" the doc comment above
+    /// says cannot happen. Exactly-once closes it. The page is also
+    /// densely commented and its comments QUOTE code, so a count is what
+    /// catches a pinned call that has migrated into a comment as well.
+    /// Both levers are written up in
+    /// `research/WEB-ONLY-DIFF-HAS-NO-RUST-GATE-2026-09-17.md`; naming a
+    /// value in the source is the other one, and is why `const word=`
+    /// exists.
+    ///
+    /// EIGHT MUTANTS, all RUN against `web/dashboard.html` and restored
+    /// from a copy afterwards, never with `git checkout --`:
+    ///   1. drop the leading space from the affordance node -> caught
+    ///   2. drop `t('toast.details')` as the default wording -> caught
+    ///   3. drop the caller's label from the WORDS, leaving it on the
+    ///      `className` line -> caught only after `const word=` existed;
+    ///      this one PASSED the first repair, which is what the naming
+    ///      lever is for
+    ///   4. give every toast the long lifetime -> caught
+    ///   5. remove the undo window entirely -> caught
+    ///   6. a second `toastShow` path inside `toast()` -> caught by the
+    ///      count, and confirmed to PASS under the `contains` form it
+    ///      replaced, so the hole was real rather than theoretical
+    ///   7. a duplicate affordance-words line -> caught by the count
+    ///   8. a duplicate `textContent` assignment (the later one silently
+    ///      wins at runtime) -> caught by the count
+    /// A ninth is worth someone's four minutes and is NOT done here:
+    /// `a_bulk_selection_never_travels_in_the_request_line` below is
+    /// still `contains` over five call shapes and has the duplicate hole
+    /// mutants 6-8 close. Left alone deliberately - its property is a
+    /// different one, and widening somebody else's assertion in passing
+    /// is how a test acquires a claim nobody verified.
     #[test]
     fn every_toast_goes_through_the_one_renderer() {
         let show = fn_body("toastShow");
@@ -1032,9 +1083,18 @@ mod tests {
             show.contains("a11y.error") && show.contains("sr-only"),
             "the hidden error prefix must survive in the renderer"
         );
-        assert!(
-            show.contains("toast.details") && show.contains("' '+t('toast.details'"),
-            "the details affordance must stay a NODE with its leading space"
+        assert_eq!(
+            show.matches("const word=(go&&go.label)||t('toast.details'")
+                .count(),
+            1,
+            "the affordance's words must be the caller's label, defaulting to \
+             details - exactly once, so a second affordance cannot grow beside it"
+        );
+        assert_eq!(
+            show.matches("more.textContent=' '+word").count(),
+            1,
+            "the affordance must stay a NODE whose text starts with the space - \
+             exactly once, since a duplicate assignment silently wins"
         );
         // The public door is a thin wrapper, and it CANCELS a run: a
         // direct toast answers something the user just did, and making
@@ -1045,9 +1105,30 @@ mod tests {
             outer.contains("toastRunQ=[]") && outer.contains("toastMore=0"),
             "a direct toast must displace a run in flight"
         );
+        // ONE call, and this is the arm the test is named for. A second
+        // `toastShow` here - an early return for some new kind of
+        // message, with its own lifetime and its own idea of the
+        // affordance - is the second code path the doc comment above
+        // promises cannot exist, and `contains` would have welcomed it.
+        assert_eq!(
+            outer.matches("toastShow(").count(),
+            1,
+            "the public door must reach the renderer exactly once"
+        );
+        // The lifetime is chosen per call now, so this cannot be one
+        // literal either - but the guarantee the arm was written for is
+        // unchanged and is the first of these two: an ordinary toast
+        // still gets TOAST_MS. Both constants are named, so neither arm
+        // can be lost quietly. A change that gave EVERY toast the long
+        // lifetime would drop `TOAST_MS)`, and one that took the undo
+        // window away again would drop `TOAST_ACT_MS`.
         assert!(
-            outer.contains("toastShow(msg, bad, go, TOAST_MS)"),
-            "the single-message lifetime must be unchanged"
+            outer.contains("toastShow(msg, bad, go,") && outer.contains("TOAST_MS)"),
+            "an ordinary toast's lifetime must still be TOAST_MS"
+        );
+        assert!(
+            outer.contains("go.label?TOAST_ACT_MS"),
+            "only a LABELLED action may take the longer undo lifetime"
         );
         // The overflow line is the last slot of a capped run, and it is
         // the only part of this that is a COUNT: it stands for several

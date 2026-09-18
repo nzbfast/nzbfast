@@ -500,7 +500,10 @@ fn scan_in_order_returns_input_order_whatever_order_the_workers_finish_in() {
 //
 //   REVSCAN_SET   a directory holding the kept set (built once)
 //   REVSCAN_WORK  a work copy made of HARD LINKS to it
-//   REVSCAN_DROP  the 1-based part to delete, or "none" for a scan-only run
+//   REVSCAN_DROP  the 1-based part(s) to delete - one number, a
+//                 comma-separated list of them, or "none" for a scan-only
+//                 run. A LIST is what moves the DAMAGE COUNT, which is the
+//                 divisor in `stripe_len_for_budget`
 //   REVSCAN_SIZES "<count>x<MiB>" for the builder
 //   REVSCAN_REV   how many .rev volumes the builder writes
 
@@ -551,28 +554,51 @@ fn revscan_one_repair() {
     for entry in std::fs::read_dir(&kept).unwrap().flatten() {
         std::fs::hard_link(entry.path(), work.join(entry.file_name())).unwrap();
     }
-    let victim = (drop != "none").then(|| {
-        let name = format!("set.part{:02}.rar", drop.parse::<usize>().unwrap());
-        let original = std::fs::read(kept.join(&name)).unwrap();
-        // Unlink the LINK, never the kept file.
-        std::fs::remove_file(work.join(&name)).unwrap();
-        (name, original)
-    });
+    // One part, or several. The damage COUNT is not cosmetic here: it is the
+    // divisor in `StripeRepairPlan::stripe_len_for_budget`, which turns the
+    // fold's byte budget into its actual window as
+    // `min(shard_len, (budget / (2 * damaged + 1)) & !1)`. So `REVSCAN_DROP=2`
+    // and `REVSCAN_DROP=2,3,5` do not merely rebuild one file against three -
+    // they run the SAME budget at a three-times-different window, which is the
+    // axis this list exists to move. A single number still means exactly what
+    // it meant before the list was accepted, so every log taken at `--drop 2`
+    // stays comparable.
+    let victims: Vec<(String, Vec<u8>)> = if drop == "none" {
+        Vec::new()
+    } else {
+        drop.split(',')
+            .map(|part| {
+                let part: usize = part
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("REVSCAN_DROP={drop:?} is not a part number list"));
+                let name = format!("set.part{part:02}.rar");
+                let original = std::fs::read(kept.join(&name)).unwrap();
+                // Unlink the LINK, never the kept file.
+                std::fs::remove_file(work.join(&name)).unwrap();
+                (name, original)
+            })
+            .collect()
+    };
 
     let start = std::time::Instant::now();
     let rebuilt = try_rev_reconstruct(&work);
     let elapsed = start.elapsed();
 
-    match &victim {
-        Some((name, original)) => {
-            assert!(rebuilt, "the repair reported nothing rebuilt");
+    if victims.is_empty() {
+        assert!(!rebuilt, "a whole set must report nothing to rebuild");
+    } else {
+        assert!(rebuilt, "the repair reported nothing rebuilt");
+        // EVERY rebuild is byte-compared, not just the first: a repair that
+        // reconstructs one of three volumes correctly and the other two from a
+        // mis-indexed row would otherwise time as a result.
+        for (name, original) in &victims {
             assert_eq!(
                 &std::fs::read(work.join(name)).unwrap(),
                 original,
-                "the rebuild is not byte-identical to the original"
+                "the rebuild of {name} is not byte-identical to the original"
             );
         }
-        None => assert!(!rebuilt, "a whole set must report nothing to rebuild"),
     }
     let _ = std::fs::remove_dir_all(&work);
     println!("TOTAL {:.3}", elapsed.as_secs_f64() * 1000.0);

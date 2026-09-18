@@ -59,6 +59,96 @@ fn preview_wait() -> Duration {
 /// stalled provider should buffer the player, not corrupt the stream.
 const BODY_CEILING: Duration = Duration::from_secs(300);
 
+/// Counts the wait-loop sleeps in [`LiveSource::read_at_wait`], so the
+/// tests that mean "this read returned WITHOUT waiting" can say that
+/// instead of timing it.
+///
+/// nzbfast-local, 16 Sep 2026. Sibling of `vendor/rars/src/recovery/
+/// workgauge.rs` and written for the same reason: two assertions in
+/// `live_source_does_not_spin` bounded a no-wait return with
+/// `Instant::elapsed() < 200 ms`, which is a measurement of the BOX and
+/// not of the code - it reds when the box is busy and passes when the
+/// box is quiet whatever the read did. `nzbfast-api:lib` is a leg of
+/// nightly's `one-process-loaded` matrix in `.github/workflows/
+/// nightly.yml`, a job whose whole purpose is to perturb timing, so both
+/// halves of that are live here.
+///
+/// The claim both assertions are reaching for is about WORK: the wait
+/// loop is the only place this function sleeps, so "did not wait" is
+/// exactly "slept zero times", and a covered or past-the-end read that
+/// sleeps once is caught at any load.
+///
+/// **Empty body outside this crate's own test build** - `#[cfg(not(test))]`
+/// arms, so every shipped build pays nothing. **Thread-local, not
+/// global**: `read_at_wait` sleeps on its caller's thread, the probe is
+/// taken on that same thread, and a process-global counter would be the
+/// shared-state defect the one-process jobs exist to find.
+mod waitgauge {
+    #[cfg(test)]
+    use std::cell::Cell;
+
+    #[cfg(test)]
+    thread_local! {
+        static WAIT_SLEEPS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Charges one 50 ms sleep inside the hole-wait loop.
+    #[cfg(not(test))]
+    #[inline(always)]
+    pub(super) fn charge_wait_sleep() {}
+
+    /// Charges one 50 ms sleep inside the hole-wait loop.
+    #[cfg(test)]
+    pub(super) fn charge_wait_sleep() {
+        let _ = WAIT_SLEEPS.try_with(|slot| slot.set(slot.get().saturating_add(1)));
+    }
+
+    /// Zeroes the counter and reads it back for the rest of the test.
+    ///
+    /// Take one immediately before the call under test: the counter is
+    /// cumulative for the life of the thread, and one test body here
+    /// makes several reads that each wait or do not.
+    #[cfg(test)]
+    pub(super) fn probe() -> Probe {
+        WAIT_SLEEPS.with(|slot| slot.set(0));
+        Probe(())
+    }
+
+    /// Reader for the counter, from the [`probe`] that zeroed it.
+    #[cfg(test)]
+    pub(super) struct Probe(());
+
+    #[cfg(test)]
+    impl Probe {
+        /// Wait-loop sleeps since the probe was taken.
+        pub(super) fn wait_sleeps(&self) -> u64 {
+            WAIT_SLEEPS.with(|slot| slot.get())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The gauge itself: a probe zeroes, charges accumulate, and a
+        /// second probe does not see the first one's charges. Without
+        /// this, a gauge that silently counted nothing would make every
+        /// assertion built on it vacuous - which is the exact failure
+        /// mode the wall clocks it replaces already had.
+        #[test]
+        fn waitgauge_counts_and_a_probe_zeroes() {
+            let first = probe();
+            assert_eq!(first.wait_sleeps(), 0);
+            charge_wait_sleep();
+            charge_wait_sleep();
+            assert_eq!(first.wait_sleeps(), 2);
+
+            let second = probe();
+            assert_eq!(second.wait_sleeps(), 0);
+        }
+    }
+}
+
 /// How long a SEEK waits for its target span before answering 425.
 /// Short on purpose - the client asked for interactivity, and "fetching
 /// that part" on screen beats a socket that sits there.
@@ -201,6 +291,7 @@ impl Source for LiveSource {
                 if Instant::now() >= deadline {
                     return Err(nzbkit::mediaprobe::source::would_block());
                 }
+                waitgauge::charge_wait_sleep();
                 std::thread::sleep(Duration::from_millis(50));
                 waited += 50;
                 if let Some(e) = self.revoked().or_else(|| self.abandoned()) {
@@ -960,16 +1051,21 @@ mod tests {
         w.write_at(0, &data[..4_096]).unwrap();
         let src = live_source(&w);
 
-        // Covered: answered from disk with no wait at all.
-        let t = Instant::now();
+        // Covered: answered from disk with no wait at all. Counted, not
+        // timed: returning the right bytes does not say the read skipped
+        // the wait loop - a source that slept 50 ms first answers
+        // identically - and a clock over this says only how busy the box
+        // is. The wait loop is the one place `read_at_wait` sleeps, so
+        // "no wait at all" is exactly "slept zero times".
+        let gauge = waitgauge::probe();
         let mut head = [0u8; 4];
         src.read_at_wait(0, &mut head, Duration::from_secs(5))
             .unwrap();
         assert_eq!(&head, &[0x1A, 0x45, 0xDF, 0xA3]);
-        assert!(
-            t.elapsed() < Duration::from_millis(200),
-            "a covered read waited {:?}",
-            t.elapsed()
+        assert_eq!(
+            gauge.wait_sleeps(),
+            0,
+            "a covered read entered the wait loop"
         );
 
         // Uncovered: waits out the budget, then reports a retryable
@@ -993,12 +1089,15 @@ mod tests {
 
         // Past the end of the FILE is not a hole, and no budget makes
         // it one.
-        let t = Instant::now();
+        // "No budget makes it one" is the half worth an instrument: the
+        // 5 s budget handed in here must not be touched. Counted rather
+        // than timed, for the reason given at the covered read above.
+        let gauge = waitgauge::probe();
         let e = src
             .read_at_wait(w.size - 2, &mut cold, Duration::from_secs(5))
             .unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
-        assert!(t.elapsed() < Duration::from_millis(200), "EOF waited");
+        assert_eq!(gauge.wait_sleeps(), 0, "EOF waited");
 
         // Dropping hands the promotion rights and the reader gauge back,
         // so an abandoned preview does not hold the pool's hot lane.

@@ -347,6 +347,27 @@ pub fn sevenz_set_is_encrypted(parts: &[PathBuf]) -> bool {
     nzbkit::nameprobe::sevenz_is_encrypted(&mut src)
 }
 
+/// Does this 7-Zip container (the ordered parts of a split set, or a
+/// single file) REFUSE to open without a password?
+///
+/// The `parts`-taking face of [`nzbkit::nameprobe::sevenz_needs_password`],
+/// through the same joining reader [`open_sevenz`] uses. Fails OPEN
+/// exactly as that one does: false for anything that is not a readable
+/// 7z, because a caller asking "does this need a password" about a
+/// malformed file wants no.
+///
+/// NOT interchangeable with [`sevenz_set_is_encrypted`] beside it, and
+/// the difference is which way each fails. That one is the cheap
+/// "could this possibly need a key" gate a caller uses to SKIP work, so
+/// it fails closed. This is the one that raises the password
+/// affordance on a job, so a maybe must never be a yes.
+pub fn sevenz_set_needs_password(parts: &[PathBuf]) -> bool {
+    let Ok(mut src) = SplitParts::open(parts) else {
+        return false;
+    };
+    nzbkit::nameprobe::sevenz_reader_needs_password(&mut src)
+}
+
 /// Extract one 7-Zip container (its ordered parts) into `out` (an
 /// `ExtractStaging` dir, never the directory holding the container),
 /// path-sanitized and bounded by the same decompression-bomb guard as the

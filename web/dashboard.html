@@ -1217,6 +1217,15 @@ button.hlp{background:transparent;padding:0;font-weight:600;transition:filter .1
    its clicks back for the few seconds it is up. */
 #toast.on.clickable{pointer-events:auto;cursor:pointer}
 #toast.on.clickable:hover,#toast.on.clickable:focus-visible{border-color:var(--acc)}
+/* GH #86: the LABELLED affordance ("Undo"), as against the default
+   "- details". Both are the same one click on the same box, but the
+   default reads as a trailing clause of the sentence and this one is a
+   control the user is being offered, so it takes the accent rather than
+   the dim. It is a span and not a <button> on purpose: the box itself
+   already carries role="button", the tab stop and the Enter/Space
+   handler, and a real button nested inside that would be a second stop
+   leading to the same place. */
+#toast .toastact{color:var(--acc);font-weight:600}
 /* Chip C: in-page manual drawer (slides from the right). */
 .helpdrawer{position:fixed;inset:0;z-index:80;display:none}
 .helpdrawer.open{display:block}
@@ -1247,6 +1256,61 @@ button.hlp{background:transparent;padding:0;font-weight:600;transition:filter .1
 #keyov.on{display:grid}
 #keymodal{background:var(--surface);border:1px solid var(--line);border-radius:14px;
   width:min(460px,96vw);box-shadow:0 24px 70px rgba(0,0,0,.5);overflow:hidden}
+/* GH #86: the in-page ask - the ONE replacement for `window.prompt()`,
+   which embedded webviews and kiosk browsers refuse outright. Same shell
+   as the key modal above, which exists for exactly that reason.
+   z-index 73 is deliberate and sits between two neighbours: ABOVE #fsov
+   (70), because `fsNewFolder` asks its question ON TOP of the directory
+   browser, and BELOW #keyov (75), because nothing outranks the way back
+   into a locked dashboard. */
+#askov{position:fixed;inset:0;z-index:73;display:none;place-items:center;
+  background:color-mix(in srgb,#000 55%,transparent);backdrop-filter:blur(2px);padding:16px}
+#askov.on{display:grid}
+#askmodal{background:var(--surface);border:1px solid var(--line);border-radius:14px;
+  width:min(460px,96vw);box-shadow:0 24px 70px rgba(0,0,0,.5);overflow:hidden}
+.askbody{padding:16px;display:flex;flex-direction:column;gap:10px}
+/* One node per line of the question, because these strings were written
+   for a dialog that honoured "\n" and several still carry one. An empty
+   line is a paragraph break and has to keep its height. */
+.askline{font-size:13.5px;line-height:1.45}
+.askline:empty{height:.5em}
+/* GH #86 row 19: the import PREVIEW panel. `confirm.import` was never a
+   confirm - it is "found this file, it holds these servers and these
+   categories, shall I" - and it was shaped as one `\n`-formatted native
+   dialog, which an embedded webview or a kiosk browser REFUSES outright:
+   confirm() then returns false with nothing drawn, so on those clients
+   the import silently never happened and nothing said so. That is the
+   same failure #keymodal and #askov above exist for.
+   The `\n` half had already stopped working everywhere else too.
+   Measured 17 Sep 2026 across the catalogues: TWENTY-ONE of the 27 carry
+   no newline at all in their translation of that string (six keep all
+   five), so for most of the world the dialog was one run-on paragraph.
+   Real elements cannot lose their structure to a translator, which is
+   why the string was split into keys rather than reused whole.
+   z-index 72, between #fsov (70) and #askov (73): nothing stacks on this
+   panel today, and if anything ever does it is an ask. */
+#impov{position:fixed;inset:0;z-index:72;display:none;place-items:center;
+  background:color-mix(in srgb,#000 55%,transparent);backdrop-filter:blur(2px);padding:16px}
+#impov.on{display:grid}
+#impmodal{background:var(--surface);border:1px solid var(--line);border-radius:14px;
+  width:min(460px,96vw);max-height:88vh;display:flex;flex-direction:column;
+  box-shadow:0 24px 70px rgba(0,0,0,.5);overflow:hidden}
+.impbody{padding:14px 16px;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
+/* The other program's config file, by its own path. A filesystem path is
+   an LTR token even in an RTL UI - the rule .fsbar and .keyrow already
+   carry - and it wraps rather than being cut, because which file this is
+   is half of what the panel is for. */
+.imppath{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+  color:var(--dim);direction:ltr;text-align:start;word-break:break-all}
+.impsec{display:flex;flex-direction:column;gap:5px}
+.impsec b{font-size:12.5px}
+/* One row per server, because a hostname is long and there can be five
+   of them. The categories stay on one line in their own shipped string,
+   because a category name is a short word where a hostname is not. */
+.implist{background:var(--surface-2);border-radius:8px;padding:8px 10px;font-size:12.5px;
+  color:var(--dim);display:flex;flex-direction:column;gap:3px;max-height:150px;overflow-y:auto}
+.implist div{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr;text-align:start}
+.impnote{margin:0;font-size:12px;color:var(--dim)}
 .keybody{padding:14px 16px;display:flex;flex-direction:column;gap:10px}
 .keybody p{margin:0}
 .keyrow{display:flex;gap:6px}
@@ -2506,6 +2570,11 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
   <select class="ctl" id="qselPrio" onchange="qBulkPrio(this)" data-i18n-title="sel.prio.title" title="Set the priority of the selected downloads" aria-label="Set the priority of the selected downloads"></select>
   <select class="ctl" id="qselCat" onchange="qBulkCat(this)" data-i18n-title="sel.cat.title" title="Move the selected downloads to a category" aria-label="Move the selected downloads to a category"></select>
   <button class="ghost mini" data-snd="remove" onclick="qBulkDelete()" data-i18n-title="sel.qdel.title" title="Remove the selected downloads from the queue. Nothing is deleted from disk." data-i18n="sel.remove">✕ Remove</button>
+  <!-- GH #86: the second, deliberate one. Keep is still what ✕ Remove
+       does and what every quick route out of the queue does; this is
+       the separate control, exactly as History has carried one since
+       the truth audit, and it is never folded into the stop button. -->
+  <button class="ghost mini" data-snd="remove" onclick="qBulkDeleteFiles()" data-i18n-title="sel.qfiles.title" title="Remove the selected downloads from the queue AND delete what they have already written to disk" data-i18n="sel.delfiles">Remove + delete files</button>
   <button class="ghost mini" onclick="selClear('q')" data-i18n="sel.clear">Clear selection</button>
 </div>
   <div class="cardscroll"><table id="queue"><thead><tr><th class="selcol" onclick="selCellClick(event,'q',this)"><input type="checkbox" id="qSelAll" onclick="selAllClick(this,'q')" data-i18n-title="sel.q.all" title="Select every download listed" aria-label="Select every download listed"></th><th data-i18n="col.name">Name</th><th data-i18n="col.size">Size</th><th data-i18n="col.left">Left</th><th data-i18n="col.eta">ETA</th><th style="width:210px" data-i18n="col.progress">Progress</th><th style="width:110px"></th></tr></thead><tbody></tbody></table>
@@ -2631,7 +2700,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
 <div class="bulkbar" id="hselbar" role="toolbar" data-i18n-title="sel.h.bar" title="Actions for the selected history entries" aria-label="Actions for the selected history entries">
   <span class="count" id="hselcount"></span>
   <button class="ghost mini" data-snd="top" onclick="hBulkRetry()" data-i18n-title="sel.retry.title" title="Retry the selected downloads: each resumes from what already arrived" data-i18n="sel.retry">↻ Retry</button>
-  <button class="ghost mini" data-snd="remove" onclick="hBulkDelete()" data-i18n-title="sel.hdel.title" title="Remove the selected entries from history (files stay on disk)" data-i18n="sel.remove">✕ Remove</button>
+  <button class="ghost mini" data-snd="remove" onclick="hBulkDelete()" data-i18n-title="sel.hdel.title" title="Remove the selected entries from history. The downloads themselves stay in their own folders." data-i18n="sel.remove">✕ Remove</button>
   <button class="ghost mini" data-snd="remove" onclick="hBulkDeleteFiles()" data-i18n-title="sel.hfiles.title" title="Remove the selected entries AND delete their downloaded files from disk" data-i18n="sel.delfiles">Remove + delete files</button>
   <button class="ghost mini" onclick="selClear('h')" data-i18n="sel.clear">Clear selection</button>
 </div>
@@ -2794,7 +2863,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
       </select>
       <span id="paletteSwatch" style="display:inline-flex;gap:4px"></span>
     </span></div>
-  <div class="row"><label data-i18n="set.look.motion">Movement<span class="hint" data-i18n="set.look.motion.hint">charts glide and views fade in. Follows your system's reduce-motion setting unless you choose here</span></label>
+  <div class="row"><label data-i18n="set.look.motion">Movement<span class="hint" data-i18n="set.look.motion.hint">the interface animations: the download speed number glides to each new value, charts scroll smoothly, provider rows slide when they re-sort, and views fade in. None turns all of it off. Follows your system's reduce-motion setting unless you choose here</span></label>
     <select class="sel" id="s_motion" style="max-width:200px" onchange="setLook('Motion',this.value)">
       <option value="" data-i18n="set.look.motion.auto">Follow my system</option>
       <option value="full" data-i18n="set.look.motion.full">Full</option>
@@ -3011,7 +3080,8 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
   <div class="row"><label data-i18n="set.perf.fastpar">Fast PAR mode<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.perf.fastpar.hint">speeds up repair of badly damaged downloads. Turns itself off automatically if a repair does not verify</span></label>
     <input type="checkbox" id="s_fast_par" onchange="setCfg('fast_par',this.checked?1:0)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.perf.mem">Memory budget<span class="badge restart" data-i18n="badge.restart">applies after restart</span><span class="hint" data-i18n="set.perf.mem.hint">pipeline RAM cap, e.g. 8G; 0 = automatic (sized from this machine's RAM)</span></label>
-    <input class="txt sm" id="s_mem_limit" onchange="setCfg('mem_limit',this.value)"></div>
+    <span><input class="txt sm" id="s_mem_limit" onchange="setCfg('mem_limit',this.value)">
+      <span class="dim" id="s_mem_inforce" style="font-size:11.5px;margin-inline-start:8px"></span></span></div>
 </div>
 
 <div class="card set" data-sg="download" data-sk="disk">
@@ -4046,6 +4116,57 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <button id="keygo" onclick="keySubmit()" data-i18n="key.unlock">Unlock</button>
   </div>
 </div></div>
+<!-- GH #86: the in-page ask. ONE shell for every question the page used
+     to put to `window.prompt()`, which embedded webviews and kiosk
+     browsers refuse outright - the same failure that made #keymodal
+     necessary, and the reason those five paths were dead rather than
+     merely ugly on those clients. `askText()` below is the whole API.
+     No heading element: the question IS the label, exactly as it was in
+     the dialog this replaces, so the five shipped strings are reused
+     word for word and none of them needed re-translating. -->
+<div id="askov" onclick="if(event.target===this)askCancel()"><div id="askmodal" role="dialog" aria-modal="true" aria-labelledby="asktext">
+  <div class="askbody">
+    <div id="asktext"></div>
+    <input class="txt" id="askin" autocomplete="off" spellcheck="false" list="askopts"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();askOk()}">
+    <!-- Suggestions where the caller has a list worth offering (the
+         category move). Empty for every other question, which is what a
+         datalist with no options already means. -->
+    <datalist id="askopts"></datalist>
+  </div>
+  <div class="fsfoot">
+    <span class="grow"></span>
+    <button class="ghost" onclick="askCancel()" data-i18n="btn.cancel">Cancel</button>
+    <button id="askok" onclick="askOk()" data-i18n="btn.ok">OK</button>
+  </div>
+</div></div>
+<!-- GH #86 row 19: the SABnzbd / NZBGet import preview. See the CSS
+     above for why this is a panel rather than the `\n`-formatted
+     confirm() it replaces. The import still has to be AGREED to - it
+     writes server rows into somebody's settings - so this keeps the two
+     outcomes the confirm had rather than becoming a silent action.
+     Backdrop, Escape and ✕ all mean "not now", and "not now" is not a
+     one-shot: the ⤵ Import control in Settings > Usenet servers is
+     behind this backdrop, unchanged and still working, which is this
+     panel's equivalent of #keymodal's keynotice strip. The run says so
+     in a toast when nothing was imported, so declining is never a click
+     that quietly did nothing. -->
+<div id="impov" onclick="if(event.target===this)impCancel()"><div id="impmodal" role="dialog" aria-modal="true" aria-labelledby="imptitle">
+  <div class="fshead"><b id="imptitle"></b><span class="grow"></span>
+    <button class="ghost mini" onclick="impCancel()" data-i18n-title="btn.close.title"
+      title="Close this panel" aria-label="Close this panel">✕</button></div>
+  <div class="impbody">
+    <div class="imppath" id="imppath"></div>
+    <div class="impsec"><b id="impsrvn"></b><div class="implist" id="impsrvs"></div></div>
+    <div class="impsec" id="impcatrow"><div id="impcats"></div></div>
+    <p class="impnote" id="impnote" data-i18n="imp.note">Existing servers are kept; duplicates are skipped.</p>
+  </div>
+  <div class="fsfoot">
+    <span class="grow"></span>
+    <button class="ghost" onclick="impCancel()" data-i18n="btn.cancel">Cancel</button>
+    <button id="impgo" onclick="impOk()" data-i18n="imp.go">Import</button>
+  </div>
+</div></div>
 <!-- §129 2f: keyboard shortcut sheet, opened with '?'. Same shell as the
      directory browser; Escape, backdrop and ✕ all close it. -->
 <!-- §73 phase 2: the file itself, in the page, for the formats this
@@ -4317,6 +4438,48 @@ if(!IDX_ON){
 // Same regex byte for byte, leading space and trailing slash included, so
 // the two can never disagree about what counts as the wrapper.
 if(/ NzbFastApp\//.test(navigator.userAgent)) document.documentElement.classList.add('macapp');
+// ---- Movement (Appearance -> Movement, GH #87). ONE live answer to "is
+// motion off right now?", mirroring the CSS cascade in ui-tokens.html
+// exactly: an explicit None wins, an explicit Full deliberately opts back
+// in over the OS preference, and with neither chosen the OS preference
+// decides. Two copies of that cascade would be two settings.
+//
+// It has to be LIVE, and it was a load-time constant down beside the chart
+// loop. The branch that starts the requestAnimationFrame glide was
+// therefore taken once at script init, so choosing Movement -> None in
+// Settings killed the CSS transitions instantly and left the headline
+// speed number still tweening to every new value for the life of the page
+// - which is the motion GH #87 was reported against ("the download speed
+// indicator spinning to the next value"), and why the setting read as
+// doing nothing at all. Refreshed from setLook and from the media query's
+// own change event, so both halves land without a reload.
+function motionState(){
+  const m = document.documentElement.dataset.motion;
+  if(m==='none') return true;
+  if(m==='full') return false;
+  return matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+let MOTION_OFF = motionState();
+// Everything on this page that moves reads MOTION_OFF - the rAF glide and
+// the speed tween, the queue drag slides, the provider FLIP reorder and
+// every smooth scroll. Before GH #87 they were split three ways: some read
+// the stale load-time flag, some read the media query directly (so the
+// in-app setting never reached them at all), and two hard-coded
+// behavior:'smooth' and honoured neither.
+function applyMotion(){
+  const was = MOTION_OFF;
+  MOTION_OFF = motionState();
+  if(MOTION_OFF===was) return;
+  if(MOTION_OFF){
+    // Land what is mid-flight on its final value rather than freezing a
+    // chart part way through a glide or the number short of the truth.
+    chartFrac = 0;
+    if(shownSpeed!==targetSpeed){ shownSpeed=targetSpeed; renderSpeedNumber(); }
+    drawAllCharts(0);
+  } else startGlide();
+}
+// The OS preference can be flipped while the page is open too.
+matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', applyMotion);
 const LOCALES=['en','fr','de','it','es','nl','pt','sv','da','nb','fi','tr','ro','ru','pl','cs','uk','el','ja','he','ar','fa','hu','sk','hr','sr','bg','sl'];
 // [native name, English name] for every tag in LOCALES - the single source
 // for both Settings → Interface language selects, which are populated below
@@ -5426,16 +5589,39 @@ async function toggleOffline(){
   // on this page - a set that unpacks as it arrives has nothing on disk
   // for the reconnect to pick up.
   const opc=going?pauseCostOf(null):null;
-  const offlineMsg = (opc && opc.kind==='refetch')
-    ? t('hdr.offline.confirm.refetch','Disconnect from your providers?\n\nEvery connection is closed, so you can use the account from another machine or another app. Downloads pause - but one of them unpacks as it arrives, so nothing on disk can be picked up again: the {gb} GB it has already fetched would be fetched again when you reconnect.',{gb:pauseCostGB(opc)})
-    : t('hdr.offline.confirm',
-      'Disconnect from your providers?\n\nEvery connection is closed, so you can use the account from another machine or another app. Downloads pause and keep what they have already fetched - nothing is lost, and they carry on where they left off when you reconnect.');
-  if(going && !confirm(offlineMsg))
+  // GH #86: this one was a confirm in front of a TOGGLE. The button it
+  // is on already says which way it goes in both states ("Online ·
+  // disconnect" / "Offline · reconnect"), its tooltip already carries
+  // every clause the dialog did, and the dialog's own copy ended
+  // "nothing is lost, and they carry on where they left off when you
+  // reconnect" - so it was guarding a one-click round trip, which is
+  // habit rather than a decision.
+  //
+  // The half worth keeping is the half the button does NOT show: going
+  // offline also pauses. That is now said after the fact instead of
+  // asked before it, which is the move notePauseCost() already made for
+  // Pause under TODO 309(b) - and for the second reason recorded there,
+  // which matters more than the tidiness: Cancel returns false, and an
+  // embedded webview with no confirm panel returns false without even
+  // drawing a dialog, so the confirm was also a way for the click to
+  // silently do nothing at all.
+  //
+  // The refetch arm still asks, and must. A set that unpacks as it
+  // arrives has nothing on disk for the reconnect to pick up, so that
+  // one really does cost the GB already fetched, and no toast undoes a
+  // re-download.
+  if(going && opc && opc.kind==='refetch'
+     && !confirm(t('hdr.offline.confirm.refetch','Disconnect from your providers?\n\nEvery connection is closed, so you can use the account from another machine or another app. Downloads pause - but one of them unpacks as it arrives, so nothing on disk can be picked up again: the {gb} GB it has already fetched would be fetched again when you reconnect.',{gb:pauseCostGB(opc)})))
     return;
   offline=going;
   paintNet();
-  reportRefusal(await api(going ? 'offline' : 'online'));
+  // Only over a disconnect the daemon actually took: the optimistic flip
+  // above is repainted by tick() either way, and a green "Disconnected."
+  // over a refusal is the one thing worse than the dialog was.
+  const ok=reportRefusal(await api(going ? 'offline' : 'online'));
   tick();
+  if(going && ok)
+    toast(t('toast.offline','Disconnected from your providers, and downloads are paused. They pick up where they left off when you reconnect.'));
 }
 // Single place that renders the state, so the optimistic flip above and
 // the poll below cannot disagree about it.
@@ -5474,7 +5660,7 @@ async function setLimit(v){
     // The presets are round numbers for round lines; a 37 Mb/s uplink is
     // not one of them, and until now the header could not express it.
     // Accepts what the API accepts - 25M, 500K, a bare byte count.
-    const typed=prompt(t('hdr.limit.ask','Speed limit - e.g. 25M, 500K, or 0 for no limit'), '');
+    const typed=await askText({text:t('hdr.limit.ask','Speed limit - e.g. 25M, 500K, or 0 for no limit')});
     if(typed==null||typed.trim()===''){ tick(); return; }  // tick() re-syncs the select
     // THE LIMIT FIRST, and auto off only once it is accepted. The other
     // order shipped: `notanumber` disabled automatic control (which
@@ -5818,7 +6004,7 @@ function drawArea(cv, data, color, frac=0, floorMax=0){
   // instead of the whole history breathing with the window max.
   const target=Math.max(...data.slice(s0),floorMax,0.001);
   let max=target;
-  if(!REDUCED){
+  if(!MOTION_OFF){
     const d0=cv._dispMax;
     if(d0==null || target>=d0) max=target;
     else { max=d0+(target-d0)*0.06; if((max-target)/target<0.002) max=target; }
@@ -6627,7 +6813,7 @@ function busyCfg(name,val){ setCfg(name,val); }
 function busyGoCard(id){
   setView('dash');
   const c=document.getElementById(id); if(!c) return;
-  c.scrollIntoView({block:'start',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});
+  c.scrollIntoView({block:'start',behavior:MOTION_OFF?'auto':'smooth'});
   c.classList.remove('clickflash'); void c.offsetWidth; c.classList.add('clickflash');
 }
 // Shared by both chip menus and the queue pill's: same #ctxmenu element,
@@ -7024,7 +7210,7 @@ async function tick(){
     chartFrac=Math.max(-1.5, chartFrac-1);
     targetSpeed=mbps; speedSuffix=paused?' · '+t('status.paused','paused'):'';
     speedSounds(mbps);
-    if(REDUCED) drawSpeed(0);
+    if(MOTION_OFF) drawSpeed(0);
     drawHistogram();
 
     // Whole-queue remaining + ETA in the tab title (useful when backgrounded).
@@ -7050,7 +7236,7 @@ async function tick(){
     // empty queue does; a paused or held queue keeps its frozen chart.
     if(burnLive) push(burnHist, totLeft);
     else if(!qCount(q)||(totLeft<=0&&q.slots.length&&q.slots.every(isTail))) burnHist.length=0;
-    if(REDUCED) drawBurn(0);
+    if(MOTION_OFF) drawBurn(0);
     document.title = (mbps>0 && !paused) ? `${fmtRate(mbps)} · nzbfast`
       : (qCount(q)? 'nzbfast · '+(paused?t('status.paused','paused')
         : tailNow?tStatus(tailNow.status):t('status.idle','idle')) : 'nzbfast');
@@ -8016,7 +8202,7 @@ function renderHistory(slots){
         ((act==='servers'||act==='retention')?`<button class="ghost mini" title="${escA(t('hist.act.servers.title','Open the server list - this failure was decided by your own server setup'))}" onclick="event.stopPropagation();goSetting('servers')">⚙ ${t('hist.act.servers','Server settings')}</button>`:'')+
         (act==='path'?`<button class="ghost mini" title="${escA(t('hist.act.folder.title','Open this job’s output folder, where the evidence is'))}" onclick="event.stopPropagation();openItem('${s.nzo_id}','folder')">📂 ${t('hist.act.folder','Show the folder')}</button>`:'')+
         (retryable?`<button class="ghost mini${retryDim?' dimbtn':''}" title="${escA(retryTip)}" onclick="event.stopPropagation();retryJob('${s.nzo_id}')">↻ ${t('hist.retry','retry')}</button>`:'')+
-        `<button class="ghost mini" title="${escA(t('hist.del.title','Remove this entry from history (files stay on disk)'))}" aria-label="${escA(t('hist.del.title','Remove this entry from history (files stay on disk)'))}" data-snd="remove" onclick="event.stopPropagation();delHist('${s.nzo_id}')">✕</button>`+
+        `<button class="ghost mini" title="${escA(t('hist.del.title','Remove this entry from history. The download itself stays in its own folder.'))}" aria-label="${escA(t('hist.del.title','Remove this entry from history. The download itself stays in its own folder.'))}" data-snd="remove" onclick="event.stopPropagation();delHist('${s.nzo_id}')">✕</button>`+
         // The same menu the right-click opens - as a visible button,
         // because touch has no right-click and four of these actions
         // (play, show in folder, change category, delete files) had no
@@ -9648,9 +9834,12 @@ function pipeline(s,mbps,queued,done,failed){
         <span class="mono dim">${share.toFixed(0)}%</span>
         <span class="gb">${gb(sv.bytes)} ${unit('GB')}</span>${detail}</div>`;
     }).join(''));
-    // FLIP: rows slide from their old spot to the new one (skipped for
-    // reduced-motion users - the reorder still happens, instantly).
-    if(firstRects && !matchMedia('(prefers-reduced-motion: reduce)').matches){
+    // FLIP: rows slide from their old spot to the new one (skipped when
+    // Movement is off - the reorder still happens, instantly). This is the
+    // "rows slide to their new spot" the provider re-sort row promises,
+    // and until GH #87 it read the OS preference alone, so the in-app
+    // Movement -> None left it sliding.
+    if(firstRects && !MOTION_OFF){
       document.querySelectorAll('#servers .srv').forEach(el=>{
         const f=firstRects[el.dataset.rk]; if(!f) return;
         const r=el.getBoundingClientRect();
@@ -10819,6 +11008,10 @@ function setLook(key, value){
   } else if(value){ localStorage.setItem('nzbfast'+key, value); r.setAttribute('data-'+attr, value); }
   else { localStorage.removeItem('nzbfast'+key); r.removeAttribute('data-'+attr); }
   if(key==='Palette') paletteSwatch();
+  // The CSS half of Movement is the attribute set just above; this is the
+  // other half, and without it the glide and the speed tween carried on
+  // until the page was reloaded (GH #87).
+  if(key==='Motion') applyMotion();
   // Charts read their colours through css(), so they must be redrawn to
   // pick up a new palette - and a shape or spacing change resizes them.
   // Via redrawCanvases so the usage chart is included; it used to be left
@@ -11348,6 +11541,7 @@ function drawerHtml(s){
     // download is exactly the one that would have missed the block.
     return files+vline+sline+oline+whyslowBlock(s)+reportBlock(s)+mediaWarnBlock(s.media)+insBlock(s)+altSwitchBlock(s)+pwBlock(s)
       +`<div style="font-size:12px;margin-top:7px">${nzbBlock(s)}</div>`
+      +qDelFilesBlock(s)
       +(previewMode==='off'?'':probeHtml(s.nzo_id));
   }
   // Finishing: neither of the two branches around this one fits. The
@@ -11380,6 +11574,7 @@ function drawerHtml(s){
       +(dol?`<div class="dim" style="font-size:12px;margin-top:7px">${t('drawer.origin','added by')} ${originIconHtml(s.origin)}${esc(dol)}</div>`:'')
       +mediaWarnBlock(s.media)+altSwitchBlock(s)+healthDetail(s.health)
       +`<div style="font-size:12px;margin-top:7px">${nzbBlock(s)}</div>`
+      +qDelFilesBlock(s)
       +reportBlock(s);
   }
   const prios=[[2,'Force',t('prio.force','Force')],[1,'High',t('prio.high','High')],[0,'Normal',t('prio.normal','Normal')],[-1,'Low',t('prio.low','Low')]];
@@ -11453,6 +11648,7 @@ function drawerHtml(s){
     pwBlock(s)+
     `<div class="dim" style="font-size:11.5px;margin-top:7px">${t('drawer.tiebreak','Queue order breaks ties within a priority: Force/High items download first regardless of position.')}
       ${t('drawer.reorder','Reorder with the ↑ ↓ buttons on each row, or by dragging a row with the mouse.')}</div>`+
+    qDelFilesBlock(s)+
     reportBlock(s);
 }
 // M24 queue-side password entry (Gary's report: the history 🔑 was the
@@ -11483,6 +11679,21 @@ async function dlNzb(id){
 }
 function nzbBlock(s){
   return `<button class="ghost mini" title="${escA(t('drawer.getnzb.title',"Save this job's .nzb file - nzbfast keeps its own copy even after the original is gone"))}" onclick="dlNzb('${s.nzo_id}')">⬇ ${t('drawer.getnzb','Download .nzb')}</button>`;
+}
+// GH #86: the per-row half of "let a cancel delete the files". It lives
+// in the drawer rather than on the row, for the reason History's own
+// copy of this button gives: the row's controls are the ones you reach
+// for without reading, and this is the one that cannot be undone. One
+// click opens the drawer; the deliberate action is behind it.
+//
+// On EVERY queue row, including the one downloading right now - that row
+// IS the cancel the reporter was talking about, and its files are the
+// ones they wanted gone. A running job's directory still has live
+// writers, so the daemon defers the removal to park() rather than
+// racing them; qFilesToast says so instead of claiming the disk space
+// is already back.
+function qDelFilesBlock(s){
+  return `<div style="font-size:12px;margin-top:7px"><button class="ghost mini danger" title="${escA(t('queue.delfiles.title','Remove this download from the queue AND delete what it has already written to disk. Asks first.'))}" data-snd="remove" onclick="event.stopPropagation();qDelFiles('${escA(s.nzo_id)}')">🗑 ${esc(t('menu.removefiles','Remove and delete files…'))}</button></div>`;
 }
 function pwBlock(s){
   return `<div style="font-size:12px;margin-top:7px"><button class="ghost mini" title="${escA(t('drawer.pw.title','Attach the archive password now: the download unpacks with it the moment it needs one, instead of parking as password-required'))}" onclick="unlockJob('${s.nzo_id}')">🔑 ${t('drawer.pw.set','Set password…')}</button>`+
@@ -11581,7 +11792,7 @@ async function qMove(id, delta){
   // sits; the dragged row's own transform is set every move, so only
   // the neighbour needs the animation.
   const qMakeWay=(row,fromDy)=>{
-    if(REDUCED) return;
+    if(MOTION_OFF) return;
     row.animate([{transform:`translateY(${fromDy}px)`},{transform:'translateY(0)'}],
       {duration:130,easing:'ease-out'});
   };
@@ -11625,7 +11836,7 @@ async function qMove(id, delta){
     // row now owns.
     const dy=/-?[\d.]+/.exec(tr.style.transform||'');
     tr.style.transform='';
-    if(dy&&!REDUCED) tr.animate([{transform:`translateY(${dy[0]}px)`},{transform:'translateY(0)'}],
+    if(dy&&!MOTION_OFF) tr.animate([{transform:`translateY(${dy[0]}px)`},{transform:'translateY(0)'}],
       {duration:140,easing:'ease-out'});
     const to=[...tb.querySelectorAll('tr.qrow')].indexOf(tr);
     tb.__h=null;                       // DOM was hand-mutated - force a redraw
@@ -12358,29 +12569,109 @@ async function qOp(name,id){
   if(name==='pause') notePauseCost([id]);
   const j=await api('queue',`&name=${name}&value=${id}`);
   if(!j.status) toast(t('toast.nochange','Nothing to change. The item may have just finished.'), true);
-  else if(name==='delete') toast(t('toast.qRemoved','Removed from the queue.'));
+  // GH #86: the row's own ✕ has no confirm in front of it and never did.
+  // What it gains is the way back, on the sentence that says what it
+  // did - which is also why stopJob below could drop its dialog: the
+  // same delete, the same token.
+  else if(name==='delete') toast(t('toast.qRemoved','Removed from the queue.'), false, qUndoAct(j));
   tick();
   return j;
 }
+// GH #86: the way back from a cancel, as the `{fn,label}` a toast
+// carries.
+//
+// The reporter's objection was to dialogs you have to stop and read, and
+// their example was cancelling a download. The answer is not to delete
+// the dialog - a cancel with neither a confirm nor an undo is an
+// irreversible silent action, which is strictly worse - it is to make
+// the action reversible. The daemon now keeps a cancelled row's spooled
+// .nzb for a grace window and hands back a token; this spends it.
+//
+// ABSENT `undo` MEANS THERE IS NO WINDOW and this returns null, so the
+// toast is a plain announcement. That is not a detail: the daemon
+// withholds the token when the files half was asked for (the removal can
+// still be deferred to park(), so "the files are still there" is not yet
+// true), and when any one row's copy could not be held - because an Undo
+// that puts nine of ten rows back looks exactly like one that puts all
+// ten back. Never synthesise a token this side.
+function qUndoAct(j){
+  const u = j && j.undo;
+  if(!u || !u.token) return null;
+  return {label: t('toast.undo','Undo'), fn: async()=>{
+    const r = await api('queue',`&name=undelete&value=${encodeURIComponent(u.token)}`);
+    // reportRefusal, not `r.status===false && r.error`: the daemon sends
+    // a sentence for both of its refusals (a window that closed, and one
+    // that could not deliver) and apiErr falls back if a future one does
+    // not, so a failed undo is never a green toast.
+    if(!reportRefusal(r)){ tick(); return; }
+    // A PARTIAL restore says so. `failed` is per-row and the daemon
+    // fills it whenever a retained copy was unreadable, which is the one
+    // case where "it worked" and "your queue is back" come apart.
+    const lost = (r.failed||[]).length;
+    toast(t('toast.qUndone','Put {n} back in the queue.',{n:num(r.restored||0,0)})
+      + (lost ? ' · '+tn('sel.fail',lost,'{n} failed','{n} failed') : ''), lost>0);
+    tick();
+  }};
+}
+// GH #86: the way back from a history delete, as the `{fn,label}` a
+// toast carries. qUndoAct's twin for the other list.
+//
+// Deliberately NOT one function over both: the two arms are on different
+// modes and hold different stores, and a shared helper would need the
+// mode passed in - which is one argument away from spending a queue
+// token on the history door. The daemon's prefixes make that miss rather
+// than half-match, and this keeps the page from ever posing the question.
+//
+// ABSENT `undo` MEANS THERE IS NO WINDOW, exactly as it does next door,
+// and here there is one more way to get it: a row whose early-published
+// copies at the destination are about to be taken back cannot be given
+// back, so the daemon withholds the token for its whole batch. Never
+// synthesise a token this side.
+function hUndoAct(j){
+  const u = j && j.undo;
+  if(!u || !u.token) return null;
+  return {label: t('toast.undo','Undo'), fn: async()=>{
+    const r = await api('history',`&name=undelete&value=${encodeURIComponent(u.token)}`);
+    // reportRefusal for the reason qUndoAct gives: the daemon sends a
+    // sentence for both of its refusals, so a failed undo is never a
+    // green toast.
+    if(!reportRefusal(r)){ tick(); return; }
+    const lost = (r.failed||[]).length;
+    toast(t('toast.hUndone','Put {n} back in the list.',{n:num(r.restored||0,0)})
+      + (lost ? ' · '+tn('sel.fail',lost,'{n} failed','{n} failed') : ''), lost>0);
+    tick();
+  }};
+}
 async function stopJob(id){
-  // Honest about the consequences: a stopped job is dropped, not filed
-  // to history, and its spooled copy of the NZB is deleted - so the
-  // only resume route is the user's own copy of the file. The old copy
-  // promised a History retry that never existed after a stop.
-  // TODO 309(b): the sentence above is false for a set that unpacks as
-  // it arrives - there IS no partial data for the re-add to pick up, so
-  // that row gets its own confirm rather than a contradiction inside one
-  // dialog. A separate key and not an appended clause, so the shipped
-  // wording of `confirm.stop` and its 27 translations stay put.
+  // GH #86: THE PLAIN CONFIRM IS GONE AND THE REFETCH ONE STAYS, and the
+  // divider is whether an undo can actually give back what the click
+  // cost - not how destructive the sentence sounds.
+  //
+  // For an ordinary row it can. The daemon keeps the spooled .nzb for a
+  // grace window now (`cancelundo.rs`), so the row comes back with its
+  // NZB, its id, its category, its priority and its paused flag, and the
+  // partial data was never touched: the state after Undo is the state
+  // before the click. A dialog in front of that is asking the user to
+  // read a paragraph to avoid something one click reverses - and it is
+  // a second way for the action to silently not happen, which is the
+  // argument already written down at `notePauseCost`.
+  //
+  // For a set that unpacks as it arrives it CANNOT. Those GB are gone
+  // the moment the download stops, whatever happens to the row, so the
+  // undo gives back a job that starts from zero. That is the same
+  // asymmetry `toggleOffline` already ships (audit rows 1 and 2): the
+  // arm whose cost survives the undo keeps its dialog, and the figure is
+  // the whole point of it. `confirm.stop.refetch` and its 27
+  // translations are untouched.
   const spc=pauseCostOf([id]);
-  if(spc && spc.kind==='refetch'){
-    if(!confirm(t('confirm.stop.refetch','Stop this download?\n\nIt leaves the queue and history entirely. It also unpacks as it arrives, so nothing it has on disk can be picked up again: the {gb} GB already fetched would be fetched from the start.',{gb:pauseCostGB(spc)}))) return;
-  }
-  else if(!confirm(t('confirm.stop','Stop this download?\n\nIt leaves the queue and history entirely. The partial data stays on disk, and adding the same NZB again picks up from it - but that needs your own copy of the .nzb file.'))) return;
+  if(spc && spc.kind==='refetch'
+     && !confirm(t('confirm.stop.refetch','Stop this download?\n\nIt leaves the queue and history entirely. It also unpacks as it arrives, so nothing it has on disk can be picked up again: the {gb} GB already fetched would be fetched from the start.',{gb:pauseCostGB(spc)}))) return;
   // Only over a delete the daemon actually took: qOp has already said
   // the refusal in the daemon's own words, and this line replaced it.
   const j = await qOp('delete', id);
-  if(j && j.status) toast(t('toast.stopped','Download stopped.'));
+  // qOp's own toast already carried the undo; this one replaces it, so
+  // it has to carry it too or the affordance dies on the way past.
+  if(j && j.status) toast(t('toast.stopped','Download stopped.'), false, qUndoAct(j));
 }
 // History's "Clear completed", for the queue - and a blunter thing than
 // that one, because what it discards has not finished. So it says the
@@ -12409,11 +12700,19 @@ async function clearQueue(btn){
   // on this page - a set that unpacks as it arrives has nothing on disk
   // for a re-add to pick up.
   const qpc=pauseCostOf(null);
-  const clearMsg = (qpc && qpc.kind==='refetch')
-    ? t('confirm.qclear.refetch','Remove everything from the queue?\n\nNo files are deleted, but one of these downloads unpacks as it arrives, so nothing it has on disk can be picked up again: the {gb} GB it has already fetched would be fetched from the start if you add it back.\n\nNothing is filed to history, and this cannot be undone.',{gb:pauseCostGB(qpc)})
-    : t('confirm.qclear','Remove everything from the queue?\n\nNo files are deleted: whatever has already arrived stays on disk, and adding the same NZB again picks up from there - but that needs your own copy of the .nzb file, because the queue\'s copy goes with the row.\n\nNothing is filed to history, and this cannot be undone.');
-  if(!confirm((busyRow?t('confirm.qclear.active','This stops the download in progress, and anything still repairing or unpacking.')+'\n\n':'')
-      +clearMsg)) return;
+  // GH #86: the same split as stopJob, for the same reason. `confirm.qclear`
+  // said "the queue's copy goes with the row" and "this cannot be undone",
+  // and both sentences are now false: the daemon holds every removed
+  // row's .nzb for a grace window and the toast carries an Undo that puts
+  // the whole sweep back at once. So the plain arm acts, and the refetch
+  // arm - where the GB really are gone whatever the row does - still
+  // asks, with the figure that is the point of asking. The `active`
+  // preamble rides the refetch arm only, because it is the only arm left
+  // that puts up a dialog; the fact it carried ("this stops the download
+  // in progress") is a thing Undo reverses.
+  if(qpc && qpc.kind==='refetch'
+     && !confirm((busyRow?t('confirm.qclear.active','This stops the download in progress, and anything still repairing or unpacking.')+'\n\n':'')
+      +t('confirm.qclear.refetch','Remove everything from the queue?\n\nNo files are deleted, but one of these downloads unpacks as it arrives, so nothing it has on disk can be picked up again: the {gb} GB it has already fetched would be fetched from the start if you add it back.\n\nNothing is filed to history, and this cannot be undone.',{gb:pauseCostGB(qpc)}))) return;
   await busy(btn, t('busy.clearing','Clearing…'), async()=>{
     // mustOk, not a bare await: a refused clear used to fall through to
     // the toast below and report "Removed 0 from the queue." in the
@@ -12423,7 +12722,9 @@ async function clearQueue(btn){
     const j=mustOk(await api('queue','&name=delete&value=all'));
     // Counted from the daemon's own sweep, and worded without a plural
     // noun so one string covers 0, 1 and 20 in every locale.
-    toast(t('toast.qCleared','Removed {n} from the queue.',{n:num(j.removed||0,0)}));
+    // GH #86: and it carries the way back, which is what let the dialog
+    // above narrow to the one arm an undo cannot answer.
+    toast(t('toast.qCleared','Removed {n} from the queue.',{n:num(j.removed||0,0)}), false, qUndoAct(j));
     tick();
   });
 }
@@ -12492,7 +12793,9 @@ async function retryMove(id){
 // M24: passworded archive - send the password, daemon unpacks the
 // verified volumes in the background (badge clears on the next poll).
 async function unlockJob(id){
-  const pw=prompt(t('prompt.password','Archive password:'));
+  // `password:true` so it is not shoulder-read and not offered to a
+  // browser's autofill - the field this replaces was a plain prompt().
+  const pw=await askText({text:t('prompt.password','Archive password:'), password:true});
   if(!pw) return;
   // The password travels in a POST body, never on the request line: a
   // query string lands in reverse-proxy logs, browser history and any
@@ -12684,7 +12987,7 @@ function openQueueRow(id){
   renderQueue();
   const tr=document.querySelector(`#queue tbody tr.qrow[data-id="${CSS.escape(id)}"]`);
   if(!tr) return false;
-  tr.scrollIntoView({block:'center',behavior:'smooth'});
+  tr.scrollIntoView({block:'center',behavior:MOTION_OFF?'auto':'smooth'});
   return true;
 }
 // The verdict chip on a downloading row: open that row and land on the
@@ -12695,7 +12998,7 @@ function openWhySlow(id){
   if(!openQueueRow(id)) return;
   requestAnimationFrame(()=>{
     const b=document.getElementById('whyslowBlk');
-    if(b) b.scrollIntoView({block:'center',behavior:REDUCED?'auto':'smooth'});
+    if(b) b.scrollIntoView({block:'center',behavior:MOTION_OFF?'auto':'smooth'});
   });
 }
 // The same contract for the benched-job chip on a QUEUED row: open the
@@ -12710,7 +13013,7 @@ function openDefer(id){
   if(!openQueueRow(id)) return;
   requestAnimationFrame(()=>{
     const b=document.getElementById('deferBlk');
-    if(b) b.scrollIntoView({block:'center',behavior:REDUCED?'auto':'smooth'});
+    if(b) b.scrollIntoView({block:'center',behavior:MOTION_OFF?'auto':'smooth'});
   });
 }
 // `ref` is the row's opaque id (the daemon matches it against the full
@@ -12780,22 +13083,32 @@ async function jobReport(id){
 async function delHist(id){
   const j=await api('history',`&name=delete&value=${id}`);
   if(!reportRefusal(j)){ tick(); return; }
-  toast(t('toast.histRemoved','History entry removed.'));
+  // GH #86: this ✕ has no confirm in front of it and never did. What it
+  // gains is the way back, on the sentence that says what it did - and
+  // that is also what let the three bulk dialogs below go, because they
+  // are all the same delete and all carry the same token.
+  toast(t('toast.histRemoved','History entry removed.'), false, hUndoAct(j));
   tick();
 }
 // One click to tidy the list once a batch has finished. Deliberately
 // NOT "clear history": what failed is what you retry from, and a
 // password-locked row carries the only 🔑 that unpacks its download, so
 // both stay and the button is only ever a housekeeping action. No
-// del_files either - same as the per-row ✕, the files stay on disk.
+// del_files either - same as the per-row ✕, so the download itself
+// stays in its own folder. NOT "no files are deleted", which is what
+// this said and what the retired dialog promised: a job whose move
+// never settled has early-published copies at the DESTINATION, and
+// `early_take` takes those back on a plain delete too (audit section 5).
+// That is also the one case the daemon refuses an undo token for.
 //
 // The daemon picks the records (value=completed), not this list: history
 // is served unpaginated today, but a UI that posted the ids it happens
 // to be holding would quietly clear only the visible page the day that
 // changes - and would race any job finishing between paint and click.
 // ...but the daemon must be told which list. Both header sweeps are
-// offered ON a searched list, their confirmations say "out of this
-// list", and until 1 Sep 2026 they sent no filter at all: 39 failures
+// offered ON a searched list - their confirmations SAID "out of this
+// list" until GH #86 retired them, and the narrowing is why that
+// mattered - and until 1 Sep 2026 they sent no filter at all: 39 failures
 // the user had narrowed away with "Alpha" went with the one row on
 // screen, silently, and the toast reported all 40 (bug sweep F26).
 // `search=` is the daemon's own SAB narrowing on the class sweeps
@@ -12810,7 +13123,14 @@ async function delHist(id){
 // daemon's real count) where an over-delete was not.
 function histClearSearch(){ return histSearch?'&search='+encodeURIComponent(histSearch):''; }
 async function clearHistDone(btn){
-  if(!confirm(t('confirm.histclear','Clear the finished downloads out of this list?\nAnything that failed or is waiting for a password stays, and no files are deleted.'))) return;
+  // GH #86: THE CONFIRM IS GONE, because the daemon now keeps what this
+  // throws away. `confirm.histclear` asked the user to read a paragraph
+  // to avoid something one click reverses - and, worse, its paragraph
+  // was not quite true: it promised "no files are deleted" while the
+  // early-published destination copies of an unsettled move went with
+  // the record. The sentence is not missed, because the toast now
+  // carries an Undo instead of a claim, and a row whose early copies
+  // really are about to go gets no token at all rather than a promise.
   await busy(btn, t('busy.clearing','Clearing…'), async()=>{
     // mustOk for the reason clearQueue above carries: a refusal used to
     // reach the count toast and say "Cleared 0 from the list." over a
@@ -12820,7 +13140,7 @@ async function clearHistDone(btn){
     // has rows in it (the failures, which is the whole point) reads as a
     // button that did not work. Worded without a plural noun so one
     // string covers 0, 1 and 20 in every locale.
-    toast(t('toast.histCleared','Cleared {n} from the list.',{n:num(j.removed||0,0)}));
+    toast(t('toast.histCleared','Cleared {n} from the list.',{n:num(j.removed||0,0)}), false, hUndoAct(j));
     tick();
   });
 }
@@ -12834,10 +13154,13 @@ async function clearHistDone(btn){
 // And the same search scoping, for the same reason - see
 // histClearSearch above.
 async function clearHistFailed(btn){
-  if(!confirm(t('confirm.histclearfailed','Clear the failed downloads out of this list?\nAnything waiting for a password stays, and no files are deleted.'))) return;
+  // The confirm is gone here too, and for the same reason - see
+  // clearHistDone. The failed bucket is the one where the undo earns
+  // most: a failed row carries the retry door, and the spooled .nzb the
+  // daemon now holds for ten minutes is exactly what that door reads.
   await busy(btn, t('busy.clearing','Clearing…'), async()=>{
     const j=mustOk(await api('history','&name=delete&value=failed'+histClearSearch()));
-    toast(t('toast.histCleared','Cleared {n} from the list.',{n:num(j.removed||0,0)}));
+    toast(t('toast.histCleared','Cleared {n} from the list.',{n:num(j.removed||0,0)}), false, hUndoAct(j));
     tick();
   });
 }
@@ -13005,9 +13328,18 @@ async function qBulkCat(sel){
 // audit bundle A: a delete path that skips them is a correctness bug).
 async function qBulkDelete(){
   const ids=[...qSel]; if(!ids.length) return;
-  if(!confirm(tn('confirm.sel.qdel',ids.length,
-      'Remove the selected download from the queue?\n\nNo files are deleted: whatever has already arrived stays on disk. Nothing is filed to history, and this cannot be undone.',
-      'Remove {n} selected downloads from the queue?\n\nNo files are deleted: whatever has already arrived stays on disk. Nothing is filed to history, and this cannot be undone.'))) return;
+  // GH #86: the third of the three, on the same rule as stopJob and
+  // clearQueue. `confirm.sel.qdel` ended "this cannot be undone" and that
+  // is no longer true, so the plain selection just acts and offers the
+  // way back. A selection HOLDING a row that unpacks as it arrives still
+  // asks, because that row's fetched GB do not come back with it -
+  // `pauseCostOf` answers the worst row in the set, which is the right
+  // question for a bulk control. Its own key rather than a reworded
+  // `confirm.sel.qdel`: that string and its 27 translations still serve
+  // the plural the count-free wording could not.
+  const bpc=pauseCostOf(ids);
+  if(bpc && bpc.kind==='refetch'
+     && !confirm(t('confirm.sel.qdel.refetch','Remove the selected downloads from the queue?\n\nNo files are deleted, but one of them unpacks as it arrives, so nothing it has on disk can be picked up again: the {gb} GB it has already fetched would be fetched from the start.',{gb:pauseCostGB(bpc)}))) return;
   // Same POST-body id list as qBulk: the selection can outgrow the line.
   const j=await apiPost('queue',{name:'delete', value:ids.join(',')});
   // `reportRefusal`, not `j.status===false && j.error`. That guard was
@@ -13029,15 +13361,91 @@ async function qBulkDelete(){
   // handler that clears a selection on a write it was told no to is the
   // wrong shape whether or not today's daemon can hit it.
   if(!reportRefusal(j)){ tick(); return; }
-  toast(t('toast.qCleared','Removed {n} from the queue.',{n:num(j.removed||0,0)}));
+  // GH #86: with the way back on it. The selection is cleared either
+  // way - an Undo restores the ROWS, and re-ticking them is not part of
+  // what the user asked to take back.
+  toast(t('toast.qCleared','Removed {n} from the queue.',{n:num(j.removed||0,0)}), false, qUndoAct(j));
   qSel.clear(); updateSelBar('q');
   tick();
 }
+// GH #86, second half: "If cancelling, I'd like to be able to delete the
+// files (it seems it defaults to keep)."
+//
+// KEEP IS STILL THE DEFAULT AND NOTHING ABOVE CHANGED. The row's ✕ /
+// stop, the bulk ✕ Remove and Clear queue all still post no del_files,
+// so every route a user takes by reflex leaves the partial download
+// exactly where it was. This is the deliberate second control - its own
+// button, its own confirm, the `danger` class - and it is NOT folded
+// into the stop confirm: a stop is a thing you can change your mind
+// about by re-adding the NZB, and a delete is not, so bundling them
+// would make the quick route the destructive one.
+//
+// Nothing new on the daemon either. `mode=queue&name=delete&del_files=1`
+// is an arm that has always been there - it is what *arr's own cancel
+// reaches through JSON-RPC GroupFinalDelete - so the custody
+// transaction, the reservation, the trash-aware removal, the deferral
+// to park() while the pipeline is still writing and the kept-files
+// notice are all inherited. A second delete here would have been a
+// second copy of every one of those rules.
+async function qDelFiles(id){
+  if(!confirm(t('confirm.qdelfiles','Remove this download from the queue AND delete what it has already written to disk?\n\nIt stops if it is running, and it is not filed to history. This cannot be undone.'))) return;
+  const j=await api('queue',`&name=delete&value=${encodeURIComponent(id)}&del_files=1`);
+  if(!reportRefusal(j)){ tick(); return; }
+  qFilesToast(j);
+  tick();
+}
+// The bulk twin, on the selection bar beside ✕ Remove - the same
+// comma-separated arm the daemon already honours, one call.
+async function qBulkDeleteFiles(){
+  const ids=[...qSel]; if(!ids.length) return;
+  // Count-free wording, like toast.qCleared and the daemon's own refusal
+  // sentence: one string covers 1 and 250 in every locale, and this one
+  // carries {n} as a fact rather than as a plural the catalogue has to
+  // agree with.
+  if(!confirm(t('confirm.sel.qdelfiles','Remove the selected downloads from the queue AND delete what they have already written to disk?\n\n{n} selected. Anything running stops, nothing is filed to history, and this cannot be undone.',{n:num(ids.length,0)}))) return;
+  // Same POST-body id list as qBulk: a selection outgrows the request line.
+  const j=await apiPost('queue',{name:'delete', value:ids.join(','), del_files:'1'});
+  if(!reportRefusal(j)){ tick(); return; }
+  qFilesToast(j);
+  qSel.clear(); updateSelBar('q');
+  tick();
+}
+// What to SAY about the files half - and the reason this is not just
+// `toast(t('toast.delfiles'))` the way History's pair still is.
+//
+// `status: true` only ever described the RECORD. The files can be
+// refused (no Trash would take the folder, and the daemon now leaves the
+// download alone rather than destroying it), or not attempted yet (a
+// running job's directory still has live writers, so the removal is
+// deferred to park()). GH #71 is what a green "files deleted" over
+// either of those costs: the outcome was final, nothing retried, and the
+// user found out hours later. The daemon answers all three now
+// (`files` on the queue delete), so this says which one happened.
+//
+// An OLD daemon behind a new page sends no `files` key at all. That is
+// not "deleted": it is unknown, and the honest line is the one that
+// claims only what this page can see, which is the record.
+function qFilesToast(j){
+  const f=j&&j.files;
+  if(!f){ toast(t('toast.qRemoved','Removed from the queue.')); return; }
+  if(f.kept&&f.kept.length){
+    // Red, and carrying the daemon's own sentence - it names the reason
+    // and the setting that changes it. The strip above the queue has the
+    // folder itself and stays until dismissed; this is the moment.
+    toast(t('toast.qdelfiles.kept','Removed from the queue, but the files could not be deleted: {why} The note above the queue has the folder.',{why:f.kept[0]||''}), true);
+    return;
+  }
+  if(f.pending>0){
+    toast(t('toast.qdelfiles.pending','Stopping. The files are removed once the download winds down - if that cannot be done, a note appears above the queue.'));
+    return;
+  }
+  toast(t('toast.delfiles','Removed: files deleted.'));
+}
 async function hBulkDelete(){
   const ids=[...hSel]; if(!ids.length) return;
-  if(!confirm(tn('confirm.sel.hdel',ids.length,
-      'Remove the selected entry from history?\nFiles stay on disk.',
-      'Remove {n} selected entries from history?\nFiles stay on disk.'))) return;
+  // GH #86: no confirm, an Undo instead - clearHistDone above carries
+  // the argument, and the `del_files` sibling below keeps its dialog
+  // because no undo can answer it.
   // Same POST-body id list as qBulk: two Show more pages outgrow the line.
   const j=await apiPost('history',{name:'delete', value:ids.join(',')});
   // The daemon refuses the WHOLE batch when one row is mid-move, and
@@ -13045,7 +13453,7 @@ async function hBulkDelete(){
   // say either rather than a false "cleared". See qBulkDelete for why
   // this is `reportRefusal` and not a test for `j.error`.
   if(!reportRefusal(j)){ tick(); return; }
-  toast(t('toast.histCleared','Cleared {n} from the list.',{n:num(j.removed||0,0)}));
+  toast(t('toast.histCleared','Cleared {n} from the list.',{n:num(j.removed||0,0)}), false, hUndoAct(j));
   hSel.clear(); updateSelBar('h');
   tick();
 }
@@ -13161,7 +13569,7 @@ addEventListener('keydown', e=>{
   }
   const hd=document.getElementById('helpDrawer');
   if(inSettings
-    ||document.querySelector('#fsov.on,#adov.on,#keyov.on,#gbov.on,#cuov.on,#fuov.on,#stopped.on')
+    ||document.querySelector('#fsov.on,#adov.on,#keyov.on,#gbov.on,#cuov.on,#fuov.on,#askov.on,#impov.on,#stopped.on')
     ||(hd&&hd.classList.contains('open'))
     ||document.getElementById('ctxmenu')) return;
   switch(e.key){
@@ -13275,7 +13683,9 @@ async function fsGo(path){
   list.scrollTop=0;
 }
 async function fsNewFolder(){
-  const name=prompt(t('prompt.newfolder','New folder name (created inside the current folder):'));
+  // Asked OVER the open directory browser - the one stacked case, and
+  // why the Escape chain lets the ask stop it. See askText().
+  const name=await askText({text:t('prompt.newfolder','New folder name (created inside the current folder):')});
   if(!name) return;
   const j=await api('fs_mkdir',`&path=${encodeURIComponent(fsCtx.path)}&value=${encodeURIComponent(name)}`);
   if(j.status){ toast(t('toast.created','Created {p}',{p:name})); fsGo(fsCtx.path); }
@@ -13530,7 +13940,24 @@ async function gbDetailPoll(name,box,tries){
       <div class="gbname" style="margin-top:3px;opacity:.85;line-height:1.7">${
         j.samples.map(s=>esc(s)).join('<br>')}</div></div>`:''}
     <div style="margin-top:8px"><button class="ghost mini" data-g="${escA(name)}"
-      onclick="gbResample(this.dataset.g,this)">${esc(t('grp.det.resample','Look again'))}</button></div>`;
+      onclick="gbResample(this.dataset.g,this)">${esc(t('grp.det.resample','Look again'))}</button>
+      <!-- GH #76: the hand-off. Everything above is what the SERVER
+           holds for this group; this is what WE indexed out of it, and
+           until now there was no way from one to the other but typing
+           the name into the wall's search box, where it is not even a
+           filter. The wall reads the name off the hash (#group=) and
+           lands with the filter already on.
+
+           Only for a group on the scan list, and that is not tidiness:
+           a group we have never scanned has nothing indexed BY
+           CONSTRUCTION, so the link would land every time on an empty
+           wall that reads as a broken filter rather than as "you do not
+           scan this group". The + Add button on the row is the honest
+           next step there, and it is already sitting beside it. -->
+      ${gbSubs().includes(name)?`<a class="ghost mini" style="text-decoration:none;margin-inline-start:6px"
+        href="/wall#group=${escA(encodeURIComponent(name))}"
+        title="${escA(t('grp.det.browse.title','Open the wall showing only the releases we have indexed from this group'))}"
+        >${esc(t('grp.det.browse','Indexed releases'))}</a>`:''}</div>`;
 }
 async function gbResample(name,btn){
   await busy(btn,t('busy.checking','Checking…'),async()=>{
@@ -13626,14 +14053,42 @@ async function gbToggle(btn){
 async function gbAddMatching(btn){
   const n=gbSt.total;
   if(!n){ toast(t('grp.none','No groups match.')); return; }
-  if(!confirm(t('grp.addall.confirm','Add {n} matching groups to the scan list?',{n:gbNum(n)}))) return;
+  // GH #86: it used to confirm, "because this rewrites the scan list".
+  // Rewriting the scan list is precisely what makes it undoable: the
+  // list is ONE config string, so the whole of the previous state fits
+  // in a local, and putting it back is one setCfg. So this acts and
+  // hands the way back to the toast instead of asking first.
+  //
+  // Captured BEFORE the add and off the same field gbToggle writes, so
+  // the undo restores what the user had rather than what the daemon
+  // ended up with (it caps, and it refuses an unfiltered add, so those
+  // are not the same list). If the field is not on the page there is
+  // nothing trustworthy to put back and no undo is offered - writing a
+  // guessed-at empty string over someone's scan list would be the
+  // irreversible silent action this whole exercise exists to avoid.
+  const el=document.getElementById('s_index_groups');
+  const before=el?gbSubs().join(', '):null;
   await busy(btn,t('busy.saving','Saving…'), async()=>{
     const j=await api('groups_add_matching',gbQS());
     if(!j.status){ toast(tErr(j.error)||j.error||t('err.rejected','rejected'),true); return; }
     if(j.warning) toast(j.warning,true);
+    // A capped add still has an undo, and wants it more: it is the case
+    // where what landed is least like what was asked for.
+    const undo=(before===null||!j.added) ? null : {
+      label:t('toast.undo','Undo'),
+      fn:async()=>{
+        const e2=document.getElementById('s_index_groups');
+        if(e2) e2.value=before;
+        // setCfg reloads Settings and toasts "Saved." itself; this line
+        // lands after it and is the one the user needs to read.
+        if(await setCfg('index_groups',before)){
+          toast(t('toast.grpundone','Scan list put back the way it was.'));
+          gbLoad(0);
+        }
+      }};
     toast(j.capped
       ? t('grp.addall.capped','Added {n} groups (capped; narrow the search and repeat for the rest).',{n:gbNum(j.added)})
-      : t('grp.addall.done','Added {n} groups.',{n:gbNum(j.added)}));
+      : t('grp.addall.done','Added {n} groups.',{n:gbNum(j.added)}), false, undo);
     loadSettings(); gbLoad(0);
   });
 }
@@ -13644,7 +14099,13 @@ async function gbRefresh(btn){ await busy(btn,t('busy.checking','Checking…'), 
 
 async function changeCat(id){
   const cats=((await api('get_cats')).categories||[]).filter(c=>c!=='*');
-  const cat=prompt(t('prompt.cat',"Move to category - the files move to that category's folder.\nExisting: {cats}\n(leave empty for no category)",{cats:cats.join(', ')||t('drawer.nocat','none')}));
+  // The list goes to the field as well as into the sentence: the
+  // sentence already had to name the existing categories, and a
+  // suggestion list is the same fact where it can be acted on rather
+  // than retyped. `null` alone is the cancel here - "" is a real answer
+  // meaning no category at all - which is why askText keeps prompt()'s
+  // two outcomes rather than collapsing them to a falsy test.
+  const cat=await askText({text:t('prompt.cat',"Move to category - the files move to that category's folder.\nExisting: {cats}\n(leave empty for no category)",{cats:cats.join(', ')||t('drawer.nocat','none')}), options:cats});
   if(cat===null) return;
   const j=await api('history',`&name=set_cat&value=${id}&value2=${encodeURIComponent(cat.trim())}`);
   // A TV-filed job relabels without moving (its files share a season
@@ -13702,6 +14163,157 @@ function modalClose(box){
   if(prev && document.contains(prev) && prev!==document.body){ try{ prev.focus(); }catch(_){} }
 }
 
+// ---- GH #86: askText(), the in-page replacement for window.prompt() ---
+//
+// WHY THIS EXISTS AT ALL, and why it is not a taste question. An embedded
+// webview and a kiosk browser REFUSE `prompt()`: it returns null without
+// drawing anything, so the handler behind it silently does nothing and
+// the user is given no word for it. That is the same failure `#keymodal`
+// was built for (its comment records the page sitting on "connecting"
+// with twelve empty cards and no way in), and five callers here were
+// still on the old road: the speed limit, an archive password, a new
+// folder name, the category move and the SABnzbd/NZBGet import path.
+//
+// Same SHAPE as `prompt()` on purpose, so each call site keeps the test
+// it already had: resolves to the typed string, or to `null` when the
+// user backs out. The distinction is load-bearing at one of them -
+// `changeCat` reads an empty string as "no category" and only `null` as
+// "changed my mind" - so an "" that meant cancel would move files.
+//
+// No heading: the question is the label, exactly as it was in the dialog
+// this replaces. That is what let all five shipped strings, and their 27
+// translations, carry over untouched.
+let askCtx=null;
+function askText(opt){
+  return new Promise(resolve=>{
+    // A second ask while one is up answers the first as CANCELLED rather
+    // than dropping its promise on the floor. An await that never
+    // settles is a handler stopped halfway with nothing said, which is
+    // the very failure this function exists to remove.
+    askSettle(null);
+    askCtx={resolve};
+    const box=document.getElementById('asktext');
+    box.textContent='';
+    // One node per line, and textContent throughout: these questions
+    // carry category names, filesystem paths and a daemon's own
+    // sentences, none of which is ours.
+    for(const line of String(opt.text||'').split('\n')){
+      const d=document.createElement('div');
+      d.className='askline'; d.textContent=line;
+      box.appendChild(d);
+    }
+    const inp=document.getElementById('askin');
+    inp.type=opt.password?'password':'text';
+    inp.value=opt.value||'';
+    const dl=document.getElementById('askopts');
+    dl.textContent='';
+    for(const o of opt.options||[]){
+      const e=document.createElement('option'); e.value=o; dl.appendChild(e);
+    }
+    document.getElementById('askov').classList.add('on');
+    modalOpen(document.getElementById('askmodal'), inp);
+    inp.select();
+  });
+}
+// The one exit. Every way out of the dialog - OK, Cancel, the backdrop,
+// Escape - comes through here, so the promise cannot be left unsettled
+// by a route somebody adds later. Returns whether there was anything to
+// settle, which is what makes the Escape chain below able to stop.
+function askSettle(v){
+  const c=askCtx; askCtx=null;
+  if(!c) return false;
+  document.getElementById('askov').classList.remove('on');
+  modalClose(document.getElementById('askmodal'));
+  // Blanked on the way out, for the archive-password caller: a secret
+  // left in the DOM outlives the dialog it was typed into, and the next
+  // question would open showing it.
+  document.getElementById('askin').value='';
+  c.resolve(v);
+  return true;
+}
+function askOk(){ askSettle(document.getElementById('askin').value); }
+function askCancel(){ return askSettle(null); }
+
+// ---- GH #86 row 19: askImport(), the SABnzbd / NZBGet import preview --
+//
+// `confirm.import` was never a confirm. It is a PREVIEW - "found this
+// file, it holds these servers and these categories, shall I" - and the
+// modal audit's verdict was that the complaint applies to its SHAPE
+// rather than to its existence: the import writes server rows into
+// somebody's settings, so it still has to be agreed to and nothing here
+// makes it happen with one fewer deliberate act.
+//
+// Two things were wrong with the shape and only one of them is taste.
+// A native confirm() is REFUSED by embedded webviews and kiosk browsers:
+// it returns false with nothing drawn, so on those clients the import
+// silently never happened - the failure #keymodal and askText() above
+// exist for, and the same argument notePauseCost() carries at its own
+// site, that a confirm is a second way for the action to not happen.
+// And the `\n` layout it was doing the panel's job with had already
+// stopped working for most of the world: 21 of the 27 catalogues carry
+// no newline at all in their translation of that string.
+//
+// Same two outcomes as the confirm it replaces, kept distinct: resolves
+// TRUE for Import, FALSE for every way of saying not now (Cancel, ✕, the
+// backdrop, Escape). False is per-candidate exactly as `continue` was, so
+// a machine carrying both a SABnzbd and an NZBGet config is still asked
+// about each one.
+let impCtx=null;
+function askImport(c){
+  return new Promise(resolve=>{
+    // A second preview while one is up answers the first as DECLINED
+    // rather than dropping its promise on the floor. An await that never
+    // settles stops the import loop halfway with nothing said, which is
+    // the very failure this panel exists to remove. Same rule, and the
+    // same reason, as askText().
+    impSettle(false);
+    impCtx={resolve};
+    const kind=c.kind==='sabnzbd'?'SABnzbd':'NZBGet';
+    document.getElementById('imptitle').textContent=t('imp.title','Found a {kind} configuration',{kind});
+    // textContent throughout: the path, the hostnames and the category
+    // names are the other program's, not ours.
+    document.getElementById('imppath').textContent=c.path||'';
+    const srvs=c.servers||[];
+    document.getElementById('impsrvn').textContent=t('imp.servers','{n} server(s)',{n:srvs.length});
+    const list=document.getElementById('impsrvs'); list.textContent='';
+    for(const sv of srvs){
+      const d=document.createElement('div');
+      d.textContent=sv.host||''; d.title=sv.host||'';
+      list.appendChild(d);
+    }
+    // #17: categories come over too, and they are the half that decides
+    // whether Sonarr and Radarr will talk to us at all - they validate
+    // their configured category against our list and refuse to connect
+    // when it is missing. So the preview names them before anything is
+    // written, rather than surprising the user afterwards.
+    const cats=(c.categories||[]).map(x=>x.name);
+    document.getElementById('impcatrow').style.display=cats.length?'':'none';
+    document.getElementById('impcats').textContent=cats.length
+      ? t('confirm.import.cats','{n} categor(ies): {names}',{n:cats.length,names:cats.join(', ')})
+      : '';
+    document.getElementById('impov').classList.add('on');
+    // Focus the Import button rather than Cancel. confirm()'s default
+    // button was OK and Enter took it, so this is the keyboard behaviour
+    // the preview already had; the action is additive - existing servers
+    // are kept, duplicates skipped - which is what makes the primary a
+    // safe default to land on.
+    modalOpen(document.getElementById('impmodal'), document.getElementById('impgo'));
+  });
+}
+// The one exit, for the reason askSettle() gives: every way out of the
+// panel comes through here, so a route somebody adds later cannot leave
+// the import loop awaiting a promise nothing will ever settle.
+function impSettle(v){
+  const c=impCtx; impCtx=null;
+  if(!c) return false;
+  document.getElementById('impov').classList.remove('on');
+  modalClose(document.getElementById('impmodal'));
+  c.resolve(v);
+  return true;
+}
+function impOk(){ impSettle(true); }
+function impCancel(){ return impSettle(false); }
+
 // Right-click menu on history rows.
 // Also the ⋯ button's menu, which means it has to work from the keyboard:
 // opened with Enter, walked with the arrows, closed with Escape, and the
@@ -13719,7 +14331,18 @@ function closeMenu(restore){
   if(o && (restore===true || inside) && document.contains(o)) o.focus();
 }
 addEventListener('click', ()=>closeMenu());
-addEventListener('keydown', e=>{ if(e.key==='Escape'){ closeMenu(true); fsClose(); adCancel(); gbClose(); cuClose(); fuClose(); keyCancel(); shClose(); pvClose(); } });
+addEventListener('keydown', e=>{ if(e.key==='Escape'){
+  // The ask is the one overlay here that can sit ON TOP of another -
+  // `fsNewFolder` asks its question over the open directory browser - so
+  // it takes Escape alone and stops. Running the rest of the chain under
+  // it would close the browser the user is still standing in, on the
+  // keypress they meant as "not that folder name after all". Every other
+  // entry is mutually exclusive, which is why those can be called blind.
+  // Deliberately NOT also handled on the input's own onkeydown: two
+  // handlers for one key means the second sees a dialog the first has
+  // already closed, and falls through to exactly the chain this guards.
+  if(askCancel()) return;
+  closeMenu(true); fsClose(); adCancel(); gbClose(); cuClose(); fuClose(); keyCancel(); shClose(); pvClose(); impCancel(); } });
 // Arrow-walk the open menu. Wraps at both ends, the way a menu should.
 function menuKey(e){
   const m=document.getElementById('ctxmenu'); if(!m) return;
@@ -15199,7 +15822,7 @@ function handleLifeEvents(r){
       // there rather than just to Settings.
       const go=()=>{ showSettings(); setTimeout(()=>{
         const c=document.querySelector('.card.set[data-sk="servers"]');
-        if(c) c.scrollIntoView({block:'start',behavior:REDUCED?'auto':'smooth'});
+        if(c) c.scrollIntoView({block:'start',behavior:MOTION_OFF?'auto':'smooth'});
       },60); };
       if(e.kind==='server.block_spent'){
         notice(t('toast.blockspent','{host} has used all of its prepaid block, so it is not being used for downloads. Top it up, then press Block refilled in Settings.',
@@ -15568,11 +16191,27 @@ let toastH, toastRunQ=[], toastMore=0;
 // TOAST_RUN_MS plus two gaps is about eight and a half seconds, which
 // is the ceiling on how stale the last line of a run can be.
 const TOAST_MS=3500, TOAST_RUN_MS=2600, TOAST_GAP=260, TOAST_RUN_MAX=3;
+// An UNDO gets longer than an announcement does. 3.5 s is the right
+// lifetime for news the user only has to read; it is the wrong one for
+// the only way back from something they just did, because reading the
+// sentence and deciding to reverse it both have to fit inside it. Only
+// the labelled `{fn,label}` form takes this - a bare `go` is still the
+// "- details" affordance and keeps the lifetime it has always had.
+const TOAST_ACT_MS=8000;
 // `go` makes the box a way IN rather than just an announcement: a
 // failure toast that says one clause has to be able to hand the user the
 // drawer holding the rest, or the full diagnostic is only reachable by
 // hunting the row down afterwards. Optional - most toasts have nowhere
 // to go, and those stay exactly as inert as before.
+//
+// GH #86: it is also where an UNDO lives. A confirm() only earns its
+// block when the action behind it cannot be taken back; the answer for
+// the ones that can is to act, say so, and offer the way back on the
+// sentence that says so. So `go` takes `{fn, label}` as well as a bare
+// function - same one action reached the same two ways, its own word on
+// it instead of "- details", and the longer TOAST_ACT_MS lifetime. The
+// bare-function form is untouched down to the millisecond, which is what
+// keeps the couple of hundred existing callers out of this diff.
 function toast(msg, bad, go){
   // A direct toast is the user's own news and outranks a batch that is
   // still playing: drop the remainder rather than making them sit
@@ -15585,7 +16224,13 @@ function toast(msg, bad, go){
   // without a second buzz landing on top of the `failed` chime.
   if(bad){ actSnd('refuse'); popupErr(msg); }
   toastRunQ=[]; toastMore=0;
-  toastShow(msg, bad, go, TOAST_MS);
+  toastShow(msg, bad, go, toastGoFn(go)&&go.label?TOAST_ACT_MS:TOAST_MS);
+}
+// The one place that reads either shape of `go`, so every caller below
+// asks it rather than testing for a function itself.
+function toastGoFn(go){
+  if(typeof go==='function') return go;
+  return (go && typeof go.fn==='function') ? go.fn : null;
 }
 // Strip the click-through affordance. Run before every render, and again
 // the moment the box goes dark - `role="button"` and a tab stop on an
@@ -15616,19 +16261,32 @@ function toastShow(msg, bad, go, ms){
   // textContent for the message, always: these carry release names and
   // server errors from outside. The affordance is a separate node.
   toastInert(el);
-  if(typeof go==='function'){
+  const gofn=toastGoFn(go);
+  if(gofn){
     const more=document.createElement('span');
-    more.className='dim'; more.style.marginInlineStart='6px';
+    // The WORDS on the affordance, named rather than inlined so that the
+    // two things about them can be asserted apart: a caller's own label
+    // when it gave one, the details wording otherwise. Inlined into the
+    // assignment below, a reflection test could not tell "the label
+    // stopped reaching the text" from "the space went missing" - it read
+    // `go.label` off the className line and passed over the first
+    // (`every_toast_goes_through_the_one_renderer`, negative control 3).
+    const word=(go&&go.label)||t('toast.details','- details');
+    // A labelled action brings its own word and looks like a control:
+    // the default reads as a continuation of the sentence ("- details"),
+    // where "Undo" is something to press.
+    more.className=(go&&go.label)?'toastact':'dim';
+    more.style.marginInlineStart='6px';
     // Leading space in the NODE, not just the margin: the live region
     // reads textContent, and without it a screen reader hears the last
     // word of the message run into the affordance ("errors- details").
-    more.textContent=' '+t('toast.details','- details');
+    more.textContent=' '+word;
     el.appendChild(more);
     el.classList.add('clickable'); el.setAttribute('role','button'); el.setAttribute('tabindex','0');
     // Following the box ENDS the run. The user has just left for a
     // history drawer, and the rest of the batch popping up over it
     // seconds later is a box talking past whatever they went to read.
-    const follow=()=>{ el.classList.remove('on'); toastInert(el); clearTimeout(toastH); toastRunQ=[]; toastMore=0; go(); };
+    const follow=()=>{ el.classList.remove('on'); toastInert(el); clearTimeout(toastH); toastRunQ=[]; toastMore=0; gofn(); };
     el.onclick=follow;
     // ONE action, reached two ways. A box that claims `role="button"`
     // and takes a tab stop has to answer Enter and Space, or the stop
@@ -15725,7 +16383,7 @@ function openHistDrawer(id){
   const tr=document.querySelector(`#hist tbody tr.item[data-id="${CSS.escape(id)}"]`);
   if(!tr) return false;
   if(!tr.classList.contains('open')) toggleHistRow(tr);
-  tr.scrollIntoView({block:'center',behavior:'smooth'});
+  tr.scrollIntoView({block:'center',behavior:MOTION_OFF?'auto':'smooth'});
   return true;
 }
 // ---- Add-NZB options (TODO §181) --------------------------------------
@@ -16402,7 +17060,7 @@ let setGroup=null;
 // people hunt for a card that is not there.
 const setCards=()=>[...document.querySelectorAll('#setMain .card.set')]
   .filter(c=>IDX_ON||!c.classList.contains('idxon'));
-const setSmooth=()=>matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth';
+const setSmooth=()=>MOTION_OFF?'auto':'smooth';
 
 // The rail is the ONE part of the settings shell that carries translated
 // text, and initSetShell runs once - it used to render the rail inline, so
@@ -17166,6 +17824,26 @@ async function loadSettings(){
   // read can never raise this note, only retire it.
   if(!peu.checked) extUnrarNote(false);
   put('s_mem_limit', sizeStr(c.mem_limit));
+  // The field above shows the SAVED figure, not the running one: the
+  // `pending` block in api/config.rs deliberately leaves mem_limit out
+  // ("mem_limit already surfaces its saved value directly"), because
+  // `mem_limit` and `mem_budget_total` are different quantities rather
+  // than one quantity in two states - 0 means "size it from this
+  // machine's RAM", which has no figure to show in the field at all.
+  // The consequence, until 17 Sep 2026, was that the budget the daemon
+  // is actually working to appeared on NO surface: typing a new number
+  // made the number change and nothing else, while the row's restart
+  // badge was the only hint that it had not taken effect. Reproduced on
+  // a scratch daemon (claim `daemon-memlimit-published-once-at-boot`):
+  // write 3G, mem_limit echoes 3000000000, mem_budget_total and
+  // /metrics' nzbfast_memory_budget_bytes both stay on the boot figure;
+  // restart and all three agree. So show the resolved figure beside the
+  // field. Why the daemon does not simply republish on the write is
+  // censused at the "mem_limit" arm of settings_apply.rs.
+  const mif=document.getElementById('s_mem_inforce');
+  if(mif) mif.textContent = c.mem_budget_total
+    ? t('set.perf.mem.inforce','in force now: {n}',{n:fmtBytes(c.mem_budget_total)})
+    : '';
   put('s_out_dir', c.out_dir); put('s_move_completed', c.move_completed||'');
   // TODO 317. Same focus guard as the two ticks above: a settings
   // poll landing while the box is being clicked must not fight it.
@@ -18601,7 +19279,18 @@ async function toggleServer(i,on,box){
   } finally { box.disabled=false; }
 }
 // M19: import servers from SABnzbd / NZBGet configs found on this machine.
-async function importServers(btn){ await busy(btn,t('busy.scanning','Scanning…'), async()=>{
+//
+// THE FOCUS HAND-BACK IS THIS FUNCTION'S AND NOT modalOpen's, and the
+// reason is `busy()` two lines down: it DISABLES the button for the
+// length of the run, and a disabled element cannot hold focus, so the
+// browser has already moved focus to <body> by the time either overlay
+// this run can raise (the typed-path askText, the preview panel) records
+// where to give it back. `modalClose` then has nothing to hand over -
+// it skips <body> on purpose, because that is the top of the document.
+// So the hand-back happens HERE, after `busy` has re-enabled the
+// control, and only if nothing else has since claimed the keyboard.
+async function importServers(btn){
+  await busy(btn,t('busy.scanning','Scanning…'), async()=>{
   let j=await api('import_probe');
   let cands=j.candidates||[];
   if(!cands.length){
@@ -18609,7 +19298,7 @@ async function importServers(btn){ await busy(btn,t('busy.scanning','Scanning…
     // up empty the config may still exist somewhere else (Docker volume,
     // portable install), so offer a typed path before giving up - the
     // probe endpoint has taken one all along.
-    const p=prompt(t('prompt.importpath','No SABnzbd or NZBGet configuration found in the usual places.\n\nIf yours is somewhere else, paste the full path to the sabnzbd.ini or nzbget.conf file:'),'');
+    const p=await askText({text:t('prompt.importpath','No SABnzbd or NZBGet configuration found in the usual places.\n\nIf yours is somewhere else, paste the full path to the sabnzbd.ini or nzbget.conf file:')});
     if(p===null||!p.trim()) return;
     j=await api('import_probe',`&value=${encodeURIComponent(p.trim())}`);
     cands=j.candidates||[];
@@ -18620,20 +19309,11 @@ async function importServers(btn){ await busy(btn,t('busy.scanning','Scanning…
       return;
     }
   }
-  let imported=0;
+  let imported=0, declined=0;
   for(const c of cands){
-    const names=c.servers.map(s=>s.host).join(', ');
-    // #17: categories come over too, and they are the half that decides
-    // whether Sonarr and Radarr will talk to us at all - they validate
-    // their configured category against our list and refuse to connect
-    // when it is missing. So the prompt names them before anything is
-    // written, rather than surprising the user afterwards.
-    const cats=(c.categories||[]).map(x=>x.name);
-    const catLine=cats.length
-      ? '\n\n'+t('confirm.import.cats','{n} categor(ies): {names}',{n:cats.length,names:cats.join(', ')})
-      : '';
-    if(!confirm(t('confirm.import','Found {kind} config:\n{path}\n\n{n} server(s): {names}\n\nImport them? (existing servers are kept; duplicates skipped)',
-        {kind:c.kind==='sabnzbd'?'SABnzbd':'NZBGet', path:c.path, n:c.servers.length, names})+catLine)) continue;
+    // GH #86 row 19: an in-page preview panel, not a confirm(). What it
+    // shows and why each half of it is there is at askImport().
+    if(!await askImport(c)){ declined++; continue; }
     const r=await api('import_apply',`&value=${encodeURIComponent(c.path)}&value2=${c.kind}`);
     if(r.error){ toast(tErr(r.error), true); continue; }
     if(r.warning) toast(r.warning,true);
@@ -18662,7 +19342,26 @@ async function importServers(btn){ await busy(btn,t('busy.scanning','Scanning…
         {kind:c.kind==='sabnzbd'?'SABnzbd':'NZBGet', what:rc.dropped.join('; ')}));
   }
   if(imported) loadSettings();
-}); }
+  // A declined preview must not be a click that quietly did nothing -
+  // that is the failure notePauseCost() records for the old Pause
+  // confirm, and with the panel gone from the screen there is otherwise
+  // no trace that anything was asked. Say what happened and name the way
+  // back: the ⤵ Import button is still there, behind where the panel
+  // was, which is this panel's equivalent of #keymodal's keynotice strip.
+  else if(declined) toast(t('toast.import.none','Nothing imported. The Import button is still there when you want it.'));
+  });
+  // Only when the keyboard has nowhere better to be: <body> (the top of
+  // the document), or still inside one of the two overlays this run
+  // raises. That second case is the usual one and is not obvious -
+  // hiding an overlay does not blur its focused child synchronously, so
+  // by the time this line runs after the awaits, `activeElement` can
+  // still be a button inside a panel that is already display:none.
+  const a=document.activeElement;
+  const stranded=!a||a===document.body
+    ||document.getElementById('impov').contains(a)
+    ||document.getElementById('askov').contains(a);
+  if(btn && stranded && document.contains(btn)) btn.focus();
+}
 function editServer(i){
   srvEditIdx=i;
   // connections: 100 is the allowance most providers sell; the grant
@@ -20424,12 +21123,6 @@ let lastSample=performance.now(), targetSpeed=0, shownSpeed=0, speedSuffix='';
 // low-pass keep the glide continuous through early, late, and skipped
 // samples alike.
 let chartFrac=0;
-// OS preference OR the in-app Movement=None setting: the CSS side of
-// data-motion already killed transitions, but the rAF glide, the speed
-// tween and the FLIP reorder read only this flag - so the in-app
-// setting quietly did nothing for them.
-const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches
-  || document.documentElement.dataset.motion==='none';
 function renderSpeedNumber(){
   const el=document.getElementById('speed');
   const p=rateParts(shownSpeed);
@@ -20540,8 +21233,17 @@ function redrawCanvases(){
 addEventListener('visibilitychange', ()=>{
   if(!document.hidden){ redrawQ=0; redrawCanvases(); }
 });
-if(!REDUCED){
+// The glide loop. Self-stopping rather than chosen once at load: it exits
+// the moment Movement goes to None (or the OS preference comes on), and
+// applyMotion starts it again on the way back, so neither direction needs
+// a reload. `glideOn` is what keeps a quick flip back and forth from
+// starting a second loop alongside the first.
+let glideOn=false;
+function startGlide(){
+  if(glideOn||MOTION_OFF) return;
+  glideOn=true;
   (function anim(){
+    if(MOTION_OFF){ glideOn=false; return; }
     if(!document.hidden && speedHist.length>1){
       const raw=Math.min(1,(performance.now()-lastSample)/(PERIOD*1000));
       chartFrac+=(raw-chartFrac)*0.18;
@@ -20553,10 +21255,15 @@ if(!REDUCED){
     }
     requestAnimationFrame(anim);
   })();
-} else {
-  // Reduced motion: update the number instantly each tick.
-  setInterval(()=>{ if(shownSpeed!==targetSpeed){ shownSpeed=targetSpeed; renderSpeedNumber(); } }, PERIOD*1000);
 }
+startGlide();
+// Movement off: the number steps once per poll instead of gliding. The
+// timer runs unconditionally and reads the live flag, where it used to be
+// the `else` arm of a branch taken at load - so a page that started with
+// motion on had no instant-update path at all when the setting was turned
+// off (GH #87). A hidden tab runs no rAF, so this keeps a backgrounded
+// page's figure honest too.
+setInterval(()=>{ if(MOTION_OFF && shownSpeed!==targetSpeed){ shownSpeed=targetSpeed; renderSpeedNumber(); } }, PERIOD*1000);
 
 // Background tabs drop to a 5 s trickle (not zero - embedded webviews can
 // report hidden while actually shown); foregrounding catches up instantly.

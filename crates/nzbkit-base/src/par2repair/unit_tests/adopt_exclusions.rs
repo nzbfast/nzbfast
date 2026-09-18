@@ -75,7 +75,7 @@ fn copy_only_set(tag: &str) -> (PathBuf, Vec<u8>, PathBuf) {
 /// THE ADMITTED ARM, and the control for the one below: with nothing
 /// excluded the copy is an ordinary candidate and the set repairs
 /// wholly out of it. Same assertion as `donor_dir`'s
-/// `a_wholly_renamed_copy_is_adopted_and_reported_consumed`, taken
+/// `a_wholly_renamed_copy_is_landed_by_renaming_the_copy`, taken
 /// through the SURVEYED entry point - which is the only entry point
 /// that has an observer, and so the only one the gate exists on.
 #[test]

@@ -321,6 +321,159 @@ pub(super) fn adopted_from_names(
 /// directory. Spelled once, because a reader and a test both read it.
 pub(super) const DONOR_MARK: &str = "(donor directory)";
 
+/// WHY "EVERY BLOCK, ALIGNED, RIGHT LENGTH" IS NOT "THIS FILE IS THAT
+/// MEMBER", and what has to be asked instead.
+///
+/// [`adopt_blocks`]'s fast path compares the candidate's WHOLE-FILE MD5
+/// against the target's declared `md5` and adopts every slice at an
+/// aligned offset; the derivation "same length, all slices, every offset
+/// aligned" reads that decision back out of the adoption map. It was
+/// documented here as exact, on the argument that a sliding-scan hit
+/// could not counterfeit it - a candidate whose bytes hashed equal would
+/// have been claimed by the fast path first.
+///
+/// THAT ARGUMENT IS FALSE, measured 17 Sep 2026 against the existing
+/// fixture `unrepairable_partial::on_a_repairable_set_a_failed_member_verify_is_still_an_error`,
+/// whose set declares a whole-file MD5 that DISAGREES with its own block
+/// hashes (`index_lying_about_md5`). The fast path refuses such a
+/// candidate, the sliding scan then matches every block of it at its
+/// aligned offset, and the derivation says "whole file" about a file the
+/// set's own FileDesc says is not. The engine's self-proving contract
+/// catches it at the final whole-file verify and returns
+/// `RepairError::VerifyFailed` - so a caller that SKIPPED that verify on
+/// the strength of the derivation alone would ship bytes the set does
+/// not vouch for, which is the one thing that contract exists to
+/// prevent.
+///
+/// So the fast path's own claim is carried out of it explicitly, and
+/// both consumers - the reference's `is a match for` announcement and
+/// the rename - require it. The reference reaches its line by the same
+/// whole-file comparison, so requiring it is also strictly closer to
+/// what the reference prints: on the lying set above it says "found N of
+/// N data blocks", which is what the scan really established.
+/// Per candidate, per target: how many of that target's slices came
+/// from it, and whether every one sat at its own aligned offset.
+///
+/// ONE COPY of the whole-file derivation's raw material. Two callers
+/// read it and they must never disagree: [`extra_file_matches`]
+/// ANNOUNCES the match in the reference's words, and
+/// [`whole_file_renames`] ACTS on it by moving the donor onto the
+/// target's name. A second copy of this walk would be a repair whose
+/// report and whose filesystem outcome could drift apart.
+///
+/// The `cand < donor_from` boundary is [`extra_file_matches`]'s own and
+/// its docstring carries the argument: everything at or past it is a
+/// §293 donor directory's file or one of the two IN-SET sources the
+/// caller appends after it, and none of the three is an extra file in
+/// the directory the reference would have scanned.
+fn adoption_tally(
+    donor_from: usize,
+    targets: &[Target],
+    adopted: &HashMap<usize, AdoptSrc>,
+    bs: usize,
+) -> HashMap<usize, HashMap<usize, (usize, bool)>> {
+    let mut per: HashMap<usize, HashMap<usize, (usize, bool)>> = HashMap::new();
+    for (ti, t) in targets.iter().enumerate() {
+        for i in 0..t.n_slices {
+            let Some(src) = adopted.get(&(t.first_slice + i)) else {
+                continue;
+            };
+            if src.cand >= donor_from {
+                continue;
+            }
+            let e = per
+                .entry(src.cand)
+                .or_default()
+                .entry(ti)
+                .or_insert((0, true));
+            e.0 += 1;
+            e.1 &= src.offset == i as u64 * bs as u64;
+        }
+    }
+    per
+}
+
+/// What the reference's "Scanning extra files:" section announces, read
+/// back out of the adoption decision this repair already made.
+///
+/// See [`ExtraFileMatch`] for what the three shapes are and why only
+/// files under `dir` are in them. The rule is `cand < donor_from`:
+/// everything at or past that boundary is either a §293 donor
+/// directory's file or one of the two IN-SET sources the caller appends
+/// after it ([`harvest_in_set`] and the escalation's damaged targets),
+/// and none of the three is an extra file in the directory the
+/// reference would have scanned. It is the same boundary
+/// [`adopted_from_names`] reads, taken the other way round: that
+/// function MARKS what is past it, this one drops it.
+///
+/// WHOLE-FILE IS THE FAST PATH'S OWN CLAIM, carried in `whole_claims`,
+/// AND the derivation over the adoption map. It was the derivation
+/// alone until 17 Sep 2026, on the argument that a sliding-scan hit
+/// could not counterfeit it - and a set whose declared whole-file MD5
+/// disagrees with its own block hashes does exactly that. The
+/// measurement, the fixture that shows it and why the pair is also
+/// closer to what the reference prints are in [`adoption_tally`].
+///
+/// THE COUNT IS "BLOCKS THIS REPAIR TOOK", which is the reference's
+/// count on every shape that arises in practice and not by definition:
+/// the reference counts what its scan matched IN the file, and this
+/// counts what was still missing when the scan ran. The two differ only
+/// for an extra file that also holds blocks the target already had
+/// intact on disk - the reference would count those too. Reporting what
+/// was actually adopted is the honest half of that pair: it is what
+/// this repair did.
+pub(super) fn extra_file_matches(
+    dir: &Path,
+    cands: &[(PathBuf, u64)],
+    donor_from: usize,
+    targets: &[Target],
+    adopted: &HashMap<usize, AdoptSrc>,
+    bs: usize,
+    whole_claims: &HashSet<usize>,
+) -> Vec<ExtraFileMatch> {
+    if adopted.is_empty() {
+        // The ordinary repair adopts nothing, and the walk below is over
+        // every slice of every target - so the section's builder costs
+        // exactly nothing on the repairs that have nothing to announce.
+        return Vec::new();
+    }
+    let mut out: Vec<ExtraFileMatch> = adoption_tally(donor_from, targets, adopted, bs)
+        .into_iter()
+        .map(|(ci, by_target)| {
+            let donor = crate::disk::out_name_of(dir, &cands[ci].0);
+            let blocks: usize = by_target.values().map(|(n, _)| n).sum();
+            if by_target.len() > 1 {
+                return ExtraFileMatch {
+                    donor,
+                    target: None,
+                    blocks,
+                    target_blocks: 0,
+                    whole_file: false,
+                };
+            }
+            let (ti, (n, aligned)) = by_target
+                .into_iter()
+                .next()
+                .expect("a candidate with no target is never inserted");
+            let t = &targets[ti];
+            ExtraFileMatch {
+                donor,
+                target: Some(t.file.name.clone()),
+                blocks: n,
+                target_blocks: t.n_slices,
+                whole_file: whole_claims.contains(&ci)
+                    && aligned
+                    && n == t.n_slices
+                    && cands[ci].1 == t.file.length,
+            }
+        })
+        .collect();
+    // Candidate order is a HashMap's, so the printed section would
+    // otherwise move between runs of the same repair.
+    out.sort_by(|a, b| a.donor.cmp(&b.donor).then_with(|| a.target.cmp(&b.target)));
+    out
+}
+
 /// Is the candidate at `p` somebody's PAYLOAD rather than this job's
 /// junk - a target of the set being repaired, or a file some set in
 /// this directory declares by name?
@@ -360,6 +513,265 @@ pub(super) fn is_somebodys_payload(
         || p.file_name()
             .map(|n| name_identity_key(fold, &n.to_string_lossy()))
             .is_some_and(|n| declared_names.contains(&n))
+}
+
+/// Targets this repair can land by RENAMING an extra file onto them
+/// instead of rebuilding them out of that same file's bytes.
+///
+/// # What this is for
+///
+/// The ordinary obfuscated Usenet post: every member complete, every
+/// name a hash. par2cmdline does a directory operation per file and
+/// writes nothing; until 17 Sep 2026 this engine adopted every block of
+/// every member from its hash-named twin and wrote the whole payload a
+/// SECOND time, leaving the donor in the job folder. Measured on a
+/// three-member fixture with one whole match: the reference wrote
+/// 300,000 bytes and left one name, this engine wrote 600,000 and left
+/// both. Three costs, none of them the repair's answer - which was
+/// correct either way: the write I/O, a peak disk of 2x the payload
+/// where the reference needs 1x, and the leftover, which SABnzbd does
+/// not delete because `is a match for` maps to a rename in its
+/// bookkeeping and not to `reconstructed`.
+///
+/// # The proof
+///
+/// `whole_claims` is [`adopt_blocks`]'s fast path saying it compared the
+/// candidate's WHOLE-FILE MD5 against the target's declared one and they
+/// agreed - the same comparison the reference renames on, and a proof
+/// about every byte. That is what licenses skipping the final verify:
+/// the donor IS the target, so there is nothing left to prove.
+///
+/// The derivation over the adoption map ("same length, all slices, every
+/// offset aligned") is kept beside it as the belt, and is NOT sufficient
+/// on its own - [`adoption_tally`] carries the fixture that counterfeits
+/// it and what skipping the verify on it would have shipped.
+///
+/// # The guards, and why each one is here
+///
+/// * `shortfall` refuses the whole thing. A short set publishes what it
+///   can and SPENDS NOTHING (`RepairStatus::Unrepairable`'s
+///   `consumed_sources` note) - a rename is a spend of the donor's name,
+///   and on a repair that failed, the name the file arrived under is
+///   evidence. The old copy-and-keep behaviour stands there.
+/// * `!t.exists` - the destination must be free. This is the missing-
+///   member case the fixture measures and the only one worth taking:
+///   where something already occupies the target's name, rebuilding
+///   through the temp+rename path is what keeps the old file until the
+///   new one is proven, and that is worth more than the write it saves.
+/// * `p.starts_with(dir)` - never a §293 donor directory's file. Those
+///   are a PREDECESSOR JOB's payload, and moving one is the same
+///   destruction the spent sweep refuses for the same reason.
+/// * [`is_somebodys_payload`] - a name any set in this directory
+///   declares is somebody's payload whatever it hashes to. A rename
+///   REMOVES that name, so it owes the same proof a delete does.
+/// * exactly one target per candidate, and all of that target's slices.
+///   The tally's shape gives both: a donor feeding two targets can be
+///   renamed onto neither, and a target short of its slice count still
+///   needs the fold.
+///
+/// # What the caller owes
+///
+/// The renames must land through the SAME path the rebuild temps do,
+/// past every `cleanup` call site - `cleanup` DELETES what is in that
+/// list, and a donor is not this repair's to delete - and the donor's
+/// candidate index must be kept out of the spent sweep, because its
+/// path no longer exists and naming it would have the caller delete a
+/// file this repair already moved.
+pub(super) struct WholeMatches {
+    /// (donor path, target index), in donor-path order - the same shape
+    /// the rebuild temps are landed in, so one loop lands both.
+    pub renames: Vec<(PathBuf, usize)>,
+    /// Target indices in `renames`, for the caller's damaged-list
+    /// exclusion: a renamed target opens no destination and writes no
+    /// byte.
+    pub targets: HashSet<usize>,
+    /// Candidate indices in `renames` - what the spent sweep must skip.
+    pub cands: HashSet<usize>,
+}
+
+/// Which donors this repair PROVED spent - the paths a caller that owns
+/// the directory may delete, as `RepairReport::consumed_sources`.
+///
+/// Moved out of `repair_dir_set_inner` bodily under the size gate on
+/// 17 Sep 2026, unchanged except for the `renamed` arm below; it belongs
+/// here beside [`is_somebodys_payload`] and [`proven_spent`], which are
+/// the two proofs it drives.
+///
+/// One adopted block authenticates ONE window of the donor - a legal
+/// PAR2 block can be four bytes - and says nothing whatever about the
+/// donor's other bytes. Handing the caller every path that donated
+/// anything, which it deletes outright, therefore destroyed complete
+/// files over a shared block: zero padding, a common container header,
+/// or a neighbouring recovery set's payload (foreign targets are
+/// unidentified here, so they are ordinary adoption candidates).
+///
+/// The case this cleanup exists for - issue #9, the obfuscated post -
+/// is the one where the hash-named donor IS the payload byte for byte,
+/// and the repair has just landed those same bytes under the FileDesc
+/// name. So require exactly that: the donor must match a target of this
+/// set in declared length AND in declared whole-file MD5. That is a
+/// proof about every byte, which is what deletion needs, and it is
+/// cheap to reach because the length test rejects almost everything
+/// before a hash is computed.
+///
+/// A name any set in the directory declares is somebody's payload and
+/// is never swept, whatever it hashes to.
+///
+/// `renamed` is [`WholeMatches::cands`] and is the arm added on 17 Sep
+/// 2026: a donor that was RENAMED onto its target is not a consumed
+/// source but the file itself, and its old path no longer exists.
+/// Naming it would have the caller delete a path this repair already
+/// moved - a no-op today and a warn in the daemon's sweep, and a
+/// genuine loss if the rename had failed and left the donor where it
+/// was. Nothing downstream is weakened by the omission: a renamed donor
+/// can only ever have cleared the EXACT-MD5 arm below, and the one
+/// caller that reads `consumed_sources` for accounting rather than for
+/// deletion (`nzbfast-engine`'s `repair_accounts_for_the_shortfall`)
+/// asks it about a SHORT slot's partial, which by construction is not
+/// byte-exact for the member it is short of.
+#[expect(clippy::too_many_arguments)]
+pub(super) fn spent_donors(
+    dir: &Path,
+    fold: bool,
+    cands: &[(PathBuf, u64)],
+    targets: &[Target],
+    adopted: &HashMap<usize, AdoptSrc>,
+    rebuilt_set: &HashSet<usize>,
+    bs: usize,
+    declared: &HashSet<String>,
+    donors: HashSet<usize>,
+    renamed: &HashSet<usize>,
+    shortfall: bool,
+) -> Vec<PathBuf> {
+    let declared_names: HashSet<String> = declared
+        .iter()
+        .cloned()
+        .chain(
+            targets
+                .iter()
+                .map(|t| name_identity_key(fold, &t.file.name)),
+        )
+        .collect();
+    let target_keys: HashSet<PathBuf> = targets
+        .iter()
+        .map(|t| path_identity_key(fold, &t.path))
+        .collect();
+    let mut spent: Vec<PathBuf> = Vec::new();
+    // A shortfall publishes files and spends NOTHING: see the
+    // `consumed_sources` note on `status::RepairStatus::Unrepairable`.
+    for ci in donors
+        .into_iter()
+        .filter(|ci| !shortfall && !renamed.contains(ci))
+    {
+        let (p, len) = &cands[ci];
+        // §293: a candidate from a DONOR directory is a predecessor
+        // job's payload, not this directory's junk - byte-identical to
+        // a target is exactly the good case there, and sweeping it
+        // would delete another job's files. Only the repair dir's own
+        // files can ever be spent.
+        if !p.starts_with(dir) {
+            continue;
+        }
+        if is_somebodys_payload(dir, fold, p, &target_keys, &declared_names) {
+            continue;
+        }
+        let want: Vec<[u8; 16]> = targets
+            .iter()
+            .filter(|t| t.file.length == *len)
+            .map(|t| t.file.md5)
+            .collect();
+        // A hash that cannot be read decides nothing: keep the file.
+        if !want.is_empty() && md5_of_file(p, None).is_ok_and(|h| want.contains(&h)) {
+            spent.push(p.clone());
+            continue;
+        }
+        // The damaged-twin and fully-donated arms - the per-byte proofs
+        // for a source the exact-MD5 test can never clear. See
+        // [`proven_spent`].
+        if proven_spent(p, *len, ci, targets, adopted, rebuilt_set, cands, bs) {
+            spent.push(p.clone());
+        }
+    }
+    spent.sort();
+    spent
+}
+
+pub(super) fn whole_file_renames(
+    dir: &Path,
+    fold: bool,
+    cands: &[(PathBuf, u64)],
+    donor_from: usize,
+    targets: &[Target],
+    adopted: &HashMap<usize, AdoptSrc>,
+    bs: usize,
+    declared: &HashSet<String>,
+    whole_claims: &HashSet<usize>,
+    shortfall: bool,
+) -> WholeMatches {
+    let mut out = WholeMatches {
+        renames: Vec::new(),
+        targets: HashSet::new(),
+        cands: HashSet::new(),
+    };
+    if shortfall || adopted.is_empty() {
+        return out;
+    }
+    let declared_names: HashSet<String> = declared
+        .iter()
+        .cloned()
+        .chain(
+            targets
+                .iter()
+                .map(|t| name_identity_key(fold, &t.file.name)),
+        )
+        .collect();
+    let target_keys: HashSet<PathBuf> = targets
+        .iter()
+        .map(|t| path_identity_key(fold, &t.path))
+        .collect();
+    for (ci, by_target) in adoption_tally(donor_from, targets, adopted, bs) {
+        if by_target.len() != 1 {
+            continue;
+        }
+        let (ti, (n, aligned)) = by_target
+            .into_iter()
+            .next()
+            .expect("a candidate with no target is never inserted");
+        let t = &targets[ti];
+        let (p, len) = &cands[ci];
+        if !(whole_claims.contains(&ci)
+            && aligned
+            && n == t.n_slices
+            && t.n_slices > 0
+            && *len == t.file.length)
+        {
+            continue;
+        }
+        if t.exists || !p.starts_with(dir) {
+            continue;
+        }
+        if is_somebodys_payload(dir, fold, p, &target_keys, &declared_names) {
+            continue;
+        }
+        // Two candidates cannot reach one target - the fast path
+        // consumes a candidate and breaks out of its target's loop, and
+        // `adopted` is filled with `or_insert` so a later one writes
+        // nothing. Refused rather than relied on: a rename is a
+        // destructive write, and a second one for the same target would
+        // land on top of the first with a HashMap's iteration order
+        // deciding which survived.
+        if !out.targets.insert(ti) {
+            continue;
+        }
+        out.renames.push((p.clone(), ti));
+        out.cands.insert(ci);
+    }
+    // Candidate order is a HashMap's, so two runs of the same repair
+    // would otherwise land the renames in different orders - which a
+    // report a caller prints, and a conformance row that fingerprints
+    // the directory, both read.
+    out.renames.sort();
+    out
 }
 
 /// Does `dir` hold ANY file that could serve as an adoption source -
@@ -761,10 +1173,16 @@ fn prefetch_md5s(
 /// Anything the pairing guessed wrong about is simply hashed lazily by
 /// the loop, exactly as before.
 ///
-/// The middle of the returned triple is [`adoption_candidates`]'s donor
+/// The second of the returned four is [`adoption_candidates`]'s donor
 /// boundary, passed through so the caller can classify candidate slots
 /// by ownership after this returns - [`pin_donor_sources`] needs it, and
 /// the caller appends its own escalation candidates past it.
+///
+/// The FOURTH is the candidate indices THE FAST PATH CLAIMED, and it is
+/// the only surface that says a candidate cleared the declared
+/// WHOLE-FILE MD5 rather than merely every block hash. See
+/// [`adoption_tally`] for why the two are not the same question and
+/// what read them apart.
 pub(super) fn adopt_blocks(
     dir: &Path,
     donors: &[PathBuf],
@@ -772,11 +1190,20 @@ pub(super) fn adopt_blocks(
     missing: &[usize],
     bs: usize,
     exclude: &HashSet<PathBuf>,
-) -> Result<(Vec<(PathBuf, u64)>, usize, HashMap<usize, AdoptSrc>), RepairError> {
+) -> Result<
+    (
+        Vec<(PathBuf, u64)>,
+        usize,
+        HashMap<usize, AdoptSrc>,
+        HashSet<usize>,
+    ),
+    RepairError,
+> {
     let (cands, donor_from) = adoption_candidates(dir, donors, targets, exclude)?;
     let mut adopted: HashMap<usize, AdoptSrc> = HashMap::new();
+    let mut whole_claims: HashSet<usize> = HashSet::new();
     if cands.is_empty() {
-        return Ok((cands, donor_from, adopted));
+        return Ok((cands, donor_from, adopted, whole_claims));
     }
     let missing_set: HashSet<usize> = missing.iter().copied().collect();
 
@@ -846,6 +1273,9 @@ pub(super) fn adopt_blocks(
             if whole != t.file.md5 {
                 continue;
             }
+            // PAST THE WHOLE-FILE MD5, which is the only place in this
+            // module that compares one - see [`adoption_tally`].
+            whole_claims.insert(ci);
             for i in 0..t.n_slices {
                 let g = t.first_slice + i;
                 if missing_set.contains(&g) {
@@ -870,7 +1300,7 @@ pub(super) fn adopt_blocks(
         bs,
         &mut adopted,
     )?;
-    Ok((cands, donor_from, adopted))
+    Ok((cands, donor_from, adopted, whole_claims))
 }
 
 /// The IN-SET harvest: fill a missing slice from another slice of the
@@ -1646,6 +2076,29 @@ mod spend_tests;
 /// size gate's ceiling while this file is nowhere near it.
 pub(super) struct CandReader<'a> {
     pub(super) cands: &'a [(PathBuf, u64)],
+    /// Every candidate this repair has read from, still OPEN.
+    ///
+    /// The cache is what makes the per-block reads cheap, and it is
+    /// also a handle the caller has to get rid of before it MOVES one
+    /// of these files. [`whole_file_renames`] renames a donor onto its
+    /// target, and a donor is read here whether or not its target is
+    /// written: adopted blocks are fed into the syndrome as present
+    /// data, so a set with anything left to rebuild opens every donor
+    /// it adopted from, including a whole-file match's.
+    ///
+    /// POSIX renames an open file without complaint, and Windows
+    /// permits it only because Rust's std opens with FILE_SHARE_DELETE.
+    /// ref-gate: that share mode is set in the RUST TOOLCHAIN's own
+    /// source, not in this workspace - `library/std/src/sys/fs/
+    /// windows.rs` under the rustup toolchain, read there on 17 Sep
+    /// 2026. It is named so a reader can re-check the one claim this
+    /// argument rests on, and it is deliberately not a path in this
+    /// repo. That is a share mode no
+    /// test on this fleet has ever exercised on this path, and an
+    /// antivirus or indexer handle taken WITHOUT it would fail the
+    /// rename intermittently with os error 5 or 32 - which reads as a
+    /// flake and is not one. [`CandReader::close_all`] removes the
+    /// dependency rather than resting on it.
     pub(super) open: HashMap<usize, File>,
 }
 
@@ -1660,6 +2113,14 @@ impl CandReader<'_> {
         let mut v = vec![0u8; take];
         crate::disk::read_exact_at(f, &mut v[..avail], s.offset)?;
         Ok(v)
+    }
+
+    /// Close every cached handle. See [`CandReader::open`] for why a
+    /// caller that renames a candidate must call this first, and why
+    /// dropping the reader itself is not available at that point (the
+    /// patch closure still borrows it).
+    pub(super) fn close_all(&mut self) {
+        self.open.clear();
     }
 }
 

@@ -97,9 +97,23 @@ pub enum Sub {
     /// decoded payload the process is holding, so it is charged rather
     /// than left in round 14's unattributed remainder.
     WriteStage,
+    /// The run buffers' RESERVED-BUT-UNUSED bytes: for every buffer the
+    /// run pool owns, `capacity() - len()`, summed over the open runs,
+    /// the runs whose `pwrite` has not returned, and the free list
+    /// (where a cleared buffer is all slack).
+    ///
+    /// Same split as [`Sub::HoldsReserve`] and for the same reason.
+    /// `WriteStage` charges the STAGED BYTES, because that is the
+    /// quantity `stage::coalesce_cap` and `stage::coalesce_total_cap`
+    /// bound and the quantity a kill loses; a run buffer is larger than
+    /// its bytes by construction, and before the pool existed that slack
+    /// was resident, unbounded and unreported (up to 4x the charge -
+    /// `research/SMALL-ARTICLE-MEMCPY-2026-09-16.md` section 6a). The
+    /// two lines together are exactly the window's resident bytes.
+    WriteStageReserve,
 }
 
-pub const SUB_COUNT: usize = 15;
+pub const SUB_COUNT: usize = 16;
 
 impl Sub {
     pub fn name(self) -> &'static str {
@@ -119,6 +133,7 @@ impl Sub {
             Sub::RepairScan => "repair_scan",
             Sub::RepairWork => "repair_work",
             Sub::WriteStage => "write_stage",
+            Sub::WriteStageReserve => "write_stage_reserve",
         }
     }
 }

@@ -238,13 +238,18 @@ pub(super) fn enabled() -> bool {
 /// `NZBFAST_NTT_ADDITIVE_MIN=<sources>`: the leaf fill from which the
 /// additive kernel is taken.
 ///
-/// **128, and re-confirmed by measurement after the second cut rather
-/// than kept out of caution** (7 Sep 2026). The second cut made the
-/// additive leaf cheaper on both boxes, so its crossover against the
-/// paired leaf moved down INSIDE the old 96 -> 128 step of `leaf_bench`
-/// and the gate could not be argued about from that bracket; 104, 112
-/// and 120 exist in that list for this reason. Measured then, ms per
-/// leaf at w=512, paired vs additive:
+/// **128, and it stays there - but read the rest of this before quoting
+/// it, because the gate is measured RIGHT on one kernel class, measured
+/// WRONG on a second, and unmeasured on the third, and it is ONE
+/// constant shared by all of them.**
+///
+/// **How the gate was set, on a SINGLE-LEAF MICROBENCH** (7 Sep 2026,
+/// re-confirmed by measurement after the second cut rather than kept out
+/// of caution). The second cut made the additive leaf cheaper on both
+/// boxes, so its crossover against the paired leaf moved down INSIDE the
+/// old 96 -> 128 step of `leaf_bench` and the gate could not be argued
+/// about from that bracket; 104, 112 and 120 exist in that list for this
+/// reason. Measured then, ms per leaf at w=512, paired vs additive:
 ///
 /// | fill | M3 paired | M3 additive | i5 paired | i5 additive |
 /// |---|---|---|---|---|
@@ -253,33 +258,83 @@ pub(super) fn enabled() -> bool {
 /// | 120 | 0.608 | 0.629 | - | - |
 /// | 128 | 0.671 | 0.655 | 0.687 | 0.558 |
 ///
-/// The M3 crosses at ~124 and BINDS: at 120 the paired leaf is still 3%
-/// ahead there, so a gate at 112 or 120 would be a regression on the
-/// box with the narrower margin. The i5 crosses near 110 and would take
-/// a lower gate happily - at 128 the additive leaf is already 19% ahead
-/// of the paired one there, against 2% on the M3. One arm winning at
-/// the boundary on one box is not a reason to move a gate both share.
+/// **THAT TABLE IS HOW THE GATE GOT HERE, NOT THE CURRENT EVIDENCE FOR
+/// IT.** Its rows are real, but its NEAR-GATE rows are now known
+/// optimistic about the additive leaf by roughly a factor of three, in
+/// the direction the rig's own header warns about - it overstates a
+/// method that trades arithmetic for memory, which is precisely what the
+/// additive leaf does. `leaf_bench` puts the two leaves 3.5% apart at
+/// fill 120; the real transform at production worker count reads 12.5%
+/// at fill 119 on NEON
+/// (`research/PARFAST-BARE-RAISE-TIMING-2026-09-16.md`, section 8.17.9).
+/// So the old reading of the boundary rows as "inside the noise" (the i5
+/// reads 0.547 against 0.548 at fill 112) is a microbench reading that
+/// does not survive the move to production scale: on an AVX-512 GFNI
+/// part the rung next to it is worth 38% of the transform (8.19.7 item
+/// 1). The 9 Sep 2026 re-measurement on the same rig is also folded in
+/// above: the two columns CONVERGED, the M3 bracketing its crossover at
+/// 112-120 where it had read ~124 and the i5 at 112-120 where it had
+/// read ~110, so the 14-point spread and the 19% lead at fill 128 that
+/// the first reading reasoned from are both gone - at fill 128 the
+/// additive leaf leads by 2% on the i5, because the PAIRED leaf got
+/// faster there (0.621 ms against 0.687).
 ///
 /// Earlier evidence, still true: the real transform at ~141 per leaf was
 /// -30% on the M3 and -12% on the i5, and the i5 FORCED at ~44 per leaf
 /// was 2x SLOWER - the fill gate is the whole safety of the default.
 ///
-/// **Re-measured 9 Sep 2026 on both classes, and the two have
-/// CONVERGED.** Same rig, three reps each, medians: the M3 now brackets
-/// its crossover at 112-120 (it read ~124 above) and the i5 brackets
-/// 112-120 as well (it read ~110), so the 14-point spread the paragraph
-/// above reasons from is gone. So is its 19%: at fill 128 the additive
-/// leaf leads by 2% on the i5 now, not 19%, because the PAIRED leaf got
-/// faster there (0.621 ms against 0.687). The gate stays 128, but it now
-/// stays on evidence rather than on caution, and it does not want
-/// splitting per class - both classes want the same number.
+/// **THE TRANSFORM AT ITS PRODUCTION WORKER COUNT, which this docstring
+/// used to ask for, HAS NOW BEEN MEASURED TWICE - and the two classes
+/// answer OPPOSITE WAYS.** Same A/B both times:
+/// `NZBFAST_NTT_ADDITIVE_MIN=64` against the shipped 128, over the band
+/// the gate governs, on a real transform rather than one leaf at a time.
 ///
-/// It is not moved to 120 because this rig's own header says it
-/// overstates a method that trades arithmetic for memory, which is
-/// precisely what the additive leaf does; because the band a move would
-/// change is only 112-128 wide; and because the boundary rows are inside
-/// the noise (the i5 reads 0.547 against 0.548 at fill 112). A move
-/// wants the transform at its production worker count, not this rig.
+/// - **NEON (M3 Ultra, 162 legs, section 8.17.9): 128 IS the production
+///   crossover and the gate must NOT come down.** Every rung below it is
+///   a loss, shrinking monotonically towards the gate - 59.5, 43.3,
+///   36.8, 20.1, 12.5 and 7.0 per cent at leaf fills 78 to 125 - and the
+///   first all-additive width above the gate already wins 6.8%. A gate
+///   at 120 is worth 7 to 12 points of wall here.
+/// - **AVX-512 GFNI (EPYC 9354P 8-vCPU guest, 168 legs, section 8.19):
+///   THE SIGN IS FLIPPED AT EVERY RUNG.** The same A/B reads 12.9 to
+///   38.4 per cent FASTER at gate 64, and a ladder walked down with
+///   `ADDITIVE_MIN=32` brackets that class's real crossover at **leaf
+///   fill 50 to 60** against a gate at 128, so the band between them
+///   costs 13 to 38 per cent of the transform. The kernel is worth more
+///   there than on any class measured before: turning it off entirely
+///   costs 27% to 149% above the gate.
+/// - **A gate ABOVE 128 is dead and nobody need re-run it.** 8.17
+///   bounded what one could win at under +6.8%; 8.19 measures
+///   `ADDITIVE_MIN=192` losing 35 to 61 per cent between fills 128 and
+///   192 (8.19.7 item 3).
+///
+/// So the production-scale bias is a property of `leaf_bench` rather
+/// than of NEON - but the correction does not point one way for
+/// everybody, and **the conclusion is not that either round was wrong,
+/// it is that ONE constant shared by every class cannot be right.** This
+/// docstring used to say the gate "does not want splitting per class -
+/// both classes want the same number"; that was true of the two classes
+/// that had been measured, and a third disagrees by the full width of
+/// the band.
+///
+/// **WHAT IS OPEN IS A DECISION, AND IT IS JEZ'S, NOT THIS FILE'S.**
+/// 8.19.7 item 2 parks two honest options: a per-class gate
+/// (`MIN_SOURCES` beside `NTT_MIN_MISSING_NIBBLE` and
+/// `NTT_MIN_MISSING_NEON`, which are already per-class for exactly this
+/// reason), or a gate left at 128 with the GFNI cost written down and
+/// accepted. **Until that is decided, do not lower the shared
+/// constant** - on NEON that is measured at 7 to 59 points of loss.
+///
+/// **AND THE THIRD CLASS IS MISSING - the one this docstring's own i5
+/// column is actually taken on.** The i5-10600KF is AVX2 without GFNI
+/// and selects the NIBBLE kernel, fan-in 4 against GFNI's 12 and NEON's
+/// 8. With two classes now disagreeing by the full width of the band,
+/// the nibble answer **cannot be interpolated** and has to be measured.
+/// It is not just a matter of running the ladder either: that part's box
+/// has no python, so `research/harness/nttladder.py` cannot drive it and
+/// the round wants the `plib.ps1` half of the harness. Nobody held that
+/// work as of 17 Sep 2026 (8.19.7 item 4); check
+/// `tools/claims.py list --open` before assuming that is still true.
 const MIN_SOURCES: usize = 128;
 
 pub(super) fn min_sources() -> usize {

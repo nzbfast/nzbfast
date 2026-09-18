@@ -86,8 +86,8 @@ pub use daemon_cats::DEFAULT_CATS;
 // whole (TODO 106).
 #[path = "daemon_park.rs"]
 pub mod daemon_park;
-pub use daemon_park::CustodyBatch;
 pub(crate) use daemon_park::SidecarTailGuard;
+pub use daemon_park::{CustodyBatch, FilesVerdict};
 
 // Which of the user's indexer accounts a background lane speaks to -
 // the scoreboard's and the confirm lane's reference resolution, the
@@ -1794,6 +1794,29 @@ pub struct Daemon {
     /// check reads it and declines to hold a re-add of any of them. See
     /// `Daemon::note_releases_deleted`.
     pub deleted_recent: Mutex<std::collections::VecDeque<dupe::DeleteMark>>,
+    /// GH #86: cancelled queue rows still inside their grace window,
+    /// oldest batch first - one entry per delete REQUEST, spent as a
+    /// unit by [`Daemon::take_cancel_undo`].
+    ///
+    /// In memory and never persisted, which is the point rather than an
+    /// omission: a token means nothing to a run that did not mint it,
+    /// and a retained copy that outlived a restart would be the
+    /// cancelled-release-comes-back-at-next-start defect
+    /// `mask_spool_path` exists to prevent. `purge_cancel_undo` empties
+    /// the store's directory at startup for the same reason. See
+    /// `crates/nzbfast-daemon/src/cancelundo.rs`.
+    pub cancel_undo: Mutex<std::collections::VecDeque<cancelundo::UndoBatch>>,
+    /// GH #86: deleted HISTORY rows still inside their grace window,
+    /// oldest batch first - one entry per delete REQUEST, spent as a
+    /// unit by [`Daemon::take_hist_undo`].
+    ///
+    /// Its own store and not a second kind of entry in `cancel_undo`
+    /// above: the two restore by different routes (an `enqueue_as`
+    /// there, a `history_restore` here) and a token must MISS the wrong
+    /// one rather than half-match it. Everything else about it is that
+    /// one's - in memory, never persisted, and purged from the same
+    /// directory at startup. See `crates/nzbfast-daemon/src/histundo.rs`.
+    pub hist_undo: Mutex<std::collections::VecDeque<histundo::HistUndoBatch>>,
     /// Failed API-key attempts per source address: (count, window start).
     ///
     /// The key comparison is constant-time, but nothing recorded a wrong one

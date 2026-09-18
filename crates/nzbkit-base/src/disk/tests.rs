@@ -1949,6 +1949,16 @@ fn drop_lands_the_run_and_abandon_close_throws_it_away() {
 #[test]
 fn the_window_merges_across_a_late_gap_and_is_bounded() {
     use super::stage::WriteStage;
+    // Staging MINTS run buffers from the process-global `RUN_POOL`, and
+    // `a_run_of_runs_costs_one_allocation_and_no_realloc` asserts an
+    // exact equality over that pool's `mints` counter. `cargo test` runs
+    // this crate in ONE process with a thread per test, so a staging test
+    // that skips this guard races that assertion from another thread -
+    // measured at 6 failures in 200 rounds of `disk::tests::` alone,
+    // and far likelier in the full-crate run the `unit-one-process` job
+    // makes on every push. The guard costs nothing here: these tests
+    // assert over their own `WriteStage`, not over a gauge.
+    let _g = crate::memgauge::one_gauge_test_at_a_time();
     let (cap, run) = (4096, 1024);
     let mut st = WriteStage::default();
     // The shipped window arms only once a file has proved it is fed fast
@@ -2029,6 +2039,182 @@ fn the_window_merges_across_a_late_gap_and_is_bounded() {
     assert!(!held && out.is_empty());
 }
 
+/// **THE RUN-BUFFER POOL, STATED AS THE TWO NUMBERS IT WAS BUILT FOR.**
+/// Sixteen consecutive runs cost ONE allocation between them, and not one
+/// of them reallocates.
+///
+/// Both halves are what
+/// `research/SMALL-ARTICLE-MEMCPY-2026-09-16.md` section 6a asked for. A
+/// run used to open at `run_cap.min(data.len() * 4)`, so a 128 KB article
+/// opened a 512 KiB run, grew past it and copied half of every run's
+/// bytes a second time - 2.03% of a small-article download's on-CPU
+/// samples, 28% of the window's mem-op cycles on the x86 rig - and every
+/// run was also a fresh `malloc` and `free` of about a megabyte, whose
+/// first touch is a page fault (minor faults moved 87% when the window
+/// was switched off entirely).
+///
+/// `mints` is the allocation half and it is the counter that has to be
+/// read for it: [`stage::pool_owned`] is a NET figure and reads the same
+/// whether a run reused a buffer or minted one and freed the last.
+/// `owned` is the realloc half - a run that grows past its buffer calls
+/// `RunPool::regrew`, so a reverted reserve shows up here as growth with
+/// the run count and not as a single buffer.
+#[test]
+fn a_run_of_runs_costs_one_allocation_and_no_realloc() {
+    use super::stage::WriteStage;
+    // The pool and both counters are PROCESS-wide and `cargo test --lib`
+    // runs this crate in one process - the same guard, for the same
+    // reason, as every staging test above.
+    let _g = crate::memgauge::one_gauge_test_at_a_time();
+    let (cap, run_cap, art) = (4 << 20, 1 << 20, 128 << 10);
+    let caps = super::stage::Caps {
+        file: cap,
+        run: run_cap,
+        max_article: 256 << 10,
+        age: std::time::Duration::ZERO,
+    };
+    let mut st = WriteStage::default();
+    st.arm_for_test();
+    let data = vec![3u8; art];
+
+    // Warm the free list, so the counters below are read against a pool
+    // that is in its steady state rather than its first moment.
+    let mut off = 0u64;
+    for _ in 0..(run_cap / art) {
+        let (out, held) = st.offer(off, &data, caps);
+        assert!(held);
+        off += art as u64;
+        drop(out);
+    }
+
+    let (mints, owned) = (super::stage::pool_mints(), super::stage::pool_owned());
+    let runs = 16u64;
+    let mut taken = 0u64;
+    for _ in 0..(runs * (run_cap / art) as u64) {
+        let (out, held) = st.offer(off, &data, caps);
+        assert!(held, "a 128 KB article is inside the staging bound");
+        off += art as u64;
+        taken += out.len() as u64;
+        // Dropping a `StagedRun` is what a written run does, and it is
+        // what hands the buffer back.
+        drop(out);
+    }
+    assert_eq!(taken, runs, "the run cap is what closes a run");
+    assert_eq!(
+        super::stage::pool_mints(),
+        mints,
+        "{runs} runs in a row must reuse the buffer, not allocate one each"
+    );
+    assert_eq!(
+        super::stage::pool_owned(),
+        owned,
+        "and none of them may grow past the buffer it was minted at"
+    );
+}
+
+/// The accounting decision, executed: `WriteStage` charges the STAGED
+/// BYTES and `WriteStageReserve` charges the run buffer's slack, so
+/// **the two together are exactly the capacity the pool owns** and
+/// neither is a lie.
+///
+/// This is the half `research/SMALL-ARTICLE-MEMCPY-2026-09-16.md`
+/// section 6a warned about. Reserving a run's full size at the open -
+/// the naive form of the fix - would have left the gauge reading
+/// `data.len()` while up to four times that was resident, which is
+/// precisely the unattributed remainder the gauges exist to prevent.
+///
+/// The sum is asserted ABSOLUTELY and the staged half as a delta, which
+/// is the other way round from most gauge tests here and is deliberate:
+/// the free list PERSISTS between tests in a `cargo test --lib` process,
+/// so a run that reuses a buffer moves no capacity at all and a delta on
+/// the slack alone reads as a NEGATIVE number. The identity is immune to
+/// that by construction, and it is also the stronger statement.
+#[test]
+fn the_reserve_gauge_carries_the_run_buffers_unused_capacity() {
+    use super::stage::WriteStage;
+    use crate::memgauge::{Sub, cur};
+    let _g = crate::memgauge::one_gauge_test_at_a_time();
+    let caps = super::stage::Caps {
+        file: 4 << 20,
+        run: 1 << 20,
+        max_article: 256 << 10,
+        age: std::time::Duration::ZERO,
+    };
+    let art = 128usize << 10;
+    let accounted = || cur(Sub::WriteStage) + cur(Sub::WriteStageReserve);
+
+    let staged0 = cur(Sub::WriteStage);
+    assert_eq!(
+        accounted(),
+        super::stage::pool_owned(),
+        "staged + slack is the pool's capacity, before anything is staged"
+    );
+
+    let mut st = WriteStage::default();
+    st.arm_for_test();
+    let (out, held) = st.offer(0, &vec![7u8; art], caps);
+    assert!(held && out.is_empty());
+    assert_eq!(
+        cur(Sub::WriteStage) - staged0,
+        art as u64,
+        "the staged bytes are the window's charge, and its caps bound THEM"
+    );
+    assert_eq!(
+        accounted(),
+        super::stage::pool_owned(),
+        "and the rest of the buffer is resident too, so it is reported"
+    );
+
+    // A window dropped with a run open returns both halves: the bytes are
+    // lost (the caller's business), the BUFFER is not.
+    drop(st);
+    assert_eq!(
+        cur(Sub::WriteStage),
+        staged0,
+        "the charge follows the bytes"
+    );
+    assert_eq!(
+        accounted(),
+        super::stage::pool_owned(),
+        "a returned buffer is all slack, and still the pool's"
+    );
+}
+
+/// At the pool's ceiling the window declines to open a run, which is the
+/// same answer the three bounds above it give and is never a failure -
+/// the article takes the positioned write it would have taken anyway.
+///
+/// Driven by asking for a run larger than the pool's whole budget rather
+/// than by an environment variable, because [`stage::run_pool_cap`] is
+/// latched on first use like every other knob here and a test cannot move
+/// it without deciding the value for every test that runs after it.
+#[test]
+fn a_run_the_pool_cannot_afford_is_simply_not_staged() {
+    use super::stage::WriteStage;
+    let _g = crate::memgauge::one_gauge_test_at_a_time();
+    let huge = super::stage::run_pool_cap() as usize + (1 << 20);
+    let caps = super::stage::Caps {
+        file: usize::MAX,
+        run: huge,
+        max_article: huge,
+        age: std::time::Duration::ZERO,
+    };
+    let mut st = WriteStage::default();
+    st.arm_for_test();
+    let before = super::stage::pool_owned();
+    let (out, held) = st.offer(0, &[1u8; 4096], caps);
+    assert!(
+        !held && out.is_empty(),
+        "no buffer, no run - and the caller writes the article itself"
+    );
+    assert_eq!(
+        super::stage::pool_owned(),
+        before,
+        "a refused mint must not charge the pool for what it did not allocate"
+    );
+    assert!(st.spans().is_empty());
+}
+
 /// The window is a memory budget item, so it is charged and released
 /// like one - `mem_floor` must not grow an unattributed term the moment
 /// this lands (round 14's whole lane).
@@ -2078,6 +2264,11 @@ fn staged_bytes_are_charged_to_the_gauge_and_released() {
 #[test]
 fn the_window_reassembles_every_byte_under_shuffled_arrival() {
     use super::stage::WriteStage;
+    // Every staging test takes this guard, gauge or no gauge: offering
+    // bytes mints from the process-global `RUN_POOL`, which
+    // `a_run_of_runs_costs_one_allocation_and_no_realloc` asserts an
+    // exact count over from another thread of the same process.
+    let _g = crate::memgauge::one_gauge_test_at_a_time();
     let (cap, run_cap) = (64 * 1024, 8 * 1024);
     let art = 1500usize;
     let n = 400usize;
@@ -2151,6 +2342,11 @@ fn the_window_reassembles_every_byte_under_shuffled_arrival() {
 #[test]
 fn a_merge_that_removes_an_earlier_run_keeps_the_growing_one() {
     use super::stage::WriteStage;
+    // Every staging test takes this guard, gauge or no gauge: offering
+    // bytes mints from the process-global `RUN_POOL`, which
+    // `a_run_of_runs_costs_one_allocation_and_no_realloc` asserts an
+    // exact count over from another thread of the same process.
+    let _g = crate::memgauge::one_gauge_test_at_a_time();
     let (cap, run_cap) = (64 * 1024, 8 * 1024);
     let mut st = WriteStage::default();
     // The shipped window arms only once a file has proved it is fed fast
@@ -2475,6 +2671,202 @@ fn the_resume_mark_survives_bytes_held_in_the_window() {
         std::fs::read(&p).unwrap()[..size as usize],
         art.repeat(n)[..],
         "and reading the mark wrote every byte it describes"
+    );
+}
+
+/// THE ORDER [`stage::WriteStage::take_all`] TAKES ITS RUNS IN, pinned
+/// as an OUTCOME rather than as a Vec comparison: a window holding two
+/// DISJOINT runs whose birth order is not their offset order, and the
+/// resume mark read over it.
+///
+/// `PrefixHash` advances only on a write landing exactly at its hashed
+/// end and FREEZES on one landing ahead, so the two orders give two
+/// different marks over the same bytes on disk:
+///
+/// - ASCENDING (shipped): the low run lands at the hashed end and
+///   advances it; the high run then lands past the hole and freezes it.
+///   The mark is the low run - everything genuinely contiguous from
+///   byte zero.
+/// - BIRTH order: the high run lands FIRST, freezes the hash at zero,
+///   and the low run - which is contiguous from byte zero and is the
+///   one thing a resume could have trusted - can never be observed.
+///   The mark is 0, which `settle_resume_ledger` reads as "nothing
+///   about this file can be proven" and answers by DELETING it.
+///
+/// **This test is the only thing in the tree that separates the two
+/// orders, which is why it is here** (17 Sep 2026,
+/// `research/WSTAGE-TAKEALL-ORDER-INTEGRATION-2026-09-17.md`). The
+/// ordering was measured against the whole e2e suite with the window
+/// forced on: 457/457 pass with the sort reverted, and so do the
+/// 1,629 tests of this crate's own lib. The reason is structural and
+/// not a gap in the fixtures - the only reader of a prefix hash is
+/// `extract::resume::settle_resume_ledger`, whose writers are all
+/// `ChaseSink`s driven by `io::copy`, so every mark the product
+/// actually READS is taken over a file written STRICTLY ASCENDING,
+/// where the two orders are the same order. The e2e suite does produce
+/// windows of out-of-order runs on prefix-hashed writers (three
+/// fixtures do), and not one of them is ever asked for its mark.
+///
+/// So the sort is insurance against the day a mapped or routed member -
+/// which IS written out of order, by articles arriving across
+/// connections - becomes resume-eligible. Do not delete it because
+/// nothing above the unit level reds: that is the measurement, not a
+/// licence.
+#[test]
+fn a_window_of_disjoint_runs_is_flushed_low_first_so_the_mark_survives() {
+    let _gauge = crate::memgauge::one_gauge_test_at_a_time();
+    let dir = stage_dir("takeall-offset-order");
+    let art = 4096usize;
+    let low = vec![7u8; art];
+    let high = vec![9u8; art];
+    let p = dir.join("outoforder.bin");
+    // Declared far larger than what arrives, for the reason the test
+    // above gives: a mark is only ever worth anything over a PARTIAL
+    // file, and a completion rule that flushed for us would take the
+    // experiment away.
+    let (w, _sig) = FileWriter::create(&p, 1 << 20)
+        .unwrap()
+        .coalescing(true)
+        .with_prefix_hash()
+        .fed();
+    // BORN HIGH FIRST. Both spans are far below the 1 MiB run cap and
+    // the 4 MiB file cap, so both stay OPEN; the hole at
+    // [4096, 8192) is what stops them merging into one run, which
+    // would freeze the hash by the `merged` rule instead and prove
+    // nothing about order.
+    w.write_article_at(2 * art as u64, &high).unwrap();
+    w.write_article_at(0, &low).unwrap();
+    let (len, crc) = w
+        .prefix_hash()
+        .expect("the hash is armed and nothing rewrote hashed bytes");
+    assert_eq!(
+        len, art as u64,
+        "the mark must cover the low run: a window flushed in BIRTH order writes the \
+         high run first, freezes the hash at zero, and hands the resume ledger a mark \
+         of 0 - which deletes the file instead of resuming from it"
+    );
+    assert_eq!(
+        crc,
+        crc32fast::hash(&low),
+        "and the mark's crc is the low run's"
+    );
+    // Both runs reached disk either way: the order decides what may be
+    // CLAIMED about them, never whether they landed.
+    let on_disk = std::fs::read(&p).unwrap();
+    assert_eq!(&on_disk[..art], &low[..], "the low run must be on disk");
+    assert_eq!(
+        &on_disk[2 * art..3 * art],
+        &high[..],
+        "and so must the high one"
+    );
+}
+
+/// THE SECOND SITE OF THE SAME ORDER RULE, and the one
+/// [`stage::WriteStage::take_all`]'s sort does not reach.
+///
+/// `take_all` hands its runs out in ascending offset order because
+/// `PrefixHash` advances only on a write landing exactly at its hashed
+/// end. But `take_all` is not the only producer of a flush batch:
+/// `write_article_at` builds one out of `take_expired`, then whatever
+/// `offer`'s make-room loop displaced, then - last - the run the
+/// incoming article closed. That last run can be the LOWEST in the
+/// batch, so the batch is descending however the victims were chosen,
+/// and the victim rule (`min_by_key(|r| r.born)`, the run least likely
+/// to grow) is not what decides it. `FileWriter::flush_runs` therefore
+/// sorts the whole batch, which is the one site every producer passes
+/// through.
+///
+/// The shape below is the cheapest one that builds a descending batch:
+/// a high run born first, a low run grown to one article short of the
+/// run cap, and then the article that both trips the per-file cap (so
+/// the high run is evicted) and closes the low run (so it is appended
+/// behind it).
+///
+/// Against the code as it was before this test, the mark read 0 -
+/// which `settle_resume_ledger` reads as "nothing about this file can
+/// be proven" and answers by DELETING the partial.
+#[test]
+fn an_eviction_batch_is_flushed_low_first_so_the_mark_survives() {
+    let _gauge = crate::memgauge::one_gauge_test_at_a_time();
+    let dir = stage_dir("evict-offset-order");
+    let art = 4096usize;
+    // The per-file cap IS the run cap at this size (`Caps::sized` clamps
+    // the run to the window), so eight articles fill either.
+    let cap = 8 * art;
+    let p = dir.join("evictorder.bin");
+    // Declared far larger than what arrives: the completion rule flushes
+    // a file whose covered + staged bytes reach its size, and a flush we
+    // did not ask for would take the experiment away.
+    let (w, _sig) = FileWriter::create(&p, 1 << 20)
+        .unwrap()
+        .coalescing(true)
+        .staging_cap(cap)
+        // THE AGE RULE OUT OF THE EXPERIMENT (zero = unbounded, see
+        // `stage::Caps::age`). The shipped bound is 100 ms and this test
+        // builds its batch in microseconds, so it is not a slack being
+        // widened - it is a second producer of flushed runs
+        // (`take_expired`) that would otherwise take the high run out
+        // early on a stalled box and grade a batch this test did not
+        // build. The structural assertions below would catch that as a
+        // failure rather than pass it, which is the wrong kind of red.
+        .staging_age(std::time::Duration::ZERO)
+        .with_prefix_hash()
+        .fed();
+    // BORN FIRST, AND HIGH - so it is the make-room loop's victim.
+    let high_at = 16 * art as u64;
+    let high = vec![9u8; art];
+    w.write_article_at(high_at, &high).unwrap();
+    // The low run, grown to one article short of the run cap. Each of
+    // these extends run L rather than opening a new one, so nothing is
+    // displaced and nothing is closed.
+    let mut low = Vec::new();
+    for i in 0..7 {
+        let a = vec![(i + 1) as u8; art];
+        w.write_article_at((i * art) as u64, &a).unwrap();
+        low.extend_from_slice(&a);
+        assert_eq!(
+            w.staged_bytes(),
+            ((i + 2) * art) as u64,
+            "the high run and the low one must both still be OPEN"
+        );
+    }
+    // THE ARTICLE THAT BUILDS THE BATCH. Holding both runs plus this
+    // article is over the per-file cap, so the loop evicts the
+    // oldest-born run - the HIGH one - and pushes it first; then this
+    // article takes the low run to the run cap and it is pushed behind
+    // it. Descending, in one batch, with both writes still to come.
+    let last = vec![8u8; art];
+    w.write_article_at(7 * art as u64, &last).unwrap();
+    low.extend_from_slice(&last);
+    assert_eq!(
+        w.staged_bytes(),
+        0,
+        "both runs left the window in that one call - if either is still \
+         held this test is no longer building the batch it grades"
+    );
+    let (len, crc) = w
+        .prefix_hash()
+        .expect("the hash is armed and nothing rewrote hashed bytes");
+    assert_eq!(
+        len, cap as u64,
+        "the mark must cover the low run: a batch written in the order it \
+         was DISPLACED writes the high run first, freezes the hash at zero, \
+         and hands the resume ledger a mark of 0 - which deletes the file \
+         instead of resuming from it"
+    );
+    assert_eq!(
+        crc,
+        crc32fast::hash(&low),
+        "and the mark's crc is the low run's"
+    );
+    // Both runs reached disk either way: the order decides what may be
+    // CLAIMED about them, never whether they landed.
+    let on_disk = std::fs::read(&p).unwrap();
+    assert_eq!(&on_disk[..cap], &low[..], "the low run must be on disk");
+    assert_eq!(
+        &on_disk[high_at as usize..high_at as usize + art],
+        &high[..],
+        "and so must the high one"
     );
 }
 

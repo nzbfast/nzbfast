@@ -3419,6 +3419,175 @@ fn a_padded_last_block_donor_serves_its_bytes_and_is_not_spent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The ordinary obfuscated Usenet post: every member complete, every
+/// name a hash. par2cmdline RENAMES such a file; this engine rebuilt the
+/// member from that same file's adopted blocks and left the donor on
+/// disk (claim `sab-whole-match-rename-not-rewrite`, 17 Sep 2026).
+///
+/// Measured against `~/parshoot3/bin/par2cmdline130` on a three-member
+/// 300,000-byte fixture with one whole match and one damaged member: the
+/// reference printed "Wrote 300000 bytes to disk" and left one name,
+/// this engine printed 600000 and left BOTH. The repair was correct
+/// either way - this is about the ACTION - and the three costs are the
+/// write I/O, a peak disk of 2x the payload where the reference needs
+/// 1x, and the leftover, which SABnzbd does not delete because
+/// `is a match for` maps to a rename in its bookkeeping.
+///
+/// `b.bin` is here so the fixture has a member that genuinely must be
+/// WRITTEN beside the one that must not: its bytes are split across two
+/// donors, so no single candidate is it whole and the old path is the
+/// only one available. Without it the test would pass on an engine that
+/// had simply stopped repairing.
+#[test]
+fn a_whole_file_match_is_renamed_and_not_rewritten() {
+    let dir = tmpdir("wholerename");
+    let a = payload(BS * 3, 71);
+    let b = payload(BS * 3, 72);
+    let files: &[(&str, &[u8])] = &[("a.bin", &a), ("b.bin", &b)];
+    std::fs::write(dir.join("set.par2"), par2_index(SET, BS, files)).unwrap();
+    // Neither member is on disk under its own name - the obfuscated
+    // post's whole shape.
+    std::fs::write(dir.join("9f8a7b6c5d4e3f2a1b0c"), &a).unwrap();
+    std::fs::write(dir.join("deadbeefcafe1234"), &b[..BS * 2]).unwrap();
+    std::fs::write(dir.join("cafef00dbaadf00d"), &b[BS * 2..]).unwrap();
+    let report = match repair_dir(&dir).expect("adoption repairs without recovery") {
+        RepairStatus::Repaired(r) => r,
+        other => panic!("expected Repaired, got {other:?}"),
+    };
+    assert_eq!(
+        report.files_renamed,
+        ["a.bin"],
+        "the whole-file match is the only one a rename can land, and the \
+         caller's 'Wrote N bytes' line is this list subtracted from the \
+         damaged set: {report:?}"
+    );
+    assert!(
+        !dir.join("9f8a7b6c5d4e3f2a1b0c").exists(),
+        "the donor was MOVED onto the target's name, so a second copy of \
+         the payload must not be left in the job folder"
+    );
+    assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), a);
+    assert_eq!(
+        std::fs::read(dir.join("b.bin")).unwrap(),
+        b,
+        "the member no single candidate carries whole must still be \
+         rebuilt and written"
+    );
+    assert!(
+        !report
+            .consumed_sources
+            .iter()
+            .any(|p| p.ends_with("9f8a7b6c5d4e3f2a1b0c")),
+        "a renamed donor is not a consumed source - its path no longer \
+         exists, and a caller that deleted it would be unlinking a file \
+         this repair already moved: {:?}",
+        report.consumed_sources
+    );
+    assert!(dir.join("deadbeefcafe1234").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// THE SHAPE THE TWO ROWS ABOVE DO NOT REACH: a whole-file match
+/// landing while the FOLD has run, so the engine is holding an open
+/// read handle on the donor it is about to move.
+///
+/// Adopted blocks are fed into the syndrome as present data, not merely
+/// written, so `adopt::CandReader` opens every donor this repair
+/// adopted from - including a whole-file match's, whose target is
+/// written by nobody. That feed is gated on `blocks_rebuilt > 0`, and
+/// the two rows above satisfy every missing block by adoption with NO
+/// recovery data at all, so the fold is skipped there and the donor is
+/// never opened. This fixture gives `b.bin` real damage and real
+/// recovery slices, so the fold runs, `CandReader` caches the handle on
+/// `9f8a...`, and the rename below happens with that handle live.
+///
+/// It passed on macOS before `CandReader::close_all` existed, because
+/// POSIX renames an open file without complaint - which is exactly why
+/// this row was missing and why the gap was invisible here. Windows
+/// permits it only through Rust's FILE_SHARE_DELETE default, and a
+/// scanner handle taken without that share mode fails the rename with
+/// os error 5 or 32, intermittently. Found by reading rather than by a
+/// red, 17 Sep 2026, claim `sab-whole-match-rename-not-rewrite`.
+#[test]
+fn a_whole_file_match_is_renamed_while_the_fold_holds_its_donor_open() {
+    let dir = tmpdir("wholerenamefold");
+    let a = payload(BS * 3, 81);
+    let b = payload(BS * 3, 82);
+    let files: &[(&str, &[u8])] = &[("a.bin", &a), ("b.bin", &b)];
+    std::fs::write(dir.join("set.par2"), par2_index(SET, BS, files)).unwrap();
+    // a.bin: absent under its own name, whole under a hash name.
+    std::fs::write(dir.join("9f8a7b6c5d4e3f2a1b0c"), &a).unwrap();
+    // b.bin: on disk and damaged in its first two blocks, with two
+    // recovery slices to rebuild them. This is what puts
+    // `blocks_rebuilt` above zero and makes the fold run.
+    let mut damaged = b.clone();
+    for x in &mut damaged[..BS * 2] {
+        *x ^= 0x5a;
+    }
+    std::fs::write(dir.join("b.bin"), &damaged).unwrap();
+    std::fs::write(
+        dir.join("set.vol0+2.par2"),
+        par2_volume(SET, BS, files, &[0, 1]),
+    )
+    .unwrap();
+
+    let report = match repair_dir(&dir).expect("the set repairs") {
+        RepairStatus::Repaired(r) => r,
+        other => panic!("expected Repaired, got {other:?}"),
+    };
+    assert!(
+        report.blocks_rebuilt > 0,
+        "the fixture must actually REBUILD something, or the fold never \
+         runs and this row silently becomes a copy of the one above: \
+         {report:?}"
+    );
+    assert_eq!(report.files_renamed, ["a.bin"]);
+    assert!(
+        !dir.join("9f8a7b6c5d4e3f2a1b0c").exists(),
+        "the donor must be moved even though the fold read it"
+    );
+    assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), a);
+    assert_eq!(std::fs::read(dir.join("b.bin")).unwrap(), b);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The rename's `!t.exists` guard, which is the one that decides whether
+/// this is a safe optimisation or a data-loss bug.
+///
+/// Something already occupies the target's name - here a same-length
+/// file whose every block is wrong, which is exactly the shape that
+/// reaches the adoption scan as an UNIDENTIFIED target. Rebuilding
+/// through the temp+rename path keeps that file until the new one is
+/// proven and only then replaces it atomically; a rename of the donor
+/// over it would destroy it first and prove nothing. The write is worth
+/// paying for, so the old path stands and the donor survives.
+#[test]
+fn a_whole_file_match_does_not_rename_over_an_occupied_target() {
+    let dir = tmpdir("wholerenameoccupied");
+    let a = payload(BS * 3, 71);
+    let files: &[(&str, &[u8])] = &[("a.bin", &a)];
+    std::fs::write(dir.join("set.par2"), par2_index(SET, BS, files)).unwrap();
+    std::fs::write(dir.join("a.bin"), payload(BS * 3, 99)).unwrap();
+    std::fs::write(dir.join("9f8a7b6c5d4e3f2a1b0c"), &a).unwrap();
+    let report = match repair_dir(&dir).expect("adoption repairs without recovery") {
+        RepairStatus::Repaired(r) => r,
+        other => panic!("expected Repaired, got {other:?}"),
+    };
+    assert!(
+        report.files_renamed.is_empty(),
+        "a target with a file already at its name is rebuilt, never \
+         renamed over: {report:?}"
+    );
+    assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), a);
+    assert!(
+        dir.join("9f8a7b6c5d4e3f2a1b0c").exists(),
+        "the donor is not moved on this arm, so it is still the caller's \
+         to sweep through `consumed_sources`"
+    );
+    assert_eq!(report.consumed_sources.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// M4-62's control, and the reason the bound is a `min` rather than a
 /// ban on spending a block-sized donor. A candidate that is exactly one
 /// FULL interior block of the target has every one of its bytes in the

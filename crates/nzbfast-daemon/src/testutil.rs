@@ -395,6 +395,8 @@ pub fn test_daemon(dir: &Path) -> Arc<Daemon> {
         watch_failed: Mutex::new(std::collections::HashMap::new()),
         delete_kept: Mutex::new(std::collections::VecDeque::new()),
         deleted_recent: Mutex::new(std::collections::VecDeque::new()),
+        cancel_undo: Mutex::new(std::collections::VecDeque::new()),
+        hist_undo: Mutex::new(std::collections::VecDeque::new()),
         auth_fails: Mutex::new(std::collections::HashMap::new()),
         #[cfg(feature = "indexer")]
         enrich_hot: Mutex::new(std::collections::VecDeque::new()),

@@ -1658,8 +1658,12 @@ complete = true
             verify: true,
             // The default packing: this row is about the wire and the
             // round trip, and the parse is pinned on the bytes by
-            // `the_optimal_parse_flag_reaches_the_posted_bytes`.
+            // `the_optimal_parse_flag_reaches_the_posted_bytes`. Both
+            // fields carry the CLI's own defaults, so `None` here is
+            // the writer's fitted dictionary and not a choice this
+            // test is making.
             optimal_parse: false,
+            dictionary: None,
             connections: 4,
         };
         let report = run(&args).await.expect("post and verify");

@@ -32,9 +32,11 @@ if [ $# -lt 2 ]; then
 fi
 TAG=$1; shift
 # TWO PRODUCTS SHIP FROM THIS REPO, so two tag shapes are valid.
-# nzbfast tags `vX.Y.Z`; parfast ships as its own PRE-RELEASE on the same
-# landing repo under a parfast tag (SPEC-PARFAST-PUBLICATION-2026-09-10
-# item 7), so `parfast-vX.Y.Z[-beta.N]` is equally a tag. The guard
+# nzbfast tags `vX.Y.Z`; parfast ships from the same landing repo under a
+# parfast tag of its own (SPEC-PARFAST-PUBLICATION-2026-09-10 item 7), so
+# `parfast-vX.Y.Z[-beta.N]` is equally a tag - bare since the CLI left
+# beta at 1.6.0, and still suffixed for the desktop app, which has not.
+# The guard
 # accepted only the first shape and refused parfast's outright, which
 # would have pushed a release engineer to `gh release upload` and around
 # the scan-stamp enforcement this script exists to apply - the one thing

@@ -107,20 +107,27 @@ ROOT=$(pwd)
 CLI_VERSION=$(grep -m1 '^version' crates/parfast/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
 [ -n "$CLI_VERSION" ] || { echo "cannot read parfast version" >&2; exit 1; }
 
-# ...BUT ITS STAGE DOES NOT, AND THAT IS THE POINT OF THESE FOUR LINES.
-# The CLI is at 1.5.0-beta.1: it has shipped, been benchmarked against six
-# other tools and published round after round. The desktop app was first
-# compiled on 12 Sep 2026 and has never been driven by hand by anybody.
-# Calling both of them "beta" because they share an engine tells a tester
-# the wrong thing about the one they just downloaded, so the GUI carries
-# its own stage - a maintainer decision, 12 Sep 2026.
+# ...BUT ITS STAGE DOES NOT, AND THAT IS THE POINT OF THESE LINES. The CLI
+# shipped STABLE at 1.6.0: it has been benchmarked against six other tools
+# and published round after round, and carries no pre-release part at all
+# now. The desktop app is younger - first compiled on 12 Sep 2026 - and is
+# a beta. Calling both of them by the CLI's label because they share an
+# engine tells a tester the wrong thing about the one they just
+# downloaded, so the GUI carries its own stage - a maintainer decision,
+# 12 Sep 2026, and the reason this divergence survives the CLI going
+# stable rather than ending with it.
 #
 # Only the PRE-RELEASE part diverges. The x.y.z stays the CLI's, so the
 # two products still move together and a bug report still names a number
 # that means something. Bump GUI_STAGE, not the number, as the app firms
-# up; when it is genuinely beta this becomes beta.N and the filenames
-# follow with no other edit.
-GUI_STAGE=alpha.4
+# up.
+#
+# alpha.1 .. alpha.4, then beta.1 at 1.6.0 (17 Sep 2026). The count
+# RESTARTS at a stage change, as the CLI's own beta series restarted per
+# version: an alpha.4 followed by a beta.5 would claim four betas that
+# never existed. The day the app is no longer a beta, GUI_STAGE goes
+# empty and the `case` below is what stops the filename saying nothing.
+GUI_STAGE=beta.1
 VERSION="${CLI_VERSION%%-*}-$GUI_STAGE"
 
 # The stage in the filename, exactly once. $VERSION now always carries one,
@@ -541,13 +548,15 @@ parfast protects a set of files with PAR2 recovery data, checks a set
 you already have, and repairs one that has lost or damaged files. It is
 the desktop app over the same engine as the parfast command line tool.
 
-THIS IS A PRIVATE ALPHA. The app is early: it has been built, tested
-against a measured acceptance corpus and screenshotted, but it has not
-been lived with. Expect rough edges, and please say how you got on -
-hearing that it worked is as useful as hearing that it did not.
+THIS IS A BETA. The app has been built, tested against a measured
+acceptance corpus and screenshotted, and driven by hand, but it is
+younger than the engine inside it. Expect the odd rough edge, and
+please say how you got on - hearing that it worked is as useful as
+hearing that it did not.
 
 The ENGINE underneath is the same one the parfast command line tool
-ships, which is further along; it is the app around it that is new.
+ships, and that one is a full release; it is the app around it that is
+newer.
 
 Repairing rewrites files in place, which is what repairing is. Keep a
 copy of anything you cannot lose, the same as with any other such tool.

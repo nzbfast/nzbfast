@@ -232,17 +232,48 @@ where
 /// stored. Rows are append-only per release (a later batch that
 /// reveals lower part numbers just adds keys - the old ones still
 /// belong to this release and still join).
+///
+/// Returns the number of keys this call actually wrote, which is what
+/// [`msgid_map_backfill_slice`] accumulates to report its own advance.
+/// `INSERT OR IGNORE` makes a repeat harmless AND makes it count zero,
+/// so the figure is keys added and not keys offered.
 pub(super) fn msgid_map_insert<'a>(
     db: &Connection,
     rid: i64,
     msgids: impl Iterator<Item = &'a str>,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<u64> {
     let mut ins =
         db.prepare_cached("INSERT OR IGNORE INTO msgid_map(h, release_id) VALUES(?1, ?2)")?;
+    let mut wrote = 0u64;
     for m in msgids.take(MSGID_KEYS_PER_FILE) {
-        ins.execute(rusqlite::params![msgid_hash(m), rid])?;
+        wrote += ins.execute(rusqlite::params![msgid_hash(m), rid])? as u64;
     }
-    Ok(())
+    Ok(wrote)
+}
+
+/// What one slice of the retroactive `msgid_map` fill did.
+///
+/// `complete` is the caught-up contract both callers' loops break on -
+/// true when the fill is finished or cannot proceed, false while rows
+/// remain. `inserted` and `cursor` are what the slice itself observed,
+/// and they exist so a caller can describe the advance WITHOUT counting
+/// the table: see [`Index::msgid_map_progress`] for what that costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsgidFillSlice {
+    /// Nothing left to fill (or nothing that can be filled).
+    pub complete: bool,
+    /// Keys this slice wrote, counted at the insert rather than
+    /// inferred from a before/after `count(*)` difference. The
+    /// difference was never this slice's own figure: the daemon's index
+    /// write mutex does not exclude the deepen and gapfill legs, which
+    /// ingest on their own `open_scratch` connection and write
+    /// `msgid_map` rows of their own, so a concurrent leg's inserts
+    /// landed in this slice's log line.
+    pub inserted: u64,
+    /// The `files` rowid the cursor reached, from the kv row this slice
+    /// wrote (so: where the NEXT slice resumes). Zero when the slice did
+    /// no work.
+    pub cursor: i64,
 }
 
 /// Retroactive `msgid_map` fill for files rows written before the
@@ -251,11 +282,11 @@ pub(super) fn msgid_map_insert<'a>(
 /// reasons (a one-shot UPDATE loses the write lock to a live scanner
 /// and an unbounded loop stalls every daemon start).
 pub(super) fn msgid_map_backfill(db: &mut Connection) {
-    msgid_map_backfill_slice(db, std::time::Duration::from_secs(2));
+    let _ = msgid_map_backfill_slice(db, std::time::Duration::from_secs(2));
 }
 
-/// One time-bounded slice of the retroactive fill. Returns true when
-/// the fill is COMPLETE (or cannot proceed), false while rows remain.
+/// One time-bounded slice of the retroactive fill. See
+/// [`MsgidFillSlice`] for what it reports.
 ///
 /// Why this is a per-lap leg and not only an open-time one (measured
 /// 2 Sep 2026, research/LIVE-INDEX-CENSUS-2026-09-02.md): the open-time
@@ -267,17 +298,26 @@ pub(super) fn msgid_map_backfill(db: &mut Connection) {
 /// because of the quorum rule but because the ids were unlisted. The
 /// maintenance slice now loops this the way it loops the folds; the
 /// 2 s open-time call is kept so a small index still finishes at once.
-pub(super) fn msgid_map_backfill_slice(db: &mut Connection, budget: std::time::Duration) -> bool {
+pub(super) fn msgid_map_backfill_slice(
+    db: &mut Connection,
+    budget: std::time::Duration,
+) -> MsgidFillSlice {
     let done: Option<String> = db
         .query_row("SELECT v FROM kv WHERE k='msgid_map_fill'", [], |r| {
             r.get(0)
         })
         .ok();
     if done.as_deref() == Some("1") {
-        return true;
+        return MsgidFillSlice {
+            complete: true,
+            inserted: 0,
+            cursor: 0,
+        };
     }
     let deadline = std::time::Instant::now() + budget;
     let mut complete = false;
+    let mut inserted = 0u64;
+    let mut cursor_at = 0i64;
     let _ = (|| -> rusqlite::Result<()> {
         loop {
             // IMMEDIATE for the same reason as every cursor walk here:
@@ -315,7 +355,8 @@ pub(super) fn msgid_map_backfill_slice(db: &mut Connection, budget: std::time::D
                 // Serialized from a BTreeMap so already ascending, but
                 // the sort is cheap insurance against a hand-edited row.
                 parsed.sort_by_key(|(n, _, _)| *n);
-                msgid_map_insert(&tx, *rid, parsed.iter().map(|(_, id, _)| id.as_str()))?;
+                inserted +=
+                    msgid_map_insert(&tx, *rid, parsed.iter().map(|(_, id, _)| id.as_str()))?;
             }
             tx.execute(
                 "INSERT INTO kv(k, v) VALUES('msgid_map_at', ?1)
@@ -323,25 +364,69 @@ pub(super) fn msgid_map_backfill_slice(db: &mut Connection, budget: std::time::D
                 [last.to_string()],
             )?;
             tx.commit()?;
+            cursor_at = last;
             if std::time::Instant::now() >= deadline {
                 return Ok(());
             }
         }
     })();
-    complete
+    MsgidFillSlice {
+        complete,
+        inserted,
+        cursor: cursor_at,
+    }
 }
 
 impl Index {
     /// One budgeted slice of the retroactive `msgid_map` fill, for the
-    /// maintenance lap. True when nothing remains. See
+    /// maintenance lap. [`MsgidFillSlice::complete`] is true when
+    /// nothing remains; the other two fields are the slice's own
+    /// advance, for a caller that wants to log it. See
     /// [`msgid_map_backfill_slice`] for why the open-time call alone
     /// never finished on a real index.
-    pub fn msgid_map_backfill_slice(&mut self, budget: std::time::Duration) -> bool {
+    pub fn msgid_map_backfill_slice(&mut self, budget: std::time::Duration) -> MsgidFillSlice {
         msgid_map_backfill_slice(&mut self.db, budget)
     }
 
-    /// Progress of that fill for a log line: `(files rowid cursor,
-    /// map rows)`. Both are cheap reads.
+    /// Has the retroactive fill finished? One kv read, and the
+    /// question [`Index::msgid_map_progress`] must not be used to ask -
+    /// see its note. Same shape as
+    /// `Index::titles_unstamp_blanked`'s cheap-once-finished contract,
+    /// which the maintenance lap's other budgeted legs are written
+    /// against.
+    pub fn msgid_map_complete(&self) -> bool {
+        self.db
+            .query_row("SELECT v FROM kv WHERE k='msgid_map_fill'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+            .as_deref()
+            == Some("1")
+    }
+
+    /// Progress of that fill: `(files rowid cursor, map rows)`.
+    ///
+    /// NOT for a log line, and nothing on the maintenance lap calls this
+    /// any more - [`Index::msgid_map_backfill_slice`] reports its own
+    /// advance, which is both free and correct where the difference of
+    /// two counts was neither (see [`MsgidFillSlice::inserted`]). This
+    /// is kept for a caller that genuinely wants the table's size and
+    /// is willing to pay for it OFF the write mutex.
+    ///
+    /// The cursor is one kv read. THE COUNT IS NOT CHEAP and this
+    /// comment said it was until 17 Sep 2026: `msgid_map` is a
+    /// `WITHOUT ROWID` table, so `count(*)` walks its whole primary-key
+    /// btree, and on a live 125 GB index on a 32-core workstation that
+    /// is **123,440,076 rows and 2.5-2.8 s** from a cold read-only
+    /// handle (measured directly,
+    /// section 11c of
+    /// `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md`). Every caller
+    /// runs inside the daemon's index WRITE mutex, so the price is paid
+    /// by every queued reader; [`Index::msgid_map_complete`] is the one
+    /// to ask when all that is wanted is whether the fill is done. The
+    /// maintenance lap wrapped each of up to sixteen slices a lap in two
+    /// of these until 17 Sep 2026, which is roughly 30 s of extra
+    /// write-mutex hold a lap on an index still filling.
     pub fn msgid_map_progress(&self) -> (i64, i64) {
         let at = self
             .db
@@ -1989,7 +2074,10 @@ mod tests {
             .unwrap();
         // First slice: one chunk lands (the only row), deadline already
         // past, so it returns before discovering the table is drained.
-        assert!(!ix.msgid_map_backfill_slice(std::time::Duration::ZERO));
+        assert!(
+            !ix.msgid_map_backfill_slice(std::time::Duration::ZERO)
+                .complete
+        );
         assert_eq!(ix.find_releases_by_msgids(["bs1"]).unwrap(), vec![(rid, 1)]);
         assert_eq!(ix.kv_get("msgid_map_fill"), None);
         let (cursor, keys) = ix.msgid_map_progress();
@@ -1998,10 +2086,16 @@ mod tests {
             "progress reads the cursor and the key count"
         );
         // Second slice: nothing left, flag stamped, done.
-        assert!(ix.msgid_map_backfill_slice(std::time::Duration::ZERO));
+        assert!(
+            ix.msgid_map_backfill_slice(std::time::Duration::ZERO)
+                .complete
+        );
         assert_eq!(ix.kv_get("msgid_map_fill").as_deref(), Some("1"));
         // And once done it stays a cheap no-op that still says done.
-        assert!(ix.msgid_map_backfill_slice(std::time::Duration::from_secs(1)));
+        assert!(
+            ix.msgid_map_backfill_slice(std::time::Duration::from_secs(1))
+                .complete
+        );
         teardown(&d, ix);
     }
 
@@ -2281,6 +2375,118 @@ mod tests {
             .unwrap();
         assert_eq!(ix.repair_doubled_pre_titles(400).unwrap(), 0);
         assert_eq!(named(&ix, e).0, doubled);
+        teardown(&d, ix);
+    }
+
+    /// The completeness flag the maintenance lap must ask BEFORE it
+    /// asks for progress, and the no-op contract behind it.
+    ///
+    /// A finished fill was costing the live daemon ~1.9 s of index
+    /// WRITE-mutex hold once a lap for nothing at all: the slice read
+    /// one kv key and returned, and the two `msgid_map_progress` calls
+    /// wrapping it each counted a 123.4M-row `WITHOUT ROWID` table to
+    /// decide a log line that could not print (section 11c of
+    /// `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md`). So the two
+    /// things worth holding are that the flag answers the question at
+    /// all, and that it tracks what the slice actually did rather than
+    /// being a second, drifting copy of the rule.
+    #[test]
+    fn a_finished_msgid_fill_is_answered_by_one_kv_read() {
+        let d = dir("msgid-complete");
+        let mut ix = Index::open(&d.join("index.db")).unwrap();
+        // `Index::open` runs the open-time fill itself, and an empty
+        // files table finishes it there - which is the live daemon's
+        // state and the one the pass pays for.
+        assert!(ix.msgid_map_complete(), "open's own fill finished it");
+        // An ABSENT key is unfinished, never done. Defaulting the other
+        // way would park the fill for ever on every index that has work
+        // left, which is the failure this flag must not invent.
+        ix.db
+            .execute("DELETE FROM kv WHERE k='msgid_map_fill'", [])
+            .unwrap();
+        assert!(!ix.msgid_map_complete(), "cleared means unfinished again");
+        // One slice re-walks to the end and stamps it back...
+        assert!(
+            ix.msgid_map_backfill_slice(std::time::Duration::from_secs(1))
+                .complete,
+            "an empty files table completes in one slice"
+        );
+        assert!(ix.msgid_map_complete(), "the slice stamped it");
+        // ...and a slice past that point is the no-op the pass relies
+        // on: still true, and reached off the same one key rather than
+        // off a second, drifting copy of the rule.
+        assert!(
+            ix.msgid_map_backfill_slice(std::time::Duration::from_secs(1))
+                .complete
+        );
+        assert!(ix.msgid_map_complete());
+        teardown(&d, ix);
+    }
+
+    /// The slice reports the keys IT wrote, so the maintenance lap can
+    /// log the fill's advance without counting the table.
+    ///
+    /// Two things are held here, and the second is a correctness fix
+    /// rather than a cost one. The pass used to take the difference of
+    /// two `Index::msgid_map_progress` calls, each a `count(*)` over a
+    /// `WITHOUT ROWID` table measured at 123.4M rows and ~949 ms warm on
+    /// a live index (section 11c of
+    /// `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md`), and it took
+    /// them inside the daemon's index WRITE mutex. That mutex does not
+    /// exclude the deepen and gapfill legs, which write `msgid_map` rows
+    /// on a connection of their own - so the difference could report
+    /// another leg's inserts as this slice's. Counting at the insert
+    /// cannot: the figure comes from `INSERT OR IGNORE`'s own row count,
+    /// which is why a re-walk over already-keyed rows reports zero
+    /// rather than the keys it offered.
+    #[test]
+    fn the_slice_reports_the_keys_it_wrote_itself() {
+        let d = dir("msgid-slice-count");
+        let mut ix = Index::open(&d.join("index.db")).unwrap();
+        let a = seed(&mut ix, "5c1de9f2a7b40836x", "sc1@x");
+        let b = seed(&mut ix, "7f30bc41d8a92e65y", "sc2@x");
+        let c = seed(&mut ix, "9b24ae07c3f158daz", "sc3@x");
+        // A pre-substrate database: the rows are there, the map is not.
+        ix.db.execute("DELETE FROM msgid_map", []).unwrap();
+        ix.db
+            .execute(
+                "DELETE FROM kv WHERE k IN ('msgid_map_fill','msgid_map_at')",
+                [],
+            )
+            .unwrap();
+        let slice = ix.msgid_map_backfill_slice(std::time::Duration::from_secs(1));
+        let rows: u64 = ix
+            .db
+            .query_row("SELECT count(*) FROM msgid_map", [], |r| r.get::<_, i64>(0))
+            .unwrap() as u64;
+        assert_eq!(slice.inserted, rows, "reported count is the rows it keyed");
+        assert_eq!(slice.inserted, 3, "one key per seeded release");
+        assert!(slice.complete, "three rows fit in one chunk");
+        for (msgid, rid) in [("sc1@x", a), ("sc2@x", b), ("sc3@x", c)] {
+            assert_eq!(
+                ix.find_releases_by_msgids([msgid]).unwrap(),
+                vec![(rid, 1)],
+                "{msgid} joins its own release"
+            );
+        }
+        // Re-walk the same rows: the cursor goes back, the keys are
+        // already there, and `INSERT OR IGNORE` writes nothing - so the
+        // slice reports no advance rather than three keys of it.
+        ix.db
+            .execute(
+                "DELETE FROM kv WHERE k IN ('msgid_map_fill','msgid_map_at')",
+                [],
+            )
+            .unwrap();
+        let again = ix.msgid_map_backfill_slice(std::time::Duration::from_secs(1));
+        assert_eq!(again.inserted, 0, "nothing new was written");
+        assert!(again.complete);
+        // And the cursor it reports is where the next slice resumes.
+        assert_eq!(
+            again.cursor.to_string(),
+            ix.kv_get("msgid_map_at").unwrap_or_default(),
+            "the reported cursor is the one the slice committed"
+        );
         teardown(&d, ix);
     }
 }

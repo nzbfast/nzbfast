@@ -20,6 +20,7 @@
 //! still resolve exactly as they did.
 
 use super::{FileVerify, HASH16K_LEN, Par2File};
+use crate::disk::{Storage, detect_storage};
 use crate::md5fast::{Digest, Md5};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -1129,6 +1130,82 @@ const VERIFY_POOL_BYTES: usize = 64 << 20;
 /// malformed or accidental request into a thread-exhaustion panic.
 #[doc(hidden)]
 pub const VERIFY_MAX_WORKERS: usize = 64;
+/// Hash lanes a NETWORK filesystem gets, whatever the machine could run.
+///
+/// Every lane `pread`s the ONE descriptor opened for the member (the comment
+/// above `verify_range` says why), so the lane count is the number of streams
+/// interleaved on a single readahead state. A page cache shrugs that off; a
+/// network client's prefetcher need not, and the macOS SMB client does not.
+///
+/// Measured 17 Sep 2026 on a wired 10Gbase-T link to a Synology over SMB,
+/// cached mount, shipped 64 KiB read pattern, 256 MiB never-read regions,
+/// min/min with an A/A pair at every rung
+/// (`research/VERIFY-SLICE-NETWORK-LANE-CAP-WIRED-2026-09-17.md`):
+///
+/// | lanes | 1 | 2 | 4 | 6 | 8 | 12 (shipped) |
+/// |---|---|---|---|---|---|---|
+/// | MB/s | 583-592 | 664-749 | 607-616 | 472-497 | 442-452 | **328-336** |
+///
+/// Twelve lanes is the worst rung on the table and 4 is 80.5 and 87.8% faster
+/// in wall, two sittings, against A/A floors of 1.7 and 15.9%. Six is already
+/// 22.1 and 30.5% worse than four, RESOLVED both times, which is what makes
+/// the cap FOUR rather than a rounder eight. Four lanes also matches TWELVE
+/// LANES COALESCED to 512 KiB (2.0% and 0.9% apart, inside the floor) for no
+/// buffers at all, where that coalescing costs +5.2 MB at twelve lanes and
+/// +28 MB at sixty-four - which is why this is a lane cap and not a read-size
+/// change, and the whole of that note's sections 5 to 7a is why coalescing is
+/// refused on every other storage class.
+///
+/// IT IS GATED ON THE CLASS BECAUSE THE DESKTOP CONTROL POINTS THE OTHER WAY,
+/// per `RARFAST-BENCH-2026-09-14.md` section 24.7: warm on this box's own
+/// NVMe the same sweep is MONOTONE THE OTHER DIRECTION - 17.80 ms at one lane
+/// against 6.92 at twelve, 2.6x - so capping unconditionally would be a
+/// ~14% loss at four lanes and a 2.6x loss at one. Never widen this past
+/// `Storage::Network`.
+///
+/// FOUR RATHER THAN TWO, AND ANOTHER LANE'S WiFi ROUND SAYS TWO. That round
+/// (`verify-slice-lanecap-curve-17sep`, 6 runs a rung, no per-rung A/A) reads
+/// 4 lanes as already a 16.9% loss; this one (32 samples a rung, an A/A pair
+/// at every rung, RTT 0.38 ms rather than ~15) reads 1, 2 and 4 as level and
+/// 6 as the first resolved loss, and of its four cells three favour 2 over 4
+/// and one favours 4, every one of them at or inside a floor. Neither round
+/// separates 2 from 4. Four ships because the wired instrument is the one
+/// commissioned to settle exactly this and does not reproduce the 4-lane
+/// loss, and because of the next paragraph - two lanes has no headroom; see
+/// section 2a of that note for the table and for what would overturn it.
+///
+/// FOUR IS NOT A THROUGHPUT RISK. Verify is read-plus-MD5 and MD5 runs at
+/// ~692 MB/s per core on an M1, so four lanes is ~2.7 GB/s of hashing against
+/// the 1.25 GB/s a 10Gbase-T link can deliver: the cap binds on the reads,
+/// never on the hash. Past ~25 GbE that reasoning runs out and this constant
+/// wants re-measuring rather than nudging.
+///
+/// STATED LIMIT: ONE PROTOCOL. Every figure above is SMB. `Storage::Network`
+/// also covers NFS, AFP, WebDAV, 9P and FUSE on Apple, and a FUSE or 9P mount
+/// fast enough to behave like local storage is the case this cap could cost -
+/// bounded by the ~14% the desktop control measured, against a ~80% win on
+/// the one protocol tested. None of them is measured and all of them are
+/// capped; that is deliberate, and it is the narrowest cell left.
+///
+/// APPLE ONLY, and that is the 17 Sep Linux cell's doing rather than caution.
+/// A Linux `cifs` client against the SAME server, share and harness loses
+/// 9.1% from one lane to eight where macOS loses 51% from one to twelve, and
+/// coalescing is a slight LOSS there at every lane count
+/// (`research/nzbfast-vslice-2026-09-17/linux-cifs-client.log`). So the
+/// thrash is a property of one client's prefetcher and not of
+/// `verify_blocks_path_parallel`'s design, and the cap is scoped to the
+/// client that has it. The commonest verify-over-a-mount case there is - a
+/// headless Linux box or a NAS reading its own shares - shows none of it and
+/// keeps all its lanes.
+#[cfg(target_vendor = "apple")]
+const VERIFY_NETWORK_WORKERS: Option<usize> = Some(4);
+
+/// No cap off Apple: see the Apple arm above for the Linux `cifs` measurement
+/// that scopes this. `None` rather than `Some(64)` so the absence is a
+/// deliberate state a reader can see, not a ceiling that happens not to bind.
+#[cfg(not(target_vendor = "apple"))]
+const VERIFY_NETWORK_WORKERS: Option<usize> = None;
+
 /// How many inner hash lanes each OUTER verify worker gets, given the
 /// members it will claim biggest-first.
 ///
@@ -1219,7 +1296,7 @@ const VERIFY_PAR_MIN_BYTES: u64 = 8 << 20;
 const VERIFY_PAR_MIN_BYTES: u64 = 64 << 10;
 
 fn verify_blocks_path_parallel(
-    _path: &Path,
+    path: &Path,
     _source: &File,
     file: &Par2File,
     block_size: u64,
@@ -1243,11 +1320,86 @@ fn verify_blocks_path_parallel(
     // research/PAR2-TWO-LANES-COMPARED-2026-09-03.md. Its number came from a
     // single-threaded in-library harness; the ranges above already spread the
     // reads over up to 64 lanes, which is what hides the syscall count.
-    // Worth revisiting ONLY on high-latency storage (a NAS or network mount),
-    // where a pread is a round trip rather than a page-cache hit and neither
-    // box on this fleet can see the difference.
+    //
+    // THE HIGH-LATENCY CASE THIS COMMENT USED TO LEAVE OPEN IS MEASURED
+    // (research/VERIFY-SLICE-READ-HIGH-LATENCY-2026-09-17.md). On LOCAL
+    // storage it is answered no; ON A NETWORK MOUNT IT IS NOT, and that
+    // exception is stated at the end of this comment rather than here,
+    // because it is about the LANE COUNT as much as about the reads.
+    //
+    // Local first, on the fleet's twelve-spindle RAID6 NAS (the box the
+    // original wording said did not exist). Cold on that array the
+    // coalescing arm is INSIDE its own
+    // A/A floor at every lane count from 1 to 64, and warm it is a 78 to 101%
+    // LOSS - 12 lanes x 512 KiB is 6 MB of buffer against a 6 MB L3, and the
+    // loop reads each chunk straight back out to hash it. Eight times fewer
+    // syscalls and MORE system time, which is the whole finding: the call
+    // count is not the cost. `parfast v` on the default tier really does issue
+    // one read per slice there (33,950 by /proc/<pid>/io syscr over a 2 GiB
+    // member), and the read is 18.3% of that phase's CPU cold - the largest
+    // read share measured anywhere in this family - and the wall still does
+    // not move.
+    //
+    // WHAT MAKES IT SO is READAHEAD, not the storage: with the kernel's
+    // per-fd readahead switched off, the same arm wins 82% at one lane and
+    // 66% at twelve, worth 433-445 microseconds a call. Coalescing merges
+    // consecutive proved slices and readahead merges consecutive reads - the
+    // same optimisation, and the kernel gets there first with no per-lane
+    // buffer to pay for. Sharing one fd across the lanes does not defeat it.
+    // AND A NETWORK MOUNT IS THE EXCEPTION, measured the same day on a
+    // guest SMB share over WiFi. THE SHIPPED CONFIGURATION IS THE ONLY ONE
+    // THAT LOSES THROUGHPUT THERE: one lane reads 95 MB/s, four read 89,
+    // and TWELVE - what `bounded_verify_workers` picks on any ordinary
+    // machine - read 61-63, while twelve lanes WITH coalescing read 89-94.
+    // Coalescing is -32.8% and -32.0% of wall in two sittings against A/A
+    // floors of 4.7% and 4.3%; at one and four lanes the arms are level.
+    // The cause is the shared fd a few lines below: twelve interleaved
+    // streams on one descriptor defeat the macOS SMB client's readahead,
+    // where the Linux page cache shrugs it off (cold at 64 lanes is 770 ms
+    // against 753 at one).
+    //
+    // THAT DID NOT LICENCE COALESCING AND STILL DOES NOT - THE FANOUT WAS
+    // THE FAULT, AND IT IS CAPPED. The three cells that question was left
+    // open on were taken on 17 Sep 2026 over a WIRED 10Gbase-T link to the
+    // same NAS, RTT 0.38 ms against the WiFi round's ~15
+    // (`research/VERIFY-SLICE-NETWORK-LANE-CAP-WIRED-2026-09-17.md`). The
+    // wired curve reproduces the WiFi SHAPE with the resolution the WiFi
+    // round lacked and NAMES the cap at FOUR: twelve lanes is the worst rung
+    // on the table at 328-336 MB/s, four reads 607-616, and SIX is already
+    // 22.1 and 30.5% worse than four with A/A floors of 1.7 and 15.9%. Four
+    // lanes matches twelve lanes COALESCED to within 2.0 and 0.9%, inside
+    // those floors, for none of the +5.2 MB of buffers the coalescing costs -
+    // so the cheap fix is not merely sufficient, it is the whole of the win.
+    // The desktop control ran the same sweep warm on this box's own NVMe and
+    // is MONOTONE THE OTHER WAY (17.80 ms at one lane, 6.92 at twelve), which
+    // is why the cap hangs on `Storage::Network` via `detect_storage` and
+    // must never be widened - see `VERIFY_NETWORK_WORKERS`, which carries the
+    // table and the arithmetic that says four lanes still outruns a 10 GbE
+    // link. IT IS ALSO APPLE-ONLY, because the second client answered: a
+    // Linux `cifs` mount of the same share loses 9.1% from one lane to eight
+    // where macOS loses 51% from one to twelve, and coalescing is a slight
+    // loss there too, so the thrash is one prefetcher's and not this
+    // function's shape.
+    //
+    // AND THE SPARSE SHAPE - a partially proved member, where the skip above
+    // leaves holes between proved runs - IS THE CASE THAT CONFIRMS THIS MOST
+    // STRONGLY, not the corner that might overturn it. It looked like
+    // coalescing's best case, because holes are what stop readahead being
+    // free; it is its worst. Coalescing costs +295 to +315% of COLD WALL at
+    // 87.5% and 75% proved (three sittings, A/A floors 8.5-24.5%), and
+    // `read_bytes` says why: at 87.5% proved the shipped 64 KiB arm pulls
+    // the WHOLE member off the array, holes included, and finishes in
+    // 1,375 ms, while the 512 KiB arm pulls 11% FEWER bytes and takes
+    // 5,548 ms. Reading more bytes sequentially beats reading fewer with
+    // gaps. It is a cliff and not a gradient - flat from 64 to 256 KiB, then
+    // 3.6x at 512 - so a smaller cap would not rescue it either.
     let chunk_buf = bs.min(VERIFY_CHUNK);
     let workers = bounded_verify_workers(threads, proven_blocks, chunk_buf);
+    // The fanout is the thing a network client pays for, so it is capped
+    // HERE and not inside `bounded_verify_workers`, whose job is the
+    // machine's own limits. `detect_storage` memoises on the device id, so
+    // this is one `statfs` per device and not one per member.
+    let workers = storage_capped_workers(workers, detect_storage(path));
     let (per, raw_ranges) = raw_range_geometry(diagnostic_blocks, workers);
     let balanced = (proven_blocks < diagnostic_blocks)
         .then(|| balanced_proven_ranges(&file.blocks[..diagnostic_blocks], workers, proven_blocks))
@@ -1485,6 +1637,26 @@ fn diagnostic_block_count(blocks: &[BlockCheck]) -> usize {
         .iter()
         .rposition(BlockCheck::is_proven)
         .map_or(0, |index| index + 1)
+}
+
+/// Clamp a resolved lane count to what the storage class will tolerate.
+///
+/// Split out from [`bounded_verify_workers`] rather than folded into it so
+/// the network arm can be pinned by a unit test without a mount: the class is
+/// the argument, and no test has to find a NAS to assert the rule.
+/// [`VERIFY_NETWORK_WORKERS`] carries the measurement and the stated limits.
+fn storage_capped_workers(workers: usize, class: Storage) -> usize {
+    capped_workers(workers, class, VERIFY_NETWORK_WORKERS)
+}
+
+/// The rule itself, with the cap passed IN rather than read off the cfg'd
+/// constant, so a unit test exercises both arms on every platform instead of
+/// asserting whichever one this build happens to compile.
+fn capped_workers(workers: usize, class: Storage, cap: Option<usize>) -> usize {
+    match cap {
+        Some(cap) if class == Storage::Network => workers.min(cap),
+        _ => workers,
+    }
 }
 
 /// Resolve a caller's worker hint without ever permitting zero lanes or a
@@ -1855,6 +2027,55 @@ mod worker_bound_tests {
                 );
                 assert!(plan.len() <= sizes.len());
             }
+        }
+    }
+
+    /// The network arm of the lane cap, pinned without a mount.
+    ///
+    /// The cap exists because twelve lanes on ONE shared descriptor read
+    /// 328-336 MB/s over SMB where four read 607-616 - see
+    /// [`VERIFY_NETWORK_WORKERS`], which carries the wired measurement, the
+    /// desktop control that points the OTHER way, and the one-client limit.
+    /// Two halves are asserted here and both matter: that `Network` clamps,
+    /// and that NOTHING ELSE DOES. The desktop control makes the second half
+    /// the load-bearing one - warm local storage wants MORE lanes, 2.6x from
+    /// one to twelve - so a later edit that widened this past `Network` would
+    /// be a measured regression on every ordinary machine, and this is what
+    /// refuses it.
+    #[test]
+    fn the_lane_cap_is_the_network_class_and_only_the_network_class() {
+        // Both arms, on every platform, through the cap-taking form.
+        assert_eq!(capped_workers(12, Storage::Network, Some(4)), 4);
+        assert_eq!(
+            capped_workers(VERIFY_MAX_WORKERS, Storage::Network, Some(4)),
+            4
+        );
+        // A clamp, never a floor: a machine that already runs fewer lanes
+        // than the cap keeps its own smaller number.
+        assert_eq!(capped_workers(2, Storage::Network, Some(4)), 2);
+        // Zero lanes means "nothing to verify" and must survive the clamp;
+        // `bounded_verify_workers` returns it when there are no blocks.
+        assert_eq!(capped_workers(0, Storage::Network, Some(4)), 0);
+        // No cap configured is the Linux arm: the fanout stays whole.
+        assert_eq!(
+            capped_workers(VERIFY_MAX_WORKERS, Storage::Network, None),
+            VERIFY_MAX_WORKERS
+        );
+        for class in [Storage::Solid, Storage::Rotational, Storage::Unknown] {
+            assert_eq!(
+                capped_workers(VERIFY_MAX_WORKERS, class, Some(4)),
+                VERIFY_MAX_WORKERS,
+                "{class:?} must be untouched - the desktop control says more \
+                 lanes is FASTER there and capping it is a measured loss"
+            );
+        }
+        // And the shipped wiring reads the cfg'd constant, which is Some only
+        // on Apple - the platform the thrash was measured on.
+        let shipped = storage_capped_workers(VERIFY_MAX_WORKERS, Storage::Network);
+        if cfg!(target_vendor = "apple") {
+            assert_eq!(shipped, 4);
+        } else {
+            assert_eq!(shipped, VERIFY_MAX_WORKERS);
         }
     }
 

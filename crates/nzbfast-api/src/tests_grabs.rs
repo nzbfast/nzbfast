@@ -481,6 +481,14 @@ fn a_secret_setting_never_travels_in_the_request_line() {
     );
 }
 
+/// RECONCILED with 78ba0bd12, which landed the counting half nine
+/// seconds ahead of this lane's claim on the same file - two lanes, one
+/// box, neither seeing the other. That version said in its own docstring
+/// what it did not catch: "counting a POST cannot assert the absence of
+/// a sibling GET". Arm one below is that assertion, so the two are one
+/// test rather than a better and a worse; the wording of the counting
+/// half is largely theirs and kept.
+///
 /// 27 Aug sweep finding 1: a bulk selection's id list is 250 ids a
 /// Show more page (~7 KB), so one page past the first 414s on the
 /// request line. Every multi-id queue/history op goes up in a JSON
@@ -489,20 +497,330 @@ fn a_secret_setting_never_travels_in_the_request_line() {
 /// Source-level like its neighbours above, and for the same reason:
 /// the property is which channel a call takes, and the call is one
 /// line.
+///
+/// TWO ARMS, AND THE FIRST ONE IS THE PROPERTY. This test pinned six
+/// POST spellings with `contains` until 17 Sep 2026, and a pinned-
+/// spelling check of any kind - `contains` OR a count - cannot see the
+/// regression it is named for. Measured rather than reasoned: with the
+/// six spellings counted `assert_eq!(.., 1)`, adding a SEVENTH call site
+/// that puts an id list back on the request line passed all six arms,
+/// six times out of six, because each pinned spelling is still there
+/// exactly once. A positive assertion about the calls that are right can
+/// never prove the absence of one that is wrong.
+///
+/// So arm one is negative space: EVERY `ids.join(` in the page must sit
+/// inside an `apiPost(`. That is the house idiom for a bulk selection -
+/// all six sites use it and nothing else in the page does (the wider
+/// `.join(',')` population is config keys, localStorage and render
+/// signatures, which is why the net is this exact string and not that
+/// one). A new bulk op added tomorrow is caught whatever its spelling.
+/// STATED LIMIT: a bulk op that names its list something other than
+/// `ids` slips it. That is a real hole and it is written here rather
+/// than papered over - widen the net when one appears, do not add a
+/// baseline.
+///
+/// Arm two keeps the six spellings, now counted exactly once. It is a
+/// roster rather than the guard: it catches a call site REMOVED or
+/// renamed (which arm one cannot - no site, no `ids.join(` to check) and
+/// a pinned call migrating INTO a comment, which matters more in this
+/// page than in most because its comments quote code constantly.
+///
+/// FIFTEEN MUTANTS, all run against `web/dashboard.html` rather than
+/// reasoned about, and the shape of this test changed twice because of
+/// what they said:
+///
+///   * each of the six call sites moved back onto the request line, and
+///     each of the six duplicated by a request-line copy with the pinned
+///     spelling left intact - 12 arms, all caught. Under `contains` six
+///     of those twelve passed; under counting alone, the same six.
+///   * a SEVENTH request-line site added beside six untouched pinned
+///     ones. This is the one that matters: it passed six of six under
+///     counting, and it is what arm one exists for.
+///   * a bare `'?v='+ids.join(',')` one line under an existing
+///     `apiPost(`. This PASSED the first draft, which walked back 300
+///     bytes and so attributed the id list to a call that was merely
+///     nearby. That false pass is why the window is the LINE.
+///   * a call site deleted outright, which arm one cannot inspect (no
+///     `ids.join(` left) - caught by the site floor below.
 #[cfg(feature = "dashboard")]
 #[test]
 fn a_bulk_selection_never_travels_in_the_request_line() {
     let src = DASHBOARD_HTML;
+
+    // Arm one: the channel every bulk id list actually takes.
+    let mut seen = 0usize;
+    for (at, _) in src.match_indices("ids.join(") {
+        seen += 1;
+        // THE WINDOW IS THE LINE, and that is a fix rather than a
+        // simplification. A byte window back from the match attributes an
+        // id list to whatever call happened to be NEAR it: a bare
+        // `'?v='+ids.join(',')` added one line under an existing
+        // `apiPost(` read as going through that call, and the mutant for
+        // it passed. All six real sites open their call on the same line
+        // as the join. A legitimately multi-line call would read as
+        // unattributable and fail - which is the right way round, because
+        // that is this test telling you it can no longer see, not telling
+        // you the page is clean.
+        let bol = src[..at].rfind('\n').map_or(0, |i| i + 1);
+        let head = &src[bol..at];
+        // `api(` cannot match inside `apiPost(` - the paren is part of
+        // the needle - so the later of the two openers is the call this
+        // id list is actually an argument to.
+        let post = head.rfind("apiPost(");
+        let line = head.rfind("api(");
+        let line_no = src[..at].matches('\n').count() + 1;
+        let through_post = match (post, line) {
+            (Some(p), Some(l)) => p > l,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if through_post {
+            continue;
+        }
+        // Failing to find is failing: an `ids.join(` this cannot
+        // attribute to either door is this test going blind, which is the
+        // state every rubber-stamp starts from. Never widen the window to
+        // make it pass - find out what shape the call grew.
+        assert!(
+            line.is_some(),
+            "dashboard.html:{line_no}: an `ids.join(` that belongs to \
+             neither api() nor apiPost() on its own line. The call shape \
+             changed; fix this test's reach, never its verdict."
+        );
+        panic!(
+            "dashboard.html:{line_no}: a bulk id list is going up on the \
+             REQUEST LINE through api(). A Show more page is 250 ids \
+             (~7 KB) and the line 414s - it belongs in a JSON POST body \
+             through apiPost(), which `merge_body_params` reads."
+        );
+    }
+    assert!(
+        seen >= 6,
+        "only {seen} `ids.join(` site(s) reached - the page's bulk ops are \
+         supposed to be at least six, so this test is looking at the wrong \
+         thing rather than reporting a clean page"
+    );
+
+    // Arm two: the roster, which arm one cannot supply.
     for call in [
         "await apiPost('queue',{name:op, value:ids.join(',')})",
         "await apiPost('queue',{name:'priority', value:ids.join(','), value2:String(v)})",
         "await apiPost('queue',{name:'delete', value:ids.join(',')})",
         "await apiPost('history',{name:'delete', value:ids.join(',')})",
         "await apiPost('history',{name:'delete', value:ids.join(','), del_files:'1'})",
+        "await apiPost('queue',{name:'delete', value:ids.join(','), del_files:'1'})",
     ] {
+        assert_eq!(
+            src.matches(call).count(),
+            1,
+            "a bulk op is no longer in the page exactly once - removed, \
+             renamed, or a second copy grew beside it: {call}"
+        );
+    }
+}
+
+/// GH #86: KEEP IS THE DEFAULT, and this is what holds it there.
+///
+/// The reporter asked to BE ABLE to delete the files on a cancel, not
+/// for cancelling to start deleting them - so every route out of the
+/// queue that a user takes without stopping to read must still post no
+/// `del_files`: the row's own ✕ / stop (`qOp`), the selection bar's
+/// ✕ Remove, and Clear queue. `clear_queue_empties_every_row_and_counts_them`
+/// asserts the daemon end of the same promise with a directory it must
+/// not remove; this asserts the call, which is where a well-meant
+/// "make cancel tidy up after itself" would land.
+///
+/// Source-level, like its neighbours: the property is what a call
+/// carries, and each one is a single line.
+///
+/// EXACTLY ONCE, not `contains`, and the difference is the whole guard.
+/// A presence check answers "this spelling is somewhere in the file",
+/// which a SECOND copy satisfies just as well as the first: add a
+/// del_files variant beside one of these and leave the pinned line
+/// sitting there as dead code, and a `contains` arm passes over a page
+/// whose button now deletes the user's files. This page is also densely
+/// commented and its comments quote code, so a call that moved into a
+/// comment satisfies `contains` too. Counting says which of those
+/// happened. (Each of these appears once today - verified - so the count
+/// is a ratchet rather than a new claim.)
+///
+/// All four arms were negative-controlled on 17 Sep 2026 by mutating the
+/// page rather than by reading it: each of the three call sites was given
+/// the `del_files` a well-meant "make cancel tidy up after itself" would
+/// add, and each failed ALONE, naming its own call. An assertion nobody
+/// has watched fail is a claim about a test, not a test.
+///
+/// ## The second arm, and why it arrived (GH #86, 17 Sep 2026)
+///
+/// The grace window took the blocking `confirm()` off all three of these
+/// routes: the daemon keeps a cancelled row's spooled `.nzb` for
+/// `CANCEL_UNDO_SECS` now, so the toast that says what happened carries
+/// an Undo that puts the whole batch back. The three CALLS did not move -
+/// the undo is a separate `name=undelete` request, so the first arm above
+/// is unchanged and this test did not go red for the change.
+///
+/// That is exactly why the second arm is here. The dialogs were what
+/// stood between a mis-click and an irreversible action, and the undo is
+/// what replaced them; a later edit that drops `qUndoAct(j)` off one of
+/// these toasts would leave that route a silent, dialog-free,
+/// irreversible cancel - strictly worse than the state before this
+/// change, and invisible to every other test in the repo, because the
+/// handler still parses, still resolves every name and still removes the
+/// row. So the pairing is pinned: each route keeps its no-`del_files`
+/// call AND keeps the way back on the sentence that announces it.
+#[cfg(feature = "dashboard")]
+#[test]
+fn the_quick_ways_out_of_the_queue_still_keep_the_files() {
+    let src = DASHBOARD_HTML;
+    for call in [
+        // The per-row ✕ and the stop button behind it.
+        "await api('queue',`&name=${name}&value=${id}`)",
+        // The selection bar's ✕ Remove.
+        "await apiPost('queue',{name:'delete', value:ids.join(',')})",
+        // Clear queue.
+        "mustOk(await api('queue','&name=delete&value=all'))",
+    ] {
+        assert_eq!(
+            src.matches(call).count(),
+            1,
+            "a keep-the-files route is no longer in the page exactly once - it \
+             changed shape, or a second copy grew beside it. Check neither one \
+             carries a del_files: {call}"
+        );
+    }
+
+    // Arm two: and every toast those routes end on offers the way back.
+    // Four, not three, because `stopJob` replaces `qOp`'s toast with its
+    // own and so has to carry the affordance a second time - a toast that
+    // announces a cancel and cannot reverse it is the case this counts.
+    // `, qUndoAct(j))` and not the bare name: the declaration matches the
+    // bare name too, so a page that kept the helper and dropped every
+    // call would count 1 and read as "one route lost it".
+    assert_eq!(
+        src.matches(", qUndoAct(j))").count(),
+        4,
+        "a cancel route lost its Undo. With the confirm() gone from all \
+         three (GH #86), a toast without it is an irreversible action \
+         behind no dialog at all - fix the toast, never this count"
+    );
+    assert!(
+        src.contains("function qUndoAct(j){"),
+        "the one place that reads the daemon's undo token is gone"
+    );
+    // It must not invent one either: an absent `undo` key is the daemon
+    // saying there is NO window (the files half was asked for, or a row's
+    // copy could not be held), and a page that offered one anyway would
+    // show a button that always refuses.
+    assert!(
+        src.contains("if(!u || !u.token) return null;"),
+        "qUndoAct no longer stands down when the daemon offered no window"
+    );
+}
+
+/// The history half of the pairing above, and the same reason for
+/// existing.
+///
+/// GH #86 took the blocking `confirm()` off the three plain history
+/// deletes - the header's Clear completed and Clear failed, and the
+/// selection bar's ✕ Remove - because the daemon now holds each removed
+/// row's spooled `.nzb` for `CANCEL_UNDO_SECS` and the toast carries an
+/// Undo that puts the whole batch back where it was. The per-row ✕ never
+/// had a dialog and gained the same affordance.
+///
+/// So there are two ways a later edit breaks this, and neither one is
+/// visible to any other test in the repo, because the handler keeps
+/// parsing, keeps resolving every name and keeps removing the row:
+///
+/// * dropping `hUndoAct(j)` off one of those four toasts leaves that
+///   route a silent, dialog-free, irreversible delete of the only Retry
+///   handle the user has - strictly worse than the state before the
+///   change;
+/// * teaching one of them `del_files` would make it destroy the payload
+///   too, over an Undo the daemon deliberately does NOT offer on that
+///   arm (the removal can be refused, so "it is as it was" is not
+///   something the request can promise when it answers).
+///
+/// AND THE CARVE-OUT IS PINNED TOO. The two routes that DO ask for the
+/// files keep their dialogs, exactly as the queue's refetch arms kept
+/// theirs: no undo can give a deleted payload back, so the sentence that
+/// says "this cannot be undone" is still the only thing standing there.
+/// A future tidy-up that retired those two on the strength of "the
+/// history deletes do not ask any more" is the edit this arm refuses.
+#[cfg(feature = "dashboard")]
+#[test]
+fn the_quick_ways_out_of_the_history_still_keep_the_files() {
+    let src = DASHBOARD_HTML;
+    for call in [
+        // The per-row ✕, the context menu and the workflow card.
+        "await api('history',`&name=delete&value=${id}`)",
+        // Clear completed, and Clear failed.
+        "api('history','&name=delete&value=completed'+histClearSearch())",
+        "api('history','&name=delete&value=failed'+histClearSearch())",
+        // The selection bar's ✕ Remove.
+        "await apiPost('history',{name:'delete', value:ids.join(',')})",
+    ] {
+        assert_eq!(
+            src.matches(call).count(),
+            1,
+            "a keep-the-files history route is no longer in the page exactly \
+             once - it changed shape, or a second copy grew beside it. Check \
+             neither one carries a del_files: {call}"
+        );
+    }
+
+    // Arm two: and every toast those four routes end on offers the way
+    // back. `, hUndoAct(j))` and not the bare name, for the reason the
+    // queue arm gives - the declaration matches the bare name too, so a
+    // page that kept the helper and dropped every call would count 1 and
+    // read as "one route lost it".
+    assert_eq!(
+        src.matches(", hUndoAct(j))").count(),
+        4,
+        "a history delete route lost its Undo. With the confirm() gone from \
+         three of the four (GH #86), a toast without it is an irreversible \
+         delete behind no dialog at all - fix the toast, never this count"
+    );
+    assert!(
+        src.contains("function hUndoAct(j){"),
+        "the one place that reads the daemon's history undo token is gone"
+    );
+    // TWO undo doors, one per list, and each on its OWN mode. The
+    // daemon holds two stores that answer the same verb name, so a
+    // helper shared between the lists is one argument away from spending
+    // a queue token on the history arm - the daemon makes that MISS
+    // rather than half-match (`hundo` against `undo`), and this keeps
+    // the page from ever putting the question. Asserted per helper on
+    // the MODE, not on a count of call sites: a count is satisfied by
+    // two calls that both post to `queue`, which is the defect.
+    for (func, mode) in [
+        ("function hUndoAct(j){", "await api('history',"),
+        ("function qUndoAct(j){", "await api('queue',"),
+    ] {
+        let at = src
+            .find(func)
+            .unwrap_or_else(|| panic!("{func} moved or was renamed"));
+        let end = src[at..].find("\n}").map(|e| at + e).unwrap_or(src.len());
+        let body = &src[at..end];
         assert!(
-            src.contains(call),
-            "a bulk op regressed to the request line: {call}"
+            body.contains(mode) && body.contains("&name=undelete&value="),
+            "{func} no longer spends its token on its own list ({mode})"
+        );
+    }
+
+    // And the carve-out: the two routes that ask for the files keep the
+    // dialog, because no undo can answer them.
+    for (func, key) in [
+        ("async function delHistFiles(id){", "confirm.delfiles"),
+        ("async function hBulkDeleteFiles(){", "confirm.sel.hfiles"),
+    ] {
+        let at = src
+            .find(func)
+            .unwrap_or_else(|| panic!("{func} moved or was renamed"));
+        let end = src[at..].find("\n}").map(|e| at + e).unwrap_or(src.len());
+        assert!(
+            src[at..end].contains(key),
+            "{func} lost its confirm. It deletes the payload and gets NO undo \
+             token, so {key} is the only thing left in front of it"
         );
     }
 }

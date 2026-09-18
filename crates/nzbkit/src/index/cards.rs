@@ -674,6 +674,20 @@ impl Index {
             let p = bind(&mut params, Box::new(res.clone()));
             wheres.push(format!("{{}}res = {p}"));
         }
+        // GH #76: the newsgroup filter, release-level like its
+        // neighbours - so a card survives while ANY of its releases is
+        // in the group, and the representative pick and the nested
+        // release list both describe that same surviving set. Carrying
+        // it here rather than only in `browse()` is the point: the
+        // Releases surface's "Group by title" toggle runs this query
+        // instead of the flat one, and a filter that lived in only one
+        // of them would be a toggle that silently widens the answer -
+        // the shape `hide_adult` shipped broken in and this file's
+        // comments keep naming.
+        if let Some(g) = &q.group {
+            let p = bind(&mut params, Box::new(g.clone()));
+            wheres.push(format!("{{}}grp = {p}"));
+        }
         if q.complete_only {
             wheres.push("{}complete".into());
         }

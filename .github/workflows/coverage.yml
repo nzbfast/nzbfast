@@ -65,7 +65,12 @@ permissions:
   contents: read
 concurrency:
   group: coverage-${{ github.ref }}
-  cancel-in-progress: true
+  # Same reasoning as nightly.yml: only schedule and workflow_dispatch
+  # fire this workflow, so there is no PR push for an in-progress run to
+  # be superseded by. A coverage report going stale by one commit before
+  # the next scheduled run is not worth trading away a half-finished run
+  # to a hand dispatch (or a second dispatch cancelling the first).
+  cancel-in-progress: false
 jobs:
   coverage:
     if: github.repository != 'nzbfast/nzbfast'

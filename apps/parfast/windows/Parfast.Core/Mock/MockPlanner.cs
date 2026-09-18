@@ -725,6 +725,17 @@ public static class MockPlanner
             sb.Append(" --std-naming");
         }
 
+        // The pane's Overwrite tick, inverted, in `command_args`'s own position - after
+        // `--std-naming` and before `-f`. The engine's line has carried it since
+        // 17 September 2026 and this one did not, which is the same defect that commit
+        // fixed pointing the other way: a pane that protects the set and hands the user a
+        // line that would destroy it. It matters MORE here than there, because the mock
+        // is what draws the pane on a box with no library.
+        if (!spec.Overwrite)
+        {
+            sb.Append(" --no-clobber");
+        }
+
         if (spec.FirstRecoveryBlock > 0)
         {
             sb.Append(" -f").Append(spec.FirstRecoveryBlock.ToString(CultureInfo.InvariantCulture));

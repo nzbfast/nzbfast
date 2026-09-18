@@ -35,19 +35,20 @@
 ; A NUMERIC VERSION FOR THE VERSIONINFO RESOURCE, derived rather than passed.
 ; VersionInfoVersion is a Windows binary resource field and takes x.y.z[.w] and
 ; nothing else, while AppVersion is a DISPLAY string and this product's is
-; "1.5.0-beta.1" (plan decision D2, tracking the CLI). Handing the display
-; string to both stops the compile dead:
+; "1.6.0-beta.1" (plan decision D2, tracking the CLI's NUMBER while carrying a
+; stage of its own). Handing the display string to both stops the compile dead:
 ;
 ;   Error on line 43: Value of [Setup] section directive "VersionInfoVersion"
 ;   is invalid.  Compile aborted.
 ;
 ; which is where the first end-to-end run of the bundle script got to on 12 Sep
-; 2026. Everything a person reads still says 1.5.0-beta.1; only the resource
+; 2026. Everything a person reads still says 1.6.0-beta.1; only the resource
 ; field is trimmed.
 ;
 ; packaging/windows/installer.iss (the nzbfast CLI's) has the same shape and has
 ; not hit it, because that product has never cut a pre-release. It will the day
-; it does.
+; it does. The parfast CLI's bundler is NOT a third instance: it ships tarballs
+; and a zip with no installer in them at all.
 #if Pos("-", AppVersion) > 0
   #define NumericVersion Copy(AppVersion, 1, Pos("-", AppVersion) - 1)
 #else
@@ -59,12 +60,20 @@
 ; side by side, and sharing an AppId would make each one's installer uninstall
 ; the other.
 AppId={{5C1A4E93-2D7B-49F0-9E1C-8D6A3B44F7A2}
-; "parfast (alpha)" in Add or Remove Programs and on the installer's own
+; "parfast (beta)" in Add or Remove Programs and on the installer's own
 ; pages, so a tester who installed this months ago and forgot can still
 ; tell what they have. The VERSION carries the stage too
-; (1.5.0-alpha.1), but a version string is not what anybody reads in a
+; (1.6.0-beta.1), but a version string is not what anybody reads in a
 ; program list.
-AppName=parfast (alpha)
+;
+; alpha -> beta at 1.6.0 (17 Sep 2026). This is a DISPLAY name and the
+; uninstall entry is keyed on AppId above, so an existing install upgrades
+; in place and its program-list row simply re-reads - which is the whole
+; reason the stage lives here rather than in the AppId. Keep it in step
+; with GUI_STAGE in apps/parfast/packaging/build-parfast-gui-bundles.sh
+; and with `app.stage` in apps/parfast/shared/strings/en.json, which is
+; what the app's own title bar reads.
+AppName=parfast (beta)
 AppVersion={#AppVersion}
 AppPublisher=parfast
 VersionInfoVersion={#NumericVersion}

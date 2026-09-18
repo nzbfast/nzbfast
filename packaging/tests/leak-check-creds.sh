@@ -1,4 +1,11 @@
-#!/bin/zsh
+#!/usr/bin/env bash
+# bash AND NOT zsh since 17 Sep 2026: leak-check.yml has spelled
+# `bash packaging/tests/leak-check-....sh` since the job was written, so every
+# green run of this file is a bash run, while the `# Run:` line below and the
+# pre-push hook read the shebang and got zsh. preflight's interp check refuses
+# that split now; this is its fix at the site, taken in the direction that
+# leaves CI running what it has been running. Re-verified under macOS bash
+# 3.2.57 the day it changed.
 # Guard tests for leak-check.sh's credential-shape scan (TODO 63e) and
 # the public-file announcement (TODO 63d).
 #

@@ -100,7 +100,9 @@ struct RootView: View {
                 // The stage, then the ENGINE's version - which is what
                 // capabilities.version is, and it is further along than this
                 // app. Without the stage beside it the footer reads as the
-                // app's own version and says "beta" for an alpha app.
+                // app's own version, and at 1.6.0 that is a bare release
+                // number on a beta app (it was "beta" on an alpha one
+                // before; the gap moved, it did not close).
                 Text("\(S.appStage) \u{00B7} \(app.capabilities.version)")
                     .font(.system(size: 10))
                     .monospacedDigit()

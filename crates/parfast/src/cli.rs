@@ -122,6 +122,32 @@ pub struct Options {
     /// express an arbitrary one. Both are ceilings, so when both are
     /// given the tighter wins - see [`crate::create::volume_ceiling`].
     pub volume_blocks: Option<u64>,
+    /// `--no-clobber`: refuse to write over a file that is already
+    /// sitting under one of the set's own names - the index, or any of
+    /// its recovery volumes under either spelling - instead of
+    /// truncating it.
+    ///
+    /// **Off by default, and that is not an oversight.** par2cmdline
+    /// overwrites, a re-run of a create is ordinary use, and parfast is
+    /// a conformance clone: flipping the default would break every
+    /// script that re-runs a create and would diverge from the
+    /// reference on rows the table cannot see. So this is an opt-in
+    /// switch for the caller who wants the other answer - a GUI's own
+    /// no-overwrite setting, a batch job that must never destroy an
+    /// earlier set - and a bare `parfast c` behaves exactly as it
+    /// always has.
+    ///
+    /// Not a reference switch, so a long option per spec R.3, and
+    /// accepted on every command for the wrapper reason the three
+    /// long options above give: it does nothing on verify and repair,
+    /// which write no set.
+    ///
+    /// It reaches the engine as `par2gen::CreatePlan::no_clobber`,
+    /// which opens every member with `O_EXCL`. That matters more than a
+    /// check here would: a look-before-you-write answers for the
+    /// instant it looked, and two creates started together on one base
+    /// both walk through it.
+    pub no_clobber: bool,
     /// `-a`, with the reference's `.par2` suffix already appended when
     /// the switch did not carry one. NOT folded into `par2` at parse
     /// time, because the two commands resolve the pair differently:
@@ -581,6 +607,12 @@ fn apply_switch(
         // option for spec R.3's reason, accepted on every command for the
         // same wrapper reason as the two above.
         '-' if value == "digest-cache" => o.digest_cache = true,
+        // Refuse an overwrite of the set's own files (see
+        // `Options::no_clobber`). A long option for spec R.3's reason,
+        // accepted on every command for the same wrapper reason as the
+        // three above, and OFF by default because the reference
+        // overwrites and this is a drop-in.
+        '-' if value == "no-clobber" => o.no_clobber = true,
         // An explicit ceiling on one volume's recovery slice count.
         // The engine has honoured an arbitrary ceiling all along
         // (`par2gen::CreatePlan::max_blocks_per_volume`); what was

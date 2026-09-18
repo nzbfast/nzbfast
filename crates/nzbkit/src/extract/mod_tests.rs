@@ -1086,8 +1086,71 @@ fn obfuscated_uniform_store_set_streams_one_pass_any_order() {
 /// than the window demotes, correctly.
 #[test]
 fn a_set_with_neither_end_parsed_holds_then_places() {
+    both_ends_late_holds_then_places(fixtures::Rar5Head::Numberless);
+}
+
+/// The SAME shape over the other legal set head - an explicit `vint(0)`
+/// on every volume, which is what this repo's own `Rar50VolumeWriter`
+/// writes and therefore what `postfast` posts.
+///
+/// This is the system-level pin for the arithmetic gate's 16 Sep 2026
+/// head-layout fix, and it pins the thing the unit tests cannot: not
+/// that the OUTPUT is right - chain resolution produced correct output
+/// all along, which is why the defect read as a lost fast path rather
+/// than as damage - but that the ARITHMETIC path is what carries such a
+/// set. The generous-budget leg one-passes only because every volume is
+/// placeable the moment its own headers parse; with the gate deriving
+/// the head's field length from its NUMBER again, the same feed order
+/// holds the whole window and this leg demotes with "non-uniform store
+/// set" (measured by re-applying that half of the revert, 17 Sep 2026 -
+/// and the Numberless arm above stayed green, so it is the head arm
+/// specifically).
+///
+/// IT PINS ONE OF THE TWO HALVES, and that was once the fixture's
+/// limit rather than the test's: the other half was the FINAL volume's
+/// `off_base` having to match the shared one, which only bites where
+/// the final volume's header is a different size, and that happens
+/// because a real archiver stamps the member CRC32 on the last
+/// fragment ALONE. The `_crc` fixture family used to give every piece
+/// a CRC, so every header in a fixture set was the same size and
+/// re-applying that half of the revert left both arms here green
+/// (measured 17 Sep 2026), leaving
+/// `a_real_writer_stored_set_reaches_arithmetic_placement` in
+/// nzbkit-base the one test in the tree that could see it.
+///
+/// `fixtures::Rar5Crc::FinalFragment` closed that hole the same day and
+/// `uniform_store_set_head` builds on it, so a fixture set's final
+/// volume now carries the four extra header bytes a real one does. Both
+/// arms here still stay green under that revert - the feed order gets
+/// them placed either way - but four tests in this file do not:
+/// `obfuscated_uniform_store_set_streams_one_pass_any_order`,
+/// `unclosed_arithmetic_set_demotes_at_finish`,
+/// `uniform_store_set_with_odd_mid_volume_demotes_whole` and
+/// `store_set_crossing_the_volnum_vint_band_still_one_passes`. The
+/// real-writer test remains the pin over bytes `Rar50VolumeWriter`
+/// actually wrote, which is why it cannot be replaced by a fixture
+/// one.
+#[test]
+fn a_zero_numbered_set_with_neither_end_parsed_holds_then_places() {
+    both_ends_late_holds_then_places(fixtures::Rar5Head::NumberedZero);
+}
+
+/// Body of the two tests above: feed a uniform store set with BOTH ends
+/// late, under a budget above the hold window and then under one below
+/// it. Parameterised by set head so the WinRAR arm stays a control
+/// rather than being replaced by the arm the fix added.
+fn both_ends_late_holds_then_places(head: fixtures::Rar5Head) {
+    // The two callers run as separate tests in ONE process under
+    // `cargo test --lib`, and `tmpdir` keys only on tag + pid - so the
+    // tag has to carry the head or they share a scratch directory and
+    // race. Invisible to nextest, which gives every test its own
+    // process; this is the local one-process line's whole point.
+    let tag = match head {
+        fixtures::Rar5Head::NumberedZero => "head0",
+        _ => "headless",
+    };
     let inner = "late.mkv";
-    let (data, vols, names) = uniform_store_set(inner, 300_000, 44, 200_000, 31);
+    let (data, vols, names) = uniform_store_set_head(inner, 300_000, 44, 200_000, 31, head);
     // Feed order that keeps both ends late: this is the case the
     // arithmetic gate used to guess its way through.
     let mut order = shuffled_zero_last(vols.len(), 0xC0FFEE);
@@ -1097,15 +1160,15 @@ fn a_set_with_neither_end_parsed_holds_then_places() {
     order.insert(order.len() - 1, tail);
 
     // Budget above the window: one-pass, byte-exact.
-    let dir = tmpdir("arith-lateends-ok");
+    let dir = tmpdir(&format!("arith-lateends-ok-{tag}"));
     let ex = Extractor::new(&dir, vols.len(), true);
     ex.set_holds_cap(64 << 20);
     for &vi in &order {
         feed(&ex, vi, &names[vi], &vols[vi], 9000, 70 + vi as u64);
     }
     let rep = ex.finish().unwrap();
-    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
-    assert_eq!(std::fs::read(dir.join(inner)).unwrap(), data);
+    assert!(rep.fallbacks.is_empty(), "{head:?}: {:?}", rep.fallbacks);
+    assert_eq!(std::fs::read(dir.join(inner)).unwrap(), data, "{head:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 
     // Budget below it: demotes on the holds cap, and every volume
@@ -1113,7 +1176,7 @@ fn a_set_with_neither_end_parsed_holds_then_places() {
     // with it on (the default) this window pages to scratch and the
     // set one-passes instead (pinned separately below); this leg
     // keeps the demote plumbing itself honest.
-    let dir = tmpdir("arith-lateends-tight");
+    let dir = tmpdir(&format!("arith-lateends-tight-{tag}"));
     let ex = Extractor::new(&dir, vols.len(), true);
     ex.set_holds_cap(8 << 20);
     ex.set_holds_paging(false);
@@ -1125,14 +1188,14 @@ fn a_set_with_neither_end_parsed_holds_then_places() {
         rep.fallbacks
             .iter()
             .any(|(_, w)| w.contains("held-bytes cap")),
-        "{:?}",
+        "{head:?}: {:?}",
         rep.fallbacks
     );
     for (vi, vol) in vols.iter().enumerate() {
         assert_eq!(
             &std::fs::read(dir.join(&names[vi])).unwrap(),
             vol,
-            "volume {vi}"
+            "{head:?}: volume {vi}"
         );
     }
     std::fs::remove_dir_all(&dir).unwrap();
@@ -1153,7 +1216,7 @@ fn uniform_store_set_with_odd_mid_volume_demotes_whole() {
     let tail = 40_000usize;
     let total = ((dl + 1) + (n_full - 1) * dl + tail) as u64; // as declared; vol 20 lies
     let data = payload((dl + 1) + (n_full - 1) * dl + tail, 33);
-    let mut vols: Vec<Vec<u8>> = Vec::new();
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
     let mut pos = 0usize;
     for k in 0..n_full {
         let len = if k == 0 {
@@ -1163,34 +1226,34 @@ fn uniform_store_set_with_odd_mid_volume_demotes_whole() {
         } else {
             dl
         };
-        let piece = &data[pos..pos + len];
+        cuts.push((pos, pos + len));
         pos += len;
-        vols.push(fixtures::rar5_volume_n_crc(
-            &[(
+    }
+    cuts.push((pos, pos + tail));
+    let owned: Vec<Vec<(&str, u64, &[u8], bool, bool, Option<u32>)>> = cuts
+        .iter()
+        .enumerate()
+        .map(|(k, &(a, b))| {
+            vec![(
                 inner,
                 total,
-                piece,
+                &data[a..b],
                 k > 0,
-                true,
-                Some(crc32fast::hash(piece)),
-            )],
-            k as u64,
-        ));
-    }
-    vols.push(fixtures::rar5_volume_n_crc(
-        &[(
-            inner,
-            total,
-            &data[pos..pos + tail],
-            true,
-            false,
-            Some(crc32fast::hash(&data)),
-        )],
-        n_full as u64,
-    ));
-    // Every volume but the last says another follows, as an archiver
-    // stamps it - see `fixtures::rar5_seal_set`.
-    fixtures::rar5_seal_set(&mut vols);
+                k < n_full,
+                Some(crc32fast::hash(&data)),
+            )]
+        })
+        .collect();
+    let refs: Vec<&[(&str, u64, &[u8], bool, bool, Option<u32>)]> =
+        owned.iter().map(|v| v.as_slice()).collect();
+    // Numbered, each non-final volume saying another follows, and the
+    // member CRC on the final fragment alone - all three the way an
+    // archiver writes them.
+    let vols = fixtures::rar5_volume_set_crc_layout(
+        &refs,
+        fixtures::Rar5Head::Numberless,
+        fixtures::Rar5Crc::FinalFragment,
+    );
     let ex = Extractor::new(&dir, vols.len(), true);
     // Everything but the odd volume first (volume 0 late, so the
     // gate engages with provisional placements), the odd one last.
@@ -1411,7 +1474,7 @@ fn store_set_crossing_the_volnum_vint_band_still_one_passes() {
     let tail = 3_000usize;
     let total = d + 127 * (d - 1) + 3 * (d - 2) + tail;
     let data = payload(total, 39);
-    let mut vols: Vec<Vec<u8>> = Vec::new();
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
     let mut pos = 0usize;
     for k in 0..n_full {
         let len = if k == 0 {
@@ -1421,34 +1484,34 @@ fn store_set_crossing_the_volnum_vint_band_still_one_passes() {
         } else {
             d - 2
         };
-        let piece = &data[pos..pos + len];
+        cuts.push((pos, pos + len));
         pos += len;
-        vols.push(fixtures::rar5_volume_n_crc(
-            &[(
+    }
+    cuts.push((pos, data.len()));
+    let owned: Vec<Vec<(&str, u64, &[u8], bool, bool, Option<u32>)>> = cuts
+        .iter()
+        .enumerate()
+        .map(|(k, &(a, b))| {
+            vec![(
                 inner,
                 total as u64,
-                piece,
+                &data[a..b],
                 k > 0,
-                true,
-                Some(crc32fast::hash(piece)),
-            )],
-            k as u64,
-        ));
-    }
-    vols.push(fixtures::rar5_volume_n_crc(
-        &[(
-            inner,
-            total as u64,
-            &data[pos..],
-            true,
-            false,
-            Some(crc32fast::hash(&data)),
-        )],
-        n_full as u64,
-    ));
-    // Every volume but the last says another follows, as an archiver
-    // stamps it - see `fixtures::rar5_seal_set`.
-    fixtures::rar5_seal_set(&mut vols);
+                k < n_full,
+                Some(crc32fast::hash(&data)),
+            )]
+        })
+        .collect();
+    let refs: Vec<&[(&str, u64, &[u8], bool, bool, Option<u32>)]> =
+        owned.iter().map(|v| v.as_slice()).collect();
+    // Numbered, each non-final volume saying another follows, and the
+    // member CRC on the final fragment alone - all three the way an
+    // archiver writes them.
+    let vols = fixtures::rar5_volume_set_crc_layout(
+        &refs,
+        fixtures::Rar5Head::Numberless,
+        fixtures::Rar5Crc::FinalFragment,
+    );
     let names: Vec<String> = (0..vols.len()).map(|k| format!("bx{k:03}NoDot")).collect();
     let ex = Extractor::new(&dir, vols.len(), true);
     for vi in shuffled_zero_last(vols.len(), 0xBAD5EED) {
@@ -2212,6 +2275,15 @@ fn a_split_sets_crc_key_is_the_final_fragments_whole_file_value() {
     );
 
     // Part 2 ends the file, so its header carries the whole-file value.
+    //
+    // This set deliberately stays on `Rar5Crc::EveryPiece` (part 1 above
+    // is built with a fragment CRC on a piece whose `split_after` is
+    // set, which `FinalFragment` would strip). The interior fragment's
+    // checksum is the whole point: the first assertion above is a
+    // negative control over the `!split_after` guard in `chase.rs`, and
+    // with no fragment CRC anywhere in the set that control would pass
+    // whether or not the guard existed. Some writers do emit one there,
+    // and the latch has to refuse it.
     let v2 = fixtures::rar5_volume_n_crc_of(
         &[("movie.mkv", 200_000, tail, true, false, Some(whole))],
         1,
@@ -2490,11 +2562,17 @@ fn slot_group_separates_an_extracted_set_from_a_demoted_one() {
 /// same head, with obfuscated names so nothing but the headers orders
 /// the set.
 ///
-/// The arithmetic gate is the one place that does NOT treat the two
-/// heads alike, and deliberately so today: see
-/// `the_arithmetic_gate_refuses_a_set_whose_head_numbers_itself_zero` in
-/// nzbkit-base. The chain path this test exercises is what carries such
-/// a set, and it is indifferent to the distinction.
+/// The arithmetic gate was the one place that did NOT treat the two
+/// heads alike - it modelled WinRAR's geometry only and reported a
+/// contradiction on this one - and since 16 Sep 2026 it does: see
+/// `the_arithmetic_gate_places_a_set_whose_head_numbers_itself_zero` in
+/// nzbkit-base. So this test now covers BOTH paths at once, and covers
+/// the harder half of the gate's fix besides: the head is fed LAST, so
+/// while volumes 2 and 1 are all that have parsed, volume 0's
+/// volume-number field length is not observable and the gate has to
+/// SOLVE it out of the closure identity. A wrong answer there shifts
+/// every interior base by one byte, which is what the byte-exact
+/// assertion below refuses.
 #[test]
 fn a_zero_numbered_set_head_extracts_through_settle() {
     let dir = tmpdir("head0-settle");

@@ -35,6 +35,7 @@ mod deobf_tests;
 mod encrypted;
 mod evict;
 mod fold;
+mod foldpace;
 mod ingest;
 #[cfg(test)]
 mod ingest_diff_tests;
@@ -70,7 +71,9 @@ mod titles;
 
 pub use browse::*;
 pub use cards::*;
-pub use claims::{MSGID_KEYS_PER_FILE, NameClaim, NameEvidence, ProvenOutcome, msgid_set_key};
+pub use claims::{
+    MSGID_KEYS_PER_FILE, MsgidFillSlice, NameClaim, NameEvidence, ProvenOutcome, msgid_set_key,
+};
 pub use deobf::{
     CatalogRow, CollectionKey, HUNT_MIN_SLACK, HUNT_SIZE_SLACK_DIV, HUNT_TIGHT_WINDOW,
     HUNT_TIME_WINDOW, HitRank, HuntQuery, IndexerJoin, NameFromNzbError, coarsen_age_days,

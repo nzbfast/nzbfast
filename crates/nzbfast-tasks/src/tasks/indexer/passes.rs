@@ -419,6 +419,27 @@ pub(crate) async fn maintenance_slice(
     // against ~6.3M new ids a day; 40 slices of 4 s is the 160 s a lap
     // that 16 x 10 s measured clearing the 66M-id backlog at ~17M ids
     // a day, with every hold still under the HTTP waiter's bound.
+    //
+    // THAT LAST CLAUSE WAS NOT TRUE WHEN IT WAS WRITTEN, and the dial's
+    // arithmetic is not what was wrong with it. `index_fold_secs`
+    // bounded when a fold stopped TAKING work, not when it let the
+    // mutex go, so every slice ran one whole unit past its deadline -
+    // read on a live 125 GB index 16 Sep 2026, on an idle 32-core
+    // workstation, at the shipped budget of 4 s: p50 hold 4,002 ms, p90 4,108 ms, and a tail
+    // reaching 9,140 ms (research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md
+    // sections 10 and 11). The 2 Sep dial could not have seen it: it
+    // measured slice length as the gap between log lines at 1 s
+    // resolution, and the overrun is ADDITIVE - one unit, whatever the
+    // budget - so it does not scale with the slice and it hides under
+    // a second of granularity. The three folds now refuse to START a
+    // unit the time left does not cover (`nzbkit`'s
+    // `index::foldpace`), which makes the clause above true rather
+    // than making the constant wrong: NEITHER this number nor
+    // `index_fold_secs` moved, because the dial's own measurement -
+    // yield flat from 4 s to 10 s - says a shorter slice costs
+    // throughput proportionally and buys back only the part of the
+    // overrun that scales, which is not the part that crossed the
+    // bound.
     const FOLD_SLICES_PER_LAP: u32 = 40;
     for _ in 0..FOLD_SLICES_PER_LAP {
         if !ok() {
@@ -591,28 +612,75 @@ pub(crate) fn shatter_fold_pass(daemon2: &Arc<Daemon>) -> bool {
 /// One budgeted slice of the retroactive `msgid_map` fill per call.
 /// Same caught-up contract as [`shatter_fold_pass`]: true when the fill
 /// is complete, so the caller's slice loop stops early. Logs progress
-/// once per lap (on the first slice that did work) so the fill's
-/// advance is visible in the log rather than only in `kv`.
+/// on each slice that added keys, so the fill's advance is visible in
+/// the log rather than only in `kv`. (That last sentence read "once per
+/// lap (on the first slice that did work)" until 17 Sep 2026 and the
+/// code has never done that - the call is inside
+/// `MSGID_MAP_SLICES_PER_LAP`, so every slice that inserts logs. The
+/// line is harmless and the doc was what was wrong.)
+///
+/// The log line stays, and deleting it is not the fix for what follows:
+/// the open-time-only fill silently stalled at `files` rowid 18.9M for
+/// weeks and left 19.4M releases unkeyed
+/// (`research/LIVE-INDEX-CENSUS-2026-09-02.md`), and the advance being
+/// visible in the log is what caught that.
+///
+/// # What it costs to say that, and what it used to cost
+///
+/// `mode=index_holds` filed this site at **hold p50 1,898.6 ms and max
+/// 2,460.5 ms against a 1 s budget** on the live daemon, at 0.0 ms of
+/// wait - a real hold, 90-146% over. The budget was never the thing
+/// being overrun. The pass wrapped the slice in two
+/// [`Index::msgid_map_progress`] calls, each a `count(*)` over a
+/// 123.4M-row `WITHOUT ROWID` table (2.5-2.8 s cold, ~949 ms warm),
+/// held under the index WRITE mutex, purely to decide this log line.
+/// Section 11c of `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md` is
+/// the measurement.
+///
+/// 17 Sep 2026 took the FINISHED case: the fill being complete is one
+/// kv read, so a long-running daemon stopped paying for it. That left
+/// the dearer half - while the fill is still RUNNING the early-out does
+/// not fire, so up to `MSGID_MAP_SLICES_PER_LAP` = 16 slices a lap each
+/// paid two counts, roughly 30 s of extra write-mutex hold per lap
+/// during exactly the weeks a new index is being built, landing on new
+/// users and on nothing this fleet could measure.
+///
+/// Both halves are gone now. The slice reports what it did - see
+/// [`nzbkit::index::MsgidFillSlice`] - so the line is built from the
+/// keys actually inserted and the cursor actually reached, and the
+/// table is never counted. The finished-fill early-out did not need to
+/// stay here either: `msgid_map_backfill_slice`'s own first statement
+/// is that same kv read, so a complete fill still costs one read and
+/// there is no second copy of the test.
+///
+/// **The running total is deliberately not in the line any more.** It
+/// was the `count(*)`, so it was the whole price; and the cursor plus
+/// the per-slice count already show the advance, which is the thing the
+/// line exists to make visible. The total is still one query away
+/// through [`Index::msgid_map_progress`], for a caller willing to pay
+/// for it off the mutex.
+///
+/// **And the difference of two counts was never this slice's own
+/// figure.** The daemon's index write mutex does not exclude the deepen
+/// and gapfill legs, which ingest on their own `open_scratch`
+/// connection and write `msgid_map` rows, so `after - before` could
+/// attribute another leg's inserts to this slice. Counting at the
+/// insert fixes a correctness bug and not only a cost.
 pub(crate) fn msgid_map_backfill_pass(daemon2: &Arc<Daemon>) -> bool {
     const BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
-    let Some((done, before, after)) = daemon2.with_index_mut(|ix| {
-        let before = ix.msgid_map_progress();
-        let done = ix.msgid_map_backfill_slice(BUDGET);
-        Some((done, before, ix.msgid_map_progress()))
-    }) else {
+    let Some(slice) = daemon2.with_index_mut(|ix| Some(ix.msgid_map_backfill_slice(BUDGET))) else {
         return true;
     };
-    if after.1 > before.1 {
+    if slice.inserted > 0 {
         info!(
             target: "index",
-            "msgid map fill: +{} key(s) this slice, cursor at files row {}, {} keys total{}",
-            after.1 - before.1,
-            after.0,
-            after.1,
-            if done { " - complete" } else { "" }
+            "msgid map fill: +{} key(s) this slice, cursor at files row {}{}",
+            slice.inserted,
+            slice.cursor,
+            if slice.complete { " - complete" } else { "" }
         );
     }
-    done
+    slice.complete
 }
 
 /// One budgeted slice of the quality re-classification backfill per

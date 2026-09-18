@@ -144,11 +144,12 @@ pub trait ProgressSink: Send + Sync {
 
     /// WHICH ROUTE IS REPORTING - see [`RepairRoute`].
     ///
-    /// DEFAULTED, for the same reason [`slab`](Self::slab) is: a sink
-    /// that draws one bar per phase and does not place `Verify`
-    /// differently by route (`parfast`'s `Meter`, every test sink here)
-    /// is correct ignoring it. Implement it only if a band table needs
-    /// to tell a pre-fold `Verify` from a post-patch one.
+    /// DEFAULTED, like [`slab`](Self::slab) - but NOT for the same
+    /// reason, since 17 Sep 2026 narrowed that one: a sink that draws
+    /// one bar per phase and does not place `Verify` differently by
+    /// route (`parfast`'s `Meter`, every test sink here) is correct
+    /// ignoring THIS one. Implement it only if a band table needs to
+    /// tell a pre-fold `Verify` from a post-patch one.
     fn route(&self, _route: RepairRoute) {}
 
     /// WHICH SWEEP OF THE PAYLOAD IS STARTING, `index` of `of`.
@@ -162,9 +163,26 @@ pub trait ProgressSink: Send + Sync {
     /// announces `(0, 1)` once; one with no blocks to rebuild announces
     /// nothing, and `(0, 1)` is the right reading of that too.
     ///
-    /// DEFAULTED, so this is not a break: a sink that draws one bar per
-    /// phase (`parfast`'s `Meter`) or that records calls (every test
-    /// sink here) is correct ignoring it. Implement it only if a slab is
+    /// DEFAULTED, so this is not a break: a sink that RECORDS the calls
+    /// (every test sink here) is correct ignoring it.
+    ///
+    /// It named `parfast`'s `Meter` as the other such case - "a sink
+    /// that draws one bar per phase ... is correct ignoring it" - and
+    /// that was WRONG, corrected 17 Sep 2026. Drawing one bar per phase
+    /// does not excuse a caller from the frame; it only changes how the
+    /// frame is spent. Starting a phase's bar over at each sweep is not
+    /// a neutral simplification of a slabbed repair, because the
+    /// REFERENCE spans its own memory passes with one bar: par2cmdline
+    /// at `-m1` prints `Repairing:` once, 0.1% to 100.0%, strictly
+    /// monotone, over a payload it demonstrably re-read per pass
+    /// (measured, and the figures are on `parfast`'s `Meter`). A
+    /// drop-in that resets per sweep therefore reports something the
+    /// tool it replaces never reports, on fragments a queue scraper
+    /// reads. `Meter` implements this now, banding each phase's own bar
+    /// into the frame.
+    ///
+    /// So ignore it only if your caller neither DRAWS nor DERIVES a
+    /// fraction from these calls. If it does either, a slab is
     /// something your bar has to be able to say.
     ///
     /// # Why a caller that weighs the phases NEEDS this
@@ -394,6 +412,10 @@ pub struct RepairControl {
     /// control is cloned into worker closures and they all count into
     /// the same totals.
     meters: Option<Arc<[Meter; 4]>>,
+    /// THE ONE PHASE THIS VIEW MAY REPORT, if it is a narrowed one -
+    /// see [`RepairControl::reporting_only`]. `None` is a full control
+    /// and the default.
+    only: Option<RepairPhase>,
 }
 
 impl std::fmt::Debug for RepairControl {
@@ -415,6 +437,7 @@ impl RepairControl {
             sink,
             gate,
             meters: any.then(|| Arc::new(std::array::from_fn(|_| Meter::default()))),
+            only: None,
         }
     }
 
@@ -455,23 +478,47 @@ impl RepairControl {
         Ok(())
     }
 
-    /// This control's CANCEL and nothing else: the same gate, no sink,
-    /// and meters of its own, so a stretch that polls it can never move
-    /// the host's bar or park.
+    /// This control NARROWED TO ONE PHASE: the same sink, the same gate
+    /// and the SAME METERS, so the phase named here keeps counting into
+    /// the host's bar and every other phase's `begin`/`step`/`finish` is
+    /// a no-op on this view.
     ///
     /// For the syndrome pass - the fold worker's folds and the NTT's
-    /// stripes - which must stop when the repair is called off but is
-    /// not a phase anybody watches. Until 15 Sep 2026 that pass took no
-    /// control at all, so a cancel that landed after the feed's last
-    /// check waited out the whole transform with the driver parked on
-    /// its join: 53 s of a 54 s run locally, and a `parfast` cancel test
-    /// killed at CI's 600 s ceiling (`research/CLAIMS.jsonl`,
+    /// stripes - which must stop when the repair is called off AND is
+    /// the stretch [`RepairPhase::Fold`] is a fraction of. It took no
+    /// control at all until 15 Sep 2026, so a cancel that landed after
+    /// the feed's last check waited out the whole transform with the
+    /// driver parked on its join: 53 s of a 54 s run locally, and a
+    /// `parfast` cancel test killed at CI's 600 s ceiling
+    /// (`research/CLAIMS.jsonl`,
     /// `single-file-followups-linux-tests-cancel-wedge`). A pass it cuts
     /// short leaves syndromes nobody may act on, which is legal for the
     /// same reason the dense back-substitution's is: the check before
     /// the patch refuses first.
-    pub(crate) fn cancel_only(&self) -> RepairControl {
-        RepairControl::new(None, self.gate.clone())
+    ///
+    /// Then it took the CANCEL ALONE (`cancel_only`, a gate and meters
+    /// of its own) on the reasoning that the syndrome pass "is not a
+    /// phase anybody watches". That was the accounting defect this
+    /// narrowing replaces: the pass IS the fold, and while it reported
+    /// nothing the `Fold` bar was filled by the hand-over instead -
+    /// measured 17 Sep 2026 at 1.96 s of a 3.45 s fold running after
+    /// the bar read 100%
+    /// (`research/SAB-PARFAST-METER-DROPIN-2026-09-17.md`).
+    ///
+    /// The MASK is what makes that safe rather than a second bar. The
+    /// tiled fold the syndrome pass runs re-sizes and counts
+    /// [`RepairPhase::Solve`] as it drains its unit grid, because that
+    /// grid IS the solve for the dense back-substitution that shares
+    /// the code; reached from the fold worker with a full control it
+    /// would drive the host's solve bar through the fold. On this view
+    /// it cannot.
+    pub(crate) fn reporting_only(&self, phase: RepairPhase) -> RepairControl {
+        RepairControl {
+            sink: self.sink.clone(),
+            gate: self.gate.clone(),
+            meters: self.meters.clone(),
+            only: Some(phase),
+        }
     }
 
     /// Park while paused; `Err(Cancelled)` once cancelled.
@@ -499,6 +546,12 @@ impl RepairControl {
     }
 
     fn meter(&self, phase: RepairPhase) -> Option<&Meter> {
+        // A narrowed view answers for its own phase and nothing else -
+        // see `reporting_only`. One compare, on the same branch the
+        // inert control already costs.
+        if self.only.is_some_and(|only| only != phase) {
+            return None;
+        }
         let i = match phase {
             RepairPhase::Verify => 0,
             RepairPhase::Fold => 1,
@@ -534,6 +587,9 @@ impl RepairControl {
     /// has no `(done, total)`; it is the frame the phases that follow
     /// are read in.
     pub(crate) fn slab(&self, index: usize, of: usize) {
+        if self.only.is_some() {
+            return;
+        }
         if let Some(s) = self.sink.as_ref() {
             s.slab(index, of.max(1));
         }
@@ -545,6 +601,9 @@ impl RepairControl {
     /// begins. A no-op on a control with no sink, exactly like every
     /// other hook here.
     pub(crate) fn route(&self, route: RepairRoute) {
+        if self.only.is_some() {
+            return;
+        }
         if let Some(s) = self.sink.as_ref() {
             s.route(route);
         }
@@ -603,6 +662,26 @@ impl RepairControl {
         if let Some(s) = self.sink.as_ref() {
             s.progress(phase, total, total);
         }
+    }
+
+    /// [`finish`](Self::finish) for a phase THIS call may not have
+    /// opened: a no-op unless somebody called [`begin`](Self::begin) on
+    /// it first.
+    ///
+    /// The fold's landing needs this because it is no longer the
+    /// driver's to make. The fold is not over when the last block has
+    /// been HANDED to the syndrome worker, it is over when that worker
+    /// has been joined - and the join is inside
+    /// `Reconstructor::finish_blocks_reported`, which is also the
+    /// public `Reconstructor::finish` that direct callers reach with a
+    /// control that never opened a `Fold` phase at all. `begin` stores
+    /// `total.max(1)`, so a zero total is exactly "never begun".
+    pub(crate) fn finish_begun(&self, phase: RepairPhase) {
+        let Some(m) = self.meter(phase) else { return };
+        if m.total.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        self.finish(phase);
     }
 }
 

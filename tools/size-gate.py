@@ -1131,12 +1131,55 @@ def selftest():
     bad += selftest_line_structure()
     bad += selftest_headroom()
     bad += selftest_argv()
+    # ---- main()'s EXIT CODE. Everything above drives collect() and the limit rules; CI's exit
+    # status comes from main(). Until 17 Sep 2026 nothing here drove main(),
+    # so `return 1` on the hit path becoming `return 0` was invisible to this
+    # whole selftest - a gate that PRINTS its findings and then exits 0, green
+    # in CI forever. That shape was measured across 66 of this repo's gates
+    # and is held by tools/selftest-exit-code-gate.py; this is its site half.
+    def _exit_code(argv, **stubs):
+        saved, saved_argv = {k: globals()[k] for k in stubs}, sys.argv
+        globals().update(stubs)
+        sys.argv = ["size-gate.py"] + argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                return main()
+        finally:
+            globals().update(saved)
+            sys.argv = saved_argv
+
+    for _label, _argv, _stubs, _want in (
+        ("a file over its ceiling", [],
+         dict(collect=lambda: ([("src/big.rs", 99_999, False)], []),
+              BASELINE_FILES={}, BASELINE_FNS={}), 1),
+        ("a fn over its ceiling", [],
+         dict(collect=lambda: ([("src/a.rs", 10, False)],
+                               [("src/a.rs", "huge", 1, 99_999, False)]),
+              BASELINE_FILES={}, BASELINE_FNS={}), 1),
+        ("a clean tree", [],
+         dict(collect=lambda: ([("src/a.rs", 10, False)],
+                               [("src/a.rs", "f", 1, 5, False)]),
+              BASELINE_FILES={}, BASELINE_FNS={}), 0),
+        ("--list over a tree with a violation", ["--list"],
+         dict(collect=lambda: ([("src/big.rs", 99_999, False)], []),
+              BASELINE_FILES={}, BASELINE_FNS={}), 0),
+        ("an unrecognised flag", ["--nope"], {}, 1),
+        ("--headroom with a junk count", ["--headroom=0"], {}, 1),
+    ):
+        _got = _exit_code(_argv, **_stubs)
+        if _got != _want:
+            print(f"  selftest FAIL: main() exits {_got} on {_label}, wanted "
+                  f"{_want} - the verdict and the exit code disagree, which is "
+                  "a gate that reports a defect and passes anyway",
+                  file=sys.stderr)
+            bad += 1
     if bad:
         print(f"\nsize-gate: {bad} selftest case(s) failed - the gate is not doing its job.", file=sys.stderr)
         return 1
     print(
         f"size-gate: selftest ok ({len(SELFTEST)} scope cases, {len(SELFTEST_NOISE)} tokenizer cases, "
-        f"{HEADROOM_CASES} headroom cases, {ARGV_CASES} argv cases, plus the tree-wide line-structure pin)"
+        f"{HEADROOM_CASES} headroom cases, {ARGV_CASES} argv cases, 6 exit-code cases, plus the tree-wide line-structure pin)"
     )
     return 0
 

@@ -9,7 +9,7 @@
     <value>parfast</value>
   </data>
   <data name="app_stage" xml:space="preserve">
-    <value>Alpha</value>
+    <value>Beta</value>
   </data>
   <data name="app_tagline" xml:space="preserve">
     <value>PAR2 create, verify and repair</value>

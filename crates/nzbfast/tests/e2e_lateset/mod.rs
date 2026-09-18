@@ -214,6 +214,26 @@ async fn run_wave5(fx: &Fixture, chaos: Chaos) -> (String, bool, PathBuf) {
     if std::env::var("WAVE5_DUMP_LOG").is_ok() {
         eprintln!("==== run log ====\n{log}\n==== end ====");
     }
+    // A campaign driver needs the log of a PASSING run too, and stderr
+    // cannot carry it: libtest CAPTURES a passing test's stderr and
+    // throws it away, so `WAVE5_DUMP_LOG` alone yields logs only for the
+    // failures. That is what made the 16 Sep campaign able to name the
+    // election winner in 2 of 180 runs and not in the other 178 - the
+    // distribution the flake actually turns on was unmeasurable. A file
+    // sink is outside libtest's capture, so every run keeps its log.
+    if let Ok(d) = std::env::var("WAVE5_LOG_DIR") {
+        let tag = fx
+            .dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(
+            PathBuf::from(d).join(format!("{tag}-{}.log", std::process::id())),
+            format!("ok={ok}\n{log}"),
+        );
+    }
     (log, ok, out)
 }
 

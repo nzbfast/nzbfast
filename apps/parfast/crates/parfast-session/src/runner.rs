@@ -11,11 +11,14 @@
 //!
 //! # The process-global knobs
 //!
-//! `nzbkit::mem::set_cpu_workers`, `set_file_workers`,
-//! `set_process_budget` and `par2repair::set_joint_arm` are
-//! PROCESS-wide. A CLI sets them once in `run_with` and exits; a
-//! long-lived app has to set them per job, and with two jobs running at
-//! once the last writer wins. That is not a bug this crate can fix - it
+//! `nzbkit::mem::set_cpu_workers`, `set_process_budget` and
+//! `par2repair::set_joint_arm` are PROCESS-wide (`set_file_workers` is
+//! the CLI's `-T`, which has no GUI counterpart, so this crate never
+//! calls it). A CLI sets them once in `run_with` and exits; a
+//! long-lived app has to set them per job - and to UNSET them per job,
+//! because a knob nobody writes is the last job's and not the engine's
+//! (see [`apply_knobs`]) - and with two jobs running at once the last
+//! writer wins. That is not a bug this crate can fix - it
 //! is what the engine's interface is - so the queue takes a lock around
 //! the setting and the START of the job, the Settings pane says
 //! plainly that the performance knobs are shared above concurrency 1,
@@ -56,11 +59,12 @@
 //! that does nothing, and `pf_capabilities.pause` is what a host reads
 //! to decide whether to show one at all.
 
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use nzbkit::par2repair;
-use parfast::out::Sink;
+use parfast::out::{Level, Sink};
 
 use crate::job::{
     ChecksumFormat, ChecksumResult, CreateSpec, JobError, JobKind, JobResult, JobSnapshot, JobSpec,
@@ -138,7 +142,9 @@ impl Control {
 /// under a lock.
 pub struct Publisher {
     pub snapshot: Mutex<JobSnapshot>,
-    wake: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// An `Arc` rather than a `Box` so [`Publisher::ring`] can take a
+    /// handle to it and let go of this mutex BEFORE calling - see there.
+    wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Publisher {
@@ -150,7 +156,7 @@ impl Publisher {
     }
 
     pub fn set_wake(&self, f: Option<Box<dyn Fn() + Send + Sync>>) {
-        *self.wake.lock().unwrap_or_else(|p| p.into_inner()) = f;
+        *self.wake.lock().unwrap_or_else(|p| p.into_inner()) = f.map(Arc::from);
     }
 
     /// Change the snapshot and ring the host. The lock is NEVER held
@@ -158,16 +164,39 @@ impl Publisher {
     /// its wake handler would deadlock on it, and that is exactly what
     /// a UI thread does when it marshals and polls.
     pub fn update(&self, f: impl FnOnce(&mut JobSnapshot)) {
-        {
-            let mut s = self.snapshot.lock().unwrap_or_else(|p| p.into_inner());
-            f(&mut s);
-        }
+        self.update_quiet(f);
         self.ring();
     }
 
+    /// [`Publisher::update`] with NO wake, for a caller that is holding
+    /// a session lock. It rings once the lock is gone; the wake carries
+    /// no data, so ringing a moment later is the same wake.
+    ///
+    /// Not an optimisation - it is the other half of the API.md promise
+    /// that "the session never holds a lock across the callback". Every
+    /// `update` under `Inner::jobs` used to ring from inside it, so a
+    /// host whose wake handler polls (which API.md explicitly permits,
+    /// and which is what a host that polls from its wake DOES) re-entered
+    /// `snapshot()` on the ringing thread and wedged on a `std` mutex
+    /// that is not reentrant. Cancelling a queued job was the shortest
+    /// route to it.
+    pub fn update_quiet(&self, f: impl FnOnce(&mut JobSnapshot)) {
+        let mut s = self.snapshot.lock().unwrap_or_else(|p| p.into_inner());
+        f(&mut s);
+    }
+
     pub fn ring(&self) {
-        let held = self.wake.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(w) = held.as_ref() {
+        // TAKEN, not borrowed: the callback is allowed to call back in,
+        // and `set_wake` is one of the doors it may come through. Holding
+        // this mutex across `w()` made replacing the wake from inside a
+        // wake a deadlock of its own, beside the jobs-lock one above.
+        let held = self
+            .wake
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(Arc::clone);
+        if let Some(w) = held {
             w();
         }
     }
@@ -194,6 +223,19 @@ impl Publisher {
 /// exactly one case, [`crate::pairing`]'s: two large single-file creates
 /// the queue has checked set the SAME knobs, so both writing them is one
 /// value written twice.
+///
+/// # This lock is per SESSION; the knobs are per PROCESS
+///
+/// A real gap, and an unreachable one - checked 17 Sep 2026 and recorded
+/// here so the next host does not have to re-derive it. Two `Session`s
+/// in one process would serialise against two different locks over one
+/// set of globals, and the FFI permits that: `pf_session_new` may be
+/// called as often as a host likes. Neither shipped wrapper does. The
+/// mac app builds exactly one `FfiCore` (`App.swift`) and the Windows
+/// app exactly one (`App.xaml.cs`), each once at launch, and both apps
+/// are single-instance. A host that wants a second Session needs this
+/// lock moved to a process-wide static FIRST - the type is deliberately
+/// the only thing that would have to change.
 pub struct KnobLock(pub RwLock<()>);
 
 impl KnobLock {
@@ -208,30 +250,85 @@ impl Default for KnobLock {
     }
 }
 
-/// Apply a job's performance knobs. Returns nothing, deliberately: the
-/// engine has no way to hand the previous values back, so there is
-/// nothing to restore and a caller that believed otherwise would be
-/// wrong.
+/// Apply a job's performance knobs. EVERY knob is written on EVERY job,
+/// including the ones this job does not name.
+///
+/// Returns nothing, deliberately: the engine has no way to hand the
+/// previous values back, so there is nothing to save and restore and a
+/// caller that believed otherwise would be wrong. That is why the reset
+/// is a door of the engine's own - `mem::clear_cpu_workers` and
+/// `mem::clear_process_budget`, which put a knob back to the state it is
+/// in when no entry point has ever spoken - rather than a value stashed
+/// here.
+///
+/// # "Auto" means the ENGINE'S default, not the last job's number
+///
+/// SETTLED 17 Sep 2026, lead 2 of
+/// `research/CODEX-SWEEP-2026-09-17-VERDICTS.md`. Until then each knob
+/// was written only for a positive `Some`, so a job carrying `None` ran
+/// under whatever the PREVIOUS job had published: one job at 4 threads
+/// and the next left on Auto ran at 4 threads, with the pane saying
+/// Auto. The other coherent answer was to keep the stickiness and stop
+/// both apps calling it Auto. Three things decided it this way:
+///
+/// * [`crate::settings::Performance::threads`] already PROMISED it -
+///   "`None` is `nzbkit::mem::cpu_workers()`". A promise the code did
+///   not keep is not a policy.
+/// * `digest_cache` below has published in BOTH directions since it
+///   landed, for the identical reason, stated there: a job must never
+///   inherit the last one's store. Two knobs in one function answering
+///   that question opposite ways is an oversight, not a design.
+/// * The sticky reading has no surface to read it off. The number in
+///   force came from a job that has FINISHED, and may have come from a
+///   per-job override ([`crate::job::Perf`],
+///   [`crate::job::VerifyOptions::threads`]) that was never in the
+///   Settings pane at all - so nothing on screen would ever name it.
+///   "Leave it alone" is defensible for a knob a user can SEE; it is not
+///   one for a knob whose value is invisible.
+///
+/// `Some(0)` is Auto here and not a zero-width pool. Both panes map
+/// their Auto row to `null`, so the only source of a 0 is a host writing
+/// the JSON by hand, and the engine reads a published 0 as a SERIAL run
+/// - the one answer nobody asked for.
+///
+/// Pinned by `parfast-ffi`'s `tests/knobs.rs`, which reads the live
+/// `mem::cpu_workers()` from INSIDE a second job rather than reading
+/// this function's spec back to itself. It sits in that crate and not
+/// in this one's unit tests because it needs a process to itself - the
+/// header of that file says why, and the reason is this function.
 fn apply_knobs(
     threads: Option<usize>,
     memory_mb: Option<u64>,
-    fast_solver: Option<bool>,
+    fast_solver: bool,
     digest_cache: bool,
 ) {
-    if let Some(t) = threads.filter(|&t| t > 0) {
-        nzbkit::mem::set_cpu_workers(t);
+    match threads.filter(|&t| t > 0) {
+        Some(t) => nzbkit::mem::set_cpu_workers(t),
+        None => nzbkit::mem::clear_cpu_workers(),
     }
-    if let Some(mb) = memory_mb.filter(|&m| m > 0) {
-        nzbkit::mem::set_process_budget(nzbkit::mem::MemBudget {
-            total: mb
-                .saturating_mul(1024 * 1024)
-                .max(nzbkit::mem::MemBudget::MIN),
-        });
+    match memory_mb.filter(|&m| m > 0) {
+        // `from_user_limit`, not a struct literal: this is a figure a
+        // person typed into the Settings pane's Memory limit picker (or
+        // sent as `Perf::memory_mb` over the FFI), and that funnel is
+        // what lets `par2repair::fastpar::clamp_to_published` RAISE the
+        // repair's solve window to meet it, not just lower it - the same
+        // reason `-m` and the daemon's `mem_limit` setting both go
+        // through it. It also clamps and warns on its own, so the
+        // hand-rolled `.max(MemBudget::MIN)` this replaced was a second
+        // copy of a floor `with_total` already owns.
+        Some(mb) => nzbkit::mem::set_process_budget(nzbkit::mem::MemBudget::from_user_limit(
+            mb.saturating_mul(1024 * 1024),
+            "the Memory limit setting",
+        )),
+        None => nzbkit::mem::clear_process_budget(),
     }
-    if let Some(on) = fast_solver {
-        nzbkit::par2repair::set_joint_arm(on);
-        nzbkit::par2repair::reset_joint_reach();
-    }
+    // A plain `bool` and not an `Option`: every caller already resolved
+    // the job's answer against the Settings field, which is itself a
+    // `bool`, so the absent case this used to carry could not arise -
+    // and an `Option` that is always `Some` is the shape the two knobs
+    // above went wrong in.
+    nzbkit::par2repair::set_joint_arm(fast_solver);
+    nzbkit::par2repair::reset_joint_reach();
     // The Settings pane's "Remember checksums of large files", published
     // in BOTH directions for the CLI's reason (`parfast::run_with`): a job
     // must never inherit the last one's store. Always the per-user store;
@@ -468,7 +565,7 @@ fn run_verify(job: &Job, spec: &VerifySpec, started: Instant) -> Outcome {
         job.settings.performance.memory_mb,
         spec.options
             .fast_solver
-            .or(Some(job.settings.performance.fast_solver)),
+            .unwrap_or(job.settings.performance.fast_solver),
         job.settings.performance.digest_cache,
     );
     let mut sink = sink_for(job);
@@ -553,7 +650,7 @@ fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
         job.settings.performance.memory_mb,
         spec.options
             .fast_solver
-            .or(Some(job.settings.performance.fast_solver)),
+            .unwrap_or(job.settings.performance.fast_solver),
         job.settings.performance.digest_cache,
     );
     let mut sink = sink_for(job);
@@ -570,9 +667,7 @@ fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
         job,
         started,
         control: par2repair::RepairControl::new(
-            Some(Arc::new(RepairProgress {
-                publisher: job.publisher.clone(),
-            })),
+            Some(Arc::new(RepairProgress::new(job.publisher.clone()))),
             Some(job.control.engine_gate()),
         ),
     };
@@ -646,13 +741,67 @@ fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
     }
 }
 
+/// Is `name` a file of the recovery set based on `base`? The index
+/// itself, or one of its volumes under EITHER spelling - the engine's
+/// fixed `vol000+01` or the renamed `vol0+1` / `vol0-0` the CLI leaves
+/// behind, which is why this matches the `vol` prefix and not a width.
+///
+/// ONE predicate, read by the no-overwrite guard before a create and by
+/// the written-file report after it: a file the guard would not protect
+/// but the report would claim is a file destroyed without warning and
+/// then listed as this job's own output.
+fn set_member(base: &str, name: &str) -> bool {
+    name == format!("{base}.par2")
+        || (name.starts_with(&format!("{base}.vol")) && name.ends_with(".par2"))
+}
+
+/// The first file of `output`'s recovery set already on disk, if any.
+/// See [`set_member`], and the guard in [`run_create`] that reads this.
+fn existing_set_member(output: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let base = planner::base_name(output);
+    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| set_member(&base, &e.file_name().to_string_lossy()))
+        .map(|e| e.path())
+        .collect();
+    // Sorted so the message names the same file every time rather than
+    // whatever the directory happened to hand back first.
+    found.sort();
+    found.into_iter().next()
+}
+
 /// The create, through `parfast::create::run` for the same reason.
 fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
-    let members =
-        match planner::expand_sources(&spec.sources, spec.path_mode, spec.base_path.as_deref()) {
-            Ok(m) => m,
-            Err(e) => return Outcome::failed(e.code, e.message),
-        };
+    let planner::Expansion { members, left_out } = match planner::expand_sources(
+        &spec.sources,
+        spec.path_mode,
+        spec.base_path.as_deref(),
+        planner::SourceRules::Par2,
+    ) {
+        Ok(m) => m,
+        Err(e) => return Outcome::failed(e.code, e.message),
+    };
+    // WHAT THE WALK COULD NOT TAKE IN, said twice: once into the log
+    // tail the moment it is known, and once into the result the pane
+    // shows beside Done. The preview says it too, but the preview is a
+    // different moment - the walk happens AGAIN here, over a tree that
+    // may have changed, and a folder that became unreadable since the
+    // pane was drawn would otherwise reach nobody. See
+    // `planner::LeftOut`.
+    let coverage = left_out.lines();
+    if !coverage.is_empty() {
+        let mut early = sink_for(job);
+        for line in &coverage {
+            early.line(Level::Terse, line);
+        }
+    }
     let preview = match planner::preview(spec) {
         Ok(p) => p,
         Err(e) => return Outcome::failed(e.code, e.message),
@@ -687,14 +836,45 @@ fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
     apply_knobs(
         spec.perf.threads.or(job.settings.performance.threads),
         spec.perf.memory_mb.or(job.settings.performance.memory_mb),
-        Some(job.settings.performance.fast_solver),
+        job.settings.performance.fast_solver,
         job.settings.performance.digest_cache,
     );
-    if !spec.overwrite && spec.output.exists() {
-        return Outcome::failed(
-            "exists",
-            format!("{} already exists", spec.output.display()),
-        );
+    // THE WHOLE SET, not just the index. A create writes one `.par2`
+    // and N `.vol...par2` beside it, the engine writes those volumes
+    // under its own fixed-width spelling and the CLI renames them to
+    // par2cmdline's widths afterwards - and this guard asked only
+    // whether `spec.output` existed. A set whose index had been deleted
+    // (or which was written under a different `-f`) left its volumes
+    // sitting there, and a create submitted with `overwrite = false`
+    // replaced every one of them and reported Done. The pane's own
+    // protection, on the only files it protects.
+    //
+    // The predicate is `set_member` - the SAME one the run reads the
+    // written set back with below - so what the guard protects and what
+    // the create claims cannot drift apart. It is deliberately wider
+    // than the exact planned names: a volume of some earlier, differently
+    // sliced run of this base is still a file this create is about to
+    // destroy.
+    //
+    // A PREFLIGHT, and it is now the FIRST of two. It is what gives the
+    // good message - the path of the file that is in the way, under an
+    // `exists` code a host can act on - and it is the only one of the
+    // pair that can say anything at all, because the engine answers a
+    // refused open with an exit code and nothing else.
+    //
+    // It cannot be the only one: a set that appears between this check
+    // and the engine's first open is not caught here, and two creates
+    // started together on one base walk straight through it. The engine
+    // has an `O_EXCL` door of its own since 17 Sep 2026 (claim
+    // `par2gen-no-clobber-create`), reached by `--no-clobber` on the
+    // argv above - `planner::options_for` sets it from this same
+    // `spec.overwrite` and `planner::command_args` spells it, so the
+    // line the pane SHOWS carries it too. Belt and brace: this check
+    // for the message, the open for the guarantee.
+    if !spec.overwrite
+        && let Some(clash) = existing_set_member(&spec.output)
+    {
+        return Outcome::failed("exists", format!("{} already exists", clash.display()));
     }
     job.publisher.update(|s| {
         s.phase = Phase::Solving;
@@ -739,6 +919,7 @@ fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
             state: JobState::Failed,
             result: Some(JobResult {
                 exit_code: Some(code),
+                warnings: coverage,
                 ..Default::default()
             }),
             error: Some(JobError::new(
@@ -765,9 +946,7 @@ fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            let is_ours = name == format!("{base}.par2")
-                || (name.starts_with(&format!("{base}.vol")) && name.ends_with(".par2"));
-            is_ours.then(|| {
+            set_member(&base, &name).then(|| {
                 let size = e.metadata().map(|m| m.len()).unwrap_or(0);
                 WrittenFile { name, size }
             })
@@ -779,6 +958,7 @@ fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
         result: Some(JobResult {
             written,
             exit_code: Some(code),
+            warnings: coverage,
             ..Default::default()
         }),
         error: None,
@@ -855,27 +1035,89 @@ struct FoldWatch<'a> {
 /// structured solve is seconds - and they are a LABELLING choice, not a
 /// prediction: a bar that is honest about which phase is running and
 /// monotone within it beats one that lies smoothly.
+///
+/// # And the SWEEP those weights sit inside
+///
+/// A memory-capped repair sweeps the payload once per SLAB, re-entering
+/// `Fold` and `Solve` at every one (`par2repair`'s two drivers), so
+/// their `(done, total)` says where this SWEEP is and nothing about
+/// where the repair is. Weighing them without the sweep count froze
+/// this bar at the literal figure 0.95 for slabs 2..N - measured here
+/// 17 Sep 2026 over the engine's own recorded four-sweep sequence, and
+/// three quarters of the slabbed work read `0.9500` while the sentence
+/// under it went on counting. That is the daemon's defect of 16 Sep
+/// 2026 (`research/REPAIR-SLABBED-BAR-2026-09-16.md`), in the second
+/// copy of it, and this is that fix.
+///
+/// **The split is by SWEEP, not by phase**, and the obvious version is
+/// wrong in exactly the way that would leave the defect in place:
+/// giving `Fold` the `i`th slice of `[0.45, 0.85)` and `Solve` the
+/// `i`th slice of `[0.85, 0.95)` puts sweep 1's solve ABOVE sweep 2's
+/// fold, so a monotone bar swallows every later fold just as it does
+/// today. So `[0.45, 0.95)` is cut into `of` equal sweep segments and
+/// the 40/10 weighting lives INSIDE each one. `Verify` runs once before
+/// any of it and `Write` once after, so neither is swept.
+///
+/// At `of == 1` the arithmetic is the pre-sweep split - to within a
+/// float ULP rather than to the bit, which
+/// `a_repair_that_does_not_slab_keeps_the_bar_it_always_had` states as
+/// the tolerance it checks.
 struct RepairProgress {
     publisher: Arc<Publisher>,
+    /// The sweep frame: which slab, and how many. `(0, 1)` until the
+    /// engine says otherwise - a repair that does not slab announces
+    /// `(0, 1)` once and one with no blocks to rebuild announces
+    /// nothing, and `(0, 1)` is the right reading of both.
+    ///
+    /// Relaxed: `slab` is the driver thread, at the top of its sweep,
+    /// before that sweep's `begin(Fold, ..)` and never concurrent with
+    /// a `progress`.
+    slab: AtomicU32,
+    slabs: AtomicU32,
 }
 
 impl RepairProgress {
-    /// `(bar offset, bar span)` for a phase.
-    fn band(phase: par2repair::RepairPhase) -> (f64, f64) {
+    /// A sink publishing into `publisher`, framed as one sweep of one
+    /// until the engine says otherwise.
+    fn new(publisher: Arc<Publisher>) -> RepairProgress {
+        RepairProgress {
+            publisher,
+            slab: AtomicU32::new(0),
+            slabs: AtomicU32::new(1),
+        }
+    }
+
+    /// `(bar offset, bar span)` for a phase in sweep `slab` of `of`.
+    fn band(phase: par2repair::RepairPhase, slab: u32, of: u32) -> (f64, f64) {
         use par2repair::RepairPhase as P;
+        let of = f64::from(of.max(1));
+        let i = f64::from(slab).min(of - 1.0);
         match phase {
             P::Verify => (0.0, 0.45),
-            P::Fold => (0.45, 0.40),
-            P::Solve => (0.85, 0.10),
+            // The two swept phases, inside sweep `i`'s own segment of
+            // the half-open `[0.45, 0.95)` the sweeps share.
+            P::Fold => (0.45 + 0.50 * i / of, 0.40 / of),
+            P::Solve => (0.45 + (0.50 * i + 0.40) / of, 0.10 / of),
             P::Write => (0.95, 0.05),
         }
     }
 }
 
 impl par2repair::ProgressSink for RepairProgress {
+    fn slab(&self, index: usize, of: usize) {
+        self.slabs
+            .store(u32::try_from(of.max(1)).unwrap_or(1), Ordering::Relaxed);
+        self.slab
+            .store(u32::try_from(index).unwrap_or(0), Ordering::Relaxed);
+    }
+
     fn progress(&self, phase: par2repair::RepairPhase, done: u64, total: u64) {
         use par2repair::RepairPhase as P;
-        let (base, span) = RepairProgress::band(phase);
+        let (base, span) = RepairProgress::band(
+            phase,
+            self.slab.load(Ordering::Relaxed),
+            self.slabs.load(Ordering::Relaxed),
+        );
         let frac = if total == 0 {
             0.0
         } else {
@@ -890,13 +1132,19 @@ impl par2repair::ProgressSink for RepairProgress {
             };
             s.phase_text = match phase {
                 P::Verify => format!("Verifying before repair - {pct}%"),
-                P::Fold => format!("Reading the good blocks - {pct}%"),
+                // "Folding", not "Reading": since 17 Sep 2026 this
+                // phase's figure counts bytes XORed into the syndrome
+                // rows rather than bytes handed to the worker that
+                // does it, and on a set whose corpus the verify pass
+                // kept there is no read in it at all.
+                P::Fold => format!("Combining the good blocks - {pct}%"),
                 P::Solve => format!("Rebuilding the missing blocks - {pct}%"),
                 P::Write => format!("Writing the repaired files - {pct}%"),
             };
-            // MONOTONE ACROSS PHASES as well as within one: the engine
-            // may re-enter `Solve` once per slab, and a bar that went
-            // back to 85% on the second slab would read as a restart.
+            // MONOTONE ACROSS PHASES as well as within one: the bands
+            // above run in the order the engine enters them, and a bar
+            // that went backwards at a hand-over would read as a
+            // restart.
             s.progress = s.progress.max(base + span * frac);
         });
     }
@@ -918,11 +1166,93 @@ impl par2repair::ProgressSink for RepairProgress {
 /// So HASHING and the FOLD share one span, 0 to 90%, and the bar is
 /// whichever of the two is further along - honest on every arm, and
 /// monotone because the snapshot only ever takes the larger value. The
-/// volume WRITES are the last 10%: on a one-pass create they land at
-/// the end, and on a multi-pass one they interleave with the folds,
-/// which is exactly what the user sees happening.
+/// volume WRITES are the last 10%.
+///
+/// # The batch frame, and the three ways this bar pegged without it
+///
+/// A memory-capped create folds the set a BATCH of volumes at a time.
+/// `Verify` is sized once for the whole create and `Write` is sized
+/// once over every recovery slice of the set, but `Fold` is re-sized at
+/// every batch (`par2gen::recovery_slices`), so its `(done, total)`
+/// says where THIS batch is and nothing about where the create is.
+/// Merging the three with `max` and no frame pegged the bar three
+/// separate ways on an 18-batch create, all of them during batch 1:
+///
+/// 1. the scan reads the payload ONCE, beside batch 1, so `Verify`
+///    reached 100% of the shared span there and `max` held the bar at
+///    90% for the seventeen batches after it;
+/// 2. `Fold` itself ran 0 to 100% of that span within batch 1 and was
+///    then discarded at every later batch, for the same reason;
+/// 3. and `Write`, which `par2gen::volwrite` steps after EVERY batch,
+///    put the bar over 90% as soon as batch 1's volumes were flushed -
+///    so even with 1 and 2 fixed, seventeen eighteenths of the create
+///    would have shared the last tenth of the bar. This one is the
+///    dominant peg and it is not in the report that found the other
+///    two: `Write` overlaps the fold on the stripe-first arm as well
+///    (the volumes are laid out up front and filled by chunk), where it
+///    took the bar to 90% within the first chunk of a ONE-batch create.
+///
+/// That is the shape the daemon's slabbed repair bar had until 16 Sep
+/// 2026 (`research/REPAIR-SLABBED-BAR-2026-09-16.md`), and the fix is
+/// that one: the engine announces the frame through
+/// [`par2repair::ProgressSink::slab`]
+/// (`nzbkit::par2gen::control::CreateControl::batch`), `Fold` is placed
+/// INSIDE it, `Verify` may not push the bar past the end of the batch
+/// it runs beside, and the writes wait for their turn.
+///
+/// `parfast c`'s own meter does exactly this (`parfast::control`'s
+/// `CreateMeter`) and the two must not disagree: one job showing two
+/// percentages is a defect whichever side moved.
+///
+/// ON A ONE-BATCH CREATE - every create that fits the accumulator
+/// budget, so nearly all of them - the first two rules are arithmetic
+/// identities over the old ones and the figures are unchanged to the
+/// bit. `a_one_batch_create_draws_exactly_the_bar_it_always_did` is
+/// that claim.
+///
+/// # Why the writes wait, which is a real change on every arm
+///
+/// Rule 3 has no one-batch identity: holding the write band back until
+/// the hash-and-fold band is full changes what a one-batch stripe-first
+/// create draws, deliberately. Drawing the writes as they arrive is not
+/// a bar - it is 90% reached in the first seconds and then a tenth of a
+/// bar for the rest of the create - and it flickers `phase_text`
+/// between "Building the recovery blocks" and "Writing the recovery
+/// volumes" for the whole of the overlap, because the two phases really
+/// are running at once. Held, the bar is the hashing and the folding
+/// until they are done and the volume writes after, which is the order
+/// the user is told about, the order `parfast c` prints
+/// (`Processing:` runs to 100 before `Writing:` takes the line) and the
+/// order par2cmdline prints. The cost, stated: the writes that already
+/// happened during the fold are not owed a second showing, so on the
+/// arms where the overlap is total the last tenth crosses quickly.
 struct CreateProgress {
     publisher: Arc<Publisher>,
+    /// The fold batch frame: which batch, and how many there are.
+    /// `(0, 1)` until the engine says otherwise, which is the right
+    /// reading of a create that folds in one pass and of the
+    /// stripe-first transform, which announces nothing.
+    ///
+    /// Relaxed: `slab` is the driver thread, once per batch, before
+    /// that batch's `begin(Fold, ..)` and never concurrent with a
+    /// `progress` of its own - and the only other reader is a scan
+    /// thread whose `Verify` fraction is a cap on a bar, not a
+    /// correctness bit.
+    batch: AtomicU32,
+    batches: AtomicU32,
+    /// Set once the hash-and-fold band is FULL, which is the gate on
+    /// the write band - see the type doc. A separate flag rather than a
+    /// read of `s.progress`, so a held write frame never takes the
+    /// snapshot lock or rings the host's wake.
+    ///
+    /// EITHER phase can set it, which is deliberate and is why it is
+    /// not named for the fold. The band holds whichever of the two is
+    /// further along, so a hash that reaches the end of it has left
+    /// nothing for the fold to move: the bar would sit at 0.90 with the
+    /// writes still held, which is the freeze this whole type is about.
+    /// On a multi-batch create the hash cannot reach the end anyway,
+    /// because it is capped at the batch it runs beside.
+    band_full: AtomicBool,
 }
 
 impl CreateProgress {
@@ -931,11 +1261,20 @@ impl CreateProgress {
     fn watch(job: &Job) -> CreateWatch {
         CreateWatch {
             control: nzbkit::par2gen::control::CreateControl::new(
-                Some(Arc::new(CreateProgress {
-                    publisher: job.publisher.clone(),
-                })),
+                Some(Arc::new(CreateProgress::new(job.publisher.clone()))),
                 Some(job.control.engine_gate()),
             ),
+        }
+    }
+
+    /// A sink publishing into `publisher`, framed as one batch of one
+    /// until the engine says otherwise.
+    fn new(publisher: Arc<Publisher>) -> CreateProgress {
+        CreateProgress {
+            publisher,
+            batch: AtomicU32::new(0),
+            batches: AtomicU32::new(1),
+            band_full: AtomicBool::new(false),
         }
     }
 }
@@ -952,6 +1291,13 @@ impl parfast::create::CreateWatch for CreateWatch {
 }
 
 impl par2repair::ProgressSink for CreateProgress {
+    fn slab(&self, index: usize, of: usize) {
+        self.batches
+            .store(u32::try_from(of.max(1)).unwrap_or(1), Ordering::Relaxed);
+        self.batch
+            .store(u32::try_from(index).unwrap_or(0), Ordering::Relaxed);
+    }
+
     fn progress(&self, phase: par2repair::RepairPhase, done: u64, total: u64) {
         use par2repair::RepairPhase as P;
         let frac = if total == 0 {
@@ -960,13 +1306,27 @@ impl par2repair::ProgressSink for CreateProgress {
             (done as f64 / total as f64).clamp(0.0, 1.0)
         };
         let pct = (frac * 100.0).round() as u64;
-        let (base, span) = match phase {
-            // The two that overlap, sharing one span - see the type doc.
-            P::Verify | P::Fold => (0.0, 0.90),
-            P::Write => (0.90, 0.10),
+        let of = f64::from(self.batches.load(Ordering::Relaxed).max(1));
+        let i = f64::from(self.batch.load(Ordering::Relaxed)).min(of - 1.0);
+        // The bar this frame asks for, in the 0..0.90 hash-and-fold
+        // span, or `None` for a frame that is not allowed to draw.
+        let band = match phase {
+            // This batch's own fraction, placed inside the batch frame.
+            P::Fold => Some((i + frac) / of),
+            // The hash, which cannot speak for a batch it never ran
+            // beside - see the type doc.
+            P::Verify => Some(frac.min((i + 1.0) / of)),
             // A create has nothing to solve; `par2gen` never sends it.
             P::Solve => return,
+            // The writes, held until the fold has finished with the bar.
+            P::Write => None,
         };
+        if band.is_some_and(|b| b >= 1.0) {
+            self.band_full.store(true, Ordering::Relaxed);
+        }
+        if band.is_none() && !self.band_full.load(Ordering::Relaxed) {
+            return;
+        }
         self.publisher.update(|s| {
             s.phase = match phase {
                 P::Verify => Phase::Hashing,
@@ -978,7 +1338,15 @@ impl par2repair::ProgressSink for CreateProgress {
                 P::Write => format!("Writing the recovery volumes - {pct}%"),
                 _ => format!("Building the recovery blocks - {pct}%"),
             };
-            s.progress = s.progress.max(base + span * frac);
+            // MONOTONE, as it always was: every hand-over this bar has -
+            // the hashing and the folding trading places as the further
+            // on of the two, one batch to the next - can present a
+            // smaller figure than the one already on screen, and a bar
+            // that falls back reads as a restart.
+            s.progress = s.progress.max(match band {
+                Some(b) => 0.90 * b,
+                None => 0.90 + 0.10 * frac,
+            });
         });
     }
 }
@@ -1066,6 +1434,44 @@ fn model_from_counts(survey: &parfast::verify::Survey) -> SurveyModel {
     }
 }
 
+/// A key equal for two paths naming the SAME file on disk - through a
+/// symlink, a hard link, or two spellings of one path - and `None` for a
+/// path that is not there at all.
+///
+/// The identity, not the spelling: a checksum create asked to write its
+/// manifest over one of its own inputs is the same destruction whether
+/// the user typed the path twice, pointed at a symlink to it, or hard
+/// linked it beside itself.
+fn same_file_key(path: &std::path::Path) -> Option<String> {
+    // Follows links deliberately: a symlink and its target are one file
+    // for the purpose of "am I about to overwrite my input".
+    let md = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(format!("{}:{}", md.dev(), md.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = md;
+        Some(
+            std::fs::canonicalize(path)
+                .ok()?
+                .to_string_lossy()
+                .to_lowercase(),
+        )
+    }
+}
+
+/// Do these two paths name the same file on disk? [`same_file_key`] on
+/// both, with a missing file never equal to anything.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (same_file_key(a), same_file_key(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// The two checksum jobs, which are wholly this crate's - see
 /// [`crate::checksum`] for why they are not `nzbfast-engine`'s parser.
 mod checksums {
@@ -1082,24 +1488,148 @@ mod checksums {
                 crate::job::PathMode::Basename
             },
             spec.output.parent(),
+            // NOT the PAR2 rule. A checksum manifest is not a recovery
+            // set: `sha256sum` hashes what it is given, and both of
+            // par2cmdline's source exclusions are silently wrong here -
+            // a folder holding a PAR2 set produced a manifest with every
+            // `.par2` missing from it, and a dot-file named explicitly
+            // as a source was dropped with nothing said. The manifest
+            // then verified CLEAN, because what is not in it is not
+            // checked. See `planner::SourceRules`.
+            crate::planner::SourceRules::All,
         ) {
             Ok(m) => m,
             Err(e) => return Outcome::failed(e.code, e.message),
         };
+        // As `run_create`: a manifest that covers less than the folder
+        // the user chose says so, on the log and on the result. It
+        // matters MORE here than it does for a create, because what is
+        // not in a manifest is not checked - the verify that reads this
+        // file back reports CLEAN over the gap.
+        let coverage = members.left_out.lines();
+        if !coverage.is_empty() {
+            let mut early = sink_for(job);
+            for line in &coverage {
+                early.line(Level::Terse, line);
+            }
+        }
+        let members = members.members;
+        // THE MANIFEST IS NOT ONE OF ITS OWN INPUTS. A recursive source
+        // over the folder the manifest sits in picks the manifest up on
+        // the SECOND run, so the file recorded its own previous contents
+        // and then mismatched itself the moment it was rewritten - and
+        // the aliasing case below is worse still. Dropped silently and
+        // not refused: a whole folder is the ordinary way to ask for
+        // this, and "hash everything here except the answer" is what the
+        // user meant by it.
+        let out_id = same_file_key(&spec.output);
+        let members: Vec<_> = members
+            .into_iter()
+            .filter(|m| {
+                m.path != spec.output && !(out_id.is_some() && same_file_key(&m.path) == out_id)
+            })
+            .collect();
+        // AN INPUT NAMED AS THE OUTPUT IS REFUSED, and this is the whole
+        // of P1: the write below is an unconditional `fs::write`, so
+        // `parfast` asked to checksum `payload.bin` INTO `payload.bin`
+        // replaced the file it was protecting with a one-line manifest
+        // of what it used to be, and reported Done. The filter above
+        // removes the alias from a folder expansion; an explicitly named
+        // one is a refusal, because dropping it silently would leave a
+        // manifest that does not cover the file the user pointed at.
+        if let Some(clash) = spec.sources.iter().find(|s| {
+            s.path == spec.output || (out_id.is_some() && same_file_key(&s.path) == out_id)
+        }) {
+            return Outcome::failed(
+                "output_is_a_source",
+                format!(
+                    "{} is both a source and the checksum file to write; \
+                     choose a different output",
+                    clash.path.display()
+                ),
+            );
+        }
+        if members.is_empty() {
+            return Outcome::failed(
+                "no_sources",
+                "no files to check: add at least one file, or a folder that holds one \
+                 besides the checksum file itself",
+            );
+        }
+        // NEVER WRITE A MANIFEST THIS SAME CODE CANNOT READ BACK. A
+        // checksum file's names are resolved relative to its OWN
+        // directory (`checksum::resolve`), so a source that does not sit
+        // under that directory has no name this format can carry:
+        // `expand_sources` falls back to the source's own - usually
+        // ABSOLUTE - path, and the checker then finds nothing at all.
+        // The file the user just hashed verifies as Missing while
+        // sitting untouched where it always was.
+        //
+        // Asked as a ROUND TRIP rather than as a list of bad shapes:
+        // each name is put back through the reader's own resolver and
+        // must come out pointing at the file it was made from. That is
+        // the property that matters, it needs no second reading of the
+        // traversal rules, and it catches whatever a future name rule
+        // would catch too.
+        let out_dir = spec
+            .output
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        if let Some(stray) = members.iter().find(|m| {
+            !checksum::resolve(&out_dir, &m.name)
+                .is_some_and(|back| back == m.path || same_file(&back, &m.path))
+        }) {
+            return Outcome::failed(
+                "outside_checksum_folder",
+                format!(
+                    "{} is not inside {}, so no name in the checksum file can point at it; \
+                     write the checksum file beside the files it covers",
+                    stray.path.display(),
+                    out_dir.display()
+                ),
+            );
+        }
         let total = members.len();
-        let mut entries = Vec::with_capacity(total);
-        for (i, m) in members.iter().enumerate() {
+        let entries: Vec<(String, std::path::PathBuf)> = members
+            .iter()
+            .map(|m| (m.name.clone(), m.path.clone()))
+            .collect();
+        // THE GATE IS ROUND THE HASHING, which is where the work is.
+        // This loop used to run first and only build the list above -
+        // so the progress bar reached 100% before a single byte was
+        // read, and the whole hashing pass then happened inside one
+        // uninterruptible call. A Cancel pressed during a large folder
+        // was noticed when the LAST file finished, against an API.md
+        // that promises cancellation between files.
+        let text = match checksum::write_text_watched(&entries, spec.format, |i| {
             if !gated(job) {
-                return Outcome::cancelled();
+                return false;
             }
             publish_file_progress(job, i, total, started, "Hashing");
-            entries.push((m.name.clone(), m.path.clone()));
-        }
-        let text = match checksum::write_text(&entries, spec.format) {
+            true
+        }) {
             Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Outcome::cancelled(),
             Err(e) => return Outcome::failed("io", e.to_string()),
         };
-        if let Err(e) = std::fs::write(&spec.output, text.as_bytes()) {
+        // STAGED and renamed over, the same shape the queue store uses:
+        // a failed or interrupted write must not leave a truncated
+        // manifest where a complete one was.
+        let tmp = spec.output.with_extension(format!(
+            "{}.parfast-tmp",
+            spec.output
+                .extension()
+                .map(|e| e.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ));
+        if let Err(e) = std::fs::write(&tmp, text.as_bytes()) {
+            let _ = std::fs::remove_file(&tmp);
+            return Outcome::failed("io", format!("{}: {e}", tmp.display()));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &spec.output) {
+            let _ = std::fs::remove_file(&tmp);
             return Outcome::failed("io", format!("{}: {e}", spec.output.display()));
         }
         let size = std::fs::metadata(&spec.output)
@@ -1120,6 +1650,7 @@ mod checksums {
                     ok: total,
                     ..Default::default()
                 }),
+                warnings: coverage,
                 ..Default::default()
             }),
             error: None,
@@ -1485,13 +2016,132 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// A create's bar: the two OVERLAPPING phases share one span and
-    /// the writes are the last tenth, monotone throughout.
+    /// A repair that does NOT slab keeps the bar it always had: the
+    /// 45/40/10/5 split, phase by phase.
+    ///
+    /// This is the safety argument for the sweep frame, and both ways a
+    /// repair can be one sweep are run - the engine announcing `(0, 1)`
+    /// and the engine announcing NOTHING, which is what a repair with
+    /// no blocks to rebuild does.
+    ///
+    /// Checked to within a float ULP and not to the bit, which is the
+    /// honest claim: the segment arithmetic reassociates the same
+    /// weights, so `0.45 + 0.40/1.0` is one ULP above the literal
+    /// `0.85` the table used to carry. Nothing draws a bar to
+    /// seventeen digits; a host draws a percentage.
+    #[test]
+    fn a_repair_that_does_not_slab_keeps_the_bar_it_always_had() {
+        use par2repair::ProgressSink;
+        use par2repair::RepairPhase as P;
+        for announce in [false, true] {
+            let p = Publisher::new(JobSnapshot::queued(
+                1,
+                JobKind::Repair,
+                "2026-09-12T00:00:00Z".into(),
+                false,
+            ));
+            let sink = RepairProgress::new(Arc::clone(&p));
+            if announce {
+                sink.slab(0, 1);
+            }
+            for (phase, base, span) in [
+                (P::Verify, 0.0, 0.45),
+                (P::Fold, 0.45, 0.40),
+                (P::Solve, 0.85, 0.10),
+                (P::Write, 0.95, 0.05),
+            ] {
+                for done in 0..=4u64 {
+                    sink.progress(phase, done, 4);
+                    // The pre-sweep table, verbatim.
+                    let want: f64 = base + span * (done as f64 / 4.0);
+                    assert!(
+                        (p.get().progress - want).abs() < 1e-12,
+                        "{phase:?} {done}/4 (announce={announce}) drew {} and the pre-sweep \
+                         table says {want}",
+                        p.get().progress
+                    );
+                }
+            }
+        }
+    }
+
+    /// THE DEFECT, pinned, and measured off the engine before it was
+    /// fixed: a four-sweep repair read the literal figure 0.95 for
+    /// sweeps 1, 2 and 3 while the sentence under it went on counting.
+    ///
+    /// The sequence is the engine's own order - `Verify` once, then per
+    /// sweep an announcement, a `Fold` and a `Solve`, then one `Write`
+    /// (`research/REPAIR-SLABBED-BAR-2026-09-16.md` section 2 records
+    /// it from a real four-sweep repair). Asserted per sweep that BOTH
+    /// of its phases moved the bar, which is the discriminating pair: a
+    /// bar that merely rose somewhere and landed on full passes against
+    /// the unswept bands too.
+    #[test]
+    fn every_sweep_of_a_slabbed_repair_moves_the_bar() {
+        use par2repair::ProgressSink;
+        use par2repair::RepairPhase as P;
+        const OF: usize = 4;
+        let p = Publisher::new(JobSnapshot::queued(
+            1,
+            JobKind::Repair,
+            "2026-09-12T00:00:00Z".into(),
+            false,
+        ));
+        let sink = RepairProgress::new(Arc::clone(&p));
+        for step in 1..=4u64 {
+            sink.progress(P::Verify, step, 4);
+        }
+        assert!((p.get().progress - 0.45).abs() < 1e-12, "{:?}", p.get());
+        for sweep in 0..OF {
+            sink.slab(sweep, OF);
+            let opened = p.get().progress;
+            for step in 1..=4u64 {
+                sink.progress(P::Fold, step, 4);
+            }
+            let folded = p.get().progress;
+            assert!(
+                folded > opened,
+                "sweep {sweep} of {OF}: its fold did not move the bar ({opened} -> {folded})"
+            );
+            for step in 1..=4u64 {
+                sink.progress(P::Solve, step, 4);
+            }
+            let solved = p.get().progress;
+            assert!(
+                solved > folded,
+                "sweep {sweep} of {OF}: its solve did not move the bar ({folded} -> {solved})"
+            );
+            // And no sweep may spend the room the later ones need.
+            assert!(
+                solved <= 0.95 + 1e-12,
+                "sweep {sweep} of {OF} took the bar to {solved}, into the write's band"
+            );
+        }
+        // The last sweep hands the bar to the write exactly where the
+        // unswept table handed it over.
+        assert!((p.get().progress - 0.95).abs() < 1e-12, "{:?}", p.get());
+        for step in 1..=4u64 {
+            sink.progress(P::Write, step, 4);
+        }
+        assert!((p.get().progress - 1.0).abs() < 1e-12, "{:?}", p.get());
+    }
+
+    /// A create's bar on a ONE-BATCH create: the two OVERLAPPING
+    /// phases share one span and the writes are the last tenth,
+    /// monotone throughout.
     ///
     /// This is the mapping `CreateProgress`'s doc argues for, pinned -
     /// because the failure it avoids (a bar that stalls at 45% on one
     /// engine arm and jumps backwards on another) is invisible in any
     /// test that only runs one arm.
+    ///
+    /// The figures here are the ones this bar drew before the batch
+    /// frame landed, to the bit, which is half of the safety argument
+    /// for that change - see
+    /// `a_one_batch_create_draws_exactly_the_bar_it_always_did` for the
+    /// other half. What did change is WHEN the writes may draw: they
+    /// now wait for the fold, so the fold is run to full below before
+    /// the write is asked for.
     #[test]
     fn a_creates_hash_and_fold_share_one_span_and_the_writes_are_the_last_tenth() {
         use par2repair::ProgressSink;
@@ -1501,9 +2151,7 @@ mod tests {
             "2026-09-12T00:00:00Z".into(),
             false,
         ));
-        let sink = CreateProgress {
-            publisher: Arc::clone(&p),
-        };
+        let sink = CreateProgress::new(Arc::clone(&p));
         sink.progress(par2repair::RepairPhase::Verify, 1, 2);
         assert!((p.get().progress - 0.45).abs() < 1e-9, "{:?}", p.get());
         assert_eq!(p.get().phase, Phase::Hashing);
@@ -1516,17 +2164,249 @@ mod tests {
             (p.get().progress - 0.675).abs() < 1e-9,
             "a create bar went backwards"
         );
+        // A create has nothing to solve and the engine never sends it;
+        // if one ever arrived it must not move a create's bar to 85%.
+        let before = p.get().progress;
+        sink.progress(par2repair::RepairPhase::Solve, 1, 2);
+        assert!((p.get().progress - before).abs() < f64::EPSILON);
+        // The fold finishes, which is what hands the bar to the writes.
+        sink.progress(par2repair::RepairPhase::Fold, 4, 4);
+        assert!((p.get().progress - 0.90).abs() < 1e-9, "{:?}", p.get());
         // The writes are the last tenth, and they land on full.
         sink.progress(par2repair::RepairPhase::Write, 1, 2);
         assert!((p.get().progress - 0.95).abs() < 1e-9, "{:?}", p.get());
         assert_eq!(p.get().phase, Phase::Writing);
         sink.progress(par2repair::RepairPhase::Write, 2, 2);
         assert!((p.get().progress - 1.0).abs() < 1e-9, "{:?}", p.get());
-        // A create has nothing to solve and the engine never sends it;
-        // if one ever arrived it must not move a create's bar to 85%.
-        let before = p.get().progress;
-        sink.progress(par2repair::RepairPhase::Solve, 1, 2);
-        assert!((p.get().progress - before).abs() < f64::EPSILON);
+    }
+
+    /// THE SAFETY ARGUMENT FOR THE BATCH FRAME, as a test rather than a
+    /// claim: on a create that folds in one batch - every create that
+    /// fits the accumulator budget, so nearly all of them - the framed
+    /// rules are arithmetic identities over the unframed ones.
+    ///
+    /// Both ways a create can be one batch are run: the engine
+    /// announcing `(0, 1)` (the batched driver with one group) and the
+    /// engine announcing NOTHING (the stripe-first transform, which
+    /// never calls `batch`). They must give the same bar, because the
+    /// frame's default is what makes the silent arm safe.
+    ///
+    /// Compared against the expression this sink used before the frame,
+    /// evaluated here, so the two cannot drift apart silently.
+    #[test]
+    fn a_one_batch_create_draws_exactly_the_bar_it_always_did() {
+        use par2repair::ProgressSink;
+        use par2repair::RepairPhase as P;
+        for announce in [false, true] {
+            let p = Publisher::new(JobSnapshot::queued(
+                1,
+                JobKind::Create,
+                "2026-09-12T00:00:00Z".into(),
+                false,
+            ));
+            let sink = CreateProgress::new(Arc::clone(&p));
+            if announce {
+                sink.slab(0, 1);
+            }
+            let mut want: f64 = 0.0;
+            for (phase, done) in [
+                (P::Verify, 1u64),
+                (P::Fold, 1),
+                (P::Verify, 4),
+                (P::Fold, 2),
+                (P::Verify, 7),
+                (P::Fold, 9),
+                (P::Verify, 10),
+                (P::Fold, 10),
+            ] {
+                sink.progress(phase, done, 10);
+                // The pre-frame rule, verbatim: one 0.0..0.90 span for
+                // both phases, the larger of the two wins, monotone.
+                want = want.max(0.0 + 0.90 * (done as f64 / 10.0));
+                assert_eq!(
+                    p.get().progress,
+                    want,
+                    "{phase:?} {done}/10 (announce={announce}) moved a one-batch bar off the \
+                     figure it drew before the batch frame"
+                );
+            }
+        }
+    }
+
+    /// THE DEFECT, pinned: an 18-batch create must not spend
+    /// seventeen of its eighteen passes at the top of the bar.
+    ///
+    /// The sequence is the engine's own, in the engine's order
+    /// (`par2gen`'s batch loop): the frame is announced before each
+    /// batch's fold, the scan runs ONCE beside batch 1 and reaches
+    /// 100% there, each batch's fold runs 0 to 100% of its own
+    /// re-sized phase, and the volume writes step after every batch
+    /// against a total sized over the whole set.
+    ///
+    /// Three assertions, one per peg the unframed bar had: the hash
+    /// cannot take the bar past the end of batch 1, the writes cannot
+    /// take it into the last tenth while folding is still to come, and
+    /// every batch after the first moves it. Against the unframed
+    /// rule all three fail; the two tests above pass against it, which
+    /// is why they are not enough on their own.
+    #[test]
+    fn every_batch_of_a_multi_batch_create_moves_the_bar() {
+        use par2repair::ProgressSink;
+        use par2repair::RepairPhase as P;
+        const OF: usize = 18;
+        // The whole set's recovery payload, which is what `Write` is
+        // sized over: one volume's worth per batch here.
+        const SET: u64 = OF as u64;
+        let p = Publisher::new(JobSnapshot::queued(
+            1,
+            JobKind::Create,
+            "2026-09-12T00:00:00Z".into(),
+            false,
+        ));
+        let sink = CreateProgress::new(Arc::clone(&p));
+        let mut last = 0.0f64;
+        for b in 0..OF {
+            sink.slab(b, OF);
+            let opened = p.get().progress;
+            for step in 1..=4u64 {
+                sink.progress(P::Fold, step, 4);
+                if b == 0 {
+                    // The scan reads the payload once, beside batch 1.
+                    sink.progress(P::Verify, step, 4);
+                }
+            }
+            let folded = p.get().progress;
+            assert!(
+                folded > opened,
+                "batch {b} of {OF} did not move the bar: {opened} -> {folded}"
+            );
+            assert!(
+                folded > last,
+                "batch {b} of {OF} did not move the bar past batch {}: {last} -> {folded}",
+                b.saturating_sub(1)
+            );
+            if b == 0 {
+                // THE FIRST PEG: the hash finished here and may not
+                // speak for the seventeen batches it never ran beside.
+                assert!(
+                    folded <= 0.90 / OF as f64 + 1e-9,
+                    "a finished hash took the bar to {folded} during batch 1 of {OF}"
+                );
+            }
+            // The batch's volumes are flushed. `Write` is sized over
+            // the whole set, so this is the create's own write
+            // fraction and not the batch's.
+            sink.progress(P::Write, b as u64 + 1, SET);
+            let written = p.get().progress;
+            if b + 1 < OF {
+                // THE SECOND PEG, and the dominant one: a write frame
+                // may not put the bar into the last tenth while there
+                // are batches left to fold.
+                assert!(
+                    written < 0.90,
+                    "batch {b} of {OF}'s volume write took the bar to {written}, into the band \
+                     reserved for the writes that outlive the fold"
+                );
+            }
+            last = p.get().progress;
+        }
+        // The last batch has folded, so the writes own the bar now and
+        // the create lands on full.
+        sink.progress(P::Write, SET, SET);
+        assert!(
+            (p.get().progress - 1.0).abs() < 1e-9,
+            "a finished create left the bar at {}",
+            p.get().progress
+        );
+    }
+
+    /// A held write frame publishes NOTHING - not the bar, not the
+    /// phase word, and no wake to the host.
+    ///
+    /// The phase word is the half a bar-only test cannot see: `Write`
+    /// overlaps `Fold` on the stripe-first arm for the whole of the
+    /// create, so a sink that suppressed only the FIGURE would leave
+    /// the pane saying "Writing the recovery volumes" while the fold
+    /// ran, which is the flicker this rule exists to stop.
+    #[test]
+    fn a_write_that_arrives_during_the_fold_says_nothing_at_all() {
+        use par2repair::ProgressSink;
+        use par2repair::RepairPhase as P;
+        let p = Publisher::new(JobSnapshot::queued(
+            1,
+            JobKind::Create,
+            "2026-09-12T00:00:00Z".into(),
+            false,
+        ));
+        let woke = Arc::new(AtomicU32::new(0));
+        let w2 = Arc::clone(&woke);
+        p.set_wake(Some(Box::new(move || {
+            w2.fetch_add(1, Ordering::Relaxed);
+        })));
+        let sink = CreateProgress::new(Arc::clone(&p));
+        sink.progress(P::Fold, 1, 4);
+        let after_fold = p.get();
+        let wakes = woke.load(Ordering::Relaxed);
+        sink.progress(P::Write, 3, 4);
+        let after_write = p.get();
+        assert_eq!(
+            after_write.progress, after_fold.progress,
+            "a write drew during the fold"
+        );
+        assert_eq!(
+            after_write.phase_text, after_fold.phase_text,
+            "a held write took the phase text"
+        );
+        assert_eq!(after_write.phase, Phase::Solving);
+        assert_eq!(
+            woke.load(Ordering::Relaxed),
+            wakes,
+            "a held write rang the host's wake"
+        );
+        // And once the fold is done with the bar, the same frame draws.
+        sink.progress(P::Fold, 4, 4);
+        sink.progress(P::Write, 3, 4);
+        assert!((p.get().progress - 0.975).abs() < 1e-9, "{:?}", p.get());
+        assert_eq!(p.get().phase, Phase::Writing);
+    }
+
+    /// A hash that reaches the end of the shared span opens the write
+    /// band too, and on a ONE-BATCH create that is the case that
+    /// matters: the two phases run at once and either can be the one
+    /// that finishes it.
+    ///
+    /// Not an oversight in the write's hold, and the alternative is
+    /// worse. The span holds whichever of the two is further along, so
+    /// a finished hash has left nothing for the fold to move it with -
+    /// waiting for the fold as well would leave the bar sitting at 0.90
+    /// with the writes still held, which is the freeze the hold exists
+    /// to avoid. On a MULTI-batch create the hash cannot reach the end
+    /// of the span at all, which
+    /// `every_batch_of_a_multi_batch_create_moves_the_bar` pins.
+    #[test]
+    fn a_finished_hash_hands_a_one_batch_create_to_its_writes() {
+        use par2repair::ProgressSink;
+        use par2repair::RepairPhase as P;
+        let p = Publisher::new(JobSnapshot::queued(
+            1,
+            JobKind::Create,
+            "2026-09-12T00:00:00Z".into(),
+            false,
+        ));
+        let sink = CreateProgress::new(Arc::clone(&p));
+        sink.progress(P::Fold, 1, 4);
+        sink.progress(P::Write, 1, 4);
+        assert!(
+            (p.get().progress - 0.225).abs() < 1e-9,
+            "a write drew while the span still had room: {:?}",
+            p.get()
+        );
+        // The hash finishes first, which is all the span has left.
+        sink.progress(P::Verify, 4, 4);
+        assert!((p.get().progress - 0.90).abs() < 1e-9, "{:?}", p.get());
+        sink.progress(P::Write, 1, 4);
+        assert!((p.get().progress - 0.925).abs() < 1e-9, "{:?}", p.get());
+        assert_eq!(p.get().phase, Phase::Writing);
     }
 
     /// The publisher must not hold its lock across the wake: a host

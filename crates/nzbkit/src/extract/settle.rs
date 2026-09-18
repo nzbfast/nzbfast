@@ -2262,27 +2262,31 @@ mod tests {
     fn nested_crc_gate_survives_mapped_repair() {
         let f = payload(400_000, 97);
         let whole = crc32fast::hash(&f);
-        let iv = fixtures::rar5_volume_set_crc(&[
-            // WinRAR-true geometry: volume 0 carries one byte more (its
-            // main header has no volume-number field).
-            &[(
-                "F.mkv",
-                400_000,
-                &f[..150_001],
-                false,
-                true,
-                Some(crc32fast::hash(&f[..150_001])),
-            )],
-            &[(
-                "F.mkv",
-                400_000,
-                &f[150_001..300_001],
-                true,
-                true,
-                Some(crc32fast::hash(&f[150_001..300_001])),
-            )],
-            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
-        ]);
+        let iv = fixtures::rar5_volume_set_crc_layout(
+            &[
+                // WinRAR-true geometry: volume 0 carries one byte more (its
+                // main header has no volume-number field).
+                &[(
+                    "F.mkv",
+                    400_000,
+                    &f[..150_001],
+                    false,
+                    true,
+                    Some(crc32fast::hash(&f[..150_001])),
+                )],
+                &[(
+                    "F.mkv",
+                    400_000,
+                    &f[150_001..300_001],
+                    true,
+                    true,
+                    Some(crc32fast::hash(&f[150_001..300_001])),
+                )],
+                &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+            ],
+            fixtures::Rar5Head::default(),
+            fixtures::Rar5Crc::FinalFragment,
+        );
         // Outer entries carry CRCs too, so the level-0 gate composes
         // the inner-archive files alongside the child's payload gate.
         let outer = fixtures::rar5_volume_n_crc(

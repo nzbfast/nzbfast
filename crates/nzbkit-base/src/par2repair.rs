@@ -990,7 +990,6 @@ fn repair_mapped_inner(
                                 // holding the repair.
                                 control.gate_if_held()?;
                                 feeder.feed_with(g, take, |buf| io.read(fi, off, buf))?;
-                                control.step(control::RepairPhase::Fold, take as u64);
                             }
                             Ok(())
                         })();
@@ -1002,7 +1001,11 @@ fn repair_mapped_inner(
                 r?;
             }
         }
-        control.finish(control::RepairPhase::Fold);
+        // NO `finish(Fold)` HERE. Queueing the last read is not the end
+        // of the fold - the syndrome worker is still folding what it
+        // was handed, and `Reconstructor::finish_owned_reported` below
+        // lands the phase once it has joined it. Same for the per-block
+        // step the reader loop above used to make.
         if timing {
             info!(
                 target: "repair-timing",
@@ -1026,6 +1029,41 @@ fn repair_mapped_inner(
             );
         }
 
+        // THE LAST PAUSE POINT, and the one this driver went without
+        // until 17 Sep 2026. Everything inside `finish_owned_reported`
+        // abandons its work on a cancel and returns NORMALLY - it hands
+        // back a tuple, not a `Result` - so a half-done solve reaches
+        // here looking exactly like a finished one: the fold worker
+        // DRAINS its channel instead of folding, `ntt_syndromes_into`'s
+        // stripe workers `break`, and `linalg::fold_parallel_opts`'s
+        // unit drain returns with the output grid still at zero. Each
+        // of those three sites is legal only because a driver refuses
+        // before the patch, and each says so; the disk driver's own
+        // check is at the head of its patch for the same reason and its
+        // comment says it may never be moved below one.
+        //
+        // Without this, a cancel landing anywhere after the pre-solve
+        // `check` above wrote ZERO BLOCKS through `VolumeIo` into a
+        // live extractor slot and then reported
+        // `RepairError::VerifyFailed(<member>)` from the self-prove -
+        // so a user who pressed Cancel was told their set could not be
+        // repaired, and `repair_dir_set_inner`'s retry ladder reads
+        // that verdict as a reason to try again. Measured on the dense
+        // arm at m = 3: 64 bytes per damaged block, all of them zero,
+        // at the damaged blocks' own offsets
+        // (`control_tests::a_cancel_raised_inside_the_solve_ends_the_
+        // mapped_repair_before_it_writes`).
+        //
+        // `gate` rather than `check`, the same call the disk driver
+        // makes here: a driver boundary before the patch opens its
+        // first destination is on [`control::PauseGate`]'s own list of
+        // the places a repair may park, and this driver already parks
+        // at the slab top above and per block in the feed - so an
+        // extractor slot is held across a pause here whatever this line
+        // does, and honouring Pause costs nothing that is not already
+        // being paid. Per slab, which is where the disk driver takes it
+        // too.
+        control.gate()?;
         // Write rebuilt blocks back, tails trimmed - across threads, the same
         // fan-out the disk driver's patch uses: `VolumeIo` is `Sync`, each
         // block is one positional write to its own offset, and serially this
@@ -1089,8 +1127,13 @@ fn repair_mapped_inner(
         // phases by a wide margin (`forney`'s measurements: seconds
         // against minutes), so stopping inside it buys nothing a check
         // at the next slab boundary does not. The checks that matter -
-        // before the fold, before the solve, between slabs - are all
-        // ahead of it.
+        // before the fold, before the solve, between slabs, and the
+        // `gate` immediately above this loop - are all ahead of it.
+        // That last one is what makes this paragraph true rather than
+        // merely stated: until 17 Sep 2026 the list ended at "between
+        // slabs" and a single-slab repair had NO check at all between
+        // its solve and its writes, so the omission the first sentence
+        // calls a decision was one only for the phases after it.
     }
     if timing {
         info!(target: "repair-timing", "patch done at {:.2?}", t0.elapsed());
@@ -1706,8 +1749,9 @@ struct Target {
 
 mod survey;
 pub use survey::{
-    AfterSurvey, MemberSurvey, PacketFileScan, PacketSeen, RecoverySeen, RepairForecast,
-    ScanReport, SolveKind, SurveyObserver, repair_dir_set_surveyed, repair_dir_set_surveyed_as,
+    AfterSurvey, ExtraFileMatch, MemberSurvey, PacketFileScan, PacketSeen, RecoverySeen,
+    RepairForecast, ScanReport, SolveKind, SurveyObserver, repair_dir_set_surveyed,
+    repair_dir_set_surveyed_as,
 };
 
 // What a repair says WHILE it runs, and how a caller stops it - the
@@ -1934,8 +1978,9 @@ fn repair_sets_catalog(
                 // an id with no FileDesc packet at all never reaches it;
                 // here every id in the walk is attempted, and one whose
                 // Main packet lists file ids no FileDesc describes comes
-                // straight back `Malformed("FileDesc missing for file
-                // id ...")` - an ERROR, which fails `every_set_ok` for
+                // straight back `Malformed("No details available for
+                // recoverable file number N. ... FileDesc missing for
+                // file id ...")` - an ERROR, which fails `every_set_ok` for
                 // the whole directory and takes the real set's verdict
                 // down with it.
                 //
@@ -2107,12 +2152,37 @@ fn repair_dir_set_inner(
     // --- lay the recovery-set files onto the global slice index space ---
     let mut targets: Vec<Target> = Vec::with_capacity(file_ids.len());
     let mut next_slice = 0usize;
-    for fid in &file_ids {
+    for (fno, fid) in file_ids.iter().enumerate() {
         let Some(d) = replay.descs.remove(fid) else {
             // Without the FileDesc we know neither name nor length, and
             // the global constant assignment shifts - unrecoverable here.
+            //
+            // THE SENTENCE IS THE REFERENCE'S, ORDINAL INCLUDED, and it
+            // leads because a caller PARSES it. par2cmdline prints "No
+            // details available for recoverable file number N." /
+            // "Recovery will not be possible." for this exact condition
+            // (par2repairer.cpp, captured from v1.3.0 on 17 Sep 2026),
+            // SABnzbd fails the job with that line as the reason it
+            // shows the user, and a message that led with our own words
+            // reached no branch of it.
+            //
+            // THE NUMBER IS OURS AND IS DELIBERATELY NOT THE
+            // REFERENCE'S. par2cmdline's is `filenumber+1` off a counter
+            // it declares at the top of `VerifySourceFiles` and never
+            // increments in that loop, so the reference prints "number
+            // 1" for every such file however deep in the set it sits -
+            // verified against v1.3.0 on 17 Sep 2026, which called the
+            // THIRD member number 1. Ours is this walk's real position
+            // in the Main packet's recoverable-id list. Do not "fix" it
+            // to agree with the reference: the parsed part of the line
+            // is the sentence, the ordinal is for a human, and a
+            // constant 1 tells that human nothing. The id stays after
+            // the sentence, because it is the half an engine caller
+            // debugs from.
             return Err(RepairError::Malformed(format!(
-                "FileDesc missing for file id {fid:02x?}"
+                "No details available for recoverable file number {}. Recovery will not be \
+                 possible. FileDesc missing for file id {fid:02x?}",
+                fno + 1
             )));
         };
         // d.length is attacker-controlled; a huge value makes n_slices
@@ -2483,12 +2553,14 @@ fn repair_dir_set_inner(
     let any_unidentified = targets
         .iter()
         .any(|t| t.n_slices > 0 && !(t.exists && (t.intact || t.present.iter().any(|&p| p))));
-    let (mut cands, donor_from, mut adopted) = if adopt::disabled_for_screen() {
+    // `whole_claims` is the fast path's own whole-file-MD5 verdict, which
+    // the adoption map cannot be read back for - `adopt::adoption_tally`.
+    let (mut cands, donor_from, mut adopted, whole_claims) = if adopt::disabled_for_screen() {
         // The deterministic trap screen: no writer of `adopted` runs,
         // so a repair here can only come out of the recovery set. All
         // THREE writers are gated, not just this one - see
         // `adopt::disabled_for_screen`.
-        (Vec::new(), 0, HashMap::new())
+        (Vec::new(), 0, HashMap::new(), HashSet::new())
     } else if !missing.is_empty() && (any_unidentified || missing.len() > by_exp.len()) {
         let mut excluded = sniffed.clone();
         if let Some(observer) = observe.as_ref() {
@@ -2496,7 +2568,7 @@ fn repair_dir_set_inner(
         }
         adopt::adopt_blocks(dir, &ctx.donors, &targets, &missing, bs, &excluded)?
     } else {
-        (Vec::new(), 0, HashMap::new())
+        (Vec::new(), 0, HashMap::new(), HashSet::new())
     };
     // §293 donors are the walk's tail; fixed before the escalation appends.
     let donor_cands = donor_from..cands.len();
@@ -2570,6 +2642,19 @@ fn repair_dir_set_inner(
     // argument and the reason the donor NAMES were not plumbed here.
     let adopted = adopted;
     let missing = missing;
+    // The extra-file scan's results, before the fold and free when
+    // nothing was adopted - [`SurveyObserver::extra_files_scanned`].
+    if let Some(o) = observe.as_mut() {
+        o.extra_files_scanned(&adopt::extra_file_matches(
+            dir,
+            &cands,
+            donor_from,
+            &targets,
+            &adopted,
+            bs,
+            &whole_claims,
+        ));
+    }
     let mut cand_reader = adopt::CandReader {
         cands: &cands,
         open: pinned,
@@ -2846,22 +2931,20 @@ fn repair_dir_set_inner(
                     // recorded the admission that paid for it.
                     att.consumed(n, bytes);
                     for b in batches {
-                        // Retained blocks are fold input that never
-                        // touched the disk on this pass, and they are
-                        // counted in the phase's total above - a bar
-                        // that ignored them would sit at zero through
-                        // the whole of a set that fitted the retention
-                        // budget, which is most small repairs.
-                        control.step(control::RepairPhase::Fold, b.len() as u64);
+                        // NOT STEPPED HERE, 17 Sep 2026. Retained
+                        // blocks ARE in the phase's total above, but
+                        // handing them over is instant and the FOLD of
+                        // them is not, so the syndrome worker steps the
+                        // phase as it folds instead.
+                        // `Reconstructor::new_controlled` carries what
+                        // stepping here measured (40-80 ms whatever the
+                        // payload) and why a bar at zero was no answer.
                         rec.send_batch(b);
                     }
-                    // Handing over is instant; the FOLDING of what was
-                    // just handed over is not, and it happens on the
-                    // syndrome worker - which polls the same cancel and
-                    // discards instead of folding (see
-                    // `Reconstructor::new_controlled`). This check is
-                    // what stops the hand-over itself on a corpus large
-                    // enough to be several batches.
+                    // The worker polls the same cancel and discards
+                    // instead of folding, so this check is what stops
+                    // the hand-over itself on a corpus large enough to
+                    // be several batches.
                     if control.cancelled() {
                         return Err(RepairError::Cancelled);
                     }
@@ -2948,7 +3031,6 @@ fn repair_dir_set_inner(
                                     feeder.feed_with(g, take, |buf| {
                                         crate::disk::read_exact_at(f, buf, off)
                                     })?;
-                                    control.step(control::RepairPhase::Fold, take as u64);
                                 }
                                 Ok(())
                             })();
@@ -2981,10 +3063,10 @@ fn repair_dir_set_inner(
                     let from = c0.min(data.len());
                     let to = (c0 + w).min(data.len());
                     rec.feed(g, &data[from..to]);
-                    control.step(control::RepairPhase::Fold, (to - from) as u64);
                 }
             }
-            control.finish(control::RepairPhase::Fold);
+            // NO `finish(Fold)` HERE: the phase lands inside
+            // `finish_owned_reported` below, after the worker is joined.
             // BEFORE THE SOLVE, which is the other multi-minute stretch
             // and the one a cancelled repair must not sit through. On a
             // set whose whole corpus was retained the fold is one
@@ -3037,6 +3119,7 @@ fn repair_dir_set_inner(
         adopted_from,
         files_patched: Vec::new(),
         files_created: Vec::new(),
+        files_renamed: Vec::new(),
         consumed_sources: Vec::new(),
         // Built HERE and not in the patch loop below: that loop walks
         // `damaged` only, and the census is over every target.
@@ -3053,6 +3136,27 @@ fn repair_dir_set_inner(
     // `missing`, correct only while the spend loop is gated on
     // `shortfall.is_none()`. Read `adopt::proven_spent` before lifting it.
     let rebuilt_set: HashSet<usize> = missing.iter().copied().collect();
+    // A target whose every block came from ONE extra file that IS it,
+    // whole, is a RENAME and not a rebuild - the reference does a
+    // directory operation per file on the ordinary obfuscated post
+    // where this engine wrote the payload a second time and left the
+    // donor behind. `adopt::whole_file_renames` carries the proof, the
+    // five guards and the fixture. The patch loop below skips it once
+    // it has made its parent directory, so no destination is opened and
+    // no byte is written for it, and it is landed through the rename
+    // loop at the end.
+    let whole = adopt::whole_file_renames(
+        dir,
+        fold,
+        &cands,
+        donor_from,
+        &targets,
+        &adopted,
+        bs,
+        &ctx.declared,
+        &whole_claims,
+        shortfall.is_some(),
+    );
     let mut damaged: Vec<usize> = needs_resize;
     for (ti, t) in targets.iter().enumerate() {
         if !t.present.iter().all(|&p| p) && !damaged.contains(&ti) {
@@ -3177,6 +3281,14 @@ fn repair_dir_set_inner(
         // the same parent, so both arms need it. Symlink-refusing, same
         // containment rule as every other tree write.
         crate::disk::create_out_dirs(dir, &crate::disk::out_name_of(dir, &t.path))?;
+        // A whole-file match opens no destination and writes no byte -
+        // it is landed by moving the donor, below. It stays in `damaged`
+        // as far as THIS line because a tree-shaped target's parent
+        // directory has to exist before anything can be renamed into it,
+        // and this is the one place that makes it.
+        if whole.targets.contains(&ti) {
+            continue;
+        }
         let identified = t.exists && (t.intact || t.present.iter().any(|&p| p));
         // Shortfall publishes stage - `status::publishable`'s argument.
         let via_temp = !identified
@@ -3374,76 +3486,31 @@ fn repair_dir_set_inner(
     }
     mark("final verify");
     // --- which donors are provably spent ---
-    //
-    // One adopted block authenticates ONE window of the donor - a legal
-    // PAR2 block can be four bytes - and says nothing whatever about the
-    // donor's other bytes. Handing the caller every path that donated
-    // anything, which it deletes outright, therefore destroyed complete
-    // files over a shared block: zero padding, a common container
-    // header, or a neighbouring recovery set's payload (foreign targets
-    // are unidentified here, so they are ordinary adoption candidates).
-    //
-    // The case this cleanup exists for - issue #9, the obfuscated post -
-    // is the one where the hash-named donor IS the payload byte for
-    // byte, and the repair has just landed those same bytes under the
-    // FileDesc name. So require exactly that: the donor must match a
-    // target of this set in declared length AND in declared whole-file
-    // MD5. That is a proof about every byte, which is what deletion
-    // needs, and it is cheap to reach because the length test rejects
-    // almost everything before a hash is computed.
-    //
-    // A name any set in the directory declares is somebody's payload and
-    // is never swept, whatever it hashes to.
-    let declared_names: HashSet<String> = ctx
-        .declared
-        .iter()
-        .cloned()
-        .chain(
-            targets
-                .iter()
-                .map(|t| name_identity_key(fold, &t.file.name)),
-        )
-        .collect();
-    let target_keys: HashSet<PathBuf> = targets
-        .iter()
-        .map(|t| path_identity_key(fold, &t.path))
-        .collect();
-    let mut spent_donors: Vec<PathBuf> = Vec::new();
-    // A shortfall publishes files and spends NOTHING: see the
-    // `consumed_sources` note on `status::RepairStatus::Unrepairable`.
-    for ci in donors.into_iter().filter(|_| shortfall.is_none()) {
-        let (p, len) = &cands[ci];
-        // §293: a candidate from a DONOR directory is a predecessor
-        // job's payload, not this directory's junk - byte-identical to
-        // a target is exactly the good case there, and sweeping it
-        // would delete another job's files. Only the repair dir's own
-        // files can ever be spent.
-        if !p.starts_with(dir) {
-            continue;
-        }
-        if adopt::is_somebodys_payload(dir, fold, p, &target_keys, &declared_names) {
-            continue;
-        }
-        let want: Vec<[u8; 16]> = targets
-            .iter()
-            .filter(|t| t.file.length == *len)
-            .map(|t| t.file.md5)
-            .collect();
-        // A hash that cannot be read decides nothing: keep the file.
-        if !want.is_empty() && adopt::md5_of_file(p, None).is_ok_and(|h| want.contains(&h)) {
-            spent_donors.push(p.clone());
-            continue;
-        }
-        // The damaged-twin and fully-donated arms - the per-byte proofs
-        // for a source the exact-MD5 test can never clear. See
-        // [`adopt::proven_spent`].
-        if adopt::proven_spent(p, *len, ci, &targets, &adopted, &rebuilt_set, &cands, bs) {
-            spent_donors.push(p.clone());
-        }
-    }
-    spent_donors.sort();
-    report.consumed_sources = spent_donors;
+    // The proofs, the arms and the §293 rule are `adopt::spent_donors`.
+    report.consumed_sources = adopt::spent_donors(
+        dir,
+        fold,
+        &cands,
+        &targets,
+        &adopted,
+        &rebuilt_set,
+        bs,
+        &ctx.declared,
+        donors,
+        &whole.cands,
+        shortfall.is_some(),
+    );
     // Every adopted read and every verify is done - land the rebuilds.
+    // The whole-file matches land through the SAME loop: a donor that IS
+    // the target is a staged file that needed no writing. Added HERE,
+    // past every `cleanup` call site - `cleanup` REMOVES what is in this
+    // list, and a donor is not this repair's to delete.
+    // CLOSE THE DONOR HANDLES BEFORE ANY RENAME - `CandReader::open`
+    // carries the argument and the Windows share mode it removes a
+    // dependency on. Every adopted read and every verify is done by
+    // here, so the cache has no readers left.
+    cand_reader.lock_ok().close_all();
+    renames.extend(whole.renames);
     status::drop_unpublished(&unpublished, &mut damaged, &mut renames);
     let temp_set: HashSet<usize> = renames.iter().map(|&(_, ti)| ti).collect();
     for &ti in &damaged {
@@ -3468,6 +3535,9 @@ fn repair_dir_set_inner(
         report.files_patched.push(t.file.name.clone());
         if !t.exists {
             report.files_created.push(t.file.name.clone());
+        }
+        if whole.targets.contains(&ti) {
+            report.files_renamed.push(t.file.name.clone());
         }
     }
     Ok(status::finish(shortfall, needed, adopted.len(), report))

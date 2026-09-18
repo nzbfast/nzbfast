@@ -395,6 +395,28 @@ final class PlannerTests: XCTestCase {
         XCTAssertTrue(plan.command.hasSuffix("/abs/x.par2 /abs/part1.bin"), plan.command)
     }
 
+    /// command: the line carries the Overwrite decision, both ways round.
+    ///
+    /// The engine's `command_args` has spelled `--no-clobber` since 17 September 2026 and
+    /// this mock did not, which `PlannerParityTests` caught on every one of its cases at
+    /// once. That parity test is the stronger claim and it is COMPILED OUT on a box with
+    /// no staticlib, so the value assertion lives here too: the mock is exactly what
+    /// draws the pane on such a box, and a pane that protects the set while handing the
+    /// user a line that overwrites it is the pane lying about the one tick that decides
+    /// whether a file survives. The ticked arm is beside it so the switch is conditional
+    /// rather than unconditional - the way the engine's own test is written.
+    func testCommandCarriesTheOverwriteDecision() {
+        let mib: Int64 = 1_048_576
+        func line(overwrite: Bool) -> String {
+            MockPlanner.plan(
+                spec: CreateSpec(block: .size(mib), recovery: .count(2),
+                                 output: "/abs/x.par2", overwrite: overwrite),
+                sources: sources([10 * mib])).command
+        }
+        XCTAssertTrue(line(overwrite: false).contains("--no-clobber"), line(overwrite: false))
+        XCTAssertFalse(line(overwrite: true).contains("--no-clobber"), line(overwrite: true))
+    }
+
     /// command: a block ceiling is parfast's own long option, and a recovery size is
     /// spelled as a scaled `-r` only when a unit divides it exactly.
     func testCommandSpellsTheCeilingsAndSizesTheEngineSpells() {

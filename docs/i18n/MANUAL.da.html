@@ -369,6 +369,7 @@ for længst er væk.</li>
 <li>Mærker viser særlige tilstande: <i>forsøgt, sat til side</i>, <i>prefetcher</i>,
 <i>på pause</i> (se <a href="#performance">Ydelsesværktøjer</a>).</li>
 <li>Et nedtællingsdiagram følger de samlede GB, der er tilbage i hele køen.</li>
+<li><b>Annullering kan fortrydes.</b> At stoppe en download eller rydde hele køen spørger ikke længere først: det sker, og beskeden om det bærer et <b>Fortryd</b>. I ti minutter beholder nzbfast sin egen kopi af NZB-filen, så rækken kommer tilbage med sin kategori, sin prioritet og alt, hvad der allerede var hentet. En download, der pakkes ud, mens den kommer ind, spørger stadig, fordi den allerede hentede del ikke kan gives tilbage.</li>
 </ul>
 <h3 id="dash-browse">Gennemse indeks</h3>
 <p>Søg i alt, hvad den indbyggede indexer har katalogiseret fra dine overvågede grupper
@@ -405,6 +406,7 @@ Kun historikposten fjernes - de hentede filer bliver liggende præcis, hvor de e
 Aldersreglen tager kun fuldførte downloads, så et mislykket venter, til du prøver
 igen eller selv sletter det; længdegrænsen tæller hver post med, uanset hvordan den
 endte.</p>
+<p><b>At fjerne en historikpost kan fortrydes.</b> At rydde de fuldførte eller de mislykkede downloads ud af listen, og at fjerne en markering, spørger ikke længere først: det sker, og beskeden om det bærer et <b>Fortryd</b>. I ti minutter beholder nzbfast hver fjernet posts egen kopi af NZB-filen, så rækken kommer tilbage samme sted og stadig tilbyder <b>Prøv igen</b>. At fjerne en post og slette dens filer spørger stadig, fordi slettede filer ikke kan gives tilbage.</p>
 <h3 id="dash-usage">Dataforbrug</h3>
 <p>Daglige bjælker pr. udbyder og totaler for I dag / 7 dage / 30 dage - uundværligt for målte
 og blok-konti. Blok-konti viser livstidsforbrug mod deres størrelse.</p>
@@ -634,6 +636,7 @@ releases under. Åbn den med <b>&#9656;</b> eller ved at klikke på rækken;
 afkrydsningen på titlen vælger de viste releases. Gruppering gælder kun <b>Dette
 indeks</b>; vælger du <b>Indeksere</b> eller <b>Begge</b>, bliver tabellen flad igen
 og siger det.</li>
+<li><b>Én nyhedsgruppe ad gangen.</b> Klik på gruppenavnet under en release, så indsnævres siden til de releases, der er lagt ud der; en pille over tabellen nævner gruppen, indtil du rydder den. Den indsnævrer både væggen og tabellen, så du beholder den, når du skifter mellem dem. Den anden vej ind er Indstillinger &rarr; Organisering &rarr; <b>Indeksering</b> &rarr; <b>Grupper der skal scannes</b> &rarr; <b>Find…</b>: åbn en gruppe, du allerede scanner, og tryk <b>Indekserede releases</b>.</li>
 <li><b>Alle releases af en titel</b> står i dens kort, når du åbner det, med
 opløsning, codec, lydformat og dynamikområde (Dolby Vision, HDR10) læst ud af
 release-navnet, plus størrelse, alder og om hver del stadig ligger hos din udbyder.

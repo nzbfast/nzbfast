@@ -382,9 +382,10 @@ pub(super) fn admissible(
 
 pub(super) struct Args<'a> {
     pub control: &'a CreateControl,
-    /// Every volume laid out below is noted here before its
-    /// `File::create`, so a cancel removes it - see
-    /// `control::CreateTrail`.
+    /// Every volume laid out below is opened THROUGH this and noted the
+    /// moment the open succeeds, so a cancel removes it - and a volume
+    /// the trail REFUSED (no-clobber over a file already there) is
+    /// never noted and so never removed. See `control::CreateTrail`.
     pub trail: &'a CreateTrail,
     pub scanned: &'a [(PathBuf, u64)],
     pub bs: usize,
@@ -579,70 +580,28 @@ fn band_chunk(
     Ok(Some(probe))
 }
 
-/// `Ok(Some(volumes))` with every volume written and sealed;
-/// `Ok(None)` when the transform's check disagreed or the mapping could
-/// not be built - the caller runs the batched path.
-pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2GenError> {
-    let t0 = std::time::Instant::now();
-    let bs = a.bs;
-    let words = bs / 2;
-    let logs = crate::par2repair::input_base_logs(a.n_slices)
-        .map_err(|e| Par2GenError::Other(format!("assigning RS constants: {e}")))?;
-    let present: Vec<(u32, crate::par2ntt::SrcId)> = logs
-        .iter()
-        .enumerate()
-        .map(|(i, &l)| (l, i as crate::par2ntt::SrcId))
-        .collect();
-    let Ok((ntt, out_first)) = ntt_range::plan(&present, a.first, a.rows) else {
-        return Ok(None);
-    };
-    let Some(window) = super::ntt_range::create_ntt_window(bs, a.n_slices, a.first, a.rows) else {
-        return Ok(None);
-    };
-    // The block list in input-slice order, as `recovery_slices` builds it.
-    let mut plan: Vec<(usize, u64, usize)> = Vec::with_capacity(a.n_slices);
-    for (mi, &(_, length)) in a.scanned.iter().enumerate() {
-        let mut off = 0u64;
-        while off < length {
-            let want = (length - off).min(bs as u64) as usize;
-            plan.push((mi, off, want));
-            off += want as u64;
-        }
-    }
-    // Mapped: the sources, and the independent check - row `first` by the
-    // fold over the same sources, compared chunk by chunk below - up
-    // front. Bands: one read handle per member now, the check per band.
-    let (maps, sources) = match a.corpus {
-        Corpus::Mapped => {
-            let Some(maps) = MappedPlan::open(a.scanned, &plan, bs, window.saturating_mul(bs))
-            else {
-                return Ok(None);
-            };
-            (Some(maps), Vec::new())
-        }
-        Corpus::Bands { .. } => {
-            let sources = a
-                .scanned
-                .iter()
-                .map(|(path, _)| std::fs::File::open(path).map_err(io(path)))
-                .collect::<Result<Vec<_>, _>>()?;
-            (None, sources)
-        }
-    };
-    let probe: Vec<u16> = maps.as_ref().map_or_else(Vec::new, |maps| {
-        let srcs: Vec<&[u8]> = (0..a.n_slices).map(|i| maps.block(i, bs)).collect();
-        probe_row(&srcs, &logs, a.first, words)
-    });
+/// The volume files `run` folds into, laid out and header-written before
+/// the first payload byte exists.
+struct Volumes {
+    files: Vec<std::fs::File>,
+    names: Vec<String>,
+    patches: Vec<CriticalPatch>,
+    /// Per row: (volume, offset of the packet header in that file).
+    place: Vec<(usize, u64)>,
+}
 
-    // Volumes laid out up front, exactly as the batched writer lays them
-    // (its shape is what the backfill patches): the head layout puts the
-    // critical block first and the packets after it; the interleaved
-    // layout (par2cmdline's, the CLI's default) puts each recovery
-    // packet, then the critical packets the schedule owes at that point,
-    // and the Creator once at the end, recording every critical copy's
-    // offset. Recovery headers go in with their MD5 field zero; the
-    // payloads and seals follow.
-    let packet = 68 + bs as u64;
+/// Create every volume file, size it, and write the head and each
+/// recovery packet's header (MD5 fields zero, patched after the last
+/// chunk) - split out of [`run`] on 17 Sep 2026 for the 500-line
+/// function ceiling, not because it is reused anywhere else.
+///
+/// It reads nothing but [`Args`], and it runs to completion before any
+/// transform does, which is what makes it a seam rather than a slice of
+/// the fold: the whole point of this path is that the layout exists up
+/// front so each chunk can be written straight into its packet at a
+/// known offset.
+fn lay_out_volumes(a: &Args) -> Result<Volumes, Par2GenError> {
+    let packet = 68 + a.bs as u64;
     let mut files: Vec<std::fs::File> = Vec::with_capacity(a.layout.len());
     let mut names: Vec<String> = Vec::with_capacity(a.layout.len());
     let mut patches: Vec<CriticalPatch> = Vec::with_capacity(a.layout.len());
@@ -651,8 +610,10 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
     for (vi, &(vfirst, count)) in a.layout.iter().enumerate() {
         let name = format!("{}.vol{vfirst:03}+{count:02}.par2", a.base);
         let path = a.dir.join(&name);
-        a.trail.note(&name);
-        let f = std::fs::File::create(&path).map_err(io(&path))?;
+        // Opened and noted in ONE call - see `CreateTrail::create`. A
+        // no-clobber trail answers `AlreadyExists` here, and unwinds
+        // through the same `io(&path)` as any other open failure.
+        let f = a.trail.create(a.dir, &name).map_err(io(&path))?;
         let header_at = |e: usize, at: u64| -> std::io::Result<()> {
             let mut header = [0u8; 68];
             header[..8].copy_from_slice(crate::par2::MAGIC);
@@ -727,6 +688,83 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
         names.push(name);
         patches.push(patch);
     }
+    Ok(Volumes {
+        files,
+        names,
+        patches,
+        place,
+    })
+}
+
+/// `Ok(Some(volumes))` with every volume written and sealed;
+/// `Ok(None)` when the transform's check disagreed or the mapping could
+/// not be built - the caller runs the batched path.
+pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2GenError> {
+    let t0 = std::time::Instant::now();
+    let bs = a.bs;
+    let words = bs / 2;
+    let logs = crate::par2repair::input_base_logs(a.n_slices)
+        .map_err(|e| Par2GenError::Other(format!("assigning RS constants: {e}")))?;
+    let present: Vec<(u32, crate::par2ntt::SrcId)> = logs
+        .iter()
+        .enumerate()
+        .map(|(i, &l)| (l, i as crate::par2ntt::SrcId))
+        .collect();
+    let Ok((ntt, out_first)) = ntt_range::plan(&present, a.first, a.rows) else {
+        return Ok(None);
+    };
+    let Some(window) = super::ntt_range::create_ntt_window(bs, a.n_slices, a.first, a.rows) else {
+        return Ok(None);
+    };
+    // The block list in input-slice order, as `recovery_slices` builds it.
+    let mut plan: Vec<(usize, u64, usize)> = Vec::with_capacity(a.n_slices);
+    for (mi, &(_, length)) in a.scanned.iter().enumerate() {
+        let mut off = 0u64;
+        while off < length {
+            let want = (length - off).min(bs as u64) as usize;
+            plan.push((mi, off, want));
+            off += want as u64;
+        }
+    }
+    // Mapped: the sources, and the independent check - row `first` by the
+    // fold over the same sources, compared chunk by chunk below - up
+    // front. Bands: one read handle per member now, the check per band.
+    let (maps, sources) = match a.corpus {
+        Corpus::Mapped => {
+            let Some(maps) = MappedPlan::open(a.scanned, &plan, bs, window.saturating_mul(bs))
+            else {
+                return Ok(None);
+            };
+            (Some(maps), Vec::new())
+        }
+        Corpus::Bands { .. } => {
+            let sources = a
+                .scanned
+                .iter()
+                .map(|(path, _)| std::fs::File::open(path).map_err(io(path)))
+                .collect::<Result<Vec<_>, _>>()?;
+            (None, sources)
+        }
+    };
+    let probe: Vec<u16> = maps.as_ref().map_or_else(Vec::new, |maps| {
+        let srcs: Vec<&[u8]> = (0..a.n_slices).map(|i| maps.block(i, bs)).collect();
+        probe_row(&srcs, &logs, a.first, words)
+    });
+
+    // Volumes laid out up front, exactly as the batched writer lays them
+    // (its shape is what the backfill patches): the head layout puts the
+    // critical block first and the packets after it; the interleaved
+    // layout (par2cmdline's, the CLI's default) puts each recovery
+    // packet, then the critical packets the schedule owes at that point,
+    // and the Creator once at the end, recording every critical copy's
+    // offset. Recovery headers go in with their MD5 field zero; the
+    // payloads and seals follow.
+    let Volumes {
+        files,
+        names,
+        patches,
+        place,
+    } = lay_out_volumes(a)?;
     let mut seals: Vec<Md5> = (0..a.rows)
         .map(|r| {
             let mut m = Md5::new();

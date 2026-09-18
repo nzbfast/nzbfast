@@ -107,15 +107,70 @@ fn ledger_writing_off(backbone: &str) -> Snapshot {
 /// proportional to what it delivers). On any real line the healthy
 /// server is the slow one and the dead server claims the queue, which
 /// is the shape this reproduces.
+///
+/// It also pays [`HEALTHY_DIAL_MS`] before its greeting, and that is
+/// what makes the blind leg's split a fact rather than a coin flip -
+/// see that constant.
 fn line_rate() -> Chaos {
     Chaos {
         throttle: Throttle {
             per_conn_bps: 200_000,
             ..Default::default()
         },
+        greet_delay_ms: HEALTHY_DIAL_MS,
         ..Default::default()
     }
 }
+
+/// What the healthy server spends dialling before it greets, and so
+/// before its workers may claim anything off the shared FIFO. The
+/// reaped server greets immediately, as a spool that only ever answers
+/// 430 does.
+///
+/// **This exists because the blind leg's split was a race the PLATFORM
+/// decided, and the arming guard below was calibrated against one
+/// platform's answer.** Without it the two pools come up together and
+/// the healthy one claims its whole pipeline (`connections` x `window`
+/// = 4 x 3 = 12) before the reaped one draws, leaving the reaped server
+/// 36 of 48 - stable on macOS/aarch64 at exactly 36 in 14 of 14 runs,
+/// and stable at NOTHING on a loaded 4-vCPU Windows runner. Measured
+/// 17 Sep 2026 over twelve consecutive nightly `windows-one-process`
+/// runs: **eleven green and one red at 20**, which is a TAIL and not a
+/// second platform's constant.
+///
+/// The reason that tail is so easy to reach is worth writing down,
+/// because it is much smaller than it looks. `per_conn_bps` is BYTES a
+/// second, so one 4 KiB article costs the healthy server ~20 ms and its
+/// four connections drain the FIFO at ~195 articles a second. The old
+/// guard's entire headroom was therefore `(ARTICLES / 2 - 12) / 195`,
+/// which is **62 milliseconds** of scheduling jitter between the two
+/// pools' connects; the red run's 20 is 82 ms of it. On a 4-vCPU hosted
+/// runner executing 300-odd tests in one process, 82 ms is a Tuesday.
+///
+/// A greeting delay converts that implicit 62 ms into an explicit,
+/// stated budget: the healthy server can claim nothing for
+/// `HEALTHY_DIAL_MS`, so the reaped server takes the whole queue unless
+/// its own connects are later than that. 500 ms is ~6x the worst
+/// lateness ever observed here and ~8x the budget it replaces, and it
+/// costs the rig 500 ms a leg - the test goes from ~0.7 s to ~1.7 s.
+///
+/// **And the budget is measured, not argued.** Injecting a greeting
+/// delay on the REAPED server reproduces the Windows condition exactly
+/// - a late reaped pool - and walking it across the budget reads, on
+/// this box: 0/300/450 ms all give a flat 48, 550 ms gives 28 (past the
+/// budget, still over the floor), 700 ms gives 4 and RED, 1000 ms gives
+/// 0 and RED. So the rig is insensitive to lateness up to the budget
+/// and still fails when the arming genuinely does not happen, which is
+/// the property an arming guard exists to have.
+///
+/// **It does NOT weaken the guard: the floor below is unchanged at
+/// `ARTICLES / 2`.** What changed is the quantity it reads, which is
+/// now decided by this rig rather than by whichever box is running it.
+/// And the delay is not a thumb on the scale - it is the shape the
+/// docstring above already claims to reproduce, priced with the mock's
+/// own stand-in for a real dial (TCP + TLS + AUTH), which a reaped
+/// spool answering 430 from its front door genuinely does not pay.
+const HEALTHY_DIAL_MS: u64 = 500;
 
 /// The daemon's decision path, verbatim: for each configured server, ask
 /// the snapshot about its BACKBONE at this release's family and age, then
@@ -280,16 +335,23 @@ async fn oracle_route_ab_moves_the_doomed_round_trips_off_the_front() {
         informed_done, ARTICLES,
         "the informed leg must still complete"
     );
-    // The blind leg pays a doomed round trip for most of the release;
-    // the informed leg pays none, because the healthy server never
-    // misses and so never opens the fill gate.
+    // The blind leg pays a doomed round trip for the whole release; the
+    // informed leg pays none, because the healthy server never misses
+    // and so never opens the fill gate.
     //
-    // "Most" and not "every": the healthy server claims one pipeline
-    // fill (connections x window) off the shared FIFO before the reaped
-    // one can take it, so the measured blind cost is ARTICLES minus that
-    // fill - 36 of 48 here. The floor is half the corpus rather than the
-    // exact figure, so a window or connection-count change moves the
-    // number without reddening a rig that is still measuring the effect.
+    // "The whole release" and not "most": the healthy server cannot
+    // claim anything for HEALTHY_DIAL_MS, so the reaped primary has the
+    // shared FIFO to itself and is asked for all ARTICLES. This read
+    // "36 of 48 here" until 17 Sep 2026, when that 36 turned out to be
+    // one platform's answer to a race rather than a property of the rig
+    // - the constant's docstring has the measurement and the arithmetic.
+    //
+    // The floor stays half the corpus rather than the exact figure, and
+    // deliberately was not moved when the red was fixed: a window or
+    // connection-count change should move the number without reddening
+    // a rig that is still measuring the effect, and a floor lowered to
+    // whatever a platform happened to produce is the same edit as
+    // deleting the guard.
     assert!(
         blind_wasted >= (ARTICLES / 2) as u64,
         "the rig never armed - the reaped server was asked only {blind_wasted} times"

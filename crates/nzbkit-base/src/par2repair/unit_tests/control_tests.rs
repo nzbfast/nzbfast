@@ -219,10 +219,29 @@ fn a_cancel_raised_mid_fold_ends_the_repair_before_it_writes() {
     let rec = Arc::new(Rec {
         calls: Mutex::new(Vec::new()),
         slabs: Mutex::new(Vec::new()),
-        // From INSIDE the fold, at the first bucket it crosses - a
-        // timer would either fire before the fold or after the repair
-        // on a box of a different speed.
-        trip: Some((RepairPhase::Fold, 1, gate.clone())),
+        // From INSIDE the fold, at the phase's SIZING call - a timer
+        // would either fire before the fold or after the repair on a
+        // box of a different speed.
+        //
+        // `0` AND NOT `1`, since 17 Sep 2026. The fold's figure counts
+        // bytes FOLDED now rather than bytes handed to the syndrome
+        // worker, and the grain it can report at is one unit of the
+        // tiled fold's grid: a set with 64-byte blocks has a column
+        // narrower than `MIN_COL_WORDS` and so exactly one unit, which
+        // means its first NON-ZERO fold figure is also its last. The
+        // phase's opening is published by the driver before the readers
+        // below start, and it is the cue that still lands inside the
+        // feed on a fixture this small.
+        //
+        // WHAT THE PAIR BELOW STILL DISCRIMINATES, exactly: an in-fold
+        // stop from a pre-patch one. It no longer singles out the
+        // READERS' per-block poll, because a cancel this early also
+        // reaches the syndrome worker, which drains its channel instead
+        // of folding - verified by deleting `gate_if_held` from the
+        // reader loop, which leaves this test green. The reader loop's
+        // own poll is pinned by the pause test below, which that same
+        // deletion DOES fail: nothing on the worker side parks.
+        trip: Some((RepairPhase::Fold, 0, gate.clone())),
     });
     let mut o = watching(rec.clone(), Some(gate.clone()));
     let err = repair_dir_set_surveyed(&dir, &SET, &[], &mut o)
@@ -233,8 +252,8 @@ fn a_cancel_raised_mid_fold_ends_the_repair_before_it_writes() {
     );
     let fold = rec.of(RepairPhase::Fold);
     assert!(
-        fold.len() >= 2,
-        "the cancel was raised from inside the fold, so the fold ran"
+        !fold.is_empty(),
+        "the cancel was raised from inside the fold, so the fold was reached"
     );
     // THE DISCRIMINATING ASSERTION, and the reason the two above are not
     // enough on their own. A cancel honoured ONLY at the pre-patch gate
@@ -271,6 +290,108 @@ fn a_cancel_raised_mid_fold_ends_the_repair_before_it_writes() {
     assert!(!any_repair_temp(&dir), "a repair temp survived the cancel");
 
     // AND IT IS RE-RUNNABLE, which is the whole of what a cancel owes.
+    let mut o2 = watching(Arc::new(Rec::default()), None);
+    let status = repair_dir_set_surveyed(&dir, &SET, &[], &mut o2)
+        .expect("the re-run repairs")
+        .expect("the observer said Repair");
+    assert!(matches!(status, RepairStatus::Repaired(_)), "{status:?}");
+    assert!(intact(&dir, &files), "the re-run is byte-exact");
+}
+
+/// THE FOLD BAR MEASURES THE FOLD, and not the hand-over that feeds it.
+///
+/// The discriminating case is the MEMORY-RETAINED one, which is why
+/// retention is forced ON here and OFF in the two neighbours. When the
+/// verify pass kept the corpus there is no read to pace the feed: the
+/// driver hands the whole thing to the syndrome worker as a few
+/// memcpys, and until 17 Sep 2026 it stepped `Fold` as it did so. So
+/// the phase counted bytes HANDED OVER, and a bar that had been given
+/// the fold's own byte total emptied at hand-over speed - 40 to 80 ms
+/// whatever the payload, 0.04 s on 384 MB and 0.08 s on 1.5 GB, with
+/// every Galois-field operation it was meant to be measuring still to
+/// come (`research/SAB-PARFAST-METER-DROPIN-2026-09-17.md`).
+///
+/// A cancel raised at the phase's SIZING call is what turns that into
+/// an assertion with no clock in it. `begin(Fold, total)` runs on the
+/// driver thread before the syndrome worker exists, so when the gate
+/// trips NOT ONE BYTE has been folded and none ever will be - the
+/// worker drains the channel instead. A phase that nevertheless reports
+/// its total has reported work that did not happen. Against the
+/// stepping this replaces the assertion below fails, `total/total`
+/// against a fold that never ran.
+///
+/// It has to be the retained path or it proves nothing: on the
+/// streaming path the reader loop's own `gate_if_held` returns before
+/// the first block is read, so the old accounting never got to step
+/// either. The census is asked whether the corpus was really retained
+/// for exactly that reason - a box or a future default that quietly
+/// stopped retaining would leave this passing over the wrong path.
+#[test]
+fn a_fold_that_never_ran_does_not_report_a_finished_fold() {
+    let census = crate::par2repair::census::testing::record();
+    // Ample for this set (160 blocks of 64 bytes) and EXPLICIT, so the
+    // corpus-size ceiling cannot refuse it. `census::testing::record()`
+    // above is the process-wide lock these two seams share.
+    let _retained = crate::par2repair::retain::force_policy(1 << 20, true);
+    let damage = [(0, 3), (1, 7), (2, 11), (3, 19)];
+    let (dir, files) = damaged_set("control-fold-counts-work", &damage);
+    let before: Vec<Vec<u8>> = files
+        .iter()
+        .map(|(n, _)| std::fs::read(dir.join(n)).unwrap())
+        .collect();
+
+    let gate = PauseGate::new();
+    let rec = Arc::new(Rec {
+        calls: Mutex::new(Vec::new()),
+        slabs: Mutex::new(Vec::new()),
+        // `at` of ZERO: the phase's own sizing call, which is the first
+        // thing anybody hears about the fold.
+        trip: Some((RepairPhase::Fold, 0, gate.clone())),
+    });
+    let mut o = watching(rec.clone(), Some(gate.clone()));
+    let err = repair_dir_set_surveyed(&dir, &SET, &[], &mut o)
+        .expect_err("a cancelled repair is not a verdict");
+    assert!(matches!(err, RepairError::Cancelled), "{err:?}");
+
+    let retained_blocks = census
+        .of_kind("survey")
+        .last()
+        .and_then(|e| e["retained_blocks"].as_u64())
+        .unwrap_or(0);
+    assert!(
+        retained_blocks > 0,
+        "the verify pass retained nothing, so this repair took the STREAMING path and the \
+         assertion below is not about the hand-over at all"
+    );
+
+    let fold = rec.of(RepairPhase::Fold);
+    assert_eq!(
+        fold.first().map(|f| f.0),
+        Some(0),
+        "the phase sizes its bar before it starts: {fold:?}"
+    );
+    let (last, total) = *fold.last().expect("the fold phase was announced");
+    assert!(
+        last < total,
+        "the fold reported {last}/{total} on a repair cancelled before the syndrome worker \
+         existed - nothing was folded, so the phase is counting the hand-over that feeds \
+         the fold rather than the fold"
+    );
+    assert!(
+        rec.of(RepairPhase::Solve).is_empty() && rec.of(RepairPhase::Write).is_empty(),
+        "nothing past the fold may run under a cancel raised at the top of it"
+    );
+
+    // AND THE ORDINARY PROMISES A CANCEL MAKES, on this path as on the
+    // other two: nothing written, no temp left, a re-run repairs.
+    for ((name, _), was) in files.iter().zip(&before) {
+        assert_eq!(
+            &std::fs::read(dir.join(name)).unwrap(),
+            was,
+            "{name} changed under a repair that was cancelled before the patch"
+        );
+    }
+    assert!(!any_repair_temp(&dir), "a repair temp survived the cancel");
     let mut o2 = watching(Arc::new(Rec::default()), None);
     let status = repair_dir_set_surveyed(&dir, &SET, &[], &mut o2)
         .expect("the re-run repairs")
@@ -411,7 +532,11 @@ fn a_pause_raised_mid_fold_parks_the_readers_inside_it() {
     let (dir, files) = damaged_set("control-pause-fold", &[(0, 3), (1, 7), (2, 11), (3, 19)]);
 
     let gate = PauseGate::new();
-    // A sink that pauses from INSIDE the fold, at its first bucket.
+    // A sink that pauses from INSIDE the fold, at the phase's sizing
+    // call - the same cue and the same reason as the in-fold cancel
+    // test above, and it still pins the READERS specifically: the
+    // syndrome worker never parks, so a feed that did not park would
+    // fold every byte and the counter below would read `total/total`.
     struct PauseAt {
         gate: Arc<PauseGate>,
         calls: Mutex<Vec<(RepairPhase, u64, u64)>>,
@@ -423,10 +548,7 @@ fn a_pause_raised_mid_fold_parks_the_readers_inside_it() {
     impl ProgressSink for PauseAt {
         fn progress(&self, phase: RepairPhase, done: u64, total: u64) {
             self.calls.lock_ok().push((phase, done, total));
-            if phase == RepairPhase::Fold
-                && done > 0
-                && self.armed.fetch_add(1, Ordering::Relaxed) == 0
-            {
+            if phase == RepairPhase::Fold && self.armed.fetch_add(1, Ordering::Relaxed) == 0 {
                 self.gate.set_paused(true);
             }
         }
@@ -590,7 +712,9 @@ fn the_controlled_entry_carries_progress_and_a_cancel_of_its_own() {
     let rec2 = Arc::new(Rec {
         calls: Mutex::new(Vec::new()),
         slabs: Mutex::new(Vec::new()),
-        trip: Some((RepairPhase::Fold, 1, gate.clone())),
+        // The phase's sizing call, for the reason the surveying
+        // headline's own trip gives.
+        trip: Some((RepairPhase::Fold, 0, gate.clone())),
     });
     let err = repair_dir_set_with_donors_controlled_as(
         &dir2,
@@ -804,34 +928,55 @@ fn mapped_rig(
     tag: &str,
     damage: &[(usize, usize)],
 ) -> (PathBuf, Vec<Vec<u8>>, Vec<(Par2File, Vec<bool>)>, BufIo) {
+    mapped_rig_sized(tag, BS, 200, damage)
+}
+
+/// [`mapped_rig`] over a chosen BLOCK SIZE and block count.
+///
+/// The size is a parameter because one test needs the fold to have more
+/// than one work unit in it, and the block is what decides that: the
+/// tiled fold refuses to split a column narrower than `MIN_COL_WORDS`
+/// (2,048 words, `linalg`), so a set whose whole block is 32 words has
+/// exactly one unit per fold call however many cores or missing blocks
+/// it has - and a phase that reports per unit can then only say `0` and
+/// `total`. A block wider than that splits on every box and every
+/// architecture, which is what makes the requirement statable at all.
+fn mapped_rig_sized(
+    tag: &str,
+    bs: usize,
+    blocks: usize,
+    damage: &[(usize, usize)],
+) -> (PathBuf, Vec<Vec<u8>>, Vec<(Par2File, Vec<bool>)>, BufIo) {
     let dir = tmpdir(tag);
-    let whole: Vec<Vec<u8>> = (0..3).map(|i| payload(BS * 200, 31 + i as u64)).collect();
+    let whole: Vec<Vec<u8>> = (0..3)
+        .map(|i| payload(bs * blocks, 31 + i as u64))
+        .collect();
     let names: Vec<String> = (0..3).map(|i| format!("m{i}.bin")).collect();
     let refs: Vec<(&str, &[u8])> = names
         .iter()
         .zip(&whole)
         .map(|(n, d)| (n.as_str(), d.as_slice()))
         .collect();
-    std::fs::write(dir.join("set.par2"), par2_index(SET, BS, &refs)).unwrap();
+    std::fs::write(dir.join("set.par2"), par2_index(SET, bs, &refs)).unwrap();
     let exps: Vec<u32> = (0..32u32).collect();
     std::fs::write(
         dir.join("set.vol0+32.par2"),
-        par2_volume(SET, BS, &refs, &exps),
+        par2_volume(SET, bs, &refs, &exps),
     )
     .unwrap();
     let metas: Vec<Par2File> = names
         .iter()
         .zip(&whole)
-        .map(|(n, d)| meta_for(n, d, BS))
+        .map(|(n, d)| meta_for(n, d, bs))
         .collect();
     let mut damaged = whole.clone();
     let mut present: Vec<Vec<bool>> = metas
         .iter()
-        .map(|m| vec![true; m.length.div_ceil(BS as u64) as usize])
+        .map(|m| vec![true; m.length.div_ceil(bs as u64) as usize])
         .collect();
     for &(fi, bi) in damage {
         present[fi][bi] = false;
-        for b in &mut damaged[fi][bi * BS..(bi + 1) * BS] {
+        for b in &mut damaged[fi][bi * bs..(bi + 1) * bs] {
             *b ^= 0xFF;
         }
     }
@@ -866,13 +1011,21 @@ fn mapped_rig(
 /// the ordering a route-aware band table depends on.
 #[test]
 fn the_mapped_driver_reports_a_rising_fraction_through_all_four_phases() {
-    let (dir, whole, files, io) = mapped_rig("mapped-progress", &[(0, 3), (1, 17), (2, 41)]);
+    // A WIDER BLOCK THAN ITS NEIGHBOURS, and 16 of them rather than
+    // 200 so the fixture costs the same: this is the only test here
+    // that holds the fold to a RISING fraction rather than to a
+    // landing, and since 17 Sep 2026 the fold reports per unit of its
+    // own work grid. `mapped_rig_sized` carries why 64-byte blocks
+    // cannot have more than one such unit.
+    const WIDE: usize = 8192;
+    let (dir, whole, files, io) =
+        mapped_rig_sized("mapped-progress", WIDE, 16, &[(0, 3), (1, 7), (2, 11)]);
     let rec = Arc::new(Rec::default());
     let control = RepairControl::new(Some(rec.clone()), Some(PauseGate::new()));
     let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
     let n = super::super::repair_mapped_catalog_resumed_controlled(
         &files,
-        BS,
+        WIDE,
         &mut cat,
         &SET,
         &io,
@@ -965,7 +1118,12 @@ fn a_cancel_raised_mid_fold_ends_the_mapped_repair_before_it_writes() {
     let before: Vec<Vec<u8>> = io.0.iter().map(|m| m.lock_ok().clone()).collect();
     let gate = PauseGate::new();
     let rec = Arc::new(Rec {
-        trip: Some((RepairPhase::Fold, 1, gate.clone())),
+        // The phase's SIZING call, for the reason the surveying
+        // headline's own trip gives: the fold reports per unit of its
+        // work grid now, and a 64-byte block has exactly one such unit,
+        // so its first non-zero figure is also its last. This is the
+        // cue that still lands before the reader loop's first block.
+        trip: Some((RepairPhase::Fold, 0, gate.clone())),
         ..Rec::default()
     });
     let control = RepairControl::new(Some(rec.clone()), Some(gate.clone()));
@@ -1009,6 +1167,126 @@ fn a_cancel_raised_mid_fold_ends_the_mapped_repair_before_it_writes() {
     // AND IT IS RE-RUNNABLE, which is the whole of what a cancel owes a
     // user who changes their mind - through a FRESH control, because
     // the cancelled gate is sticky by design.
+    let again = super::super::repair_mapped_catalog_resumed_controlled(
+        &files,
+        BS,
+        &mut cat,
+        &SET,
+        &io,
+        false,
+        &[],
+        &RepairControl::new(None, Some(PauseGate::new())),
+    )
+    .expect("the re-run repairs");
+    assert_eq!(again, 3);
+    for (fi, want) in whole.iter().enumerate() {
+        assert_eq!(&*io.0[fi].lock_ok(), want, "the re-run is byte-exact");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+/// A CANCEL RAISED INSIDE THE SOLVE ENDS THE MAPPED REPAIR BEFORE IT
+/// WRITES - the window between the driver's pre-solve `check` and its
+/// patch, which until 17 Sep 2026 had no poll in it at all.
+///
+/// THE SIBLING ABOVE DOES NOT COVER THIS AND CANNOT. It trips on the
+/// fold and asserts `done < total`; this one trips on the SOLVE'S OWN
+/// SIZING CALL and asserts the fold landed on FULL, which is what
+/// places the cancel after `control.check()?` and after
+/// `finish_owned_reported` has joined the syndrome worker. A cancel
+/// raised early passes on either side of the fix and proves nothing.
+///
+/// WHY THE BYTES ARE NOT A REPAIR. Every stretch inside
+/// `finish_owned_reported` abandons its work on a cancel and returns
+/// NORMALLY - it hands back a tuple, not a `Result` - so nothing about
+/// a half-solved set reaches the driver as an error: the fold worker
+/// DRAINS its channel instead of folding (`Reconstructor::build`'s
+/// worker loop), `ntt_syndromes_into`'s stripe workers `break`, and
+/// `linalg::fold_parallel_opts`'s unit drain returns leaving the output
+/// grid part-computed. Each of those sites says in a comment that it is
+/// legal because "the driver refuses before the patch" - which was true
+/// of `repair_dir_set_inner`, whose check sits at the head of its patch,
+/// and was NOT true here.
+///
+/// THIS FIXTURE TAKES THE DENSE ARM (m = 3 is below
+/// `forney::backsub_min_missing`, so consecutive exponents go to
+/// `invert_vandermonde` rather than to a `ForneyPlan`), so before the
+/// fix the patch wrote a grid the unit drain left at zero and the
+/// self-prove reported `VerifyFailed("m0.bin")` - a user who pressed
+/// Cancel told their set could not be repaired, and a verdict
+/// `repair_dir_set_inner`'s retry ladder reads as a reason to try
+/// again. The Forney arms poll nothing at all (`forney.rs` holds no
+/// cancel site; `finish_blocks_reported` calls them "bracketed rather
+/// than instrumented"), so on a set that took one of those the same
+/// cancel produced CORRECT blocks and a completed repair - milder, and
+/// still not what Cancel means. The assertions below hold either way,
+/// which is why the test does not pin the arm.
+#[test]
+fn a_cancel_raised_inside_the_solve_ends_the_mapped_repair_before_it_writes() {
+    let (dir, whole, files, io) = mapped_rig("mapped-cancel-solve", &[(0, 3), (1, 17), (2, 41)]);
+    let before: Vec<Vec<u8>> = io.0.iter().map(|m| m.lock_ok().clone()).collect();
+    let gate = PauseGate::new();
+    let rec = Arc::new(Rec {
+        // THE SOLVE'S SIZING CALL, which `finish_blocks_reported` makes
+        // on the driver thread after the syndrome worker has been
+        // joined and the retained tail transformed - so the cancel
+        // lands inside the window, synchronously, with no clock in it.
+        // The consecutive-exponent arm this fixture takes never reports
+        // `Solve` during construction (only the Gauss-Jordan arm does,
+        // and that one is reached when recovery packets were themselves
+        // lost), so the first `Solve` call a sink sees here is the one
+        // past the driver's `check`. The fold assertion below is what
+        // proves it rather than assuming it.
+        trip: Some((RepairPhase::Solve, 0, gate.clone())),
+        ..Rec::default()
+    });
+    let control = RepairControl::new(Some(rec.clone()), Some(gate.clone()));
+    let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
+    let err = super::super::repair_mapped_catalog_resumed_controlled(
+        &files,
+        BS,
+        &mut cat,
+        &SET,
+        &io,
+        false,
+        &[],
+        &control,
+    )
+    .expect_err("a cancelled repair is not a verdict");
+    assert!(
+        matches!(err, RepairError::Cancelled),
+        "a user's Cancel must not be reported as a set that could not be repaired: {err:?}"
+    );
+    // THE CANCEL LANDED PAST THE FOLD, which is the half that makes
+    // this a test of the pre-patch window rather than a second copy of
+    // the mid-fold test above.
+    let fold = rec.of(RepairPhase::Fold);
+    let (done, total) = *fold
+        .last()
+        .expect("the fold reported before the solve began");
+    assert_eq!(
+        done, total,
+        "the fold did not land ({done}/{total}) - this cancel was raised before the \
+         driver's pre-solve check and so proves nothing about the window after it"
+    );
+    assert!(
+        rec.of(RepairPhase::Write).is_empty(),
+        "nothing may be written after a cancel that landed in the solve: {:?}",
+        rec.of(RepairPhase::Write)
+    );
+    // AND THE BUFFERS ARE UNTOUCHED. This is the claim that matters:
+    // the mapped driver's writes go through `VolumeIo` into a LIVE
+    // extractor slot, and a half-applied slab has no caller-visible
+    // rollback the way the disk driver's temp-staged rename does.
+    for (fi, was) in before.iter().enumerate() {
+        assert_eq!(
+            &*io.0[fi].lock_ok(),
+            was,
+            "member {fi} was patched with blocks an abandoned solve produced"
+        );
+    }
+
+    // AND IT IS RE-RUNNABLE through a fresh control, the same thing the
+    // mid-fold cancel owes: the gate is sticky by design.
     let again = super::super::repair_mapped_catalog_resumed_controlled(
         &files,
         BS,

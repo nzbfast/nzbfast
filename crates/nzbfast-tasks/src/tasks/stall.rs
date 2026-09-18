@@ -1478,6 +1478,11 @@ pub fn spawn_slow_job_watchdog(
         // when it clears - so "send me the log" captures a flatline
         // after the fact. Observation only, and always on: it runs
         // BEFORE the auto-defer/prefetch gates below.
+        // env-default-gate: the 10 the doc row states is the literal on
+        // the next line, but it reaches the env read through this file's
+        // own local `secs` helper wrapped in `Duration::from_secs` at the
+        // call, which is not one of the helper shapes the resolver
+        // discovers.
         let mut stall = StallTracker::new(std::time::Duration::from_secs(secs(
             "NZBFAST_STALL_LOG_SECS",
             10,

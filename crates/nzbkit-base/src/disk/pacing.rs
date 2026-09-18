@@ -99,6 +99,10 @@ pub(super) fn write_pace_stride() -> u64 {
     const DEFAULT: u64 = WRITE_PACE_STRIDE_DEFAULT;
     #[cfg(target_os = "linux")]
     const DEFAULT: u64 = 0;
+    // env-default-gate: `DEFAULT` above is cfg-split - `WRITE_PACE_STRIDE_DEFAULT`
+    // on macOS, 0 on Linux - so there is no one value to pair with, which is
+    // also why the doc row reads "32 (macOS)". Check that row against the two
+    // consts, not against one of them.
     static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
         parse_pace_mb(std::env::var("NZBFAST_WRITE_PACE_MB").ok().as_deref()).unwrap_or(DEFAULT)

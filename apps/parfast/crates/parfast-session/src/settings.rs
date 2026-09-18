@@ -200,8 +200,12 @@ impl Default for CreateDefaults {
 #[serde(default)]
 pub struct Performance {
     /// `None` is `nzbkit::mem::cpu_workers()`, the one place this
-    /// workspace derives a pool width from.
+    /// workspace derives a pool width from - and it MEANS that, on every
+    /// job, whatever the job before it ran at. See
+    /// [`crate::runner`]'s `apply_knobs` for the policy and why the
+    /// alternative was rejected.
     pub threads: Option<usize>,
+    /// `None` is `nzbkit::mem::MemBudget::auto()`, on the same terms.
     pub memory_mb: Option<u64>,
     /// The EXPERIMENTAL joint solve (`--fast`). Off, as the CLI has it.
     pub fast_solver: bool,

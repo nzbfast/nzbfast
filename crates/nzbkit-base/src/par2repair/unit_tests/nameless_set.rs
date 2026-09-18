@@ -13,7 +13,8 @@
 //!
 //! That fallback attempts EVERY set the walk found. The decoy's Main
 //! packet lists a file id no FileDesc describes, so `repair_dir_set`
-//! answers `Malformed("FileDesc missing for file id ...")` - an Err,
+//! answers `Malformed("No details available for recoverable file number
+//! N. ... FileDesc missing for file id ...")` - an Err,
 //! which the caller
 //! (`nzbfast_engine::get::settle::noset::disk_par2_fallback`) reads as
 //! a repair failure for the directory. The real set repaired the

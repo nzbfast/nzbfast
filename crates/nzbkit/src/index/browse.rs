@@ -41,6 +41,19 @@ pub struct BrowseQuery {
     pub kind: Option<String>,
     /// Exact resolution filter ("2160p", …).
     pub res: Option<String>,
+    /// GH #76: exact newsgroup filter ("alt.binaries.teevee"). None =
+    /// every group.
+    ///
+    /// Exact rather than a substring or a prefix, and that is the same
+    /// choice `curation_wheres`' `group` rule already made: the two
+    /// places a group name comes from - the group browser's own list and
+    /// the badge on a release row - both hand over a name the index
+    /// stored verbatim, so a looser test would only widen the answer
+    /// past what the user pointed at. A cross-posted release is in
+    /// several groups and so survives a filter naming ANY of them; the
+    /// representative-copy pick below then runs over the surviving rows,
+    /// which is what keeps `total` and the page describing one list.
+    pub group: Option<String>,
     pub complete_only: bool,
     /// Minimum total_bytes (0 = unbounded).
     pub min_bytes: u64,
@@ -170,6 +183,7 @@ impl Default for BrowseQuery {
             q: String::new(),
             kind: None,
             res: None,
+            group: None,
             complete_only: false,
             min_bytes: 0,
             newer_than: 0,
@@ -350,6 +364,20 @@ impl Index {
         if let Some(res) = &q.res {
             let p = bind(&mut params, Box::new(res.clone()));
             wheres.push(format!("{{}}res = {p}"));
+        }
+        // GH #76: one newsgroup. No index carries `grp`, and none is
+        // added for it: the count is `COUNT(DISTINCT +stem)`, which
+        // already fetches the table row for every candidate (that is
+        // what the unary `+` is for), so testing one more column of a
+        // row that is already in hand costs nothing on top. The PAGE
+        // walks the same posted index testing `grp` per row, which puts
+        // this filter in exactly the cost class `res` has shipped in
+        // since M25 - a group the user actually scans is dense in the
+        // recent window the page reads, and a rare one is bounded by
+        // `index::deadline` like every other unindexed predicate.
+        if let Some(g) = &q.group {
+            let p = bind(&mut params, Box::new(g.clone()));
+            wheres.push(format!("{{}}grp = {p}"));
         }
         if q.complete_only {
             wheres.push("{}complete".into());

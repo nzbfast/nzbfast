@@ -101,7 +101,21 @@ pub fn unix_secs() -> u64 {
 pub fn local_civil_now() -> Option<Civil> {
     #[cfg(unix)]
     {
-        let t = unix_secs() as libc::time_t;
+        // `as _` and NOT `as libc::time_t`, which is DEPRECATED on
+        // musl: libc's alias is still 32-bit on 32-bit musl while musl
+        // itself went 64-bit in 1.2.0, so libc has announced it will
+        // change the alias (libc #1848) and warns at every naming of it.
+        // The warning fires on musl ONLY, so no documented local line and
+        // no CI job in this repo could see it - it was found in an
+        // aarch64-musl build log on 17 Sep 2026 and is why the musl-cross
+        // job in nightly.yml builds with `-D warnings`.
+        //
+        // Hardcoding a width is the wrong fix in BOTH directions: `i64`
+        // is a type mismatch on 32-bit musl today (libc's alias there is
+        // i32), and `i32` breaks everywhere else. `as _` takes its target
+        // from `localtime_r`'s own signature below, so it is whatever the
+        // libc we link says today and whatever it says after the change.
+        let t = unix_secs() as _;
         // SAFETY: `libc::tm` is a plain C struct of integers and a
         // pointer; all-zero is a valid bit pattern for it, and
         // localtime_r overwrites it before anything is read.

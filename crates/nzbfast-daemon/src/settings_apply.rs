@@ -380,6 +380,39 @@ pub(super) fn apply_setting_tail(
         "arr_instances" => set_arr_instances(d, name, v)?,
         // Restart-only: bound/opened at startup. Persisted now, applied
         // on the next launch.
+        //
+        // REPUBLISHING HERE WAS CENSUSED AND REFUSED (17 Sep 2026).
+        // Calling `MemBudget::from_user_limit` then
+        // `mem::set_process_budget` on this arm is two lines, and the
+        // reason it is not here is that the readers of the published
+        // budget DISAGREE about when they read it:
+        //
+        //   - `get/vrig.rs:316` hands the extractor its holds cap once,
+        //     with `set_holds_cap`, when the job starts. A later
+        //     republish never reaches that extractor.
+        //   - `get/plan.rs` sizes the buffer pool, the channel depth and
+        //     the in-flight cap at PLAN time, per job, likewise once.
+        //   - `requeue.rs:357` (`pause_cost`) reads
+        //     `mem::process_budget()` LIVE, on every call.
+        //   - `mem.rs:1252` (`rar_window_limit` / `rar_read_options`)
+        //     re-reads it at every archive OPEN, so a running job picks
+        //     the new figure up at its next volume and not before.
+        //   - `rarfix.rs:1627` reads `repair_cap()` when a repair
+        //     starts; `par2gen.rs` reads the total per generate.
+        //
+        // So a republish mid-download moves some of those and not
+        // others, in an order that depends on where each job happens to
+        // be. That is the split the handoff names as worse than either
+        // answer: a budget half the engine is working to. Making it
+        // whole would mean re-sizing already-allocated pools under a
+        // live download, which is a different and much larger piece of
+        // work than this arm.
+        //
+        // The surface carries the restart-only shape instead: the
+        // dashboard row has the `badge.restart` "applies after restart"
+        // badge, this arm answers `live: false`, and the row shows the
+        // resolved figure in force now beside the field
+        // (`mem_budget_total`, `s_mem_inforce` in web/dashboard.html).
         "mem_limit" => {
             let b = size()?; // 0 = automatic sizing
             (false, json!(b))

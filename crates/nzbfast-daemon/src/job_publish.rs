@@ -244,24 +244,144 @@ pub fn refile_out_dir(
     choose_out_dir(&base, &dir_stem, claim)
 }
 
+/// A hand-over that has happened but is not yet SETTLED: the new payload
+/// is at the canonical path and the previous result is parked beside it,
+/// waiting for the caller to say whether the replacement was any good.
+///
+/// # Why this is a handle and not a `PathBuf`
+///
+/// `publish_over_previous` used to park the old result, rename the new
+/// one over it and `remove_dir_all` the old one, all three, before
+/// returning - and its caller (`job_finalize::finalize_payload`) only
+/// finds out AFTERWARDS whether the replacement is usable at all. An
+/// encrypted RAR set completes with its volumes still locked, by design;
+/// the unlock ladder runs after publication and can end with no password
+/// that opens it. By then the user's earlier, working, unpacked copy of
+/// that release had already been deleted, to be replaced by a folder of
+/// archives nobody can open. Publication's own contract says the
+/// opposite in as many words: a re-add that never finishes costs the
+/// user nothing.
+///
+/// So the delete is the CALLER's, and it has two doors: [`Self::commit`]
+/// once the payload is known good, or [`Self::roll_back`], which puts
+/// both directories back exactly where they were. Dropping the handle
+/// without choosing keeps the parked copy - the safe direction, and the
+/// startup sweep reports it.
+pub(crate) struct Published {
+    /// Where the job lives now: the canonical directory.
+    dir: PathBuf,
+    /// Where it lived before, which is where a rollback returns it.
+    from: PathBuf,
+    /// The previous result, parked. `None` when the canonical path was
+    /// free and there was nothing to park.
+    aside: Option<PathBuf>,
+}
+
+impl Published {
+    /// The directory the job now lives in.
+    pub(crate) fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// The replacement is good: drop the previous result and answer the
+    /// directory the job lives in.
+    pub(crate) fn commit(self) -> PathBuf {
+        if let Some(aside) = &self.aside
+            && let Err(e) = std::fs::remove_dir_all(aside)
+        {
+            warn!(
+                target: "replace",
+                "previous result left behind in {}: {e}",
+                aside.display()
+            );
+        }
+        self.dir
+    }
+
+    /// The replacement turned out NOT to be usable - it is still locked,
+    /// or the unlock was refused - so undo the hand-over: the new payload
+    /// goes back to its own directory and the previous result returns to
+    /// the canonical path, byte for byte where each of them started.
+    ///
+    /// Answers true when the state was restored. A rollback that cannot
+    /// complete leaves BOTH copies on disk under distinct names and says
+    /// so: nothing is deleted on this path, ever, which is the whole
+    /// reason it exists.
+    pub(crate) fn roll_back(self) -> bool {
+        let Some(aside) = self.aside else {
+            // Nothing was parked, so there is no previous result to
+            // restore and the new payload simply goes back to its own
+            // directory.
+            return match std::fs::rename(&self.dir, &self.from) {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!(
+                        target: "replace",
+                        "{} stays at {}: {e}",
+                        self.from.display(),
+                        self.dir.display()
+                    );
+                    false
+                }
+            };
+        };
+        if let Err(e) = std::fs::rename(&self.dir, &self.from) {
+            warn!(
+                target: "replace",
+                "could not move the unusable replacement out of {}: {e} - the previous \
+                 result is intact at {}",
+                self.dir.display(),
+                aside.display()
+            );
+            return false;
+        }
+        if let Err(e) = std::fs::rename(&aside, &self.dir) {
+            // HALF WAY, which is the one state no caller can describe:
+            // the canonical name is now EMPTY, the replacement is back
+            // at `from` and the previous result is still parked. So the
+            // first rename is undone and the hand-over stands as
+            // published - `false` then means "nothing moved back", which
+            // is what the caller already handles, and the startup sweep
+            // reports the parked copy. Nothing is deleted either way.
+            warn!(
+                target: "replace",
+                "could not restore {} from {}: {e} - the hand-over stands and the previous \
+                 result is intact under {}",
+                self.dir.display(),
+                aside.display(),
+                aside.display()
+            );
+            let _ = std::fs::rename(&self.from, &self.dir);
+            return false;
+        }
+        info!(
+            target: "replace",
+            "{} put back: the replacement at {} is not usable",
+            self.dir.display(),
+            self.from.display()
+        );
+        true
+    }
+}
+
 /// Take over the canonical output directory from the completed job this
 /// one replaces (see `Job::replaces`). Called once the job has finished
 /// successfully and before any renaming or relocation, so everything
 /// downstream sees the final location.
 ///
-/// The previous result is moved aside first and only deleted once the new
-/// payload is in place; if the move in fails, the old result goes straight
-/// back and this job keeps its own directory. A re-add that never
-/// finishes therefore costs the user nothing - which is the whole point,
-/// since reusing the folder used to truncate the good payload with the
-/// replacement's first decoded span.
+/// The previous result is moved aside first and is NOT deleted here at
+/// all: the caller settles it through [`Published`], once it knows
+/// whether the replacement is usable. If the move in fails, the old
+/// result goes straight back and this job keeps its own directory. A
+/// re-add that never finishes therefore costs the user nothing - which
+/// is the whole point, since reusing the folder used to truncate the good
+/// payload with the replacement's first decoded span.
 ///
-/// Returns the directory the job now lives in, or `None` when nothing
-/// moved.
+/// Returns the hand-over, or `None` when nothing moved.
 pub(crate) fn publish_over_previous(
     out_dir: &std::path::Path,
     canon: &std::path::Path,
-) -> Option<PathBuf> {
+) -> Option<Published> {
     if out_dir == canon || !out_dir.exists() {
         return None;
     }
@@ -285,15 +405,12 @@ pub(crate) fn publish_over_previous(
     }
     match std::fs::rename(out_dir, canon) {
         Ok(()) => {
-            if parked && let Err(e) = std::fs::remove_dir_all(&aside) {
-                warn!(
-                    target: "replace",
-                    "previous result left behind in {}: {e}",
-                    aside.display()
-                );
-            }
             info!(target: "replace", "{} → {}", out_dir.display(), canon.display());
-            Some(canon.to_path_buf())
+            Some(Published {
+                dir: canon.to_path_buf(),
+                from: out_dir.to_path_buf(),
+                aside: parked.then(|| aside.clone()),
+            })
         }
         Err(e) => {
             warn!(
@@ -403,7 +520,10 @@ mod tests {
         std::fs::create_dir_all(&fresh).unwrap();
         std::fs::write(canon.join("payload.iso"), b"the good old copy").unwrap();
         std::fs::write(fresh.join("payload.iso"), b"the new copy").unwrap();
-        assert_eq!(publish_over_previous(&fresh, &canon), Some(canon.clone()));
+        assert_eq!(
+            publish_over_previous(&fresh, &canon).map(Published::commit),
+            Some(canon.clone())
+        );
         assert_eq!(
             std::fs::read(canon.join("payload.iso")).unwrap(),
             b"the new copy"
@@ -420,16 +540,100 @@ mod tests {
         // A job that never produced its directory leaves the old result
         // exactly where it was.
         let missing = root.join("Release.3");
-        assert_eq!(publish_over_previous(&missing, &canon), None);
+        assert!(publish_over_previous(&missing, &canon).is_none());
         assert_eq!(
             std::fs::read(canon.join("payload.iso")).unwrap(),
             b"the new copy"
         );
         // And a job that already owns the canonical name is a no-op.
-        assert_eq!(publish_over_previous(&canon, &canon), None);
+        assert!(publish_over_previous(&canon, &canon).is_none());
         assert_eq!(
             std::fs::read(canon.join("payload.iso")).unwrap(),
             b"the new copy"
+        );
+    }
+
+    /// N1 (reports/code-audit-2026-09-17): the hand-over can be UNDONE,
+    /// and undoing it costs neither copy a byte.
+    ///
+    /// The publication used to park the previous result, rename the new
+    /// payload over it and delete the parked copy, all inside one call -
+    /// so by the time the finalizer discovered the replacement was a
+    /// locked archive set nobody has the password for, the working copy
+    /// it replaced was already gone. The delete belongs to the caller
+    /// now, and this is the door it takes when the answer is no.
+    #[test]
+    fn a_rolled_back_publication_puts_both_payloads_back() {
+        let guard = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join(format!("nzbfast-a6-rollback-{}", std::process::id())),
+        );
+        let root = guard.to_path_buf();
+        let canon = root.join("Release");
+        let fresh = root.join("Release.2");
+        std::fs::create_dir_all(&canon).unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(canon.join("payload.iso"), b"the good old copy").unwrap();
+        std::fs::write(fresh.join("set.part01.rar"), b"the locked replacement").unwrap();
+
+        let published = publish_over_previous(&fresh, &canon).expect("the hand-over happens");
+        assert_eq!(published.dir(), canon.as_path());
+        // Mid-flight: the new payload is at the canonical name and the
+        // old one is parked, not deleted.
+        assert_eq!(
+            std::fs::read(canon.join("set.part01.rar")).unwrap(),
+            b"the locked replacement"
+        );
+        assert!(published.roll_back(), "the rollback must complete");
+
+        assert_eq!(
+            std::fs::read(canon.join("payload.iso")).unwrap(),
+            b"the good old copy",
+            "the previous result did not come back"
+        );
+        assert_eq!(
+            std::fs::read(fresh.join("set.part01.rar")).unwrap(),
+            b"the locked replacement",
+            "the replacement must survive for the retry a password makes work"
+        );
+        // Exactly two directories, and no parked copy left over.
+        let mut left: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec!["Release".to_string(), "Release.2".to_string()],
+            "leftovers: {left:?}"
+        );
+    }
+
+    /// N1's other arm: a hand-over onto a FREE canonical name rolls back
+    /// too, and leaves nothing behind at the name it briefly held.
+    ///
+    /// `Job::replaces` names a completed payload, but the directory can
+    /// be gone by the time the tail runs (the user deleted it, a sweep
+    /// took it). There is then nothing to park, and a rollback still has
+    /// to return the payload to the directory it downloaded into rather
+    /// than leaving it under a name the record does not use.
+    #[test]
+    fn a_rollback_with_nothing_parked_still_returns_the_payload() {
+        let guard = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join(format!("nzbfast-a6-rollback-free-{}", std::process::id())),
+        );
+        let root = guard.to_path_buf();
+        let canon = root.join("Release");
+        let fresh = root.join("Release.2");
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(fresh.join("set.part01.rar"), b"the locked replacement").unwrap();
+
+        let published = publish_over_previous(&fresh, &canon).expect("the hand-over happens");
+        assert!(published.roll_back());
+        assert!(!canon.exists(), "the canonical name must be free again");
+        assert_eq!(
+            std::fs::read(fresh.join("set.part01.rar")).unwrap(),
+            b"the locked replacement"
         );
     }
 }

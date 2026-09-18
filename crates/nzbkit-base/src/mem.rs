@@ -598,6 +598,27 @@ pub fn set_cpu_workers(n: usize) {
     CPU_WORKERS_PUBLISHED.store(n.clamp(1, 1024), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Un-publish the pool width: [`cpu_workers`] goes back to answering
+/// what it answers in a process where no entry point ever spoke - the
+/// `NZBFAST_CPU_WORKERS` ceiling, or the machine.
+///
+/// Not reachable through [`set_cpu_workers`] on purpose: that clamps to
+/// 1..=1024 so a `-t0` is a serial run rather than a hang, which leaves
+/// 0 free to mean "nobody published", and a knob whose UNSET state can
+/// only be entered by a door of its own cannot be entered by accident.
+///
+/// The caller this exists for is a LONG-LIVED host that runs many jobs
+/// under one process: parfast's GUI session, whose Performance pane
+/// offers "Auto" beside the explicit widths. Without this door "Auto"
+/// could only mean "leave whatever the last job published", so a user
+/// who ran one job at 4 threads and left the next on Auto got 4 threads
+/// with the pane saying Auto (lead 2 of
+/// `research/CODEX-SWEEP-2026-09-17-VERDICTS.md`). A CLI that publishes
+/// once and exits has never needed it.
+pub fn clear_cpu_workers() {
+    CPU_WORKERS_PUBLISHED.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 thread_local! {
     /// A ceiling on the WINDOW FOLD's worker count, published by a create
     /// that has measured its fold outrunning its whole-file MD5 chain, or 0
@@ -1252,6 +1273,20 @@ static PROCESS_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// budget down that chain would touch every caller for one leaf consumer.
 pub fn set_process_budget(budget: MemBudget) {
     PROCESS_BUDGET.store(budget.total, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Un-publish the budget: [`process_budget`] goes back to
+/// [`MemBudget::auto`] and [`published_budget`] to `None`, exactly as in
+/// a process where no entry point ever resolved one.
+///
+/// The twin of [`clear_cpu_workers`], for the same caller and the same
+/// reason - a host whose "Auto" has to MEAN the engine's own answer and
+/// not the last job's number. [`USER_LIMIT`] is deliberately left alone:
+/// [`published_user_limit`] answers by VALUE against the published total,
+/// so clearing the total already makes it `None`, and a stale figure
+/// nothing is published against says nothing.
+pub fn clear_process_budget() {
+    PROCESS_BUDGET.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The published budget, or [`MemBudget::auto`] when nothing set one (a

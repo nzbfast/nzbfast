@@ -26,7 +26,7 @@
   "strings": {
     "app.name": "parfast",
     "app.tagline": "PAR2 create, verify and repair",
-    "app.stage": "Alpha",
+    "app.stage": "Beta",
     "mode.verify": "Verify & Repair",
     "mode.create": "Create",
     "mode.checksums": "Checksums",

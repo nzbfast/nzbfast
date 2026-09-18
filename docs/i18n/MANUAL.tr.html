@@ -368,6 +368,7 @@ kaybolmuş olsa bile.</li>
 <li>Rozetler özel durumları gösterir: <i>denendi, bir kenara alındı</i>, <i>ön yükleniyor</i>,
 <i>duraklatıldı</i> (bkz. <a href="#performance">Performans araçları</a>).</li>
 <li>Bir iniş grafiği kuyruk boyunca kalan toplam GB'ı izler.</li>
+<li><b>İptal geri alınabilir.</b> Bir indirmeyi durdurmak ya da bütün kuyruğu temizlemek artık önceden sormuyor: işlem yapılır ve bunu bildiren not bir <b>Geri al</b> taşır. nzbfast on dakika boyunca NZB'nin kendi kopyasını saklar, böylece satır kategorisi, önceliği ve o ana kadar indirilmiş olan her şeyle geri gelir. Geldikçe açılan bir indirme yine sorar, çünkü halihazırda alınan kısım geri verilemez.</li>
 </ul>
 <h3 id="dash-browse">Dizine göz at</h3>
 <p>Gömülü dizinleyicinin izlenen gruplarından kataloglamış olduğu her şeyi ara
@@ -405,6 +406,7 @@ kapatır. Yalnızca geçmiş kaydı silinir - indirilen dosyalar tam olarak oldu
 yerde kalır. Yaş kuralı yalnızca tamamlanmış indirmeleri alır, dolayısıyla başarısız
 olan, siz yeniden deneyene ya da kendiniz silene kadar bekler; uzunluk sınırı ise
 sonucu ne olursa olsun her kaydı sayar.</p>
+<p><b>Geçmişten bir giriş kaldırmak geri alınabilir.</b> Tamamlanan ya da başarısız indirmeleri listeden temizlemek ve bir seçimi kaldırmak artık önceden sormuyor: işlem yapılır ve bunu bildiren not bir <b>Geri al</b> taşır. nzbfast on dakika boyunca kaldırılan her girişin kendi NZB kopyasını saklar, böylece satır bulunduğu yere geri gelir ve hâlâ <b>Yeniden Dene</b> sunar. Bir girişi dosyalarını da silerek kaldırmak yine sorar, çünkü silinen dosyalar geri verilemez.</p>
 <h3 id="dash-usage">Veri kullanımı</h3>
 <p>Sağlayıcı başına günlük çubuklar ve Bugün / 7 günlük / 30 günlük toplamlar - sayaçlı ve
 blok hesaplar için elzem. Blok hesaplar ömür boyu kullanımı boyutlarına karşı gösterir.</p>
@@ -632,6 +634,7 @@ ekrana daha çok afiş sığdırır, büyük daha az.</li>
 altında. <b>&#9656;</b> ile veya satıra tıklayarak aç; başlıktaki kutu gösterilen
 sürümleri seçer. Gruplama yalnızca <b>Bu dizin</b> için geçerlidir; <b>Indexer'lar</b>
 ya da <b>İkisi de</b> seçersen tablo yeniden düzleşir ve bunu söyler.</li>
+<li><b>Bir seferde tek haber grubu.</b> Bir sürümün altındaki grup adına tıklayın; sayfa oraya gönderilen sürümlerle sınırlanır ve tablonun üstündeki bir etiket, siz temizleyene kadar grubu söyler. Duvarı da tabloyu da aynı şekilde daraltır, bu yüzden ikisi arasında geçiş yapmak onu korur. Diğer giriş yolu Ayarlar &rarr; Düzenleme &rarr; <b>Dizinleme</b> &rarr; <b>Taranacak gruplar</b> &rarr; <b>Bul…</b>: zaten taradığınız bir grubu açın ve <b>Dizine alınan sürümler</b>e basın.</li>
 <li><b>Bir başlığın her sürümü</b>, kartını açtığında listelenir: çözünürlük, kodek,
 ses biçimi ve dinamik aralık (Dolby Vision, HDR10) sürüm adından okunur, yanında
 boyut, yaş ve her parçanın sağlayıcında hâlâ durup durmadığı. Ayarlar → Düzenleme →

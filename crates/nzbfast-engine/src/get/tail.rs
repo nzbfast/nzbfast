@@ -1599,10 +1599,43 @@ pub(super) fn print_mem_summary(
             "holds backpressure engaged {park_cycles} time(s): chased articles parked at the pool near the holds cap instead of forfeiting the chase"
         );
     }
+    print_write_window();
     print_mem_floor(&mem_sampler.record);
     // The sampler served this summary; a later job spawns its own, and
     // the token keeps this stop from retiring it if it already has.
     super::workers::stop_mem_sampler(mem_sampler.run);
+}
+
+/// What the one-pass writer's write-coalescing window actually did, and
+/// NOTHING AT ALL when it is off - which is the shipped default
+/// (`nzbkit::disk::stage::COALESCE_CAP_DEFAULT` = 0 since 17 Sep 2026,
+/// `research/WSTAGE-WINDOW-DEFAULT-2026-09-17.md`), so an ordinary run's
+/// output is byte-for-byte what it was.
+///
+/// **THIS LINE IS THE ARMING PROOF AN INTEGRATION TEST READS.** The
+/// window ships off and, when a run turns it on, still arms itself per
+/// FILE only on a file proved fast enough for a run to fill - so a test
+/// that sets `NZBFAST_WRITE_COALESCE_KB` and grades an outcome can take
+/// the unstaged path from end to end and report a pass over a feature it
+/// never touched. Round 44 (`research/RAR-PERF-AUDIT-2026-09-02.md`) hit
+/// exactly that shape when a 100 KB `manysmall` leg declined to arm. The
+/// counters behind this are cumulative by construction - see
+/// `stage::staged_totals` for why a level cannot answer the question.
+///
+/// `0 span(s)` is therefore a REAL and useful reading: the window was
+/// configured on and never armed.
+fn print_write_window() {
+    use nzbkit::disk::stage;
+    if stage::coalesce_cap() == 0 {
+        return;
+    }
+    let (spans, runs, bytes) = stage::staged_totals();
+    info!(
+        target: "write-window",
+        "write window on at {} KB/file: staged {spans} span(s), {:.1} MB, written as {runs} coalesced run(s)",
+        stage::coalesce_cap() / 1024,
+        bytes as f64 / 1e6,
+    );
 }
 
 /// Instrument-first: the memory-floor attribution block (memgauge).

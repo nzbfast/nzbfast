@@ -22,9 +22,17 @@ mod digest_cache;
 /// whole-file one answer the same on an honest set, by exit code, stdout
 /// and repaired bytes.
 mod fast_check;
+/// The named `.par2` is junk and its volumes are not: the set the
+/// reference repairs off the siblings and parfast used to decline, and
+/// the two-set directory the rescue must not reach across.
+mod junk_index;
 /// `-p` deletes files, and this holds it to deleting only the ones the
 /// run made - the 10 Sep 2026 data-loss defect.
 mod purge;
+/// What SABnzbd's own parser gets out of a repair: the extra-file
+/// announcements it turns into renames and deletions, and the order
+/// that makes them readable at all.
+mod sab_parser;
 /// TODO 334: the repair's load prints from the engine's scan report;
 /// this holds it byte for byte against the whole-read load it replaced.
 mod scan_load;

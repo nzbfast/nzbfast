@@ -192,6 +192,12 @@ impl Extractor {
         // trail stays narrow on purpose - it vouches only for writes
         // whose identity offsets this path knows - and the disk oracle
         // is the wider claim, made where the destination can be asked.
+        // The word doing the work in that sentence is PARKED: the
+        // RAR-fallback re-route above this call returned `Persist::No`
+        // until 17 Sep 2026, so the article it rewrote here was never
+        // parked and the oracle was never asked about it. Both halves
+        // are needed, and only the pair closes the e2e resume rig's
+        // retry count.
         if inner.refeed_active {
             inner.push_late(LatePlacement {
                 slot,

@@ -145,6 +145,9 @@ fn env_knob_on(var: &str) -> bool {
 pub(super) fn read_knobs(cfg_all: &Config, config: &Path) -> FleetKnobs {
     // Stall-detection timeout; env override exists for the chaos suite
     // (a mock stall shouldn't cost a test 30 wall-clock seconds).
+    // env-default-gate: the fallback is `PoolConfig::default().read_timeout`,
+    // a struct field built by a `Default` impl, so the documented 30 is not a
+    // literal anywhere on this chain. Check the doc row against that impl.
     let read_timeout = std::env::var("NZBFAST_READ_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -264,6 +267,10 @@ pub(super) fn read_knobs(cfg_all: &Config, config: &Path) -> FleetKnobs {
     // the band and spending least, and the 10 GbE apollo guard reads
     // the two within 0.15 s. 80 is the tested upper margin, not a
     // second default.
+    // env-default-gate: the fallback is `ship.race_sat_pct` from
+    // `PoolConfig::shipped()` - one definition of "what the daemon ships",
+    // deliberately so a test fleet can build from it too (see the comment on
+    // `ship` above). Check the doc row's 70 against that function.
     let race_sat_pct = std::env::var("NZBFAST_RACE_SAT_PCT")
         .ok()
         .and_then(|v| v.parse::<u8>().ok())

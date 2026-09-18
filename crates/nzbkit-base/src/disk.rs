@@ -1186,14 +1186,27 @@ impl FileWriter {
     /// test can assert on both behaviours in one process without
     /// depending on a latched environment variable.
     ///
-    /// The window ships ON, at [`stage::COALESCE_CAP_DEFAULT`]. It
-    /// shipped OFF until round 44 replaced the quiescence INFERENCE with
-    /// the engine's own `feeding` signal; these two comments still said
-    /// "ships OFF at 0" afterwards, and on 4 Sep 2026 a review read them
-    /// and reported the shipped default as 0 in a section headed clean.
-    /// A test still says which arm it means, because the shipped window
-    /// arms itself only on a file proved to be fed fast enough and no
-    /// test's handful of small articles is.
+    /// The window ships OFF, at [`stage::COALESCE_CAP_DEFAULT`], which
+    /// is 0 again since 17 Sep 2026
+    /// (`research/WSTAGE-WINDOW-DEFAULT-2026-09-17.md`: a wall loss on
+    /// both an SSD and a rotational array, a win on neither). It was ON
+    /// from round 44, which replaced the quiescence INFERENCE with the
+    /// engine's own `feeding` signal, to that date. **This comment has
+    /// been wrong in both directions now** - it still said "ships OFF at
+    /// 0" through the fortnight it was on, and on 4 Sep 2026 a review
+    /// read it and reported the shipped default as 0 in a section headed
+    /// clean - so re-read the constant rather than this sentence. A test
+    /// says which arm it means either way, because even when the window
+    /// is armed by the environment it arms per file only on one proved
+    /// to be fed fast enough, and no test's handful of small articles
+    /// is.
+    ///
+    /// This door is `#[cfg(test)]` and so reaches UNIT tests only. The
+    /// integration half - the two behaviours round 44's defects sat in,
+    /// which need a forfeited chase and a real SIGKILL against a real
+    /// journal - is `crates/nzbfast/tests/e2e_wstage/mod.rs`, which dials
+    /// the window through the environment on fixtures fast enough to arm
+    /// it for real, and proves each one armed before it grades anything.
     #[cfg(test)]
     pub(crate) fn coalescing(mut self, on: bool) -> FileWriter {
         // The same 4 MiB the process default uses - see
@@ -1210,6 +1223,22 @@ impl FileWriter {
             st.arm_for_test();
             std::sync::Mutex::new(st)
         });
+        self
+    }
+
+    /// Re-cut this writer's window to a named per-file cap, the rest of
+    /// the bounds derived from it exactly as `Caps::sized` derives them
+    /// for the process default. Applied AFTER
+    /// [`FileWriter::coalescing`], which arms the window at the shipped
+    /// 4 MiB.
+    ///
+    /// A test that means to observe the EVICTION path needs a cap it can
+    /// fill: at 4 MiB the make-room loop only fires after four megabytes
+    /// of articles, which is a memory bill and a wall figure for a rule
+    /// that has nothing to do with either.
+    #[cfg(test)]
+    pub(crate) fn staging_cap(mut self, file: usize) -> FileWriter {
+        self.caps = stage::Caps::sized(file);
         self
     }
 
@@ -1621,12 +1650,48 @@ impl FileWriter {
     /// One run, one `pwrite`. The gate entries the run carries are
     /// struck whatever the write did: a neighbour must never wait out
     /// the 30-second deadline behind a write that has already failed.
-    /// Write out runs the staging path displaced, in the order it
-    /// displaced them.
-    fn flush_runs(&self, runs: Vec<stage::StagedRun>) -> io::Result<()> {
+    /// Write out runs the staging path displaced, in ASCENDING OFFSET
+    /// ORDER - the same rule, and for the same reason, as
+    /// [`stage::WriteStage::take_all`]: `PrefixHash` advances only on a
+    /// write landing exactly at its hashed end and FREEZES on one
+    /// landing ahead of it, so a batch written high-run-first hands the
+    /// hash a hole and the resume ledger a mark shorter than the file
+    /// deserves - or 0, which `settle_resume_ledger` reads as "nothing
+    /// about this file can be proven" and answers by DELETING the
+    /// partial.
+    ///
+    /// **It is sorted HERE and not at the three producers**, which is
+    /// the whole reason this is a second site rather than a copy of
+    /// `take_all`'s sort (17 Sep 2026,
+    /// `research/WSTAGE-TAKEALL-ORDER-INTEGRATION-2026-09-17.md`
+    /// section 4). `write_article_at` builds one batch out of three:
+    /// `stage::WriteStage::take_expired`, then whatever
+    /// `stage::WriteStage::offer`'s make-room loop displaced, then -
+    /// appended LAST - the run the incoming article closed. That last
+    /// run is frequently the LOWEST in the batch, so the batch is
+    /// descending whatever order each producer used internally; sorting
+    /// any one of them would leave the composite unsorted. This is the
+    /// one point where a batch becomes disk writes.
+    ///
+    /// The victim rule is deliberately untouched. `offer` evicts
+    /// `min_by_key(|r| r.born)` - the run least likely to grow, which is
+    /// what makes the window coalesce at all - and that is a question
+    /// about which bytes leave RAM, not about what order they land in,
+    /// two things that were conflated once and are separate.
+    ///
+    /// The runs are disjoint by construction (the article gate
+    /// establishes it before a span is ever offered), so the sort is
+    /// total and there are at most `stage::MAX_RUNS` + 1 of them.
+    ///
+    /// Separated by
+    /// `disk::tests::an_eviction_batch_is_flushed_low_first_so_the_mark_survives`,
+    /// which reads a mark of 0 without this sort and the whole low run
+    /// with it.
+    fn flush_runs(&self, mut runs: Vec<stage::StagedRun>) -> io::Result<()> {
         if runs.is_empty() {
             return Ok(());
         }
+        runs.sort_by_key(|r| r.start);
         let _g = self.flush_lock.lock_ok();
         let mut r = Ok(());
         for run in runs {

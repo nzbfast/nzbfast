@@ -39,7 +39,17 @@ use super::*;
 /// invents an `extracted-1-movie.mkv` rather than overwrite, so a stale
 /// partial still sitting under the member's own name would shunt the
 /// real payload to that name instead of failing.
-async fn forfeited_arm(tag: &str, container: &str, hatch: bool) -> String {
+///
+/// `extra_env` rides on top of the three hatches below, and is what
+/// `e2e_wstage` uses to run this same fixture with the write-coalescing
+/// window armed - see that module's header for why a fixture this shape
+/// is the one round 44's `prefix_hash` defect reddened.
+pub(crate) async fn forfeited_arm(
+    tag: &str,
+    container: &str,
+    hatch: bool,
+    extra_env: &[(&str, &str)],
+) -> String {
     let mut fx = Fixture::new(tag);
     let movie = incompressible(36 << 20, 44);
     let arch = if container.ends_with(".7z") {
@@ -76,9 +86,19 @@ async fn forfeited_arm(tag: &str, container: &str, hatch: bool) -> String {
     if hatch {
         env.push(("NZBFAST_NO_CHASE_RESUME", "1"));
     }
+    // Owned, because the run below moves `env` into a blocking task and
+    // `extra_env`'s borrow does not outlive this function.
+    let mut env: Vec<(String, String)> = env
+        .into_iter()
+        .chain(extra_env.iter().copied())
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    env.shrink_to_fit();
     let (log, ok) = {
         let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
         tokio::task::spawn_blocking(move || {
+            let env: Vec<(&str, &str)> =
+                env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
             run_get_args(&cfg, &nzb, &out, &env, &["--mem-limit", "64M"])
         })
         .await
@@ -121,7 +141,7 @@ async fn forfeited_arm(tag: &str, container: &str, hatch: bool) -> String {
 /// written the prefix once instead of twice.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_forfeited_7z_chase_resumes_its_member_on_disk() {
-    let log = forfeited_arm("res7z", "release.7z", false).await;
+    let log = forfeited_arm("res7z", "release.7z", false, &[]).await;
     assert!(
         log.contains("resuming 1 member(s)"),
         "the 7z arm wrote no ledger, so the member re-extracted from byte zero:\n{log}"
@@ -134,7 +154,7 @@ async fn a_forfeited_7z_chase_resumes_its_member_on_disk() {
 /// the appended files collected across the pool.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_forfeited_zip_chase_resumes_its_member_on_disk() {
-    let log = forfeited_arm("reszip", "release.zip", false).await;
+    let log = forfeited_arm("reszip", "release.zip", false, &[]).await;
     assert!(
         log.contains("resuming 1 member(s)"),
         "the zip arm wrote no ledger, so the member re-extracted from byte zero:\n{log}"
@@ -149,7 +169,7 @@ async fn a_forfeited_zip_chase_resumes_its_member_on_disk() {
 /// so a zip twin would re-run the same branch.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_kill_switch_puts_a_forfeited_7z_back_on_byte_zero() {
-    let log = forfeited_arm("res7zoff", "release.7z", true).await;
+    let log = forfeited_arm("res7zoff", "release.7z", true, &[]).await;
     assert!(
         !log.contains("resuming"),
         "the hatch was set and the pass resumed anyway:\n{log}"

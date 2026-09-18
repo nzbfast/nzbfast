@@ -661,6 +661,11 @@ pub(crate) fn cards_summary_eligible(
         // Release-level filters with no summary column behind them.
         && q.kind.is_none()
         && q.res.is_none()
+        // GH #76. A summary row aggregates a title's releases across
+        // EVERY group it was posted to, so there is no column here that
+        // could answer "only the ones in alt.binaries.teevee" - the
+        // request goes to the exact query.
+        && q.group.is_none()
         && !q.complete_only
         && q.min_bytes == 0
         && q.newer_than == 0
@@ -1319,6 +1324,13 @@ mod tests {
                 "res chip",
                 BrowseQuery {
                     res: Some("1080p".into()),
+                    ..wall_q()
+                },
+            ),
+            (
+                "newsgroup filter",
+                BrowseQuery {
+                    group: Some("alt.binaries.g1".into()),
                     ..wall_q()
                 },
             ),

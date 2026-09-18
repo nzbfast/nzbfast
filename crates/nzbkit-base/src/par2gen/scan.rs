@@ -241,7 +241,7 @@ pub(super) fn scan_all(
     // The cap lands HERE and not inside the geometry, and it binds only
     // `inner`: the OUTER fan-out is what makes a many-member set's
     // chains run beside each other, which is the quantity both a-priori
-    // widths are derived against (`super::chain_pass_bytes`), so moving
+    // widths are derived against (`super::fold_pace::chain_pass_bytes`), so moving
     // it would move the ground under them. Narrowing after the search
     // only ever spends LESS than the budget the search admitted.
     let inner = lane_cap.map_or(inner, |cap| inner.min(cap.max(1)));
@@ -702,7 +702,7 @@ fn forced_scan_lane_width() -> Option<usize> {
 /// both run the chain on the file-level worker while the lanes hash that
 /// worker's own member), so the payload and the member length both
 /// cancel out of the ratio exactly as the payload cancels out of
-/// [`super::fold_rows_per_worker_per_chain_pass`]. What is left is one
+/// [`super::fold_pace::fold_rows_per_worker_per_chain_pass`]. What is left is one
 /// lane's cost against one chain's, and a lane does the chain's MD5 plus
 /// a CRC32 over the same bytes - so the ratio is at MOST 1000 on any
 /// box, structurally, and the only way it falls much below is a CRC32
@@ -742,7 +742,7 @@ fn block_digest_lane_per_mille_of_chain() -> Option<u64> {
 }
 
 /// The fewest block-digest lanes whose work still lands INSIDE the
-/// chain's wall, at the same 80% target `super::paced_width` aims at:
+/// chain's wall, at the same 80% target `super::fold_pace::paced_width` aims at:
 /// `lanes >= (1 / 0.8) / (per-mille / 1000)`, which is `1250 / per_mille`.
 fn scan_lane_keep_up_width(per_mille: u64) -> usize {
     (1250u64.div_ceil(per_mille.max(1))).max(1) as usize
@@ -774,7 +774,7 @@ pub(super) fn apriori_scan_lane_width(
 /// [`apriori_scan_lane_width`]'s arithmetic with the machine constant
 /// already reduced to `keep_up` - split out so the RULE can be pinned by
 /// a test on every box in the fleet, exactly as
-/// [`super::apriori_fold_width_for`] is.
+/// [`super::fold_pace::apriori_fold_width_for`] is.
 ///
 /// # The rule, and why it is ONE decision with the fold's and not two
 ///
@@ -801,7 +801,7 @@ pub(super) fn apriori_scan_lane_width(
 /// (a 32-core host running one member keeps every lane the geometry
 /// gave it).
 ///
-/// The floor is `keep_up` and not `super::PACED_WIDTH_FLOOR`: the
+/// The floor is `keep_up` and not `super::fold_pace::PACED_WIDTH_FLOOR`: the
 /// dangerous direction here is making the DIGESTS the pole, and the
 /// number that bounds that is the one derived from the chain, not the
 /// fold's floor. It is the binding term on a small box - four cores with
@@ -1726,7 +1726,7 @@ pub(super) fn finish_scan(
 /// Every arm's CHAIN lane accounts for its member on the chain counter.
 ///
 /// This is the other half of the 16 Sep fix (the pacer half is
-/// `super::batch_fold_pacer_tests`): the pacer can read the right
+/// `super::fold_pace::batch_fold_pacer_tests`): the pacer can read the right
 /// counter and still learn nothing if the lane never steps it, which is
 /// precisely what shipped - `scan_mapped`'s and
 /// `scan_parallel_positional`'s chain lanes stepped NOTHING, by design,

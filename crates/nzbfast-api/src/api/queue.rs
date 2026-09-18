@@ -2215,3 +2215,9 @@ impl Drop for Relocation {
 
 #[cfg(test)]
 mod custody_tests;
+
+#[cfg(test)]
+mod cancelundo_tests;
+
+#[cfg(test)]
+mod histundo_tests;

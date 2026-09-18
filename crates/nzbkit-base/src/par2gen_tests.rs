@@ -1363,3 +1363,161 @@ fn the_plan_preview_prices_the_comment_packet() {
         plan_files(&shapes, "cmt", 4096, 6, CreatePlan::ENGINE)
     );
 }
+
+// ---- no-clobber: the engine's own O_EXCL door -------------------------
+
+/// The `AlreadyExists` inside a create's error, or a panic naming what
+/// it really was. Kept as one helper so all four tests below refuse in
+/// the SAME way rather than each settling for "it failed".
+fn already_exists_path(e: &Par2GenError) -> PathBuf {
+    match e {
+        Par2GenError::Io { path, source } if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            path.clone()
+        }
+        other => panic!("expected an AlreadyExists refusal, got {other:?}"),
+    }
+}
+
+/// The INDEX is the first file of the set the engine creates, so it is
+/// where a no-clobber create most often stops - and it must stop there
+/// without having touched a byte of what was in the way.
+#[test]
+fn a_no_clobber_create_refuses_an_existing_index() {
+    let t = Tmp::new("noclobber-index");
+    let members = vec![t.write("a.bin", &payload(30_000, 3))];
+    let theirs = payload(4_096, 91);
+    std::fs::write(t.0.join("set.par2"), &theirs).unwrap();
+
+    let e = create_into_exact(
+        &t.0,
+        &members,
+        "set",
+        Some(2048),
+        4,
+        CreatePlan::ENGINE.with_no_clobber(true),
+    )
+    .expect_err("a no-clobber create must not write over an existing index");
+    assert_eq!(already_exists_path(&e), t.0.join("set.par2"));
+    assert_eq!(
+        std::fs::read(t.0.join("set.par2")).unwrap(),
+        theirs,
+        "the index was truncated by a create that claimed to refuse it"
+    );
+}
+
+/// A VOLUME already there, with the index name free: the set whose
+/// `.par2` was deleted, which is the shape finding P2 of the 17 Sep
+/// 2026 sweep is about. The create gets past the index and must still
+/// refuse - and the volume's bytes must survive, which is the whole
+/// point of refusing.
+#[test]
+fn a_no_clobber_create_refuses_an_existing_volume() {
+    let t = Tmp::new("noclobber-volume");
+    let members = vec![t.write("a.bin", &payload(30_000, 3))];
+    let theirs = payload(8_192, 77);
+    // The engine's own fixed-width spelling, which is what it opens.
+    std::fs::write(t.0.join("set.vol000+01.par2"), &theirs).unwrap();
+
+    let e = create_into_exact(
+        &t.0,
+        &members,
+        "set",
+        Some(2048),
+        4,
+        CreatePlan::ENGINE.with_no_clobber(true),
+    )
+    .expect_err("a no-clobber create must not write over an existing volume");
+    assert_eq!(already_exists_path(&e), t.0.join("set.vol000+01.par2"));
+    assert_eq!(
+        std::fs::read(t.0.join("set.vol000+01.par2")).unwrap(),
+        theirs,
+        "a volume of a set whose index had been deleted was destroyed anyway"
+    );
+}
+
+/// THE CONTROL ARM, and the one that would catch this landing as a
+/// behaviour change: the default is still to overwrite, because
+/// par2cmdline overwrites and re-running a create is ordinary use.
+#[test]
+fn the_default_create_still_writes_over_an_existing_set() {
+    let t = Tmp::new("clobber-default");
+    let members = vec![t.write("a.bin", &payload(30_000, 3))];
+    std::fs::write(t.0.join("set.par2"), payload(4_096, 91)).unwrap();
+    std::fs::write(t.0.join("set.vol000+01.par2"), payload(8_192, 77)).unwrap();
+
+    let names = create_into_exact(&t.0, &members, "set", Some(2048), 4, CreatePlan::ENGINE)
+        .expect("the default create writes over what is there");
+    let set = parse(&read_all(&t.0, &names));
+    assert_eq!(set.files.len(), 1);
+}
+
+/// THE CASE A PREFLIGHT CANNOT COVER, which is why the engine has a
+/// door at all: two creates started TOGETHER on one base.
+///
+/// A caller that stats the directory first answers for the instant it
+/// looked; both of these would look, both would see nothing, and both
+/// would then truncate the other's files. With the `O_EXCL` open
+/// exactly one gets the index and the other stops there.
+///
+/// A BARRIER and not a sleep: the two threads are released into the
+/// create at the same instant by construction, so this fails on a fact
+/// rather than on timing. The assertion is on the OUTCOME - one whole
+/// readable set, no half-written file - which is what a race leaves
+/// wrong however the interleaving fell.
+#[test]
+fn two_concurrent_no_clobber_creates_leave_exactly_one_whole_set() {
+    let t = Tmp::new("noclobber-race");
+    let members = vec![
+        t.write("a.bin", &payload(60_000, 3)),
+        t.write("b.bin", &payload(23_000, 9)),
+    ];
+    let start = std::sync::Barrier::new(2);
+    let results: Vec<Result<Vec<String>, Par2GenError>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..2)
+            .map(|_| {
+                let (dir, members, start) = (&t.0, &members, &start);
+                sc.spawn(move || {
+                    start.wait();
+                    create_into_exact(
+                        dir,
+                        members,
+                        "set",
+                        Some(2048),
+                        6,
+                        CreatePlan::ENGINE.with_no_clobber(true),
+                    )
+                })
+            })
+            .collect();
+        hs.into_iter()
+            .map(|h| h.join().expect("create thread panicked"))
+            .collect()
+    });
+
+    let winners: Vec<&Vec<String>> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+    let losers: Vec<&Par2GenError> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one of two concurrent creates may own the set, got {results:?}"
+    );
+    already_exists_path(losers[0]);
+
+    // The loser must not have left a truncated file behind, which is
+    // the failure a race produces and an exit code does not show: the
+    // winner's whole set has to read back through our own parser.
+    let set = parse(&read_all(&t.0, winners[0]));
+    assert_eq!(set.files.len(), 2);
+    // And nothing beyond the winner's own names is sitting in the
+    // directory - a refused create writes NO file, not even an empty one.
+    let mut on_disk: Vec<String> = std::fs::read_dir(&t.0)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".par2"))
+        .collect();
+    on_disk.sort();
+    let mut want = winners[0].clone();
+    want.sort();
+    assert_eq!(on_disk, want);
+}

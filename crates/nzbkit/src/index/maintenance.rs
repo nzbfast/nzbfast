@@ -1254,7 +1254,10 @@ impl Index {
     /// Like `par2_sidecar_fold` this can never finish for good -
     /// ingest keeps shattering new postings - so the cursor parks at
     /// the top id and follows it. Bounded per call in time and id
-    /// space; the caller holds the index write mutex throughout.
+    /// space; the caller holds the index write mutex throughout, so
+    /// the time bound is a bound on that HOLD and is enforced by
+    /// [`super::foldpace`] rather than by a deadline checked after the
+    /// fact.
     /// Returns (postings folded, rows folded away, caught up).
     pub fn shatter_fold(
         &mut self,
@@ -1263,7 +1266,6 @@ impl Index {
     ) -> rusqlite::Result<(usize, usize, bool)> {
         const STRIDE: i64 = 100_000;
         const SUB_STRIDE: i64 = 1_000;
-        let started = std::time::Instant::now();
         let top: i64 = self
             .db
             .query_row("SELECT COALESCE(MAX(id),0) FROM releases", [], |r| r.get(0))?;
@@ -1282,7 +1284,10 @@ impl Index {
             return Ok((0, 0, true));
         }
         let call_top = cursor.saturating_add(STRIDE).min(top);
-        let deadline = started + budget;
+        // The budget bounds the HOLD, not the intake: every indivisible
+        // step below is run only when the time left covers the dearest
+        // one this call has already paid for. See `super::foldpace`.
+        let pace = super::foldpace::FoldPace::new(budget);
         let (mut groups, mut folded) = (0usize, 0usize);
         let mut reached_top = false;
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1306,6 +1311,7 @@ impl Index {
                 // `12345`, which must NOT lose the poster from their
                 // cluster key
                 // (research/SHATTER-FOLD-STARVATION-2026-09-01.md).
+                let unit = pace.unit_start();
                 let cands: Vec<String> = {
                     let mut stmt = self.db.prepare_cached(
                         "SELECT DISTINCT stem FROM releases
@@ -1316,11 +1322,19 @@ impl Index {
                     stmt.query_map([cursor, hi], |r| r.get(0))?
                         .collect::<rusqlite::Result<_>>()?
                 };
+                pace.unit_end(unit);
                 for stem in cands {
                     if crate::release::stem_is_a_name(&stem) || !seen.insert(stem.clone()) {
                         continue;
                     }
-                    let (g, n, complete) = self.shatter_fold_stem(&stem, now, deadline)?;
+                    if !pace.room() {
+                        // No time for this stem's own first step. Same
+                        // park as the deadline arm just below - the
+                        // cursor stays at the substride start, so the
+                        // remainder is revisited.
+                        break 'pass;
+                    }
+                    let (g, n, complete) = self.shatter_fold_stem(&stem, now, &pace)?;
                     groups += g;
                     folded += n;
                     if !complete {
@@ -1356,7 +1370,7 @@ impl Index {
                     reached_top = true;
                     break;
                 }
-                if hi >= call_top || started.elapsed() >= budget {
+                if hi >= call_top || !pace.room() {
                     break;
                 }
             }
@@ -1464,8 +1478,9 @@ impl Index {
         &mut self,
         stem: &str,
         now: i64,
-        deadline: std::time::Instant,
+        pace: &super::foldpace::FoldPace,
     ) -> rusqlite::Result<(usize, usize, bool)> {
+        let unit = pace.unit_start();
         let names: Vec<String> = {
             let mut stmt = self.db.prepare_cached(
                 "SELECT DISTINCT f.filename
@@ -1476,14 +1491,18 @@ impl Index {
             stmt.query_map([stem], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
+        pace.unit_end(unit);
         let (mut groups, mut folded) = (0usize, 0usize);
         for name in names {
-            let (n, complete) = self.shatter_fold_group(stem, &name, now, deadline)?;
+            if !pace.room() {
+                return Ok((groups, folded, false));
+            }
+            let (n, complete) = self.shatter_fold_group(stem, &name, now, pace)?;
             if n > 0 {
                 groups += 1;
                 folded += n;
             }
-            if !complete || std::time::Instant::now() >= deadline {
+            if !complete {
                 return Ok((groups, folded, false));
             }
         }
@@ -1500,7 +1519,7 @@ impl Index {
         stem: &str,
         fname: &str,
         now: i64,
-        deadline: std::time::Instant,
+        pace: &super::foldpace::FoldPace,
     ) -> rusqlite::Result<(usize, bool)> {
         // Hard cap keeps the id list bounded. A posting bigger than
         // the cap folds over successive PASSES of this same call (see
@@ -1510,6 +1529,12 @@ impl Index {
         const MEMBER_CAP: usize = 20_000;
         let mut folded = 0usize;
         loop {
+            // The whole batch - the members read, the merge and the
+            // commit - is ONE indivisible unit: `shatter_fold_members`
+            // runs in a transaction, and at `WAL_AUTOCHECKPOINT_PAGES`
+            // its commit is usually a WAL checkpoint, which is the
+            // 50-350 ms that used to land past the budget.
+            let unit = pace.unit_start();
             let members: Vec<ShatterMember> = {
                 let mut stmt = self.db.prepare_cached(
                     "SELECT r.id, r.has_par2, r.first_posted, r.first_seen, r.need_parts,
@@ -1533,6 +1558,7 @@ impl Index {
             };
             let capped = members.len() >= MEMBER_CAP;
             let n = self.shatter_fold_members(stem, fname, members, now)?;
+            pace.unit_end(unit);
             folded += n;
             // Another cap's worth may be waiting behind this one. Stop
             // when the batch came in under the cap, or when a capped
@@ -1544,7 +1570,7 @@ impl Index {
             // Each batch commits its own transaction, so stopping here
             // is clean - but the remainder must be REVISITED, which is
             // what the false `complete` makes the top-level cursor do.
-            if std::time::Instant::now() >= deadline {
+            if !pace.room() {
                 return Ok((folded, false));
             }
         }

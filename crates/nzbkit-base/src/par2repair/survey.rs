@@ -39,6 +39,51 @@ pub struct MemberSurvey {
     pub blocks_total: usize,
 }
 
+/// One extra file the adoption pass took blocks from, in the shape
+/// par2cmdline's "Scanning extra files:" section announces it.
+///
+/// WHY THE ENGINE BUILDS THIS AND NOT THE CALLER. A par2cmdline-dialect
+/// CLI has to print a per-donor result line under that header, and
+/// SABnzbd PARSES those lines: they are where it learns that an
+/// obfuscated file is really `movie.mkv` (`renames`) and that the
+/// incomplete original a repair consumed is now junk it should delete
+/// (`reconstructed`). Deciding which donor fed which target is a
+/// CHECKSUM question, and the only place it is answered is
+/// [`adopt::adopt_blocks`] - a caller that answered it again would be
+/// reading every candidate a second time to reach a conclusion this
+/// repair already holds. So the decision is reported, not re-derived.
+///
+/// Only files under the repair's OWN directory appear here. A §293
+/// donor-directory file and an in-set harvest source are both adoption
+/// sources and neither is an "extra file" in the reference's sense: the
+/// reference has no donor directories at all, and it announces a
+/// member's own bytes under `Target:`, which is a different line that a
+/// caller prints from its own survey.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtraFileMatch {
+    /// The donor's name relative to the repair directory - the same
+    /// out-relative vocabulary [`RepairReport::adopted_from`] speaks, so
+    /// a nested candidate is a path a reader (or SABnzbd) can open.
+    pub donor: String,
+    /// The target its blocks belong to, as the recovery set names it,
+    /// or `None` when they belong to MORE THAN ONE - the reference's
+    /// "several target files" line. That third shape is the one
+    /// SABnzbd's two rename regexes deliberately do not match, here as
+    /// there: the line names no single target to rename to.
+    pub target: Option<String>,
+    /// Blocks this repair took from this donor for that target.
+    pub blocks: usize,
+    /// Blocks the target has in total. Zero when `target` is `None`.
+    pub target_blocks: usize,
+    /// The donor IS that target, whole: same length, and every one of
+    /// its blocks adopted at its own aligned offset. The reference
+    /// reaches this by comparing the whole-file MD5, and
+    /// [`adopt::adopt_blocks`]'s fast path is that same comparison - a
+    /// sliding-scan hit cannot reach it, because a file that hashed
+    /// equal would have been claimed by the fast path first.
+    pub whole_file: bool,
+}
+
 /// One validated packet the scan found, as a surveying caller's own
 /// loader needs it: enough to print par2cmdline's per-file
 /// `Loaded N new packets including M recovery blocks` line and to count
@@ -134,6 +179,28 @@ pub trait SurveyObserver {
     /// duplicate was the whole of the critical path
     /// (TODO 334).
     fn packets_scanned(&mut self, _report: &ScanReport) {}
+    /// The extra files the adoption pass took blocks from, once that
+    /// decision is final and BEFORE the fold - so a caller that prints
+    /// the reference's "Scanning extra files:" results can print them
+    /// where the reference does, ahead of "Repair is required.".
+    ///
+    /// THAT POSITION IS THE WHOLE POINT, and it is why this is a second
+    /// handshake rather than a field on the final report. SABnzbd stops
+    /// reading rename announcements the moment it sees "Repair is
+    /// required." (`newsunpack.py`'s `verified` flag), so a donor named
+    /// after the fold is a donor SAB never hears about. A caller that
+    /// prints from here must therefore hold back the lines that follow
+    /// the section until this fires - and an implementation that prints
+    /// on another thread should make this call BLOCK until it has,
+    /// which is what `crates/parfast` does.
+    ///
+    /// Fires ONCE per attempt, on the repair's thread, only on the path
+    /// that goes on to repair something: a set that turns out clean, a
+    /// caller that stopped at [`after_survey`](Self::after_survey) and
+    /// a cancel all return before it. An empty slice is a real answer -
+    /// the scan found nothing to adopt - and is the usual one.
+    /// Defaulted to nothing, like `forecast`.
+    fn extra_files_scanned(&mut self, _matches: &[ExtraFileMatch]) {}
     /// About to write the first target byte. Only reached after
     /// [`after_survey`](Self::after_survey) returned
     /// [`AfterSurvey::Repair`]; never reached when the repair has
@@ -283,6 +350,16 @@ pub fn repair_dir_set_surveyed_as(
             }
             fn packets_scanned(&mut self, r: &ScanReport) {
                 self.inner.packets_scanned(r);
+            }
+            // EVERY defaulted method needs a line here. This wrapper
+            // exists to remember the caller's `after_survey` answer and
+            // forwards the rest verbatim - but a default it does NOT
+            // name is a default it SILENTLY APPLIES, so an observer
+            // method added to the trait and not to this list is dead on
+            // this entry point, which is the only entry point a
+            // par2cmdline-dialect CLI uses. Cost an hour on 17 Sep 2026.
+            fn extra_files_scanned(&mut self, matches: &[ExtraFileMatch]) {
+                self.inner.extra_files_scanned(matches);
             }
             fn before_write(&mut self) {
                 self.inner.before_write();

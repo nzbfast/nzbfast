@@ -922,3 +922,50 @@ test-group = 'pool-rigs-serial'
 
 [test-groups.pool-rigs-serial]
 max-threads = 1
+
+# ---------------------------------------------------------------------
+# THE ONE e2e LEG WHOSE ORACLE A RETRY DESTROYS (17 Sep 2026, claim
+# `e2e-matvol-retry-race-reopened`).
+#
+# `a_retry_over_materialized_volumes_fetches_only_the_missing_article`
+# asserts an EXACT article-id set on a resumed download's second run:
+# one body on the wire, and it is the victim. That is the whole value of
+# the test - the byte-bound belt it replaced could only approximate it -
+# and it makes the test a detector for a class of race rather than a
+# pass/fail on a feature. A detector that gets a second attempt detects
+# nothing: the race it watches for is a scheduling one, so attempt two
+# on a momentarily quieter runner passes, nextest reports FLAKY, the job
+# goes green, and nobody reads it.
+#
+# That is not hypothetical, it is the history. The race this test was
+# built for was closed on 23 Aug 2026 (TODO 252) and REOPENED - strictly,
+# was never fully closed; see the test's own doc comment - and it failed
+# about a quarter of the time under load on origin/main for three weeks
+# with every e2e job green, because both of the sweep's e2e runs scored
+# it `FLAKY 2/2`. Nightly cannot see it either: it runs e2e on an idle
+# box, which is the one condition under which this passes 5 of 5.
+#
+# So this leg opts out of the repo-wide `retries = 1`. The header of
+# this file is built on retries CAPTURING flakes rather than hiding
+# them, and that reasoning holds for every test whose flake is NOISE; it
+# inverts for a test whose flake is the FINDING.
+#
+# THE COST, MEASURED BEFORE IT WAS ACCEPTED, on the dev Mac at box load
+# averages between 24 and 116 (four concurrent loops of the test against
+# itself, `--retries 0`): 11 of 40 on origin/main `2b81dbd4d` before the
+# fix, 0 of 192 concurrent and 0 of 32 standalone after it. A CI runner
+# is 4 vCPU and does not reach that contention, so the expected false-red
+# rate here is zero and a red is a finding. If this ever starts redding
+# without a diff to blame, the answer is to FIX what it found or to say
+# in this block why it was downgraded - not to quietly restore the retry,
+# which is exactly what hid it for three weeks.
+#
+# NAMED, not `binary(e2e)`-wide: the other ~450 legs in that binary grade
+# a finished job and keep the flake capture the rest of this file argues
+# for. And the filter is a `test()` predicate, which nextest does NOT
+# error on when it stops matching (see the extract:: block above) - so if
+# this test is renamed, this line moves in the same commit or it goes
+# silently inert.
+[[profile.default.overrides]]
+filter = 'package(nzbfast) and binary(e2e) and test(/^e2e_resume::a_retry_over_materialized_volumes_fetches_only_the_missing_article$/)'
+retries = 0

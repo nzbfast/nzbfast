@@ -1876,7 +1876,7 @@ pub(crate) use tar::{collect_tar_containers, extract_tar, first_tar_container, i
 mod sevenz;
 pub use sevenz::{
     collect_sevenz_archives, concat_files, extract_sevenz, open_sevenz, sevenz_set_is_encrypted,
-    split_7z_part,
+    sevenz_set_needs_password, split_7z_part,
 };
 
 /// Extract every zip container in `dir`. Returns true only if every one

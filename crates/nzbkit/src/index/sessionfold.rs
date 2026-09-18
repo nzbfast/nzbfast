@@ -108,8 +108,9 @@ impl Index {
         /// scan is STILL INGESTING has rows in the table and more
         /// coming; folding its early half now would split it for good.
         const SETTLE: i64 = 2 * 3_600;
-        let started = std::time::Instant::now();
-        let deadline = started + budget;
+        // The budget bounds the HOLD and not only the intake - see
+        // `super::foldpace` for the measurement that separates the two.
+        let pace = super::foldpace::FoldPace::new(budget);
         let horizon = now.saturating_sub(SETTLE);
         let mut cursor: i64 = match self.kv_get("session_fold_at").and_then(|v| v.parse().ok()) {
             Some(v) => v,
@@ -137,7 +138,7 @@ impl Index {
                     break;
                 }
                 let hi = cursor + WINDOW;
-                let (s, n, seen, complete) = self.session_fold_window(cursor, hi, now, deadline)?;
+                let (s, n, seen, complete) = self.session_fold_window(cursor, hi, now, &pace)?;
                 sessions += s;
                 folded += n;
                 if !complete {
@@ -155,7 +156,7 @@ impl Index {
                 // per lap.
                 cursor = if seen == 0 { hi } else { hi - MAX_SPAN };
                 self.kv_set("session_fold_at", &cursor.to_string())?;
-                if started.elapsed() >= budget {
+                if !pace.room() {
                     break;
                 }
             }
@@ -208,8 +209,9 @@ impl Index {
         lo: i64,
         hi: i64,
         now: i64,
-        deadline: std::time::Instant,
+        pace: &super::foldpace::FoldPace,
     ) -> rusqlite::Result<(usize, usize, usize, bool)> {
+        let unit = pace.unit_start();
         // The population is the commissioning memo's: dark, individually
         // COMPLETE single files claiming more than one part. A poster
         // key of "" groups nothing. Rides `idx_rel_posted`.
@@ -246,6 +248,9 @@ impl Index {
                 groups.entry((poster, grp)).or_default().push(m);
             }
         }
+        // The population query is one indivisible unit; so is each
+        // merge below, whose commit is the dear half.
+        pace.unit_end(unit);
         let (mut sessions, mut folded) = (0usize, 0usize);
         // Deterministic order under replay: by lowest member id.
         let mut cands: Vec<Vec<SessMember>> = groups
@@ -279,13 +284,15 @@ impl Index {
             if members.iter().any(|m| m.need_parts != need) {
                 continue;
             }
+            if !pace.room() {
+                return Ok((sessions, folded, seen, false));
+            }
+            let unit = pace.unit_start();
             let n = self.session_fold_members(&members, need, now)?;
+            pace.unit_end(unit);
             if n > 0 {
                 sessions += 1;
                 folded += n;
-            }
-            if std::time::Instant::now() >= deadline {
-                return Ok((sessions, folded, seen, false));
             }
         }
         Ok((sessions, folded, seen, true))

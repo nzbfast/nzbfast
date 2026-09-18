@@ -243,10 +243,126 @@ pub fn locate(opts: &Options, sink: &mut Sink) -> Result<(PathBuf, PathBuf, [u8;
         return Err(crate::EXIT_INVALID_ARGS);
     };
     let Some(want) = Par2Set::set_id_of(&first) else {
+        // A FILE NAMED `.par2` THAT CARRIES NO SET IS THE REFERENCE'S
+        // "Main packet not found.", not a command-line mistake, and the
+        // difference is worth four exit codes and a rescued job.
+        //
+        // par2cmdline decides what the par file IS by its extension and
+        // only then tries to read packets out of it, so a `.par2`
+        // argument whose bytes are damaged reaches its loader, finds no
+        // Main packet and reports THAT (exit 4, eInsufficientCriticalData -
+        // captured from v1.3.0 on 17 Sep 2026). An argument that is not
+        // named `.par2` never becomes the par file at all and gets "You
+        // must specify a Recovery file.", which is what this said for
+        // both.
+        //
+        // SABnzbd BRANCHES ON IT (`newsunpack.py`, `par2cmdline_verify`):
+        // "Main packet not found." is its signal to fetch a DIFFERENT
+        // par2 file out of the NZB and retry the whole repair, which is
+        // the ordinary cure for the first par2 arriving with bad
+        // articles. Under the old line it read an unexplained failure
+        // and failed the job with recovery data still waiting on the
+        // server.
+        //
+        // BUT THE SIBLINGS ARE ASKED FIRST, because the reference does
+        // not stop at the file it was named: it loads that one and then
+        // globs `<stem>*.par2` and loads each of those, and par2cmdline
+        // repeats the whole critical block through every volume - so an
+        // index overwritten with junk while its volumes sit intact
+        // beside it is a set the reference repairs and this used to
+        // decline (measured 17 Sep 2026 against par2cmdline v1.3.0:
+        // `r set.par2 '*'` reaches "Repair complete." and exit 0).
+        // Nothing below this changes: a directory where no sibling can
+        // supply the set id still answers "Main packet not found.",
+        // which is SABnzbd's cue above and what `sab-parser-gate`'s
+        // `corrupt-par2` fixture - every `.par2` in the directory
+        // zeroed - still gets.
+        if let Some(want) = sibling_set_id(&dir, &named) {
+            return Ok((named, dir, want));
+        }
+        let named_par2 = named
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("par2"));
+        if named_par2 {
+            sink.err("Main packet not found.");
+            return Err(crate::EXIT_INSUFFICIENT_DATA);
+        }
         sink.err("You must specify a Recovery file.");
         return Err(crate::EXIT_INVALID_ARGS);
     };
     Ok((named, dir, want))
+}
+
+/// The set id a SIBLING declares, for a named file that carries none -
+/// [`locate`]'s last question before it refuses the run.
+///
+/// # Which set, which is the part with teeth
+///
+/// Taking the set id off the wrong neighbour would point the whole
+/// repair at somebody else's files, and a directory holding two sets is
+/// the ordinary shape of a season folder. So the rule is NARROWER than
+/// the reference's glob, deliberately, and it errs by declining a set
+/// rather than by adopting one:
+///
+/// 1. a sibling votes only if it parses ON ITS OWN to exactly one
+///    recovery set. [`Par2Set::parse`] wants a Main packet
+///    (`NoMainPacket` otherwise) and refuses a file carrying two sets
+///    that each have one (`MixedRecoverySets`), so a vote is a whole,
+///    self-describing set and not one stray packet's header - which is
+///    also why this cannot adopt a set the load would then fail to
+///    describe.
+/// 2. only a sibling whose OWN [`set_stem`] equals the named file's may
+///    vote, so the voters are the set's own volumes
+///    (`set.vol00+1.par2` beside `set.par2`) and a prefix-collision
+///    neighbour the glob also reaches (`Show.S01E01.Extra.par2` beside
+///    `Show.S01E01.par2`) is not asked at all. The reference IS asked,
+///    and gets it wrong: measured 17 Sep 2026, par2cmdline v1.3.0 on
+///    exactly that directory with `Show.S01E01.par2` junked adopts
+///    whichever set its readdir reached first, reports "There are 1
+///    recoverable files", verifies the OTHER release's `b.bin` and
+///    exits 0 with the damaged `a.bin` untouched. This lane's rule
+///    repairs `a.bin`.
+/// 3. the voters must AGREE. Two stem-equal volumes naming different
+///    sets is a set that was re-created over its own leftovers, and
+///    there is no evidence here about which one the run meant.
+/// 4. anything else - no voter, or a disagreement - is `None`, and the
+///    caller refuses the run exactly as it did before.
+///
+/// It is reached only when the named file holds no structurally valid
+/// packet at all ([`Par2Set::set_id_of`] answers from ANY packet's
+/// header and needs no Main packet), so this is the junk-index case and
+/// never a merely damaged one.
+fn sibling_set_id(dir: &Path, named: &Path) -> Option<[u8; 16]> {
+    let stem = set_stem(named);
+    let mut votes = siblings(dir, named).into_iter().filter_map(|path| {
+        (path.file_name() != named.file_name() && set_stem(&path) == stem)
+            .then(|| declared_set_id(&path))
+            .flatten()
+    });
+    let first = votes.next()?;
+    votes.all(|id| id == first).then_some(first)
+}
+
+/// The single recovery set one `.par2` file describes on its own, or
+/// `None`.
+///
+/// CRITICAL PACKETS ONLY: a volume is almost entirely its own parity and
+/// [`locate`] is the cheap prologue the whole load is split around, so
+/// this frames the file by seeking ([`par2::sparse_frame`], the same
+/// walk [`load_sparse`] uses) and parses the criticals it lifts out. A
+/// file that will not frame - a header out of place - is read whole,
+/// which is what the load itself falls back to.
+fn declared_set_id(path: &Path) -> Option<[u8; 16]> {
+    let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let critical = match par2::sparse_frame(&file, len) {
+        Some(frame) => frame.bytes,
+        None => std::fs::read(path).ok()?,
+    };
+    Par2Set::parse(&[&critical])
+        .ok()
+        .map(|set| set.recovery_set_id)
 }
 
 /// [`load_with`] verifying every packet: the repair path's load, whose
@@ -411,8 +527,12 @@ pub fn load_with(opts: &Options, sink: &mut Sink, may_defer: bool) -> Result<Loa
         // packets belonging to the set it settles on, so admitting a
         // mixed file costs nothing.
         //
-        // The NAMED file is never dropped: it is the first entry and
-        // `want` came out of it, so this only ever filters siblings.
+        // The NAMED file is dropped only where it carries no packet of
+        // this set at all, which since 17 Sep 2026 is reachable: `want`
+        // comes out of a SIBLING when the named file is junk (see
+        // `sibling_set_id`), and a junk index has nothing to admit. On
+        // every ordinary set `want` still came out of the named file, so
+        // this only ever filters siblings.
         let census = match &censused {
             Some(all) => all[at].clone(),
             None => par2::packet_census(bytes),
@@ -1589,7 +1709,7 @@ pub fn print_verdict(loaded: &Loaded, survey: &Survey, sink: &mut Sink) -> u8 {
         );
         return crate::EXIT_SUCCESS;
     }
-    print_extra_scan(loaded, survey, sink);
+    print_extra_scan(loaded, survey, &[], sink);
     sink.line(Level::Terse, "Repair is required.");
     print_damage_detail(survey, sink);
     if survey.repairable() {
@@ -1719,6 +1839,37 @@ pub fn extra_candidates(loaded: &Loaded, survey: &Survey) -> Vec<PathBuf> {
     out
 }
 
+/// The reference's result line for one adopted extra file, in its own
+/// three shapes.
+///
+/// PHRASING IS THE CONTRACT, not a style choice. SABnzbd matches these
+/// with two regexes it compiled against par2cmdline's exact wording
+/// (`newsunpack.py:84-85`), and the `File:` prefix is load-bearing: its
+/// `PAR2_TARGET_RE` takes `File` or `Target`, but both rename regexes
+/// take only `File`, which is what separates "an extra file turned out
+/// to be this member" from "this member is damaged". Captured from
+/// par2cmdline v1.3.0 on 17 Sep 2026, and its source prints them at
+/// `noiselevel > nlSilent` - one level BELOW the section header, so
+/// `-q` silences the header and keeps these, which is why they are
+/// [`Level::Terse`].
+fn extra_match_line(m: &par2repair::ExtraFileMatch) -> String {
+    let donor = &m.donor;
+    match (&m.target, m.whole_file) {
+        (Some(t), true) => format!("File: \"{donor}\" - is a match for \"{t}\"."),
+        (Some(t), false) => format!(
+            "File: \"{donor}\" - found {} of {} data blocks from \"{t}\".",
+            m.blocks, m.target_blocks
+        ),
+        // One donor feeding several members. The reference names no
+        // target here and neither do we - there is no single name to
+        // rename to, which is exactly why SAB's two regexes miss it.
+        (None, _) => format!(
+            "File: \"{donor}\" - found {} data blocks from several target files.",
+            m.blocks
+        ),
+    }
+}
+
 /// The extra-file scan announcement, which the reference prints only
 /// when something is actually wrong - `verify-intact-verbose` runs at
 /// the same level and has no such line.
@@ -1729,21 +1880,71 @@ pub fn extra_candidates(loaded: &Loaded, survey: &Survey) -> Vec<PathBuf> {
 /// under a hash name be adopted. Printing the header while scanning
 /// nothing made the drop-in claim something it did not do; the files
 /// are now named under it.
-pub fn print_extra_scan(loaded: &Loaded, survey: &Survey, sink: &mut Sink) {
-    if !survey.damaged() || !sink.shows(Level::Normal) {
+///
+/// `matches` is the ENGINE's answer to "which of these files fed which
+/// member", and it is empty on every caller that has not got one yet:
+/// the `v` command never repairs, and the repair's own fallback route
+/// runs the engine without an observer. An empty list prints exactly
+/// what this printed before 17 Sep 2026 - the header and the candidate
+/// names - so a route with no answer degrades to the old silence rather
+/// than to a wrong claim. Where the answer comes from, and why it
+/// cannot be worked out here, is at
+/// [`par2repair::ExtraFileMatch`].
+pub fn print_extra_scan(
+    loaded: &Loaded,
+    survey: &Survey,
+    matches: &[par2repair::ExtraFileMatch],
+    sink: &mut Sink,
+) {
+    if !survey.damaged() {
         return;
     }
-    sink.line(Level::Normal, "Scanning extra files:");
-    sink.line(Level::Normal, "");
+    // The header is `noiselevel > nlQuiet` on the reference and the
+    // result lines are `> nlSilent`, so at `-q` the lines print under no
+    // header at all. That is the reference's own shape, and a caller
+    // that reads the lines (SABnzbd does not pass `-q`) sees the same
+    // thing from either binary.
+    let header = sink.shows(Level::Normal);
+    if !header && matches.is_empty() {
+        // Nothing to say and no header to say it under: skip the
+        // directory walk, which is what this did at `-q` before the
+        // result lines existed.
+        return;
+    }
+    if header {
+        sink.line(Level::Normal, "Scanning extra files:");
+        sink.line(Level::Normal, "");
+    }
+    let mut said: Vec<bool> = vec![false; matches.len()];
     for path in extra_candidates(loaded, survey) {
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        sink.line(Level::Normal, &format!("Opening: \"{name}\""));
+        if header {
+            sink.line(Level::Normal, &format!("Opening: \"{name}\""));
+        }
+        // The engine names a candidate relative to the repair directory
+        // and this walk is flat, so the two agree on every shape this
+        // walk can produce; a donor it cannot pair with a candidate is
+        // printed after the loop rather than dropped.
+        let rel = display_name(&loaded.data_dir, &path);
+        for (i, m) in matches.iter().enumerate() {
+            if !said[i] && (m.donor == rel || m.donor == name) {
+                said[i] = true;
+                sink.line(Level::Terse, &extra_match_line(m));
+            }
+        }
     }
-    sink.line(Level::Normal, "");
+    for (i, m) in matches.iter().enumerate() {
+        if !said[i] {
+            sink.line(Level::Terse, &extra_match_line(m));
+        }
+    }
+    if header {
+        sink.line(Level::Normal, "");
+    }
 }
 
 /// The excess/needed pair, `-v` only, printed between "Repair is
@@ -1868,6 +2069,77 @@ pub fn run_watched(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn a_match(donor: &str, target: Option<&str>) -> par2repair::ExtraFileMatch {
+        par2repair::ExtraFileMatch {
+            donor: donor.to_string(),
+            target: target.map(str::to_string),
+            blocks: 0,
+            target_blocks: 0,
+            whole_file: false,
+        }
+    }
+
+    /// The three lines the reference prints under "Scanning extra
+    /// files:", byte for byte. Captured from par2cmdline v1.3.0 on
+    /// 17 Sep 2026 over a set with one whole misnamed member and one
+    /// damaged misnamed member, and SABnzbd's two regexes were written
+    /// against exactly these strings - so a spelling change here is a
+    /// silent loss of every rename on every obfuscated post, which is
+    /// the defect this test stands against.
+    #[test]
+    fn the_extra_file_lines_are_the_references_own_spelling() {
+        let whole = par2repair::ExtraFileMatch {
+            whole_file: true,
+            blocks: 10,
+            target_blocks: 10,
+            ..a_match("9f8a7b6c5d4e3f2a1b0c", Some("alpha.bin"))
+        };
+        assert_eq!(
+            extra_match_line(&whole),
+            "File: \"9f8a7b6c5d4e3f2a1b0c\" - is a match for \"alpha.bin\"."
+        );
+        let partial = par2repair::ExtraFileMatch {
+            blocks: 9,
+            target_blocks: 10,
+            ..a_match("deadbeefcafe1234", Some("beta.bin"))
+        };
+        assert_eq!(
+            extra_match_line(&partial),
+            "File: \"deadbeefcafe1234\" - found 9 of 10 data blocks from \"beta.bin\"."
+        );
+        let several = par2repair::ExtraFileMatch {
+            blocks: 4,
+            ..a_match("joined.001", None)
+        };
+        assert_eq!(
+            extra_match_line(&several),
+            "File: \"joined.001\" - found 4 data blocks from several target files."
+        );
+    }
+
+    /// The prefix is `File:` and never `Target:`. SAB's
+    /// `PAR2_TARGET_RE` takes either, but both rename regexes take only
+    /// `File`, and that is what separates "an extra file turned out to
+    /// be this member" from "this member is damaged" - a `Target:`
+    /// spelling here would read as a verify row and rename nothing.
+    #[test]
+    fn every_extra_file_line_is_a_file_line() {
+        for m in [
+            par2repair::ExtraFileMatch {
+                whole_file: true,
+                ..a_match("x", Some("y"))
+            },
+            a_match("x", Some("y")),
+            a_match("x", None),
+        ] {
+            assert!(
+                extra_match_line(&m).starts_with("File: \""),
+                "{}",
+                extra_match_line(&m)
+            );
+        }
+    }
 
     /// The stem a set's volumes share. The old rule cut at the FIRST
     /// `.`, which made every dotted release name a prefix of its

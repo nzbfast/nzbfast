@@ -19,6 +19,20 @@ pub struct RepairReport {
     pub files_patched: Vec<String>,
     /// Subset of `files_patched` that were missing entirely.
     pub files_created: Vec<String>,
+    /// Subset of `files_created` that landed by RENAMING a matched
+    /// extra file onto the target's name rather than by writing its
+    /// bytes - the ordinary obfuscated post, where every member is
+    /// complete under a hash name. `adopt::whole_file_renames` carries
+    /// the proof and the guards.
+    ///
+    /// A caller that reports how much a repair WROTE has to subtract
+    /// these: the reference prints "Wrote 300000 bytes to disk" for a
+    /// three-member set with one whole match and one damaged member,
+    /// and a total over every non-`Found` target says 600000. The donor
+    /// path each one came from is in `adopted_from`; it is deliberately
+    /// NOT in `consumed_sources`, because it no longer exists and there
+    /// is nothing left for the caller to delete.
+    pub files_renamed: Vec<String>,
     /// Full paths of the extra files this repair CONSUMED as adoption
     /// sources - obfuscated copies whose bytes now also exist under the
     /// name the PAR2 set gives them. The engine never deletes them (it
@@ -606,6 +620,7 @@ mod tests {
             adopted_from: Vec::new(),
             files_patched: created.iter().map(|s| s.to_string()).collect(),
             files_created: created.iter().map(|s| s.to_string()).collect(),
+            files_renamed: Vec::new(),
             consumed_sources: Vec::new(),
             per_file: per
                 .iter()

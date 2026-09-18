@@ -1134,6 +1134,129 @@ async fn wall_arrivals_and_expanded_rows_answer_the_page_honestly() {
     .unwrap();
 }
 
+/// GH #76: the `&group=` browse filter, over the daemon rather than over
+/// the index - the join the issue is about is the API one, so this is
+/// the level it has to be pinned at.
+///
+/// Both endpoints, because the Releases surface hands the same query
+/// string to `index_browse` and to `wall2` and the "Group by title"
+/// toggle picks between them: a filter one of them dropped would be a
+/// checkbox that silently widens the answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_browse_group_filter_reaches_both_endpoints() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-wallgrp-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        ix.ingest(
+            "alt.binaries.teevee",
+            &[over(
+                1,
+                "\"Grouped.Show.S01E01.1080p.WEB-DL-GRP.mkv\" yEnc (1/1)",
+                "<g1@x>",
+                400 << 20,
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+        ix.ingest(
+            "alt.binaries.moovee",
+            &[over(
+                2,
+                "\"Grouped.Film.2020.1080p.BluRay.x264-GRP.mkv\" yEnc (1/1)",
+                "<g2@x>",
+                400 << 20,
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+    }
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    index_enabled(&cfg);
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--index-db")
+            .arg(&db);
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        settle_index(port, "&apikey=sekrit");
+        let stems = |group: &str| -> Vec<String> {
+            let q = format!("/api?mode=index_browse&all=1&group={group}&apikey=sekrit");
+            api_rows(port, &q, "results")
+                .iter()
+                .map(|r| r["name"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        assert_eq!(stems("").len(), 2, "no group named = every group");
+        assert_eq!(
+            stems("alt.binaries.moovee"),
+            vec!["Grouped.Film.2020.1080p.BluRay.x264-GRP.mkv"],
+        );
+        assert_eq!(
+            stems("alt.binaries.teevee"),
+            vec!["Grouped.Show.S01E01.1080p.WEB-DL-GRP.mkv"],
+        );
+        // A name no group has is an empty answer, never an unfiltered
+        // one - the failure mode that would make the filter look like it
+        // works while the list ignores it.
+        let v = api_json(
+            port,
+            "/api?mode=index_browse&all=1&group=alt.binaries.nothing&apikey=sekrit",
+        );
+        assert_eq!(v["total"], 0, "{v}");
+        assert_eq!(v["results"].as_array().map(Vec::len), Some(0), "{v}");
+        // Blank and whitespace are "no filter", not "the group named
+        // nothing": the browser sends `&group=` whenever the pill is
+        // cleared.
+        for blank in ["", "%20"] {
+            let v = api_json(
+                port,
+                &format!("/api?mode=index_browse&all=1&group={blank}&apikey=sekrit"),
+            );
+            assert_eq!(v["total"], 2, "group={blank:?} must not filter: {v}");
+        }
+
+        // The grouped rendering - one card per title - honours it too.
+        let titles = |group: &str| -> Vec<String> {
+            let q = format!("/api?mode=wall2&matched=0&all=1&group={group}&apikey=sekrit");
+            api_rows(port, &q, "cards")
+                .iter()
+                .map(|c| c["title"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        assert_eq!(titles("").len(), 2, "{:?}", titles(""));
+        assert_eq!(titles("alt.binaries.moovee"), vec!["Grouped Film"]);
+        assert_eq!(titles("alt.binaries.teevee"), vec!["Grouped Show"]);
+    })
+    .await
+    .unwrap();
+}
+
 /// Grabbing from the wall has to name the job after the release, however
 /// deep in the index the row sits. The name is not cosmetic: it becomes
 /// the output directory, the spool file, the history label and - through

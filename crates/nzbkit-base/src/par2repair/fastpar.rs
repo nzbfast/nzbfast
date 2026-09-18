@@ -330,12 +330,35 @@ pub(crate) const NTT_MIN_MISSING: usize = 320;
 /// **Not on AVX-512 GFNI (fan-in 12)**: its only 1 MiB reading, a KVM
 /// guest at `-t8`, crosses at ~323, so the clause would cost it the band
 /// this buys GFNI-256; a bare-metal part is owed before that arm moves.
-/// **Not on NEON**: the 15 Sep work-floor grid put NEON's 1 MiB crossover
-/// BELOW its 128 KiB one (0.63-0.80x, [`NTT_MIN_WORK`]), and the 11 Sep
-/// large-block row round left [`NTT_MIN_MISSING_NEON`] unchanged, so its
-/// block-size effect points the other way. Blocks past 1 MiB are
-/// unmeasured; the rise is in the direction that makes 352 conservative
-/// there. The rule that a fold change moves it is at [`NTT_MIN_PRESENT`].
+/// **Not on NEON - and the REASON below no longer reads as settled.** The
+/// 15 Sep work-floor grid put NEON's 1 MiB crossover BELOW its 128 KiB one
+/// (0.63-0.80x, [`NTT_MIN_WORK`]), and the 11 Sep large-block row round
+/// left [`NTT_MIN_MISSING_NEON`] unchanged, which was read at the time as
+/// NEON's block-size effect pointing the other way. **Two forced-arm 2x2s
+/// on 17 Sep 2026 measured it pointing the SAME way as this clause, on
+/// both NEON parts they ran on**: between 64 KiB and 4,429,188-byte
+/// blocks a Snapdragon X2's crossover rises 130 -> 218 on the repair and
+/// 171 -> 225 on the create
+/// (`research/NTT-NEON-ROW-GATE-SNAPDRAGON-2026-09-17.md`), and an M3
+/// Ultra's rises 133 -> 158 and 133 -> 176 over the same span
+/// (`research/NTT-NEON-LARGE-BLOCK-APPLE-2026-09-17.md`), both on one
+/// binary with an A/A copy of each arm at every rung. So NEON is not the
+/// exception that sentence made it, and a reader must not take it as one.
+///
+/// **It still buys NEON no clause, and now for a measured reason rather
+/// than an absent measurement**: the two parts' MAGNITUDES differ far
+/// more than their signs. At 4,429,188 bytes the M3 wants a gate at or
+/// below 176 and the Snapdragon one at or above 218, so 192 is on the
+/// right side for the Apple part and the wrong side for the Qualcomm one
+/// and no single number is on both. A shared 224 from 512 KiB up - the
+/// clause this shape asks for - would buy the Snapdragon 6-11% over a
+/// 13-to-33-row band and cost the M3 16-31% over a 48-to-74-row one.
+/// [`NTT_MIN_MISSING_NEON`] therefore stays at 192 on the strength of
+/// this, not in spite of it.
+///
+/// Blocks past 1 MiB are unmeasured ON THIS CLASS; the rise is in the
+/// direction that makes 352 conservative there. The rule that a fold
+/// change moves it is at [`NTT_MIN_PRESENT`].
 pub(crate) const NTT_MIN_MISSING_GFNI256_LARGE_BLOCK: usize = 352;
 
 /// The row gate on aarch64 (NEON), re-measured 5 Sep 2026 with the
@@ -859,10 +882,12 @@ pub(super) fn ntt_default_budget(ram: Option<u64>, cgroup_limit: Option<u64>) ->
 ///
 /// **That was the right reading of ONE shape and the wrong constant for
 /// the rest**, because the charge is not a fixed number of seconds a
-/// window. It is `c_w * min(m, 4369)` per 64 KiB of width - it grows with
-/// the ROWS, plateaus at the depth-2 tile, and does not move with the
-/// sources the window holds - so "sources per window" was a proxy that
-/// only held at 900 rows and 1 MiB. On a 512 MB box (a 128 MiB budget)
+/// window. It is about `c_w * min(m, 4369)` per 64 KiB of width - it
+/// grows with the ROWS, BENDS at the depth-2 tile, and does not move
+/// with the sources the window holds - so "sources per window" was a
+/// proxy that only held at 900 rows and 1 MiB. ("Bends" was "plateaus"
+/// until 17 Sep 2026, and the block below is why it is not.) On a
+/// 512 MB box (a 128 MiB budget)
 /// at 64 KiB blocks a window holds ~1,650 sources once the worker arenas
 /// are paid, so 2,048 refused the transform at EVERY `m`, while the
 /// forced transform beat the fold from m = 256 (by 18%) to m = 4,096
@@ -870,6 +895,151 @@ pub(super) fn ntt_default_budget(ram: Option<u64>, cgroup_limit: Option<u64>) ->
 /// (`research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md`).
 /// The curve in window size that replaced it, per kernel class, is
 /// [`ntt_window_row_gate`].
+///
+/// **THE TILE IS MEASURED SINCE 17 SEP 2026, AND THE PLATEAU IS NOT
+/// FLAT.** This block said "plateaus" from 14 Sep on the strength of
+/// the allocation shape alone - [`crate::par2ntt`] decimates
+/// 65,535 = 3 x 5 x 17 x 257, so `FlatPlan::new_scratch` and
+/// `scratch_bytes` hold `min(needed, 4369)` rows at depth 2 - with no
+/// timing behind it on any box. Five `m` ladders have now put a knee on
+/// it, and not one of them had 4,369 in its rung set
+/// (`research/PARFAST-BARE-RAISE-TIMING-2026-09-16.md`, sections 8.12,
+/// 8.14, 8.15, 8.21 and - on a guest, and read as such - 8.18):
+///
+/// | round | class, box, block | knee | slope below | slope above |
+/// |---|---|---:|---:|---:|
+/// | 8.12, 64 legs | x86 nibble, Xeon D-1531, 1 MiB | **4,383** | 4.5792 ms/row | **15.9%** |
+/// | 8.14, 104 legs | NEON, M3 Ultra, 1 MiB | **4,396** | 0.6859 ms/row | **12.47%** |
+/// | 8.14.8, 72 legs | NEON, M3 Ultra, 64 KiB | 4,382 / 4,539 | 0.0400 / 0.0436 | 18.8% / 7.4% |
+/// | 8.15, 240 legs | NEON, M3 Ultra, 512 KiB | **4,334** | 0.3419 ms/row | **14.9%** |
+/// | 8.21, 68 legs | x86 nibble, i5-10600KF, 512 KiB | **4,231** | 1.0595 ms/row | **18.3%** |
+/// | 8.18, 45 legs, GUEST | AVX-512 GFNI, EPYC 9354P 8-vCPU guest, 1 MiB | 4,275 | 0.9440 ms/row | not measured |
+///
+/// **THE LAST ROW IS A CONSISTENCY CHECK AND NOT A MEASUREMENT**, in
+/// 8.18.1's own headline: a leg-resampling bootstrap puts that knee at
+/// 4,000-4,600 at 68%, where the bare-metal cells agree to a few per
+/// cent, and a median hypervisor steal of 3.41% moved the same fit by
+/// 20% on the unfiltered legs. Read it as the third class showing a
+/// knee at all; do not average it into the rows above it.
+///
+/// **The tile is a property of the PLAN and not of the kernel** - the
+/// two bare-metal classes' below-tile slopes differ by 6.7x at 1 MiB
+/// and 3.10x at 512 KiB, and a cache effect sitting near 4,369 by
+/// coincidence could not do that five times over. **But it is no longer
+/// tight to 1.1%, and the honest statement is a RANGE**: the five
+/// bare-metal readings span **-3.15% (8.21) to +0.63% (8.14)** of the
+/// structural 4,369, four of them inside 1.1% and 8.21's the loose one.
+/// 8.21.7 reports its own rather than smoothing it and does not explain
+/// it: that cell's below-tile residuals are convex at about 1% of the
+/// charge against an A/A floor of 0.41%, and four extra legs run for
+/// exactly this moved the knee from -3.48% to -3.15%, so rung sparsity
+/// alone is not the cause.
+///
+/// What is wrong is the word "plateaus": **a seventh to a sixth of the
+/// slope survives above the tile**, so
+/// `c_w * min(m, 4369)` UNDERSTATES the tree by **4.6% and 4.9% at
+/// m = 5,900** and by more further out. That is the non-conservative
+/// direction for anything pricing the transform against the fold, and
+/// it is the direction a reader of this block would not expect. Which
+/// way it cuts for the shipped DECISION is worked out at
+/// [`ntt_window_row_gate`], and it is the other way.
+///
+/// **DO NOT TAKE ONE RESIDUAL FIGURE FROM THAT COLUMN.** The four
+/// 1 MiB-and-wider cells read 12.47% (NEON, 1 MiB), 14.9% (NEON,
+/// 512 KiB), 15.9% (nibble, 1 MiB) and 18.3% (nibble, 512 KiB) - **a
+/// 47% spread** around a structural 12.33%, where 8.15 reported 27%
+/// over three (8.21.6). So the 1.1% agreement 8.14 found was partly
+/// luck of the cell, and every cell added since has WIDENED the
+/// interval rather than narrowing it: the residual is not pinned the
+/// way the knee is. Quote the range, not a number.
+///
+/// **The mechanism, offered as one and not as a fit.** Only the depth-2
+/// level saturates: the root holds `min(m, 65535)` rows over its live
+/// depth-1 children and each depth-1 node `min(m, 21845)` over its
+/// depth-2 children, and neither stops growing at 4,369. Taking the
+/// per-row cost as equal at each level, the surviving fraction is
+/// `(3 + 15) / (3 + 15 + L)` for `L` live leaves, which at **L = 128** -
+/// the leaf count the 2,048 paragraph above already gives, because the
+/// base logs are coprime to 65,535 - is **12.33%**. NEON measured
+/// 12.47%, 1.1% out; the nibble class measured 15.9%, 29% out.
+///
+/// **That equal-cost assumption was TESTED on 17 Sep 2026 and it is
+/// FALSE on BOTH classes that can test it, by the same factor** (8.15.5
+/// and 8.21.6 - the two cells with three regimes to solve with, so the
+/// system is determined in each). Per fold-row: NEON's root
+/// **0.00940 ms** against depth-1's 0.00153 and depth-2's 0.00227; the
+/// nibble class's **0.02881** against 0.00718 and 0.00676. **The root
+/// is 4.1x a depth-2 fold-row on NEON and 4.26x on nibble** - an
+/// agreement to 4% between kernels whose below-tile slopes differ by
+/// 3.10x. So this is a property of the PLAN and no longer a candidate
+/// artefact of one kernel's memory behaviour, which is the one thing
+/// 8.15 could not say. The mechanism is still offered rather than
+/// measured - the root's folds combine the widest spans in the plan,
+/// 65,535 rows against 4,369, so they have the least locality per row -
+/// and it survived a class change that should have broken a
+/// memory-behaviour story. A root that is dear per row makes BOTH knees
+/// shallower than the node counts say, which is the measured pattern on
+/// both cells: the first drop reads 0.1494 (NEON, +21%) and 0.1832
+/// (nibble, +49%) against a structural 18/146, the second 0.5526
+/// (**+232%**) and 0.4452 (**+167%**) against 3/18. Same direction,
+/// same order, wider spread - **so anyone pricing the transform past a
+/// tile from `(3 + 15) / (3 + 15 + L)` will UNDER-price it**, on any
+/// class, by roughly the same amount. The second cell strengthens that
+/// conclusion rather than changing it. Keep the arithmetic as the
+/// family and sign it gets right; do not use it as a number.
+///
+/// **The MEMORY estimate's tile is exact, and its CONSTANT is PER-CELL
+/// rather than per-class.** `scratch_bytes` prices `5 + 3 + 1` rows per
+/// row below the tile and `3 + 1` above, and THAT half transfers
+/// wherever it has been checked: 8.14.9 backs 9,216 and 4,096 B/row out
+/// of the NEON arenas to the byte at `W = 512`, and 8.21.3 reads
+/// **7,549.7 B/row** across the depth-2 tile against a structural
+/// 7,545.9 - 0.05% out. **The ADDITIVE term is three values on three
+/// cells, and NONE of them is "the x86 figure".** 2,304,000 B is the
+/// constant 8.12 FITTED on its own Xeon D-1531 cell; 8.14.9 puts NEON
+/// at 76-207 KB per worker; and 8.21.3 puts a DIFFERENT x86 part in the
+/// SAME nibble class at **under 78.6 KB per worker**, over four probe
+/// legs at m = 1,000 / 6,000 / 15,000 / 26,500 - about thirty times
+/// smaller than the figure fitted on the other x86 box. **So never
+/// quote 2,304,000 B as an x86-CLASS figure; name the box it was fitted
+/// on.** Carrying it costs real budget in either direction: 17% over at
+/// m = 600 on NEON (8.14.9), and 18 MB of over-budgeted arena on 8.21's
+/// cell, which would have put every window 35 sources wide of where it
+/// was asked to be. 8.14.9's rule stands and is now paid for twice -
+/// carry the `m` half between classes, measure the constant with one
+/// probe leg.
+///
+/// **AND IT BENDS A SECOND TIME, AT THE DEPTH-1 TILE** (8.15, 240 legs
+/// at 512 KiB, landed hours after the paragraphs above were written).
+/// The charge does not stay on the residual line either: it breaks
+/// again at **m = 22,074 against `min(m, 21845)`, 1.05% out**, to
+/// **2.8%** of the below-tile slope. Three regimes, three straight
+/// lines, r2 = 0.99998 / 0.99978 / 0.99289. So the honest shape of the
+/// tree charge is piecewise with a knee at EACH tile the plan carries,
+/// and 4,369 is only the first of them.
+///
+/// **AND THAT SECOND TILE HAS A SECOND CLASS SINCE 8.21** (68 legs,
+/// nibble x86 at 512 KiB), which reads it TIGHTER than the class that
+/// found it: **m = 21,939, +0.43% out**, against NEON's +1.05%, on a
+/// ladder that never had 21,845 in its rung set. Three regimes again,
+/// r2 = 0.99928 / 0.99842 / 0.99215. The residual ABOVE that tile is no
+/// more a single figure than the one above 4,369 is: **2.8% of the
+/// below-tile slope on NEON against 8.2% here.**
+///
+/// **Still open.** The AVX-512 GFNI class's `m` axis is measured only
+/// on a GUEST and only at the DEPTH-2 tile - 8.18, whose own headline
+/// calls it a consistency check rather than a measurement, for the
+/// reason the table row above gives. **The DEPTH-1 tile on that class
+/// is untouched, on a guest or on metal**, and is claimed as
+/// `ntt-depth1-tile-gfni-bare-metal-17sep`; a bare-metal round there
+/// needs a PowerShell port of `research/harness/nttladder.py` before it
+/// can be scheduled at all, because the fleet's only metal GFNI parts
+/// are Windows and the driver is POSIX-only (8.18.2). And
+/// a ladder's reach above the depth-1 tile is capped by
+/// [`ntt_admit_within`]'s narrowing rule rather than by RAM (m = 26,700
+/// at 256 KiB), because the arena grows with `m` while
+/// `MAX_INPUT_SLICES` holds the corpus - any future lane on this axis
+/// needs 8.15.2's table before it sizes a cell.
 ///
 /// **320 is [`NTT_MIN_PRESENT`]**: a window holding fewer sources than
 /// the present gate asks of a whole corpus would be a transform over a
@@ -893,6 +1063,43 @@ pub(crate) const NTT_MIN_WINDOW_PRESENT: usize = 320;
 /// (`research/PARFAST-SMALL-BUDGET-TRANSFORM-CROSSOVER-2026-09-14.md`,
 /// section 3a). No margin on it: the margin is the row gate's own, which
 /// [`ntt_window_row_gate`] scales.
+///
+/// **THOSE THREE POINTS DO NOT REPRODUCE, AND THE MEDIAN IS WHY 163
+/// SURVIVED THEM** (17 Sep 2026,
+/// `research/PARFAST-BARE-RAISE-TIMING-2026-09-16.md` section 8.14.8).
+/// Read as a curve they say the combine has already saturated by
+/// m = 1,024: 4.25x from m = 256 to 1,024, then 1.03x to 4,096. A
+/// 72-leg `m` ladder on the SAME class at the SAME block size and the
+/// same three `m` values measures **2.27x and 2.97x** - still on a
+/// straight line through 4,096, bending at about 4,400 like every other
+/// cell anyone has measured. So the saturation is not the class and it
+/// is not the 64 KiB block. What that round did NOT hold fixed against
+/// this measurement is the thread count (`-t4` here, `-t8` there), the
+/// retention budget (`-m128` here, giving ~1,650-source windows against
+/// 4,400-10,000 there) and the instrument (`NZBFAST_NTT_PROFILE`'s
+/// depth0-minus-leaves per window here, a k = 1 against k = 2 syndrome
+/// difference there). One of those three is the explanation and neither
+/// round can say which; do not assert one.
+///
+/// **163 is not damaged by it, and the reason is the MEDIAN.**
+/// Charge-over-rows on the three rungs above reads 3.13e-4 / 3.32e-4 /
+/// 8.5e-5, so the median is 3.13e-4 and the anomalous third point is
+/// exactly the one the median discards. Had two of the three sat where
+/// that one does, or had `c_w` been a mean, 163 would be a different
+/// number today - which is worth knowing before reading those three
+/// figures as evidence of anything. The numerator also reproduces
+/// independently: the NEON `m` ladder's 0.6859 ms/row of wall at 1 MiB
+/// on eight threads is `0.6859e-3 * 8 / 16` = **3.43e-4** in this
+/// block's own units, **11% from 3.1e-4** across both a thread count
+/// and a 16x block. Nothing follows for 163 itself, because `k` is
+/// `c_w / c_f` and neither round measured the fold's `c_f` at that cell.
+///
+/// **And the charge this constant prices does not plateau above the
+/// depth-2 tile**, whatever [`NTT_MIN_WINDOW_PRESENT`] used to say:
+/// 12.47% of the slope survives on this class at 1 MiB, and 14.9% on
+/// the same class at 512 KiB, so take the range and not either figure.
+/// See there for the measurements and [`ntt_window_row_gate`] for which
+/// way they cut.
 pub(crate) const NTT_WINDOW_COMBINE_NEON: usize = 163;
 
 /// The same constant on x86, measured 14 Sep 2026 on BOTH x86 kernel
@@ -1032,6 +1239,21 @@ pub(crate) const NTT_WINDOW_COMBINE_NEON: usize = 163;
 /// this number, whatever it is. Re-deriving it on a shared rung set would
 /// move it DOWN 15% while the one cell above it stayed put, which is the
 /// wrong direction to move first.
+///
+/// **The nibble class's `m` axis was measured on 16 Sep 2026, and the
+/// charge this constant prices BENDS rather than plateaus above the
+/// depth-2 tile**: 15.9% of the slope survives, against 12.47% on NEON
+/// (`research/PARFAST-BARE-RAISE-TIMING-2026-09-16.md`, sections 8.12
+/// and 8.14). It moves nothing here, and for a reason worth stating -
+/// the `c_w` in the tables is a median over m = 256 / 1,024 / 4,096 and
+/// **4,096 is UNDER 4,369**, so all three rungs sit on the linear part;
+/// a rung above the tile would have read `c_w` low. (That argument does
+/// NOT carry to [`NTT_WINDOW_COMBINE_NEON`], whose own three points
+/// behave differently and whose constant survives on the median
+/// instead.) What the bend does touch is
+/// [`NTT_MIN_WINDOW_PRESENT`]'s statement of the charge and the
+/// DIRECTION of the row gate's error; both are written up at those two
+/// sites.
 pub(crate) const NTT_WINDOW_COMBINE_X86: usize = 312;
 
 /// [`NTT_WINDOW_COMBINE_NEON`] on aarch64, [`NTT_WINDOW_COMBINE_X86`]
@@ -1102,6 +1324,87 @@ pub(crate) fn ntt_window_combine() -> usize {
 /// repair CPU. A rung up, at 4 MiB, the window term's cost in rows is the
 /// SAME and it is [`ntt_min_missing`]'s block-size clause that stops
 /// carrying (that note's "The 4 MiB windowed ladder").
+///
+/// **THE TREE TERM ABOVE IS UNCAPPED, AND THAT IS WHY THE DEPTH-2 TILE
+/// COSTS THIS GATE NOTHING** (17 Sep 2026,
+/// `research/PARFAST-BARE-RAISE-TIMING-2026-09-16.md`, sections 8.12.10
+/// and 8.14.12). The model this hyperbola is solved out of charges
+/// `c_w * m` for the upper tree with no cap on `m`, where
+/// [`NTT_MIN_WINDOW_PRESENT`] states the same charge as
+/// `c_w * min(m, 4369)`. Above the tile BOTH are wrong and they are
+/// wrong in OPPOSITE directions: the measured charge bends there to
+/// 12.47% of its slope on NEON and 15.9% on the nibble class, so the
+/// capped form under-charges the transform and this one over-charges
+/// it. **The truth sits between the file's two statements, and the
+/// executable one is on the safe side** - over-charging the transform
+/// raises the ask, so the gate refuses a window it could have admitted
+/// and that window folds.
+///
+/// **On NEON the tile is not reachable by this gate at all.** The ask
+/// is `gate + gate * k / (S - k)` over a budget holding `S` sources, so
+/// it reaches 4,369 only for:
+///
+/// | class arm | `gate` | `k` | ask >= 4,369 at | admitted? |
+/// |---|---:|---:|---|---|
+/// | NEON | 192 | 163 | `S <= 170` | **no** |
+/// | x86 nibble (fan-in 4) | 256 | 312 | `S <= 331` | S = 320..331 |
+/// | x86 fan-in 12, and GFNI-256 under 1 MiB | 320 | 312 | `S <= 336` | S = 320..336 |
+/// | x86 GFNI-256 from 1 MiB | 352 | 312 | `S <= 339` | S = 320..339 |
+///
+/// [`NTT_MIN_WINDOW_PRESENT`] refuses every window under 320 sources
+/// before the curve is consulted, so on NEON the two bounds are 170 and
+/// 320 and do not overlap. On the x86 arms they do - by twelve,
+/// seventeen and twenty budgets. 8.12.10 rounded the first band away
+/// ("about 332 - a window `NTT_MIN_WINDOW_PRESENT` refuses at 320
+/// anyway") and 8.14.12 corrected it on the nibble arm; **the other two
+/// rows are this block's own arithmetic**, because
+/// [`ntt_min_missing_for`] answers three different gates on x86 and
+/// both rounds priced x86 as one class.
+///
+/// **In every one of those bands the error is the conservative one**,
+/// and it is not small at the bottom: at S = 320 the nibble arm asks
+/// 10,240 rows where the bent charge wants about 4,540, falling to 2%
+/// over by S = 331. It is also a band the slab arithmetic three
+/// paragraphs up already protects - `plan_slabs` keeps `2 * m * w`
+/// inside the budget, so 4,369 rows against at most 331 blocks puts
+/// `2 * m` at 26 times the whole window. **Nothing to move, on any
+/// arm**: the understatement is a defect of the MODEL as
+/// [`NTT_MIN_WINDOW_PRESENT`] states it, not of a decision this gate
+/// makes.
+///
+/// **THE OTHER TERM IS NOT A CONSTANT EITHER** (17 Sep 2026, sections
+/// 8.15.1 and 8.15.9 item 3). The `c_l * S` above treats the leaf cost
+/// as flat in the window's sources, and across 8.11, 8.12 and 8.14 it
+/// measured flat - but those ladders all sat well under 16,000 sources
+/// a window. Past that it collapses by about a factor of ten.
+/// **No constant in this family is damaged**, because every one of them
+/// was measured inside the flat band. The error direction is the
+/// conservative one again - over-pricing the leaves raises the ask, so
+/// the gate prefers the fold where it need not - and it only arises on
+/// a big box with a budget wide enough for a window that wide.
+///
+/// **AND IT IS A LEAF-KERNEL SWITCH, AT A THRESHOLD WITH A NAME**
+/// (section 8.17, which closed 8.15.8's first stated limit; 162 legs on
+/// NEON at 256 KiB plus an untimed leaf-fill census). `par2ntt` admits
+/// each leaf to a kernel BY FILL: the fixed-cost 512-point additive FFT
+/// at or above `par2ntt::additive::MIN_SOURCES` = 128 sources, else the
+/// O(fill) paired leaf. Base logs are coprime to 65,535 so 128 of the
+/// 255 Rader-257 leaves are live, a window of `S` sources has mean leaf
+/// fill `S / 128`, and the mean leaf crosses the gate at
+/// `128 * MIN_SOURCES` = **16,384 sources**. Measured there: `df/dS` is
+/// 0.16337 ms/source below and 0.01671 above at 256 KiB, and with
+/// `NZBFAST_NTT_ADDITIVE=0` it is 0.16331 below and **0.17482 above** -
+/// the collapse is that one kernel and nothing else.
+///
+/// **WRITE THE THRESHOLD AS `128 * additive::MIN_SOURCES`, NEVER AS
+/// 16,384**: it moves with that gate, which is measured at 64 and 192
+/// as well as at the shipped 128. **And it is a KNEE, not a band** -
+/// the leaves go 0 additive at S = 16,000 to all 128 at 16,896, about
+/// 900 sources - so 8.15's "14,000 to 22,000" was that round's secant
+/// spacing and not the shape. Do not re-derive the leaf-OCCUPANCY
+/// account (`128 x 257 = 32,896`): the same coprimality excludes one of
+/// a leaf's 257 slots, so `128 x 256` is `par2gen::MAX_INPUT_SLICES`
+/// exactly and 32,896 is off the end of the axis.
 pub(crate) fn ntt_window_row_gate(sources: usize, gate: usize, k: usize) -> Option<usize> {
     let spare = sources.checked_sub(k).filter(|&s| s > 0)?;
     Some(gate.saturating_add(gate.saturating_mul(k) / spare))
@@ -1845,6 +2148,29 @@ pub(super) fn resolve_syndrome_path(
                 // The environment is the bench/test/ops escape hatch: it
                 // overrides the daemon setting in both directions and
                 // ignores the trip-breaker.
+                //
+                // NOTE THE WHOLE `budget` HERE, WHERE `gated()` ABOVE
+                // HANDS ON `budget - arenas`: forcing retains the whole
+                // budget for the corpus and allocates the worker arenas
+                // ON TOP, unpriced. So `force` is a CPU CEILING AND NEVER
+                // A MEMORY REFERENCE, and the difference is not small - at
+                // 64 KiB blocks, `-m128`, w = 512 and four threads it is
+                // 27.95 MiB at m = 224, which buys forcing a 2,112-slice
+                // window against the gated path's 1,664 and 7 transform
+                // windows against 9. MEASURED 17 Sep 2026: that is the
+                // WHOLE of the 4.45% (m = 224) and 6.39% (m = 256) by
+                // which `auto` costs more than `force` at rungs where both
+                // take this path - 99% of the gap is inside `transform_s`
+                // and the admission arithmetic itself differences to zero,
+                // and `auto_window = floor_64(force_window - arenas/64KiB)`
+                // reproduces both measured widths EXACTLY. Do not read
+                // that gap as a dispatcher defect or "fix" it by widening
+                // the gated path's retention: it is the price of the
+                // budget, `auto` still beats the fold by 3.1% and 9.3%
+                // there, and the arenas are priced out of the budget to
+                // stop an OOM-kill `catch_unwind` cannot rescue (see the
+                // comment on `gated()` above).
+                // research/PARFAST-AUTO-VS-FORCED-TRANSFORM-GAP-2026-09-17.md
                 "force" => Some(NttAdmission {
                     budget,
                     stripe_cap: usize::MAX,

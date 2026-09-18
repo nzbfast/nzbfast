@@ -1799,7 +1799,12 @@ impl Daemon {
     /// The timer starts before the lock is ACQUIRED, deliberately: it
     /// is a hold from the point of view of a reader queued behind it,
     /// and the `blocking_db` hop plus a lazy open are part of what that
-    /// reader waits. It is the same reading the rigs take.
+    /// reader waits. It is the same reading the rigs take. Since
+    /// 17 Sep 2026 it also STAMPS the acquisition, so the sample is
+    /// split into the wait and the hold and the summed columns still
+    /// mean what they meant - because reading the sum as a hold is
+    /// exactly what happened, in four sections of the sweep, for as
+    /// long as the sum was all there was.
     #[cfg(feature = "indexer")]
     #[track_caller]
     pub fn with_index_mut<T>(
@@ -1810,11 +1815,16 @@ impl Daemon {
             return None;
         }
         let at = std::panic::Location::caller();
-        let _hold = crate::holdstat::Timer::start("index_mut", at.file(), at.line());
+        let hold = crate::holdstat::Timer::start("index_mut", at.file(), at.line());
         // blocking_db: see `with_index` - the write side is the one
         // that actually starved the runner.
         crate::persist::blocking_db(|| {
             let mut guard = self.index.lock_ok();
+            // Everything above this line is the QUEUE, everything below
+            // it is the hold. `open_locked` is inside the hold because
+            // it runs with the mutex taken, which is what a reader
+            // behind it is actually waiting out.
+            hold.acquired();
             self.open_locked(&mut guard);
             guard.as_mut().and_then(f)
         })

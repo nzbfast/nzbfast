@@ -369,6 +369,7 @@ original já desapareceu.</li>
 <li>Emblemas mostram estados especiais: <i>tentado, posto de lado</i>, <i>pré-carregando</i>,
 <i>pausado</i> (veja <a href="#performance">Ferramentas de desempenho</a>).</li>
 <li>Um gráfico de contagem regressiva acompanha o total de GB restantes em toda a fila.</li>
+<li><b>Cancelar pode ser desfeito.</b> Parar um download, ou limpar toda a fila, já não pergunta primeiro: age, e o aviso que o diz traz um <b>Desfazer</b>. Durante dez minutos o nzbfast guarda a sua própria cópia do NZB, por isso a linha volta com a categoria, a prioridade e tudo o que já tinha sido obtido. Um download que descompacta à medida que chega continua a perguntar, porque a parte já obtida não pode ser devolvida.</li>
 </ul>
 <h3 id="dash-browse">Explorar índice</h3>
 <p>Pesquise tudo o que o indexador integrado catalogou dos seus grupos monitorados
@@ -406,6 +407,7 @@ definidas, ambas se aplicam, e 0 desliga cada uma por si. Só a entrada do hist�
 só leva descargas concluídas, por isso uma que falhou espera que a repita ou apague
 você mesmo; o limite de comprimento conta todas as entradas, seja qual for o
 resultado delas.</p>
+<p><b>Remover uma entrada do histórico pode ser desfeito.</b> Limpar da lista os downloads concluídos ou os que falharam, e remover uma seleção, já não perguntam primeiro: agem, e o aviso que o diz traz um <b>Desfazer</b>. Durante dez minutos o nzbfast guarda a cópia do NZB de cada entrada removida, por isso a linha volta ao seu lugar e continua a oferecer <b>Repetir</b>. Remover uma entrada apagando os seus ficheiros continua a perguntar, porque ficheiros apagados não podem ser devolvidos.</p>
 <h3 id="dash-usage">Uso de dados</h3>
 <p>Barras diárias por provedor e totais de Hoje / 7 dias / 30 dias - essencial para contas
 medidas e de bloco. Contas de bloco mostram o uso acumulado contra seu tamanho.</p>
@@ -643,6 +645,7 @@ lançamentos por baixo. Abra-a com <b>&#9656;</b> ou clicando na linha; a caixa 
 título seleciona os lançamentos mostrados. O agrupamento só vale para <b>Este
 índice</b>; escolha <b>Indexadores</b> ou <b>Ambos</b> e a tabela volta a ser plana, e
 di-lo.</li>
+<li><b>Um grupo de cada vez.</b> Carregue no nome do grupo por baixo de uma release e a página fica só com as releases publicadas aí; uma pastilha sobre a tabela nomeia o grupo até a limpar. Restringe o mural e a tabela por igual, por isso alternar entre eles mantém-na. A outra entrada é Ajustes &rarr; Organização &rarr; <b>Indexação</b> &rarr; <b>Grupos a varrer</b> &rarr; <b>Buscar…</b>: abra um grupo que já varre e carregue em <b>Releases indexadas</b>.</li>
 <li><b>Todos os lançamentos de um título</b> aparecem quando abre o seu cartão, com a
 resolução, o codec, o formato de áudio e a gama dinâmica (Dolby Vision, HDR10) lidos
 do nome do lançamento, mais o tamanho, a idade e se todas as partes continuam no seu

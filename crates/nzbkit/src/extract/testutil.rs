@@ -175,7 +175,10 @@ pub(super) fn paced_deadline_expiries() -> usize {
 /// (SPEC-onepass-obfuscated-store-sets Part A): `n_full` volumes of
 /// `dl` payload bytes plus a smaller final piece, dotless
 /// hash-garbage volume names whose lexical order is unrelated to
-/// volume order, per-piece CRCs the way real archivers write them.
+/// volume order, and the member CRC32 on the FINAL fragment alone the
+/// way real archivers write it (`fixtures::Rar5Crc::FinalFragment`) -
+/// which is what makes this set's final volume carry a longer file
+/// header than its split ones, as a real set does.
 pub(super) fn uniform_store_set(
     inner_name: &str,
     dl: usize,
@@ -183,44 +186,74 @@ pub(super) fn uniform_store_set(
     tail: usize,
     seed: u8,
 ) -> (Vec<u8>, Vec<Vec<u8>>, Vec<String>) {
-    // WinRAR-true geometry: the VOLUME size is constant, so volume 0
-    // (whose main header has no volume-number field) carries one
-    // byte MORE data than volumes 1..127. The gate validates exactly
-    // this, so the fixture must honor it.
-    let total = (dl + 1) + (n_full - 1) * dl + tail;
+    uniform_store_set_head(
+        inner_name,
+        dl,
+        n_full,
+        tail,
+        seed,
+        fixtures::Rar5Head::Numberless,
+    )
+}
+
+/// [`uniform_store_set`] with the set HEAD's layout named, because the
+/// two legal layouts have different uniform geometry and the arithmetic
+/// gate is the one consumer that can tell them apart.
+///
+/// [`fixtures::Rar5Head::Numberless`] is WinRAR's: volume 0's main
+/// header has no volume-number field, so at a constant VOLUME size it
+/// carries one byte MORE data than volumes 1..127.
+/// [`fixtures::Rar5Head::NumberedZero`] is what this repo's own
+/// `Rar50VolumeWriter` writes - an explicit `vint(0)` on every volume,
+/// so every header is the same size and every volume carries the SAME
+/// payload. A fixture that gets this backwards is not a uniform set at
+/// all, and the gate is right to refuse it.
+pub(super) fn uniform_store_set_head(
+    inner_name: &str,
+    dl: usize,
+    n_full: usize,
+    tail: usize,
+    seed: u8,
+    head: fixtures::Rar5Head,
+) -> (Vec<u8>, Vec<Vec<u8>>, Vec<String>) {
+    let head_extra = usize::from(head == fixtures::Rar5Head::Numberless);
+    let total = (dl + head_extra) + (n_full - 1) * dl + tail;
     let data = payload(total, seed);
-    let mut vols = Vec::new();
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
     let mut pos = 0usize;
     for k in 0..n_full {
-        let len = if k == 0 { dl + 1 } else { dl };
-        let piece = &data[pos..pos + len];
+        let len = if k == 0 { dl + head_extra } else { dl };
+        cuts.push((pos, pos + len));
         pos += len;
-        vols.push(fixtures::rar5_volume_n_crc(
-            &[(
+    }
+    cuts.push((pos, data.len()));
+    let owned: Vec<Vec<(&str, u64, &[u8], bool, bool, Option<u32>)>> = cuts
+        .iter()
+        .enumerate()
+        .map(|(k, &(a, b))| {
+            let piece = &data[a..b];
+            let last = k == n_full;
+            vec![(
                 inner_name,
                 total as u64,
                 piece,
                 k > 0,
-                true,
-                Some(crc32fast::hash(piece)),
-            )],
-            k as u64,
-        ));
-    }
-    vols.push(fixtures::rar5_volume_n_crc(
-        &[(
-            inner_name,
-            total as u64,
-            &data[pos..],
-            true,
-            false,
-            Some(crc32fast::hash(&data)),
-        )],
-        n_full as u64,
-    ));
-    // Every volume but the last says another follows, as an archiver
-    // stamps it - see `fixtures::rar5_seal_set`.
-    fixtures::rar5_seal_set(&mut vols);
+                !last,
+                // The whole member's CRC32, which under
+                // `Rar5Crc::FinalFragment` rides the last fragment
+                // alone and is dropped from every split one.
+                Some(crc32fast::hash(&data[..])),
+            )]
+        })
+        .collect();
+    let refs: Vec<&[(&str, u64, &[u8], bool, bool, Option<u32>)]> =
+        owned.iter().map(|v| v.as_slice()).collect();
+    // `rar5_volume_set_crc_layout` numbers the set, stamps each
+    // non-final volume's "another volume follows" flag, and places the
+    // member CRC the way an archiver does - on the final fragment
+    // only, so this set's final volume carries a file header four
+    // bytes longer than every split fragment's, as a real one does.
+    let vols = fixtures::rar5_volume_set_crc_layout(&refs, head, fixtures::Rar5Crc::FinalFragment);
     let names = (0..vols.len())
         .map(|k| format!("{:06x}NoDotGarbage{k}", (k as u64 * 2654435761) & 0xffffff))
         .collect();

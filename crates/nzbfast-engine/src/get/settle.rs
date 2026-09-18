@@ -707,12 +707,25 @@ fn activate_deferred_sets(
     // today's, and there is nothing here that could safely guess the
     // rest - so this reports rather than acts.
     //
-    // It reports NARROWLY, too. A deferred volume stays on the repair's
-    // exact-fit fetch list whatever set it belongs to (`deferred_files`),
-    // so one whose definition was missing HERE can still be fetched
-    // whole later and reached by the disk-side pass; the line therefore
-    // says the set was not activated from disk, and must not be widened
-    // into a claim that its parity is gone.
+    // It reports NARROWLY, too. The line says the set was not activated
+    // from disk, and must not be widened into a claim that its parity is
+    // gone: a volume whose definition was missing HERE can still be
+    // fetched whole later and reached by the disk-side pass.
+    //
+    // WHAT GUARANTEES THAT, RE-TENSED 16 Sep 2026. This said "a deferred
+    // volume stays on the repair's exact-fit fetch list whatever set it
+    // belongs to (`deferred_files`)", which is true about the LIST and
+    // was false about whether anything ever READ it. That list is
+    // reached only through a damaged LIVE set's `SetPlan`, so on a job
+    // whose live set is CLEAN there is no plan, nothing calls
+    // `sniff.deferred_files()`, and the holed volume was never completed
+    // at all - measured as the live cause of two e2e flakes
+    // (`research/E2E-X5-24-SIGNATURE-2-IS-A-MISREAD-2026-09-16.md`). The
+    // second route now exists and is what carries the claim on a clean
+    // live set: `latesets::holed_deferred_volumes`, read just before the
+    // late-set pass. Both routes are still per-job and conditional, so
+    // the narrowness of this line is unchanged - it is the reason for
+    // it that is now accurate.
     //
     // Every other `continue` above stays silent on purpose. Already
     // live, and a second volume of a set already taken, are not skips at
@@ -1771,6 +1784,45 @@ async fn settle_with_set(
                  vouches for bytes it was shown, so this is not a clean download",
                 derrs.saturating_sub(spared)
             );
+        }
+    }
+    // The refetch gap (claim `lateset-deferred-parity-refetch-16sep`,
+    // measured 16 Sep 2026): the pass below is about to repair sets off
+    // volumes the in-stream deferral left HOLED, and until this call
+    // nothing on a clean-live-set job ever bought the cancelled tail
+    // back. `holed_deferred_volumes` carries the four doors and the
+    // cost; the only thing decided HERE is which slots are candidates,
+    // which is the same test `settle::noset`'s own fallback applies -
+    // a slot the sniff deferred that actually LOST articles to the
+    // cancel. A sniffed volume that landed whole anyway (a cancel that
+    // caught nothing) is already on disk and refetching it buys
+    // nothing. Paths come from the extractor's writer, with
+    // `resume_vols` as the authority where a resumed volume has none,
+    // exactly as `activate_deferred_sets` above reads them.
+    let holed: Vec<(usize, PathBuf)> = sniff
+        .deferred_slots()
+        .into_iter()
+        .filter(|&s| slots[s].deferred.load(Ordering::Relaxed) > 0)
+        .filter_map(|s| {
+            extractor
+                .slot_path(s)
+                .or_else(|| resume_vols.get(&s).cloned())
+                .map(|p| (slot_file[s], p))
+        })
+        .collect();
+    let want = latesets::holed_deferred_volumes(out_dir, &sets, &holed, all_good);
+    if !want.is_empty() {
+        info!(
+            target: "repair",
+            "{} deferred recovery volume(s) were left holed by the in-stream \
+             cancel and belong to a set the late pass may need - fetching the \
+             cancelled articles back",
+            want.len()
+        );
+        if let Err(e) =
+            crate::repair::fetch_volumes(servers, nzb, out_dir, buf_pool, &want, cancel).await
+        {
+            warn!(target: "repair", "holed deferred volume fetch failed: {e}");
         }
     }
     // Finding F12 (par2-of-par2), W4-01 and X5-24 - see [`super::latesets`].

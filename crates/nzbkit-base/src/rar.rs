@@ -243,6 +243,22 @@ pub struct VolumeMapper {
     /// RAR5 main-header volume number (0-based; absent on the first
     /// volume and in RAR4) - the obfuscation-proof volume ordering.
     pub volume_number: Option<u64>,
+    /// Bytes the main header spent ENCODING that number: `Some(0)` when
+    /// the archive declared itself a volume without a number field,
+    /// `Some(n)` for an explicit vint of length n, `None` when no main
+    /// header has parsed yet.
+    ///
+    /// Set alongside [`Self::volume_number`], and separate from it
+    /// because the number alone cannot tell the two legal set-head
+    /// layouts apart: WinRAR omits the field on volume 0 (flags `0x01`),
+    /// while this repo's own `Rar50VolumeWriter` stamps flags `0x03` and
+    /// an explicit one-byte `vint(0)` on every volume including the
+    /// first. Both normalise to `volume_number == Some(0)`, so anything
+    /// that reads only the number is right to ignore the distinction -
+    /// but the volume's data area starts one byte later in the second
+    /// layout, so anything reasoning about volume GEOMETRY has to read
+    /// this instead of deriving a length from the number.
+    pub volume_number_len: Option<u64>,
     /// The main header declared an embedded recovery record (RAR5 flag
     /// 0x0008, RAR4 MHD_PROTECT). Read off the volume's HEAD, so it is
     /// known while the tail that holds the record is still in flight.
@@ -720,6 +736,7 @@ impl VolumeMapper {
             entries: Vec::new(),
             blocker: None,
             volume_number: None,
+            volume_number_len: None,
             recovery_record: false,
             complete: false,
             volume_size,
@@ -774,6 +791,7 @@ impl VolumeMapper {
             entries,
             blocker: None,
             volume_number: None,
+            volume_number_len: None,
             recovery_record: false,
             complete: true,
             volume_size,
@@ -1152,10 +1170,12 @@ impl VolumeMapper {
                         BlockResult::Skip {
                             next,
                             volume_number,
+                            volume_number_len,
                             recovery_record,
                         } => {
                             if volume_number.is_some() {
                                 self.volume_number = volume_number;
+                                self.volume_number_len = Some(volume_number_len);
                             }
                             if recovery_record {
                                 self.recovery_record = true;
@@ -1390,6 +1410,13 @@ enum BlockResult {
     Skip {
         next: u64,
         volume_number: Option<u64>,
+        /// Bytes the main header actually spent on the volume-number
+        /// field: the vint's encoded length when the field is present,
+        /// and 0 when it is absent (including every block that is not a
+        /// RAR5 main header). Reported separately from the NUMBER
+        /// because volume 0 is written both ways - see
+        /// [`VolumeMapper::volume_number_len`].
+        volume_number_len: u64,
         recovery_record: bool,
     },
     File {
@@ -1592,11 +1619,18 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
             // (vint) when flag 0x02 is set. A volume archive (flag 0x01)
             // without an explicit number is the FIRST volume (0).
             let mut volume_number = None;
+            let mut volume_number_len = 0u64;
             let mut recovery_record = false;
             if let Some((aflags, n)) = vint(&hdr[p..]) {
                 if aflags & 0x02 != 0 {
-                    if let Some((vn, _)) = vint(&hdr[p + n..]) {
+                    if let Some((vn, vl)) = vint(&hdr[p + n..]) {
                         volume_number = Some(vn);
+                        // The BYTE LENGTH, not the vint length implied by
+                        // the value: a volume 0 written with an explicit
+                        // field costs a byte that an omitted field does
+                        // not, and `ArchiveMap::resolve_arithmetic` is
+                        // the consumer that has to know which it got.
+                        volume_number_len = vl as u64;
                     }
                 } else if aflags & 0x01 != 0 {
                     volume_number = Some(0);
@@ -1609,6 +1643,7 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
             BlockResult::Skip {
                 next,
                 volume_number,
+                volume_number_len,
                 recovery_record,
             }
         }
@@ -1619,6 +1654,7 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
                 return BlockResult::Skip {
                     next,
                     volume_number: None,
+                    volume_number_len: 0,
                     recovery_record: false,
                 };
             }
@@ -1744,6 +1780,7 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
         _ => BlockResult::Skip {
             next,
             volume_number: None,
+            volume_number_len: 0,
             recovery_record: false,
         }, // main header (1), unknown types
     }
@@ -1986,6 +2023,7 @@ fn parse_block_v4_at(h: &[u8], base: u64, hdr_span: Option<u64>) -> BlockResult 
                 BlockResult::Skip {
                     next,
                     volume_number: None,
+                    volume_number_len: 0,
                     // MHD_PROTECT: the rar 3.00 recovery fixture reads
                     // main flags 0x40.
                     recovery_record: flags & 0x0040 != 0,
@@ -2122,6 +2160,7 @@ fn parse_block_v4_at(h: &[u8], base: u64, hdr_span: Option<u64>) -> BlockResult 
         _ => BlockResult::Skip {
             next,
             volume_number: None,
+            volume_number_len: 0,
             recovery_record: false,
         },
     }
@@ -2615,23 +2654,38 @@ impl ArchiveMap {
     /// first live set this ran against): real archivers keep the VOLUME
     /// size constant, so the data area shrinks by a byte wherever the
     /// main header's volume-number vint grows - at volume 128, again at
-    /// 16384 - and volume 0, whose number field is absent entirely,
-    /// carries one byte MORE than volumes 1..127. The true invariants,
-    /// validated against every parsed volume:
+    /// 16384. The true invariants, validated against every parsed
+    /// volume:
     ///
-    ///   data_off(k) == off_base + volnum_field_len(k)
+    ///   data_off(k) == off_base + flen(k)
     ///   data_off(k) + data_len(k) == data_end          (non-final k)
     ///
-    /// from which any volume's base follows in closed form:
+    /// where `flen(k)` is the number of bytes volume k's main header
+    /// ACTUALLY spent on its volume-number field, read off the parse
+    /// ([`VolumeMapper::volume_number_len`]) rather than derived from
+    /// the number. That distinction is the whole of the set head: a
+    /// WinRAR head omits the field on volume 0 (`flen(0) == 0`) while
+    /// this repo's own `Rar50VolumeWriter` stamps an explicit `vint(0)`
+    /// (`flen(0) == 1`), and both parse as `volume_number == Some(0)`.
+    /// Deriving the length from the number modelled the first layout
+    /// and only the first, which put volume 0's `off_base` one byte
+    /// above every other volume's and reported a geometry contradiction
+    /// on sets that have none - every set this project itself produces
+    /// (finding of 16 Sep 2026). Past volume 0 the two layouts agree,
+    /// and a parsed length that disagrees with the number's canonical
+    /// vint length there is a real contradiction.
     ///
-    ///   D = data_end - off_base                      (= volume 0's dl)
+    /// From those invariants any volume's base follows in closed form:
+    ///
+    ///   D = data_end - off_base           (a zero-field volume's dl)
     ///   base(N) = sum of dl(k) for k < N = N*D - S(N)
     ///
     /// with S(N) the total volume-number field bytes across volumes
-    /// 0..N-1 ([`volnum_field_bytes_before`]). A set whose non-final
-    /// pieces all share one data_len regardless of header size (some
-    /// custom packers) does NOT fit this model and stays on the chain
-    /// path - business as usual, never a demote.
+    /// 0..N-1 - that is, `h + volnum_field_bytes_before(N)` for N > 0,
+    /// where `h = flen(0)` is the head layout's one free parameter. A
+    /// set whose non-final pieces all share one data_len regardless of
+    /// header size (some custom packers) does NOT fit this model and
+    /// stays on the chain path - business as usual, never a demote.
     ///
     /// `vols` is every parsed mapper of the group, in ANY order. The
     /// distinction between the two failure modes matters to the caller:
@@ -2646,13 +2700,17 @@ impl ArchiveMap {
             return Shape;
         }
         let mut geom: Option<(u64, u64)> = None; // (off_base, data_end) from non-finals
-        let mut fin: Option<(u64, u64, u64)> = None; // final (volnum, data_len, data_off)
+        let mut fin: Option<(u64, u64)> = None; // final (volnum, data_len)
         let mut total: Option<u64> = None;
         let mut name: Option<&str> = None;
         let mut seen: HashSet<u64> = HashSet::with_capacity(vols.len());
         // Did a parsed volume 0 actually START this file? (Half of the
         // premise proof below.)
         let mut starts_at_zero = false;
+        // h = flen(0): how many bytes the set HEAD spends on its
+        // volume-number field. Known only once volume 0 itself parses;
+        // solved from the closure identity below when it has not.
+        let mut head_len: Option<u64> = None;
         for m in vols {
             if m.version != Some(RarVersion::V5) || m.blocker.is_some() {
                 return Shape;
@@ -2699,9 +2757,36 @@ impl ArchiveMap {
             if !seen.insert(vn) {
                 return Numbers; // duplicate volume number
             }
+            // How many bytes THIS volume's header spent on its
+            // volume-number field, as parsed. A mapper that reached a
+            // volume number always recorded it; absent, there is nothing
+            // to reason about and this is not the shape.
+            let Some(flen) = m.volume_number_len else {
+                return Shape;
+            };
+            if vn == 0 {
+                // The head's two legal layouts are "no field" and "an
+                // explicit one-byte vint(0)". Anything else - a
+                // non-minimal multi-byte zero - is a header this model
+                // does not describe.
+                if flen > 1 {
+                    return Numbers;
+                }
+                match head_len {
+                    None => head_len = Some(flen),
+                    Some(h) if h == flen => {}
+                    Some(_) => return Numbers,
+                }
+            } else if flen != volnum_field_len(vn) {
+                // Past the head both layouts agree, so a field longer or
+                // shorter than the number's canonical vint length means
+                // the closed form below cannot predict the field bytes
+                // of the volumes that have NOT parsed.
+                return Numbers;
+            }
             // Header-base consistency: this volume's data offset must sit
-            // exactly volnum_field_len(vn) past the shared base.
-            let Some(off_base) = e.data_off.checked_sub(volnum_field_len(vn)) else {
+            // exactly `flen` past the shared base.
+            let Some(off_base) = e.data_off.checked_sub(flen) else {
                 return Numbers;
             };
             if e.split_after {
@@ -2717,57 +2802,134 @@ impl ArchiveMap {
                     Some(_) => return Numbers, // volume geometry contradicts
                 }
             } else {
-                if let Some(&(ob, _)) = geom.as_ref()
-                    && ob != off_base
-                {
-                    return Numbers;
-                }
-                if fin.replace((vn, e.data_len, e.data_off)).is_some() {
+                // THE FINAL VOLUME'S OWN off_base IS DELIBERATELY NOT
+                // COMPARED against the shared one. It was, until 16 Sep
+                // 2026, and that refused every set this project's own
+                // writer produces: `Rar50VolumeWriter` stamps the
+                // member's CRC32 on the LAST fragment alone (the RAR5
+                // rule - a split member is verified against its final
+                // fragment), so the final volume's file header is four
+                // bytes longer than every split fragment's and its data
+                // area starts four bytes later. That is not a geometry
+                // contradiction, because the constant-volume-size model
+                // never describes the final volume: it is the short one,
+                // and its base is `total - data_len`, read off the
+                // declared file size rather than computed from D.
+                //
+                // Nor is anything lost by dropping the comparison. The
+                // fact it stood in for - that this final piece belongs
+                // to THIS set's geometry - is exactly what the closure
+                // identity `base(fvn) == total - fdl` checks below, over
+                // the whole set rather than over four header bytes, and
+                // that check runs on every path that reaches a final
+                // piece.
+                if fin.replace((vn, e.data_len)).is_some() {
                     return Numbers; // two declared-final pieces of one file
                 }
             }
-        }
-        // A final parsed before any non-final: its off_base still has to
-        // agree once geometry is known - re-check it here (the loop only
-        // compared when geom was already set).
-        if let (Some((fvn, _, foff)), Some((ob, _))) = (fin, geom)
-            && foff.checked_sub(volnum_field_len(fvn)) != Some(ob)
-        {
-            return Numbers;
         }
         let total = total.unwrap();
         // Per-volume capacity D (volume 0's data_len): from geometry, or
         // derived from the final piece when only IT has parsed - the
         // premise fixes base(fvn) == total - fdl, so D must divide out
         // exactly.
-        let d = match (geom, fin) {
+        let (d, h) = match (geom, fin) {
             (Some((ob, de)), _) => {
                 let Some(d) = de.checked_sub(ob) else {
                     return Numbers;
                 };
-                d
+                let h = match (head_len, fin) {
+                    // Volume 0 parsed: its field length is a FACT, and
+                    // the closure check below stays a real check.
+                    (Some(h), _) => h,
+                    // Volume 0 absent, a final piece present: SOLVE the
+                    // head's field length out of the closure identity
+                    // base(fvn) == total - fdl, then constrain it to the
+                    // two lengths a set head may have.
+                    //
+                    // THIS IS THE ONE PLACE THE PROOF IS WEAKER THAN IT
+                    // WAS. Before, `head` had to equal exactly one value
+                    // for the set to place; now it may equal either of
+                    // two adjacent ones, because the h that makes the
+                    // identity hold is derived rather than checked. The
+                    // adversary the identity exists to refuse - a season
+                    // pack's continuation-only group, whose `head` is an
+                    // offset inside ITS file while `fvn*D - S` is an
+                    // offset inside the whole pack - misses by the size
+                    // of every earlier member, so a window of two bytes
+                    // refuses it exactly as a window of one did. What a
+                    // solved h cannot survive is a set whose head layout
+                    // is neither of the two legal ones, and the {0, 1}
+                    // constraint is what refuses that.
+                    //
+                    // And the error direction is not silent. A solved h
+                    // that is wrong by one shifts every INTERIOR base by
+                    // one byte while volume 0's stays 0 and the final
+                    // piece's stays `total - data_len`, so the pieces no
+                    // longer tile [0, total) - which the settle-time
+                    // structural check tests directly and answers by
+                    // demoting the whole group to the disk ladder. The
+                    // stored member CRC32 stands behind that. Neither is
+                    // an excuse to guess, but it means the worst case
+                    // here is the slow path, not a shipped wrong file.
+                    (None, Some((fvn, fdl))) => {
+                        let Some(head) = total.checked_sub(fdl) else {
+                            return Shape;
+                        };
+                        let Some(zero_head) = arith_base(fvn, d, 0) else {
+                            return Shape;
+                        };
+                        match zero_head.checked_sub(head) {
+                            Some(v @ (0 | 1)) => v,
+                            _ => return Shape, // closes under neither layout
+                        }
+                    }
+                    // Neither end parsed: nothing proves this set starts
+                    // at volume 0 at all, and the proof below turns that
+                    // into `Shape` before any base is computed.
+                    (None, None) => 0,
+                };
+                (d, h)
             }
-            (None, Some((fvn, fdl, _))) if fvn > 0 => {
+            (None, Some((fvn, fdl))) if fvn > 0 => {
+                // No volume carried a split_after piece, so the ONE
+                // parsed volume is the final one. Its base is
+                // `total - fdl` and needs neither D nor h; both are
+                // computed only to run the closure proof, so when volume
+                // 0 is absent it is enough that SOME legal head layout
+                // divides out - no placement depends on which.
                 let Some(head) = total.checked_sub(fdl) else {
                     return Numbers;
                 };
                 let Some(s) = volnum_field_bytes_before(fvn) else {
                     return Numbers;
                 };
-                let Some(num) = head.checked_add(s) else {
+                let candidates: &[u64] = match head_len {
+                    Some(h) => &[h][..],
+                    None => &[0, 1][..],
+                };
+                let mut found = None;
+                for &h in candidates {
+                    let Some(num) = head.checked_add(s).and_then(|n| n.checked_add(h)) else {
+                        continue;
+                    };
+                    if num % fvn != 0 {
+                        continue;
+                    }
+                    let d = num / fvn;
+                    if d == 0 || fdl > d {
+                        continue;
+                    }
+                    found = Some((d, h));
+                    break;
+                }
+                let Some(dh) = found else {
                     return Numbers;
                 };
-                if num % fvn != 0 {
-                    return Numbers;
-                }
-                let d = num / fvn;
-                if d == 0 || fdl > d {
-                    return Numbers;
-                }
-                d
+                dh
             }
             // Only a volnum-0 piece parsed; D is unused below.
-            _ => 0,
+            _ => (0, head_len.unwrap_or(0)),
         };
         // PROOF that the premise holds, before a single byte is placed on
         // it. The premise is "this file begins at volume 0", and headers
@@ -2801,7 +2963,7 @@ impl ArchiveMap {
         // shape this path exists to keep streaming); reporting it as a
         // different shape costs nothing, because the chain handles it.
         let mut proven = starts_at_zero;
-        if let Some((fvn, fdl, _)) = fin {
+        if let Some((fvn, fdl)) = fin {
             if seen.iter().any(|&v| v > fvn) {
                 return Shape; // pieces past the declared last volume
             }
@@ -2812,7 +2974,7 @@ impl ArchiveMap {
                 if head != 0 {
                     return Shape; // an unsplit volume must hold the whole file
                 }
-            } else if arith_base(fvn, d) != Some(head) || fdl > d {
+            } else if arith_base(fvn, d, h) != Some(head) || fdl > d {
                 return Shape; // the set does not close from volume 0
             }
             proven = true;
@@ -2829,7 +2991,7 @@ impl ArchiveMap {
             } else if !e.split_after {
                 total - e.data_len // final piece; fits by checked_sub above
             } else {
-                match arith_base(vn, d) {
+                match arith_base(vn, d, h) {
                     Some(b) => b,
                     None => return Numbers,
                 }
@@ -2853,15 +3015,22 @@ impl ArchiveMap {
         // to 0 and answers "not closed", which is safe; debug and test builds
         // panicked here while holding the routing lock, poisoning it for the
         // rest of the job.
-        let closed = fin.is_some_and(|(fvn, _, _)| seen.len() as u64 == fvn.saturating_add(1));
+        let closed = fin.is_some_and(|(fvn, _)| seen.len() as u64 == fvn.saturating_add(1));
         ArithGate::Place { bases, closed }
     }
 }
 
-/// Bytes the RAR5 main header spends on the volume-number field for
-/// volume `vn`: absent on volume 0 (MHD_VOLUME implies "first"), else
-/// the vint length of the number - 1 byte through volume 127, 2 through
-/// 16383, and so on.
+/// The CANONICAL number of bytes a RAR5 main header spends on the
+/// volume-number field for volume `vn`: the minimal vint length of the
+/// number - 1 byte through volume 127, 2 through 16383, and so on -
+/// and 0 for volume 0, whose field a WinRAR head omits entirely.
+///
+/// Volume 0 is the one volume whose ANSWER HERE IS NOT THE WHOLE TRUTH:
+/// the field is optional there, not forbidden, and a head that carries
+/// an explicit `vint(0)` spends one byte on it. Callers reasoning about
+/// a PARSED volume must read [`VolumeMapper::volume_number_len`]
+/// instead; this function is for predicting the field bytes of volumes
+/// that have not parsed, where past the head the two layouts agree.
 fn volnum_field_len(vn: u64) -> u64 {
     if vn == 0 {
         return 0;
@@ -2875,8 +3044,10 @@ fn volnum_field_len(vn: u64) -> u64 {
     l
 }
 
-/// S(N): total volume-number field bytes across volumes 0..N-1 - the
-/// closed-form band sum behind `base(N) = N*D - S(N)`.
+/// The part of S(N) past the head: total volume-number field bytes
+/// across volumes 1..N-1, as a closed-form band sum. Volume 0's own
+/// contribution is the head-layout parameter `arith_base` takes
+/// separately, because it is the one term this function cannot derive.
 fn volnum_field_bytes_before(n: u64) -> Option<u64> {
     let mut s = 0u64;
     let mut band_start = 1u64; // volume 0 contributes nothing
@@ -2899,10 +3070,18 @@ fn volnum_field_bytes_before(n: u64) -> Option<u64> {
 }
 
 /// base(N) = N*D - S(N): the inner-file offset where volume N's piece
-/// starts, under the constant-volume-size geometry. None on overflow or
-/// an impossible (S > N*D) combination - hostile headers fail closed.
-fn arith_base(n: u64, d: u64) -> Option<u64> {
-    n.checked_mul(d)?.checked_sub(volnum_field_bytes_before(n)?)
+/// starts, under the constant-volume-size geometry. `head_len` is the
+/// bytes volume 0's main header spends on its volume-number field (0 for
+/// a WinRAR head, 1 for the explicit `vint(0)` this repo's own writer
+/// stamps), which is the whole of S(N) that
+/// [`volnum_field_bytes_before`] does not cover. None on overflow or an
+/// impossible (S > N*D) combination - hostile headers fail closed.
+fn arith_base(n: u64, d: u64, head_len: u64) -> Option<u64> {
+    let mut s = volnum_field_bytes_before(n)?;
+    if n > 0 {
+        s = s.checked_add(head_len)?;
+    }
+    n.checked_mul(d)?.checked_sub(s)
 }
 
 /// May this piece's base be derived from `unpacked_size - data_len`?

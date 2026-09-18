@@ -12,7 +12,7 @@ public enum S {
     /// app.name
     public static let appName = "parfast"
     /// app.stage
-    public static let appStage = "Alpha"
+    public static let appStage = "Beta"
     /// app.tagline
     public static let appTagline = "PAR2 create, verify and repair"
     /// checksums.create

@@ -559,6 +559,58 @@ fn nothing_is_swept_until_every_set_has_spoken() {
     );
 }
 
+/// The refetch gap (claim `lateset-deferred-parity-refetch-16sep`,
+/// 16 Sep 2026): settle must buy the in-stream cancel's holed volumes
+/// back BEFORE the late-set pass reads them, and must decide which ones
+/// through [`super::holed_deferred_volumes`] rather than inline.
+///
+/// STRUCTURAL for the reason the module header gives about its
+/// neighbours, and for one of its own. The decision is unit-pinned in
+/// `refetch_tests`, but the decision is worth nothing unless settle
+/// still ASKS it, and still asks it on the right side of the pass: a
+/// fetch moved to after `apply_nonactivated_disk_sets` completes the
+/// volume for nobody, and the only behavioural witness to that is the
+/// e2e probe this claim exists to stop flaking - which is a 1-2% timing
+/// race and cannot pin anything. An ORDER assertion and not a presence
+/// one, for exactly the reason [`nothing_is_swept_until_every_set_has_spoken`]
+/// gives one line over: the call existing on the wrong side is precisely
+/// the defect, and a presence check passes it.
+///
+/// FIX A HIT by keeping the call where it belongs, never by deleting
+/// this scan. If the fetch legitimately moves, repoint the scan at where
+/// it went - a refetch nothing reads is the gap this row closed, wearing
+/// a fix's name.
+#[test]
+fn the_holed_deferred_volumes_are_fetched_before_the_late_pass() {
+    let settle = code_only(SETTLE).expect("settle.rs lexes");
+    let decide = settle.find("latesets::holed_deferred_volumes(").expect(
+        "settle.rs must ask which deferred volumes the late pass needs - \
+             without it a holed volume's cancelled parity is reachable only \
+             through a damaged LIVE set's exact-fit list, which a clean live \
+             set never builds",
+    );
+    let fetch = settle[decide..]
+        .find("fetch_volumes(")
+        .map(|d| decide + d)
+        .expect("settle.rs must fetch what that decision names");
+    let late = settle
+        .find("apply_nonactivated_disk_sets(")
+        .expect("settle.rs calls the late-set pass");
+    assert!(
+        fetch < late,
+        "the holed-volume fetch must come BEFORE the late-set pass - after \
+         it the volume is completed for nobody, which is the same defect \
+         with a fetch in it"
+    );
+    assert_eq!(
+        only_depth(SETTLE, "latesets::holed_deferred_volumes("),
+        Ok(0),
+        "the decision must run once per settle, at loop depth 0 like the \
+         pass it feeds - inside a loop it re-reads every volume head per \
+         iteration"
+    );
+}
+
 /// F1 (bug sweep, 1 Sep 2026): the late-set verdict may not outvote a
 /// REFUSAL settle has already recorded in `reextract_failed`.
 ///

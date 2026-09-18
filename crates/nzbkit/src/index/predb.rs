@@ -1399,6 +1399,26 @@ impl Index {
     /// ONE `corr_consider`, so the realized hold is the bound plus
     /// about one row.
     ///
+    /// The bound is therefore `max(hold, setup + one row)` and not
+    /// `hold`, which is the same rule and the same reason as
+    /// [`crate::index::foldpace::FoldPace`]: the first row of a call
+    /// always runs, because a call whose own SETUP outlasted the bound
+    /// would otherwise examine nothing, write no cursor, and be asked
+    /// the identical question on the next tick for ever. Setup here is
+    /// two kv reads, a `MIN(id)`, the cursor read and the stride
+    /// SELECT - ~1.5 ms on the live 125 GB index, so `hold` = 1.25 s at
+    /// the caller needs a ~830x dilation before the guarantee is what
+    /// makes the difference. It costs one row (~12 ms, ~1% of that
+    /// bound) and only in the case where the alternative is no progress
+    /// at all.
+    ///
+    /// It applies the RULE rather than taking `FoldPace` itself, and
+    /// deliberately: the pacer also refuses a unit the remaining budget
+    /// does not cover, which would trade ~one row a slice for an
+    /// overrun this walk already keeps to one row by checking the clock
+    /// BEFORE each row. Adopting it wholesale is a second, priced
+    /// change that wants the 125 GB index to measure on.
+    ///
     /// Stopping early never skips a row: the cursor parks just below
     /// the last id actually considered, so the remainder of the stride
     /// is re-selected on the next call. Returns
@@ -1411,6 +1431,11 @@ impl Index {
         now: i64,
         hold: std::time::Duration,
     ) -> rusqlite::Result<(usize, usize, usize)> {
+        // A zero bound is a kill switch and stays one: it returns
+        // before `examined`, so the first-row guarantee below cannot
+        // resurrect it. `a_zero_hold_bound_examines_nothing_and_skips_
+        // nothing` asserts that, and the two are a pair - do not fold
+        // this arm into the loop's check.
         if budget == 0 || hold.is_zero() {
             return Ok((0, 0, 0));
         }
@@ -1460,8 +1485,11 @@ impl Index {
         for rid in &ids {
             // The bound is checked BEFORE the row, not after: a row
             // already paid for cannot be un-held, and checking first is
-            // what keeps the overrun to one unit.
-            if started.elapsed() >= hold {
+            // what keeps the overrun to one unit. `examined > 0` is the
+            // first-row guarantee the doc comment derives: without it a
+            // call whose setup outlasted `hold` returns (0,0,0), leaves
+            // the cursor unwritten, and makes no progress ever again.
+            if examined > 0 && started.elapsed() >= hold {
                 break;
             }
             examined += 1;

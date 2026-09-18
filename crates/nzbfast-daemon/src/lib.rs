@@ -74,9 +74,40 @@ pub use nzbkit::par2repair::FAST_PAR_DEFAULT;
 // IS `crate::watchlist`, so the layer crate is named outright at every
 // reference instead (`nzbfast_meta::watchlist::WatchItem`).
 pub(crate) use nzbfast_core::{
-    conntune, diag, diskfree, eatvol, failkind, health, holdstat, identify, identity, localtime,
-    manifest, netfetch, notify, persist, pwfile, sandbox, setup, sizes, srrdb, streamhub, tools,
+    conntune, diag, diskfree, eatvol, failkind, health, identify, identity, localtime, manifest,
+    netfetch, notify, persist, pwfile, sandbox, setup, sizes, srrdb, streamhub, tools,
 };
+// `holdstat` is out of that list and carries its consumer's cfg, which is
+// the same shape `repair` below has and for the same reason: a `use` can
+// be unused where a `mod` never could. Its ONLY caller in this layer is
+// `Daemon::with_index_mut` (daemon_index.rs), itself
+// `#[cfg(feature = "indexer")]`, so an indexer-off build compiled the
+// import and nothing that reads it - `warning: unused import: holdstat`
+// in EVERY slim build of this crate, including the one `-p
+// nzbfast-daemon` alone produces, because this crate's own defaults have
+// `indexer` off.
+//
+// Two lanes measured that warning on 17 Sep 2026 and both got its scope
+// wrong before this landed - one called it specific to the
+// slim+dashboard build, one called it a `-p` list artifact. The measured
+// answer is `indexer` off in ANY build; the `-p` list matters only
+// because it decides which features unification resolves on, which the
+// two manifests settle in ninety seconds (`nzbfast-daemon` is
+// `default = []`, `nzbfast` is `default = ["indexer", "dashboard"]`).
+//
+// IF YOU RE-MEASURE THIS, THE TRAP IS THE SHELL AND NOT THE CACHE.
+// `cargo $args` does not word-split an unquoted parameter in zsh, so a
+// matrix loop built that way passes one giant argument, cargo errors,
+// and a grep for the warning reports clean - a broken arm that is
+// indistinguishable from the answer you were hoping for. Test for
+// `^error` explicitly. (An earlier revision of this comment blamed a
+// warm target directory instead. That was WRONG and is retracted:
+// measured 17 Sep, cargo replays a cached diagnostic on a fresh unit -
+// warning present, nothing recompiled - three warm runs in a row. Do
+// not reintroduce a `touch` between arms on that reasoning; it costs a
+// full rebuild per cell and buys nothing.)
+#[cfg(feature = "indexer")]
+pub(crate) use nzbfast_core::holdstat;
 pub(crate) use nzbfast_engine::get;
 pub(crate) use nzbfast_meta::{newznab, nzbindex, plex, rss, wall};
 pub(crate) use nzbfast_unpack::{smart, unlockpw, unpack};
@@ -161,6 +192,17 @@ pub mod altspend;
 
 // dupe.rs: inherent methods on `Daemon`, so no glob is needed.
 pub mod dupe;
+
+// cancelundo.rs: GH #86 - the grace window that makes cancelling a
+// download undoable. Inherent methods on `Daemon`, so no glob is
+// needed; the two public types travel by path.
+pub mod cancelundo;
+
+// histundo.rs: GH #86 - the same grace window for the OTHER list, where
+// what has to be held is a spool copy and what has to be refused is a
+// row whose early copies are about to go. Same shape, same directory,
+// same startup purge.
+pub mod histundo;
 
 // spare.rs: TODO 282 section B - the ranked spares a grab holds
 // against its own failure, and the same-post admission test the promote

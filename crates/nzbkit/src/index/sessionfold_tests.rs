@@ -543,3 +543,197 @@ fn a_folded_session_is_scored_the_way_ingest_scores_it() {
 // TRUE size the walk needs, where its unfolded members were vetoed on
 // ratio - lives in predb_tests/correlation_tests.rs beside the shatter
 // fold's own correlation tests, which own the `tpre`/`dir` builders.
+
+/// The session fold's loop really consults the pacer: a slice with a
+/// budget for a few sessions folds some and then DECLINES one for want
+/// of time, mid-window.
+///
+/// This is `a_fold_slice_declines_a_unit_it_has_no_time_for`
+/// (`predb_tests::correlation_tests`) for this fold. Until 17 Sep 2026
+/// only `shatter_fold` had one, and every call to this fold in the suite
+/// passes the 60 s `WALK`, which a test-sized index can never spend - so
+/// a pacer this loop silently stopped asking would have gone unnoticed.
+/// The two assertions are that test's, and they are the ONLY two that
+/// survive a shared box: `folds > 0` (the near wall - a budget too small
+/// admits nothing past the read) and `take_refusals() > 0` (the pacer
+/// said no at least once). There is NO wall-clock assertion on the
+/// hold, and that test's doc comment lists the four formulations that
+/// were tried and why each one either passes on both rules or reds
+/// under load. Do not add one.
+///
+/// The one thing this asserts beyond the shatter test is that the
+/// refusal was the MERGE loop's and not the outer walk's: this fold asks
+/// `room()` once more after a window completes, before stepping to the
+/// next, and a refusal there records the same count while proving
+/// nothing about the loop that does the work. The discriminator is the
+/// cursor, which `session_fold` writes only after a whole window
+/// survives its merge loop: a slice that declined mid-window leaves it
+/// unwritten. That is also what makes a zero-budget call a free read
+/// sample (`testutil::probe_fold_cost`).
+///
+/// SIZING, REDONE FOR THIS FOLD'S OWN UNIT, and the shape of it is
+/// different from the shatter test's in one way that decides everything
+/// else. A unit here is one SESSION merge (`session_fold_members`), and
+/// the walk has no sub-stride: a decline parks the cursor at the window
+/// START, the next call re-reads the window, and a folded session
+/// rescans to nothing, so a slice spends exactly the sessions it merged
+/// and the fixture window is [1, SESSIONS) merges. But the pacer's first
+/// unit, the population READ, scans the WHOLE window - every row of
+/// every session in the fixture - where the shatter fold's sub-stride
+/// read covers three stems. So this read costs `SESSIONS` times what a
+/// merge's share of it would, and it cannot be made small relative to a
+/// merge by choosing the fixture: measured on the dev Mac 17 Sep 2026,
+/// a read of 0.4 ms against 400 rows and 5 ms against 10,000, while a
+/// merge's own SQL is under a millisecond in either shape. The near
+/// wall is the read dilated past `read + UNITS * merge / 2`, so with a
+/// merge no dearer than the read one ordinary scheduler preemption
+/// (10-60 ms on this fleet at load 100-230, measured) is the wall: two
+/// shapes with the merge at or under the read failed 4 in 64 and 3 in
+/// 128, 16 at a time, on exactly that.
+///
+/// WHAT MAKES A UNIT DEAR HERE, AND IT IS THE FOLD'S REAL UNIT. The
+/// fixture is ingested through the real path in one batch per session,
+/// 20,000 articles, and the WAL is left as ingest leaves it - past
+/// `WAL_AUTOCHECKPOINT_PAGES`. Each merge's `tx.commit()` then carries
+/// checkpoint work, which is the unit `foldpace`'s header measured on
+/// the live 125 GB index ("50-350 ms of it is `tx.commit()`") and the
+/// unit the pacer exists for. Measured 17 Sep 2026, 128 runs 16 at a
+/// time at load 85-125: a merge priced between 0.5 ms and 167 ms across
+/// runs, p50 12 ms, against a read of 0.4 ms (p90 1.0 ms) - and every
+/// run passed, slices of 1 to 12 folds, because the spread is BETWEEN
+/// runs and the walls only care about consistency WITHIN one: the probe
+/// and the slice see the same regime in a given run. The control with a
+/// `PRAGMA wal_checkpoint(TRUNCATE)` after ingest is what showed that:
+/// merges fell to 0.5 ms, the read stayed at 0.4 ms, and the same test
+/// failed 3 in 128 on both walls and the fixture guard. Nothing here
+/// asserts the regime - a guard on WAL size would assert a mechanism
+/// this test has measured but not proved - so the record is this
+/// comment and section 7 of
+/// research/FOLD-BUDGET-DERIVATION-CENSUS-2026-09-17.md, which also says
+/// why `album_fold` did NOT get this test: its ingest lands the WAL just
+/// under the threshold, the first fold commit past it pays the whole
+/// checkpoint at once (0.4-1.9 s, measured, 31 times in 32 runs), and a
+/// single unit five hundred times dearer than its neighbours is a
+/// spread no window holds.
+#[test]
+fn a_session_fold_slice_declines_a_session_it_has_no_time_for() {
+    /// Foldable units in the fixture, and the WINDOW the budget lands
+    /// in. A hundred puts both walls a factor of ten from the geometric
+    /// middle. Paid for in ingest only.
+    const SESSIONS: usize = 100;
+    /// Files per session: the fold's own floor, which keeps the window
+    /// read at 400 rows. See the doc comment for why the read, and not
+    /// the merge, is what the fixture has to keep small.
+    const FILES: usize = 4;
+    /// Parts per file. Fifty is what the measured campaign ran and is
+    /// kept for that reason; the merge repoints one message-id row per
+    /// part, so it is the one lever that moves a merge's own SQL
+    /// without moving the read.
+    const PARTS: u32 = 50;
+    /// Merges' worth of budget on top of the admission floor, and the
+    /// only term that buys work: `sqrt(SESSIONS)`, the geometric middle
+    /// of the window. DO NOT RAISE IT when this reds - the far wall is
+    /// the same failure as the near one. Widen `SESSIONS` and this
+    /// follows by square root.
+    const UNITS: u32 = 10;
+    /// The most sessions ONE slice has been SEEN to take at [`UNITS`] =
+    /// 10 - an observation and not a ceiling, and the fixture guard's
+    /// number rather than an assertion's. Measured on the dev Mac
+    /// 17 Sep 2026 at load 85-125, 16 at a time, 128 runs: p50 4, p90
+    /// 11, worst 12; the probe spent at most 6.
+    const SLICE_SATURATION: usize = 12;
+    /// Every session inside ONE posting window, and that window is the
+    /// walk's LAST: `hi - MAX_SPAN + WINDOW > horizon`, so a slice that
+    /// completes it catches up rather than reading empty windows until
+    /// the pacer stops it there. The sessions sit in the window's first
+    /// three hours, clear of the final `MAX_SPAN` strip the fold defers.
+    const T0: i64 = 5_000_000;
+    const NOW: i64 = 5_027_200;
+
+    let (dir, mut ix) = fixture("pacer");
+    let build_t = std::time::Instant::now();
+    for s in 0..SESSIONS {
+        let poster = format!("sess{s:03}@h.tld");
+        let posted = T0 + s as i64 * 30;
+        let mut batch = Vec::with_capacity(FILES * PARTS as usize);
+        for f in 0..FILES {
+            // A 32-char blob stem per file, which is what the dark band
+            // wears and what `stem_is_a_name` damns.
+            let stem = format!(
+                "{:032x}",
+                0xe3b0c44298fc1c149afbf4c800000000u128 + (s * FILES + f) as u128
+            );
+            for p in 1..=PARTS {
+                batch.push(OverEntry {
+                    number: 0,
+                    subject: format!("\"{stem}\" yEnc ({p}/{PARTS})"),
+                    from: poster.clone(),
+                    message_id: format!("<{stem}-{p}@sess>"),
+                    bytes: 50_000_000,
+                    date: posted,
+                });
+            }
+        }
+        ix.ingest("a.b.tv", &batch, posted).unwrap();
+    }
+    let built_in = build_t.elapsed();
+    // The fold's own population screen, so a fixture that drifted out
+    // of the dark band fails HERE and not as a slice that folded
+    // nothing.
+    let pop: i64 = ix
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM releases
+              WHERE junk>=70 AND pre_title='' AND complete=1 AND files=1
+                AND need_parts>1 AND poster<>''",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pop,
+        (SESSIONS * FILES) as i64,
+        "the family-S fixture really was built, every file in the band"
+    );
+
+    let probe = probe_fold_cost(built_in, |budget| {
+        let (sessions, _, done) = ix.session_fold(NOW, budget).unwrap();
+        (sessions, done)
+    });
+    let left = SESSIONS.saturating_sub(probe.spent);
+    assert!(
+        left > SLICE_SATURATION,
+        "the probe spent {} of {SESSIONS} sessions and left {left}, but one \
+         slice has been seen to take {SLICE_SATURATION} - this fixture can \
+         no longer answer the question on this box. Raise SESSIONS.",
+        probe.spent
+    );
+    assert!(
+        ix.kv_get("session_fold_at").is_none(),
+        "the probe completed the window, so its rounds were not the free \
+         read samples the derivation prices them as"
+    );
+
+    let _ = super::foldpace::take_refusals();
+    let budget = probe.budget(UNITS);
+    let (folds, _, done) = ix.session_fold(NOW, budget).unwrap();
+    let refusals = super::foldpace::take_refusals();
+    eprintln!("SLICE budget={budget:?} folds={folds} done={done} refusals={refusals} left={left}");
+    assert!(folds > 0, "slice folded nothing at all");
+    assert!(
+        refusals > 0,
+        "slice ended without the pacer declining anything, so it says \
+         nothing about whether the fold consults it"
+    );
+    assert!(
+        ix.kv_get("session_fold_at").is_none(),
+        "the slice folded all {folds} sessions left and completed the \
+         window, so the refusal it recorded was the outer walk's - it \
+         says nothing about the merge loop"
+    );
+    // No upper bound on `folds`, deliberately: the budget is derived
+    // and any ceiling is a constant, which is the pairing that held
+    // main red for a day on the shatter test. `SLICE_SATURATION` is
+    // the fixture guard's number and is never asserted.
+    teardown(&dir, ix);
+}

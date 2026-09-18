@@ -40,7 +40,7 @@
 #![recursion_limit = "256"]
 
 use std::collections::VecDeque;
-#[cfg(feature = "indexer")]
+#[cfg(any(feature = "indexer", feature = "dashboard"))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

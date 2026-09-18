@@ -93,7 +93,7 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn CreateWatch) -> 
     // On create the bare arguments are all MEMBERS once `-a` named the
     // set, so the one that would otherwise have been the set name is a
     // member like any other.
-    let members = match collect(opts, &dir, sink) {
+    let members = match collect(opts, &dir, &base, &par2, sink) {
         Ok(m) => m,
         Err(code) => return code,
     };
@@ -170,14 +170,32 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn CreateWatch) -> 
             );
             sink.line(Level::Normal, "Writing recovery packets");
             sink.line(Level::Normal, "Writing verification packets");
-            rename_volumes(
+            // PUBLICATION, and checked like one. Every rename that did
+            // not happen is named on stderr and the command fails: the
+            // set on disk is not the set the header, the preview and
+            // `final_volume_names` all said would be written, and a
+            // caller told `Done` has no way to find that out - both
+            // spellings answer the same "is this one of ours" scan.
+            let unpublished = rename_volumes(
                 &dir,
                 &base,
                 &written,
                 opts.first_block,
                 recovery,
                 opts.std_naming,
+                opts.no_clobber,
             );
+            if !unpublished.is_empty() {
+                for (from, to, why) in &unpublished {
+                    sink.err(&format!("Could not name {from} as {to}: {why}"));
+                }
+                sink.err(&format!(
+                    "The recovery set is on disk but {} of its files could not be given \
+                     their final names; nothing was deleted.",
+                    unpublished.len()
+                ));
+                return crate::EXIT_FILE_IO_ERROR;
+            }
             sink.line(Level::Terse, "Done");
             crate::EXIT_SUCCESS
         }
@@ -194,8 +212,97 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn CreateWatch) -> 
     }
 }
 
+/// Is `path` one of the files THIS create is about to write - the index
+/// itself, or one of its recovery volumes?
+///
+/// A source that is also an output is a source the create destroys. The
+/// index is judged by IDENTITY (`same_file`), because the two spellings
+/// need not match - a symlink, a hard link, `./set.par2`, a case variant
+/// on APFS - and the volumes by NAME, because they do not exist yet and
+/// there is nothing to compare an inode against.
+///
+/// # What this costs, and why it is a skip rather than a refusal
+///
+/// `parfast c set.par2 set.par2` measured the 40 KB file it was handed,
+/// wrote the index over it with `File::create`, and then folded recovery
+/// out of the 480 bytes it had just left there - so the engine's own
+/// length check fired ("changed length while the PAR2 set was being
+/// built"), the command failed, and the user's file was gone anyway. The
+/// far commoner route is a glob: `parfast c set.par2 *` after any earlier
+/// run sweeps that run's whole set back in as sources.
+///
+/// Both want the same answer, and it is the reference's - its recovery
+/// files are not members of their own set - so these are SKIPPED with a
+/// line, beside the 0-byte and out-of-basepath skips this loop already
+/// prints. A refusal would break the glob re-run, which is ordinary use;
+/// and a create left with no members at all still fails loudly on the
+/// "You must specify a list of files" door, with the file intact.
+fn is_own_output(path: &Path, par2: Option<&Path>, base: &str) -> bool {
+    if par2.is_some_and(|p| same_file(path, p)) {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    // `<base>.vol...par2`, either spelling of the volume numbers - the
+    // engine's fixed widths or the renamed ones. Case-insensitively,
+    // because the index name is matched that way too
+    // (`strip_par2_suffix`).
+    let lower = name.to_ascii_lowercase();
+    let prefix = format!("{}.vol", base.to_ascii_lowercase());
+    lower.starts_with(&prefix) && lower.ends_with(".par2")
+}
+
+/// Do these two paths name the same file on disk? Through a symlink, a
+/// hard link, or two spellings of one path. A path that is not there is
+/// never equal to anything, which is the right answer for an output that
+/// has not been written yet.
+fn same_file(a: &Path, b: &Path) -> bool {
+    let key = |p: &Path| -> Option<(u64, u64)> {
+        // Follows links: a symlink and its target are one file for the
+        // purpose of "am I about to overwrite this".
+        let md = std::fs::metadata(p).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some((md.dev(), md.ino()))
+        }
+        #[cfg(windows)]
+        {
+            // No `MetadataExt` here on purpose: this arm never calls a
+            // method from it, so importing it is an `unused_imports` error
+            // under the windows-clippy job's `-D warnings` (and only
+            // there, which is why it reached main).
+            let _ = md;
+            // No inode on Windows; the canonical path is the identity
+            // that is available, and it resolves links and `.` the same
+            // way `dev`/`ino` does on unix.
+            let c = std::fs::canonicalize(p).ok()?;
+            let s = c.to_string_lossy().to_lowercase();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&s, &mut h);
+            Some((std::hash::Hasher::finish(&h), 0))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = md;
+            None
+        }
+    };
+    match (key(a), key(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// The members, with the reference's skip rules applied and announced.
-fn collect(opts: &Options, dir: &Path, sink: &mut Sink) -> Result<Vec<Member>, u8> {
+fn collect(
+    opts: &Options,
+    dir: &Path,
+    base: &str,
+    out_par2: &Path,
+    sink: &mut Sink,
+) -> Result<Vec<Member>, u8> {
     let mut named: Vec<PathBuf> = Vec::new();
     if opts.archive.is_some()
         && let Some(first) = &opts.par2
@@ -255,6 +362,36 @@ fn collect(opts: &Options, dir: &Path, sink: &mut Sink) -> Result<Vec<Member>, u
                 Level::Terse,
                 &format!(
                     "Skipping 0 byte file: {}",
+                    canonical_pathname(&path).display()
+                ),
+            );
+            continue;
+        }
+        // A file this create is about to WRITE is not a file it can
+        // protect. See [`is_own_output`]: without this, the index was
+        // opened as a member, measured, and then truncated by the
+        // create's own `File::create` - the source/output collision the
+        // 17 Sep sweep found in the legacy tool (L1) and which this
+        // tree's CLI shared.
+        //
+        // `out_par2` and NOT `opts.par2`, and the difference is the
+        // whole of the `-a` regression this guard shipped with. Under
+        // `-a` the output is the ARCHIVE and the first bare argument is
+        // an ordinary MEMBER - the comment above `collect`'s call site
+        // says so, and `run` resolves the pair correctly two lines
+        // earlier. Passing the raw `opts.par2` here made that member
+        // look like the file about to be written, so
+        // `parfast c -aout2.par2 text.txt rand.bin` protected rand.bin
+        // ALONE and reported Done: the "quietly protects four of five"
+        // outcome, from the guard written to prevent it. Caught by
+        // `tools/conformance/run.py`, which no CI job runs against this
+        // binary - `par2-conformance` checks the reference against
+        // ITSELF.
+        if is_own_output(&path, Some(out_par2), base) {
+            sink.line(
+                Level::Terse,
+                &format!(
+                    "Skipping the recovery set's own file: {}",
                     canonical_pathname(&path).display()
                 ),
             );
@@ -330,18 +467,69 @@ fn strip_par2_suffix(name: &str) -> &str {
 /// the reference's behaviour and it is reproduced rather than
 /// corrected: a drop-in that walked further would build a set out of
 /// files par2cmdline never read.
+///
+/// # A link is never followed and never protected, and neither is a fifo
+///
+/// That is the reference's rule too, MEASURED on 17 Sep 2026 against
+/// par2cmdline 1.2.0 rather than read out of its source: over a folder
+/// holding `dirlink -> ../other`, `filelink -> real.bin` and a `mkfifo`d
+/// entry beside one real file it answers `Source file count: 1` and
+/// opens only the real file. The fifo does not even reach its own
+/// "Skipping 0 byte file" line - it is gone before `collect` can say
+/// that - so the type filter is in the WALK and not below it. It lstats,
+/// and a link is not a source.
+///
+/// This walk followed them until that day, and the cost was not
+/// fidelity alone. `Path::is_dir` follows a link, so a `loop -> .` inside
+/// a source folder was re-entered at every level until macOS's 32-link
+/// `stat` limit stopped it: ONE ordinary file came out as 95 members,
+/// 30 of them a file from a DIFFERENT folder reached through a second
+/// link, in a set the user never asked for. `named.dedup()` cannot see
+/// it, because the 95 spellings are 95 different paths.
+///
+/// The ARGUMENT is deliberately left alone - `collect` reaches this
+/// function only for a path the user typed, and `/tmp` is a link on
+/// macOS. The reference refuses a named link outright ("You must specify
+/// a list of files when creating."); refusing a path somebody typed is
+/// worse than protecting it, and that departure is the same one `within`
+/// and the basepath default already make.
+///
+/// # THE MEASUREMENT IS THE UNIX HALF'S, AND WINDOWS IS UNMEASURED
+///
+/// `FindFiles` is written twice and the two halves already disagree
+/// about `.` (see `dot_named`, and README.md's windows section). The
+/// windows half hands its argument to `FindFirstFileW` and branches on
+/// `FILE_ATTRIBUTE_DIRECTORY` alone - it never looks at
+/// `FILE_ATTRIBUTE_REPARSE_POINT` - so the reference there may well
+/// FOLLOW a junction or a directory symlink where the unix half does
+/// not, which would make this rule a windows-only divergence. Nobody has
+/// run it: there is no windows par2 reference on the box this was
+/// measured on, the conformance matrix has no link row on any platform,
+/// and `par2-conformance` in CI never runs this binary at all. The
+/// windows leg (`tools/conformance/README.md`, "Both windows legs")
+/// is where that gets an answer. Until it does, the safety argument
+/// decides it: a 95-member set built out of one file is a worse answer
+/// than a link left out and counted.
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for e in rd.flatten() {
+        // `DirEntry::file_type` does NOT follow a link. `Path::is_dir`
+        // does, which is what made a loop walkable.
+        let Ok(ft) = e.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
         let p = e.path();
-        if p.is_dir() {
+        if ft.is_dir() {
             if dot_named(&p) {
                 continue;
             }
             walk(&p, out);
-        } else {
+        } else if ft.is_file() {
             out.push(p);
         }
     }
@@ -805,7 +993,13 @@ pub fn create_plan(
         .with_first_exponent(as_count(opts.first_block))
         // The ceiling on one volume, in slices. TWO switches can set
         // one and both are ceilings - see `volume_ceiling`.
-        .with_max_blocks_per_volume(volume_ceiling(opts, largest_member, block_size));
+        .with_max_blocks_per_volume(volume_ceiling(opts, largest_member, block_size))
+        // `--no-clobber`. OFF unless asked, because the reference
+        // overwrites and this is a drop-in - see `cli::Options::
+        // no_clobber`. This is the one translation point, so the Create
+        // pane's preview reaches it too and cannot describe a create
+        // under a different write policy from the one that runs.
+        .with_no_clobber(opts.no_clobber);
     // Neither switch given is the exponential default, and it must stay
     // literally that call: `Even` over the same COUNT is a different
     // split (1+2+4+8+5 against 4+4+4+4+4), so routing the default
@@ -952,6 +1146,44 @@ pub fn final_volume_names(
 }
 
 /// [`final_volume_names`] applied to what the writer left on disk.
+///
+/// Answers the renames that did NOT happen, as
+/// `(engine name, final name, why)`. An empty vector is the whole set
+/// published under the names the caller asked for, and nothing else is.
+///
+/// # Why this is not `let _ =`
+///
+/// It was, and the caller then printed `Done` and returned zero
+/// unconditionally. A final name occupied by a DIRECTORY, a
+/// cross-device layout, a read-only parent, a Windows share that refuses
+/// the rename - each leaves the engine's `vol000+01` spelling on disk,
+/// the requested `vol0+1` absent, and the command claiming success. A
+/// caller cannot tell the two apart afterwards either, because both
+/// spellings match the same "is this one of ours" scan.
+///
+/// Renaming is part of PUBLICATION, not a cosmetic pass after it: the
+/// names are what `final_volume_names` promised the preview, so a create
+/// that could not write them has not written the set that was asked for.
+///
+/// # `no_clobber` and why this arm is a check and not an open
+///
+/// `std::fs::rename` REPLACES its destination - that is what the POSIX
+/// call does and there is no portable no-clobber spelling of it - so
+/// under `--no-clobber` the engine's `O_EXCL` opens would refuse every
+/// file of the set and this pass would then quietly write over the one
+/// name the user actually sees. A destination that exists is therefore
+/// checked here and reported as a rename that did not happen, which is
+/// the same outcome and the same message as a destination occupied by a
+/// directory.
+///
+/// It is a check-then-act and it is honestly weaker than the engine's
+/// door: something that creates the final name between the check and the
+/// rename still loses it. That window is much narrower than it looks,
+/// because the INDEX is the first member the engine creates and it is
+/// never renamed - so two creates over one base have already been
+/// separated by `O_EXCL` long before either reaches this line, and what
+/// is left is a create racing an unrelated writer over one volume name.
+#[must_use = "a rename that failed leaves the set under the engine's own names"]
 pub fn rename_volumes(
     dir: &Path,
     base: &str,
@@ -959,13 +1191,33 @@ pub fn rename_volumes(
     first_block: u64,
     recovery: u64,
     std_naming: bool,
-) {
+    no_clobber: bool,
+) -> Vec<(String, String, std::io::Error)> {
     let want = final_volume_names(base, written, first_block, recovery, std_naming);
+    let mut failed = Vec::new();
     for (name, want) in written.iter().zip(&want) {
-        if want != name {
-            let _ = std::fs::rename(dir.join(name), dir.join(want));
+        if want == name {
+            continue;
+        }
+        // `symlink_metadata`, not `exists`: a dangling symlink under the
+        // final name is still a file the rename would replace, and
+        // `exists` follows the link and answers no.
+        if no_clobber && dir.join(want).symlink_metadata().is_ok() {
+            failed.push((
+                name.clone(),
+                want.clone(),
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "a file is already there and --no-clobber was given",
+                ),
+            ));
+            continue;
+        }
+        if let Err(e) = std::fs::rename(dir.join(name), dir.join(want)) {
+            failed.push((name.clone(), want.clone(), e));
         }
     }
+    failed
 }
 
 /// `<base>.vol<first>+<count>.par2` back into its two numbers.
@@ -986,6 +1238,296 @@ fn digits(n: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// UNDER `-a` THE FIRST BARE ARGUMENT IS A MEMBER, NOT THE OUTPUT -
+    /// and the no-self-overwrite guard below shipped reading it as the
+    /// output, so `parfast c -aout2.par2 text.txt rand.bin` protected
+    /// rand.bin alone and said Done.
+    ///
+    /// Found 17 Sep 2026 by `tools/conformance/run.py par2`, which no
+    /// CI job runs against this binary: `par2-conformance` builds the
+    /// pinned par2cmdline and checks it against its OWN committed
+    /// table, so it is a table-freshness guard and never a drop-in one.
+    /// The reference protects both files.
+    #[test]
+    fn an_archive_name_does_not_turn_the_first_source_into_the_output() {
+        let dir = std::env::temp_dir().join(format!(
+            "parfast-archivename-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("text.txt"), b"hello there this is text\n").unwrap();
+        std::fs::write(dir.join("rand.bin"), vec![9u8; 4096]).unwrap();
+        let opts = Options {
+            archive: Some(dir.join("out2.par2")),
+            par2: Some(dir.join("text.txt")),
+            files: vec![dir.join("rand.bin")],
+            block_size: Some(32),
+            recovery_count: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(run(&opts, &mut crate::out::Sink::buffered()), 0);
+        let set = nzbkit::par2::Par2Set::parse(&[&std::fs::read(dir.join("out2.par2")).unwrap()])
+            .expect("our own set parses");
+        let mut names: Vec<String> = set.files.iter().map(|f| f.name.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["rand.bin".to_string(), "text.txt".to_string()],
+            "both bare arguments are members once -a named the set"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE WALK IS THE REFERENCE'S WALK: a link is not followed and not
+    /// protected, and nothing that is not an ordinary file is a member.
+    ///
+    /// Measured against par2cmdline 1.2.0 on 17 Sep 2026 rather than
+    /// read out of its source. Over a folder holding
+    /// `dirlink -> ../other`, `filelink -> real.bin` and a `mkfifo`d
+    /// entry beside one real file, the reference answers
+    /// `Source file count: 1` and opens only the real file - the fifo
+    /// does not even reach its own "Skipping 0 byte file" line - and an
+    /// explicitly NAMED link is refused outright with "You must specify
+    /// a list of files when creating."
+    ///
+    /// This walk followed them until that day, which is a fidelity gap
+    /// and a defect in its own right: `loop -> .` is re-entered at every
+    /// level until the kernel's 32-link `stat` limit stops it, so ONE
+    /// file becomes 33 members of a set 33 times the size it should be.
+    /// `named.dedup()` cannot see it - the 33 spellings are 33 different
+    /// paths. The ARGUMENT is left alone, deliberately: `/tmp` is a link
+    /// on macOS and a user who typed a path meant the path.
+    #[cfg(unix)]
+    #[test]
+    fn a_walk_takes_only_ordinary_files_and_never_follows_a_link() {
+        unsafe extern "C" {
+            #[link_name = "mkfifo"]
+            fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "parfast-walk-rules-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let inside = dir.join("chosen");
+        let outside = dir.join("elsewhere");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(inside.join("movie.mkv"), vec![4u8; 30_000]).unwrap();
+        std::fs::write(outside.join("theirs.bin"), vec![5u8; 30_000]).unwrap();
+        std::os::unix::fs::symlink(&outside, inside.join("out")).unwrap();
+        std::os::unix::fs::symlink("movie.mkv", inside.join("alias.mkv")).unwrap();
+        std::os::unix::fs::symlink(".", inside.join("loop")).unwrap();
+        let pipe = inside.join("pipe");
+        let c = std::ffi::CString::new(pipe.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: `c` is a NUL-terminated C string that outlives the
+        // call, which is all `mkfifo(2)` asks of its argument.
+        assert_eq!(unsafe { mkfifo(c.as_ptr(), 0o644) }, 0, "mkfifo");
+
+        let index = dir.join("set.par2");
+        let opts = Options {
+            par2: Some(index.clone()),
+            files: vec![inside.clone()],
+            recurse: true,
+            block_size: Some(8192),
+            recovery_count: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(run(&opts, &mut crate::out::Sink::buffered()), 0);
+        let set = nzbkit::par2::Par2Set::parse(&[&std::fs::read(&index).unwrap()])
+            .expect("our own set parses");
+        let mut names: Vec<String> = set.files.iter().map(|f| f.name.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["chosen/movie.mkv".to_string()],
+            "one ordinary file in the chosen folder, protected once"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L1 (reports/code-audit-2026-09-17), in THIS tree rather than the
+    /// legacy one: a create never destroys a file it was asked to
+    /// protect.
+    ///
+    /// The sweep found the collision in the old standalone checkout and
+    /// asked for the current CLI to be checked independently. It was
+    /// checked, and it had it: `parfast c set.par2 set.par2` opened the
+    /// index as a member, measured 40,000 bytes, wrote the index over it
+    /// with `File::create`, and folded recovery out of the 480 bytes it
+    /// had just left there. The engine's own length check then fired
+    /// ("changed length while the PAR2 set was being built") and the
+    /// command failed - with the user's file already gone, which is the
+    /// only part that matters.
+    ///
+    /// Three arms, because each reaches the same destruction by a
+    /// different route: the index named as a source, one of the set's
+    /// own recovery VOLUMES swept back in by a glob on a re-run (by far
+    /// the commonest route in the field), and the index reached through
+    /// a SYMLINK, where a path comparison sees two different names.
+    #[test]
+    fn a_create_never_protects_a_file_it_is_about_to_write() {
+        let dir = std::env::temp_dir().join(format!(
+            "parfast-self-overwrite-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join("set.par2");
+        let sentinel: Vec<u8> = (0..40_000u32).map(|i| (i * 13 + 7) as u8).collect();
+
+        // 1. The index named as its own only source. Nothing is left to
+        //    protect, so the create refuses - and the file is intact.
+        std::fs::write(&index, &sentinel).unwrap();
+        let opts = Options {
+            par2: Some(index.clone()),
+            files: vec![index.clone()],
+            block_size: Some(8192),
+            recovery_count: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            run(&opts, &mut crate::out::Sink::buffered()),
+            crate::EXIT_INVALID_ARGS
+        );
+        assert_eq!(
+            std::fs::read(&index).unwrap(),
+            sentinel,
+            "the create wrote its index over the file it was protecting"
+        );
+
+        // 2. A RECOVERY VOLUME of this same set, which is what
+        //    `parfast c set.par2 *` sweeps back in on every re-run. The
+        //    real member is protected and the volume is not a member.
+        let member = dir.join("movie.mkv");
+        std::fs::write(&member, vec![4u8; 30_000]).unwrap();
+        let volume = dir.join("set.vol0+1.par2");
+        std::fs::write(&volume, &sentinel).unwrap();
+        let opts = Options {
+            par2: Some(index.clone()),
+            files: vec![member.clone(), index.clone(), volume.clone()],
+            block_size: Some(8192),
+            recovery_count: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(run(&opts, &mut crate::out::Sink::buffered()), 0);
+        let set = nzbkit::par2::Par2Set::parse(&[&std::fs::read(&index).unwrap()])
+            .expect("our own set parses");
+        let names: Vec<String> = set.files.iter().map(|f| f.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["movie.mkv".to_string()],
+            "the set protects its own files"
+        );
+
+        // 3. Through a SYMLINK, where the two spellings do not compare
+        //    equal and only the file's identity says they are one file.
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&index);
+            std::fs::write(&index, &sentinel).unwrap();
+            let link = dir.join("alias.par2");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&index, &link).unwrap();
+            let opts = Options {
+                par2: Some(index.clone()),
+                files: vec![link],
+                block_size: Some(8192),
+                recovery_count: Some(1),
+                ..Default::default()
+            };
+            assert_eq!(
+                run(&opts, &mut crate::out::Sink::buffered()),
+                crate::EXIT_INVALID_ARGS
+            );
+            assert_eq!(
+                std::fs::read(&index).unwrap(),
+                sentinel,
+                "a symlink to the index is still the index"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P9 (reports/code-audit-2026-09-17): a create whose final names
+    /// could not be written must not report success.
+    ///
+    /// `rename_volumes` discarded every `fs::rename` error and returned
+    /// nothing, and the caller printed `Done` and returned zero
+    /// whatever happened. The set was then on disk under the ENGINE's
+    /// fixed-width spelling (`set.vol000+01.par2`) with the requested
+    /// `set.vol0+1.par2` absent, and nobody downstream could tell:
+    /// "is this one of ours" matches both spellings, so the GUI listed
+    /// the wrong names as this job's output and the exit code agreed
+    /// with it.
+    ///
+    /// A DIRECTORY sitting on the final name is the portable way to
+    /// make one rename fail without root or a second filesystem - it is
+    /// `ENOTDIR`/`EISDIR` on unix and the same refusal on Windows - and
+    /// it is also a shape a user reaches by accident.
+    #[test]
+    fn a_create_that_cannot_publish_its_final_names_does_not_report_done() {
+        let dir = std::env::temp_dir().join(format!(
+            "parfast-rename-fail-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let member = dir.join("a.bin");
+        std::fs::write(&member, vec![5u8; 40_000]).unwrap();
+        // ONE recovery block, so the engine writes `set.vol000+01.par2`
+        // and the rename wants `set.vol0+1.par2`.
+        let opts = Options {
+            par2: Some(dir.join("set.par2")),
+            files: vec![member],
+            block_size: Some(8192),
+            recovery_count: Some(1),
+            ..Default::default()
+        };
+        // The blocker. Asserted to be the name the rename actually
+        // wants, so the test cannot pass by aiming at the wrong file.
+        let blocked = dir.join("set.vol0+1.par2");
+        assert_eq!(
+            final_volume_names("set", &["set.vol000+01.par2".to_string()], 0, 1, false),
+            vec!["set.vol0+1.par2".to_string()],
+            "the final name this test blocks is not the one the create asks for"
+        );
+        std::fs::create_dir(&blocked).unwrap();
+
+        let code = run(&opts, &mut crate::out::Sink::buffered());
+        assert_ne!(
+            code,
+            crate::EXIT_SUCCESS,
+            "a create that could not publish its final names claimed success"
+        );
+        assert!(
+            blocked.is_dir(),
+            "the create must not have removed what was in its way"
+        );
+        // And the bytes are still there under the engine's spelling, so
+        // the failure is a naming one and nothing was thrown away.
+        assert!(
+            dir.join("set.vol000+01.par2").is_file(),
+            "the recovery volume itself went missing"
+        );
+
+        // The control arm: the same create with nothing in the way both
+        // succeeds AND publishes the final name, so the refusal above is
+        // the rename and not the create.
+        let _ = std::fs::remove_dir(&blocked);
+        let code = run(&opts, &mut crate::out::Sink::buffered());
+        assert_eq!(code, crate::EXIT_SUCCESS);
+        assert!(blocked.is_file(), "the final name was never published");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// THE PLUMB for `--comment`, which is the half this repo has
     /// shipped broken twice (`-m` and `-t` both parsed onto `Options`
@@ -1301,6 +1843,132 @@ mod tests {
         assert_eq!(strip_par2_suffix("movie"), "movie");
         assert_eq!(strip_par2_suffix(".par2"), "");
         assert_eq!(strip_par2_suffix("par2"), "par2");
+    }
+
+    /// A temp directory with one 30 KB source in it, for the
+    /// no-clobber arms below, plus the `Options` a plain
+    /// `parfast c -s2048 -c1 set.par2 a.bin` parses to.
+    fn one_member_create(tag: &str) -> (PathBuf, Options) {
+        let dir = std::env::temp_dir().join(format!(
+            "parfast-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("a.bin");
+        std::fs::write(&src, (0..30_000u32).map(|i| i as u8).collect::<Vec<u8>>()).unwrap();
+        let opts = Options {
+            par2: Some(dir.join("set.par2")),
+            files: vec![src],
+            block_size: Some(2048),
+            recovery_count: Some(1),
+            ..Default::default()
+        };
+        (dir, opts)
+    }
+
+    /// `--no-clobber` over an existing INDEX: the engine's own
+    /// `O_EXCL` door answers, the command fails, and the file is
+    /// untouched.
+    #[test]
+    fn no_clobber_refuses_an_existing_index() {
+        let (dir, mut opts) = one_member_create("noclobber-index");
+        opts.no_clobber = true;
+        let theirs = b"the set whose volumes are still beside it".to_vec();
+        std::fs::write(dir.join("set.par2"), &theirs).unwrap();
+
+        assert_eq!(
+            run(&opts, &mut crate::out::Sink::buffered()),
+            crate::EXIT_FILE_IO_ERROR
+        );
+        assert_eq!(std::fs::read(dir.join("set.par2")).unwrap(), theirs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--no-clobber` over an existing FINAL volume name, which the
+    /// engine's door alone does NOT cover.
+    ///
+    /// The engine writes `set.vol000+01.par2` and this crate renames it
+    /// to par2cmdline's field widths afterwards, so a `set.vol0+1.par2`
+    /// already on disk is a name the engine never opens and
+    /// `std::fs::rename` would replace without a word. `rename_volumes`
+    /// is where that is refused; the create then reports the same
+    /// "could not be given their final names" failure as any other
+    /// blocked rename, and deletes nothing.
+    #[test]
+    fn no_clobber_refuses_an_existing_final_volume_name() {
+        let (dir, mut opts) = one_member_create("noclobber-final");
+        opts.no_clobber = true;
+        let theirs = b"an earlier run's only recovery volume".to_vec();
+        let final_name = dir.join("set.vol0+1.par2");
+        std::fs::write(&final_name, &theirs).unwrap();
+
+        assert_eq!(
+            run(&opts, &mut crate::out::Sink::buffered()),
+            crate::EXIT_FILE_IO_ERROR
+        );
+        assert_eq!(
+            std::fs::read(&final_name).unwrap(),
+            theirs,
+            "the rename replaced the file --no-clobber was protecting"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE CONTROL ARM. par2cmdline overwrites and parfast is a
+    /// drop-in, so a bare `parfast c` over an existing set still
+    /// replaces it - index, engine name and final name alike. A change
+    /// to the default would be a divergence the conformance table
+    /// cannot see, because no captured row re-runs a create over its
+    /// own output.
+    #[test]
+    fn the_default_create_still_overwrites_an_existing_set() {
+        let (dir, opts) = one_member_create("clobber-default");
+        std::fs::write(dir.join("set.par2"), b"old index").unwrap();
+        std::fs::write(dir.join("set.vol0+1.par2"), b"old volume").unwrap();
+
+        assert_eq!(
+            run(&opts, &mut crate::out::Sink::buffered()),
+            crate::EXIT_SUCCESS
+        );
+        assert!(std::fs::metadata(dir.join("set.par2")).unwrap().len() > 64);
+        assert!(
+            std::fs::metadata(dir.join("set.vol0+1.par2"))
+                .unwrap()
+                .len()
+                > 64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And a `--no-clobber` create with nothing in its way writes the
+    /// ordinary set: the switch refuses a collision, it does not change
+    /// what is written.
+    #[test]
+    fn no_clobber_over_an_empty_directory_writes_the_ordinary_set() {
+        let (clean_dir, clean) = one_member_create("noclobber-clean");
+        let (plain_dir, plain) = one_member_create("noclobber-plain");
+        let mut clean_opts = clean;
+        clean_opts.no_clobber = true;
+
+        assert_eq!(
+            run(&clean_opts, &mut crate::out::Sink::buffered()),
+            crate::EXIT_SUCCESS
+        );
+        assert_eq!(
+            run(&plain, &mut crate::out::Sink::buffered()),
+            crate::EXIT_SUCCESS
+        );
+        for name in ["set.par2", "set.vol0+1.par2"] {
+            assert_eq!(
+                std::fs::read(clean_dir.join(name)).unwrap(),
+                std::fs::read(plain_dir.join(name)).unwrap(),
+                "--no-clobber changed the bytes of {name}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&clean_dir);
+        let _ = std::fs::remove_dir_all(&plain_dir);
     }
 }
 

@@ -276,7 +276,13 @@ public class PlannerTests
 
         Assert.Equal([4, 4, 4, 4, 4], plan.Files.Skip(1).Select(f => f.Blocks));
         Assert.Contains("-u", plan.Command, StringComparison.Ordinal);
-        Assert.DoesNotContain("-n", plan.Command, StringComparison.Ordinal);
+        // No `-n` SWITCH, asserted over the tokens rather than as a substring of the
+        // whole line: `--no-clobber` contains the two characters `-n`, so the substring
+        // spelling this used to carry started failing the moment the line grew that
+        // switch on 17 September 2026 - a red that named nothing about volume counts at
+        // all. `--no-clobber` contains `-c` too, so the same trap is waiting for any
+        // later assertion written the short way.
+        Assert.DoesNotContain(plan.Command.Split(' '), t => t.StartsWith("-n", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -560,6 +566,32 @@ public class PlannerTests
         Assert.DoesNotContain("-R", plan.Command, StringComparison.Ordinal);
         Assert.EndsWith(@"C:\set\set.par2 C:\set\part01.rar C:\set\part02.rar", plan.Command,
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// command: the line carries the Overwrite decision, both ways round.
+    /// </summary>
+    /// <remarks>
+    /// The engine's <c>command_args</c> has spelled <c>--no-clobber</c> since
+    /// 17 September 2026 and this mock did not, which
+    /// <c>PlannerParityTests</c> caught on every one of its cases at once. The parity
+    /// test is the stronger claim and it is COMPILED PAST on a box with no cdylib, so
+    /// the value assertion lives here too: the mock is exactly what draws the pane on
+    /// such a box, and a pane that protects the set while handing the user a line that
+    /// overwrites it is the pane lying about the one tick that decides whether a file
+    /// survives. The ticked arm is beside it so the switch is conditional rather than
+    /// unconditional - the way the engine's own test is written.
+    /// </remarks>
+    [Fact]
+    public void TheCopiedLineCarriesTheOverwriteDecision()
+    {
+        var spec = Spec(BlockSpec.BySize(Mib), RecoverySpec.ByCount(2));
+
+        var guarded = MockPlanner.Plan(spec with { Overwrite = false }, Sources(10 * Mib));
+        Assert.Contains("--no-clobber", guarded.Command, StringComparison.Ordinal);
+
+        var plain = MockPlanner.Plan(spec with { Overwrite = true }, Sources(10 * Mib));
+        Assert.DoesNotContain("--no-clobber", plain.Command, StringComparison.Ordinal);
     }
 
     [Fact]

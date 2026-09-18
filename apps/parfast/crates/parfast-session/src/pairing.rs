@@ -84,13 +84,21 @@ pub fn shape_of(spec: &JobSpec, settings: &Settings) -> Option<PairShape> {
     if create.first_recovery_block != 0 {
         return None;
     }
-    let members = planner::expand_sources(
+    // `left_out` is DROPPED here on purpose and this is the one call
+    // site where that is right: this function answers "are these two
+    // creates a pair the scheduler may fuse", not "what will the user
+    // be told". The run and the preview both expand again and both
+    // state it; a scheduler hint that also emitted warnings would
+    // publish the same sentence a third time from a place with no pane
+    // to put it in.
+    let expanded = planner::expand_sources(
         &create.sources,
         create.path_mode,
         create.base_path.as_deref(),
+        planner::SourceRules::Par2,
     )
     .ok()?;
-    let [only] = members.as_slice() else {
+    let [only] = expanded.members.as_slice() else {
         return None;
     };
     let preview = planner::preview(create).ok()?;

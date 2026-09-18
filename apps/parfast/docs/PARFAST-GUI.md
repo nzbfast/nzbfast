@@ -6,14 +6,14 @@ the guide to the desktop app. The command line tool of the same name is
 covered by `parfast --help`, and the two share one engine, so anything
 the app can do the command line can do as well.
 
-> **The app is an ALPHA.** It builds, it passes a measured acceptance
-> corpus on both platforms, and the screenshots below are of the real
-> thing - but it has not been lived with, and nobody has yet spent a day
-> driving it by hand. Expect rough edges. The engine underneath is the
-> one the parfast command line tool ships, which is further along; it is
-> the app around it that is new. Where the app and this page disagree,
-> the app is right and this page is behind: please say so if you find a
-> difference.
+> **The app is a BETA.** It builds, it passes a measured acceptance
+> corpus on both platforms, it has been driven by hand, and the
+> screenshots below are of the real thing - but it is younger than the
+> engine inside it. Expect the odd rough edge. That engine is the one
+> the parfast command line tool ships, and that tool is a full release
+> as of 1.6.0; it is the app around it that is newer. Where the app and
+> this page disagree, the app is right and this page is behind: please
+> say so if you find a difference.
 
 ## What PAR2 is for, in one paragraph
 

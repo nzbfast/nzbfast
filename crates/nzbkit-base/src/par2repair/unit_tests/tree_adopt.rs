@@ -101,13 +101,59 @@ fn a_payload_obfuscated_inside_the_tree_is_adopted_under_its_declared_name() {
         a,
         "and it lands at the path the set names, not flattened to the root"
     );
-    // The source is this directory's own junk and is spendable: a
-    // subdirectory of the repair dir starts_with it, which is the same
-    // ownership test the flat scan always applied.
-    assert_eq!(
-        report.consumed_sources,
-        [dir.join("VIDEO_TS").join("0f9a7c")]
+    // The source is this directory's own junk, and since 17 Sep 2026 it
+    // is not COPIED and swept but MOVED: a candidate the fast path
+    // proved is the member whole is landed by a rename, so there is no
+    // second copy of the payload to report and nothing for the caller
+    // to delete (claim `sab-whole-match-rename-not-rewrite`). Both
+    // halves are pinned, because "renamed" and "swept" leave the same
+    // directory and only the first leaves it without writing the
+    // payload twice - the ownership test this row was written for is
+    // unchanged and still applies, a subdirectory of the repair dir
+    // starting_with it exactly as the flat scan always required.
+    assert_eq!(report.files_renamed, ["VIDEO_TS/VTS_01_1.VOB"]);
+    assert!(
+        report.consumed_sources.is_empty(),
+        "a renamed donor has no path left to sweep: {:?}",
+        report.consumed_sources
     );
+    assert!(!dir.join("VIDEO_TS").join("0f9a7c").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The whole-file RENAME into a directory that does not exist yet: the
+/// set declares a tree path, the donor sits flat at the root under a
+/// hash name, and nothing has created the subdirectory.
+///
+/// The rename is landed past the patch loop, which is the only place
+/// that calls `create_out_dirs`, so an implementation that simply
+/// dropped a renamed target out of that loop renames into ENOENT and
+/// reports the member as unpublished - with the bytes sitting right
+/// there on disk. Caught while writing the rename
+/// (claim `sab-whole-match-rename-not-rewrite`), pinned here.
+#[test]
+fn a_whole_file_rename_makes_the_tree_directory_it_lands_in() {
+    let dir = tmpdir("x602-tree-rename-mkdir");
+    let a = payload(200, 7);
+    let files: &[(&str, &[u8])] = &[("VIDEO_TS/VTS_01_1.VOB", &a)];
+    // FLAT at the root, and no `VIDEO_TS` anywhere.
+    std::fs::write(dir.join("0f9a7c"), &a).unwrap();
+    std::fs::write(dir.join("set.par2"), par2_index(SET, BS, files)).unwrap();
+
+    let outcomes = repair_present_or_renamed_sets(&dir).expect("fallback runs");
+    assert_eq!(outcomes.len(), 1);
+    let report = match outcomes[0].status.as_ref().expect("set repairs") {
+        RepairStatus::Repaired(r) => r,
+        other => panic!("expected Repaired, got {other:?}"),
+    };
+    assert_eq!(report.files_renamed, ["VIDEO_TS/VTS_01_1.VOB"]);
+    assert_eq!(
+        std::fs::read(dir.join("VIDEO_TS").join("VTS_01_1.VOB")).unwrap(),
+        a,
+        "the member must land at the path the set names, in a directory \
+         this repair had to create for it"
+    );
+    assert!(!dir.join("0f9a7c").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

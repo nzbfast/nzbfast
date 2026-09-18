@@ -1038,11 +1038,25 @@ pub fn sevenz_needs_password(path: &std::path::Path) -> bool {
     let Ok(mut f) = std::fs::File::open(path) else {
         return false;
     };
-    if sevenz_disk_header_bomb(&mut f) || f.seek(io::SeekFrom::Start(0)).is_err() {
+    sevenz_reader_needs_password(&mut f)
+}
+
+/// [`sevenz_needs_password`] over an open BYTE SPACE rather than a path,
+/// which is the same question asked of a container that is not one file.
+///
+/// A 7-Zip set posted as `name.7z.001`, `name.7z.002`, ... is ONE
+/// container cut into pieces, and its end header - the part that answers
+/// the password question - lives at the END, so the last part is where
+/// the answer is and probing part one alone finds nothing at all. The
+/// caller joins the parts (`rarfix::sevenz::SplitParts`) and asks here.
+/// Same semantics as the path face in every other way, including
+/// answering false for anything that is not a readable 7z.
+pub fn sevenz_reader_needs_password(f: &mut (impl Read + Seek)) -> bool {
+    if sevenz_disk_header_bomb(f) || f.seek(io::SeekFrom::Start(0)).is_err() {
         return false;
     }
     matches!(
-        sevenz_rust2::Archive::read(&mut f, &sevenz_rust2::Password::default()),
+        sevenz_rust2::Archive::read(f, &sevenz_rust2::Password::default()),
         Err(sevenz_rust2::Error::PasswordRequired) | Err(sevenz_rust2::Error::MaybeBadPassword(_))
     )
 }

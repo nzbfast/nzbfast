@@ -301,6 +301,17 @@ select{background:var(--surface);color:var(--fg);border:1px solid var(--line);
 #chips.fadeR{--fadeR:#000 calc(100% - 46px),transparent 100%}
 #chips .chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
 #chips .gsep{flex:none;width:1px;background:var(--line);margin:2px 4px}
+/* GH #76: the newsgroup filter pill. Its own row rather than a chip in
+   #chips, because #chips is hidden on the Releases table and this filter
+   applies to BOTH surfaces - parked in there it would be an active
+   filter with nothing on screen saying so, on exactly the surface the
+   group browser hands off into. */
+#grpbar{max-width:1660px;margin:0 auto;padding:10px 22px 0;display:none;
+  gap:7px;align-items:center;flex-wrap:wrap}
+#grpbar.on{display:flex}
+#grpbar .chip{background:var(--acc);border-color:var(--acc);color:#fff;
+  display:inline-flex;align-items:center;gap:7px}
+#grpbar .chip b{font-weight:600;font-variant-numeric:tabular-nums}
 .wallhead{grid-column:1/-1;font-size:12px;text-transform:uppercase;
   letter-spacing:.08em;color:var(--dim);font-weight:650;padding:10px 2px 0;
   border-bottom:1px solid var(--line);margin-bottom:2px}
@@ -904,6 +915,8 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
 
 <!-- M30: genre + quality filter chips (grid views only). -->
 <div id="chips"></div>
+<!-- GH #76: the active newsgroup filter, on both surfaces. -->
+<div id="grpbar"></div>
 <div id="suggest"></div>
 <!-- M31b: "Because you watch …" caption, shown under the bar while the
      For-you (affinity) sort is active and a taste profile exists. -->
@@ -1187,7 +1200,11 @@ let wtotal = 0, wseq = 0, wloading = false, wsig = '';
 // Deliberately the stand-down reason and not the mid-pass bit: that one
 // is false for the whole post-pass database section and the gap between
 // passes, so a healthy install would flip copy every poll.
-let idxGroups = -1, unmTotal = 0, idxPaused = false;
+// `unmBusy` is that probe REFUSED: the pile behind the filter is
+// unknown, not zero. Without it a refusal falls into `unmTotal = 0` and
+// the empty state tells the "truly nothing indexed" story - the exact
+// ambiguity the probe was added to resolve, resolved the wrong way.
+let idxGroups = -1, unmTotal = 0, idxPaused = false, unmBusy = false;
 // Matched-only filter (default ON): hide cards with no artwork AND no
 // enriched metadata - the unmatched/obfuscated clutter. Persisted.
 let matchedOnly = localStorage.nzbfastWallMatched !== 'off';
@@ -1196,6 +1213,12 @@ let hiddenCount = 0;
 let catGroup = localStorage.nzbfastWallGroup === 'on';
 let genreSel = localStorage.nzbfastWallGenre || '';
 let resSel = '', decSel = ''; // decade: 'min-max' ('0-1979' = older)
+// GH #76: the newsgroup filter. Deliberately NOT persisted, unlike
+// genreSel above: a genre is a taste and survives a reload usefully,
+// whereas this arrives from an act - the dashboard's group browser
+// handing off, or a click on a row's own group badge - and a narrowing
+// the user cannot remember making is one they read as an empty index.
+let grpSel = '';
 // 24D: user-defined categories ({slug,name}), served on wall2/browse
 // responses - each gets its own tab chip and section label.
 let customCats = [], _catsSig = '';
@@ -1574,6 +1597,11 @@ function render(){
     let msg;
     if(q||tab||genreSel||resSel||decSel){
       msg=t('wall.nomatch','No matches.');
+    } else if(matchedOnly && unmBusy){
+      // The probe was refused, so whether the filter is hiding a pile
+      // is unknown. The three branches below all state something about
+      // the index that nothing established on this pass.
+      msg=t('wall.empty.unmbusy','The index is busy right now, so it could not say whether Matched only is hiding anything. Wait a moment and try again.');
     } else if(matchedOnly && unmTotal>0){
       msg=`${t('wall.empty.filtered','Everything indexed so far is unmatched, and Matched only hides it.')}`+
         `<div style="margin-top:14px"><button class="chip" style="padding:7px 14px;font-size:13px" id="emptyUnm">`+
@@ -1686,6 +1714,38 @@ function renderChips(){ setTimeout(chipFades,0);
     +`<span class="gsep"></span>`
     +DECADES.map(([lab,val])=>`<button class="chip${decSel===val?' on':''}" aria-pressed="${decSel===val}" data-dec="${val}">${lab}</button>`).join('');
 }
+// GH #76: the active newsgroup filter, as one dismissible pill.
+// Rendered on BOTH surfaces (see the #grpbar rule): the group browser in
+// the dashboard hands off into the table, and the same filter narrows
+// the poster grid, so the one thing it must never be is invisible.
+// The filter as a query-string fragment. One builder, because four
+// fetches carry it (the flat list, its nested rows, the grouped list and
+// the poster grid) and a filter that reached three of them would be the
+// "Group by title" toggle silently widening the answer.
+function grpQS(){ return grpSel?`&group=${encodeURIComponent(grpSel)}`:''; }
+function renderGrpBar(){
+  const box=document.getElementById('grpbar');
+  box.classList.toggle('on',!!grpSel);
+  if(!grpSel){ box.innerHTML=''; return; }
+  box.innerHTML=`<button class="chip" id="grpclear"
+    title="${esc(t('wall.grp.clear','Show every newsgroup again'))}">${
+    t('wall.grp.only','Newsgroup: {g}',{g:`<b dir="ltr">${esc(grpSel)}</b>`})} ✕</button>`;
+}
+// The one way the filter changes, so the pill, the page number and the
+// refetch can never come apart. `name` empty clears it.
+function setGrpFilter(name){
+  const next=(name||'').trim();
+  if(next===grpSel) return;
+  grpSel=next;
+  lpage=0;
+  renderGrpBar();
+  // Whichever surface is showing asks again; the other one picks the
+  // filter up from `grpSel` the next time it fetches.
+  if(view==='releases') browseFetch(); else wallFetch(true);
+}
+document.getElementById('grpbar').addEventListener('click',e=>{
+  if(e.target.closest('#grpclear')) setGrpFilter('');
+});
 document.getElementById('chips').addEventListener('click',e=>{
   const b=e.target.closest('button'); if(!b) return;
   if(b.dataset.genre!=null){
@@ -1748,11 +1808,23 @@ async function renderStrips(){
     // reached anything you had not already seen.
     const seen=new Set();
     const fresh=list=>list.filter(c=>!seen.has(c.key)&&seen.add(c.key));
+    // A refused read is not an empty rail. `wall2` answers
+    // {status:false} rather than an empty `cards` list when the read
+    // pool is saturated or the query could not run, on purpose, so the
+    // page can tell "nothing to suggest" from "nobody looked" - and
+    // reading `j.cards||[]` here turns all three rails into silence,
+    // which is the discovery surface saying "we have nothing for you"
+    // about a shelf it never opened. One shared line beats three
+    // vanished rails: the rails are not independent answers, they are
+    // three views of the same index, so three copies of the same
+    // sentence would say nothing extra.
+    let busy=false;
     const taste=await api('taste','').catch(()=>({}));
     if(seq!==stripSeq) return;
     if((taste.n_signals>0)&&(taste.genres||[]).length){
       const ja=await api('wall2',`&sort=affinity&limit=14&matched=1&all=0${cat}`);
       if(seq!==stripSeq) return;
+      if(ja.status===false) busy=true;
       const recs=fresh((ja.cards||[]).map(toCard));
       if(recs.length) html+=`<div class="strip">
         <h2>${t('wall.strip.foryou','Recommended for you')}</h2>
@@ -1767,6 +1839,7 @@ async function renderStrips(){
     // gave us one, and falls back to the year otherwise.
     const jn=await api('wall2',`&sort=aired&limit=14&matched=1&all=0${cat}`);
     if(seq!==stripSeq) return;
+    if(jn.status===false) busy=true;
     const neu=fresh((jn.cards||[]).map(toCard));
     if(neu.length) html+=`<div class="strip">
       <h2>${tab==='movie'
@@ -1775,10 +1848,16 @@ async function renderStrips(){
       <div class="striprow">${neu.map(cardHtml).join('')}</div></div>`;
     const j=await api('wall2',`&sort=releases&limit=14&matched=1&all=0${cat}`);
     if(seq!==stripSeq) return;
+    if(j.status===false) busy=true;
     const hot=fresh((j.cards||[]).filter(c=>(c.n||0)>=3).map(toCard));
     if(hot.length) html+=`<div class="strip">
       <h2>${t('wall.strip.hot','Hot right now · most posted')}</h2>
       <div class="striprow">${hot.map(cardHtml).join('')}</div></div>`;
+    // Said whether or not a rail survived: a partial set is the same
+    // kind of quiet lie as none at all, and the rows that did render
+    // give no hint that another was asked for and refused.
+    if(busy) html+=`<div class="strip"><div class="dim" style="padding:2px 0 6px">`+
+      `${t('wall.strip.busy','The index is busy right now. These suggestions fill in once it catches up.')}</div></div>`;
     box.innerHTML=html;
   }catch(e){ if(seq===stripSeq) box.innerHTML=''; }
 }
@@ -2010,6 +2089,19 @@ async function grab(id, play){
   // daemon would otherwise hold it silently (see askDupe).
   let dupeOk='';
   const chk=await api('index_dupe',`&id=${id}`);
+  // A refusal is not "no duplicate". `m_index_dupe` reads the index
+  // through `index_read_checked` precisely so a saturated pool answers
+  // busy rather than claiming the release is not there, and `busy` is
+  // what tells that apart from this endpoint's OTHER false answer -
+  // "release not found", which is a real answer about this id and one
+  // the `index_get` below reports for itself. Falling through a refusal
+  // reads it as "not a duplicate" and puts back the silent second copy
+  // the comment above says this check exists to prevent. A grab is
+  // cheap to repeat; a duplicate nobody was told about is not.
+  if(chk.busy){
+    toast(t('wall.dupe.busy','The index is busy right now, so we could not check whether you already have this. Wait a moment and try again.'), true);
+    return;
+  }
   if(chk.status&&chk.dupe){
     const choice=await askDupe(chk, play);
     if(!choice) return;
@@ -2493,9 +2585,17 @@ function emptyRowHtml(){
 // reads `[data-sel]`, which in grouped mode matches only rows the user
 // had already expanded - so "select everything" selected nothing on a
 // freshly grouped page, with no error and no clue.
+// The relCache key for one title: the title plus EVERY filter that
+// narrows a nested release list. One builder because four call sites
+// spell it, and they were spelling it twice already - a key that grew a
+// field at one of them and not the others would silently re-render rows
+// under a filter that excludes them, which is the exact defect the
+// `|complete` half was added to fix (see toggleExp).
+function relKey(k){
+  return `${k}|${document.getElementById('onlyComplete').checked?1:0}|${grpSel}`;
+}
 function grpLoaded(c){
-  const rows=relCache.get(`${c.key}|${document.getElementById('onlyComplete').checked?1:0}`);
-  return rows||[];
+  return relCache.get(relKey(c.key))||[];
 }
 // The rows this title puts ON THE PAGE. The fetch asks for cap+1 to
 // detect the cut, so the extra one is never rendered and never
@@ -2548,11 +2648,10 @@ function renderGroups(){
   if(!lgroups||!lgroups.length){
     body.innerHTML=emptyRowHtml();
   } else {
-    // Same composite key toggleExp caches under, so nested rows always
-    // match the filter the parent rows were fetched with.
-    const ck=k=>`${k}|${document.getElementById('onlyComplete').checked?1:0}`;
     body.innerHTML=lgroups.map(c=>{
-      const all=gexp.has(c.key)?relCache.get(ck(c.key)):null;
+      // Same composite key toggleExp caches under, so nested rows always
+      // match the filter the parent rows were fetched with.
+      const all=gexp.has(c.key)?relCache.get(relKey(c.key)):null;
       if(!all) return grpRow(c);
       const lim=relLimit.get(c.key)||REL_PAGE;
       const rows=all.slice(0,lim);
@@ -2594,8 +2693,12 @@ function capMap(m,cap,keep){
 // full release list per expanded title - and an eviction there costs
 // only the refetch the first expand paid.
 const REL_CACHE_MAX=200, REL_LIMIT_MAX=500, HOV_CACHE_MAX=300;
-// relCache is keyed `title|complete`; the expanded set is keyed by title.
-const relCacheKeep=k=>gexp.has(k.slice(0,k.lastIndexOf('|')));
+// relCache is keyed by `relKey` (title + the narrowing filters); the
+// expanded set is keyed by title alone. Split at the FIRST separator, not
+// the last: a title key carries no '|' and the filters may be several
+// fields, so lastIndexOf kept a filter on the title and protected
+// nothing.
+const relCacheKeep=k=>gexp.has(k.slice(0,k.indexOf('|')));
 async function toggleExp(k){
   if(gexp.has(k)){ gexp.delete(k); renderGroups(); return; }
   gexp.add(k);
@@ -2608,11 +2711,14 @@ async function toggleExp(k){
   // cannot be acted on. It also meant nested availability never refreshed
   // for the session while the parents kept updating on the 45 s tick.
   const complete=document.getElementById('onlyComplete').checked?1:0;
-  const ck=`${k}|${complete}`;
+  // GH #76: the newsgroup filter is part of the key for the SAME reason
+  // completeness is - a nested list cached under one filter and
+  // re-rendered under another shows rows the parent row is excluding.
+  const ck=relKey(k);
   if(!relCache.has(ck)){
     try{
       const j=await api('index_browse',
-        `&title_key=${encodeURIComponent(k)}&all=1&complete=${complete}`+
+        `&title_key=${encodeURIComponent(k)}&all=1&complete=${complete}`+grpQS()+
         // One MORE than the cap, deliberately: whether the list was
       // cut is then a fact about this response rather than a guess from
       // the parent's release count, which counts releases the
@@ -2641,7 +2747,7 @@ async function groupFetch(seq){
     const j=await api('wall2',
       `&cat=${encodeURIComponent(tab||'all')}&q=${encodeURIComponent(q)}`+
       `&sort=${sort}&dir=${curDesc()?'desc':'asc'}&complete=${complete}`+
-      `&limit=${LPAGE}&offset=${lpage*LPAGE}&matched=0&all=0`);
+      `&limit=${LPAGE}&offset=${lpage*LPAGE}&matched=0&all=0`+grpQS());
     if(seq!==lseq) return;
     if(j.error){ toast(tErr(j.error), true); return; }
     updateCats(j.cats);
@@ -2688,7 +2794,8 @@ async function browseFetch(){
       wantLocal
         ? api('index_browse',
           `&cat=${encodeURIComponent(tab||'all')}&q=${encodeURIComponent(q)}`+
-          `&sort=${sort}&dir=${dir}&complete=${complete}&limit=${LPAGE}&offset=${lpage*LPAGE}`)
+          `&sort=${sort}&dir=${dir}&complete=${complete}&limit=${LPAGE}&offset=${lpage*LPAGE}`+
+          grpQS())
         : Promise.resolve({results:[],total:0}),
       wantExt
         ? api('indexer_search',`&q=${encodeURIComponent(q)}&kind=${encodeURIComponent(kindMap[tab]||'')}`)
@@ -2790,7 +2897,11 @@ function nameBadges(r){
   if(!r.pre && r.nameable)
     b.push(`<button class="nbadge sugg" onclick="event.stopPropagation();rarName(${r.id},this)"
       title="${esc(t('wall.rarname.title','Reads one to three articles of this post and looks for the real file name inside the archive. Nothing is downloaded and nothing is renamed on disk.'))}">${t('wall.rarname','name this')}</button>`);
-  if(r.group) b.push(`<span class="nbadge" dir="ltr" title="${esc(r.group)}">${esc(r.group)}</span>`);
+  // GH #76: the badge is the filter's second way in - from a release you
+  // are looking at to every release beside it. stopPropagation because
+  // the row itself opens the title sheet.
+  if(r.group) b.push(`<button class="nbadge" dir="ltr" data-grpfilter="${esc(r.group)}"
+    title="${esc(t('wall.grp.badge','Show only releases posted to {g}',{g:r.group}))}">${esc(r.group)}</button>`);
   return b.length?`<div class="brow">${b.join('')}</div>`:'';
 }
 function actCell(r){
@@ -3309,6 +3420,14 @@ async function openCard(k){
     // with no art, no synopsis, no rating - while the card-scoped wall2
     // query had all of it. Hydrate in parallel with the release fetch;
     // the sheet re-renders below either way.
+    // api-contract-gate: a refused hydrate leaves the STUB card, which
+    // states nothing false - a blank title and no art are visibly absent
+    // rather than wrongly asserted - while the release list beside it
+    // still fills from index_browse, which blocks rather than refusing.
+    // Dropping the stub instead would have to not disturb the sheet
+    // already holding it by reference, so this is a known honest
+    // degradation rather than a line of fix. Examined twice, 16 and
+    // 17 Sep 2026, and left alone both times.
     api('wall2', `&key=${encodeURIComponent(k)}&limit=1`).then(j=>{
       const m=j&&j.cards&&j.cards[0];
       if(!m || seq!==openSeq) return;
@@ -3474,10 +3593,16 @@ async function openPreCand(id){
   sheetOpen();
   const j=await api('pre_candidates',`&id=${id}`).catch(()=>null);
   const cands=(j&&j.candidates)||[];
+  // Same shape as fixSearch above, one layer down: `pre_candidates`
+  // reads the index through `index_read_checked` so that a busy pool
+  // cannot answer an empty list as success. Honour that here - the
+  // no-fit line below would report "no announcement fits" for a post
+  // nothing actually looked at.
+  const busy=!!(j&&j.status===false);
   sheet.innerHTML=`<div class="pbody">
     <h3 id="sheetTitle" style="margin:0 0 4px">${t('wall.cand.title','Which release is this?')}</h3>
     <div class="dim" style="font-size:12.5px;margin-bottom:10px">${t('wall.cand.sub','Pre announcements whose timing and size fit this post, best first. Nothing is renamed on disk either way.')}</div>
-    ${cands.length?cands.map(c=>`
+    ${busy?`<div class="dim" style="padding:8px 0">${t('wall.cand.busy','The index is busy right now. Wait a moment and open this again.')}</div>`:cands.length?cands.map(c=>`
       <div style="display:flex;align-items:center;gap:10px;padding:7px 2px;border-top:1px solid var(--line)">
         <div style="flex:1;min-width:0">
           <div dir="ltr" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</div>
@@ -3824,6 +3949,22 @@ async function fixSearch(btn){
   try{
     const j=await api('wall_search',`&q=${encodeURIComponent(q)}&kind=${kind}`);
     fixCands=j.candidates||[];
+    // A refusal is the metadata provider pacing us out, and it is the
+    // only one this endpoint can emit that reaches here - its other
+    // refusal is the empty query, which `q` above already returned on.
+    // The daemon refuses instead of answering an empty list precisely
+    // so this does not read as "no such title"; rendering the no-match
+    // line here would put back the lie it refused to tell. The user's
+    // move is to wait and press Search again, not to retype.
+    // Judged at the display edge with a plain t() key rather than
+    // tErr(): tErr keys on the exact wire sentence, so an err.* key
+    // would silently un-translate 27 locales the day the Rust string is
+    // reworded (TODO.md house rule), while a t() call is scraped by
+    // web/i18n/extract.js on its own.
+    if(!j.status){
+      document.getElementById('fixres').innerHTML=`<div class="dim" style="padding:6px 2px">${t('wall.fx.busy','The metadata provider is busy right now. Wait a moment and search again.')}</div>`;
+      return;
+    }
     document.getElementById('fixres').innerHTML=fixCands.length?fixCands.map((c,i)=>`
       <div class="cand" onclick="applyCand(${i})" title="${esc(t('wall.fx.use','Use this match'))}">
         ${c.poster_url?`<img src="${esc(c.poster_url)}" loading="lazy" alt="">`:`<div class="cph"></div>`}
@@ -3866,6 +4007,32 @@ async function mergeSearch(btn){
   btn.disabled=true; const old=btn.textContent; btn.textContent=t('wall.busy.searching','Searching…');
   try{
     const j=await api('wall2',`&q=${encodeURIComponent(q)}&limit=8&matched=0&all=1&sort=releases`);
+    // A refused read is not "no such title". `wall2` answers
+    // {status:false} rather than an empty `cards` list when the read pool
+    // is saturated or the query could not run, on purpose, so the page can
+    // tell "nothing matched" from "nobody looked" - and the no-match line
+    // below is exactly the lie it refused to tell. It costs more here than
+    // on a rail: the person is looking for the card to merge INTO, so "No
+    // matches." reads as "that title is not on the wall", and what it
+    // invites is giving up or typing a different title - after which the
+    // releases stay split across two cards, which is the thing M30 exists
+    // to undo. It does not self-heal either, unlike renderPeopleBar's
+    // type-ahead: this is a button press, so the answer sits there until
+    // the person presses it again. fixSearch sixty lines above says the
+    // same thing about its own endpoint for the same reason.
+    // `status===false` and NOT `!j.status`: a SERVED wall2 answer carries
+    // no `status` field at all, so the negation would report every
+    // successful search as a refusal. It covers both of this endpoint's
+    // false answers - the `why.refusal()` that carries `busy`, and the
+    // plain "index unavailable" - because neither of them looked.
+    // Judged at the display edge on a plain t() key rather than tErr():
+    // tErr keys on the exact wire sentence, so an err.* key would
+    // silently un-translate 27 locales the day the Rust string is
+    // reworded (TODO.md house rule).
+    if(j.status===false){
+      document.getElementById('mergeres').innerHTML=`<div class="dim" style="padding:6px 2px">${t('wall.fx.merge.busy','The index is busy right now. Wait a moment and search again.')}</div>`;
+      return;
+    }
     mergeCands=(j.cards||[]).filter(c=>c.key!==openKey);
     document.getElementById('mergeres').innerHTML=mergeCands.length?mergeCands.map((c,i)=>`
       <div class="cand" onclick="applyMerge(${i})" title="${esc(t('wall.fx.merge.use','Move all releases into this card'))}">
@@ -3947,6 +4114,7 @@ async function wallFetch(reset){
       `&sort=${sortBy}&dir=${curDesc()?'desc':'asc'}&limit=${WPAGE}&offset=${offset}`+
       `&matched=${matchedOnly?1:0}&all=${matchedOnly?0:1}`+
       `&catgroup=${catGroup?1:0}`+
+      grpQS()+
       (genreSel?`&genre=${encodeURIComponent(genreSel)}`:'')+
       (resSel?`&res=${encodeURIComponent(resSel)}`:'')+
       (decSel?`&year_min=${decSel.split('-')[0]}&year_max=${decSel.split('-')[1]}`:'');
@@ -3965,9 +4133,12 @@ async function wallFetch(reset){
       try{
         const p=await api('wall2','&cat=all&q=&limit=1&offset=0&matched=0&all=1');
         if(seq!==wseq) return;
-        unmTotal=p.total||0;
-      }catch(e){ unmTotal=0; }
-    } else unmTotal=0;
+        // A refused probe never counted anything, so `p.total||0` would
+        // be an answer we do not have. Say so instead.
+        unmBusy=(p.status===false);
+        unmTotal=unmBusy?0:(p.total||0);
+      }catch(e){ unmTotal=0; unmBusy=false; }
+    } else { unmTotal=0; unmBusy=false; }
     const page=(j.cards||[]).map(c=>({
       key:c.key, kind:c.kind, title:c.title, year:c.year||0, aired:c.aired||'',
       genres:c.genres, overview:c.overview, rating:c.rating,
@@ -3998,7 +4169,10 @@ async function wallFetch(reset){
       // itself never changes, so choosing the first newsgroup in
       // another tab left "Choose newsgroups" up forever (review sweep 7,
       // L1). Every input to the empty state belongs in this signature.
-      const sig=`${qs} ${unmTotal} ${idxGroups} ${idxPaused?1:0} ${JSON.stringify(page)}`;
+      // unmBusy rides in it for the same reason unmTotal does: on an
+      // empty page it is the whole story, and a later poll that answers
+      // the probe must repaint "could not check" into the real one.
+      const sig=`${qs} ${unmTotal} ${unmBusy?1:0} ${idxGroups} ${idxPaused?1:0} ${JSON.stringify(page)}`;
       if(sig===wsig && cards.length>=page.length){
         document.getElementById('count').textContent =
           wtotal ? tn('wall.count',wtotal,'{n} title','{n} titles') : '';
@@ -4349,6 +4523,13 @@ async function renderPeopleBar(){
   // Two characters is where a name search stops matching half the index.
   if(q.length<2){ bar.className=''; bar.innerHTML=''; return; }
   const seq=++_peopleSeq;
+  // api-contract-gate: a refused people_search hides the type-ahead bar,
+  // which claims nothing - an absent affordance states no fact about the
+  // index - and it self-heals, because this re-runs on the next keystroke
+  // 250 ms later. That retry is the whole difference between this and the
+  // merge search sixty lines up, which renders a sentence saying there
+  // was no match and waits for a second button press. Examined twice,
+  // 16 and 17 Sep 2026, and left alone both times.
   const j=await api('people_search',`&q=${encodeURIComponent(q)}`).catch(()=>({}));
   if(seq!==_peopleSeq) return;
   const people=j.people||[];
@@ -4528,6 +4709,11 @@ document.getElementById('lbody').addEventListener('click', e=>{
   // compiled as JavaScript - so in an onclick JS-string it neutralised
   // nothing. In a data attribute it is inert and dataset hands back the
   // literal value.
+  // GH #76: the group badge on a row narrows the list to that group.
+  // Delegated for the same reason as the buttons around it - a group
+  // name is provider text and has no business inside an inline handler.
+  const gf=e.target.closest('[data-grpfilter]');
+  if(gf){ e.stopPropagation(); setGrpFilter(gf.dataset.grpfilter); return; }
   const gs=e.target.closest('[data-grab-spot]');
   if(gs){ grabSpot(gs.dataset.grabSpot,gs); return; }
   const gx=e.target.closest('[data-grab-ext]');
@@ -4547,8 +4733,7 @@ document.getElementById('lbody').addEventListener('click', e=>{
     const k=m.dataset.more;
     relLimit.set(k,REL_MAX);
     capMap(relLimit,REL_LIMIT_MAX,k=>gexp.has(k));
-    const complete=document.getElementById('onlyComplete').checked?1:0;
-    relCache.delete(`${k}|${complete}`);
+    relCache.delete(relKey(k));
     gexp.delete(k);
     toggleExp(k);
     return;
@@ -4574,7 +4759,17 @@ function hovFetch(k){
   // caches, because that is an answer.
   if(!hovCache.has(k)){
     hovCache.set(k, api('wall2',`&key=${encodeURIComponent(k)}&matched=0&all=1&limit=1`)
-      .then(j=>(j.cards||[])[0]||null)
+      .then(j=>{
+        // A refusal is not a "no card" answer, so it does not get to
+        // cache like one - the distinction the comment above draws.
+        // `wall2` answers {status:false} rather than an empty `cards`
+        // list when the read pool could not serve the query, and a
+        // resolved promise holding null would pin that non-answer for
+        // the rest of the session, which is the very thing the catch
+        // arm below was added to stop.
+        if(j&&j.status===false){ hovCache.delete(k); return null; }
+        return (j.cards||[])[0]||null;
+      })
       .catch(e=>{ hovCache.delete(k); throw e; }));
     // Evicting the title under the pointer would only cost it one
     // refetch, so no `keep` set here.
@@ -4692,7 +4887,18 @@ document.getElementById('catGroup').checked=catGroup;
 //     whole second and never depends on the browser's clock.
 let tipMark=-1, freshKeys=new Set(), pendKeys=[], pendNew=0, pendLatest=0, freshTimer=0;
 const ovlOpen=()=>document.getElementById('ovl').classList.contains('open');
-const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Same cascade as the dashboard's MOTION_OFF and as the CSS in
+// ui-tokens.html, which this page also serves: an explicit Appearance ->
+// Movement wins in either direction, and only with neither chosen does the
+// OS preference decide. The setting is per browser, so a wall opened from
+// a dashboard where Movement was turned off inherits it (GH #87); reading
+// the media query alone left this page scrolling smoothly regardless.
+const REDUCED=(()=>{
+  const m=document.documentElement.dataset.motion;
+  if(m==='none') return true;
+  if(m==='full') return false;
+  return matchMedia('(prefers-reduced-motion: reduce)').matches;
+})();
 
 async function tipPoll(){
   try{
@@ -4812,6 +5018,29 @@ initArrivals();
       lpage=0;
     }
   }
+  // GH #76: /wall#group=<name> lands with the newsgroup filter already
+  // on. This is the dashboard group browser's hand-off - the way from
+  // "these are my groups" to "show me only this one" without typing a
+  // name back in. Its own arm rather than a shared parse of the hash:
+  // a `#q=` value is a release name and may contain an '&', so the two
+  // are alternatives, never combined, and splitting the hash on '&'
+  // would cut some search links in half.
+  //
+  // Same restraint as `#q=` about the view: the filter narrows both
+  // surfaces and the pill says so on either, so a link does not get to
+  // re-set the user's stored view.
+  const g=/^#group=(.*)$/.exec(location.hash||'');
+  if(g){
+    let name='';
+    try{ name=decodeURIComponent(g[1].replace(/\+/g,' ')); }catch(e){ name=g[1]; }
+    // Straight to the variable, not through setGrpFilter: nothing has
+    // fetched yet, and that helper's job is to refetch.
+    grpSel=name.trim();
+    lpage=0;
+  }
+  // After the arm above, never before it: the pill is what tells the
+  // user a link narrowed their list, and painted first it paints empty.
+  renderGrpBar();
 }
 // setView drives its own fetch; the wall surface boots straight into
 // refresh() (its markup defaults are already wall-shaped).
@@ -4856,6 +5085,9 @@ if(LOCALE!=='en'){
     // List rows repaint from the page we already hold rather than re-asking
     // the daemon; renderList is synchronous, so its count still lands last.
     renderChips();
+    // GH #76: same one-shot-render problem, same fix - the pill's label
+    // is a t() call made before the catalogue landed.
+    renderGrpBar();
     navPillName();
     idxOffPage();
     render();

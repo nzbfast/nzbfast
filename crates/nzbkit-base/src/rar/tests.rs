@@ -1815,36 +1815,28 @@ fn both_set_head_layouts_read_as_volume_zero() {
     assert_eq!(z[1].len(), n[1].len(), "only the HEAD layout differs");
 }
 
-/// FINDING, 16 Sep 2026: the arithmetic placement gate models WinRAR's
-/// set head and only WinRAR's, so a set written by this repo's own
-/// `Rar50VolumeWriter` never reaches [`ArithGate::Place`].
+/// FIXED, 16 Sep 2026 (was: the arithmetic placement gate models
+/// WinRAR's set head and only WinRAR's, so a set written by this repo's
+/// own `Rar50VolumeWriter` never reached [`ArithGate::Place`]).
 ///
-/// `volnum_field_len(0)` answers 0 - "volume 0 spends no bytes on a
-/// volume-number field" - which is true of a [`fixtures::Rar5Head::
-/// Numberless`] head and false of a [`fixtures::Rar5Head::NumberedZero`]
-/// one, and `VolumeMapper` hands the gate the same `Some(0)` for both.
-/// So volume 0's `off_base` comes out one byte above every other
-/// volume's, the header-base consistency check sees a geometry
-/// contradiction, and the gate reports `Numbers`.
+/// Two independent terms refused such a set, both of them the same
+/// mistake - a geometry model built from one archiver's output:
 ///
-/// The consequence is a LOST FAST PATH, not a wrong placement: `Numbers`
-/// with no provisional placements falls through to chain resolution,
-/// which places such a set correctly (`an_obfuscated_set_whose_head_
-/// numbers_itself_zero_still_groups` in nzbfast-unpack extracts one end
-/// to end). What it costs is the one-pass obfuscated-store path - the
-/// gate that keeps a 143-volume remux off the holds budget - for every
-/// set this project itself produces.
+/// 1. the head's volume-number field length was DERIVED from the number
+///    (`volnum_field_len(0) == 0`), which is true of a
+///    [`fixtures::Rar5Head::Numberless`] head and false of a
+///    [`fixtures::Rar5Head::NumberedZero`] one, so volume 0's `off_base`
+///    came out one byte above every other volume's;
+/// 2. the FINAL volume's `off_base` had to match the shared one, which
+///    no archiver that stamps the member CRC on the last fragment alone
+///    can satisfy - see the comment at that site.
 ///
-/// Fixing it needs `VolumeMapper` to report the field's BYTE LENGTH
-/// rather than only its value, and needs an answer for the case where
-/// volume 0 has not parsed yet (the closure identity can solve for the
-/// head's length, at the cost of admitting two hypotheses where one is
-/// admitted today). That is a production change whose error direction is
-/// a wrongly placed byte rather than a visible failure, so it wants its
-/// own sitting with the WinRAR arm kept as a control. This test pins
-/// today's behaviour so that fix is visible as a change to it.
+/// The gate now reads each parsed volume's ACTUAL field length
+/// ([`VolumeMapper::volume_number_len`]) and leaves the final volume's
+/// header size alone. This test asserts the placement AND its bases; the
+/// WinRAR arm below is the control that the old shape still places too.
 #[test]
-fn the_arithmetic_gate_refuses_a_set_whose_head_numbers_itself_zero() {
+fn the_arithmetic_gate_places_a_set_whose_head_numbers_itself_zero() {
     let dl = 60_000usize;
     let data = payload(3 * dl, 19);
     let piece = |a: usize, b: usize, sb: bool, sa: bool| (a, b, sb, sa);
@@ -1875,18 +1867,361 @@ fn the_arithmetic_gate_refuses_a_set_whose_head_numbers_itself_zero() {
         })
         .collect();
     let refs: Vec<&VolumeMapper> = ms.iter().collect();
-    assert!(
-        matches!(ArchiveMap::resolve_arithmetic(&refs), ArithGate::Numbers),
-        "a NumberedZero head is expected to contradict the gate's WinRAR \
-         geometry model today - if this now places, the finding is fixed \
-         and this test is the thing to rewrite"
-    );
-    // And the chain path, which is what actually carries such a set,
-    // resolves every base correctly regardless.
+    let want = [0u64, dl as u64, 2 * dl as u64];
+    match ArchiveMap::resolve_arithmetic(&refs) {
+        ArithGate::Place { bases, closed } => {
+            assert_eq!(bases, want, "arithmetic bases of a NumberedZero set");
+            assert!(closed, "all three volumes parsed: the set is closed");
+        }
+        other => panic!(
+            "a NumberedZero head must place arithmetically now: got {}",
+            match other {
+                ArithGate::Shape => "Shape",
+                _ => "Numbers",
+            }
+        ),
+    }
+    // And the chain path, which carried such a set while the gate
+    // refused it, still resolves every base to the same answer.
     let map = ArchiveMap::resolve(&refs);
-    assert_eq!(map.bases[&(0, 0)], 0);
-    assert_eq!(map.bases[&(1, 0)], dl as u64);
-    assert_eq!(map.bases[&(2, 0)], 2 * dl as u64);
+    for (k, &w) in want.iter().enumerate() {
+        assert_eq!(map.bases[&(k, 0)], w, "chain base of volume {k}");
+    }
+}
+
+/// The control the fix must not cost: a [`fixtures::Rar5Head::
+/// Numberless`] set - WinRAR's layout, volume 0 one byte shorter in the
+/// header and one byte longer in the payload - still places, and still
+/// places at the bases that geometry implies rather than at the equal
+/// ones the NumberedZero set has.
+#[test]
+fn the_winrar_set_head_still_places_arithmetically() {
+    // Volume 0 carries one byte MORE payload, because its header is one
+    // byte shorter for the same volume size.
+    let dl = 60_000usize;
+    let data = payload(3 * dl, 23);
+    let cut = [0usize, dl + 1, 2 * dl + 1, 3 * dl];
+    let owned: Vec<Vec<(&str, u64, &[u8], bool, bool)>> = (0..3)
+        .map(|k| {
+            vec![(
+                "w.bin",
+                3 * dl as u64,
+                &data[cut[k]..cut[k + 1]],
+                k > 0,
+                k < 2,
+            )]
+        })
+        .collect();
+    let refs: Vec<&[(&str, u64, &[u8], bool, bool)]> = owned.iter().map(|v| v.as_slice()).collect();
+    let vols = fixtures::rar5_volume_set_head(&refs, fixtures::Rar5Head::Numberless);
+    let ms: Vec<VolumeMapper> = vols
+        .iter()
+        .map(|v| {
+            let mut m = VolumeMapper::new(v.len() as u64);
+            m.feed(0, v);
+            m
+        })
+        .collect();
+    assert_eq!(
+        ms[0].volume_number_len,
+        Some(0),
+        "WinRAR head spends no byte"
+    );
+    assert_eq!(ms[1].volume_number_len, Some(1), "volume 1 spends one");
+    let refs: Vec<&VolumeMapper> = ms.iter().collect();
+    match ArchiveMap::resolve_arithmetic(&refs) {
+        ArithGate::Place { bases, .. } => assert_eq!(
+            bases,
+            [0, (dl + 1) as u64, (2 * dl + 1) as u64],
+            "WinRAR geometry: volume 0's extra payload shifts every later base"
+        ),
+        _ => panic!("the WinRAR arm must keep placing"),
+    }
+}
+
+/// The head layout is solved, not guessed, when volume 0 has NOT parsed:
+/// the closure identity against the final piece fixes `h`, and the two
+/// layouts give different bases for the same numbers, so getting `h`
+/// wrong would be visible here as an off-by-one on every interior base.
+///
+/// This is the case the fix's safety argument is about - see the long
+/// comment at the solve site. Both arms are driven WITHOUT volume 0.
+#[test]
+fn the_head_field_length_is_solved_when_volume_zero_is_absent() {
+    let dl = 60_000usize;
+    let data = payload(3 * dl, 29);
+    let build = |head: fixtures::Rar5Head, cut: [usize; 4]| {
+        let owned: Vec<Vec<(&str, u64, &[u8], bool, bool)>> = (0..3)
+            .map(|k| {
+                vec![(
+                    "s.bin",
+                    3 * dl as u64,
+                    &data[cut[k]..cut[k + 1]],
+                    k > 0,
+                    k < 2,
+                )]
+            })
+            .collect();
+        let refs: Vec<&[(&str, u64, &[u8], bool, bool)]> =
+            owned.iter().map(|v| v.as_slice()).collect();
+        fixtures::rar5_volume_set_head(&refs, head)
+    };
+    // (head layout, cut points, the bases volumes 1 and 2 must get)
+    let cases = [
+        (
+            fixtures::Rar5Head::NumberedZero,
+            [0, dl, 2 * dl, 3 * dl],
+            [dl as u64, 2 * dl as u64],
+        ),
+        (
+            fixtures::Rar5Head::Numberless,
+            [0, dl + 1, 2 * dl + 1, 3 * dl],
+            [(dl + 1) as u64, (2 * dl + 1) as u64],
+        ),
+    ];
+    for (head, cut, want) in cases {
+        let vols = build(head, cut);
+        // Volumes 1 and 2 only: the head itself never parses.
+        let ms: Vec<VolumeMapper> = vols[1..]
+            .iter()
+            .map(|v| {
+                let mut m = VolumeMapper::new(v.len() as u64);
+                m.feed(0, v);
+                m
+            })
+            .collect();
+        let refs: Vec<&VolumeMapper> = ms.iter().collect();
+        match ArchiveMap::resolve_arithmetic(&refs) {
+            ArithGate::Place { bases, closed } => {
+                assert_eq!(bases, want, "{head:?}: bases with volume 0 absent");
+                assert!(!closed, "{head:?}: volume 0 is missing, so not closed");
+            }
+            _ => panic!("{head:?} must place from volumes 1..2 alone"),
+        }
+    }
+}
+
+/// THE MEASUREMENT, against bytes this repo's own writer produced rather
+/// than a fixture: a stored three-volume set reaches [`ArithGate::Place`]
+/// with bases that reassemble the posted payload byte for byte.
+///
+/// Measured 16 Sep 2026, 300,000 bytes over `max_payload_per_volume`
+/// 120,000 (the geometry the finding was raised on):
+///
+///     vol 0  len=120056  volnum=Some(0)  flen=1  off_base=47  data_off=48  data_len=120000
+///     vol 1  len=120056  volnum=Some(1)  flen=1  off_base=47  data_off=48  data_len=120000
+///     vol 2  len= 60060  volnum=Some(2)  flen=1  off_base=51  data_off=52  data_len= 60000
+///
+/// BEFORE: `Numbers`. AFTER: `Place [0, 120000, 240000] closed=true`.
+/// Volume 2's `off_base` really is four bytes above the others - the
+/// member CRC32 that rides the last fragment alone - which is the second
+/// term the fix had to drop.
+#[test]
+fn a_real_writer_stored_set_reaches_arithmetic_placement() {
+    use rars::rar50::{Rar50VolumeWriter, StoredEntry, WriterOptions};
+    let data = payload(300_000, 31);
+    let volumes = Rar50VolumeWriter::new(WriterOptions::default())
+        .stored_entry(StoredEntry {
+            name: b"payload.bin",
+            data: &data,
+            mtime: None,
+            attributes: 0o100644,
+            host_os: 1,
+        })
+        .max_payload_per_volume(120_000)
+        .finish()
+        .unwrap();
+    assert_eq!(volumes.len(), 3, "geometry the measurement above assumes");
+    let ms: Vec<VolumeMapper> = volumes
+        .iter()
+        .map(|v| {
+            let mut m = VolumeMapper::new(v.len() as u64);
+            m.feed(0, v);
+            m
+        })
+        .collect();
+    // The two terms of the finding, as facts about the parsed bytes.
+    assert_eq!(
+        ms[0].volume_number_len,
+        Some(1),
+        "this writer numbers its head explicitly - the whole finding"
+    );
+    let off_base = |k: usize| ms[k].entries[0].data_off - ms[k].volume_number_len.unwrap();
+    assert_eq!(off_base(0), off_base(1), "head and interior share a base");
+    assert!(
+        off_base(2) > off_base(1),
+        "the final volume's header is longer (member CRC32), which the          gate must no longer read as a contradiction"
+    );
+
+    let refs: Vec<&VolumeMapper> = ms.iter().collect();
+    let ArithGate::Place { bases, closed } = ArchiveMap::resolve_arithmetic(&refs) else {
+        panic!("a real stored volume set must place arithmetically");
+    };
+    assert!(closed, "the whole set parsed");
+    assert_eq!(bases, [0, 120_000, 240_000]);
+
+    // PROVE the bases, rather than trusting the gate: carve each
+    // volume's data area out of the posted bytes, drop it at the base
+    // the gate handed back, and require the result to be the payload.
+    let mut out = vec![0u8; data.len()];
+    for (k, m) in ms.iter().enumerate() {
+        let e = &m.entries[0];
+        let at = bases[k] as usize;
+        let src = &volumes[k][e.data_off as usize..(e.data_off + e.data_len) as usize];
+        out[at..at + src.len()].copy_from_slice(src);
+    }
+    assert_eq!(
+        out, data,
+        "arithmetic bases must reassemble the posted file"
+    );
+}
+
+/// The fixture family's [`fixtures::Rar5Crc::FinalFragment`] arm must
+/// reproduce the header asymmetry a real archiver's output has, because
+/// that asymmetry is the whole reason the arm exists: a split fragment
+/// carries no checksum (file flag `0x04` clear, four fewer header
+/// bytes) and the final fragment carries the member's CRC32, so the
+/// final volume's data area starts four bytes later than every other
+/// volume's.
+///
+/// Until 17 Sep 2026 every `_crc` fixture set gave every piece a CRC,
+/// so every header in a fixture set was the same size and NO fixture
+/// test in the tree could see a consumer that reasoned about the final
+/// volume's header size. The one that did - the arithmetic gate, which
+/// required the final volume's `off_base` to match the shared one and
+/// so refused every set this project's own writer produces - was caught
+/// against real writer bytes alone
+/// (`a_real_writer_stored_set_reaches_arithmetic_placement` above).
+/// This test pins the fixture's half of that: the two arms differ by
+/// exactly four bytes on the final volume and nowhere else, and the
+/// `EveryPiece` arm stays available for the tests that damage an
+/// interior fragment and need a checksum over it.
+#[test]
+fn the_final_fragment_crc_arm_reproduces_the_real_header_asymmetry() {
+    let dl = 30_000usize;
+    let data = payload(3 * dl, 71);
+    let owned: Vec<Vec<(&str, u64, &[u8], bool, bool, Option<u32>)>> = (0..3)
+        .map(|k| {
+            vec![(
+                "c.bin",
+                3 * dl as u64,
+                &data[k * dl..(k + 1) * dl],
+                k > 0,
+                k < 2,
+                Some(crc32fast::hash(&data)),
+            )]
+        })
+        .collect();
+    let refs: Vec<&[(&str, u64, &[u8], bool, bool, Option<u32>)]> =
+        owned.iter().map(|v| v.as_slice()).collect();
+    let head = fixtures::Rar5Head::NumberedZero;
+    let every = fixtures::rar5_volume_set_crc_layout(&refs, head, fixtures::Rar5Crc::EveryPiece);
+    let real = fixtures::rar5_volume_set_crc_layout(&refs, head, fixtures::Rar5Crc::FinalFragment);
+
+    let off_base = |v: &[u8]| {
+        let mut m = VolumeMapper::new(v.len() as u64);
+        m.feed(0, v);
+        let flen = m.volume_number_len.expect("a numbered volume");
+        m.entries[0].data_off - flen
+    };
+    // Every piece carrying a CRC makes every header the same size -
+    // the shape that hid the defect.
+    assert_eq!(off_base(&every[0]), off_base(&every[1]));
+    assert_eq!(off_base(&every[1]), off_base(&every[2]));
+    // The real layout: the split fragments agree, the final volume is
+    // four bytes further in for the CRC32 it alone carries.
+    assert_eq!(off_base(&real[0]), off_base(&real[1]));
+    assert_eq!(
+        off_base(&real[2]),
+        off_base(&real[1]) + 4,
+        "the final fragment's header must be four bytes longer"
+    );
+    // And the split fragments really did lose the checksum, rather than
+    // the final one having grown some other field.
+    assert_eq!(real[0].len() + 4, every[0].len());
+    assert_eq!(real[1].len() + 4, every[1].len());
+    assert_eq!(real[2], every[2]);
+}
+
+/// The loop-shaped builder must place the CRC by exactly the same rule
+/// the slice-shaped one does, or the two families of call site are
+/// testing slightly different containers - the class of divergence the
+/// whole set-aware fixture family exists to remove.
+///
+/// And the rule is per-PIECE, not per-volume: the second member here
+/// ends inside the interior volume 1, so that volume carries one
+/// fragment with a CRC (the member that ends there) and one without
+/// (the member that continues). A builder that derived the flag from
+/// the volume index rather than from `split_after` would get this
+/// volume wrong in both directions at once.
+#[test]
+fn the_loop_shaped_builder_places_the_crc_per_piece_not_per_volume() {
+    let a = payload(20_000, 73);
+    let b = payload(20_000, 74);
+    let ca = crc32fast::hash(&a);
+    let cb = crc32fast::hash(&b);
+    // Volume 0: all of member a's first half. Volume 1: a's final
+    // fragment, then all of b's first half. Volume 2: b's final
+    // fragment.
+    let vols: Vec<Vec<u8>> = (0..3u64)
+        .map(|k| {
+            let pieces: Vec<(&str, u64, &[u8], bool, bool, Option<u32>)> = match k {
+                0 => vec![("a.bin", 20_000, &a[..10_000], false, true, Some(ca))],
+                1 => vec![
+                    ("a.bin", 20_000, &a[10_000..], true, false, Some(ca)),
+                    ("b.bin", 20_000, &b[..10_000], false, true, Some(cb)),
+                ],
+                _ => vec![("b.bin", 20_000, &b[10_000..], true, false, Some(cb))],
+            };
+            fixtures::rar5_volume_n_crc_of_layout(&pieces, k, 3, fixtures::Rar5Crc::FinalFragment)
+        })
+        .collect();
+    let crcs = |v: &[u8]| {
+        let mut m = VolumeMapper::new(v.len() as u64);
+        m.feed(0, v);
+        m.entries
+            .iter()
+            .map(|e| e.file_crc)
+            .collect::<Vec<Option<u32>>>()
+    };
+    assert_eq!(crcs(&vols[0]), vec![None], "a split fragment carries none");
+    assert_eq!(
+        crcs(&vols[1]),
+        vec![Some(ca), None],
+        "an INTERIOR volume holds the final fragment of one member and a \
+         continuing fragment of the next, so it must carry exactly one CRC"
+    );
+    assert_eq!(crcs(&vols[2]), vec![Some(cb)]);
+
+    // The same pieces under the historical layout keep every CRC, and
+    // every header is four bytes longer for it.
+    let every: Vec<Vec<u8>> = (0..3u64)
+        .map(|k| {
+            let pieces: Vec<(&str, u64, &[u8], bool, bool, Option<u32>)> = match k {
+                0 => vec![("a.bin", 20_000, &a[..10_000], false, true, Some(ca))],
+                1 => vec![
+                    ("a.bin", 20_000, &a[10_000..], true, false, Some(ca)),
+                    ("b.bin", 20_000, &b[..10_000], false, true, Some(cb)),
+                ],
+                _ => vec![("b.bin", 20_000, &b[10_000..], true, false, Some(cb))],
+            };
+            fixtures::rar5_volume_n_crc_of(&pieces, k, 3)
+        })
+        .collect();
+    assert_eq!(crcs(&every[0]), vec![Some(ca)]);
+    assert_eq!(crcs(&every[1]), vec![Some(ca), Some(cb)]);
+    assert_eq!(vols[0].len() + 4, every[0].len());
+    assert_eq!(vols[1].len() + 4, every[1].len());
+    assert_eq!(vols[2], every[2]);
+    // The plain `_of` builder is unchanged by the arm existing.
+    assert_eq!(
+        fixtures::rar5_volume_n_crc_of(
+            &[("a.bin", 20_000, &a[..10_000], false, true, Some(ca))],
+            0,
+            3
+        ),
+        every[0]
+    );
 }
 
 /// `rar5_seal_set` rewrites an end-of-archive block that `rar5_volume_set`

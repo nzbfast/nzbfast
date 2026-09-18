@@ -147,6 +147,21 @@ pub struct CreateSpec {
     pub first_recovery_block: u64,
     #[serde(default)]
     pub comment: String,
+    /// May this create write over files that are already under the
+    /// set's names?
+    ///
+    /// `false` protects the WHOLE set and not only `output` - a set
+    /// whose index was deleted still has its volumes on disk, and those
+    /// are files a create destroys. Two doors enforce it: the preflight
+    /// in `runner::run_create`, which is what produces the `exists`
+    /// error naming the file in the way, and `--no-clobber` on the argv,
+    /// which opens every member with `O_EXCL` and is the half that holds
+    /// when the set appears AFTER the check or when two creates start
+    /// together on one base.
+    ///
+    /// `true` is par2cmdline's behaviour and the `parfast` command
+    /// line's default; this field is the pane's Overwrite tick, and
+    /// `planner::options_for` is where it becomes `Options::no_clobber`.
     #[serde(default)]
     pub overwrite: bool,
     /// Spec-style `vol12-22` volume names. Gated by
@@ -172,8 +187,10 @@ pub struct VerifyOptions {
     /// `-S<n>`: how far the skip may reach.
     #[serde(default)]
     pub skip_leaway: Option<u64>,
-    /// `--fast`, the EXPERIMENTAL joint solve. `None` leaves the
-    /// process default alone.
+    /// `--fast`, the EXPERIMENTAL joint solve. `None` is the Settings
+    /// pane's own answer for this job, not "leave the last job's":
+    /// nothing in this crate leaves a performance knob alone any more -
+    /// see [`crate::runner`]'s `apply_knobs`.
     #[serde(default)]
     pub fast_solver: Option<bool>,
     #[serde(default)]
@@ -417,6 +434,19 @@ pub struct JobResult {
     /// terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<u8>,
+    /// What the job could not take in, in the words
+    /// `planner::LeftOut::lines` builds: a folder that could not be
+    /// read, a link a walk did not follow, an item that is not an
+    /// ordinary file. An ADDITION to section 4.5, and the reason it is
+    /// on the RESULT and not only on the preview: the pane's preview is
+    /// a different moment from the run, the walk happens again when the
+    /// job runs, and a set that protects less than the folder the user
+    /// chose must say so on the thing that says Done.
+    ///
+    /// Never an error. A `.Trashes` nobody can read is the ordinary
+    /// state of a mac volume's root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Why a job failed, in the two fields section 4.5 names.

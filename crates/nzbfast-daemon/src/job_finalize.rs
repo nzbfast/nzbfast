@@ -100,10 +100,24 @@ pub(super) fn finalize_payload(
     // before the unlock / still-packed / cleanup /
     // rename steps below, every one of which reads the
     // finished directory and must see the final one.
+    //
+    // NOT SETTLED HERE. The hand-over parks the previous result and
+    // leaves it parked; whether it is deleted or put back is decided at
+    // the END of this pass, once the unlock ladder below has said
+    // whether the replacement is usable at all. It used to delete the
+    // old copy inside the call, which is minutes before that answer
+    // exists: an encrypted RAR set completes with its volumes locked by
+    // design (the arm just below is what handles it), so a re-add
+    // carrying a password nobody has destroyed the user's working
+    // unpacked copy of that release and left a folder of archives
+    // nothing can open. See `job_publish::Published`. (N1,
+    // reports/code-audit-2026-09-17.)
     let mut out2 = out2;
-    let mut moved = repl2.and_then(|canon| publish_over_previous(&out2, &canon));
-    if let Some(dest) = &moved {
-        out2 = dest.clone();
+    let mut published = repl2.and_then(|canon| publish_over_previous(&out2, &canon));
+    let mut moved: Option<PathBuf> = None;
+    if let Some(p) = &published {
+        out2 = p.dir().to_path_buf();
+        moved = Some(out2.clone());
     }
     let mut needs_pw = false;
     let mut unlock_refused: Option<String> = None;
@@ -267,6 +281,45 @@ pub(super) fn finalize_payload(
     // wrote onto the files, and only this moment knows
     // it. A still-locked job never got that far, so it
     // has none to record (None, not "").
+    // THE HAND-OVER IS SETTLED HERE, and this is the whole of N1.
+    //
+    // Everything above has run against the payload at its published
+    // location, and only now is it known whether that payload is any use
+    // to anybody: `needs_pw` says the archives are still locked and no
+    // password we hold opens them, and `unlock_refused` says the ladder
+    // stood down without testing one (today a bomb verdict). Under
+    // either, the replacement is a folder of archives and the previous
+    // result was a watchable release - so the swap is undone and both
+    // copies survive, the old one back under the canonical name and the
+    // new one back in the directory it downloaded into, ready for the
+    // Retry that a password makes work.
+    //
+    // A rollback that cannot complete is reported and nothing is
+    // deleted: `moved` then still points at the canonical directory,
+    // which is where the payload actually is.
+    let unusable = needs_pw || unlock_refused.is_some();
+    if let Some(p) = published.take() {
+        if unusable {
+            let from = out2.clone();
+            let back = p.dir().to_path_buf();
+            if p.roll_back() {
+                warn!(
+                    target: "replace",
+                    "{name2:?}: the replacement is still locked, so {} is back and this \
+                     job's payload is at {} - retry it with a password",
+                    back.display(),
+                    from.display()
+                );
+                // `finalize_names` is skipped for a locked job anyway
+                // (see below), so nothing downstream has committed to
+                // the published path yet.
+                out2 = from;
+                moved = None;
+            }
+        } else {
+            p.commit();
+        }
+    }
     let mut filed_sfx = None;
     let mut filed_ttl = None;
     let mut identify = String::new();
@@ -377,5 +430,183 @@ mod tests {
             "the tail must stop reporting an unpack once unpacking is over"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A header-encrypted 7-Zip container: the file list and the payload
+    /// are both behind the key, which is the shape a locked release is
+    /// posted in and the one `unlockpw::encrypted_archive` answers yes
+    /// about.
+    fn locked_archive_bytes(key: &str, data: &[u8]) -> Vec<u8> {
+        use sevenz_rust2::{
+            ArchiveEntry, ArchiveWriter, Password, encoder_options::AesEncoderOptions,
+        };
+        let mut w = ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+        w.set_encrypt_header(true);
+        w.set_content_methods(vec![AesEncoderOptions::new(Password::from(key)).into()]);
+        w.push_archive_entry(ArchiveEntry::new_file("movie.mkv"), Some(data))
+            .unwrap();
+        w.finish().unwrap().into_inner()
+    }
+
+    /// N1 (reports/code-audit-2026-09-17): a REPLACEMENT that turns out
+    /// to be locked does not cost the user the copy it replaced.
+    ///
+    /// A re-add of a release the user already has downloads beside the
+    /// previous result and takes the canonical directory over once it
+    /// verifies - and verifying is not the same as being usable. An
+    /// encrypted RAR or 7z set completes with its volumes still locked
+    /// BY DESIGN: the unlock ladder runs afterwards, in this very
+    /// function, and can end with no password that opens it. Publication
+    /// deleted the previous result before that ladder had run, so a
+    /// re-add carrying a password nobody has replaced a watchable,
+    /// unpacked release with a folder of archives nothing can open -
+    /// against a publication contract that says in as many words that a
+    /// re-add which never finishes costs the user nothing.
+    ///
+    /// Both directories are read back by their BYTES here. Asserting on
+    /// `moved` alone would have passed on the defect: the paths were
+    /// right, and the data was gone.
+    #[test]
+    fn a_locked_replacement_leaves_the_previous_payload_intact() {
+        let root = std::env::temp_dir().join(format!(
+            "nzbfast-a6-locked-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let d = crate::testutil::test_daemon(&root);
+        d.identity_lookup.store(false, Ordering::Relaxed);
+
+        // The release the user already has, unpacked and watchable.
+        let canon = root.join("Some.Release.2024.1080p-GRP");
+        std::fs::create_dir_all(&canon).unwrap();
+        const GOOD: &[u8] = b"the previous, unpacked, watchable copy";
+        std::fs::write(canon.join("movie.mkv"), GOOD).unwrap();
+
+        // The re-add, downloaded beside it: it VERIFIED, and every one
+        // of its archives is locked with a password nobody here holds.
+        let fresh = root.join("Some.Release.2024.1080p-GRP.2");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let payload: Vec<u8> = (0..40_000u32).map(|i| (i * 11 + 5) as u8).collect();
+        std::fs::write(
+            fresh.join("release.7z"),
+            locked_archive_bytes("a-key-nobody-here-has", &payload),
+        )
+        .unwrap();
+
+        let out = finalize_payload(
+            d.clone(),
+            "nzo-a6-locked".into(),
+            fresh.clone(),
+            Some(canon.clone()),
+            None,
+            root.join("job.nzb"),
+            String::new(),
+            "Some.Release.2024.1080p-GRP".into(),
+            0,
+            Vec::new(),
+            String::new(),
+            false,
+        );
+
+        assert!(
+            out.needs_pw,
+            "the replacement is locked and no password opens it"
+        );
+        assert_eq!(
+            std::fs::read(canon.join("movie.mkv")).unwrap(),
+            GOOD,
+            "the previous payload was destroyed by a replacement that cannot be opened"
+        );
+        assert!(
+            fresh.join("release.7z").is_file(),
+            "the locked replacement must survive for the retry a password makes work"
+        );
+        assert_eq!(
+            out.moved, None,
+            "a rolled-back hand-over must not report a new directory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The control arm, and the one that keeps A6 doing its job: a
+    /// replacement that IS usable still takes the canonical directory
+    /// over, and the previous result goes.
+    ///
+    /// Without this, "never delete the old copy" would pass the test
+    /// above and silently turn every re-add into two directories.
+    #[test]
+    fn a_usable_replacement_still_takes_over_and_the_previous_copy_goes() {
+        let root = std::env::temp_dir().join(format!(
+            "nzbfast-a6-usable-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let d = crate::testutil::test_daemon(&root);
+        d.identity_lookup.store(false, Ordering::Relaxed);
+
+        let canon = root.join("Some.Release.2024.1080p-GRP");
+        std::fs::create_dir_all(&canon).unwrap();
+        std::fs::write(canon.join("movie.mkv"), b"the older copy").unwrap();
+
+        let fresh = root.join("Some.Release.2024.1080p-GRP.2");
+        std::fs::create_dir_all(&fresh).unwrap();
+        const BETTER: &[u8] = b"the re-download, unpacked and nothing locked";
+        std::fs::write(fresh.join("movie.mkv"), BETTER).unwrap();
+
+        let out = finalize_payload(
+            d.clone(),
+            "nzo-a6-usable".into(),
+            fresh.clone(),
+            Some(canon.clone()),
+            None,
+            root.join("job.nzb"),
+            String::new(),
+            "Some.Release.2024.1080p-GRP".into(),
+            0,
+            Vec::new(),
+            String::new(),
+            false,
+        );
+
+        assert!(!out.needs_pw, "nothing here is locked");
+        // `moved` is where the payload ENDED UP, which is not necessarily
+        // the canonical path: auto-renaming runs for an unlocked job and
+        // files the folder under the name the release turned out to
+        // have. What matters here is that the hand-over was COMMITTED -
+        // the replacement's bytes are the survivor and neither the old
+        // copy nor the staging directory is still sitting there.
+        let home = out.moved.clone().expect("a published job reports a home");
+        // By BYTES and not by name: filing renames the media file onto
+        // the release name as well as the folder, so the survivor is
+        // read off whatever single file is in there.
+        let landed: Vec<Vec<u8>> = std::fs::read_dir(&home)
+            .expect("the published directory")
+            .flatten()
+            .map(|e| std::fs::read(e.path()).unwrap_or_default())
+            .collect();
+        assert_eq!(
+            landed,
+            vec![BETTER.to_vec()],
+            "the published directory does not hold the replacement's bytes"
+        );
+        assert!(!fresh.exists(), "the staged directory was left behind");
+        assert!(
+            home == canon || !canon.exists(),
+            "the previous result survived a committed hand-over at {}",
+            canon.display()
+        );
+        // And no parked copy survives a committed hand-over.
+        let left: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(crate::job::REPLACED_SUFFIX))
+            .collect();
+        assert!(left.is_empty(), "parked copies left behind: {left:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -59,6 +59,38 @@ const N_GOOD: usize = 240;
 /// how long a dead queue takes to drive to terminal. 40 ms is the
 /// friendly end of what the real-provider legs saw.
 const MISS_MS: u64 = 40;
+/// How long a HOLDER takes to answer a BODY, in the legs that ask for it.
+///
+/// Zero everywhere else, and it exists for one reason: it is the width
+/// of the window a 430-ladder probe has to be picked in. A ladder
+/// candidate is an article that has already been refused somewhere
+/// (`tried_430 != 0`) and is STILL in flight, so on loopback with an
+/// instant holder that window is one round trip - a few hundred
+/// microseconds - and whether any probe lands in it is a race with the
+/// scheduler rather than a property of the pool.
+///
+/// That race is not hypothetical and it went red. On 17 Sep 2026 the
+/// one-process CI job failed here with `0 stats` and every other figure
+/// on the line correct - the work done, the ladder dups simply never
+/// issued - and it would not reproduce on an 18-core machine in 25 runs
+/// of the whole binary (floor 21).
+///
+/// The cell it needs is FEW CORES WITH THE CORES CONTENDED, which a
+/// many-core box cannot enter however high its load average climbs: the
+/// twenty connection workers stay genuinely parallel there. On four
+/// cores under spin-loop load it reproduces at 18 in 180 reps, and the
+/// same four cores with the load taken away never drop below 20.
+/// Widening the window from a round trip to a stated duration is what
+/// turns "a probe usually happens" into "a probe happens": 180 reps at
+/// three load levels, no failure of either clause of this test, and the
+/// lowest `stats` of a run off the floor at every one. It costs the
+/// pieced leg 0.25 s (0.27 -> 0.52).
+///
+/// It is applied to EVERY mock, never only the holders. A delay on some
+/// servers and not others makes the undelayed ones look faster, which
+/// arms the speculative slow-owner race and buys the duplicate bodies
+/// the second clause of this test asserts are never bought.
+const HOLD_MS: u64 = 25;
 
 /// What one leg cost.
 struct Leg {
@@ -434,8 +466,18 @@ async fn hole_leg(
     holders: usize,
     interleave: bool,
     base: PoolConfig,
+    body_delay_ms: u64,
 ) -> HoleLeg {
-    hole_leg_on(label, n_hole, holders, interleave, base, false).await
+    hole_leg_on(
+        label,
+        n_hole,
+        holders,
+        interleave,
+        base,
+        false,
+        body_delay_ms,
+    )
+    .await
 }
 
 /// [`hole_leg`] with the LAST server - always a holder - flagged
@@ -447,6 +489,7 @@ async fn hole_leg_on(
     interleave: bool,
     base: PoolConfig,
     block_last: bool,
+    body_delay_ms: u64,
 ) -> HoleLeg {
     let data: Vec<u8> = (0..(ART * N_GOOD) as u32).map(|i| i as u8).collect();
     let mut articles: HashMap<String, Vec<u8>> = HashMap::new();
@@ -468,6 +511,9 @@ async fn hole_leg_on(
                 HashSet::new()
             },
             missing_delay_ms: MISS_MS,
+            // Uniform, refusers included: see [`HOLD_MS`] for why this is
+            // not holders-only.
+            delay_ms: body_delay_ms,
             echo_missing_id: si % 2 == 0,
             ..Default::default()
         };
@@ -656,7 +702,19 @@ async fn a_stat_probe_votes_like_a_body_and_never_buys_one() {
         poisoned.missing
     );
 
-    let pieced = hole_leg("60 holes tail, 4 hold (STAT)", 60, 4, false, probing).await;
+    // HOLD_MS, not 0: without it the ladder window is one loopback round
+    // trip and `stats` is a race the assertion below loses on a
+    // contended 4-core runner. The two ignored measurement tables keep 0
+    // - they report a WALL and a byte bill, which a delay would distort.
+    let pieced = hole_leg(
+        "60 holes tail, 4 hold (STAT)",
+        60,
+        4,
+        false,
+        probing,
+        HOLD_MS,
+    )
+    .await;
     println!("{}", pieced.line());
     assert_eq!(pieced.missing, 0, "the probe path lost a servable article");
     assert_eq!(
@@ -701,6 +759,7 @@ async fn cross_server_piecing_duplicate_bodies() {
                             holders,
                             interleave,
                             cfg,
+                            0,
                         )
                         .await,
                     );
@@ -796,6 +855,7 @@ async fn per_server_stat_probe_on_a_level0_block_account() {
                             false,
                             cfg.clone(),
                             block,
+                            0,
                         )
                         .await;
                         lines.push(leg.line());

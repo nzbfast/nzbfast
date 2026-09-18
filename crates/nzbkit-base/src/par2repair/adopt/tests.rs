@@ -1492,3 +1492,197 @@ fn rig_sliding_scan_costs() {
         }
     }
 }
+
+// --- the extra-file announcement, read back out of the decision -----
+
+/// A target with nothing on disk: the shape the adoption pass probes.
+/// Only the fields [`extra_file_matches`] reads carry meaning here -
+/// name, length, first_slice, n_slices - which is the point: the
+/// builder is arithmetic over the decision map and must not need the
+/// bytes back.
+fn named_target(name: &str, first_slice: usize, n_slices: usize, length: u64) -> Target {
+    Target {
+        file: Par2File {
+            file_id: [0u8; 16],
+            name: name.into(),
+            length,
+            md5: [0u8; 16],
+            md5_16k: [0u8; 16],
+            blocks: Vec::new(),
+        },
+        path: PathBuf::from("/nowhere").join(name),
+        first_slice,
+        n_slices,
+        present: vec![false; n_slices],
+        intact: false,
+        exists: false,
+        resume: None,
+        md5_unfinished: false,
+    }
+}
+
+/// The three shapes the reference announces, and the boundary that
+/// keeps a donor-directory file out of all of them.
+///
+/// `whole_file` is DERIVED here rather than recorded by the fast path,
+/// so the derivation is what needs pinning: same length, every slice,
+/// every offset aligned. Each of the three ways to miss it - a short
+/// count, a length that differs, an unaligned offset - has to come back
+/// as the partial line, because announcing "is a match for" over a file
+/// that is not the member tells SABnzbd to rename a file that still
+/// needs repairing.
+#[test]
+fn the_extra_file_announcement_names_donor_target_and_shape() {
+    let bs = 100usize;
+    let dir = Path::new("/tmp/nowhere");
+    let targets = vec![
+        named_target("alpha.bin", 0, 3, 300),
+        named_target("beta.bin", 3, 4, 400),
+    ];
+    let cands = vec![
+        (dir.join("whole"), 300u64),
+        (dir.join("partial"), 4096),
+        (dir.join("spanning"), 4096),
+        (dir.join("longer"), 512),
+        (dir.join("shifted"), 300),
+        // Past the boundary: a §293 donor directory's file.
+        (PathBuf::from("/elsewhere/donated"), 300),
+    ];
+    let mut adopted: HashMap<usize, AdoptSrc> = HashMap::new();
+    // `whole` is alpha entire, at aligned offsets - the fast path.
+    for i in 0..3 {
+        adopted.insert(
+            i,
+            AdoptSrc {
+                cand: 0,
+                offset: i as u64 * 100,
+            },
+        );
+    }
+    // `partial` gives beta two of its four.
+    adopted.insert(
+        3,
+        AdoptSrc {
+            cand: 1,
+            offset: 900,
+        },
+    );
+    adopted.insert(
+        4,
+        AdoptSrc {
+            cand: 1,
+            offset: 1000,
+        },
+    );
+    // EVERY candidate carries the fast path's whole-file claim here, so
+    // what these rows exercise is the DERIVATION half alone - which is
+    // what they were written to pin. The claim half gets its own row at
+    // the end.
+    let claimed: HashSet<usize> = (0..cands.len()).collect();
+    let matches = extra_file_matches(dir, &cands, 5, &targets, &adopted, bs, &claimed);
+    assert_eq!(
+        matches,
+        vec![
+            ExtraFileMatch {
+                donor: "partial".into(),
+                target: Some("beta.bin".into()),
+                blocks: 2,
+                target_blocks: 4,
+                whole_file: false,
+            },
+            ExtraFileMatch {
+                donor: "whole".into(),
+                target: Some("alpha.bin".into()),
+                blocks: 3,
+                target_blocks: 3,
+                whole_file: true,
+            },
+        ]
+    );
+
+    // One donor feeding two members is the reference's "several target
+    // files" line: it names no target, because there is no single name
+    // to rename to.
+    let mut spanning: HashMap<usize, AdoptSrc> = HashMap::new();
+    spanning.insert(0, AdoptSrc { cand: 2, offset: 0 });
+    spanning.insert(
+        3,
+        AdoptSrc {
+            cand: 2,
+            offset: 100,
+        },
+    );
+    assert_eq!(
+        extra_file_matches(dir, &cands, 5, &targets, &spanning, bs, &claimed),
+        vec![ExtraFileMatch {
+            donor: "spanning".into(),
+            target: None,
+            blocks: 2,
+            target_blocks: 0,
+            whole_file: false,
+        }]
+    );
+
+    // Every slice, aligned, but the file is LONGER than the member: the
+    // reference compares the whole-file MD5 and this cannot pass it.
+    let mut longer: HashMap<usize, AdoptSrc> = HashMap::new();
+    for i in 0..3 {
+        longer.insert(
+            i,
+            AdoptSrc {
+                cand: 3,
+                offset: i as u64 * 100,
+            },
+        );
+    }
+    assert!(!extra_file_matches(dir, &cands, 5, &targets, &longer, bs, &claimed)[0].whole_file);
+
+    // Right length, every slice, but shifted inside the file.
+    let mut shifted: HashMap<usize, AdoptSrc> = HashMap::new();
+    for i in 0..3 {
+        shifted.insert(
+            i,
+            AdoptSrc {
+                cand: 4,
+                offset: i as u64 * 100 + 7,
+            },
+        );
+    }
+    assert!(!extra_file_matches(dir, &cands, 5, &targets, &shifted, bs, &claimed)[0].whole_file);
+
+    // And a donor-directory source is announced to nobody: the
+    // reference has no donor directories, and naming one as a `File:`
+    // in this directory would have SABnzbd delete or rename a path that
+    // is not where the bytes are.
+    let mut donated: HashMap<usize, AdoptSrc> = HashMap::new();
+    for i in 0..3 {
+        donated.insert(
+            i,
+            AdoptSrc {
+                cand: 5,
+                offset: i as u64 * 100,
+            },
+        );
+    }
+    assert!(extra_file_matches(dir, &cands, 5, &targets, &donated, bs, &claimed).is_empty());
+
+    // THE CLAIM HALF. The same map that produced `whole_file: true`
+    // above, with the fast path saying it never compared this
+    // candidate's whole-file MD5 - which is a real set, not a
+    // hypothetical: one whose declared MD5 disagrees with its own block
+    // hashes is refused by the fast path and then matched block for
+    // block by the sliding scan. The reference reaches its
+    // `is a match for` line by that same MD5 and would print the
+    // "found N of N data blocks" shape here, so this is the faithful
+    // answer as well as the safe one. See `adopt::adoption_tally`.
+    let unclaimed: HashSet<usize> = (0..cands.len()).filter(|&c| c != 0).collect();
+    let row = &extra_file_matches(dir, &cands, 5, &targets, &adopted, bs, &unclaimed)[1];
+    assert_eq!(row.donor, "whole");
+    assert_eq!((row.blocks, row.target_blocks), (3, 3));
+    assert!(
+        !row.whole_file,
+        "every block aligned is not a whole-file match, and a caller that \
+         RENAMES on this would skip the verify that catches a set lying \
+         about its own MD5"
+    );
+}

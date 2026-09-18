@@ -854,10 +854,17 @@ fn reextract_dir_armed_eats_volumes_as_it_goes() {
     // the first volume extracts, and the SECOND member fails when it
     // is verified - which is the only moment that can tell the two
     // routes apart from outside.
-    let v1 = fixtures::rar5_volume_n_crc_of(
+    let v1 = fixtures::rar5_volume_n_crc_of_layout(
         &[("b.bin", b.len() as u64, &b, false, false, Some(0xDEAD_BEEF))],
         1,
         2,
+        // An archiver's placement, asked for by name because this set
+        // models one: the volume boundary falls BETWEEN whole members,
+        // so no piece is split and the two layouts write the same
+        // bytes here. The wrong CRC rides an UNSPLIT member and
+        // survives either way - which is what makes it safe to say
+        // what the set means rather than leaving it to the default.
+        fixtures::Rar5Crc::FinalFragment,
     );
     std::fs::write(dir.join("x.part1.rar"), &v0).unwrap();
     std::fs::write(dir.join("x.part2.rar"), &v1).unwrap();
@@ -1506,12 +1513,16 @@ fn failed_native_extraction_publishes_nothing() {
         .collect();
     let n = total.len() as u64;
     let half = total.len() / 2;
-    let vols = fixtures::rar5_volume_set_crc(&[
-        &[("x.rar", n, &total[..half], false, true, None)],
-        // Wrong plaintext CRC on the last piece - extraction writes
-        // every byte, then rejects the entry.
-        &[("x.rar", n, &total[half..], true, false, Some(0xDEAD_BEEF))],
-    ]);
+    let vols = fixtures::rar5_volume_set_crc_layout(
+        &[
+            &[("x.rar", n, &total[..half], false, true, None)],
+            // Wrong plaintext CRC on the last piece - extraction writes
+            // every byte, then rejects the entry.
+            &[("x.rar", n, &total[half..], true, false, Some(0xDEAD_BEEF))],
+        ],
+        fixtures::Rar5Head::default(),
+        fixtures::Rar5Crc::FinalFragment,
+    );
     std::fs::write(dir.join("x.rar"), &vols[0]).unwrap();
     std::fs::write(dir.join("x.r00"), &vols[1]).unwrap();
     assert!(

@@ -39,7 +39,7 @@
 //! property the fuzz target asserts.
 
 use super::source::{Source, is_pending, read_vec};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::time::Duration;
 
@@ -401,6 +401,8 @@ pub struct MkvLayout {
 /// Follows the SeekHead for Tracks and Cues when they are not where the
 /// linear walk found them, which is the normal shape: Cues are written
 /// after the clusters, so on a live download they arrive with the tail.
+/// A SeekHead entry naming a SECOND SeekHead is chased too - see the
+/// worklist and its termination argument at the chase itself.
 pub fn mkv_layout(src: &dyn Source, wait: Duration) -> Result<MkvLayout, RemuxError> {
     let end = src.size();
     let mut pos = 0u64;
@@ -486,15 +488,70 @@ pub fn mkv_layout(src: &dyn Source, wait: Duration) -> Result<MkvLayout, RemuxEr
     // knows where to find. Verify the id at the target before walking
     // it: a SeekPosition landing in the middle of a cluster is a corrupt
     // index, and following it would read payload as structure.
-    for (id, rel) in seek {
+    //
+    // This is a WORKLIST, not a snapshot. A SeekHead entry may name a
+    // SECOND SeekHead - the ordinary deferred-index mux, a small
+    // fixed-size index at the front of the Segment and the real one in
+    // the tail - and chasing it appends to `seek` UNDER the loop, so
+    // `seek` is drained by index rather than consumed by value. Written
+    // that way, a Tracks reachable only through the second index left
+    // `lay.tracks` empty, which is a preview that does not build.
+    //
+    // TERMINATION, since the offsets are attacker-supplied and a
+    // worklist over them is a cycle. Two independent bounds, both of
+    // which I satisfied myself hold against THIS file's `charge()`
+    // budget (which is a local `u32` seeded from MAX_ELEMENTS, not the
+    // probe's `rd.budget`):
+    //
+    //   1. `next` advances on every iteration, and `seek` grows only
+    //      through `read_seek_head`, which pays `charge(budget)` for
+    //      the SEEK master and again for each of its children before it
+    //      can push a single entry. `budget` is monotonically
+    //      decreasing and `charge` fails at zero, so fewer than
+    //      MAX_ELEMENTS entries can ever reach `seek` however the file
+    //      is shaped, and the loop runs at most that many times. That
+    //      bound alone terminates a cycle - but it terminates it by
+    //      burning the budget and failing the whole layout with "too
+    //      many elements" on a file that is fine.
+    //   2. `walked`, keyed on the RESOLVED ABSOLUTE offset of the
+    //      target, refuses any offset a second time, so a cycle costs
+    //      exactly one extra `read_id`. That is what makes the chase
+    //      correct rather than merely finite, and it is why the set is
+    //      built here rather than borrowed: this file had none.
+    //
+    // No cap on the number of entries chased: a cap would turn a
+    // correctness bug into a silent truncation.
+    let mut walked: HashSet<u64> = HashSet::new();
+    let mut next = 0usize;
+    while next < seek.len() {
+        let (id, rel) = seek[next];
+        next += 1;
+        // FIRST ONE WINS, and the two `already have it` reads stay
+        // INSIDE the loop deliberately. `lay.tracks` and `lay.cues_off`
+        // each hold exactly ONE answer, so a second Tracks entry could
+        // only overwrite the first with a later, less-trusted one -
+        // there is no accumulation for it to contribute to. `ebml.rs`'s
+        // chase hoists its `seen_*` reads out for the opposite reason:
+        // there the targets append to a list and two distinct Chapters
+        // elements are two answers, so re-reading would drop every
+        // target after the first of its kind.
+        //
+        // A SeekHead gets no such check - a second index is not
+        // redundant with the first - but is worth chasing only while
+        // something is still missing, since this loop produces nothing
+        // else.
         let want_tracks = id == TRACKS && lay.tracks.is_empty();
         let want_cues = id == CUES && lay.cues_off.is_none();
-        if !(want_tracks || want_cues) {
+        let want_seek = id == SEEK_HEAD && (lay.tracks.is_empty() || lay.cues_off.is_none());
+        if !(want_tracks || want_cues || want_seek) {
             continue;
         }
         let Some(at) = seg_start.checked_add(rel).filter(|a| *a < seg_end) else {
             continue;
         };
+        if !walked.insert(at) {
+            continue;
+        }
         match read_id(src, at, wait) {
             Ok((found, idl)) if found == id => {
                 if want_cues {
@@ -503,7 +560,11 @@ pub fn mkv_layout(src: &dyn Source, wait: Duration) -> Result<MkvLayout, RemuxEr
                     let (size, szl, _) = read_size(src, at + idl, wait)?;
                     let body = at + idl + szl;
                     let bend = body.saturating_add(size).min(seg_end);
-                    lay.tracks = read_tracks(src, body, bend, wait, &mut budget)?;
+                    if want_seek {
+                        read_seek_head(src, body, bend, wait, &mut budget, &mut seek)?;
+                    } else {
+                        lay.tracks = read_tracks(src, body, bend, wait, &mut budget)?;
+                    }
                 }
             }
             // A gap over the index is not corruption: the tail has not
@@ -2284,6 +2345,7 @@ pub fn select_mp4(
 mod tests {
     use super::*;
     use crate::mediaprobe::source::MemSource;
+    use crate::mediaprobe::testmux;
 
     const NOW: Duration = Duration::ZERO;
 
@@ -2655,5 +2717,67 @@ mod tests {
         let s = MemSource(b);
         let v = read_u32s(&s, 0, s.size(), NOW).unwrap();
         assert_eq!(v, vec![7, 9]);
+    }
+
+    /// The deferred-index mux: a small fixed-size SeekHead at the front
+    /// of the Segment naming a SECOND one in the tail, which is the
+    /// index that actually names the Tracks and the Cues. Ordinary,
+    /// specified Matroska. Before the chase became a worklist this came
+    /// back with `left: []` for the tracks and `None` for the cues -
+    /// and an empty track list is a preview that does not build, not
+    /// merely a panel that reads short.
+    #[test]
+    fn tracks_and_cues_behind_a_second_chained_seekhead_are_found() {
+        let src = MemSource(testmux::mkv_layout_seekhead_chained());
+        let lay = mkv_layout(&src, NOW).unwrap();
+        assert_eq!(lay.tracks.len(), 1, "tracks behind the tail index");
+        assert!(lay.cues_off.is_some(), "cues behind the tail index");
+        let (id, _) = read_id(&src, lay.cues_off.unwrap(), NOW).unwrap();
+        assert_eq!(id, CUES, "cues_off must land on a Cues element");
+    }
+
+    /// A cyclic index still comes back with what is really behind it:
+    /// two SeekHeads naming each other, and the degenerate one naming
+    /// itself, with the Tracks and Cues reachable only through the
+    /// second hop.
+    ///
+    /// This is NOT the guard's control, and I checked rather than
+    /// assumed: with `walked` removed both of these still pass, because
+    /// a SeekHead is only chased while something is still missing, so
+    /// the loop satisfies itself and stops going round. The shape that
+    /// does need the guard is the barren cycle below.
+    #[test]
+    fn a_seekhead_cycle_terminates_and_still_reads_what_is_there() {
+        for (name, bytes) in [
+            ("cycle", testmux::mkv_layout_seekhead_cycle()),
+            ("self_loop", testmux::mkv_layout_seekhead_self_loop()),
+        ] {
+            let src = MemSource(bytes);
+            let lay = mkv_layout(&src, NOW).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(lay.tracks.len(), 1, "{name}: tracks");
+            assert!(lay.cues_off.is_some(), "{name}: cues");
+        }
+    }
+
+    /// The RUN control for the guard, and the one that is not vacuous.
+    /// Two SeekHeads naming each other and NOTHING else, so the chase
+    /// never finds what it is looking for and never stops wanting to
+    /// look: the resolved-offset set is the only thing that ends it.
+    ///
+    /// Measured on the removed-guard arm: `mkv_layout` comes back
+    /// `Err(Malformed("mkv", "too many elements"))`, the whole
+    /// three-test case taking 0.29 s against 0.00 s with the set,
+    /// having gone round until `charge()` ran the budget out - bound 1,
+    /// finite and wrong, because it condemns a file whose only sin is a
+    /// cyclic index. With the set it is `Ok` and the layout is simply
+    /// the one the linear pass found.
+    #[test]
+    fn a_barren_seekhead_cycle_terminates_on_the_offset_set() {
+        let src = MemSource(testmux::mkv_layout_seekhead_barren_cycle());
+        let lay = mkv_layout(&src, NOW).expect("a cyclic index is not a malformed file");
+        // Nothing indexes them, so nothing is found - the point is that
+        // the walk ends at all, and ends without spending the budget.
+        assert!(lay.tracks.is_empty());
+        assert!(lay.cues_off.is_none());
     }
 }

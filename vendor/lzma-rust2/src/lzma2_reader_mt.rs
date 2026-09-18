@@ -917,11 +917,30 @@ mod tests {
         }
         stream.push(0x00);
 
-        let declared: usize = 200_001 * (1 << 21);
+        // COMPUTED IN u64, AND THAT IS NOT TIDINESS. As `usize` this was
+        // `200_001 * (1 << 21)`, about 419 GB, which does not fit a
+        // 32-bit `usize` - so on armv7 it was a compile-time
+        // `arithmetic_overflow`, a DENY-by-default lint, which failed
+        // the whole `lzma-rust2` lib test target and took the workspace
+        // build down with it (`armv7-cross` red on 96f56f4b, run
+        // 35203995207). The 64-bit boxes never saw it, because there
+        // the constant simply fits.
+        //
+        // u64 is the only width that can hold what the headers CLAIM,
+        // so the claim is computed there and the assertion below is
+        // about the claim. What `prealloc_for` is then handed is the
+        // largest declaration THIS TARGET can represent: on 64-bit that
+        // is the claim itself, and on 32-bit it is `usize::MAX`, which
+        // is the strongest over-declaration a 32-bit stream could ever
+        // reach. Either way the property under test is the same one -
+        // a declaration far past the cap is reserved AT the cap - and
+        // it is now tested on both widths instead of neither.
+        let declared_by_headers: u64 = 200_001 * (1 << 21);
         assert!(
-            declared > 16 * PREALLOC_CAP,
-            "the fixture must declare far more than the cap, not {declared}"
+            declared_by_headers > 16 * PREALLOC_CAP as u64,
+            "the fixture must declare far more than the cap, not {declared_by_headers}"
         );
+        let declared = usize::try_from(declared_by_headers).unwrap_or(usize::MAX);
         assert_eq!(
             prealloc_for(declared),
             PREALLOC_CAP,

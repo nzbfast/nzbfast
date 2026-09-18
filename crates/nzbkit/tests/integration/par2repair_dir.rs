@@ -766,13 +766,20 @@ fn a_partial_donor_is_never_reported_as_spent() {
     );
 }
 
-/// The other half of the same rule: the case the sweep exists for still
-/// works. On a wholly renamed post the hash-named file IS the payload
-/// byte for byte, the repair lands those same bytes under the FileDesc
-/// name, and the leftover duplicate - 8.2 GB of one on the report that
-/// raised issue #9 - is proven spent by whole-file MD5.
+/// The other half of the same rule, and the case the sweep exists for:
+/// on a wholly renamed post the hash-named file IS the payload byte for
+/// byte - 8.2 GB of leftover duplicate on the report that raised issue
+/// #9.
+///
+/// It is no longer SWEPT, because since 17 Sep 2026 there is no
+/// duplicate to sweep: a candidate the fast path proves is the member
+/// whole is landed by RENAMING it, which is what par2cmdline has always
+/// done and which writes none of the payload (claim
+/// `sab-whole-match-rename-not-rewrite`). The end state this row was
+/// written to pin is unchanged and still asserted - one file, under the
+/// declared name, byte-exact - and the route to it is the cheap one.
 #[test]
-fn a_whole_file_donor_is_still_reported_as_spent() {
+fn a_whole_file_donor_is_landed_by_renaming_it() {
     if !have_par2() {
         eprintln!("skipping: par2 not installed");
         return;
@@ -788,10 +795,16 @@ fn a_whole_file_donor_is_still_reported_as_spent() {
         other => panic!("expected Repaired, got {other:?}"),
     };
     assert_eq!(read(&t.0, "a.bin"), a, "payload not restored byte-exact");
-    assert_eq!(
-        r.consumed_sources,
-        vec![t.0.join("9f2c1d4e")],
-        "the byte-for-byte duplicate must still be swept"
+    assert_eq!(r.files_renamed, vec!["a.bin".to_string()]);
+    assert!(
+        !t.0.join("9f2c1d4e").exists(),
+        "the hash name must be gone - the point of the whole exercise is \
+         that the folder is not left holding two copies of the payload"
+    );
+    assert!(
+        r.consumed_sources.is_empty(),
+        "a renamed donor has no path left for the caller to sweep: {:?}",
+        r.consumed_sources
     );
 }
 

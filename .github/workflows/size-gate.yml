@@ -749,6 +749,15 @@ on:
       - 'tools/cfg-safety-gate.py'
       - 'tools/cfg-symbol-gate.py'
       - 'tools/cpu-workers-gate.py'
+      - 'tools/env-default-gate.py'
+      - 'tools/env-inventory-gate.py'
+      # For `env-default-gate`, whose second subject is the Default column
+      # of docs/ENVIRONMENT.md. `crates/**` and `**/*.rs` above cover the
+      # code side; nothing in this list matches that one .md file, so
+      # without this line a doc row edited on its own - which is exactly
+      # how the 17 Sep 2026 drift would have been re-introduced - is a
+      # change the gate never fires on.
+      - 'docs/ENVIRONMENT.md'
       - 'tools/journeys-gate.py'
       # For `journeys-gate`, whose subject is the journeys/ suite's own
       # `.ts` files and playwright.config.ts - none of them .rs, .py, .sh
@@ -783,6 +792,7 @@ on:
       - '.github/workflows/ci-private.yml'
       - 'web/ui-tokens.html'
       - 'web/site.webmanifest'
+      - 'tools/i18n-value-shape-gate.py'
       - 'web/i18n/manual-check.py'
       - 'web/i18n/site-check.py'
       - 'web/i18n/site-crosslink.py'
@@ -792,6 +802,12 @@ on:
       - '.claude/tools/checkout-drift-hook.py'
       - '.claude/tools/box-load-hook.py'
       - '.github/workflows/size-gate.yml'
+      # For `selftest-exit-code-gate` below, whose subject is every gate
+      # script in these two directories rather than any one of them: a
+      # gate added or edited anywhere here changes that job's answer, and
+      # the per-script list above cannot express that.
+      - 'tools/**'
+      - '.claude/tools/**'
       # For the `packaging-tests-roster` job below, whose subject is
       # every workflow in this directory: deleting a `run:` step from
       # any of them can leave a packaging gate wired to nothing, and
@@ -1110,6 +1126,32 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/cpu-workers-gate.py --selftest && tools/cpu-workers-gate.py
+      # ---- env-default-gate ----------------------------------------
+      # docs/ENVIRONMENT.md's Default column against the default the
+      # code actually uses, for the 49 rows where that column states a
+      # number. It ships publicly, so a wrong row is a wrong promise to
+      # an operator, and the one it found on the day it landed
+      # (NZBFAST_INDEX_GATE_WAIT_SECS, 60 documented against a shipped
+      # 5) had been live for a month with every gate green. Booleans
+      # and the inventory gap are out of scope on purpose - the
+      # script's header says why, at length, and both decisions were
+      # measured rather than assumed.
+      - name: env default gate
+        if: ${{ !cancelled() }}
+        run: tools/env-default-gate.py --selftest && tools/env-default-gate.py
+      # ---- env-inventory-gate --------------------------------------
+      # The same file's ROSTER against the code's, which is the other
+      # half of what docs/ENVIRONMENT.md promises: its header says it
+      # lists every `NZBFAST_*` name read under `crates/*/src`, and on
+      # 17 Sep 2026 it was missing 57 of them - including a user-facing
+      # kill switch for the link probe. A separate step and a separate
+      # refusal on purpose: the fix is to write a row, not to re-tense a
+      # number, and a gate whose red means two things is one people stop
+      # reading. Its two arms read DIFFERENT populations, and the
+      # script's header says why at length.
+      - name: env inventory gate
+        if: ${{ !cancelled() }}
+        run: tools/env-inventory-gate.py --selftest && tools/env-inventory-gate.py
       # ---- host-config-gate ----------------------------------------
       # A test that hands the daemon a config path it never wrote.
       # `Config::load` answers a MISSING file by finding a SABnzbd
@@ -1324,6 +1366,51 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/par2-rule-gate.py --selftest && tools/par2-rule-gate.py
+      # ---- par2-create-door-gate -----------------------------------
+      # Refuses a par2gen write site that does not go through
+      # `CreateTrail::create`. `1cdeedf47` gave the PAR2 creator a
+      # no-clobber mode and made one structural rule load-bearing:
+      # every file of a recovery set is created through that one door.
+      # It honours `no_clobber` with an `O_EXCL` open - the only
+      # no-overwrite guard below the CLI that is not a racy preflight -
+      # and it notes the name for a cancel to unlink ONLY after the open
+      # succeeds. That ordering is the trap: with the note first, a file
+      # the no-clobber open REFUSED is recorded as this run's own, and a
+      # cancel afterwards deletes the very file the refusal was
+      # protecting, which is worse than the overwrite the feature
+      # prevents. Nothing held either property - verified 17 Sep 2026,
+      # no gate and no workflow mentioned `CreateTrail` or `no_clobber`
+      # at all - so a fourth write site with a bare `File::create` would
+      # lose both in silence with every existing test still green.
+      # Five arms, each seeing what the others cannot: the door still
+      # carrying its `create_new(<no_clobber>)` ARGUMENT (not merely the
+      # token - `create_new(false)` keeps the call and kills the guard),
+      # the note still landing after the open, `note(` still having the
+      # one caller, no creating shape in par2gen production code outside
+      # the door, and the door still being reached at all. It asks
+      # whether a call can BRING A FILE INTO EXISTENCE rather than
+      # whether it writes, which is what lets `backfill_critical`'s
+      # `write(true).open()` patch of an existing member pass by the
+      # rule instead of by a waiver.
+      # `--selftest` first and it is the gate: 40 cases, including four
+      # mutations planted on the REAL par2gen files (a bare create in
+      # each of the three write paths, and the door's flag pinned to a
+      # constant) that each verify the gate BITES, and refusals pinned
+      # for a renamed `CreateTrail`, a renamed `create`, a door nothing
+      # calls and an empty tree - failing to find is failing. It needs
+      # no new `paths:` entry: `**/*.rs` and `**/*.py` above already
+      # reach every file it reads. Build-free: 1.6 s for the gate and
+      # 9.4 s for the selftest, both measured on a dev Mac at ~4.5x
+      # oversubscription, so an idle runner is under both. The selftest
+      # is the dear half because four of its cases COPY the real
+      # par2gen tree to plant a mutation in it.
+      - name: par2 create door gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/par2-create-door-gate.py --selftest && tools/par2-create-door-gate.py
       # ---- extractor-anchor-gate -----------------------------------
       # A root `Arc<Extractor>` that is fed spans must be ANCHORED.
       # `Extractor::anchor` records the chain root's own `Arc` weakly and
@@ -1702,6 +1789,66 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/zip-fixture-gate.py --selftest && tools/zip-fixture-gate.py
+      # ---- sab-parser-gate -----------------------------------------
+      # parfast is a par2cmdline drop-in and SABnzbd runs it as its
+      # repair binary, parsing its stdout line by line and never looking
+      # at the exit code. Nothing in this repo compared parfast to SAB's
+      # predicates until this gate landed: tools/conformance/run.py
+      # compares it to par2cmdline, a different and only partly
+      # overlapping set of lines, and its `normalise` keeps only the text
+      # after the last carriage return of each physical line, so no
+      # progress fragment either tool draws has ever reached a
+      # conformance table in either direction. Measured 17 Sep 2026
+      # against a real SAB 5.1.2, three gaps had been there since the CLI
+      # shipped, two of them functional: SAB never learns which
+      # obfuscated files parfast matched or consumed, and four of its
+      # error branches are unreachable
+      # (research/SAB-PARFAST-METER-DROPIN-2026-09-17.md, addendum A
+      # and B). The contract with user-visible consequences was the one
+      # with no check over it.
+      # A RATCHET, NOT A BASELINE: a branch reachable today that stops
+      # being reachable is a RED; a branch that has never been reachable
+      # is REPORTED and does not red, which is what let this land BEFORE
+      # the emit-side fix (claim sab-parfast-rename-announce) rather than
+      # reddening main for everyone on the day it arrived. First run: 24
+      # branches, 16 reached, 8 not, and the 8 reproduce that addendum
+      # exactly from the other side.
+      # WHAT RUNS HERE IS THE SOURCE ARM, and that is a stated limit
+      # rather than an oversight. The gate has a FIXTURE arm that builds
+      # seven damaged par2 sets and runs a real parfast over them with
+      # SAB's own argv shape; this job is build-free by the whole
+      # rationale at the head of this file, so no binary resolves and the
+      # run says so in as many words instead of going quiet. Lanes get
+      # the fixture arm for free through tools/preflight.py whenever
+      # their worktree has a target/ binary, and the SOURCE arm is the
+      # authoritative red-maker for a deleted emit either way - it reads
+      # the Rust with comments blanked and `#[cfg(test)]` bodies
+      # excluded, so a test asserting the string cannot keep a deleted
+      # production emit looking alive.
+      # The `--selftest` is not decoration: five of its cases spawn this
+      # script as a real process and assert the exit code the shell would
+      # see (0, 1 and 2). That is deliberate and it is not the usual
+      # shape: a 17 Sep 2026 census of this suite found 53 gates whose
+      # selftests exercise every arm in-process and therefore cannot see
+      # main()'s exit code at all, which is the one thing a CI step
+      # actually reads. Four more cases drive the whole FIXTURE arm
+      # through a canned-output shim, so that half has coverage on a
+      # runner with no parfast on it. The gate's own header carries the
+      # pointer to the census.
+      # FIX A HIT at the emit site, never in the roster: a branch that was
+      # reachable and is not is a regression in what SABnzbd is told about
+      # a repair. Advancing the ratchet - flipping a `reached` from False
+      # to True - is the one roster edit that is expected and welcome, and
+      # it is what the emit lane does the day it lands.
+      # Build-free, about 1.5 s here, and no new `paths:` entry -
+      # `crates/**` and `**/*.py` above already reach every file it reads.
+      - name: SABnzbd parser contract gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/sab-parser-gate.py --selftest && tools/sab-parser-gate.py
   bench-gates:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -2330,7 +2477,12 @@ jobs:
       # it has not changed.
       #
       # The selftest is a different thing entirely: pure frozen JSON
-      # plus ONE file read, no network and no `gh` auth, about 0.2 s.
+      # plus the workflow directory, no network and no `gh` auth.
+      # RE-MEASURED 17 Sep 2026 on the dev Mac: about 3.5 s of CPU, 3.3 s
+      # wall on a quiet box. It read "ONE file read, about 0.2 s" until
+      # then, which was true of a roster held to ci-private.yml alone and
+      # had been stale since the coverage arm started classifying all 23
+      # files in this directory and holding every watched one to its own.
       # Case 16 of it holds the script's roster against ci-private.yml's
       # job list in BOTH directions - a job the tool neither judges nor
       # excuses is a refusal naming it, and so is a rostered job that has
@@ -2339,6 +2491,13 @@ jobs:
       # one person who knows whether its red belongs on main's tip, and
       # on main alone they learn it from the next lane's run instead.
       # Same argument the flatpak pin gate's tree mode was moved here on.
+      #
+      # AND SINCE 17 Sep 2026 THAT REFUSAL PRINTS A TAKE THE RED BLOCK OF
+      # ITS OWN - a derived `red-roster-gates-<h>` id, the fetch step, and
+      # an `::error` so the red lands on the COMMIT and not only in this
+      # log. It reads no claims ledger, which is what keeps this step
+      # hermetic; see `roster_selftest_lines` in tools/ci-verdict.py for
+      # what that gives up and why it is the right trade here.
       #
       # It needs no new `paths:` entry: `**/*.py` and
       # `.github/workflows/ci-private.yml` are both already triggers
@@ -2446,6 +2605,86 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/wedge-gate.py --selftest && tools/wedge-gate.py
+  # One level BELOW `selftest-roster` in the roster-gates job, and the two
+  # ask different questions. That gate asks whether a `--selftest` is RUN by
+  # a workflow. This one asks whether the selftest covers its own gate's
+  # EXIT CODE - because a selftest drives `check()` while CI reads `main()`,
+  # and nothing connects the two. Measured 17 Sep 2026 over tools/ and
+  # .claude/tools/: 70 scripts have a selftest AND a main() that can return
+  # nonzero, 176 nonzero exit paths between them, and per-line mutation
+  # proved 170 of the 176 BLIND - 66 gates blind on every path they have,
+  # including size, ref, doc, api-contract, script-parse and waiver. A gate
+  # in that state prints every finding it has and exits 0, green forever,
+  # with its selftest still reporting all cases OK.
+  #
+  # ITS OWN JOB, not a step in the group above, and the reason is cost. It
+  # imports each gate and runs that gate's own selftest THREE times - once
+  # untouched, once with main() forced to always return 0, once forced to
+  # always return 1 - because a selftest that never looks at the exit code
+  # survives both forcings and one that pins only one direction survives
+  # one. That is minutes where the steps in roster-gates are seconds each,
+  # and sharing a job would put a one-second roster behind it.
+  #
+  # `--selftest` first is not habit here: this script is its own subject,
+  # and that arm drives its own main() both ways.
+  selftest-exit-code-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: selftest-exit-code-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Ensure zsh for the gates under probe
+        # This gate IMPORTS each of its 74 subjects and drives their
+        # main(), so it inherits every precondition they have - and
+        # `tools/script-parse-gate.py` REFUSES rather than skipping when
+        # an interpreter it needs is absent, which is the right
+        # behaviour and is what reddened this job on 32362956
+        # (run 35267425576): `the shell 'zsh' is not on PATH, and
+        # riglib.sh needs it`. 239 of the committed shell files are zsh
+        # and ubuntu-latest does not carry it. The `script-parse-gate`
+        # job above has carried this same step since that gate landed;
+        # this job acquired the same need the moment script-parse-gate
+        # joined its roster, and nothing propagated the step. A no-op
+        # when zsh is already present. The fix is the SITE, not the
+        # subject: the gate's own refusal text says `install the shell,
+        # do not drop the arm`.
+        run: command -v zsh >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq zsh)
+      - name: install the pinned compiler for the gates under probe
+        # THE SECOND SUBJECT WITH A PRECONDITION, and the zsh step above
+        # does not cover it. That step fixed two of the three subjects
+        # this job reported REFUSED on ba0ff3e7 (run 35268142808) -
+        # script-parse-gate and bench-deploy-check, both of which need
+        # zsh. `tools/checkjs-gate.py` is the third and needs neither: it
+        # resolves `node_modules/typescript/lib/tsc.js` BY PATH and
+        # refuses when it is absent, which a fresh CI checkout always is.
+        #
+        # Measured rather than reasoned, because the two exit codes do
+        # not match and the mismatch is what made this look like a
+        # different defect: run the gate directly in a tree with no
+        # node_modules and it exits 2 (a refusal), while this job's log
+        # says `RED (1)`. Both are right - `probe_subprocess` runs the
+        # `--probe` WRAPPER, not the subject, and the wrapper exits 1.
+        # Reproduced in a throwaway git tree carrying only package.json,
+        # package-lock.json and tools/: gate rc=2, wrapper rc=1, which
+        # is the log's number exactly.
+        #
+        # `npm ci` and not `npm install`, and no `actions/setup-node`,
+        # for the reasons the `web-gates` job states at length where it
+        # runs this same line: tsc's diagnostics are a function of the
+        # TYPESCRIPT version, package-lock.json pins it, and `ci` refuses
+        # to move the lockfile. One package, under a second from cache.
+        #
+        # Run even when the zsh step failed, so one missing precondition
+        # cannot mask the other's verdict. The job still reds if any step
+        # did.
+        if: ${{ !cancelled() }}
+        run: npm ci --no-audit --no-fund
+      - name: selftest exit-code gate
+        run: tools/selftest-exit-code-gate.py --selftest && tools/selftest-exit-code-gate.py
+
   shell-selftests:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -2945,6 +3184,30 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: python3 web/i18n/nav-regen.py --check
+      # ---- i18n value-shape gate -----------------------------------
+      # The class `web/i18n/check.py` cannot see: a translated value that
+      # sits under the WRONG KEY, or one the English has outgrown. Every
+      # arm check.py has is a parity proof about the key set or about
+      # tokens inside a value, so a catalogue whose values are all filed
+      # one place to the left passes it perfectly - which is exactly what
+      # `set.look.motion.*` did in all 27 languages for seven weeks
+      # (4666dcfd9 to 06422c7f6), shipping a dropdown whose first option
+      # was a paragraph of explanation under a hint that just said
+      # "Full". Two length arms, one absolute per key and one relative
+      # per family; the script's header carries the measurements and the
+      # limits. `--selftest` FIRST and not optionally: both arms fire on
+      # nothing today, so a matcher that had quietly stopped matching
+      # would report a clean tree forever, and the selftest is what
+      # separates those two. It drives the shipped rotation as a frozen
+      # fixture and pins the four thresholds against the real
+      # translations that set them.
+      - name: i18n value-shape gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: python3 tools/i18n-value-shape-gate.py --selftest && python3 tools/i18n-value-shape-gate.py
   # The build-free PACKAGING gates, and the first job in this file whose
   # subject is not a python gate over the source tree.
   #
@@ -3169,6 +3432,11 @@ jobs:
       # selftest pins the derivation, the scoping and the cargo-command
       # read-out of ci-private.yml; a derivation that quietly stopped
       # parsing would otherwise read as a very fast clean run forever.
+      # It ALSO pins the two commands this file composes that no CI step
+      # can be paired against - the nextest sweep filter and, since
+      # 17 Sep 2026, the armv7 pointer-width build line - to CLAUDE.md's
+      # own copies of them, so this step reds on a CLAUDE.md edit as well
+      # as on a preflight one.
       # research/DEV-TOOLCHAIN-REVIEW-2026-08-31.md is the review that
       # commissioned it.
       - name: preflight orchestrator
@@ -3249,6 +3517,55 @@ jobs:
       # choosing - which is how the 126 was found at all.
       - name: segment codec
         run: python3 tools/segcodec.py --selftest
+      # The bimodal-cell rule the A/B drivers share
+      # (research/AB-CELL-BIMODALITY-AUDIT-2026-09-17.md). Twenty-eight banked
+      # drivers import their threshold from this ONE file - sixteen until the
+      # roster gate in the step below found twelve more that print a cell and
+      # name no `min/min` - so a change here
+      # moves every round's warning at once, and the cases it pins are the
+      # ones that are expensive to get wrong: the 0.641 cell that motivated
+      # the check MUST fire (a floor of 0.50 misses it, which is why the
+      # number is 0.70), the wholly-demoted cell must NOT (that is the
+      # documented blind spot, and a "fix" that made it fire would be the
+      # gate reporting a box state it cannot see), and all five banked
+      # print formats must still parse - the fifth was found only because
+      # the first scan missed the corpus's two most extreme cells.
+      # BOTH COPIES, and the second is not redundant: website/ is a
+      # generated, SCRUBBED mirror, so this arm is what would catch a scrub
+      # rule that mangled the code on its way out rather than only the prose.
+      - name: bimodal-cell rule, and its published copy
+        run: |
+          python3 research/harness/cellguard.py --selftest
+          python3 website/parfast-bench/harness/cellguard.py --selftest
+      # The windowed-ask reducer, which pins a PUBLISHED TABLE rather than a
+      # rule: --selftest reproduces the four figures the 16 Sep nibble round
+      # published (resident 255, -m2048 387, excess +132, the >193 bound with
+      # m = 512 excluded on its slab-shape change) out of the banked logs, with
+      # and without --threads, and proves the multi-pool refusal fires by name
+      # and EXITS 1 while a valid run exits 0. That exit-code pair is the arm
+      # worth having in CI: the defect it replaces was a reducer that fused two
+      # thread pools into a crossover belonging to neither and said nothing, so
+      # a refusal that exited 0 would be the same silent pass wearing a message.
+      # BOTH COPIES, for the scrubbed-mirror reason the cellguard step above
+      # gives - and here the mirror carries the LOGS as well as the code, so
+      # this arm also catches an export that copied the script without the
+      # evidence it reduces.
+      - name: windowed-ask reducer, and its published copy
+        run: |
+          python3 research/rounds/wask-nibble-2026-09-16/waskred.py --selftest
+          python3 website/parfast-bench/rounds/wask-nibble-2026-09-16/waskred.py --selftest
+      # And the ROSTER half: which drivers read that rule at all. The
+      # selftest is what holds its renderer honest, and the case that
+      # matters is the one pinned against the REAL tree - every file that
+      # imports cellguard must also be one the renderer can derive a cell
+      # from, so a driver written in a print shape the renderer cannot read
+      # REFUSES here rather than quietly narrowing the population it
+      # reports clean over. That case caught two defects in the script's
+      # first hour. The report half is deliberately NOT run per push: it
+      # exits 0 on hits by design (a round driver is banked history), so
+      # there is nothing for a job to fail on - it is a suite line.
+      - name: cellguard driver roster
+        run: python3 tools/cellguard-roster.py --selftest
       # zsh, WHICH THIS RUNNER DOES NOT SHIP, and the step below REFUSES
       # without it rather than passing over the case that needs it. That
       # refusal is correct and is why this install is here instead of a
@@ -3349,10 +3666,24 @@ jobs:
       # GitHub Release is live, while every download button on the site
       # is still 404 - so a false refusal there is a person under
       # pressure to loosen a leak gate. 36 cases, both directions, plus a
-      # real-tree case over all 173 published files, which makes this
+      # real-tree case over all 646 published files, which makes this
       # step a gate over website/ as well as over the scanner: a private
       # name committed to a page reddens the AUTHOR's push instead of the
-      # next release. Build-free, about 2.8 s.
+      # next release. Build-free.
+      #
+      # 173 of those files until 16 Sep 2026, when the real-tree arm
+      # stopped carrying its own guess at the publish set and started
+      # DERIVING it from publish-site.sh's step 4. The guess had drifted
+      # three ways: website/parfast-bench/ (468 files, 7.3 MB of bench
+      # evidence, an $EXTRA_ROOT_DIRS entry) was reached by no per-push
+      # check at all, website/nzbfast-synology.yml ($EXTRA_ROOT_FILES)
+      # likewise because the list took *.html only, and assets/ was
+      # listed flat though publish copies it with `cp -R`. The step was
+      # ~2.8 s here at 173 files and the walk adds about 3 s measured on
+      # the dev Mac, so expect single-digit seconds rather than the old
+      # figure. Each $EXTRA_ROOT_DIRS entry carries a FLOOR in the
+      # selftest, because 173 files clear the whole-list floor with
+      # parfast-bench contributing nothing at all.
       - name: site leak scan
         run: tools/site-leak-scan.py --selftest
       # The reader that turns a run's flake annotations back into a per-test

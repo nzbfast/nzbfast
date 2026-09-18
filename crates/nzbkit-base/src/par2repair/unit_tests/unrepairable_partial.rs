@@ -14,7 +14,7 @@
 //! and no `par2` subprocess timing to land on the interesting branch:
 //! `a.bin` never exists under its own name, but a byte-identical copy
 //! sits under an unrelated donor name (the obfuscated-post shape
-//! `a_wholly_renamed_copy_is_adopted_and_reported_consumed` next door
+//! `a_wholly_renamed_copy_is_landed_by_renaming_the_copy` next door
 //! already exercises for a ONE-file set) - so the adoption scan finds
 //! every one of `a.bin`'s own blocks with nothing missing for it
 //! specifically. `b.bin` sits in the SAME recovery set, damaged beyond

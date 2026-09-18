@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast-daemon"
-version = "1.5.0"
+version = "1.6.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -111,3 +111,15 @@ nzbfast-unpack = { path = "../nzbfast-unpack", features = ["test-support"] }
 # model a pre-manifest database. Same version/features nzbkit's index
 # tests already compile, so it adds no production dependency.
 rusqlite = { version = "0.40.1", features = ["hooks"] }
+# The 7z ENCODER, for the ONE thing a daemon test cannot fake: a
+# genuinely password-protected archive. `job_finalize`'s A6 rollback
+# (N1) turns on what the unlock ladder answers about the payload it just
+# published, and a fixture that merely looks locked would test the
+# fixture. Dev-only, exactly as nzbfast-unpack declares it and for the
+# same reason: resolver 2 keeps `compress` out of `cargo build`.
+sevenz-rust2 = { version = "0.22", default-features = false, features = [
+    "aes256",
+    "bzip2",
+    "ppmd",
+    "compress",
+] }

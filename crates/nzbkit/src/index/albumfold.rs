@@ -580,8 +580,9 @@ impl Index {
     ) -> rusqlite::Result<(usize, usize, bool)> {
         const WINDOW: i64 = 4 * 3_600;
         const SETTLE: i64 = 2 * 3_600;
-        let started = std::time::Instant::now();
-        let deadline = started + budget;
+        // The budget bounds the HOLD and not only the intake - see
+        // `super::foldpace` for the measurement that separates the two.
+        let pace = super::foldpace::FoldPace::new(budget);
         let horizon = now.saturating_sub(SETTLE);
         // The oldest posting on record, an O(1) probe of
         // `idx_rel_posted`. Starting a first walk at zero would spend a
@@ -637,7 +638,7 @@ impl Index {
                     break;
                 }
                 let hi = cursor + WINDOW;
-                let (a, n, seen, complete) = self.album_fold_window(cursor, hi, now, deadline)?;
+                let (a, n, seen, complete) = self.album_fold_window(cursor, hi, now, &pace)?;
                 albums += a;
                 folded += n;
                 if !complete {
@@ -649,7 +650,7 @@ impl Index {
                 }
                 cursor = if seen == 0 { hi } else { hi - MAX_SPAN };
                 self.kv_set("album_fold_at", &cursor.to_string())?;
-                if started.elapsed() >= budget {
+                if !pace.room() {
                     break;
                 }
             }
@@ -686,8 +687,9 @@ impl Index {
         lo: i64,
         hi: i64,
         now: i64,
-        deadline: std::time::Instant,
+        pace: &super::foldpace::FoldPace,
     ) -> rusqlite::Result<(usize, usize, usize, bool)> {
+        let unit = pace.unit_start();
         let mut groups: std::collections::HashMap<(String, String), Vec<AlbMember>> =
             Default::default();
         let mut anchors: std::collections::HashMap<(String, String), Vec<AlbMember>> =
@@ -765,6 +767,9 @@ impl Index {
                 }
             }
         }
+        // Both population reads are one indivisible unit; so is each
+        // merge below, whose commit is the dear half.
+        pace.unit_end(unit);
         let (mut albums, mut folded) = (0usize, 0usize);
         let mut cands: Vec<(Vec<AlbMember>, Vec<AlbMember>)> = groups
             .into_iter()
@@ -778,13 +783,18 @@ impl Index {
         cands.sort_by_key(|(v, _)| v.iter().map(|m| m.id).min().unwrap_or(0));
         for (members, anchor) in cands {
             for plan in album_fold_plans(members, anchor, hi) {
+                if !pace.room() {
+                    return Ok((albums, folded, seen, false));
+                }
+                let unit = pace.unit_start();
                 let n = self.album_fold_merge(&plan, now)?;
+                pace.unit_end(unit);
                 if n > 0 {
                     albums += 1;
                     folded += n;
                 }
             }
-            if std::time::Instant::now() >= deadline {
+            if !pace.room() {
                 return Ok((albums, folded, seen, false));
             }
         }

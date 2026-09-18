@@ -987,13 +987,20 @@ impl Extractor {
     /// the late placements the drains surface. A demote raises
     /// `refeed_active` so its whole reconstruction surfaces those
     /// placements - but the bytes can reach the volume by routes that
-    /// report nothing: the post-write re-route in `write` (which
-    /// deliberately returns `Persist::No`) and the forward-delivery
-    /// re-check both run with the flag DOWN, and the read-back skips a
-    /// range whose pwrite has not landed yet. The article then stayed
-    /// parked for the life of the job and refetched on the next run -
-    /// ~8% of runs standalone here, ~40% under a loaded suite, always
-    /// exactly one article of the post.
+    /// report nothing: the post-write re-route in `write` and the
+    /// forward-delivery re-check both run with the flag DOWN, and the
+    /// read-back skips a range whose pwrite has not landed yet. The
+    /// article then stayed parked for the life of the job and refetched
+    /// on the next run - ~8% of runs standalone here, ~40% under a
+    /// loaded suite, always exactly one article of the post.
+    ///
+    /// The post-write re-route needed a SECOND change to reach this at
+    /// all, and it took until 17 Sep 2026 (`e2e-matvol-retry-race-reopened`).
+    /// It returned `Persist::No`, which parks nothing - so the article
+    /// this oracle was built to rescue was never in `pending_r` for the
+    /// widening arm to ask about, and the e2e resume rig went on failing
+    /// 11 of 40 under load with this function working perfectly. It
+    /// returns `Persist::Held(vec![])` now; see the site in `write`.
     ///
     /// So ask the destination instead of the placement trail. This is
     /// the same claim the slot's `M` line makes, and it is a MEASURED

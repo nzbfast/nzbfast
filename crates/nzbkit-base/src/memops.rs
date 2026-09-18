@@ -209,6 +209,46 @@ pub unsafe fn fill(dest: *mut u8, c: u8, n: usize) {
 #[cfg(target_arch = "x86_64")]
 /// `rep movsb`: copy `n` bytes strictly in ascending address order.
 ///
+/// The arm `memmove` takes when the ranges overlap with the destination
+/// BELOW the source.
+///
+/// THIS LOSES TO `compiler_rt.memmove.memmoveFast` ACROSS A MEASURED BAND
+/// AND IS LEFT ALONE ON PURPOSE, 16 Sep 2026. `compiler_rt` moves a 16-byte
+/// vector whose chunk equals its step, which is correct at ANY gap, so the
+/// routine we are beaten by is not slow here at all: measured against it on
+/// a Zen 4 part, `rep movsb` reads **0.45-0.72x at gaps of 16 and 24 for
+/// lengths from 48 to 512**, the string op's start-up cost against a vector
+/// loop. Two replacements were built and measured and NEITHER cleared the
+/// bar - a 16/8-byte chunk loop regressed to 0.80x at gap 1 for lengths
+/// 128-192, and routing these moves into [`copy_disjoint`] regressed to
+/// 0.42x wherever `src - dest` was not a multiple of 8. Both are recorded
+/// in `research/MEMOPS-MEMMOVE-OVERLAP-2026-09-16.md` so the next attempt
+/// starts after them rather than at them, and the measured population this
+/// arm actually serves is 299 calls and 64 KB in a 2.05 GB TLS download,
+/// which is why an unproven replacement is the worse trade.
+///
+/// THREE MORE FAILED ON 17 Sep 2026 AND THE ARM IS STILL THIS, for a reason
+/// that is no longer about shape at all - see
+/// `research/MEMOPS-MEMMOVE-OVERLAP-PARITY-2026-09-17.md`. An aligned
+/// 64-byte block loop read 0.50-0.63x across 64-512 bytes; `compiler_rt`'s
+/// own `copyForwards` TRANSLITERATED read 0.51-0.65x over the same band;
+/// and the transliteration with the string op kept above 768 bytes read the
+/// same. The cause is CODEGEN, not algorithm: LLVM unrolls zig's element
+/// loop four ways and gives its aligned side a `movaps`, and gives the same
+/// algorithm written here one unaligned `movups` pair a turn. Whoever takes
+/// this next should make the aligned side an ALIGNED ACCESS and let the
+/// loop be one LLVM will unroll, rather than trying a fifth shape.
+///
+/// AND THIS ARM HAS A HOLE OF ITS OWN THAT NOTHING HERE FIXES, found the
+/// same day by benching main as an arm in its own right: at
+/// `gap == n - 1` from 4 KiB to 1 MiB `rep movsb` runs **0.067-0.095x** of
+/// `compiler_rt` - 3.4 GB/s against 37-55 - because the store for byte `i`
+/// and the load for byte `i + 1` then share their low 12 address bits and
+/// every iteration takes a false 4 KiB dependency. It is left standing
+/// deliberately: the population above says an ascending overlap here
+/// averages ~212 bytes and never reaches 4 KiB, and the guard that removes
+/// it (`(gap + 1) % 4096 != 0`) is a constant fitted to one part.
+///
 /// # Safety
 /// Both ranges must be valid for `n` bytes; ascending order makes this
 /// correct even when they overlap with `dest` below `src`.
@@ -309,6 +349,83 @@ pub unsafe fn copy_disjoint(dest: *mut u8, src: *const u8, n: usize) {
         }
         // Align the destination to 8 so the string op runs at full width,
         // then let it take everything but the ragged tail.
+        //
+        // THE RELATIVE ALIGNMENT COSTS NOTHING, AND THIS IS THE END TO
+        // ALIGN. MEASURED 17 Sep 2026 - DO NOT "FIX" IT.
+        // `rep movsq` is documented as wanting both ends aligned, and
+        // `src - dest` is invariant under any head, so when it is not a
+        // multiple of 8 no head can align both. That reads as a defect and
+        // was reported as one: section 5 of
+        // `research/MEMOPS-MEMMOVE-OVERLAP-2026-09-16.md` has this routine
+        // at 0.42-0.65x of `compiler_rt` for every copy of 2 KiB or more
+        // whose ends differ by a non-multiple of 8. It is not. Over 512
+        // cells on the same Zen 4 rig, with the ranges DISJOINT - the only
+        // way a `memcpy` is called - the code below reads **1.395-1.436x of
+        // `compiler_rt` at every one of the eight `(src - dest) % 8`
+        // residues**, against a byte-identical A/A of 0.997-1.009, with
+        // not one of grid A's 160 cells below 0.99. Ragged destination
+        // (1, 8, 16, 32, 63): median 1.518. Five separations from touching
+        // to 1 MiB apart: 1.016-1.155.
+        // WHAT THAT REPORT MEASURED IS 4 KiB STORE-TO-LOAD ALIASING, which
+        // its grid could not tell apart from alignment because it placed
+        // the source at `dest + gap` and so had one variable doing both
+        // jobs. This loop's loads run `gap` bytes ahead of its stores, and
+        // a load matching a pending store in bits 11:0 cannot be
+        // disambiguated: at `gap = 4088` the aliased store is the
+        // immediately preceding one and throughput falls to 0.41-0.45x, at
+        // every residue including 0. At `gap = 4096` and `gap = 2048` it
+        // is 1.63-1.69x, again at every residue. `compiler_rt`'s 16-byte
+        // loop loses ~8% on the same input rather than 2.4x, which is what
+        // made the contrast look like a routine defect.
+        // AND THE FIX THAT LOOKS OBVIOUS WAS BUILT AND PRICED: gating the
+        // string op on relative alignment keeps 1.32x at residue 0 and
+        // hands back 1.4x -> 1.01-1.04x at the other seven, which are
+        // seven eighths of the population. That is the same trade, on the
+        // primitive, as the 1.019x it cost the daemon's TLS cell in that
+        // round. Aligning the SOURCE instead reads 1.171-1.235, i.e. worse
+        // than this, so the end chosen here is the right one.
+        // THE ALIASING WINDOW IS REACHABLE BY A LEGAL `memcpy`, AND WAS
+        // PRICED AND LEFT ALONE. With the ranges DISJOINT throughout, a
+        // copy whose `src - dest` sits 8 or 24 bytes BELOW a multiple of
+        // 4096 runs 0.375-0.609x at every length from 2 KiB to 64 KiB; at
+        // 64 bytes below it is fast again (1.436, 1.648, 1.845), so the
+        // window is 24-64 bytes of the 4,096 - **at most 1.6% of gaps and
+        // probably ~0.8%**. A gate on `((src - dest) & 4095) >= 4096 - W`
+        // repairs every one of those cells (0.375 -> 0.982, 0.609 -> 1.161)
+        // and is NOT taken, for two reasons: W's upper edge is bracketed
+        // rather than measured (residues 32/40/48/56 were not in the grid,
+        // and both widths tried - 64 and 512 - are too wide and cost the
+        // fast residue at their own boundary), and the arithmetic is
+        // against it. The population this routine serves in a TLS leg is
+        // rustls's deframer compaction at `conn.rs:937`
+        // (`research/MEMMOVE-SELFMOVE-SITE-2026-09-17.md`), where `gap` is
+        // the bytes consumed that pass, so under 1% of 277 MB would be
+        // repaired while every copy above 2 KiB pays a load, an `and` and a
+        // compare. What would flip that is evidence the real `gap`
+        // distribution is CONCENTRATED near multiples of 4096 rather than
+        // uniform, and that commit's own probe patch answers it in one
+        // counting leg.
+        // THAT LEG HAS NOW RUN, AND THE WINDOW IS UNREACHABLE FROM THE
+        // CALLER, SO THE GATE IS CLOSED RATHER THAN DEFERRED. Over 129,966
+        // disjoint calls and 277.4 MB, 127,236 of them (97.9%) sit at
+        // `(src - dest) & 4095 == 22`, and NOT ONE lands within 256 bytes
+        // of a multiple of 4096 from below. That is 4,074 bytes from the
+        // window, on the mirror side the same grid measured at 1.353-1.927x.
+        // It is arithmetic and not luck: `gap` is one TLS record's wire
+        // size, `16384 + 22`, and **16,384 is exactly four times 4,096**, so
+        // the residue IS the per-record AEAD overhead - 22 on TLS 1.3, 29 on
+        // TLS 1.2 AES-GCM - and reaching the window would need an overhead
+        // of 4,064-4,095 bytes. Independently, only 2,682 of those calls
+        // (2.06%) are longer than `STRING_OP_MIN` and execute `rep movsq` at
+        // all; 125,678 are in the 1-2 KiB bucket, just under the crossover.
+        // So do not re-derive the gate from the 0.375x above: the hole is
+        // real and this caller is on the other side of the period from it.
+        // `research/MEMCPY-ALIAS-RESIDUE-REACHABILITY-2026-09-17.md` carries
+        // the histogram, the record arithmetic and the two limits (one
+        // caller; counted on aarch64, where the population reproduces the
+        // x86_64 musl figures to 0.02%).
+        // `research/MEMCPY-RELATIVE-ALIGNMENT-2026-09-17.md` carries the
+        // four grids, the nine shapes that were tried and that arithmetic.
         let head = (8 - ((dest as usize) & 7)) & 7;
         if head != 0 {
             let a = src.cast::<u64>().read_unaligned();
@@ -320,6 +437,77 @@ pub unsafe fn copy_disjoint(dest: *mut u8, src: *const u8, n: usize) {
         if done < n {
             let b = src.add(n - 8).cast::<u64>().read_unaligned();
             dest.add(n - 8).cast::<u64>().write_unaligned(b);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Copy `n` bytes strictly in DESCENDING address order.
+///
+/// The arm `memmove` takes when the ranges overlap with the destination
+/// ABOVE the source, which is the one direction no ascending path can
+/// serve. It was a byte-at-a-time loop until 16 Sep 2026; see
+/// [`move_bytes`] for what that cost and how it was found.
+///
+/// There is no descending string op worth having - `std; rep movsb; cld`
+/// runs the slow microcoded path on every part in this family - so this is
+/// the ascending 32-byte SSE2 loop written backwards.
+///
+/// MEASURED AT PARITY 17 Sep 2026 AND LEFT ALONE. The 16 Sep round reported
+/// this arm "short of `compiler_rt` in 54 of 215 cells", and that figure was
+/// against a 0.99 bar rather than against the noise floor: re-benched with
+/// an A/A arm of 0.825-1.158, it is **median 1.032, one cell below the
+/// floor**. Two replacements were built and measured and both were far
+/// worse - an aligned 64-byte version, and `compiler_rt`'s own
+/// `copyBackwards` transliterated, which reads a flat **0.42-0.51x** above
+/// 512 bytes because LLVM unrolls zig's loop four ways and does not unroll
+/// the same algorithm written here.
+/// `research/MEMOPS-MEMMOVE-OVERLAP-PARITY-2026-09-17.md` has both.
+///
+/// Safe at EVERY overlap, not only a wide one, because its chunk is exactly
+/// its step and both halves are READ before either is written: at iteration
+/// `k` it reads `[src + n - 32(k+1), src + n - 32k)` while the writes so far
+/// have reached down only to `dest + n - 32k = src + gap + n - 32k`, which is
+/// at or above the read's end for any `gap >= 0`. The ragged head goes to
+/// [`copy_disjoint`], whose sub-32-byte paths read both ends before writing
+/// either and so are correct at any overlap in either direction.
+///
+/// # Safety
+/// Both ranges must be valid for `n` bytes; descending order makes this
+/// correct even when they overlap with `dest` above `src`.
+#[inline]
+pub unsafe fn copy_bytes_backward(dest: *mut u8, src: *const u8, n: usize) {
+    // SAFETY: the caller owns both ranges. Every offset below is inside
+    // `0..n`, and the order is strictly descending.
+    unsafe {
+        let mut rem = n;
+        // 64 bytes - a whole cache line - and not 32. A descending walk
+        // gets no help from the hardware prefetcher, so the step is what
+        // has to carry it: measured against `compiler_rt`, the 32-byte
+        // version read 0.76-0.92x from 64 KiB to 1 MiB where this one
+        // clears parity. Widening costs nothing at the short end because
+        // the 32-byte arm below still catches it.
+        while rem >= 64 {
+            // Every load before every store: see the note above.
+            let a = src.add(rem - 64).cast::<u128>().read_unaligned();
+            let b = src.add(rem - 48).cast::<u128>().read_unaligned();
+            let c = src.add(rem - 32).cast::<u128>().read_unaligned();
+            let d = src.add(rem - 16).cast::<u128>().read_unaligned();
+            dest.add(rem - 64).cast::<u128>().write_unaligned(a);
+            dest.add(rem - 48).cast::<u128>().write_unaligned(b);
+            dest.add(rem - 32).cast::<u128>().write_unaligned(c);
+            dest.add(rem - 16).cast::<u128>().write_unaligned(d);
+            rem -= 64;
+        }
+        if rem >= 32 {
+            let a = src.add(rem - 32).cast::<u128>().read_unaligned();
+            let b = src.add(rem - 16).cast::<u128>().read_unaligned();
+            dest.add(rem - 32).cast::<u128>().write_unaligned(a);
+            dest.add(rem - 16).cast::<u128>().write_unaligned(b);
+            rem -= 32;
+        }
+        if rem != 0 {
+            copy_disjoint(dest, src, rem);
         }
     }
 }
@@ -704,6 +892,72 @@ pub unsafe fn copy_bytes_forward(dest: *mut u8, src: *const u8, n: usize) {
     }
 }
 
+/// Copy `n` bytes strictly in DESCENDING address order.
+///
+/// The AArch64 twin of the x86_64 arm above, and the same 32-byte chunk
+/// written backwards; assembly for the same reason [`copy_bytes_forward`]
+/// is, because LLVM's loop-idiom pass turns a Rust copy loop back into a
+/// `memmove` CALL, which from inside `memmove` is unbounded recursion.
+///
+/// Safe at EVERY overlap: chunk equals step and the pair is loaded before
+/// it is stored, so the write at iteration `k` lands at or above the end of
+/// the read that follows it.
+///
+/// # Safety
+/// Both ranges must be valid for `n` bytes; descending order makes this
+/// correct even when they overlap with `dest` above `src`.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub unsafe fn copy_bytes_backward(dest: *mut u8, src: *const u8, n: usize) {
+    // SAFETY: the caller owns both ranges. The loop walks down from the top
+    // of the copy, so an overlap with `dest` above `src` writes only bytes
+    // the copy has already read.
+    unsafe {
+        // 64 bytes a step, the same width the ascending block loop uses and
+        // for the same reason as the x86_64 twin: a descending walk gets no
+        // help from the hardware prefetcher, so the step has to carry it.
+        // The 32-byte arm below catches what the 64-byte loop leaves, so
+        // nothing short pays for the width.
+        let mut rem = n;
+        let blocks = n & !63;
+        let mut d = dest.add(n);
+        let mut s = src.add(n);
+        if blocks != 0 {
+            asm!(
+                "2:",
+                "sub {s}, {s}, #64",
+                "sub {d}, {d}, #64",
+                "ldp q0, q1, [{s}]",
+                "ldp q2, q3, [{s}, #32]",
+                "stp q0, q1, [{d}]",
+                "stp q2, q3, [{d}, #32]",
+                "subs {n}, {n}, #64",
+                "b.ne 2b",
+                d = inout(reg) d,
+                s = inout(reg) s,
+                n = inout(reg) blocks => _,
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+                out("v3") _,
+                options(nostack),
+            );
+            rem -= blocks;
+        }
+        if rem >= 32 {
+            let a = src.add(rem - 32).cast::<u128>().read_unaligned();
+            let b = src.add(rem - 16).cast::<u128>().read_unaligned();
+            dest.add(rem - 32).cast::<u128>().write_unaligned(a);
+            dest.add(rem - 16).cast::<u128>().write_unaligned(b);
+            rem -= 32;
+        }
+        if rem != 0 {
+            copy_disjoint(dest, src, rem);
+        }
+        let _ = (d, s);
+    }
+}
+
 /// Compare `n` bytes, eight at a time, returning the C `memcmp` ordering.
 ///
 /// # Safety
@@ -761,11 +1015,80 @@ pub unsafe fn differs(a: *const u8, b: *const u8, n: usize) -> i32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The `memmove` dispatcher, shared
+// ---------------------------------------------------------------------------
+
+/// The longest move [`copy_disjoint`] serves by reading BOTH ends before it
+/// writes either, which makes it correct at ANY overlap in EITHER direction.
+/// Both architectures' short paths have that shape (the sub-16 ladder and the
+/// 16..=32 pair), and [`move_bytes`] leans on it.
+pub const OVERLAP_SAFE_ANY_MAX: usize = 32;
+
+/// The full C `memmove`: copy `n` bytes correctly however the ranges lie.
+///
+/// WHY THIS IS A FUNCTION AND NOT FOUR LINES IN [`crate::fast_mem_ops`].
+/// It was four lines in the macro until 16 Sep 2026, which put the one part
+/// of these routines with a real decision in it in the one place no unit
+/// test can reach - the macro only expands inside a bin. The dispatch is
+/// here so the tests below drive it directly, over every shape, on both
+/// architectures.
+///
+/// THE ARMS, and each one's bound is a correctness bound first:
+///
+/// - **`dest == src`** returns at once. musl's own `memmove.c` opens with
+///   exactly this line and the first port of it here did not, which is the
+///   whole of the regression this function was written to fix: measured on
+///   the 16 Sep daemon round's TLS cell, **161,095 of the 291,000 memmove
+///   calls in a 2.05 GB download are self-moves carrying 586 MB**, and every
+///   one of them was being served a byte at a time by the descending arm
+///   below, because `abs_diff == 0` is not `>= n` and `dest < src` is false
+///   when they are equal. That is the `compiler_rt.memmove.memmoveFast`
+///   0.66% -> our 5.14% of a TLS leg reported in section 5 of
+///   `research/MUSL-MEMOPS-DAEMON-2026-09-16.md`. Genuine overlaps in that
+///   same population are 414 calls and 64 KB, i.e. nothing.
+/// - **disjoint, or `n <= OVERLAP_SAFE_ANY_MAX`** goes to
+///   [`copy_disjoint`]: either the ranges do not overlap at all, or the move
+///   is short enough that it reads both ends before writing either.
+/// - **ascending overlap** (`dest` below `src`) goes to
+///   [`copy_bytes_forward`], unchanged. Two faster shapes were built and
+///   measured for it and neither cleared parity with `compiler_rt` at every
+///   length and gap, so this arm keeps the shape it had; that routine's
+///   docs carry both results.
+/// - **descending overlap** (`dest` above `src`) goes to
+///   [`copy_bytes_backward`]. [`copy_disjoint`] can NEVER serve this
+///   direction at any gap: it writes above where it reads, so a write always
+///   lands on source bytes a later step still needs.
+///
+/// # Safety
+/// Both ranges must be valid for `n` bytes. Any overlap is allowed; that is
+/// the whole point of `memmove`.
+#[inline]
+pub unsafe fn move_bytes(dest: *mut u8, src: *const u8, n: usize) {
+    // SAFETY: the caller owns both ranges for `n` bytes. Which arm is
+    // correct depends only on how the two ranges lie, which is what the
+    // gap and the sign below decide.
+    unsafe {
+        let (d, s) = (dest as usize, src as usize);
+        let gap = d.abs_diff(s);
+        if gap == 0 {
+            return;
+        }
+        if gap >= n || n <= OVERLAP_SAFE_ANY_MAX {
+            copy_disjoint(dest, src, n);
+        } else if d < s {
+            copy_bytes_forward(dest, src, n);
+        } else {
+            copy_bytes_backward(dest, src, n);
+        }
+    }
+}
+
 /// Stamp strong `memset` / `memcpy` / `memmove` / `memcmp` / `bcmp` into the
 /// CALLING crate, overriding zig `compiler_rt`'s weak byte loops.
 ///
 /// Invoke it once at the root of a BINARY crate that ships a static musl
-/// x86_64 artifact - `crates/parfast/src/main.rs` and
+/// x86_64 or aarch64 artifact - `crates/parfast/src/main.rs` and
 /// `crates/nzbfast/src/main.rs` - and nowhere else. It is a macro rather
 /// than five `#[no_mangle]` fns in this module because the symbols only win
 /// the link from an object that is linked whole (see the module docs), which
@@ -773,7 +1096,11 @@ pub unsafe fn differs(a: *const u8, b: *const u8, n: usize) -> i32 {
 /// putting the definitions where they take effect.
 ///
 /// The caller does the target gating, so the expansion assumes it is already
-/// on x86_64 musl.
+/// on musl, on one of the two architectures the bodies above are written
+/// for. Both call sites say `any(target_arch = "x86_64", target_arch =
+/// "aarch64")`; the aarch64 half joined on 16 Sep 2026 and this line still
+/// said x86_64 alone until 17 Sep. Which jobs compile each expansion, and
+/// which do not, is in CLAUDE.md's `target_env` axis section.
 #[macro_export]
 macro_rules! fast_mem_ops {
     () => {
@@ -818,31 +1145,10 @@ macro_rules! fast_mem_ops {
             src: *const ::core::ffi::c_void,
             n: usize,
         ) -> *mut ::core::ffi::c_void {
-            // SAFETY: the C contract is the caller's to keep. Which of the
-            // three arms is correct depends only on how the ranges lie.
-            unsafe {
-                let (d, s): (*mut u8, *const u8) = (dest.cast(), src.cast());
-                if (d as usize).abs_diff(s as usize) >= n {
-                    // Disjoint: the fast path may work from both ends.
-                    $crate::memops::copy_disjoint(d, s, n);
-                } else if (d as usize) < (s as usize) {
-                    // Overlapping with the destination below the source.
-                    // Only a strictly ascending copy is correct here - the
-                    // disjoint path reads its tail after writing its head,
-                    // which can read bytes the head already overwrote when
-                    // the two ranges are within 32 bytes of each other.
-                    $crate::memops::copy_bytes_forward(d, s, n);
-                } else {
-                    // Overlapping the other way: descending, a byte at a
-                    // time. Rare enough that a second string-op path is not
-                    // worth the surface.
-                    let mut i = n;
-                    while i > 0 {
-                        i -= 1;
-                        d.add(i).write(s.add(i).read());
-                    }
-                }
-            }
+            // SAFETY: the C contract is the caller's to keep. The whole
+            // decision lives in `move_bytes`, where the unit tests can
+            // reach it - this macro only expands inside a bin.
+            unsafe { $crate::memops::move_bytes(dest.cast(), src.cast(), n) };
             dest
         }
 
@@ -974,20 +1280,169 @@ mod tests {
     fn copy_bytes_forward_is_correct_when_the_ranges_overlap() {
         // The arm `memmove` takes when the destination is below the source
         // and within `n` of it - the case the disjoint path cannot serve.
-        for n in [1usize, 7, 8, 31, 32, 33, 63, 64, 65, 127, 200, 1024, 4096] {
+        // `pad` walks the whole 16-byte residue class of the DESTINATION,
+        // which is what the arm squares up before its block loop, so every
+        // value of the ragged head is exercised at every length. Without it
+        // the only thing moving the destination's alignment is `gap`, and a
+        // head bound could be wrong at a residue no gap in the list reaches.
+        for n in [
+            1usize, 7, 8, 31, 32, 33, 47, 63, 64, 65, 79, 95, 96, 127, 128, 129, 200, 1024, 4096,
+        ] {
             for gap in [1usize, 2, 3, 8, 12, 16, 24, 31, 32, 33, 64] {
-                let base: Vec<u8> = (0..n + 128).map(|i| (i % 251) as u8).collect();
-                let mut got = base.clone();
-                let mut want = base.clone();
-                // SAFETY: src at 64, dest at 64 - gap, both inside the vec.
-                unsafe {
-                    let p = got.as_mut_ptr();
-                    copy_bytes_forward(p.add(64 - gap), p.add(64), n);
+                for pad in 0..16usize {
+                    let base: Vec<u8> = (0..n + 160).map(|i| (i % 251) as u8).collect();
+                    let mut got = base.clone();
+                    let mut want = base.clone();
+                    let d = 64 + pad - gap;
+                    // SAFETY: src at 64 + pad, dest at 64 + pad - gap, both
+                    // inside the vec for `n` bytes.
+                    unsafe {
+                        let p = got.as_mut_ptr();
+                        copy_bytes_forward(p.add(d), p.add(64 + pad), n);
+                    }
+                    let tmp: Vec<u8> = want[64 + pad..64 + pad + n].to_vec();
+                    want[d..d + n].copy_from_slice(&tmp);
+                    assert_eq!(got, want, "overlap n={n} gap={gap} pad={pad}");
                 }
-                let tmp: Vec<u8> = want[64..64 + n].to_vec();
-                want[64 - gap..64 - gap + n].copy_from_slice(&tmp);
-                assert_eq!(got, want, "overlap n={n} gap={gap}");
             }
+        }
+    }
+
+    /// The reference: a `memmove` that cannot get an overlap wrong, because
+    /// it copies the source out before it writes anything.
+    fn ref_move(buf: &mut [u8], dofs: usize, sofs: usize, n: usize) {
+        let tmp: Vec<u8> = buf[sofs..sofs + n].to_vec();
+        buf[dofs..dofs + n].copy_from_slice(&tmp);
+    }
+
+    #[test]
+    fn copy_bytes_backward_is_correct_when_the_ranges_overlap() {
+        // The arm `memmove` takes when the destination is ABOVE the source
+        // and within `n` of it - the one direction no ascending path and no
+        // disjoint path can serve, at any gap. The mirror of
+        // `copy_bytes_forward_is_correct_when_the_ranges_overlap`, and the
+        // lengths straddle the 32-byte chunk and its ragged head.
+        // `pad` walks the destination's 16-byte residue class for the same
+        // reason the ascending test does: this arm squares the TOP of the
+        // destination down, so the ragged tail is a function of
+        // `(dest + n) % 16` and nothing else in the grid moves it.
+        for n in [
+            1usize, 7, 8, 15, 16, 17, 31, 32, 33, 47, 63, 64, 65, 79, 95, 96, 127, 128, 129, 200,
+            1024, 4096,
+        ] {
+            for gap in [1usize, 2, 3, 8, 12, 15, 16, 17, 24, 31, 32, 33, 47, 64, 129] {
+                for pad in 0..16usize {
+                    let base: Vec<u8> = (0..n + 288).map(|i| (i % 251) as u8).collect();
+                    let mut got = base.clone();
+                    let mut want = base.clone();
+                    let s0 = 64 + pad;
+                    // SAFETY: src at 64 + pad, dest at 64 + pad + gap, both
+                    // inside the vec for `n` bytes.
+                    unsafe {
+                        let p = got.as_mut_ptr();
+                        copy_bytes_backward(p.add(s0 + gap), p.add(s0), n);
+                    }
+                    ref_move(&mut want, s0 + gap, s0, n);
+                    assert_eq!(got, want, "backward overlap n={n} gap={gap} pad={pad}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn move_bytes_matches_a_reference_memmove_at_every_overlap() {
+        // The dispatcher itself, which is where this module's only real
+        // DECISION lives and where the 16 Sep regression was. Four arms, and
+        // the grid has to cross every bound that selects between them: the
+        // gap `0` self-move, `OVERLAP_SAFE_ANY_MAX` and `BULK_MIN`, in both
+        // directions. The gap list keeps 31/32/33 even though no arm turns
+        // on 32 any more: an ascending chunk loop is correct at EVERY gap
+        // (its write lands below where it read), which is exactly the
+        // property a future replacement for `copy_bytes_forward` will lean
+        // on, and these rows are what would catch it being got wrong.
+        let mut lens: Vec<usize> = (0..=300).collect();
+        for extra in [
+            OVERLAP_SAFE_ANY_MAX - 1,
+            OVERLAP_SAFE_ANY_MAX,
+            OVERLAP_SAFE_ANY_MAX + 1,
+            BULK_MIN - 1,
+            BULK_MIN,
+            BULK_MIN + 1,
+            BULK_MIN + 31,
+            BULK_MIN + 49,
+            BULK_MIN + 63,
+            2 * BULK_MIN,
+            4096,
+            4096 + 63,
+            8191,
+            65537,
+        ] {
+            lens.push(extra);
+        }
+        lens.sort_unstable();
+        lens.dedup();
+        let pad = 4 * BULK_MIN + 512;
+        for &n in &lens {
+            let mut gaps: Vec<usize> = vec![
+                0, 1, 2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 47, 63, 64, 65, 127, 128, 129,
+            ];
+            for rel in [n / 2, n.saturating_sub(1), n, n + 1, n + 31, 2 * n] {
+                gaps.push(rel);
+            }
+            gaps.sort_unstable();
+            gaps.dedup();
+            // A length that reaches the block paths does not need every
+            // alignment as well - `copy_disjoint`'s own test sweeps those -
+            // so the offsets narrow once the case count would otherwise
+            // multiply out into minutes.
+            let offs: &[usize] = if n <= 300 {
+                &[0, 1, 7, 8, 15, 16, 31]
+            } else {
+                &[0, 1, 15]
+            };
+            for &gap in &gaps {
+                for &off in offs {
+                    for dir in 0..2u8 {
+                        let span = n + gap + pad;
+                        let base: Vec<u8> = (0..span).map(|i| ((i * 7 + 13) % 251) as u8).collect();
+                        let mut got = base.clone();
+                        let mut want = base.clone();
+                        let (dofs, sofs) = if dir == 0 {
+                            (off, off + gap)
+                        } else {
+                            (off + gap, off)
+                        };
+                        // SAFETY: both windows are inside the vec - the span
+                        // carries `n + gap` plus the padding.
+                        unsafe {
+                            let p = got.as_mut_ptr();
+                            move_bytes(p.add(dofs), p.add(sofs), n);
+                        }
+                        ref_move(&mut want, dofs, sofs, n);
+                        assert_eq!(got, want, "move n={n} gap={gap} off={off} dir={dir}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn move_bytes_leaves_a_self_move_alone() {
+        // `dest == src` is a no-op by the C contract, and this is the line
+        // musl's own `memmove.c` opens with. It is pinned on its own because
+        // the regression it fixes was invisible to every other test here:
+        // the byte loop the self-move used to take produced the RIGHT bytes,
+        // so only a measurement could see it (0.66% -> 5.14% of a TLS leg,
+        // 586 MB of a 2.05 GB download moved a byte at a time).
+        for n in [0usize, 1, 31, 32, 33, 1024, BULK_MIN + 1, 65536] {
+            let base: Vec<u8> = (0..n + 64).map(|i| (i % 251) as u8).collect();
+            let mut got = base.clone();
+            // SAFETY: the window is inside the vec.
+            unsafe {
+                let p = got.as_mut_ptr();
+                move_bytes(p.add(16), p.add(16), n);
+            }
+            assert_eq!(got, base, "self-move n={n}");
         }
     }
 

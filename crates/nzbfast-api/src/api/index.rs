@@ -747,6 +747,18 @@ fn m_index_scan_now(
 ///
 /// `reset=1` zeroes the counters, which is what an A/B needs between
 /// arms - they are lifetime figures otherwise.
+///
+/// # The `wait_*` and `hold_*` columns are ADDITIONS, 17 Sep 2026
+///
+/// `total_us`, `max_us` and `p50_us`..`p99_us` still mean wait+hold and
+/// are unchanged, so every snapshot in
+/// `research/index-holds-live-2026-09-16/` stays comparable column for
+/// column and the two scripts that read them did not need an edit. The
+/// split is added beside them because the sum was being read as a hold
+/// - see `crate::holdstat`'s header and section 11 of
+/// `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md`. Nothing here may be
+/// renamed or removed without updating `readholds.py` and `analyse.py`
+/// in that directory, which are the only readers the archive has.
 fn m_index_holds(
     _d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -767,6 +779,16 @@ fn m_index_holds(
                     "p90_us": h.p90_us,
                     "p99_us": h.p99_us,
                     "window": h.window,
+                    "wait_total_us": h.wait_total_us,
+                    "wait_max_us": h.wait_max_us,
+                    "wait_p50_us": h.wait_p50_us,
+                    "wait_p90_us": h.wait_p90_us,
+                    "wait_p99_us": h.wait_p99_us,
+                    "hold_total_us": h.hold_total_us,
+                    "hold_max_us": h.hold_max_us,
+                    "hold_p50_us": h.hold_p50_us,
+                    "hold_p90_us": h.hold_p90_us,
+                    "hold_p99_us": h.hold_p99_us,
                 })
             })
             .collect();
@@ -1628,6 +1650,11 @@ fn m_wall2(
         if let Some(r) = params.get("res").filter(|r| !r.is_empty()) {
             bq.res = Some(r.clone());
         }
+        // GH #76, and it rides BOTH surfaces for the reason `res` above
+        // does: the Releases table and the poster grid are two
+        // renderings of one query, and a filter the grid ignored would
+        // be one the "Group by title" toggle silently drops.
+        bq.group = group_param(params);
         // 24C: card-scoped fetch (&key=<title_key>) - the
         // Releases surface's hover preview and group-by-title
         // rows ask for ONE title's card. Same vocabulary as
@@ -1884,6 +1911,24 @@ fn m_oracle_takedowns(
     })
 }
 
+/// GH #76: the `&group=` browse filter, read the same way by the two
+/// endpoints that page the index (`index_browse` and `wall2`).
+///
+/// One function because those two ARE one filter to the user - the wall
+/// hands the same query string to both - and because the trimming is
+/// the whole of the parsing: the value is a bound SQL parameter from
+/// here on, never interpolated and never spelled into an NNTP command,
+/// so a name no group has simply matches nothing rather than needing an
+/// allowlist. (`group_sample` checks its argument against the
+/// catalogue precisely because that one DOES become a GROUP command.)
+fn group_param(params: &std::collections::HashMap<String, String>) -> Option<String> {
+    params
+        .get("group")
+        .map(|g| g.trim())
+        .filter(|g| !g.is_empty())
+        .map(str::to_string)
+}
+
 fn m_index_browse(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -1917,6 +1962,7 @@ fn m_index_browse(
         if let Some(r) = params.get("res").filter(|r| !r.is_empty()) {
             bq.res = Some(r.clone());
         }
+        bq.group = group_param(params);
         // M28: card-scoped listing (a wall card's releases)
         // and the junk ceiling (all=1 shows everything).
         if let Some(tk) = params.get("title_key").filter(|t| !t.is_empty()) {

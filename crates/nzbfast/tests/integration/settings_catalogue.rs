@@ -2535,3 +2535,128 @@ fn the_output_umask_survives_a_restart_including_zero_and_off() {
 
     drop(d);
 }
+
+/// `mem_limit` is RESTART-ONLY, and the surface says so.
+///
+/// The daemon publishes its memory budget exactly once, at
+/// `crates/nzbfast/src/serve/mod.rs`'s single
+/// `nzbkit::mem::set_process_budget` call; nothing republishes it. But
+/// `mem_limit` is an `rw` setting the dashboard edits, and its read-back
+/// comes from the settings FILE, so the typed figure echoes at once
+/// while the running daemon is unchanged.
+///
+/// That was traced from source and then reproduced by hand on a scratch
+/// daemon before this test was written: write 3G, `mem_limit` echoes
+/// 3000000000, `mem_budget_total` and /metrics'
+/// `nzbfast_memory_budget_bytes` both stay on the boot figure, and a
+/// restart brings all three into agreement.
+///
+/// This asserts the BEHAVIOUR that was CHOSEN, not the one the
+/// documentation used to imply. Republishing on the write was censused
+/// and refused - the reasoning is at the `"mem_limit"` arm of
+/// `crates/nzbfast-daemon/src/settings_apply.rs`, and the short version
+/// is that the readers of the published budget disagree about when they
+/// read it (the extractor's holds cap is set once per job, the requeue
+/// pause cost reads the global live), so a mid-download republish is a
+/// budget half the engine is working to. So the three things that must
+/// stay true are: the write does NOT move the running figure, it DOES
+/// move it across a restart, and the surface admits both.
+///
+/// A daemon here is a CHILD PROCESS, so none of this touches this test
+/// process's own `mem::process_budget()` - the global that
+/// `tools/test-global-gate.py` exists to protect.
+#[test]
+fn mem_limit_is_restart_only_and_the_surface_says_so() {
+    let dir = scratch("memlimit");
+
+    // A figure no machine's auto-sizing would land on by chance, so an
+    // equality below cannot pass by coincidence.
+    const WANT: u64 = 3_000_000_000;
+
+    let booted = {
+        let d = serve(&dir);
+        let before = settings_block(d.port);
+        let booted = before["mem_budget_total"].as_u64().unwrap();
+        assert!(booted > 0, "the daemon reported no resolved budget");
+        assert_ne!(
+            booted, WANT,
+            "the fixture figure collided with this box's auto-sized budget"
+        );
+
+        let r = api(d.port, &format!("mode=config&name=mem_limit&value={WANT}"));
+        assert_eq!(r["status"].as_bool(), Some(true), "mem_limit rejected: {r}");
+        // The daemon tells the caller it did not take effect. This is
+        // the machine-readable half of the restart-only contract; the
+        // dashboard's badge is the human half, asserted below.
+        assert_eq!(
+            r["live"].as_bool(),
+            Some(false),
+            "a restart-only setting answered live: {r}"
+        );
+
+        let after = settings_block(d.port);
+        // The saved figure echoes immediately - that is by design, and
+        // it is exactly what makes the next assertion necessary.
+        assert_eq!(
+            after["mem_limit"].as_u64(),
+            Some(WANT),
+            "the saved figure did not echo back"
+        );
+        // ...and the RUNNING figure does not move.
+        assert_eq!(
+            after["mem_budget_total"].as_u64(),
+            Some(booted),
+            "mem_budget_total moved without a restart - if the daemon now \
+             republishes the budget on the settings write, that is a real \
+             change of policy and this test, the census comment at the \
+             \"mem_limit\" arm of settings_apply.rs, the dashboard's restart \
+             badge and docs/ENVIRONMENT.md all have to move together"
+        );
+        let _log = d.stop();
+        booted
+    };
+
+    // A restart is what applies it. Without this half the test above
+    // would also pass against a daemon that had simply stopped reading
+    // the setting at all.
+    let d = serve(&dir);
+    let after = settings_block(d.port);
+    assert_eq!(
+        after["mem_budget_total"].as_u64(),
+        Some(WANT),
+        "the saved mem_limit did not take effect across a restart \
+         (boot figure was {booted})"
+    );
+    drop(d);
+
+    // The surface half. The dashboard row must carry BOTH the restart
+    // badge (this does not apply now) and the resolved figure in force
+    // now (and this is what does) - a restart note with no way to see
+    // the running value leaves the user unable to tell whether their
+    // change has landed, which is the shape the handoff reported.
+    let dash = include_str!("../../../../web/dashboard.html");
+    let row = dash
+        .split("data-i18n=\"set.perf.mem\"")
+        .nth(1)
+        .expect("the Memory budget settings row has moved or been renamed");
+    // Bounded to the row: the next row's markup must not satisfy these.
+    let row = &row[..row.find("</div>").unwrap_or(row.len())];
+    assert!(
+        row.contains("badge.restart"),
+        "the Memory budget row lost its \"applies after restart\" badge"
+    );
+    assert!(
+        dash.contains("s_mem_inforce"),
+        "the Memory budget row lost the figure in force now"
+    );
+    assert!(
+        dash.contains("set.perf.mem.inforce"),
+        "the in-force note lost its translatable string"
+    );
+    let en: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../web/i18n/en.reference.json")).unwrap();
+    assert!(
+        en["set.perf.mem.inforce"].is_string(),
+        "set.perf.mem.inforce is not in the English catalogue"
+    );
+}

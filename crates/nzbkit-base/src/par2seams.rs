@@ -374,7 +374,7 @@ pub static SEAMS: &[Seam] = &[
                           fast on the standard ladder, three rotated reps, an A/A at every \
                           rung: the held Hankel wins 5-22% of the repair from 5,120 to \
                           12,288 on both classes and loses only at 16,384 (-3.9% i5, -1.6% \
-                          Zenbook inside its floor); \
+                          Core Ultra 9 inside its floor); \
                           research/FAST-MODE-CROSS-CLASS-ROUNDS-2026-09-12.md sections 5.2 \
                           and 5.3. NEON's own round (jx3, M1 Ultra) decides that class; \
                           AVX-512 GFNI runs the same 256-bit GFNI butterfly as Gfni256 and \

@@ -954,6 +954,83 @@ async fn the_kill_switch_puts_a_resumed_job_back_on_the_disk_path() {
 /// `M` line makes - and refuses the moment a byte of the span is
 /// unwritten, so a hole still refetches.
 ///
+/// THAT "0 OF 192" WAS FALSE ON THIS FLEET FOR THREE WEEKS, and the
+/// paragraph above is kept verbatim because every sentence of it is
+/// still true - it is the READING of it as "this shape is now closed"
+/// that was wrong. Re-measured 17 Sep 2026 (claim
+/// `e2e-matvol-retry-race-reopened`, off the 17 Sep Codex sweep, which
+/// found this FLAKY 2/2 while the daemon suite ran beside it): four
+/// concurrent loops of ten runs at `--retries 0` failed 11 of 40 on
+/// origin/main `2b81dbd4d` and 5 of 40 in the fixing lane's worktree.
+/// (The sweep also reported "5 of 5 standalone on a quiet box"; that
+/// reading is retired - see the reproduction paragraph below, where a
+/// sequential quiet run failed 4 of 12.) The failure was ALWAYS
+/// this file's `unjournaled` clause, never the id-set one below it, and
+/// the article it was short was always an offset-0 HEADER article of a
+/// continuation volume - `<r_part4_rar-3-1@mock>` every time here, plus
+/// `<r_part3_rar-2-1@mock>` in the three-short runs.
+///
+/// It was NOT a regression since 23 Aug. Instrumenting the drain showed
+/// the missing article never reached `flush_pending_r` at all - it was
+/// never parked, because `Extractor::write`'s post-write re-route
+/// returned `Persist::No`, the one verdict `record_placement` neither
+/// journals nor parks. That route dates to 19 Jul 2026 (`f688e101d`,
+/// pwrites outside the extractor lock); TODO 252 NAMED it as one of the
+/// two routes that "surface nothing" and built the right oracle for it,
+/// but wired that oracle into the parked path only. So the hole is in
+/// the 23 Aug fix, not on top of it, and the article that exposes it is
+/// a different one from the article that fix was measured against -
+/// which is the likeliest reason 192 runs missed it. Whether the perf
+/// work since (the `PENDING_R_SWEEP` cadence gate, the routing-lock
+/// snapshot) also RAISED the rate is not separated here and would need
+/// a bisect; the defect predates both either way. One-pass write
+/// coalescing is NOT on that list: it ships off
+/// (`stage::COALESCE_CAP_DEFAULT` = 0 since 17 Sep 2026), so it was
+/// never in the path these runs took.
+///
+/// The re-route returns `Persist::Held(vec![])` since 17 Sep 2026: no
+/// fragments, because none of the ones it composed may be spoken, but
+/// an entry in `pending_r` so the widening arm can ask the volume file
+/// - which `plain_span` has just written the whole span into, verbatim,
+/// at its final offsets, under the routing lock. Re-measured on the
+/// same box the same day with the same recipe: 0 of 40, then 0 of 192
+/// across four concurrent loops and 0 of 32 standalone, at box load
+/// averages between 24 and 116. Two of that 192 failed a DIFFERENT
+/// clause - the demote banner, with run 1's log empty and the run over
+/// in 0.8 s - in the same second in two independent loops, which is the
+/// `spawn_under_test` hazard in `harness/mod.rs` (four concurrent
+/// `cargo nextest run`s against one target dir, and cargo re-links
+/// `target/debug/nzbfast` on every invocation; that doc measures the
+/// class at 0.42%, and this is 1.0%). Not this race, and not this fix's.
+///
+/// REPRODUCE THROUGH `cargo nextest run`, never with a loop over the
+/// test binary, and note that LOAD IS NOT THE VARIABLE. Three baseline
+/// arms on the pre-fix engine, all on this box on 17 Sep 2026: cargo in
+/// four concurrent loops at load 24-35 failed 5 of 40; cargo run
+/// SEQUENTIALLY on a quiet box failed 4 of 12 (measured independently by
+/// the `par2gen-size-ceiling-split-17sep` lane, whose addendum in the
+/// research file above corrects this file's older "5 of 5 in isolation"
+/// - at a ~30% rate, five straight passes happen 17% of the time); and
+/// driving `target/debug/deps/e2e-*` with no cargo at all passed 48 of
+/// 48 at load 86-96. The common factor in the two that fail is the cargo
+/// invocation, which removes and re-links `target/debug/nzbfast` before
+/// every rep, so each rep execs a freshly-linked, page-cache-cold
+/// binary. WHY that widens the demote window is not established; that it
+/// does is. It is also the best available account of CI's blindness -
+/// the per-push shards exec one archived binary many times with no
+/// relink between tests.
+///
+/// THIS TEST IS THE ONLY THING THAT EXERCISES THAT ROUTE. No unit test
+/// was added with the fix and that is deliberate rather than an
+/// omission: the re-route fires only when a slot is `SlotMode::Rar` at
+/// `write`'s FIRST lock acquisition and `SlotMode::RarFallback` at its
+/// second, with the unlocked pwrites in between - so single-threaded it
+/// is unreachable, and a threaded reproduction would be the same race
+/// this test already runs, with a worse oracle. `pending_r_tests.rs`
+/// covers the half after the park (an empty-fragment article completing
+/// off a materialized volume) and covered it before this fix too, which
+/// is exactly why it stayed green throughout.
+///
 /// Both clauses stay: the journal oracle is the one that does not
 /// depend on which article lost a race, and it is what would survive
 /// this shape growing a new one. A parallel session reached the same

@@ -225,6 +225,9 @@ struct Inner {
     wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Where the table is written, if the host asked for persistence.
     store: Mutex<Option<PathBuf>>,
+    /// Held across a whole `persist` - the snapshot AND its publication.
+    /// See [`Inner::persist`].
+    persist_lock: Mutex<()>,
     /// The scheduler's own wake, so a submit or a resume does not wait
     /// for a poll interval.
     tick: Condvar,
@@ -255,6 +258,7 @@ impl Session {
             knobs: KnobLock::new(),
             wake: Mutex::new(None),
             store: Mutex::new(None),
+            persist_lock: Mutex::new(()),
             tick: Condvar::new(),
             tick_lock: Mutex::new(()),
             stopping: AtomicBool::new(false),
@@ -354,20 +358,35 @@ impl Session {
 
     /// Cancel a job. A queued job is cancelled at once; a running one
     /// at its next honouring point (see [`crate::runner`]).
+    ///
+    /// A QUEUED job's cancellation is PERSISTED here and not left to the
+    /// worker that would otherwise have saved it. There is no such
+    /// worker: the scheduler never selects a cancelled entry, so on a
+    /// paused queue - or on any queue the process leaves before the
+    /// entry would have been reached - nothing ever wrote the terminal
+    /// state down, and the job came back `Queued` after a relaunch and
+    /// ran. Terminal states are the queue's own to record.
     pub fn cancel(&self, id: i64) -> bool {
         let jobs = self.inner.jobs.lock().unwrap_or_else(|p| p.into_inner());
         let Some(e) = jobs.get(&id) else {
             return false;
         };
         e.control.cancel();
-        if !e.running {
-            e.publisher.update(|s| {
+        let settled = !e.running;
+        if settled {
+            // `update_quiet`, because this lock is still held: see
+            // [`crate::runner::Publisher::update_quiet`].
+            e.publisher.update_quiet(|s| {
                 s.state = JobState::Cancelled;
                 s.phase_text = "Cancelled".to_string();
             });
         }
         drop(jobs);
+        if settled {
+            self.inner.persist();
+        }
         self.inner.kick();
+        self.inner.ring();
         true
     }
 
@@ -380,13 +399,15 @@ impl Session {
             return false;
         }
         e.control.set_paused(paused);
-        e.publisher.update(|s| {
+        e.publisher.update_quiet(|s| {
             if paused && s.state == JobState::Running {
                 s.state = JobState::Paused;
             } else if !paused && s.state == JobState::Paused {
                 s.state = JobState::Running;
             }
         });
+        drop(jobs);
+        self.inner.ring();
         true
     }
 
@@ -437,7 +458,9 @@ impl Session {
         let Some(e) = jobs.get(&id) else {
             return false;
         };
-        e.publisher.update(|s| s.low_priority = on);
+        e.publisher.update_quiet(|s| s.low_priority = on);
+        drop(jobs);
+        self.inner.ring();
         true
     }
 
@@ -552,6 +575,25 @@ impl Session {
             );
         }
         let n = jobs.len();
+        // A RESTORED batch has already had whatever post-queue action it
+        // was going to have. The action is armed by the queue DRAINING,
+        // and the drain happened in the session that ran these jobs -
+        // but `post_action_fired` was never persisted, so a fresh
+        // session that restored a finished table plus a saved "Sleep"
+        // found a drained queue on its first scheduler tick and armed it
+        // again. The host reads the flag and sleeps the machine, on a
+        // launch during which nothing ran. So the latch is raised HERE,
+        // over the restored jobs, and lowered again by the next `submit`
+        // exactly as it always was: a new batch legitimately re-arms the
+        // action, a relaunch never does.
+        //
+        // The flag is raised only when there is something finished to
+        // have finished: an empty store leaves a fresh session alone,
+        // and so does one holding work still to do - that queue has not
+        // drained yet and its drain is the host's to act on.
+        if n > 0 && jobs.values().all(|e| e.publisher.get().state.finished()) {
+            self.inner.post_action_fired.store(true, Ordering::SeqCst);
+        }
         drop(jobs);
         self.inner.next_id.store(max + 1, Ordering::SeqCst);
         *self
@@ -570,11 +612,24 @@ impl Drop for Session {
         // Every job is cancelled: the scheduler is about to stop
         // starting work, and a worker still hashing a 200 GiB set would
         // otherwise outlive the session that owns its snapshot.
+        //
+        // AND THE WAKE GOES WITH THEM. A worker holds an `Arc` of its
+        // publisher, so it outlives this `Session` and keeps publishing
+        // until it reaches its next honouring point - and the wake it
+        // rings is the host's function pointer over the host's own
+        // context. `pf_session_free` does not wait for workers (it says
+        // so), so a direct C caller that frees that context as soon as
+        // free returns was being called back through it. Dropping the
+        // wakes here closes all of it but the callback that is already
+        // running, which no amount of locking can close and which
+        // `parfast-ffi/API.md` now states as the host's obligation.
         let jobs = self.inner.jobs.lock().unwrap_or_else(|p| p.into_inner());
         for e in jobs.values() {
             e.control.cancel();
+            e.publisher.set_wake(None);
         }
         drop(jobs);
+        *self.inner.wake.lock().unwrap_or_else(|p| p.into_inner()) = None;
         self.inner.kick();
     }
 }
@@ -585,9 +640,19 @@ impl Inner {
         self.tick.notify_all();
     }
 
+    /// Ring the host's wake, holding NOTHING while it runs.
+    ///
+    /// The handle is cloned out and the mutex released first: API.md
+    /// promises a wake handler may call straight back in, and
+    /// `Session::set_wake` is one of the doors it may use.
     fn ring(&self) {
-        let held = self.wake.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(w) = held.as_ref() {
+        let held = self
+            .wake
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(Arc::clone);
+        if let Some(w) = held {
             w();
         }
     }
@@ -595,7 +660,25 @@ impl Inner {
     /// Write the table, if a store was opened. Best effort by design:
     /// a queue file that cannot be written must not stop the job that
     /// is running.
+    ///
+    /// # Why the whole transaction is under one lock
+    ///
+    /// Every mutating door calls this - submit, cancel, remove,
+    /// set_settings, and a worker finishing - and the GUI's thread and
+    /// the job threads reach them at once. This used to take its
+    /// snapshot, drop every lock, and then write ONE fixed
+    /// `<store>.json.tmp`, with no ordering anywhere: an older snapshot
+    /// that got delayed between those two steps replaced a newer one, two
+    /// writers truncated and wrote the SAME temporary inode, and one
+    /// could rename that half-written inode into place while the other
+    /// was still writing it - which is precisely the atomic replacement
+    /// the temporary file exists to provide. The guard below spans
+    /// snapshot generation through publication, so the writer that
+    /// publishes last is the one that read the table last; the unique
+    /// temporary name is the second belt, for a second PROCESS pointed at
+    /// the same store, which no lock in here can reach.
     fn persist(&self) {
+        let _txn = self.persist_lock.lock().unwrap_or_else(|p| p.into_inner());
         let store = self.store.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let Some(path) = store else { return };
         let settings = self
@@ -619,13 +702,84 @@ impl Inner {
         let Ok(text) = serde_json::to_string_pretty(&out) else {
             return;
         };
+        // The seam the transaction is PROVED through - see
+        // [`persist_seam`]. It is the gap between "this writer has read
+        // the table" and "this writer has published it", which is
+        // exactly the gap the lock above exists to make uncrossable, and
+        // there is no way to observe that from outside. Compiled out of
+        // every non-test build.
+        #[cfg(test)]
+        persist_seam(&path);
         // Written beside and renamed over: a crash mid-write must not
         // leave a half a queue, which parses as an empty one.
-        let tmp = path.with_extension("json.tmp");
+        let tmp = persist_tmp_path(&path);
         if std::fs::write(&tmp, text.as_bytes()).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+            if std::fs::rename(&tmp, &path).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        } else {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
+}
+
+/// Distinguishes one `persist` temp file from the next. See there.
+static PERSIST_SEQ: AtomicI64 = AtomicI64::new(0);
+
+/// What a test installs to stand INSIDE one `persist` transaction, in
+/// the window between reading the table and publishing it.
+///
+/// The ordering half of the persist defect cannot be seen from outside
+/// the function: two writers racing is a property of a window no caller
+/// can reach, and a test that merely runs a lot of writers at once and
+/// hopes measures the scheduler rather than the code. So the window is
+/// given a name, `#[cfg(test)]` only, and
+/// `no_two_persists_are_ever_inside_the_transaction_at_once` uses it to
+/// assert mutual exclusion directly.
+/// It is handed the STORE being written, and a hook that does not
+/// recognise it must return at once. The static is process-global while
+/// the tests around it are not: `cargo test` runs this crate's whole lib
+/// in ONE process, several of these tests own a Session with a store of
+/// its own, and every one of them persists - so an unfiltered hook fires
+/// for other tests' writes and the mutual-exclusion count reads 2 for a
+/// reason that has nothing to do with the lock. Measured, on the first
+/// spelling of this seam.
+#[cfg(test)]
+static PERSIST_SEAM: Mutex<Option<Arc<dyn Fn(&Path) + Send + Sync>>> = Mutex::new(None);
+
+#[cfg(test)]
+fn persist_seam(store: &Path) {
+    // Cloned out and the lock released before the call, for the reason
+    // `Inner::ring` gives: the hook may do anything, including reach
+    // back into the session.
+    let f = PERSIST_SEAM
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(Arc::clone);
+    if let Some(f) = f {
+        f(store);
+    }
+}
+
+#[cfg(test)]
+fn set_persist_seam(f: Option<Arc<dyn Fn(&Path) + Send + Sync>>) {
+    *PERSIST_SEAM.lock().unwrap_or_else(|p| p.into_inner()) = f;
+}
+
+/// The scratch file ONE `persist` writes before renaming it over the
+/// store. Never the same path twice: two writers that share a temporary
+/// file truncate and write the same inode, and either may rename that
+/// half-written inode into place while the other is still filling it -
+/// which is the one thing the write-then-rename shape exists to prevent.
+/// Pid as well as sequence, because a second process pointed at the same
+/// store is outside every lock this file holds.
+fn persist_tmp_path(store: &Path) -> PathBuf {
+    store.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        PERSIST_SEQ.fetch_add(1, Ordering::SeqCst)
+    ))
 }
 
 /// The scheduler. It starts jobs and never runs one itself, so a job
@@ -731,8 +885,14 @@ fn start_due(inner: &Arc<Inner>) -> bool {
     let paired_with = match paired_with {
         Ok(p) => p,
         Err((first, why)) => {
-            if let Some(line) = entry.pair_wait.refused(first, why) {
-                entry.publisher.update(|s| s.log_tail.push(line));
+            let rang = entry.pair_wait.refused(first, why).inspect(|line| {
+                entry
+                    .publisher
+                    .update_quiet(|s| s.log_tail.push(line.clone()));
+            });
+            drop(jobs);
+            if rang.is_some() {
+                inner.ring();
             }
             return false;
         }
@@ -740,13 +900,21 @@ fn start_due(inner: &Arc<Inner>) -> bool {
     entry.pair_wait = PairWait::default();
     entry.run_next = false;
     if entry.control.is_cancelled() {
-        entry.publisher.update(|s| s.state = JobState::Cancelled);
+        entry
+            .publisher
+            .update_quiet(|s| s.state = JobState::Cancelled);
+        drop(jobs);
+        // The scheduler thread rings too, and it holds the table while
+        // it decides - so the wake goes out from here, with the lock
+        // gone, for the reason `Publisher::update_quiet` gives.
+        inner.persist();
+        inner.ring();
         return true;
     }
     entry.running = true;
     entry.pair = shape;
     if let Some(first) = paired_with {
-        entry.publisher.update(|s| {
+        entry.publisher.update_quiet(|s| {
             s.log_tail.push(format!(
                 "Started beside job {first}: this machine has the cores and memory for two \
                  large single-file creates at once. Neither runs faster than it would alone; \
@@ -763,6 +931,10 @@ fn start_due(inner: &Arc<Inner>) -> bool {
         shared: entry.pair.is_some(),
     };
     drop(jobs);
+    // The pairing note and the Running transition, rung now the table is
+    // free: the two `update_quiet` calls above are silent by
+    // construction, and the worker's first publish is a tick away.
+    inner.ring();
     let back = Arc::clone(inner);
     std::thread::Builder::new()
         .name(format!("parfast-job-{id}"))
@@ -775,7 +947,7 @@ fn start_due(inner: &Arc<Inner>) -> bool {
             }
             for e in jobs.values_mut() {
                 if let Some(line) = e.pair_wait.beside_finished(id) {
-                    e.publisher.update(|s| s.log_tail.push(line));
+                    e.publisher.update_quiet(|s| s.log_tail.push(line));
                 }
             }
             drop(jobs);
@@ -1084,6 +1256,748 @@ mod tests {
         let n = s.open_store(&store).expect("reopen");
         assert_eq!(n, 1);
         assert_eq!(s.snapshot().jobs[0].state, JobState::Interrupted);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P2: `overwrite = false` protects the WHOLE set, not just the index.
+    ///
+    /// The guard asked one question - does `spec.output` exist - so a
+    /// set whose index was gone (deleted, or written under a different
+    /// `-f`) left its recovery volumes unprotected: the engine's
+    /// `File::create` truncated them, the CLI's rename walked over the
+    /// survivors, and the job reported Done. The pane's own protection,
+    /// on the only files it protects.
+    ///
+    /// Both arms, because only the pair pins the rule: an existing
+    /// volume with the index ABSENT must refuse, and a clean directory
+    /// must still create.
+    #[test]
+    fn a_no_overwrite_create_refuses_an_existing_recovery_volume() {
+        use crate::job::{
+            BlockSpec, CreateSpec, PathMode, RecoverySpec, UnicodePolicy, VolumeSpec,
+        };
+        let d = tmp("nooverwrite-vol");
+        std::fs::write(d.join("a.bin"), vec![3u8; 64_000]).expect("member");
+        let spec = CreateSpec {
+            sources: vec![Source {
+                path: d.join("a.bin"),
+                recursive: false,
+            }],
+            path_mode: PathMode::Basename,
+            base_path: None,
+            block: Some(BlockSpec::Size { size: 8_192 }),
+            recovery: Some(RecoverySpec::Count { count: 1 }),
+            output: d.join("set.par2"),
+            volumes: VolumeSpec::Pow2,
+            first_recovery_block: 0,
+            comment: String::new(),
+            overwrite: false,
+            std_naming: false,
+            unicode: UnicodePolicy::Auto,
+            perf: Default::default(),
+        };
+        // A volume of some earlier run, and NO index beside it.
+        const SENTINEL: &[u8] = b"an earlier run's recovery volume";
+        std::fs::write(d.join("set.vol0+1.par2"), SENTINEL).expect("sentinel");
+        assert!(!spec.output.exists(), "the index is deliberately absent");
+
+        let s = Session::new(None);
+        let id = s.submit(JobSpec::Create {
+            create: spec.clone(),
+        });
+        let q = until(&s, "the create", |q| {
+            q.jobs.iter().any(|j| j.id == id && j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+        assert_eq!(job.state, JobState::Failed, "{job:?}");
+        assert_eq!(
+            job.error.as_ref().map(|e| e.code.as_str()),
+            Some("exists"),
+            "{job:?}"
+        );
+        assert_eq!(
+            std::fs::read(d.join("set.vol0+1.par2")).expect("the volume"),
+            SENTINEL,
+            "a no-overwrite create replaced an existing recovery volume"
+        );
+
+        // The other arm: nothing there, and the same spec creates.
+        std::fs::remove_file(d.join("set.vol0+1.par2")).expect("clear");
+        let id = s.submit(JobSpec::Create { create: spec });
+        let q = until(&s, "the second create", |q| {
+            q.jobs.iter().any(|j| j.id == id && j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+        assert_eq!(job.state, JobState::Done, "{job:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// THE CONTROL ARM for the guard above, and for the engine door it
+    /// now hands down: `overwrite = true` still replaces the set that is
+    /// there.
+    ///
+    /// `run_create` publishes the pane's decision to the engine as
+    /// `parfast --no-clobber`, which opens every file of the set with
+    /// `O_EXCL` - the half the preflight above cannot do, because a set
+    /// that appears after the check walks straight through it. That
+    /// makes the polarity of one line load-bearing in a way it was not
+    /// before: with it inverted, the Overwrite tick would start REFUSING
+    /// every re-run, and the preflight - which the tick switches off -
+    /// would say nothing about it. Both files of the existing set are
+    /// laid down, index and volume, because they are refused by
+    /// different doors (the engine's open, and the rename that
+    /// publishes the final name).
+    #[test]
+    fn an_overwrite_create_still_replaces_the_set_that_is_there() {
+        use crate::job::{
+            BlockSpec, CreateSpec, PathMode, RecoverySpec, UnicodePolicy, VolumeSpec,
+        };
+        let d = tmp("overwrite-yes");
+        std::fs::write(d.join("a.bin"), vec![5u8; 64_000]).expect("member");
+        std::fs::write(d.join("set.par2"), b"an earlier index").expect("old index");
+        std::fs::write(d.join("set.vol0+1.par2"), b"an earlier volume").expect("old volume");
+
+        let s = Session::new(None);
+        let id = s.submit(JobSpec::Create {
+            create: CreateSpec {
+                sources: vec![Source {
+                    path: d.join("a.bin"),
+                    recursive: false,
+                }],
+                path_mode: PathMode::Basename,
+                base_path: None,
+                block: Some(BlockSpec::Size { size: 8_192 }),
+                recovery: Some(RecoverySpec::Count { count: 1 }),
+                output: d.join("set.par2"),
+                volumes: VolumeSpec::Pow2,
+                first_recovery_block: 0,
+                comment: String::new(),
+                overwrite: true,
+                std_naming: false,
+                unicode: UnicodePolicy::Auto,
+                perf: Default::default(),
+            },
+        });
+        let q = until(&s, "the overwriting create", |q| {
+            q.jobs.iter().any(|j| j.id == id && j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+        assert_eq!(job.state, JobState::Done, "{job:?}");
+        for name in ["set.par2", "set.vol0+1.par2"] {
+            let len = std::fs::metadata(d.join(name)).expect(name).len();
+            assert!(len > 64, "{name} is still the old file at {len} bytes");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P1: a checksum create never writes over one of its own inputs.
+    ///
+    /// The write was an unconditional `fs::write` with no identity check
+    /// at all, so `payload.bin` checksummed INTO `payload.bin` replaced
+    /// the file being protected with a one-line manifest of what it used
+    /// to be - and reported Done. The data is gone; the manifest that
+    /// replaced it describes a file that no longer exists.
+    #[test]
+    fn a_checksum_create_refuses_to_write_over_its_own_source() {
+        let d = tmp("cksum-self");
+        let payload = d.join("payload.bin");
+        const ORIGINAL: &[u8] = b"ORIGINAL DATA";
+        std::fs::write(&payload, ORIGINAL).expect("payload");
+        let s = Session::new(None);
+        let id = s.submit(JobSpec::ChecksumCreate {
+            checksum_create: ChecksumCreateSpec {
+                sources: vec![Source {
+                    path: payload.clone(),
+                    recursive: false,
+                }],
+                format: ChecksumFormat::Sha256,
+                output: payload.clone(),
+                relative: false,
+            },
+        });
+        let q = until(&s, "the checksum create", |q| {
+            q.jobs.iter().any(|j| j.id == id && j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+        assert_eq!(job.state, JobState::Failed, "{job:?}");
+        assert_eq!(
+            std::fs::read(&payload).expect("the payload"),
+            ORIGINAL,
+            "the checksum create overwrote the file it was protecting"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P1's other half: a RECURSIVE source over the manifest's own
+    /// folder does not hash the manifest.
+    ///
+    /// The second run over a folder picked up the checksum file written
+    /// by the first, so the manifest recorded its own previous contents
+    /// and mismatched itself the instant it was rewritten. Dropped
+    /// rather than refused - a whole folder is the ordinary way to ask
+    /// for this - so the run still succeeds and covers the real files.
+    #[test]
+    fn a_checksum_create_over_its_own_folder_is_stable_across_runs() {
+        let d = tmp("cksum-folder");
+        std::fs::write(d.join("a.bin"), vec![1u8; 512]).expect("a");
+        std::fs::write(d.join("b.bin"), vec![2u8; 512]).expect("b");
+        let out = d.join("sums.sha256");
+        let spec = ChecksumCreateSpec {
+            sources: vec![Source {
+                path: d.clone(),
+                recursive: true,
+            }],
+            format: ChecksumFormat::Sha256,
+            output: out.clone(),
+            relative: true,
+        };
+        let s = Session::new(None);
+        let run = |s: &Session, spec: &ChecksumCreateSpec| {
+            let id = s.submit(JobSpec::ChecksumCreate {
+                checksum_create: spec.clone(),
+            });
+            let q = until(s, "the checksum create", |q| {
+                q.jobs.iter().any(|j| j.id == id && j.state.finished())
+            });
+            q.jobs.iter().find(|j| j.id == id).expect("the job").clone()
+        };
+        let first = run(&s, &spec);
+        assert_eq!(first.state, JobState::Done, "{first:?}");
+        let text1 = std::fs::read_to_string(&out).expect("manifest");
+        let second = run(&s, &spec);
+        assert_eq!(second.state, JobState::Done, "{second:?}");
+        let text2 = std::fs::read_to_string(&out).expect("manifest");
+        assert_eq!(
+            text1, text2,
+            "the second run hashed the first run's manifest"
+        );
+        assert!(
+            !text1.contains("sums.sha256"),
+            "the manifest lists itself: {text1}"
+        );
+
+        // ...and it verifies clean, in place.
+        let id = s.submit(JobSpec::ChecksumVerify {
+            checksum_verify: ChecksumVerifySpec { file: out },
+        });
+        let q = until(&s, "the verify", |q| {
+            q.jobs.iter().any(|j| j.id == id && j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+        assert_eq!(job.state, JobState::Done, "{job:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P7: never write a manifest this same code cannot read back.
+    ///
+    /// A source that does not sit under the manifest's own directory has
+    /// no name the format can carry, and `expand_sources` fell back to
+    /// the source's own absolute path. The checker resolves names under
+    /// the manifest folder, so the file the user had just hashed came
+    /// back Missing while sitting untouched where it always was.
+    #[test]
+    fn a_checksum_create_refuses_a_source_outside_the_manifest_folder() {
+        let d = tmp("cksum-outside");
+        let out_dir = d.join("output");
+        std::fs::create_dir_all(&out_dir).expect("output dir");
+        let payload = d.join("payload.bin");
+        std::fs::write(&payload, vec![9u8; 1024]).expect("payload");
+        let s = Session::new(None);
+        let id = s.submit(JobSpec::ChecksumCreate {
+            checksum_create: ChecksumCreateSpec {
+                sources: vec![Source {
+                    path: payload,
+                    recursive: false,
+                }],
+                format: ChecksumFormat::Sha256,
+                output: out_dir.join("sums.sha256"),
+                relative: true,
+            },
+        });
+        let q = until(&s, "the checksum create", |q| {
+            q.jobs.iter().any(|j| j.id == id && j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+        assert_eq!(job.state, JobState::Failed, "{job:?}");
+        assert_eq!(
+            job.error.as_ref().map(|e| e.code.as_str()),
+            Some("outside_checksum_folder"),
+            "{job:?}"
+        );
+        assert!(
+            !out_dir.join("sums.sha256").exists(),
+            "a manifest this reader cannot resolve was written anyway"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P8: a manifest written here checks clean here, for names the
+    /// download path's sanitizer would have rewritten.
+    ///
+    /// The checker resolved through `disk::sanitize_out_name`, which is
+    /// the function that decides what to CREATE for a name a stranger
+    /// declared - it trims leading whitespace, folds trailing dots and
+    /// spaces, and maps a leading dot to `_`. Applied to a name being
+    /// LOOKED UP, every one of those rewrites names a different file:
+    /// `" name.bin"` was hashed, written and then reported Missing by
+    /// the same process, seconds apart.
+    #[test]
+    fn checksum_names_round_trip_for_names_the_download_sanitizer_rewrites() {
+        let d = tmp("cksum-names");
+        // Each of these survives on APFS and on ext4 and is rewritten by
+        // the download sanitizer: a leading space is trimmed, a trailing
+        // dot is folded the way Windows folds it, and the non-ASCII name
+        // is the control that must go through untouched either way.
+        //
+        // NOT a leading-dot name, though the sanitizer maps those to `_`
+        // as well: `planner::skipped` drops dot-files before any of this,
+        // which is par2cmdline's source rule and a separate question from
+        // the one under test here.
+        let awkward = [" leading space.bin", "trailing dot.", "ünïcøde.bin"];
+        for (i, name) in awkward.iter().enumerate() {
+            std::fs::write(d.join(name), vec![i as u8 + 1; 256]).expect("fixture");
+        }
+        let out = d.join("sums.sha256");
+        let s = Session::new(None);
+        let id = s.submit(JobSpec::ChecksumCreate {
+            checksum_create: ChecksumCreateSpec {
+                sources: awkward
+                    .iter()
+                    .map(|n| Source {
+                        path: d.join(n),
+                        recursive: false,
+                    })
+                    .collect(),
+                format: ChecksumFormat::Sha256,
+                output: out.clone(),
+                relative: true,
+            },
+        });
+        let q = until(&s, "the checksum create", |q| {
+            q.jobs.iter().any(|j| j.id == id && j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+        assert_eq!(job.state, JobState::Done, "{job:?}");
+
+        let id = s.submit(JobSpec::ChecksumVerify {
+            checksum_verify: ChecksumVerifySpec { file: out },
+        });
+        let q = until(&s, "the verify", |q| {
+            q.jobs.iter().any(|j| j.id == id && j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+        let tally = job
+            .result
+            .as_ref()
+            .and_then(|r| r.checksum.as_ref())
+            .expect("a checksum result");
+        assert_eq!(
+            (tally.ok, tally.missing, tally.mismatch),
+            (awkward.len(), 0, 0),
+            "files this very run hashed came back unresolved: {:?}",
+            tally.entries
+        );
+        assert_eq!(job.state, JobState::Done, "{job:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A checksum create hashes what it was POINTED AT.
+    ///
+    /// `expand_sources` applied par2cmdline's source rules to every
+    /// caller, and the checksum pane is not par2cmdline: a folder
+    /// holding a PAR2 set produced a manifest with every `.par2`
+    /// missing from it, and a dot-file named EXPLICITLY as a source was
+    /// dropped with nothing said. Both then verified CLEAN, because what
+    /// is not in the manifest is not checked - which is the worst shape
+    /// a "verified" answer can have. Found while testing P8 of the
+    /// 17 Sep sweep; `planner::SourceRules` is the fix.
+    ///
+    /// The PAR2 side keeps its rule, and the control arm below is what
+    /// says so - a create over the same folder still protects only
+    /// `movie.mkv`.
+    #[test]
+    fn a_checksum_create_covers_par2_files_and_dot_files() {
+        use crate::job::{
+            BlockSpec, CreateSpec, PathMode, RecoverySpec, UnicodePolicy, VolumeSpec,
+        };
+        let d = tmp("cksum-rules");
+        for name in ["movie.mkv", "movie.par2", ".hidden.bin"] {
+            std::fs::write(d.join(name), vec![6u8; 512]).expect("fixture");
+        }
+        let out = d.join("sums.sha256");
+        let s = Session::new(None);
+        let id = s.submit(JobSpec::ChecksumCreate {
+            checksum_create: ChecksumCreateSpec {
+                sources: vec![Source {
+                    path: d.clone(),
+                    recursive: true,
+                }],
+                format: ChecksumFormat::Sha256,
+                output: out.clone(),
+                relative: true,
+            },
+        });
+        let q = until(&s, "the checksum create", |q| {
+            q.jobs.iter().any(|j| j.id == id && j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+        assert_eq!(job.state, JobState::Done, "{job:?}");
+        let text = std::fs::read_to_string(&out).expect("manifest");
+        for want in ["movie.mkv", "movie.par2", ".hidden.bin"] {
+            assert!(text.contains(want), "{want} is not in the manifest: {text}");
+        }
+        assert!(
+            !text.contains("sums.sha256"),
+            "the manifest lists itself: {text}"
+        );
+
+        // The PAR2 side is UNCHANGED: par2cmdline does not protect a
+        // dot-file or another set's recovery files, and neither do we.
+        // Its own folder, because the manifest written above would
+        // otherwise be a member of it and the count would say nothing.
+        let p2 = d.join("par2side");
+        std::fs::create_dir_all(&p2).expect("dir");
+        for name in ["movie.mkv", "movie.par2", ".hidden.bin"] {
+            std::fs::write(p2.join(name), vec![6u8; 512]).expect("fixture");
+        }
+        let preview = crate::planner::preview(&CreateSpec {
+            sources: vec![Source {
+                path: p2.clone(),
+                recursive: true,
+            }],
+            path_mode: PathMode::Basename,
+            base_path: None,
+            block: Some(BlockSpec::Size { size: 512 }),
+            recovery: Some(RecoverySpec::Count { count: 1 }),
+            output: p2.join("set.par2"),
+            volumes: VolumeSpec::Pow2,
+            first_recovery_block: 0,
+            comment: String::new(),
+            overwrite: true,
+            std_naming: false,
+            unicode: UnicodePolicy::Auto,
+            perf: Default::default(),
+        })
+        .expect("preview");
+        assert_eq!(
+            preview.source_files, 1,
+            "a PAR2 create must still skip the dot-file and the .par2"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P10: nothing checked is not a clean check.
+    ///
+    /// An extension hint rescued a file with zero entries, so
+    /// `empty.sha256` holding one comment verified zero of zero and came
+    /// back Done with a green tick - while the identical text named
+    /// `empty.txt` was refused. Which answer a user got turned on the
+    /// spelling of the file name.
+    #[test]
+    fn a_checksum_file_with_no_entries_is_not_a_successful_check() {
+        let d = tmp("cksum-empty");
+        let s = Session::new(None);
+        for name in ["empty.sha256", "empty.txt"] {
+            let f = d.join(name);
+            std::fs::write(&f, "; nothing here\n\n").expect("fixture");
+            let id = s.submit(JobSpec::ChecksumVerify {
+                checksum_verify: ChecksumVerifySpec { file: f },
+            });
+            let q = until(&s, "the verify", |q| {
+                q.jobs.iter().any(|j| j.id == id && j.state.finished())
+            });
+            let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+            assert_eq!(
+                job.state,
+                JobState::Failed,
+                "{name} verified nothing and called it a pass: {job:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P3: a RELAUNCH is not a drain.
+    ///
+    /// The action is armed by the queue finishing work. Restoring a
+    /// table whose jobs were all finished in some earlier session is not
+    /// that, and until 17 Sep 2026 it read as exactly that: the fired
+    /// latch lived only in memory, so the first scheduler tick of the
+    /// new process found a drained queue with "Sleep" saved beside it
+    /// and armed the action. The host reads that flag and puts the
+    /// machine to sleep - on a launch during which nothing ran, every
+    /// launch, until the user changed the setting.
+    #[test]
+    fn a_restored_finished_queue_does_not_re_arm_the_post_action() {
+        let d = tmp("qpost-restore");
+        let store = d.join("queue.json");
+        {
+            let s = Session::new(None);
+            s.open_store(&store).expect("open store");
+            s.set_post_action(PostQueueAction::Sleep);
+            s.submit(checksum_job(&d, 1));
+            until(&s, "the post action to fall due", |q| q.post_action_due);
+            // The host has dealt with it - which is the state a machine
+            // that actually slept and woke comes back in.
+            s.clear_post_action_due();
+            assert!(!s.snapshot().post_action_due);
+        }
+        let s = Session::new(None);
+        let n = s.open_store(&store).expect("reopen");
+        assert_eq!(n, 1, "the finished job is restored");
+        assert_eq!(s.snapshot().post_action, "sleep", "and so is the action");
+        for _ in 0..30 {
+            assert!(
+                !s.snapshot().post_action_due,
+                "a relaunch armed the saved power action with no work behind it"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // ...and a NEW batch still re-arms it, which is the half a
+        // blanket disarm would have broken.
+        s.submit(checksum_job(&d, 2));
+        until(&s, "a new batch to re-arm the action", |q| {
+            q.post_action_due
+        });
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P4: cancelling a QUEUED job is written down.
+    ///
+    /// A cancel changed the published state and woke the scheduler, and
+    /// nothing else - the save was left to the worker completion that
+    /// would follow. For a job that never runs there is no such worker:
+    /// the scheduler skips a cancelled entry forever, so on a paused
+    /// queue (or any queue the process leaves first) the cancellation
+    /// existed only in memory and the job came back Queued and RAN.
+    #[test]
+    fn a_cancelled_queued_job_stays_cancelled_across_a_restart() {
+        let d = tmp("qcancel-store");
+        let store = d.join("queue.json");
+        let id = {
+            let s = Session::new(None);
+            s.set_queue_paused(true);
+            s.open_store(&store).expect("open store");
+            let id = s.submit(checksum_job(&d, 1));
+            assert!(s.cancel(id));
+            assert_eq!(s.job(id).expect("the job").state, JobState::Cancelled);
+            id
+        };
+        let s = Session::new(None);
+        s.set_queue_paused(true);
+        s.open_store(&store).expect("reopen");
+        assert_eq!(
+            s.job(id).expect("the job came back").state,
+            JobState::Cancelled,
+            "a cancelled job came back runnable"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P5: a wake handler may call straight back in, which is what
+    /// API.md promises and what a host that polls from its wake does.
+    ///
+    /// `cancel` held the jobs table while it published the new state,
+    /// and publishing rings the wake ON THE CALLING THREAD - so the
+    /// handler's `snapshot()` re-entered a `std` mutex the same thread
+    /// already held, and the call never returned. The test would HANG
+    /// rather than fail if this regressed, so the poll runs on a second
+    /// thread with a deadline in front of it.
+    #[test]
+    fn a_wake_handler_that_polls_does_not_wedge_a_cancel() {
+        use std::sync::mpsc;
+        let d = tmp("qwake");
+        let s = Arc::new(Session::new(None));
+        s.set_queue_paused(true);
+        let weak = Arc::downgrade(&s);
+        let rang = Arc::new(AtomicI64::new(0));
+        let counter = Arc::clone(&rang);
+        s.set_wake(Some(Arc::new(move || {
+            if let Some(live) = weak.upgrade() {
+                // The re-entrant poll itself. Every door a host reaches
+                // for from a wake, on the ringing thread.
+                let _ = live.snapshot();
+                let _ = live.settings();
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        })));
+        let id = s.submit(checksum_job(&d, 1));
+        let (tx, rx) = mpsc::channel();
+        let worker = Arc::clone(&s);
+        let t = std::thread::spawn(move || {
+            let ok = worker.cancel(id);
+            let _ = tx.send(ok);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(ok) => assert!(ok, "the cancel refused a queued job"),
+            Err(e) => panic!("cancel never returned ({e}) - a lock is held across the wake"),
+        }
+        t.join().expect("the cancelling thread");
+        assert!(
+            rang.load(Ordering::SeqCst) > 0,
+            "the wake never fired, so nothing was proved"
+        );
+        assert_eq!(s.job(id).expect("the job").state, JobState::Cancelled);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P6, the half that is DETERMINISTIC: no two persists share a
+    /// scratch file.
+    ///
+    /// The write used one fixed `<store>.json.tmp` for every caller, so
+    /// two concurrent writers truncated and filled the same inode and
+    /// either could rename it into place while the other was still
+    /// writing it - publishing a torn table through the very mechanism
+    /// that exists to make the replacement atomic. The ordering half of
+    /// the same defect is answered by the transaction lock in
+    /// [`Inner::persist`] and exercised by the soak below; this is the
+    /// part a test can pin outright.
+    #[test]
+    fn no_two_persists_write_the_same_scratch_file() {
+        let store = Path::new("/tmp/parfast-queue-store/queue.json");
+        let a = persist_tmp_path(store);
+        let b = persist_tmp_path(store);
+        assert_ne!(a, b, "two persists would share a temp inode");
+        for p in [&a, &b] {
+            assert_eq!(
+                p.parent(),
+                store.parent(),
+                "the scratch file must sit beside the store, or the rename is cross-device"
+            );
+            assert!(
+                p.to_string_lossy().ends_with(".tmp"),
+                "{}: the store's own reader skips `.tmp` by suffix",
+                p.display()
+            );
+        }
+    }
+
+    /// P6's ordering half, DETERMINISTICALLY: two persists are never
+    /// inside the transaction at once.
+    ///
+    /// The soak below cannot prove this and says so - two writers racing
+    /// is a property of a window no caller can reach from outside, and
+    /// running eight of them and hoping measures the scheduler. So the
+    /// window has a name (`PERSIST_SEAM`, `#[cfg(test)]` only) and this
+    /// stands in it: every writer records that it is inside, waits long
+    /// enough that any other writer would have joined it if it could,
+    /// and records the high-water mark. Under the transaction lock that
+    /// mark is 1, always. Without it, eight writers each holding the
+    /// window open reach 8 - it is the SLEEP that makes the failure
+    /// certain rather than likely, which is the opposite of a timing
+    /// test: the test passes on a property and fails on a fact.
+    #[test]
+    fn no_two_persists_are_ever_inside_the_transaction_at_once() {
+        let d = tmp("qpersist-excl");
+        let store = d.join("queue.json");
+        let s = Arc::new(Session::new(None));
+        s.set_queue_paused(true);
+        s.open_store(&store).expect("open store");
+        s.submit(checksum_job(&d, 1));
+
+        let inside = Arc::new(AtomicI64::new(0));
+        let peak = Arc::new(AtomicI64::new(0));
+        {
+            let (inside, peak) = (Arc::clone(&inside), Arc::clone(&peak));
+            let mine = store.clone();
+            set_persist_seam(Some(Arc::new(move |written: &Path| {
+                // ONLY this test's store: the seam is process-global and
+                // the other tests in this binary are persisting too.
+                if written != mine {
+                    return;
+                }
+                let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                // Wide enough that a second writer WOULD be seen if one
+                // could get in, and short enough to cost nothing.
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                inside.fetch_sub(1, Ordering::SeqCst);
+            })));
+        }
+        let gate = Arc::new(std::sync::Barrier::new(8));
+        let mut hands = Vec::new();
+        for _ in 0..8 {
+            let s = Arc::clone(&s);
+            let gate = Arc::clone(&gate);
+            hands.push(std::thread::spawn(move || {
+                gate.wait();
+                let mut set = s.settings();
+                set.concurrency = 2;
+                s.set_settings(set);
+            }));
+        }
+        for h in hands {
+            h.join().expect("a writer thread");
+        }
+        set_persist_seam(None);
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            1,
+            "two writers were inside one persist transaction at once"
+        );
+        // And what landed is still a whole table.
+        let text = std::fs::read_to_string(&store).expect("the store is there");
+        serde_json::from_str::<Persisted>(&text).expect("the store parses");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P6's ordering half, as a SOAK and labelled one: every mutating
+    /// door on the store at once, and what lands must be a whole table.
+    ///
+    /// It did NOT reproduce the race against the unfixed code on this
+    /// box (17 Sep 2026) and is not claimed to - the interleaving needs
+    /// a writer descheduled between its snapshot and its publication,
+    /// which nothing here can force without a hook in `persist`. The
+    /// finding is source-traced and the fix is the transaction lock; this
+    /// keeps the concurrent path exercised and would catch a future
+    /// change that published a partial table under load.
+    #[test]
+    fn concurrent_persists_never_publish_a_torn_store() {
+        let d = tmp("qpersist-race");
+        let store = d.join("queue.json");
+        let s = Arc::new(Session::new(None));
+        s.set_queue_paused(true);
+        s.open_store(&store).expect("open store");
+        // Enough jobs that one table is several KiB, so a torn write has
+        // room to be visibly torn.
+        let ids: Vec<i64> = (0..24).map(|_| s.submit(checksum_job(&d, 1))).collect();
+        let gate = Arc::new(std::sync::Barrier::new(9));
+        let mut hands = Vec::new();
+        for k in 0..8 {
+            let s = Arc::clone(&s);
+            let gate = Arc::clone(&gate);
+            let ids = ids.clone();
+            hands.push(std::thread::spawn(move || {
+                gate.wait();
+                for _ in 0..12 {
+                    if k % 2 == 0 {
+                        let mut set = s.settings();
+                        set.concurrency = (k as u32 % 3) + 1;
+                        s.set_settings(set);
+                    } else {
+                        s.cancel(ids[k as usize % ids.len()]);
+                    }
+                }
+            }));
+        }
+        gate.wait();
+        for h in hands {
+            h.join().expect("a writer thread");
+        }
+        let text = std::fs::read_to_string(&store).expect("the store is there");
+        let back: Persisted = serde_json::from_str(&text).expect("the store parses");
+        assert_eq!(
+            back.jobs.len(),
+            ids.len(),
+            "a published table lost jobs, so a stale or torn snapshot won"
+        );
+        // And no temp file is left lying beside it.
+        let strays: Vec<_> = std::fs::read_dir(&d)
+            .expect("read dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "temp files left behind: {strays:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -270,6 +270,29 @@ impl CreateControl {
         self.inner.begin(phase, total);
     }
 
+    /// The fold BATCH about to start, and how many there will be -
+    /// the create's reading of [`ProgressSink::slab`], which is the
+    /// repair's channel for exactly this and not a second one.
+    ///
+    /// A memory-capped create folds the set a batch of volumes at a
+    /// time, and [`CreatePhase::Fold`] is re-sized at each
+    /// (`par2gen::recovery_slices`), so its `(done, total)` alone says
+    /// where THIS batch is and nothing about where the create is. A bar
+    /// that is told `(index, of)` first can band the fold across the
+    /// batches and stay monotone; one that is not can only draw 0 to
+    /// 100 once per batch. `of` cannot be inferred from the re-entries
+    /// - a sink counting them knows the index and never the whole -
+    /// which is the argument [`ProgressSink::slab`] already makes for
+    /// the repair.
+    ///
+    /// Driver thread only, once per batch, BEFORE that batch's
+    /// `begin(Fold, ..)`. A create that folds in one pass announces
+    /// `(0, 1)`; the stripe-first transform announces nothing, and
+    /// `(0, 1)` is the right reading of that too.
+    pub(super) fn batch(&self, index: usize, of: usize) {
+        self.inner.slab(index, of);
+    }
+
     /// One batch of `add` units done. Safe in any loop the engine
     /// already chunks: a relaxed `fetch_add`, two multiplies and a
     /// compare, and the sink is reached at most 256 times per phase.
@@ -357,23 +380,90 @@ impl CreateControl {
 /// An EXTEND (`-f`, a first exponent onto an existing set) writes new
 /// volume names beside the ones already there, and a cancel must take
 /// its own and not the set it was extending. So the trail is a record
-/// of creation, noted by the code that calls `File::create`, rather
-/// than a glob over the directory afterwards - a glob cannot tell the
-/// two apart. A create RE-RUN over the same names is the one case
-/// where the unlink removes a file that existed before: `File::create`
-/// truncated it the moment the run started, so there was nothing left
-/// to keep.
-#[derive(Default)]
+/// of creation, written by [`CreateTrail::create`] as it opens each
+/// file, rather than a glob over the directory afterwards - a glob
+/// cannot tell the two apart. An OVERWRITING create re-run over the
+/// same names is the one case where the unlink removes a file that
+/// existed before: the open truncated it the moment the run started,
+/// so there was nothing left to keep. A no-clobber run has no such
+/// case, because it never opens a file it did not create.
+///
+/// # Which is why the trail OPENS the files
+///
+/// [`CreateTrail::create`] is the ONE door every set member is created
+/// through, and it notes the name only once the open has succeeded.
+/// The two used to be separate calls with the note going FIRST, which
+/// was right while every open truncated - the note had to cover the
+/// window between `File::create` returning and the first byte landing.
+/// It stops being right the moment an open can be REFUSED: a
+/// no-clobber create that declines to touch somebody else's file would
+/// have noted that file as its own, and a cancel taken any time
+/// afterwards would then delete the very file the refusal was
+/// protecting. Opening and noting in one place is what makes "noted
+/// means this run created it" true by construction rather than by
+/// every call site remembering the order.
+///
+/// # `no_clobber`
+///
+/// Set from [`super::CreatePlan::no_clobber`]. `false` is every caller
+/// this engine has ever had and is `File::create`'s truncating open;
+/// `true` opens with `O_EXCL`, so an existing file is
+/// [`std::io::ErrorKind::AlreadyExists`] and this run neither writes it
+/// nor owns it. That is the only door below the CLI that can refuse the
+/// overwrite ATOMICALLY - a caller's own look-before-you-write is a
+/// preflight, and two creates started together on one base race straight
+/// through it.
 pub(super) struct CreateTrail {
     names: Mutex<Vec<String>>,
+    no_clobber: bool,
+}
+
+impl Default for CreateTrail {
+    /// Overwriting, which is what every engine caller and
+    /// par2cmdline's own default do.
+    fn default() -> Self {
+        CreateTrail {
+            names: Mutex::new(Vec::new()),
+            no_clobber: false,
+        }
+    }
 }
 
 impl CreateTrail {
+    /// A trail that refuses to write over a file that is already there
+    /// when `no_clobber`, and truncates as it always has when not.
+    pub(super) fn new(no_clobber: bool) -> Self {
+        CreateTrail {
+            names: Mutex::new(Vec::new()),
+            no_clobber,
+        }
+    }
+
+    /// Create `name` in `dir` as a member of this run's set, and note
+    /// it. THE ONE DOOR: see the type's own doc for why creating and
+    /// noting are a single call and not two.
+    ///
+    /// Called from the volume writers' threads, so the note is a lock -
+    /// once per FILE, which is nothing beside writing one.
+    pub(super) fn create(&self, dir: &Path, name: &str) -> std::io::Result<std::fs::File> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(self.no_clobber)
+            // `create(true).truncate(true)` is `File::create`, spelled
+            // the long way so the one flag that differs between the two
+            // modes is the one flag that moves.
+            .create(!self.no_clobber)
+            .truncate(!self.no_clobber)
+            .open(dir.join(name))?;
+        // AFTER the open, and only on success. A refused open is
+        // somebody else's file and was never this run's to remove.
+        self.note(name);
+        Ok(file)
+    }
+
     /// Note a file this create has just created, by its name in the
-    /// output directory. Called from the volume writers' threads, so
-    /// this is a lock - once per FILE, which is nothing beside writing
-    /// one.
-    pub(super) fn note(&self, name: &str) {
+    /// output directory.
+    fn note(&self, name: &str) {
         self.names
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -589,6 +679,92 @@ mod tests {
             dir.join("old.vol100+01.par2").exists(),
             "an extend's existing volumes are not this run's to remove"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE TRAP a no-clobber create sets, pinned at the one place it can
+    /// be pinned deterministically.
+    ///
+    /// The refusal and the cancel are two features that are each fine
+    /// alone and destroy a user's file together: a create that declines
+    /// to touch a file it does not own, having NOTED that file first,
+    /// hands the cancel path a name to `remove_file`. The refusal would
+    /// then delete exactly the file it refused to overwrite - a worse
+    /// outcome than the overwrite it was added to prevent.
+    ///
+    /// `CreateTrail::create` is what makes it impossible: the note is
+    /// after the open and only on success, so "noted" means "this run
+    /// created it". This test is that sentence, both ways round.
+    #[test]
+    fn a_refused_no_clobber_open_is_never_noted_and_so_never_unlinked() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-trail-noclobber-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let theirs = b"somebody else's recovery volume".to_vec();
+        std::fs::write(dir.join("set.vol000+01.par2"), &theirs).expect("write");
+
+        let trail = CreateTrail::new(true);
+        // Ours: created here, so the trail owns it.
+        trail.create(&dir, "set.par2").expect("a free name opens");
+        // Theirs: refused, and refused in the ONE way a caller can act
+        // on - `AlreadyExists`, not a generic write failure.
+        let e = trail
+            .create(&dir, "set.vol000+01.par2")
+            .expect_err("no-clobber must refuse a file that is already there");
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e:?}");
+        assert_eq!(
+            trail.noted(),
+            vec!["set.par2".to_string()],
+            "a file this run did not create must not be on its trail"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("set.vol000+01.par2")).expect("still there"),
+            theirs,
+            "the refusal itself must not have touched the file"
+        );
+
+        trail.unlink_all(&dir);
+        assert!(!dir.join("set.par2").exists(), "this run's own file goes");
+        assert_eq!(
+            std::fs::read(dir.join("set.vol000+01.par2")).expect("still there"),
+            theirs,
+            "the cancel deleted the very file the refusal was protecting"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The control arm of the test above: the DEFAULT trail truncates,
+    /// which is what every engine caller and par2cmdline itself do, and
+    /// a file it truncated is this run's to take back on a cancel.
+    #[test]
+    fn a_default_trail_still_truncates_and_owns_what_it_truncated() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-trail-clobber-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("set.par2"), b"the previous run's index").expect("write");
+
+        let trail = CreateTrail::default();
+        trail
+            .create(&dir, "set.par2")
+            .expect("the default trail writes over what is there");
+        assert_eq!(
+            std::fs::read(dir.join("set.par2"))
+                .expect("still there")
+                .len(),
+            0,
+            "the open must have truncated"
+        );
+        assert_eq!(trail.noted(), vec!["set.par2".to_string()]);
+        trail.unlink_all(&dir);
+        assert!(!dir.join("set.par2").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

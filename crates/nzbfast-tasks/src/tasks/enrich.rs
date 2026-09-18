@@ -1083,6 +1083,20 @@ pub fn spawn_predb_feed(daemon: &Arc<Daemon>) {
                 // Covers the correlation sweeps below to the end of the
                 // tick; the 20 s sleep sits at the loop top, so the
                 // chip can never span the idle wait.
+                //
+                // `mode=index_holds` has filed maxima of 3.9 s, 7.6 s
+                // and 7.9 s at THIS line on the live daemon, at a p50
+                // of 0.0 ms, and sections 10 and 10a read them as an
+                // occasional index-wide stall landing on whoever was
+                // holding. They are not. The 17 Sep 2026 wait/hold
+                // split measured this site at **100% wait and a hold
+                // maximum of 0.0 ms**: a single-statement write that
+                // spends its whole reading QUEUED behind a fold slice.
+                // Nothing here needs a bound - what bounds it is the
+                // holder's budget - and section 11a of
+                // `research/INDEX-SCAN-CHUNK-SWEEP-2026-09-16.md` is
+                // the reading. Do not size anything from this site's
+                // summed column.
                 let _busy = daemon2.busy.hold("predb");
                 let matcher = daemon2.instant_matcher();
                 daemon2.with_index_mut(|ix| {
@@ -1180,7 +1194,16 @@ pub fn spawn_predb_feed(daemon: &Arc<Daemon>) {
                     // 1,831 s of the 3,428 s of index-mutex hold time
                     // the whole daemon spent, 53% of it at one line, at
                     // a median hold PAST the 5 s `HTTP_INDEX_WAIT` a
-                    // dashboard write waits. The fixed cost of the call
+                    // dashboard write waits. Those three figures are
+                    // wait-plus-hold, which is all `holdstat` could
+                    // report until 17 Sep 2026; the split it grew that
+                    // day says this site's wait is **0.0% of its
+                    // total** on the same daemon, so they were holds
+                    // after all and the bound below was sized against
+                    // the right number. Section 11a of the sweep is
+                    // that reading. It is the same instrument that
+                    // showed the NEIGHBOURS to be the opposite case -
+                    // see `install_instant_watch` below. The fixed cost of the call
                     // is ~1.5 ms (the floor and selection queries, timed
                     // read-only against that index), so the hold is
                     // essentially linear in rows: ~11.7 ms a row at the

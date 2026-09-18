@@ -47,10 +47,10 @@
 //! block function is written with `core::arch::asm!`, which LLVM
 //! assembles itself, so it builds under MSVC exactly as it does under
 //! mingw. It was the Windows arm of [`Md5`] from 3 Sep to 13 Sep 2026;
-//! AWS-LC's routine measured 6.6% ahead of it on the Zenbook (table
-//! above) and is linked into every desktop binary already, so the alias
-//! moved and this port stays as the A/B arm and the reference for the
-//! shape below.
+//! AWS-LC's routine measured 6.6% ahead of it on the Core Ultra 9
+//! (table above) and is linked into every desktop binary already, so
+//! the alias moved and this port stays as the A/B arm and the reference
+//! for the shape below.
 //!
 //! # What the assembly is
 //!
