@@ -155,7 +155,7 @@ md-5 = { version = "0.10", features = ["asm"] }
 # which one `md5fast::Md5` resolves to is decided in that module's
 # header from the measurement, not here.
 [target.'cfg(any(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")), all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))))'.dependencies]
-aws-lc-sys = { version = "0.44.0", default-features = false, features = ["all-bindings"] }
+aws-lc-sys = { version = "0.45.0", default-features = false, features = ["all-bindings"] }
 
 # There is deliberately NO matching aarch64 `asm` entry for sha2 beside
 # the md-5 one above, and re-adding one is not possible: sha2 0.11 has
