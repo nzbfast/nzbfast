@@ -1,0 +1,322 @@
+17:24:51Z rig lock TAKEN by memladder-crossover-rotated-remeasure pid 75048
+2026-09-17T17:24:51Z PHASE=start load=2.35 2.46 2.60 host=apple-m3-ultra cores=32
+2026-09-17T17:24:51Z PHASE=export 27f05a889
+2026-09-17T17:24:53Z PHASE=build load=2.35 2.46 2.60
+warning: `rars` (lib) generated 6 warnings
+   Compiling nzbkit v1.0.0 (<rig>/memladder-rot-17sep/tree14/crates/nzbkit)
+    Finished `release` profile [optimized] target(s) in 50.21s
+2026-09-17T17:25:43Z PHASE=binary parfast version 1.5.0-beta.3 sha256=4697ff3b3bd7ec40
+2026-09-17T17:25:43Z PHASE=fixture load=8.80 4.44 3.33
+Opening: m01.bin
+Opening: m02.bin
+Opening: m03.bin
+Opening: m04.bin
+Opening: m05.bin
+Opening: m06.bin
+Opening: m07.bin
+Opening: m08.bin
+Opening: m09.bin
+Opening: m10.bin
+Opening: m11.bin
+Opening: m12.bin
+Opening: m13.bin
+Opening: m14.bin
+Opening: m15.bin
+Opening: m16.bin
+Done
+2026-09-17T17:25:50Z PHASE=fixture-ready files=30 bytes=2612MB
+2026-09-17T17:25:50Z PHASE=settle load=8.65 4.48 3.36
+2026-09-17T17:27:20Z PHASE=settled after=4 load=3.45 3.83 3.22
+2026-09-17T17:27:20Z PHASE=ladder load=3.45 3.83 3.22
+ROUND tag=rot17sep bin=<rig>/memladder-rot-17sep/parfast-27f05a889 arm_order=rotating-by-rep arms=fold,force,auto rungs=160,192,224,256 budgets=128 reps=24 threads=4 slice=65536 load=3.45/3.83/3.22
+LEG m160-128-fold-r1-rot17sep  arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.46 peak=  702MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=3.5/3.7
+LEG m160-128-force-r1-rot17sep arm_pos=1 rc=0 ok=True wall=  2.20 cpu=  10.38 peak=  733MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=3.7/3.7
+LEG m160-128-auto-r1-rot17sep  arm_pos=2 rc=0 ok=True wall=  1.97 cpu=   9.49 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=3.6/3.6
+LEG m192-128-fold-r1-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.62 peak=  722MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=3.6/3.9
+LEG m192-128-force-r1-rot17sep arm_pos=1 rc=0 ok=True wall=  2.23 cpu=  10.53 peak=  739MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=3.9/3.9
+LEG m192-128-auto-r1-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.26 cpu=  10.66 peak=  720MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=3.9/4.0
+LEG m224-128-fold-r1-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.57 cpu=  11.86 peak=  739MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.0/4.0
+LEG m224-128-force-r1-rot17sep arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.62 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.0/4.0
+LEG m224-128-auto-r1-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.82 peak=  731MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.0/4.2
+LEG m256-128-fold-r1-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.86 cpu=  13.01 peak=  730MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.2/4.3
+LEG m256-128-force-r1-rot17sep arm_pos=1 rc=0 ok=True wall=  2.28 cpu=  10.70 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.3/4.3
+LEG m256-128-auto-r1-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.85 cpu=  12.98 peak=  742MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.3/4.3
+LEG m160-128-force-r2-rot17sep arm_pos=0 rc=0 ok=True wall=  2.20 cpu=  10.40 peak=  737MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.3/4.4
+LEG m160-128-auto-r2-rot17sep  arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.43 peak=  734MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.4
+LEG m160-128-fold-r2-rot17sep  arm_pos=2 rc=0 ok=True wall=  1.95 cpu=   9.43 peak=  735MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.4
+LEG m192-128-force-r2-rot17sep arm_pos=0 rc=0 ok=True wall=  2.23 cpu=  10.53 peak=  740MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.4/4.4
+LEG m192-128-auto-r2-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.62 peak=  714MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.5
+LEG m192-128-fold-r2-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  721MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.5/5.5
+LEG m224-128-force-r2-rot17sep arm_pos=0 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  744MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.5/5.5
+LEG m224-128-auto-r2-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.56 cpu=  11.80 peak=  755MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.5/5.4
+LEG m224-128-fold-r2-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.81 peak=  735MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.4/5.4
+LEG m256-128-force-r2-rot17sep arm_pos=0 rc=0 ok=True wall=  2.28 cpu=  10.71 peak=  764MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.2/5.2
+LEG m256-128-auto-r2-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.86 cpu=  13.01 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.3
+LEG m256-128-fold-r2-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.86 cpu=  13.03 peak=  720MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m160-128-auto-r3-rot17sep  arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  700MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m160-128-fold-r3-rot17sep  arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.47 peak=  720MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m160-128-force-r3-rot17sep arm_pos=2 rc=0 ok=True wall=  2.20 cpu=  10.42 peak=  742MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.3/5.3
+LEG m192-128-auto-r3-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.25 cpu=  10.60 peak=  720MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.2
+LEG m192-128-fold-r3-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.65 peak=  722MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.2
+LEG m192-128-force-r3-rot17sep arm_pos=2 rc=0 ok=True wall=  2.22 cpu=  10.48 peak=  754MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.2/5.2
+LEG m224-128-auto-r3-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.56 cpu=  11.81 peak=  716MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.0
+LEG m224-128-fold-r3-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.56 cpu=  11.85 peak=  749MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.0/5.0
+LEG m224-128-force-r3-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  743MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.8/4.8
+LEG m256-128-auto-r3-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.85 cpu=  13.00 peak=  702MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.8/4.8
+LEG m256-128-fold-r3-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.86 cpu=  13.04 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.8/4.8
+LEG m256-128-force-r3-rot17sep arm_pos=2 rc=0 ok=True wall=  2.28 cpu=  10.72 peak=  750MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.8/4.8
+LEG m160-128-fold-r4-rot17sep  arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  710MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.8/4.8
+LEG m160-128-force-r4-rot17sep arm_pos=1 rc=0 ok=True wall=  2.20 cpu=  10.41 peak=  739MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.8/4.8
+LEG m160-128-auto-r4-rot17sep  arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.45 peak=  704MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.6/4.6
+LEG m192-128-fold-r4-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  728MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.6/4.6
+LEG m192-128-force-r4-rot17sep arm_pos=1 rc=0 ok=True wall=  2.23 cpu=  10.51 peak=  744MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.6/4.6
+LEG m192-128-auto-r4-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  733MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.6/4.8
+LEG m224-128-fold-r4-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.55 cpu=  11.81 peak=  752MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.8/4.8
+LEG m224-128-force-r4-rot17sep arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  743MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.6/4.6
+LEG m224-128-auto-r4-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.83 peak=  721MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.6/4.6
+LEG m256-128-fold-r4-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.85 cpu=  12.99 peak=  705MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.6/4.6
+LEG m256-128-force-r4-rot17sep arm_pos=1 rc=0 ok=True wall=  2.29 cpu=  10.77 peak=  763MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.4/4.4
+LEG m256-128-auto-r4-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.85 cpu=  12.97 peak=  736MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.5
+LEG m160-128-force-r5-rot17sep arm_pos=0 rc=0 ok=True wall=  2.20 cpu=  10.41 peak=  735MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.5/4.5
+LEG m160-128-auto-r5-rot17sep  arm_pos=1 rc=0 ok=True wall=  1.95 cpu=   9.43 peak=  733MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.4
+LEG m160-128-fold-r5-rot17sep  arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.4
+LEG m192-128-force-r5-rot17sep arm_pos=0 rc=0 ok=True wall=  2.23 cpu=  10.51 peak=  748MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.4/4.4
+LEG m192-128-auto-r5-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  723MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.6
+LEG m192-128-fold-r5-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.26 cpu=  10.66 peak=  719MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.6/4.6
+LEG m224-128-force-r5-rot17sep arm_pos=0 rc=0 ok=True wall=  2.25 cpu=  10.60 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.5/4.5
+LEG m224-128-auto-r5-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.55 cpu=  11.80 peak=  734MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.5/4.5
+LEG m224-128-fold-r5-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.82 peak=  736MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.5/4.5
+LEG m256-128-force-r5-rot17sep arm_pos=0 rc=0 ok=True wall=  2.29 cpu=  10.73 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.3/4.3
+LEG m256-128-auto-r5-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.85 cpu=  13.00 peak=  726MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.3/4.5
+LEG m256-128-fold-r5-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.86 cpu=  12.99 peak=  746MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.5/4.5
+LEG m160-128-auto-r6-rot17sep  arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  701MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.3/4.3
+LEG m160-128-fold-r6-rot17sep  arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.42 peak=  710MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.3/4.4
+LEG m160-128-force-r6-rot17sep arm_pos=2 rc=0 ok=True wall=  2.21 cpu=  10.43 peak=  733MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.4/4.4
+LEG m192-128-auto-r6-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  707MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.5
+LEG m192-128-fold-r6-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  721MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.5/4.5
+LEG m192-128-force-r6-rot17sep arm_pos=2 rc=0 ok=True wall=  2.23 cpu=  10.51 peak=  738MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.3/4.3
+LEG m224-128-auto-r6-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.56 cpu=  11.81 peak=  720MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.3/4.4
+LEG m224-128-fold-r6-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.57 cpu=  11.82 peak=  748MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.4
+LEG m224-128-force-r6-rot17sep arm_pos=2 rc=0 ok=True wall=  2.40 cpu=  11.19 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.5/4.5
+LEG m256-128-auto-r6-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.89 cpu=  13.17 peak=  726MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.5/4.7
+LEG m256-128-fold-r6-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.85 cpu=  12.99 peak=  741MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.7/11.6
+LEG m256-128-force-r6-rot17sep arm_pos=2 rc=0 ok=True wall=  2.29 cpu=  10.76 peak=  764MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=11.6/11.6
+LEG m160-128-fold-r7-rot17sep  arm_pos=0 rc=0 ok=True wall=  1.99 cpu=   9.51 peak=  734MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=11.6/11.3
+LEG m160-128-force-r7-rot17sep arm_pos=1 rc=0 ok=True wall=  2.22 cpu=  10.48 peak=  748MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=11.3/11.3
+LEG m160-128-auto-r7-rot17sep  arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  717MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.9/10.9
+LEG m192-128-fold-r7-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.25 cpu=  10.63 peak=  722MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.9/10.5
+LEG m192-128-force-r7-rot17sep arm_pos=1 rc=0 ok=True wall=  2.23 cpu=  10.51 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=10.5/10.5
+LEG m192-128-auto-r7-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  728MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.5/10.1
+LEG m224-128-fold-r7-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.56 cpu=  11.84 peak=  723MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.1/10.7
+LEG m224-128-force-r7-rot17sep arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  743MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=10.7/10.7
+LEG m224-128-auto-r7-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.85 peak=  730MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.7/10.6
+LEG m256-128-fold-r7-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.85 cpu=  12.99 peak=  728MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.6/10.2
+LEG m256-128-force-r7-rot17sep arm_pos=1 rc=0 ok=True wall=  2.28 cpu=  10.72 peak=  753MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=10.2/10.2
+LEG m256-128-auto-r7-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.86 cpu=  12.99 peak=  744MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.2/9.9
+LEG m160-128-force-r8-rot17sep arm_pos=0 rc=0 ok=True wall=  2.20 cpu=  10.41 peak=  739MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=9.9/10.4
+LEG m160-128-auto-r8-rot17sep  arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.45 peak=  706MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.4/10.4
+LEG m160-128-fold-r8-rot17sep  arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.45 peak=  724MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.4/10.1
+LEG m192-128-force-r8-rot17sep arm_pos=0 rc=0 ok=True wall=  2.23 cpu=  10.51 peak=  744MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=10.1/10.1
+LEG m192-128-auto-r8-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.64 peak=  723MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.1/10.0
+LEG m192-128-fold-r8-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  704MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.0/10.0
+LEG m224-128-force-r8-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.62 peak=  742MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=9.3/9.3
+LEG m224-128-auto-r8-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.57 cpu=  11.85 peak=  755MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=9.3/9.0
+LEG m224-128-fold-r8-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.78 peak=  735MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=9.0/9.0
+LEG m256-128-force-r8-rot17sep arm_pos=0 rc=0 ok=True wall=  2.28 cpu=  10.73 peak=  734MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=8.4/8.4
+LEG m256-128-auto-r8-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.85 cpu=  12.95 peak=  704MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=8.4/8.1
+LEG m256-128-fold-r8-rot17sep  arm_pos=2 rc=0 ok=True wall=  2.87 cpu=  13.03 peak=  730MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=8.1/8.1
+LEG m160-128-auto-r9-rot17sep  arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.45 peak=  717MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=8.1/8.1
+LEG m160-128-fold-r9-rot17sep  arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.43 peak=  703MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=8.1/7.7
+LEG m160-128-force-r9-rot17sep arm_pos=2 rc=0 ok=True wall=  2.20 cpu=  10.42 peak=  745MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=7.7/7.7
+LEG m192-128-auto-r9-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  706MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=7.7/7.4
+LEG m192-128-fold-r9-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.27 cpu=  10.65 peak=  724MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=7.4/8.2
+LEG m192-128-force-r9-rot17sep arm_pos=2 rc=0 ok=True wall=  2.23 cpu=  10.51 peak=  747MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=8.2/8.2
+LEG m224-128-auto-r9-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.56 cpu=  11.82 peak=  724MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=8.2/8.2
+LEG m224-128-fold-r9-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.55 cpu=  11.80 peak=  737MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=8.2/8.2
+LEG m224-128-force-r9-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  732MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=7.9/7.9
+LEG m256-128-auto-r9-rot17sep  arm_pos=0 rc=0 ok=True wall=  2.85 cpu=  12.98 peak=  714MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=7.9/7.6
+LEG m256-128-fold-r9-rot17sep  arm_pos=1 rc=0 ok=True wall=  2.85 cpu=  12.99 peak=  712MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=7.6/7.5
+LEG m256-128-force-r9-rot17sep arm_pos=2 rc=0 ok=True wall=  2.28 cpu=  10.73 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=7.5/7.5
+LEG m160-128-fold-r10-rot17sep arm_pos=0 rc=0 ok=True wall=  1.95 cpu=   9.41 peak=  708MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=7.5/7.3
+LEG m160-128-force-r10-rot17sep arm_pos=1 rc=0 ok=True wall=  2.21 cpu=  10.45 peak=  738MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=7.3/7.3
+LEG m160-128-auto-r10-rot17sep arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  702MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.9/6.9
+LEG m192-128-fold-r10-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.64 peak=  724MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.9/7.8
+LEG m192-128-force-r10-rot17sep arm_pos=1 rc=0 ok=True wall=  2.23 cpu=  10.52 peak=  741MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=7.8/7.8
+LEG m192-128-auto-r10-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.60 peak=  716MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=7.8/7.6
+LEG m224-128-fold-r10-rot17sep arm_pos=0 rc=0 ok=True wall=  2.56 cpu=  11.84 peak=  728MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=7.6/7.6
+LEG m224-128-force-r10-rot17sep arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  744MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=7.2/7.2
+LEG m224-128-auto-r10-rot17sep arm_pos=2 rc=0 ok=True wall=  2.55 cpu=  11.82 peak=  737MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=7.2/7.0
+LEG m256-128-fold-r10-rot17sep arm_pos=0 rc=0 ok=True wall=  2.87 cpu=  13.02 peak=  733MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=7.0/7.0
+LEG m256-128-force-r10-rot17sep arm_pos=1 rc=0 ok=True wall=  2.29 cpu=  10.76 peak=  759MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=6.6/6.6
+LEG m256-128-auto-r10-rot17sep arm_pos=2 rc=0 ok=True wall=  2.84 cpu=  12.96 peak=  740MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.6/6.5
+LEG m160-128-force-r11-rot17sep arm_pos=0 rc=0 ok=True wall=  2.20 cpu=  10.42 peak=  735MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=6.5/6.5
+LEG m160-128-auto-r11-rot17sep arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.43 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.3/6.3
+LEG m160-128-fold-r11-rot17sep arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.43 peak=  722MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.3/6.2
+LEG m192-128-force-r11-rot17sep arm_pos=0 rc=0 ok=True wall=  2.23 cpu=  10.51 peak=  751MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=6.2/6.2
+LEG m192-128-auto-r11-rot17sep arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.62 peak=  737MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.2/6.3
+LEG m192-128-fold-r11-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  721MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.3/6.3
+LEG m224-128-force-r11-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.62 peak=  742MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=6.0/6.0
+LEG m224-128-auto-r11-rot17sep arm_pos=1 rc=0 ok=True wall=  2.56 cpu=  11.83 peak=  708MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.0/5.9
+LEG m224-128-fold-r11-rot17sep arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.86 peak=  723MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.9/5.9
+LEG m256-128-force-r11-rot17sep arm_pos=0 rc=0 ok=True wall=  2.28 cpu=  10.73 peak=  747MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.6/5.6
+LEG m256-128-auto-r11-rot17sep arm_pos=1 rc=0 ok=True wall=  2.86 cpu=  13.01 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.6/5.5
+LEG m256-128-fold-r11-rot17sep arm_pos=2 rc=0 ok=True wall=  2.86 cpu=  13.02 peak=  728MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.5/5.5
+LEG m160-128-auto-r12-rot17sep arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  717MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m160-128-fold-r12-rot17sep arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.46 peak=  709MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m160-128-force-r12-rot17sep arm_pos=2 rc=0 ok=True wall=  2.20 cpu=  10.41 peak=  733MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.3/5.3
+LEG m192-128-auto-r12-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.60 peak=  721MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m192-128-fold-r12-rot17sep arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.61 peak=  716MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m192-128-force-r12-rot17sep arm_pos=2 rc=0 ok=True wall=  2.24 cpu=  10.54 peak=  745MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.0/5.0
+LEG m224-128-auto-r12-rot17sep arm_pos=0 rc=0 ok=True wall=  2.56 cpu=  11.81 peak=  727MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.0/5.1
+LEG m224-128-fold-r12-rot17sep arm_pos=1 rc=0 ok=True wall=  2.55 cpu=  11.78 peak=  699MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.1
+LEG m224-128-force-r12-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  747MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.8/4.8
+LEG m256-128-auto-r12-rot17sep arm_pos=0 rc=0 ok=True wall=  2.84 cpu=  12.96 peak=  745MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.8/4.9
+LEG m256-128-fold-r12-rot17sep arm_pos=1 rc=0 ok=True wall=  2.86 cpu=  13.00 peak=  741MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.9/4.9
+LEG m256-128-force-r12-rot17sep arm_pos=2 rc=0 ok=True wall=  2.28 cpu=  10.74 peak=  760MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.6/4.6
+LEG m160-128-fold-r13-rot17sep arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  720MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.6/4.7
+LEG m160-128-force-r13-rot17sep arm_pos=1 rc=0 ok=True wall=  2.21 cpu=  10.46 peak=  733MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.7/4.7
+LEG m160-128-auto-r13-rot17sep arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  698MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.7/4.7
+LEG m192-128-fold-r13-rot17sep arm_pos=0 rc=0 ok=True wall=  2.25 cpu=  10.60 peak=  725MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.7/4.7
+LEG m192-128-force-r13-rot17sep arm_pos=1 rc=0 ok=True wall=  2.23 cpu=  10.52 peak=  737MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.6/4.6
+LEG m192-128-auto-r13-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.63 peak=  722MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.6/4.7
+LEG m224-128-fold-r13-rot17sep arm_pos=0 rc=0 ok=True wall=  2.56 cpu=  11.81 peak=  730MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.7/4.7
+LEG m224-128-force-r13-rot17sep arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  763MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.4/4.4
+LEG m224-128-auto-r13-rot17sep arm_pos=2 rc=0 ok=True wall=  2.55 cpu=  11.80 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.5
+LEG m256-128-fold-r13-rot17sep arm_pos=0 rc=0 ok=True wall=  2.87 cpu=  13.05 peak=  713MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.5/4.5
+LEG m256-128-force-r13-rot17sep arm_pos=1 rc=0 ok=True wall=  2.28 cpu=  10.73 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.3/4.3
+LEG m256-128-auto-r13-rot17sep arm_pos=2 rc=0 ok=True wall=  2.85 cpu=  12.97 peak=  730MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.3/4.3
+LEG m160-128-force-r14-rot17sep arm_pos=0 rc=0 ok=True wall=  2.21 cpu=  10.44 peak=  748MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.3/4.3
+LEG m160-128-auto-r14-rot17sep arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.43 peak=  719MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.2/4.2
+LEG m160-128-fold-r14-rot17sep arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.2/4.2
+LEG m192-128-force-r14-rot17sep arm_pos=0 rc=0 ok=True wall=  2.23 cpu=  10.51 peak=  751MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.0/4.0
+LEG m192-128-auto-r14-rot17sep arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.62 peak=  746MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.0/4.1
+LEG m192-128-fold-r14-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  706MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.1/4.1
+LEG m224-128-force-r14-rot17sep arm_pos=0 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  743MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.1/4.2
+LEG m224-128-auto-r14-rot17sep arm_pos=1 rc=0 ok=True wall=  2.55 cpu=  11.80 peak=  714MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.2/4.3
+LEG m224-128-fold-r14-rot17sep arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.83 peak=  739MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.3/4.3
+LEG m256-128-force-r14-rot17sep arm_pos=0 rc=0 ok=True wall=  2.29 cpu=  10.75 peak=  749MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.3/4.3
+LEG m256-128-auto-r14-rot17sep arm_pos=1 rc=0 ok=True wall=  2.85 cpu=  12.97 peak=  742MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.3/4.4
+LEG m256-128-fold-r14-rot17sep arm_pos=2 rc=0 ok=True wall=  2.86 cpu=  12.99 peak=  730MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.4/4.4
+LEG m160-128-auto-r15-rot17sep arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.45 peak=  692MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.2/4.2
+LEG m160-128-fold-r15-rot17sep arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.46 peak=  708MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.2/4.2
+LEG m160-128-force-r15-rot17sep arm_pos=2 rc=0 ok=True wall=  2.21 cpu=  10.43 peak=  736MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.1/4.1
+LEG m192-128-auto-r15-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  730MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.1/4.3
+LEG m192-128-fold-r15-rot17sep arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  721MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.3/4.3
+LEG m192-128-force-r15-rot17sep arm_pos=2 rc=0 ok=True wall=  2.23 cpu=  10.51 peak=  738MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.3/5.0
+LEG m224-128-auto-r15-rot17sep arm_pos=0 rc=0 ok=True wall=  2.55 cpu=  11.81 peak=  737MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.0/5.0
+LEG m224-128-fold-r15-rot17sep arm_pos=1 rc=0 ok=True wall=  2.56 cpu=  11.84 peak=  731MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.0/5.0
+LEG m224-128-force-r15-rot17sep arm_pos=2 rc=0 ok=True wall=  2.26 cpu=  10.62 peak=  754MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.0/5.1
+LEG m256-128-auto-r15-rot17sep arm_pos=0 rc=0 ok=True wall=  2.85 cpu=  13.00 peak=  734MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.1
+LEG m256-128-fold-r15-rot17sep arm_pos=1 rc=0 ok=True wall=  2.85 cpu=  12.97 peak=  728MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.1
+LEG m256-128-force-r15-rot17sep arm_pos=2 rc=0 ok=True wall=  2.28 cpu=  10.73 peak=  739MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.9/4.9
+LEG m160-128-fold-r16-rot17sep arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  704MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.9/4.9
+LEG m160-128-force-r16-rot17sep arm_pos=1 rc=0 ok=True wall=  2.21 cpu=  10.42 peak=  745MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.9/4.9
+LEG m160-128-auto-r16-rot17sep arm_pos=2 rc=0 ok=True wall=  1.95 cpu=   9.40 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.9/4.9
+LEG m192-128-fold-r16-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  705MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.9/4.9
+LEG m192-128-force-r16-rot17sep arm_pos=1 rc=0 ok=True wall=  2.24 cpu=  10.55 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.7/4.7
+LEG m192-128-auto-r16-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  729MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.7/4.7
+LEG m224-128-fold-r16-rot17sep arm_pos=0 rc=0 ok=True wall=  2.55 cpu=  11.78 peak=  738MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.7/4.7
+LEG m224-128-force-r16-rot17sep arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  742MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.7/4.7
+LEG m224-128-auto-r16-rot17sep arm_pos=2 rc=0 ok=True wall=  2.55 cpu=  11.81 peak=  700MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.7/4.8
+LEG m256-128-fold-r16-rot17sep arm_pos=0 rc=0 ok=True wall=  2.86 cpu=  13.01 peak=  712MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=4.8/4.8
+LEG m256-128-force-r16-rot17sep arm_pos=1 rc=0 ok=True wall=  2.28 cpu=  10.74 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=4.8/5.1
+LEG m256-128-auto-r16-rot17sep arm_pos=2 rc=0 ok=True wall=  2.86 cpu=  13.03 peak=  742MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.3
+LEG m160-128-force-r17-rot17sep arm_pos=0 rc=0 ok=True wall=  2.21 cpu=  10.43 peak=  736MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.3/5.3
+LEG m160-128-auto-r17-rot17sep arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.46 peak=  724MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.4
+LEG m160-128-fold-r17-rot17sep arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  705MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.4/5.4
+LEG m192-128-force-r17-rot17sep arm_pos=0 rc=0 ok=True wall=  2.23 cpu=  10.53 peak=  736MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.2/5.2
+LEG m192-128-auto-r17-rot17sep arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  730MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.3
+LEG m192-128-fold-r17-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  728MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m224-128-force-r17-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  739MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.3/5.4
+LEG m224-128-auto-r17-rot17sep arm_pos=1 rc=0 ok=True wall=  2.56 cpu=  11.84 peak=  703MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.4/6.4
+LEG m224-128-fold-r17-rot17sep arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.84 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.4/6.4
+LEG m256-128-force-r17-rot17sep arm_pos=0 rc=0 ok=True wall=  2.28 cpu=  10.72 peak=  763MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=6.4/6.2
+LEG m256-128-auto-r17-rot17sep arm_pos=1 rc=0 ok=True wall=  2.87 cpu=  13.05 peak=  760MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.2/6.1
+LEG m256-128-fold-r17-rot17sep arm_pos=2 rc=0 ok=True wall=  2.88 cpu=  13.08 peak=  759MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.1/6.1
+LEG m160-128-auto-r18-rot17sep arm_pos=0 rc=0 ok=True wall=  2.00 cpu=   9.57 peak=  702MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.1/6.9
+LEG m160-128-fold-r18-rot17sep arm_pos=1 rc=0 ok=True wall=  1.97 cpu=   9.49 peak=  750MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.9/6.9
+LEG m160-128-force-r18-rot17sep arm_pos=2 rc=0 ok=True wall=  2.24 cpu=  10.55 peak=  749MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=6.5/6.5
+LEG m192-128-auto-r18-rot17sep arm_pos=0 rc=0 ok=True wall=  2.28 cpu=  10.70 peak=  729MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.5/6.3
+LEG m192-128-fold-r18-rot17sep arm_pos=1 rc=0 ok=True wall=  2.28 cpu=  10.71 peak=  704MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.3/6.3
+LEG m192-128-force-r18-rot17sep arm_pos=2 rc=0 ok=True wall=  2.24 cpu=  10.58 peak=  739MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=6.2/6.2
+LEG m224-128-auto-r18-rot17sep arm_pos=0 rc=0 ok=True wall=  2.55 cpu=  11.78 peak=  730MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.2/6.1
+LEG m224-128-fold-r18-rot17sep arm_pos=1 rc=0 ok=True wall=  2.57 cpu=  11.85 peak=  738MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.1/6.1
+LEG m224-128-force-r18-rot17sep arm_pos=2 rc=0 ok=True wall=  2.27 cpu=  10.66 peak=  747MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.8/5.8
+LEG m256-128-auto-r18-rot17sep arm_pos=0 rc=0 ok=True wall=  2.86 cpu=  12.99 peak=  745MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.8/5.7
+LEG m256-128-fold-r18-rot17sep arm_pos=1 rc=0 ok=True wall=  2.86 cpu=  13.01 peak=  754MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.7/5.7
+LEG m256-128-force-r18-rot17sep arm_pos=2 rc=0 ok=True wall=  2.28 cpu=  10.74 peak=  740MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.7/5.7
+LEG m160-128-fold-r19-rot17sep arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.45 peak=  740MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.7/5.8
+LEG m160-128-force-r19-rot17sep arm_pos=1 rc=0 ok=True wall=  2.21 cpu=  10.43 peak=  736MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.8/5.8
+LEG m160-128-auto-r19-rot17sep arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.46 peak=  719MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.8/5.9
+LEG m192-128-fold-r19-rot17sep arm_pos=0 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  722MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.9/5.9
+LEG m192-128-force-r19-rot17sep arm_pos=1 rc=0 ok=True wall=  2.23 cpu=  10.52 peak=  741MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.6/5.6
+LEG m192-128-auto-r19-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  719MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.6/5.5
+LEG m224-128-fold-r19-rot17sep arm_pos=0 rc=0 ok=True wall=  2.56 cpu=  11.83 peak=  726MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.5/5.5
+LEG m224-128-force-r19-rot17sep arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  743MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.5/5.6
+LEG m224-128-auto-r19-rot17sep arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.81 peak=  720MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.6/5.5
+LEG m256-128-fold-r19-rot17sep arm_pos=0 rc=0 ok=True wall=  2.86 cpu=  13.03 peak=  742MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.5/5.5
+LEG m256-128-force-r19-rot17sep arm_pos=1 rc=0 ok=True wall=  2.28 cpu=  10.73 peak=  763MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.3/5.3
+LEG m256-128-auto-r19-rot17sep arm_pos=2 rc=0 ok=True wall=  2.85 cpu=  13.00 peak=  717MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m160-128-force-r20-rot17sep arm_pos=0 rc=0 ok=True wall=  2.20 cpu=  10.42 peak=  733MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.3/5.3
+LEG m160-128-auto-r20-rot17sep arm_pos=1 rc=0 ok=True wall=  1.95 cpu=   9.43 peak=  732MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m160-128-fold-r20-rot17sep arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.46 peak=  706MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m192-128-force-r20-rot17sep arm_pos=0 rc=0 ok=True wall=  2.23 cpu=  10.54 peak=  739MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.2/5.2
+LEG m192-128-auto-r20-rot17sep arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  724MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.1
+LEG m192-128-fold-r20-rot17sep arm_pos=2 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  729MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.1
+LEG m224-128-force-r20-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  758MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.1/5.1
+LEG m224-128-auto-r20-rot17sep arm_pos=1 rc=0 ok=True wall=  2.56 cpu=  11.84 peak=  717MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.2
+LEG m224-128-fold-r20-rot17sep arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.82 peak=  715MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.2
+LEG m256-128-force-r20-rot17sep arm_pos=0 rc=0 ok=True wall=  2.28 cpu=  10.73 peak=  768MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.2/5.2
+LEG m256-128-auto-r20-rot17sep arm_pos=1 rc=0 ok=True wall=  2.86 cpu=  12.97 peak=  748MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.2
+LEG m256-128-fold-r20-rot17sep arm_pos=2 rc=0 ok=True wall=  2.85 cpu=  13.02 peak=  761MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.2
+LEG m160-128-auto-r21-rot17sep arm_pos=0 rc=0 ok=True wall=  1.97 cpu=   9.48 peak=  706MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.6/5.6
+LEG m160-128-fold-r21-rot17sep arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  702MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.6/5.6
+LEG m160-128-force-r21-rot17sep arm_pos=2 rc=0 ok=True wall=  2.20 cpu=  10.43 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.3/5.3
+LEG m192-128-auto-r21-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  728MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m192-128-fold-r21-rot17sep arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  706MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m192-128-force-r21-rot17sep arm_pos=2 rc=0 ok=True wall=  2.23 cpu=  10.51 peak=  742MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.3/5.2
+LEG m224-128-auto-r21-rot17sep arm_pos=0 rc=0 ok=True wall=  2.55 cpu=  11.80 peak=  712MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.2
+LEG m224-128-fold-r21-rot17sep arm_pos=1 rc=0 ok=True wall=  2.56 cpu=  11.80 peak=  720MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.2
+LEG m224-128-force-r21-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  751MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.2/5.2
+LEG m256-128-auto-r21-rot17sep arm_pos=0 rc=0 ok=True wall=  2.87 cpu=  13.06 peak=  744MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.3
+LEG m256-128-fold-r21-rot17sep arm_pos=1 rc=0 ok=True wall=  2.86 cpu=  13.02 peak=  730MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m256-128-force-r21-rot17sep arm_pos=2 rc=0 ok=True wall=  2.28 cpu=  10.73 peak=  746MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.1/5.1
+LEG m160-128-fold-r22-rot17sep arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  716MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.1
+LEG m160-128-force-r22-rot17sep arm_pos=1 rc=0 ok=True wall=  2.20 cpu=  10.42 peak=  736MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.1/5.1
+LEG m160-128-auto-r22-rot17sep arm_pos=2 rc=0 ok=True wall=  1.95 cpu=   9.43 peak=  716MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.1
+LEG m192-128-fold-r22-rot17sep arm_pos=0 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  706MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.1
+LEG m192-128-force-r22-rot17sep arm_pos=1 rc=0 ok=True wall=  2.23 cpu=  10.52 peak=  737MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.1/5.8
+LEG m192-128-auto-r22-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.61 peak=  717MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.8/5.7
+LEG m224-128-fold-r22-rot17sep arm_pos=0 rc=0 ok=True wall=  2.56 cpu=  11.80 peak=  714MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.7/5.7
+LEG m224-128-force-r22-rot17sep arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.66 peak=  744MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.7/5.7
+LEG m224-128-auto-r22-rot17sep arm_pos=2 rc=0 ok=True wall=  2.56 cpu=  11.84 peak=  710MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.7/5.8
+LEG m256-128-fold-r22-rot17sep arm_pos=0 rc=0 ok=True wall=  2.85 cpu=  12.99 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.8/5.8
+LEG m256-128-force-r22-rot17sep arm_pos=1 rc=0 ok=True wall=  2.28 cpu=  10.73 peak=  764MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.8/5.7
+LEG m256-128-auto-r22-rot17sep arm_pos=2 rc=0 ok=True wall=  2.86 cpu=  13.04 peak=  725MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.7/5.6
+LEG m160-128-force-r23-rot17sep arm_pos=0 rc=0 ok=True wall=  2.21 cpu=  10.43 peak=  745MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.6/5.6
+LEG m160-128-auto-r23-rot17sep arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.46 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.6/5.6
+LEG m160-128-fold-r23-rot17sep arm_pos=2 rc=0 ok=True wall=  1.96 cpu=   9.45 peak=  718MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.6/5.6
+LEG m192-128-force-r23-rot17sep arm_pos=0 rc=0 ok=True wall=  2.23 cpu=  10.54 peak=  751MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.4/5.4
+LEG m192-128-auto-r23-rot17sep arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.64 peak=  729MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.4/5.4
+LEG m192-128-fold-r23-rot17sep arm_pos=2 rc=0 ok=True wall=  2.25 cpu=  10.60 peak=  708MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.4/5.4
+LEG m224-128-force-r23-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  750MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.4/5.3
+LEG m224-128-auto-r23-rot17sep arm_pos=1 rc=0 ok=True wall=  2.56 cpu=  11.84 peak=  712MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.3/5.3
+LEG m224-128-fold-r23-rot17sep arm_pos=2 rc=0 ok=True wall=  2.55 cpu=  11.79 peak=  738MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.1
+LEG m256-128-force-r23-rot17sep arm_pos=0 rc=0 ok=True wall=  2.29 cpu=  10.74 peak=  749MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.1/5.1
+LEG m256-128-auto-r23-rot17sep arm_pos=1 rc=0 ok=True wall=  2.85 cpu=  12.99 peak=  712MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.0
+LEG m256-128-fold-r23-rot17sep arm_pos=2 rc=0 ok=True wall=  2.85 cpu=  12.99 peak=  722MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.0/5.0
+LEG m160-128-auto-r24-rot17sep arm_pos=0 rc=0 ok=True wall=  1.96 cpu=   9.44 peak=  702MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.0/5.2
+LEG m160-128-fold-r24-rot17sep arm_pos=1 rc=0 ok=True wall=  1.96 cpu=   9.45 peak=  725MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.2/5.2
+LEG m160-128-force-r24-rot17sep arm_pos=2 rc=0 ok=True wall=  2.21 cpu=  10.43 peak=  735MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.1/5.1
+LEG m192-128-auto-r24-rot17sep arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.60 peak=  710MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.1
+LEG m192-128-fold-r24-rot17sep arm_pos=1 rc=0 ok=True wall=  2.25 cpu=  10.62 peak=  706MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/5.1
+LEG m192-128-force-r24-rot17sep arm_pos=2 rc=0 ok=True wall=  2.23 cpu=  10.52 peak=  740MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=5.1/5.1
+LEG m224-128-auto-r24-rot17sep arm_pos=0 rc=0 ok=True wall=  2.53 cpu=  11.72 peak=  742MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=5.1/6.2
+LEG m224-128-fold-r24-rot17sep arm_pos=1 rc=0 ok=True wall=  2.52 cpu=  11.69 peak=  728MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.2/6.2
+LEG m224-128-force-r24-rot17sep arm_pos=2 rc=0 ok=True wall=  2.26 cpu=  10.63 peak=  742MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=6.2/6.0
+LEG m256-128-auto-r24-rot17sep arm_pos=0 rc=0 ok=True wall=  2.83 cpu=  12.91 peak=  745MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.0/6.8
+LEG m256-128-fold-r24-rot17sep arm_pos=1 rc=0 ok=True wall=  2.82 cpu=  12.90 peak=  744MB fp=NoneMB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=6.8/6.8
+LEG m256-128-force-r24-rot17sep arm_pos=2 rc=0 ok=True wall=  2.29 cpu=  10.76 peak=  747MB fp=NoneMB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=6.8/6.7
+ALL DONE
+2026-09-17T17:42:44Z PHASE=done load=6.68 5.71 4.93
+17:42:44Z rig lock RELEASED (truncated, not unlinked)

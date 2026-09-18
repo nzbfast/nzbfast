@@ -1,0 +1,25 @@
+ INFO repair-timing: packet scan (critical): +1.05ms (total 1.05ms)
+ INFO repair-timing: verify targets + volume scan: +511.46ms (total 512.51ms)
+ INFO repair: repair ahead: 4096 block(s) to rebuild, structured solve
+ INFO repair-timing: adoption: +5.89ms (total 518.40ms)
+ INFO repair-timing: load recovery: +92.89ms (total 611.29ms)
+ INFO repair-timing:   forney joint plan: 2081 KB of kernel tables, locator tree held <= 85 KB (37 KB of it cached transforms)
+ INFO repair-timing: back-substitution setup (4096x4096, forney): 48.76ms
+ INFO repair-timing: feed shape under the published budget: batch 67.1 MB, channel 4, merge cap 67.1 MB
+ INFO repair-timing: retained from the verify pass: 0 block(s), 0.0 MB
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=5632, W=512, threads=4): 2.63s
+ INFO repair-timing: ntt window (369098752 bytes, 5632 slices, transformed): 2.63s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=5632, W=512, threads=4): 2.64s
+ INFO repair-timing: ntt window (369098752 bytes, 5632 slices, transformed): 2.64s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=512, threads=4): 1.93s
+ INFO repair-timing: ntt: 2 window(s) transformed before the tail, tail transformed above
+ INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic below the kernel gate 16384): 1.35s of 5.77s wall (attributed by worker share)
+ INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 4.42s of 5.77s wall (attributed by worker share)
+ INFO repair-timing: back-substitution (forney-joint): 5.77s
+ INFO repair-timing: feed+fold+solve: +13.26s (total 13.87s)
+ INFO repair-timing: patch: +29.28ms (total 13.90s)
+ INFO repair-timing: final verify: +271.16ms (total 14.17s)
+ INFO repair-timing: plan prep: 48.71ms over 1 cold build(s), 64 stripe use(s) - 0.344% of the 14.17s repair
+ INFO repair-timing: forney solve: 5.77s over 1 solve(s) (stage 1 1.35s, stage 2 4.42s) - 40.732% of the 14.17s repair
+mem-floor: live high-water · ru_maxrss 963 MB · rss 963 MB · footprint 963 MB · rss over footprint 0 MB · repair work 772 MB (own peak 772) · scan reads 0 MB (own peak 34) · verifier tables 0 MB · unattributed 191 MB
+mem-floor: sampled peak rss · ru_maxrss 963 MB · rss 963 MB · footprint 963 MB · rss over footprint 0 MB · repair work 772 MB (own peak 772) · scan reads 0 MB (own peak 34) · verifier tables 0 MB · unattributed 191 MB

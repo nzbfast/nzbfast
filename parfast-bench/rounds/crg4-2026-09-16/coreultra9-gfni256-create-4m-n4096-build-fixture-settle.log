@@ -1,0 +1,20 @@
+BOXGATE try=1 load_a=6 load_b=6 lock_held=False parfast=0 ts=2026-09-16T15:07:14.8087723Z
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=crg4 pid=17920 started=2026-09-16T15:07:14.9341527Z
+ROUND tag=crg4 phase=create root=<rig>\crg4-16sep bin=<rig>\crg4-16sep\src\target\release\parfast.exe reps=1 gf16force= start=2026-09-16T15:07:14.9423956Z
+BOX host=intel-core-ultra-9-386h cpu=Intel(R) Core(TM) Ultra 9 386H caption=Intel64 Family 6 Model 204 Stepping 2 cores=16 threads=16 ram_gb=31.4 os=Microsoft Windows 11 Home build=10.0.26200 Cfree_gb=599.9
+HARNESS plib.ps1 sha256=3b0e254eb0bd141dc1fe36caa0c6d3bf0363e0b16883e2faee108e35fecf093e bytes=51496
+HARNESS wcomb.ps1 sha256=1ad3f2601da0ce725ca2ea5628325a36f6079feb7a39225e17aeddc7da4d3999 bytes=37916
+HARNESS-RIG plib.ps1:3b0e254eb0bd141d+wcomb.ps1:1ad3f2601da0ce72
+BUILD rc=0 secs=118.3 log=<rig>\crg4-16sep\build-crg4.log
+BIN parfast sha256=fddb6aa34283001a8437d5a7208eae5f7d026f8f7e67330e78e9cb307f95295f bytes=4173312 version=parfast version 1.5.0-beta.3 built from unknown
+CREATE rc=0 wall=20.588 cpu=286.594 peak_mb=19072.1
+FIXTURE-NOINDEX rc=0 fix=<rig>\crg4-16sep\fix-4194304-1024
+SRC-NOINDEX rc=0 src=<rig>\crg4-16sep\src
+FIXTURE fix=<rig>\crg4-16sep\fix-4194304-1024 members=16 slice=4194304 n=4096 parfiles=11
+FIXTURE-RECOVERY 640 source=shape.txt
+FIXTURE-SETTLE-WAIT foreign_cpu=146.9 thresh=25 waited_s=1 cap_s=1200 at=fixture-crg4
+FIXTURE-SETTLE-WAIT foreign_cpu=71.9 thresh=25 waited_s=123 cap_s=1200 at=fixture-crg4
+FIXTURE-SETTLE-WAIT foreign_cpu=67.2 thresh=25 waited_s=234 cap_s=1200 at=fixture-crg4
+FIXTURE-SETTLE-WAIT foreign_cpu=73.4 thresh=25 waited_s=356 cap_s=1200 at=fixture-crg4
+FIXTURE-SETTLE ok=1 foreign_cpu=4.7 thresh=25 waited_s=456 busy_samples=22 at=fixture-crg4 ts=2026-09-16T15:17:53.6100204Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock

@@ -1,0 +1,2 @@
+AFFINITY mask=0xF0 cores=4 of 16 label=4m-e4 threads=4
+LOCK-BUSY <rig>\.parfast-rig.lock held by live pid=11560: round=rarfast-windows-os-error-wording-16sep pid=11560 started=2026-09-16T18:25:40.6016719Z

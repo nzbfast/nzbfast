@@ -1,0 +1,20 @@
+ INFO repair-timing: packet scan (critical): +1.07ms (total 1.07ms)
+ INFO repair-timing: verify targets + volume scan: +560.48ms (total 561.54ms)
+ INFO repair: repair ahead: 2048 block(s) to rebuild, structured solve
+ INFO repair-timing: adoption: +5.52ms (total 567.07ms)
+ INFO repair-timing: load recovery: +45.65ms (total 612.72ms)
+ INFO repair-timing:   forney joint plan: 1041 KB of kernel tables, locator tree held <= 44 KB (20 KB of it cached transforms)
+ INFO repair-timing: back-substitution setup (2048x2048, forney): 31.34ms
+ INFO repair-timing: retained from the verify pass: 0 block(s), 0.0 MB
+ INFO repair-timing: fold unit dst budget 128 KiB (L2 per core 256 KiB)
+ INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+ INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic below the kernel gate 16384): 443.87ms of 2.83s wall (attributed by worker share)
+ INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 2.38s of 2.83s wall (attributed by worker share)
+ INFO repair-timing: back-substitution (forney-joint): 2.83s
+ INFO repair-timing: feed+fold+solve: +54.95s (total 55.56s)
+ INFO repair-timing: patch: +15.35ms (total 55.58s)
+ INFO repair-timing: final verify: +268.76ms (total 55.84s)
+ INFO repair-timing: plan prep: 31.29ms over 1 cold build(s), 64 stripe use(s) - 0.056% of the 55.85s repair
+ INFO repair-timing: forney solve: 2.83s over 1 solve(s) (stage 1 443.87ms, stage 2 2.38s) - 5.065% of the 55.85s repair
+mem-floor: live high-water · ru_maxrss 607 MB · rss 607 MB · footprint 607 MB · rss over footprint 0 MB · repair work 447 MB (own peak 487) · scan reads 0 MB (own peak 34) · verifier tables 0 MB · unattributed 160 MB
+mem-floor: sampled peak rss · ru_maxrss 607 MB · rss 607 MB · footprint 607 MB · rss over footprint 0 MB · repair work 447 MB (own peak 487) · scan reads 0 MB (own peak 34) · verifier tables 0 MB · unattributed 160 MB

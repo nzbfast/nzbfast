@@ -1,0 +1,31 @@
+# The MEASUREMENT PROBE, against 499d2bd5f. It is banked here and NOT in the
+# tree on purpose: one release binary per box serves the whole ladder, which
+# is what makes the rungs comparable, and the knob must never land.
+@@ -93,6 +93,18 @@
+ /// before it; two BLAKE3 threads outrun one MD5 chain on every SIMD class
+ /// in the fleet.
+ const ENROL_THREADS: usize = 2;
++
++/// MEASUREMENT PROBE, claim `digest-cache-enrol-threads-gate-16sep`.
++/// MUST NEVER LAND: it exists so one release binary can serve a whole
++/// `ENROL_THREADS` ladder without a rebuild per rung, which is what
++/// makes the rungs comparable at all.
++fn enrol_threads_probe() -> usize {
++    std::env::var("PARFAST_ENROL_THREADS_PROBE")
++        .ok()
++        .and_then(|v| v.parse::<usize>().ok())
++        .filter(|n| *n >= 1)
++        .unwrap_or(ENROL_THREADS)
++}
+ 
+ /// A store of validated digest records, at one directory.
+ pub struct DigestCache {
+@@ -669,7 +681,7 @@
+         let threads = if record.is_some() {
+             VALIDATE_THREADS
+         } else {
+-            ENROL_THREADS
++            enrol_threads_probe()
+         }
+         .min(machine);
+         let file = Arc::new(file);

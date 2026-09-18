@@ -9,8 +9,8 @@ rung's `off`/`aa` floor, or on jx3 `--base s1on --test s1off --aa s1aa`.
 |---|---|---|---|---|
 | jx6-i5.log | intel-i5-10600kf i5-10600KF | Nibble | parfast-jx2 / -jd / -jb | off fast fastdir fastb s1off aa |
 | jx7-i5.log | intel-i5-10600kf | Nibble | parfast-jg (stage-1 gate) | off fast aa |
-| jx5-zenbook.log | intel-core-ultra-9-386h Core Ultra 9 386H | Gfni256 | parfast-jx2 / -jb | off fast fastb s1off aa |
-| jx8-zenbook.log | intel-core-ultra-9-386h | Gfni256 | parfast-jg | off fast aa |
+| jx5-coreultra9.log | intel-core-ultra-9-386h Core Ultra 9 386H | Gfni256 | parfast-jx2 / -jb | off fast fastb s1off aa |
+| jx8-coreultra9.log | intel-core-ultra-9-386h | Gfni256 | parfast-jg | off fast aa |
 | jx2-m1.log | apple-m1-ultra-64gb M1 Ultra | NEON | parfast-jx2 | off fast aa |
 | jx3-m1.log | apple-m1-ultra-64gb | NEON | parfast-jx2 | s1off s1on s1aa |
 

@@ -1,0 +1,93 @@
+ROUND label=1m phases=ladder start=2026-09-15T15:39:27Z
+LOCK-BUSY /root/.parfast-rig.lock
+WAIT-LOCK ts=2026-09-15T15:40:27Z
+LOCK-BUSY /root/.parfast-rig.lock
+WAIT-LOCK ts=2026-09-15T15:42:28Z
+LOCK-BUSY /root/.parfast-rig.lock
+WAIT-LOCK ts=2026-09-15T15:44:28Z
+LOCK-BUSY /root/.parfast-rig.lock
+WAIT-LOCK ts=2026-09-15T15:46:28Z
+LOCK-BUSY /root/.parfast-rig.lock
+WAIT-LOCK ts=2026-09-15T15:48:28Z
+LOCK-BUSY /root/.parfast-rig.lock
+WAIT-LOCK ts=2026-09-15T15:50:28Z
+LOCK-BUSY /root/.parfast-rig.lock
+WAIT-LOCK ts=2026-09-15T15:52:28Z
+LOCK-BUSY /root/.parfast-rig.lock
+WAIT-LOCK ts=2026-09-15T15:54:28Z
+RIG-LOCK-TAKEN /root/.parfast-rig.lock pid=183174
+BOX host=amd-epyc-vm cpu=AMD EPYC 9354P 32-Core Processor cores=8 ram_gb=31.3 os=Ubuntu 24.04.4 LTS (kernel 6.8.0-137-generic) free_gb=169.8
+BIN parfast sha256=98b975c57c4c0be8598f673ff95df7c6347b3f92ad62849fc483b1747c011774 bytes=2699832 version=parfast version 1.5.0-beta.3 built from unknown
+HARNESS pdrv.py sha256=15b7557472cfe2479cba688747e9ab8440a70360987fd77a9bc5b7faed4b73ff bytes=33582
+HARNESS rowgate.py sha256=a31d9117cc83d61d91420fd49ee1d64d8156de898bc53d5e92c4d4694f48c805 bytes=20650
+HARNESS-RIG pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+CREATE fix=/root/rowgate-15sep/scratch/fix1m members=16 x 256 MiB slice=1048576 recovery=1024 secs=16.5
+FIXTURE fix=/root/rowgate-15sep/scratch/fix1m n=4096 slice=1048576 recovery=1024 files=28
+PLAN label=1m rungs=[96, 128, 160, 192, 256, 320, 384, 512] threads=[8] reps=2 kf=[192, 512, 1024, 2048, 4096] kp=[256, 1024, 4096] kthreads=[4] out=/root/rowgate-15sep/rowgate-1m.jsonl
+LEG 1m-ladder-m96-big-fold-t8-r1           ok path=fold wall=   5.47 cpu=   36.00 W=[] win=0 slabs=1 foreign=3.4/4.6 steal=9.08 load=1.5/2.0 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m96-big-force-t8-r1          ok path=ntt  wall=   8.27 cpu=   60.47 W=[512] win=0 slabs=1 foreign=4.5/4.7 steal=2.42 load=2.0/3.2 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m96-big-force2-t8-r1         ok path=ntt  wall=   8.45 cpu=   60.83 W=[512] win=0 slabs=1 foreign=4.7/7.2 steal=2.12 load=3.2/3.7 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m96-big-fold2-t8-r1          ok path=fold wall=   4.63 cpu=   32.19 W=[] win=0 slabs=1 foreign=6.9/8.9 steal=2.21 load=3.7/4.7 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m128-big-fold-t8-r1          ok path=fold wall=   5.37 cpu=   37.75 W=[] win=0 slabs=1 foreign=8.6/9.7 steal=2.6 load=4.4/4.7 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m128-big-force-t8-r1         ok path=ntt  wall=   8.29 cpu=   59.77 W=[512] win=0 slabs=1 foreign=9.4/9.7 steal=0.9 load=4.7/5.5 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m128-big-force2-t8-r1        ok path=ntt  wall=   8.70 cpu=   61.42 W=[512] win=0 slabs=1 foreign=9.4/13.0 steal=5.73 load=5.5/5.9 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m128-big-fold2-t8-r1         ok path=fold wall=   5.23 cpu=   36.49 W=[] win=0 slabs=1 foreign=14.7/9.5 steal=2.28 load=5.5/10.2 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m160-big-fold-t8-r1          ok path=fold wall=   5.74 cpu=   40.96 W=[] win=0 slabs=1 foreign=9.4/9.7 steal=0.83 load=10.2/10.4 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m160-big-force-t8-r1         ok path=ntt  wall=   8.02 cpu=   58.38 W=[512] win=0 slabs=1 foreign=9.5/9.3 steal=0.42 load=10.2/10.0 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m160-big-force2-t8-r1        ok path=ntt  wall=   8.02 cpu=   57.72 W=[512] win=0 slabs=1 foreign=9.3/9.7 steal=0.37 load=9.3/9.2 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m160-big-fold2-t8-r1         ok path=fold wall=   5.38 cpu=   38.52 W=[] win=0 slabs=1 foreign=9.6/9.9 steal=0.74 load=8.6/8.9 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m192-big-fold-t8-r1          ok path=fold wall=   5.95 cpu=   42.25 W=[] win=0 slabs=1 foreign=9.8/9.9 steal=1.41 load=8.9/8.6 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m192-big-force-t8-r1         ok path=ntt  wall=   9.10 cpu=   65.20 W=[512] win=0 slabs=1 foreign=9.8/10.3 steal=3.98 load=8.1/8.1 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m192-big-force2-t8-r1        ok path=ntt  wall=   8.64 cpu=   61.78 W=[512] win=0 slabs=1 foreign=10.2/10.7 steal=0.66 load=8.1/8.4 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m192-big-fold2-t8-r1         ok path=fold wall=   5.99 cpu=   42.63 W=[] win=0 slabs=1 foreign=10.6/10.5 steal=0.61 load=8.4/13.6 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m256-big-fold-t8-r1          ok path=fold wall=   7.29 cpu=   52.37 W=[] win=0 slabs=1 foreign=10.4/10.5 steal=1.1 load=13.6/14.4 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m256-big-force-t8-r1         ok path=ntt  wall=   8.66 cpu=   61.15 W=[512] win=0 slabs=1 foreign=10.4/10.8 steal=0.58 load=14.4/12.9 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m256-big-force2-t8-r1        ok path=ntt  wall=   8.13 cpu=   57.40 W=[512] win=0 slabs=1 foreign=10.7/11.0 steal=0.52 load=12.9/11.9 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m256-big-fold2-t8-r1         ok path=fold wall=  14.40 cpu=   96.34 W=[] win=0 slabs=1 foreign=10.9/12.3 steal=44.91 load=11.9/12.3 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m320-big-fold-t8-r1          ok path=fold wall=   9.54 cpu=   66.98 W=[] win=0 slabs=1 foreign=12.2/12.0 steal=9.45 load=11.4/11.2 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m320-big-force-t8-r1         ok path=ntt  wall=   9.50 cpu=   66.14 W=[512] win=0 slabs=1 foreign=11.9/18.4 steal=3.76 load=11.2/11.3 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m320-big-force2-t8-r1        ok path=ntt  wall=   8.68 cpu=   60.17 W=[512] win=0 slabs=1 foreign=14.2/12.3 steal=0.91 load=10.5/14.3 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m320-big-fold2-t8-r1         ok path=fold wall=   8.54 cpu=   60.52 W=[] win=0 slabs=1 foreign=12.1/13.6 steal=2.46 load=14.3/13.8 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m384-big-fold-t8-r1          ok path=fold wall=  10.25 cpu=   73.41 W=[] win=0 slabs=1 foreign=13.3/15.5 steal=3.43 load=13.8/13.1 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m384-big-force-t8-r1         ok path=ntt  wall=   9.14 cpu=   63.21 W=[512] win=0 slabs=1 foreign=15.1/16.5 steal=1.84 load=13.1/12.2 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m384-big-force2-t8-r1        ok path=ntt  wall=   9.53 cpu=   64.81 W=[512] win=0 slabs=1 foreign=16.1/16.9 steal=3.13 load=11.3/11.1 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m384-big-fold2-t8-r1         ok path=fold wall=   9.70 cpu=   68.18 W=[] win=0 slabs=1 foreign=16.7/17.5 steal=3.78 load=10.8/10.8 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m512-big-fold-t8-r1          ok path=fold wall=  12.76 cpu=   91.00 W=[] win=0 slabs=1 foreign=17.1/17.0 steal=5.42 load=10.0/9.7 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m512-big-force-t8-r1         ok path=ntt  wall=   9.81 cpu=   66.78 W=[512] win=0 slabs=1 foreign=16.7/17.0 steal=2.11 load=9.0/9.0 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m512-big-force2-t8-r1        ok path=ntt  wall=   9.90 cpu=   68.35 W=[512] win=0 slabs=1 foreign=16.8/16.8 steal=1.61 load=9.0/10.7 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m512-big-fold2-t8-r1         ok path=fold wall=  12.28 cpu=   88.05 W=[] win=0 slabs=1 foreign=16.6/16.4 steal=0.8 load=10.5/14.8 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m96-big-force-t8-r2          ok path=ntt  wall=   7.87 cpu=   57.52 W=[512] win=0 slabs=1 foreign=16.3/16.2 steal=1.14 load=14.8/18.2 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m96-big-fold-t8-r2           ok path=fold wall=   4.87 cpu=   34.07 W=[] win=0 slabs=1 foreign=16.2/16.2 steal=8.1 load=18.2/17.8 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m96-big-fold2-t8-r2          ok path=fold wall=   4.54 cpu=   31.90 W=[] win=0 slabs=1 foreign=16.1/16.2 steal=3.23 load=16.8/16.8 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m96-big-force2-t8-r2         ok path=ntt  wall=   8.29 cpu=   60.04 W=[512] win=0 slabs=1 foreign=16.0/16.1 steal=1.37 load=16.1/18.9 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m128-big-force-t8-r2         ok path=ntt  wall=   8.16 cpu=   58.27 W=[512] win=0 slabs=1 foreign=16.0/16.0 steal=0.95 load=18.9/20.8 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m128-big-fold-t8-r2          ok path=fold wall=   5.43 cpu=   38.20 W=[] win=0 slabs=1 foreign=16.0/16.1 steal=2.25 load=20.8/19.8 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m128-big-fold2-t8-r2         ok path=fold wall=   5.01 cpu=   35.65 W=[] win=0 slabs=1 foreign=16.0/16.0 steal=1.59 load=18.9/21.4 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m128-big-force2-t8-r2        ok path=ntt  wall=   8.48 cpu=   61.33 W=[512] win=0 slabs=1 foreign=15.9/15.7 steal=2.63 load=21.4/21.8 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m160-big-force-t8-r2         ok path=ntt  wall=   8.51 cpu=   61.02 W=[512] win=0 slabs=1 foreign=15.6/15.4 steal=2.23 load=21.8/19.5 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m160-big-fold-t8-r2          ok path=fold wall=   5.60 cpu=   39.46 W=[] win=0 slabs=1 foreign=15.3/15.6 steal=1.58 load=19.5/22.4 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m160-big-fold2-t8-r2         ok path=fold wall=   5.55 cpu=   39.59 W=[] win=0 slabs=1 foreign=15.5/15.6 steal=2.94 load=22.4/21.2 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m160-big-force2-t8-r2        ok path=ntt  wall=   8.56 cpu=   61.55 W=[512] win=0 slabs=1 foreign=15.5/15.6 steal=1.66 load=19.6/18.7 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m192-big-force-t8-r2         ok path=ntt  wall=   8.24 cpu=   58.90 W=[512] win=0 slabs=1 foreign=15.6/15.6 steal=0.88 load=17.2/16.5 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m192-big-fold-t8-r2          ok path=fold wall=   6.07 cpu=   42.57 W=[] win=0 slabs=1 foreign=15.6/15.5 steal=1.26 load=15.3/14.7 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m192-big-fold2-t8-r2         ok path=fold wall=   7.71 cpu=   54.37 W=[] win=0 slabs=1 foreign=15.5/15.3 steal=17.97 load=14.7/14.2 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m192-big-force2-t8-r2        ok path=ntt  wall=   8.17 cpu=   58.11 W=[512] win=0 slabs=1 foreign=15.3/15.3 steal=1.44 load=13.2/12.8 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m256-big-force-t8-r2         ok path=ntt  wall=   8.62 cpu=   61.28 W=[512] win=0 slabs=1 foreign=15.2/16.2 steal=0.98 load=12.4/12.0 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m256-big-fold-t8-r2          ok path=fold wall=   6.92 cpu=   49.50 W=[] win=0 slabs=1 foreign=16.1/16.1 steal=1.64 load=11.2/10.9 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m256-big-fold2-t8-r2         ok path=fold wall=   7.92 cpu=   56.79 W=[] win=0 slabs=1 foreign=15.1/16.3 steal=2.83 load=10.1/9.9 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m256-big-force2-t8-r2        ok path=ntt  wall=   8.89 cpu=   62.38 W=[512] win=0 slabs=1 foreign=16.2/16.0 steal=2.17 load=9.2/11.4 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m320-big-force-t8-r2         ok path=ntt  wall=   9.61 cpu=   67.19 W=[512] win=0 slabs=1 foreign=16.0/16.0 steal=3.21 load=11.4/11.5 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m320-big-fold-t8-r2          ok path=fold wall=   8.41 cpu=   59.28 W=[] win=0 slabs=1 foreign=16.0/16.1 steal=2.15 load=10.7/10.4 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m320-big-fold2-t8-r2         ok path=fold wall=   9.26 cpu=   66.42 W=[] win=0 slabs=1 foreign=16.0/16.1 steal=3.44 load=10.2/10.4 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m320-big-force2-t8-r2        ok path=ntt  wall=   8.86 cpu=   61.60 W=[512] win=0 slabs=1 foreign=16.1/16.0 steal=1.56 load=9.6/9.5 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m384-big-force-t8-r2         ok path=ntt  wall=   9.29 cpu=   64.26 W=[512] win=0 slabs=1 foreign=15.9/16.0 steal=2.26 load=8.9/8.9 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m384-big-fold-t8-r2          ok path=fold wall=  10.13 cpu=   72.51 W=[] win=0 slabs=1 foreign=16.0/15.7 steal=1.64 load=8.9/9.1 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m384-big-fold2-t8-r2         ok path=fold wall=   9.71 cpu=   69.89 W=[] win=0 slabs=1 foreign=15.7/15.9 steal=1.09 load=8.4/8.2 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m384-big-force2-t8-r2        ok path=ntt  wall=   8.74 cpu=   60.26 W=[512] win=0 slabs=1 foreign=15.7/15.7 steal=0.71 load=8.2/8.5 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m512-big-force-t8-r2         ok path=ntt  wall=   9.64 cpu=   66.30 W=[512] win=0 slabs=1 foreign=15.7/15.6 steal=1.05 load=7.9/11.2 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m512-big-fold-t8-r2          ok path=fold wall=  12.69 cpu=   90.21 W=[] win=0 slabs=1 foreign=15.5/17.2 steal=6.15 load=11.2/10.0 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m512-big-fold2-t8-r2         ok path=fold wall=  11.76 cpu=   83.42 W=[] win=0 slabs=1 foreign=17.1/17.5 steal=1.85 load=10.0/9.3 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+LEG 1m-ladder-m512-big-force2-t8-r2        ok path=ntt  wall=   9.59 cpu=   66.18 W=[512] win=0 slabs=1 foreign=17.3/17.8 steal=0.76 load=9.3/8.6 rig=pdrv.py:15b7557472cfe247+rowgate.py:a31d9117cc83d61d
+ALL DONE ts=2026-09-15T16:08:36Z
+RIG-LOCK-RELEASED /root/.parfast-rig.lock
+RC1M=0

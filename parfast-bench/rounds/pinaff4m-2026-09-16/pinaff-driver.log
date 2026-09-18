@@ -1,0 +1,24 @@
+2026-09-16T22:04:02.3361261+01:00 PINAFF-ROUND start root=<rig>\crg4-16sep bin=<rig>\crg4-16sep\src\target\release\parfast.exe rungs=320,352,384,416,448 budget=21474836480 arms=4
+2026-09-16T22:04:02.3361261+01:00 PROVENANCE INHERITING the binary and the 16 GiB fixture from parfast-create-rowgate-4mib-gfni256 at <rig>\crg4-16sep, as agreed, rather than building 16 GiB twice
+2026-09-16T22:04:02.3838250+01:00 BIN sha256=FDDB6AA34283001A8437D5A7208EAE5F7D026F8F7E67330E78E9CB307F95295F bytes=4173312
+2026-09-16T22:04:02.3838250+01:00 FIXTURE PRESENT (reused) <rig>\crg4-16sep\fix-4194304-1024
+2026-09-16T22:05:40.3552437+01:00 LOAD-GATE ok at=pint16 loads=5/5 waited_s=0
+2026-09-16T22:05:48.1458800+01:00 CLASS-PROBE P-core0 mask=0x1 got=0x1 wall_s=7.743 cpu_s=7.672 SPIN ms=7583 x=72000065999996.6 
+2026-09-16T22:06:01.4784566+01:00 CLASS-PROBE E-core4 mask=0x10 got=0x10 wall_s=13.336 cpu_s=13.266 SPIN ms=13133 x=72000065999996.6 
+2026-09-16T22:06:17.1912572+01:00 CLASS-PROBE LPE-core12 mask=0x1000 got=0x1000 wall_s=15.705 cpu_s=15.609 SPIN ms=15475 x=72000065999996.6 
+2026-09-16T22:06:17.2010662+01:00 ARM pint16 label=4m-t16 aff=none threads=16 log=<rig>\pinaff-16sep\harness\logs\pint16.log
+2026-09-16T22:06:17.2030743+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\pinaff-16sep\harness\wcomb.ps1" -Root "<rig>\crg4-16sep" -Bin "<rig>\crg4-16sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag pint16 -Label 4m-t16 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 16 -Reps 1 -Residency resident -NttBudget 21474836480
+2026-09-16T22:24:29.2522393+01:00 ARM-DONE pint16 rc=0 legs=20 lock_waits=0
+2026-09-16T22:24:30.2846846+01:00 LOAD-GATE ok at=pinp4 loads=7 waited_s=0
+2026-09-16T22:24:30.3012370+01:00 ARM pinp4 label=4m-p4 aff=0xF threads=4 log=<rig>\pinaff-16sep\harness\logs\pinp4.log
+2026-09-16T22:24:30.3012370+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\pinaff-16sep\harness\wcomb.ps1" -Root "<rig>\crg4-16sep" -Bin "<rig>\crg4-16sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag pinp4 -Label 4m-p4 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 4 -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xF
+2026-09-16T22:48:38.3684001+01:00 ARM-DONE pinp4 rc=0 legs=20 lock_waits=0
+2026-09-16T22:48:39.4201588+01:00 LOAD-GATE ok at=pint4 loads=3 waited_s=0
+2026-09-16T22:48:39.4405079+01:00 ARM pint4 label=4m-t4-unpinned aff=none threads=4 log=<rig>\pinaff-16sep\harness\logs\pint4.log
+2026-09-16T22:48:39.4405079+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\pinaff-16sep\harness\wcomb.ps1" -Root "<rig>\crg4-16sep" -Bin "<rig>\crg4-16sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag pint4 -Label 4m-t4-unpinned -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 4 -Reps 1 -Residency resident -NttBudget 21474836480
+2026-09-16T23:10:57.2265553+01:00 ARM-DONE pint4 rc=0 legs=20 lock_waits=0
+2026-09-16T23:10:58.2771669+01:00 LOAD-GATE ok at=pine4 loads=5 waited_s=0
+2026-09-16T23:10:58.2973119+01:00 ARM pine4 label=4m-e4 aff=0xF0 threads=4 log=<rig>\pinaff-16sep\harness\logs\pine4.log
+2026-09-16T23:10:58.2973119+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\pinaff-16sep\harness\wcomb.ps1" -Root "<rig>\crg4-16sep" -Bin "<rig>\crg4-16sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag pine4 -Label 4m-e4 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 4 -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xF0
+2026-09-16T23:43:49.6181343+01:00 ARM-DONE pine4 rc=0 legs=20 lock_waits=0
+2026-09-16T23:43:49.6181343+01:00 PINAFF-ROUND end rc=0

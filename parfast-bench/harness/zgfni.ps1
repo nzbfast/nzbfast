@@ -25,7 +25,7 @@
 # A WARM-UP PASS, DISCARDED. Across the banked ladders, repetition 1 is
 # systematically slower than repetition 2 - and only on the boxes where the set
 # does not sit comfortably in page cache: parfast summed 1.66x slower over the
-# first four rungs on this i5, 1.30x on the VPS, 1.14x on the 31 GB zenbook,
+# first four rungs on this i5, 1.30x on the VPS, 1.14x on the 31 GB coreultra9,
 # against 0.96-1.00x on the 128 and 256 GB Apple boxes, which are flat. Two
 # repetitions then average a cold reading with a warm one, and a median of two
 # IS that average, so it cannot discard the outlier. The round now runs an

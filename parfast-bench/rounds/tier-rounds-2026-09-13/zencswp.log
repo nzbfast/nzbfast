@@ -1,0 +1,45 @@
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock pid=18148
+CSWP-START 2026-09-13T20:43:30Z
+BOX host=intel-core-ultra-9-386h cpu=Intel(R) Core(TM) Ultra 9 386H cores=16 ram_gb=31.4 os=Microsoft Windows 11 Home free_gb=591.9
+BIN parfast sha256=f018fcb2beb2122d5d019306cd86c537f7cad0d047cdccb151891f9f1ce531c8 bytes=3872768 version=parfast version 1.5.0-beta.2
+BIN parfast-beta2 sha256=93dbf97ef0a29dca5f8aed000f4969d050e10f68f56e586b0c12676e08e37083 bytes=2501632 version=parfast version 1.5.0-beta.2
+BIN turbo sha256=36ce11d92c895a552485ba8cb1ad4b92ca62a00333f1aa6308daafbc371e69e9 bytes=1653248 version=par2cmdline-turbo version 1.5.0
+PROTOCOL sizes_gib=[1, 4, 10] redundancy_pct=[10, 20] threads=16 file_threads=16 base_slice=768000 slice_cap=32768 reps=2 members=1GiB-each driver=ladder.py
+PAYLOAD-READY members=10 bytes=10737418240
+CC size=1 red=10 bs=768000 blocks=1399 arm=parfast rep=1 wall=1.327 cpu=-1.000 cpu_over_wall=-0.75 peak_mb=-1.0 recovery_mb=103 files=9 rc=0 foreign_cpu=1 foreign_after=1 waited=0s errlen=0 ts=2026-09-13T20:43:37Z
+CC size=1 red=10 bs=768000 blocks=1399 arm=parfast-beta2 rep=1 wall=1.409 cpu=-1.000 cpu_over_wall=-0.71 peak_mb=-1.0 recovery_mb=103 files=9 rc=0 foreign_cpu=9 foreign_after=4 waited=0s errlen=0 ts=2026-09-13T20:43:42Z
+CC size=1 red=10 bs=768000 blocks=1399 arm=turbo rep=1 wall=1.506 cpu=-1.000 cpu_over_wall=-0.66 peak_mb=-1.0 recovery_mb=103 files=9 rc=0 foreign_cpu=4 foreign_after=6 waited=0s errlen=0 ts=2026-09-13T20:43:48Z
+CC size=1 red=10 bs=768000 blocks=1399 arm=turbo rep=2 wall=1.622 cpu=-1.000 cpu_over_wall=-0.62 peak_mb=-1.0 recovery_mb=103 files=9 rc=0 foreign_cpu=1 foreign_after=2 waited=0s errlen=0 ts=2026-09-13T20:43:53Z
+CC size=1 red=10 bs=768000 blocks=1399 arm=parfast-beta2 rep=2 wall=1.382 cpu=-1.000 cpu_over_wall=-0.72 peak_mb=-1.0 recovery_mb=103 files=9 rc=0 foreign_cpu=3 foreign_after=2 waited=0s errlen=0 ts=2026-09-13T20:43:59Z
+CC size=1 red=10 bs=768000 blocks=1399 arm=parfast rep=2 wall=1.349 cpu=-1.000 cpu_over_wall=-0.74 peak_mb=-1.0 recovery_mb=103 files=9 rc=0 foreign_cpu=3 foreign_after=8 waited=0s errlen=0 ts=2026-09-13T20:44:04Z
+CC size=1 red=20 bs=768000 blocks=1399 arm=parfast rep=1 wall=1.534 cpu=-1.000 cpu_over_wall=-0.65 peak_mb=-1.0 recovery_mb=206 files=10 rc=0 foreign_cpu=4 foreign_after=1 waited=0s errlen=0 ts=2026-09-13T20:44:10Z
+CC size=1 red=20 bs=768000 blocks=1399 arm=parfast-beta2 rep=1 wall=1.581 cpu=-1.000 cpu_over_wall=-0.63 peak_mb=-1.0 recovery_mb=206 files=10 rc=0 foreign_cpu=11 foreign_after=3 waited=0s errlen=0 ts=2026-09-13T20:44:15Z
+CC size=1 red=20 bs=768000 blocks=1399 arm=turbo rep=1 wall=1.872 cpu=-1.000 cpu_over_wall=-0.53 peak_mb=-1.0 recovery_mb=206 files=10 rc=0 foreign_cpu=1 foreign_after=na waited=0s errlen=0 ts=2026-09-13T20:44:21Z
+CC size=1 red=20 bs=768000 blocks=1399 arm=turbo rep=2 wall=1.880 cpu=-1.000 cpu_over_wall=-0.53 peak_mb=-1.0 recovery_mb=206 files=10 rc=0 foreign_cpu=2 foreign_after=2 waited=0s errlen=0 ts=2026-09-13T20:44:27Z
+CC size=1 red=20 bs=768000 blocks=1399 arm=parfast-beta2 rep=2 wall=1.588 cpu=-1.000 cpu_over_wall=-0.63 peak_mb=-1.0 recovery_mb=206 files=10 rc=0 foreign_cpu=2 foreign_after=3 waited=0s errlen=0 ts=2026-09-13T20:44:32Z
+CC size=1 red=20 bs=768000 blocks=1399 arm=parfast rep=2 wall=1.512 cpu=-1.000 cpu_over_wall=-0.66 peak_mb=-1.0 recovery_mb=206 files=10 rc=0 foreign_cpu=na foreign_after=0 waited=0s errlen=0 ts=2026-09-13T20:44:38Z
+CC size=4 red=10 bs=768000 blocks=5596 arm=parfast rep=1 wall=4.045 cpu=-1.000 cpu_over_wall=-0.25 peak_mb=-1.0 recovery_mb=415 files=11 rc=0 foreign_cpu=1 foreign_after=1 waited=0s errlen=0 ts=2026-09-13T20:44:49Z
+CC size=4 red=10 bs=768000 blocks=5596 arm=parfast-beta2 rep=1 wall=4.117 cpu=-1.000 cpu_over_wall=-0.24 peak_mb=-1.0 recovery_mb=415 files=11 rc=0 foreign_cpu=3 foreign_after=4 waited=0s errlen=0 ts=2026-09-13T20:44:58Z
+CC size=4 red=10 bs=768000 blocks=5596 arm=turbo rep=1 wall=8.584 cpu=-1.000 cpu_over_wall=-0.12 peak_mb=-1.0 recovery_mb=415 files=11 rc=0 foreign_cpu=6 foreign_after=12 waited=0s errlen=0 ts=2026-09-13T20:45:11Z
+CC size=4 red=10 bs=768000 blocks=5596 arm=turbo rep=2 wall=8.604 cpu=-1.000 cpu_over_wall=-0.12 peak_mb=-1.0 recovery_mb=415 files=11 rc=0 foreign_cpu=0 foreign_after=7 waited=0s errlen=0 ts=2026-09-13T20:45:25Z
+CC size=4 red=10 bs=768000 blocks=5596 arm=parfast-beta2 rep=2 wall=4.148 cpu=-1.000 cpu_over_wall=-0.24 peak_mb=-1.0 recovery_mb=415 files=11 rc=0 foreign_cpu=3 foreign_after=0 waited=0s errlen=0 ts=2026-09-13T20:45:34Z
+CC size=4 red=10 bs=768000 blocks=5596 arm=parfast rep=2 wall=4.090 cpu=-1.000 cpu_over_wall=-0.24 peak_mb=-1.0 recovery_mb=415 files=11 rc=0 foreign_cpu=2 foreign_after=1 waited=0s errlen=0 ts=2026-09-13T20:45:43Z
+CC size=4 red=20 bs=768000 blocks=5596 arm=parfast rep=1 wall=4.484 cpu=-1.000 cpu_over_wall=-0.22 peak_mb=-1.0 recovery_mb=826 files=12 rc=0 foreign_cpu=2 foreign_after=3 waited=0s errlen=0 ts=2026-09-13T20:45:53Z
+CC size=4 red=20 bs=768000 blocks=5596 arm=parfast-beta2 rep=1 wall=4.528 cpu=-1.000 cpu_over_wall=-0.22 peak_mb=-1.0 recovery_mb=826 files=12 rc=0 foreign_cpu=2 foreign_after=17 waited=0s errlen=0 ts=2026-09-13T20:46:02Z
+CC size=4 red=20 bs=768000 blocks=5596 arm=turbo rep=1 wall=10.165 cpu=-1.000 cpu_over_wall=-0.10 peak_mb=-1.0 recovery_mb=826 files=12 rc=0 foreign_cpu=4 foreign_after=0 waited=5s errlen=0 ts=2026-09-13T20:46:24Z
+CC size=4 red=20 bs=768000 blocks=5596 arm=turbo rep=2 wall=11.430 cpu=-1.000 cpu_over_wall=-0.09 peak_mb=-1.0 recovery_mb=826 files=12 rc=0 foreign_cpu=4 foreign_after=3 waited=0s errlen=0 ts=2026-09-13T20:46:40Z
+CC size=4 red=20 bs=768000 blocks=5596 arm=parfast-beta2 rep=2 wall=4.491 cpu=-1.000 cpu_over_wall=-0.22 peak_mb=-1.0 recovery_mb=826 files=12 rc=0 foreign_cpu=0 foreign_after=10 waited=0s errlen=0 ts=2026-09-13T20:46:50Z
+CC size=4 red=20 bs=768000 blocks=5596 arm=parfast rep=2 wall=4.404 cpu=-1.000 cpu_over_wall=-0.23 peak_mb=-1.0 recovery_mb=826 files=12 rc=0 foreign_cpu=6 foreign_after=14 waited=0s errlen=0 ts=2026-09-13T20:46:59Z
+CC size=10 red=10 bs=768000 blocks=13990 arm=parfast rep=1 wall=10.624 cpu=-1.000 cpu_over_wall=-0.09 peak_mb=-1.0 recovery_mb=1042 files=12 rc=0 foreign_cpu=2 foreign_after=1 waited=5s errlen=0 ts=2026-09-13T20:47:27Z
+CC size=10 red=10 bs=768000 blocks=13990 arm=parfast-beta2 rep=1 wall=11.769 cpu=-1.000 cpu_over_wall=-0.08 peak_mb=-1.0 recovery_mb=1042 files=12 rc=0 foreign_cpu=3 foreign_after=9 waited=0s errlen=0 ts=2026-09-13T20:47:46Z
+CC size=10 red=10 bs=768000 blocks=13990 arm=turbo rep=1 wall=34.287 cpu=-1.000 cpu_over_wall=-0.03 peak_mb=-1.0 recovery_mb=1042 files=12 rc=0 foreign_cpu=2 foreign_after=1 waited=0s errlen=0 ts=2026-09-13T20:48:28Z
+CC size=10 red=10 bs=768000 blocks=13990 arm=turbo rep=2 wall=32.697 cpu=-1.000 cpu_over_wall=-0.03 peak_mb=-1.0 recovery_mb=1042 files=12 rc=0 foreign_cpu=2 foreign_after=7 waited=5s errlen=0 ts=2026-09-13T20:49:14Z
+CC size=10 red=10 bs=768000 blocks=13990 arm=parfast-beta2 rep=2 wall=11.551 cpu=-1.000 cpu_over_wall=-0.09 peak_mb=-1.0 recovery_mb=1042 files=12 rc=0 foreign_cpu=3 foreign_after=13 waited=0s errlen=0 ts=2026-09-13T20:49:33Z
+CC size=10 red=10 bs=768000 blocks=13990 arm=parfast rep=2 wall=11.715 cpu=-1.000 cpu_over_wall=-0.09 peak_mb=-1.0 recovery_mb=1042 files=12 rc=0 foreign_cpu=3 foreign_after=2 waited=0s errlen=0 ts=2026-09-13T20:49:53Z
+CC size=10 red=20 bs=768000 blocks=13990 arm=parfast rep=1 wall=12.874 cpu=-1.000 cpu_over_wall=-0.08 peak_mb=-1.0 recovery_mb=2070 files=13 rc=0 foreign_cpu=na foreign_after=13 waited=0s errlen=0 ts=2026-09-13T20:50:13Z
+CC size=10 red=20 bs=768000 blocks=13990 arm=parfast-beta2 rep=1 wall=12.855 cpu=-1.000 cpu_over_wall=-0.08 peak_mb=-1.0 recovery_mb=2070 files=13 rc=0 foreign_cpu=4 foreign_after=4 waited=0s errlen=0 ts=2026-09-13T20:50:33Z
+CC size=10 red=20 bs=768000 blocks=13990 arm=turbo rep=1 wall=67.606 cpu=-1.000 cpu_over_wall=-0.01 peak_mb=-1.0 recovery_mb=2070 files=13 rc=0 foreign_cpu=4 foreign_after=5 waited=0s errlen=0 ts=2026-09-13T20:51:48Z
+CC size=10 red=20 bs=768000 blocks=13990 arm=turbo rep=2 wall=67.622 cpu=-1.000 cpu_over_wall=-0.01 peak_mb=-1.0 recovery_mb=2070 files=13 rc=0 foreign_cpu=6 foreign_after=7 waited=0s errlen=0 ts=2026-09-13T20:53:04Z
+CC size=10 red=20 bs=768000 blocks=13990 arm=parfast-beta2 rep=2 wall=12.392 cpu=-1.000 cpu_over_wall=-0.08 peak_mb=-1.0 recovery_mb=2070 files=13 rc=0 foreign_cpu=4 foreign_after=10 waited=0s errlen=0 ts=2026-09-13T20:53:24Z
+CC size=10 red=20 bs=768000 blocks=13990 arm=parfast rep=2 wall=12.782 cpu=-1.000 cpu_over_wall=-0.08 peak_mb=-1.0 recovery_mb=2070 files=13 rc=0 foreign_cpu=4 foreign_after=6 waited=0s errlen=0 ts=2026-09-13T20:53:44Z
+CSWP-END 2026-09-13T20:53:45Z

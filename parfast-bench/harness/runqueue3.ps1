@@ -25,17 +25,48 @@ if (-not $rounds) { "QUEUE3-NOROUNDS $listfile is missing or empty"; exit 20 }
 # would read FREE while a round is plainly running, which is the exact
 # collision the absolute path was introduced to prevent. Wait on both until the
 # last legacy round has drained.
+# A LOCK IS ONLY MEANINGFUL WHILE ITS HOLDER IS ALIVE, and until 16 Sep 2026
+# this function applied that rule to the LEGACY locks and not to the new one -
+# the legacy arm below parsed `pid=` and asked whether that process was still
+# running, while the box lock two lines above it was held by merely EXISTING.
+# So the arm written for locks that were on their way out was right and the arm
+# for the one every round now takes was wrong, in the direction that wedges a
+# QUEUE: an orphaned box lock made this runner report busy on every poll and
+# the whole rounds list simply never started, saying only that the box was
+# never free. That is the apple-m3-ultra shape
+# (an internal note), amplified - one
+# orphan holds up every round behind it rather than one.
+#
+# Spelled INLINE rather than imported, and deliberately: this runner
+# dot-sources no plib.ps1 today and giving it one would add a deployment
+# dependency to a script that is launched standalone on every rig. The
+# canonical statement of the rule is plib.ps1's Get-RigLockHolder (and
+# riglock_state.py on unix); the unix shell takers made the same call for the
+# same reason, so a reader who has seen one recognises this. It is ONE local
+# helper used by both arms rather than a second copy inside this file - which
+# is how the two arms came to disagree in the first place.
+#
+# LIVENESS COMES FROM THE HOLDER, NEVER FROM THE CLOCK: no age bound here, and
+# none may be added. A legitimate round holds a box for hours.
+function Test-LockHolderAlive([string]$path) {
+  try {
+    # FileShare ReadWrite: a HELD lock is readable since Take-RigLock moved to
+    # FileShare::Read, but only to a reader that also permits the holder's
+    # WRITE - ReadAllText does not, and would report every live holder as
+    # unreadable.
+    $fs = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try { $txt = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Close() }
+  } catch { return $true }   # unreadable for any other reason means open, means held
+  if ($txt -match 'pid=(\d+)') {
+    return [bool](Get-Process -Id ([int]$Matches[1]) -EA SilentlyContinue)
+  }
+  return $false             # names nobody - zero bytes or no pid - so it is nobody's
+}
 function Test-AnyLock([string]$root) {
   $new = Join-Path $env:USERPROFILE '.parfast-rig.lock'
-  if (Test-Path $new) { return $new }
+  if ((Test-Path $new) -and (Test-LockHolderAlive $new)) { return $new }
   foreach ($f in @(Get-ChildItem (Join-Path $root '*.lock') -EA 0)) {
-    # a legacy lock is only meaningful while its holder is alive
-    try {
-      $txt = [IO.File]::ReadAllText($f.FullName)
-      if ($txt -match 'pid=(\d+)') {
-        if (Get-Process -Id ([int]$Matches[1]) -EA SilentlyContinue) { return $f.FullName }
-      }
-    } catch { return $f.FullName }   # unreadable means open, means held
+    if (Test-LockHolderAlive $f.FullName) { return $f.FullName }
   }
   # And a lock only excludes rounds that TOOK one. memfloor.ps1 took none at
   # all, so on 11 Sep 2026 this queue read the box as free and started a

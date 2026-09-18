@@ -1,0 +1,105 @@
+PHASE-START 2026-09-16T06:00:47Z host=apple-m5-max os=macOS-27.0-arm64-arm-64bit cores=18 extra_env={}
+CREATE wall=13.930 rc=0
+FIXTURE member_bytes=8858370048 slice=4429188 rblk=100 source_blocks=2000 par2files=8 par2bytes=444054640 gold=bbac13f2a769de2d
+LEG kind=r m=1 rep=0 arm=warm wall=4.182 rc=0 ts=2026-09-16T06:02:21Z
+  PH INFO repair-timing: packet scan (critical): +107.83µs (total 107.83µs)
+  PH INFO repair-timing: verify targets + volume scan: +1.94s (total 1.94s)
+  PH INFO repair-timing: adoption: +638.58µs (total 1.94s)
+  PH INFO repair-timing: load recovery: +474.54µs (total 1.94s)
+  PH INFO repair-timing: back-substitution setup (1x1, vandermonde): 82.46µs
+  PH INFO repair-timing: fold tile budget 512 KiB (L2 per core 2730 KiB)
+  PH INFO repair-timing: back-substitution (dense): 556.00µs
+  PH INFO repair-timing: feed+fold+solve: +242.25ms (total 2.18s)
+  PH INFO repair-timing: patch: +1.70ms (total 2.18s)
+  PH INFO repair-timing: final verify: +1.99s (total 4.17s)
+  PH INFO repair-timing: plan prep: 0.00ns over 0 cold build(s), 0 stripe use(s) - 0.000% of the 4.17s repair
+  PH INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 4.17s repair
+  GATE restored=True
+LEG kind=v m=0 rep=1 arm=warm wall=0.875 rc=0 ts=2026-09-16T06:02:26Z
+LEG kind=r m=1 rep=1 arm=warm wall=3.114 rc=0 ts=2026-09-16T06:02:30Z
+  PH INFO repair-timing: packet scan (critical): +83.71µs (total 83.71µs)
+  PH INFO repair-timing: verify targets + volume scan: +1.28s (total 1.28s)
+  PH INFO repair-timing: adoption: +462.00µs (total 1.28s)
+  PH INFO repair-timing: load recovery: +472.83µs (total 1.28s)
+  PH INFO repair-timing: back-substitution setup (1x1, vandermonde): 120.92µs
+  PH INFO repair-timing: fold tile budget 512 KiB (L2 per core 2730 KiB)
+  PH INFO repair-timing: back-substitution (dense): 595.21µs
+  PH INFO repair-timing: feed+fold+solve: +237.34ms (total 1.52s)
+  PH INFO repair-timing: patch: +1.26ms (total 1.52s)
+  PH INFO repair-timing: final verify: +1.58s (total 3.10s)
+  PH INFO repair-timing: plan prep: 0.00ns over 0 cold build(s), 0 stripe use(s) - 0.000% of the 3.10s repair
+  PH INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 3.10s repair
+  GATE restored=True
+LEG kind=r m=100 rep=1 arm=warm wall=13.159 rc=0 ts=2026-09-16T06:02:55Z
+  PH INFO repair-timing: packet scan (critical): +92.96µs (total 92.96µs)
+  PH INFO repair-timing: verify targets + volume scan: +3.24s (total 3.24s)
+  PH INFO repair-timing: adoption: +476.25µs (total 3.24s)
+  PH INFO repair-timing: load recovery: +29.76ms (total 3.27s)
+  PH INFO repair-timing: back-substitution setup (100x100, vandermonde): 228.08µs
+  PH INFO repair-timing: fold tile budget 512 KiB (L2 per core 2730 KiB)
+  PH INFO repair-timing: back-substitution (dense): 514.94ms
+  PH INFO repair-timing: feed+fold+solve: +6.64s (total 9.91s)
+  PH INFO repair-timing: patch: +187.58ms (total 10.10s)
+  PH INFO repair-timing: final verify: +3.04s (total 13.14s)
+  PH INFO repair-timing: plan prep: 0.00ns over 0 cold build(s), 0 stripe use(s) - 0.000% of the 13.15s repair
+  PH INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 13.15s repair
+  GATE restored=True
+LEG kind=v m=0 rep=2 arm=warm wall=1.924 rc=0 ts=2026-09-16T06:03:13Z
+LEG kind=r m=1 rep=2 arm=warm wall=4.252 rc=0 ts=2026-09-16T06:03:18Z
+  PH INFO repair-timing: packet scan (critical): +129.00µs (total 129.00µs)
+  PH INFO repair-timing: verify targets + volume scan: +1.75s (total 1.75s)
+  PH INFO repair-timing: adoption: +541.12µs (total 1.75s)
+  PH INFO repair-timing: load recovery: +5.33ms (total 1.75s)
+  PH INFO repair-timing: back-substitution setup (1x1, vandermonde): 93.29µs
+  PH INFO repair-timing: fold tile budget 512 KiB (L2 per core 2730 KiB)
+  PH INFO repair-timing: back-substitution (dense): 470.38µs
+  PH INFO repair-timing: feed+fold+solve: +218.86ms (total 1.97s)
+  PH INFO repair-timing: patch: +8.80ms (total 1.98s)
+  PH INFO repair-timing: final verify: +2.25s (total 4.23s)
+  PH INFO repair-timing: plan prep: 0.00ns over 0 cold build(s), 0 stripe use(s) - 0.000% of the 4.23s repair
+  PH INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 4.23s repair
+  GATE restored=True
+LEG kind=r m=100 rep=2 arm=warm wall=7.923 rc=0 ts=2026-09-16T06:03:36Z
+  PH INFO repair-timing: packet scan (critical): +98.12µs (total 98.12µs)
+  PH INFO repair-timing: verify targets + volume scan: +1.85s (total 1.85s)
+  PH INFO repair-timing: adoption: +618.46µs (total 1.85s)
+  PH INFO repair-timing: load recovery: +27.80ms (total 1.88s)
+  PH INFO repair-timing: back-substitution setup (100x100, vandermonde): 232.54µs
+  PH INFO repair-timing: fold tile budget 512 KiB (L2 per core 2730 KiB)
+  PH INFO repair-timing: back-substitution (dense): 221.23ms
+  PH INFO repair-timing: feed+fold+solve: +4.67s (total 6.55s)
+  PH INFO repair-timing: patch: +215.18ms (total 6.76s)
+  PH INFO repair-timing: final verify: +1.14s (total 7.90s)
+  PH INFO repair-timing: plan prep: 0.00ns over 0 cold build(s), 0 stripe use(s) - 0.000% of the 7.91s repair
+  PH INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 7.91s repair
+  GATE restored=True
+LEG kind=v m=0 rep=3 arm=warm wall=1.257 rc=0 ts=2026-09-16T06:03:42Z
+LEG kind=r m=1 rep=3 arm=warm wall=3.815 rc=0 ts=2026-09-16T06:03:47Z
+  PH INFO repair-timing: packet scan (critical): +107.12µs (total 107.12µs)
+  PH INFO repair-timing: verify targets + volume scan: +1.54s (total 1.54s)
+  PH INFO repair-timing: adoption: +525.71µs (total 1.54s)
+  PH INFO repair-timing: load recovery: +525.12µs (total 1.54s)
+  PH INFO repair-timing: back-substitution setup (1x1, vandermonde): 86.29µs
+  PH INFO repair-timing: fold tile budget 512 KiB (L2 per core 2730 KiB)
+  PH INFO repair-timing: back-substitution (dense): 617.71µs
+  PH INFO repair-timing: feed+fold+solve: +308.79ms (total 1.85s)
+  PH INFO repair-timing: patch: +16.00ms (total 1.86s)
+  PH INFO repair-timing: final verify: +1.93s (total 3.79s)
+  PH INFO repair-timing: plan prep: 0.00ns over 0 cold build(s), 0 stripe use(s) - 0.000% of the 3.79s repair
+  PH INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 3.79s repair
+  GATE restored=True
+LEG kind=r m=100 rep=3 arm=warm wall=10.143 rc=0 ts=2026-09-16T06:04:06Z
+  PH INFO repair-timing: packet scan (critical): +121.42µs (total 121.42µs)
+  PH INFO repair-timing: verify targets + volume scan: +2.73s (total 2.73s)
+  PH INFO repair-timing: adoption: +543.96µs (total 2.73s)
+  PH INFO repair-timing: load recovery: +35.67ms (total 2.76s)
+  PH INFO repair-timing: back-substitution setup (100x100, vandermonde): 212.29µs
+  PH INFO repair-timing: fold tile budget 512 KiB (L2 per core 2730 KiB)
+  PH INFO repair-timing: back-substitution (dense): 287.33ms
+  PH INFO repair-timing: feed+fold+solve: +5.55s (total 8.31s)
+  PH INFO repair-timing: patch: +284.88ms (total 8.60s)
+  PH INFO repair-timing: final verify: +1.51s (total 10.10s)
+  PH INFO repair-timing: plan prep: 0.00ns over 0 cold build(s), 0 stripe use(s) - 0.000% of the 10.11s repair
+  PH INFO repair-timing: forney solve: 0.00ns over 0 solve(s) (stage 1 0.00ns, stage 2 0.00ns) - 0.000% of the 10.11s repair
+  GATE restored=True
+PHASE-END 2026-09-16T06:04:11Z

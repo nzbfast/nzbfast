@@ -1,0 +1,18 @@
+HELPER-PASS host=intel-core-ultra-9-386h cores=16 bin=C21101072001CB9D start=2026-09-16T16:30:20.2944680Z
+FIXTURE bytes=8858370048
+HLEG rung=1 rep=1 rc=0 wall=9.125 helper_threads=1 helper_own_s=5.943 chain_alone=8.83s reported=9.03 foreign_cpu=18.8 sha=5b8d41b8cae45152 ts=2026-09-16T16:30:34.3741882Z
+HLEG rung=2 rep=1 rc=0 wall=9.2 helper_threads=2 helper_own_s=4.277 chain_alone=8.89s reported=9.11 foreign_cpu=31.2 sha=5b8d41b8cae45152 ts=2026-09-16T16:30:49.2714628Z
+HLEG rung=4 rep=1 rc=0 wall=9.329 helper_threads=4 helper_own_s=3.514 chain_alone=9.02s reported=9.23 foreign_cpu=20.3 sha=5b8d41b8cae45152 ts=2026-09-16T16:31:04.3225917Z
+HLEG rung=6 rep=1 rc=0 wall=9.259 helper_threads=6 helper_own_s=3.310 chain_alone=8.96s reported=9.17 foreign_cpu=7.8 sha=5b8d41b8cae45152 ts=2026-09-16T16:31:19.2958251Z
+HLEG rung=8 rep=1 rc=0 wall=9.264 helper_threads=8 helper_own_s=3.250 chain_alone=8.95s reported=9.17 foreign_cpu=6.2 sha=5b8d41b8cae45152 ts=2026-09-16T16:31:34.2870323Z
+HLEG rung=8 rep=2 rc=0 wall=9.265 helper_threads=8 helper_own_s=3.204 chain_alone=8.96s reported=9.17 foreign_cpu=21.9 sha=5b8d41b8cae45152 ts=2026-09-16T16:31:49.2583869Z
+HLEG rung=6 rep=2 rc=0 wall=9.346 helper_threads=6 helper_own_s=3.303 chain_alone=9.04s reported=9.25 foreign_cpu=4.7 sha=5b8d41b8cae45152 ts=2026-09-16T16:32:04.2855553Z
+HLEG rung=4 rep=2 rc=0 wall=9.296 helper_threads=4 helper_own_s=3.472 chain_alone=8.99s reported=9.20 foreign_cpu=23.4 sha=5b8d41b8cae45152 ts=2026-09-16T16:32:19.2753975Z
+HLEG rung=2 rep=2 rc=0 wall=9.246 helper_threads=2 helper_own_s=4.234 chain_alone=8.95s reported=9.15 foreign_cpu=14.1 sha=5b8d41b8cae45152 ts=2026-09-16T16:32:34.1947332Z
+HLEG rung=1 rep=2 rc=0 wall=9.107 helper_threads=1 helper_own_s=5.895 chain_alone=8.80s reported=9.01 foreign_cpu=9.4 sha=5b8d41b8cae45152 ts=2026-09-16T16:32:49.0715899Z
+HLEG rung=1 rep=3 rc=0 wall=9.144 helper_threads=1 helper_own_s=5.940 chain_alone=8.84s reported=9.05 foreign_cpu=9.4 sha=5b8d41b8cae45152 ts=2026-09-16T16:33:03.8650389Z
+HLEG rung=2 rep=3 rc=0 wall=9.241 helper_threads=2 helper_own_s=4.334 chain_alone=8.95s reported=9.15 foreign_cpu=12.5 sha=5b8d41b8cae45152 ts=2026-09-16T16:33:18.8108091Z
+HLEG rung=4 rep=3 rc=0 wall=9.248 helper_threads=4 helper_own_s=3.439 chain_alone=8.95s reported=9.16 foreign_cpu=4.7 sha=5b8d41b8cae45152 ts=2026-09-16T16:33:33.6948774Z
+HLEG rung=6 rep=3 rc=0 wall=9.224 helper_threads=6 helper_own_s=3.351 chain_alone=8.93s reported=9.14 foreign_cpu=48.4 sha=5b8d41b8cae45152 ts=2026-09-16T16:33:48.6056412Z
+HLEG rung=8 rep=3 rc=0 wall=9.291 helper_threads=8 helper_own_s=3.190 chain_alone=8.99s reported=9.20 foreign_cpu=15.6 sha=5b8d41b8cae45152 ts=2026-09-16T16:34:03.5454114Z
+HELPER-PASS done=2026-09-16T16:34:03.5576749Z

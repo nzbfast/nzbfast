@@ -1,0 +1,30 @@
+2026-09-17T20:49:35.6806381+01:00 POOLLADDER2-ROUND start root=<rig>\poolladder2-17sep bin=<rig>\poolladder2-17sep\src\target\release\parfast.exe rungs=320,352,384,416,448 budget=21474836480 arms=4
+2026-09-17T20:50:37.8608765+01:00 LOAD-GATE ok at=prebuild loads=0/2 waited_s=0
+2026-09-17T20:50:45.6525465+01:00 CLASS-PROBE P-core0 mask=0x1 got=0x1 wall_s=7.732 cpu_s=7.719 SPIN ms=7575 x=72000065999996.6 
+2026-09-17T20:50:53.6076918+01:00 CLASS-PROBE P-core3 mask=0x8 got=0x8 wall_s=7.954 cpu_s=7.938 SPIN ms=7813 x=72000065999996.6 
+2026-09-17T20:51:06.8192674+01:00 CLASS-PROBE E-core4 mask=0x10 got=0x10 wall_s=13.217 cpu_s=13.156 SPIN ms=13026 x=72000065999996.6 
+2026-09-17T20:51:20.0582327+01:00 CLASS-PROBE E-core7 mask=0x80 got=0x80 wall_s=13.239 cpu_s=13.156 SPIN ms=13046 x=72000065999996.6 
+2026-09-17T20:51:33.1959971+01:00 CLASS-PROBE E-core8 mask=0x100 got=0x100 wall_s=13.122 cpu_s=13.062 SPIN ms=12926 x=72000065999996.6 
+2026-09-17T20:51:46.4961549+01:00 CLASS-PROBE E-core11 mask=0x800 got=0x800 wall_s=13.301 cpu_s=13.266 SPIN ms=13100 x=72000065999996.6 
+2026-09-17T20:52:02.3301075+01:00 CLASS-PROBE LPE-core12 mask=0x1000 got=0x1000 wall_s=15.836 cpu_s=15.75 SPIN ms=15602 x=72000065999996.6 
+2026-09-17T20:52:09.1150483+01:00 EXTRACT rc=0 secs=6.8 into=<rig>\poolladder2-17sep\src
+2026-09-17T20:54:10.6380877+01:00 BUILD rc=0 secs=121.5 log=<rig>\poolladder2-17sep\build-poolladder2.log
+2026-09-17T20:54:10.7330828+01:00 BIN bytes=4173312 want_bytes=4173312 sha256=44BA297258F84C346DF4A32649550D6833D643087EF0DC67FF07FE51D219D0E1 ref_sha256=FDDB6AA34283001A8437D5A7208EAE5F7D026F8F7E67330E78E9CB307F95295F sha_same=False (a DIFFERENT sha here is expected and not a fault - the build embeds its own path and this root is not theirs; the byte count is the invariant)
+2026-09-17T20:54:10.7330828+01:00 FIXTURE ABSENT - ladder 1 builds it <rig>\poolladder2-17sep\fix-4194304-1024
+2026-09-17T20:55:07.8696814+01:00 LOAD-GATE ok at=p2t16 loads=10 waited_s=0
+2026-09-17T20:55:07.8778727+01:00 ARM p2t16 label=4m2-t16 aff=none threads=16 log=<rig>\poolladder2-17sep\harness\logs\p2t16.log
+2026-09-17T20:55:07.8778727+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\poolladder2-17sep\harness\wcomb.ps1" -Root "<rig>\poolladder2-17sep" -Bin "<rig>\poolladder2-17sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag p2t16 -Label 4m2-t16 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 16 -Reps 1 -Residency resident -NttBudget 21474836480
+2026-09-17T21:29:21.0172004+01:00 ARM-DONE p2t16 rc=0 legs=20 lock_waits=0
+2026-09-17T21:29:22.0728573+01:00 LOAD-GATE ok at=p2e8 loads=1 waited_s=0
+2026-09-17T21:29:22.0942623+01:00 ARM p2e8 label=4m2-e8 aff=0xFF0 threads=8 log=<rig>\poolladder2-17sep\harness\logs\p2e8.log
+2026-09-17T21:29:22.0942623+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\poolladder2-17sep\harness\wcomb.ps1" -Root "<rig>\poolladder2-17sep" -Bin "<rig>\poolladder2-17sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag p2e8 -Label 4m2-e8 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 8 -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xFF0
+2026-09-17T21:52:00.8139023+01:00 ARM-DONE p2e8 rc=0 legs=20 lock_waits=0
+2026-09-17T21:52:01.8772505+01:00 LOAD-GATE ok at=p2pe8 loads=3 waited_s=0
+2026-09-17T21:52:01.8860873+01:00 ARM p2pe8 label=4m2-pe8 aff=0xFF threads=8 log=<rig>\poolladder2-17sep\harness\logs\p2pe8.log
+2026-09-17T21:52:01.8860873+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\poolladder2-17sep\harness\wcomb.ps1" -Root "<rig>\poolladder2-17sep" -Bin "<rig>\poolladder2-17sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag p2pe8 -Label 4m2-pe8 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 8 -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xFF
+2026-09-17T22:12:23.1302612+01:00 ARM-DONE p2pe8 rc=0 legs=20 lock_waits=0
+2026-09-17T22:12:24.2167880+01:00 LOAD-GATE ok at=p2e4 loads=6 waited_s=0
+2026-09-17T22:12:24.2303948+01:00 ARM p2e4 label=4m2-e4 aff=0xF0 threads=4 log=<rig>\poolladder2-17sep\harness\logs\p2e4.log
+2026-09-17T22:12:24.2303948+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\poolladder2-17sep\harness\wcomb.ps1" -Root "<rig>\poolladder2-17sep" -Bin "<rig>\poolladder2-17sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag p2e4 -Label 4m2-e4 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 4 -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xF0
+2026-09-17T22:45:19.2814838+01:00 ARM-DONE p2e4 rc=0 legs=20 lock_waits=0
+2026-09-17T22:45:19.2814838+01:00 POOLLADDER2-ROUND end rc=0

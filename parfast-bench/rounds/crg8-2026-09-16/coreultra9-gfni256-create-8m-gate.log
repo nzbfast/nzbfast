@@ -1,0 +1,12 @@
+﻿2026-09-16T16:58:21.3641270Z GATE PID 11432
+2026-09-16T16:58:21.3701447Z GATE START waiting for a DONE line naming parfast-4mib-pinned-affinity-pools, then a free lock and a quiet box; deadline 2026-09-16T20:30:00Z
+2026-09-16T18:25:49.3898970Z SAW DONE for parfast-4mib-pinned-affinity-pools :: DONE 2026-09-16T18:25:42Z parfast-4mib-pinned-affinity-pools gen=a3f6f2ff (<user>, opus5 chip) ACCOUNTS=none - round ended rc=17; logs under <rig>\pinaff-16sep\harness\logs. See the follow-up line for the result and the box-as-left statement.
+2026-09-16T18:25:51.8510375Z probe held=True why=held by live pid=11560 holderpid=11560 load=86 foreign=238.4 quietRuns=0
+2026-09-16T18:26:13.9580590Z probe held=True why=held by live pid=11560 holderpid=11560 load=11 foreign=212.1 quietRuns=0
+2026-09-16T18:26:36.1189651Z probe held=False why=orphan (pid=11560 is gone) holderpid=11560 load=7 foreign=24.4 quietRuns=0
+2026-09-16T18:26:58.2658183Z probe held=False why=orphan (pid=11560 is gone) holderpid=11560 load=3 foreign=54.5 quietRuns=1
+2026-09-16T18:27:20.4039016Z probe held=False why=orphan (pid=11560 is gone) holderpid=11560 load=3 foreign=15.6 quietRuns=2
+2026-09-16T18:27:20.4376353Z CLAIM posted; launching the ladder
+2026-09-16T18:27:20.4431804Z ARGV -Root <rig>\crg8-16sep -Phase create -Tag crg8 -Label crg8-8mib-n2048 -Bin <rig>\crg8-16sep\parfast.exe -NoBuild -Slice 8388608 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448,480,512,544 -Threads 4,16 -Arms fold,force,force2,fold2 -Reps 1 -Residency resident -NttBudget 21474836480
+2026-09-16T19:11:22.6482922Z LADDER EXIT rc=0
+2026-09-16T19:11:22.7388814Z GATE DONE

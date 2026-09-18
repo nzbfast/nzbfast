@@ -1,0 +1,43 @@
+ INFO repair-timing: packet scan (critical): +984.88µs (total 984.88µs)
+ INFO repair-timing: verify targets + volume scan: +1.81s (total 1.82s)
+ INFO repair: repair ahead: 4096 block(s) to rebuild, structured solve
+ INFO repair-timing: adoption: +5.32ms (total 1.82s)
+ INFO repair-timing: load recovery: +95.65ms (total 1.92s)
+ INFO repair-timing:   forney joint plan: 2081 KB of kernel tables, locator tree held <= 85 KB (37 KB of it cached transforms)
+ INFO repair-timing: back-substitution setup (4096x4096, forney): 59.12ms
+ INFO repair-timing: retained from the verify pass: 0 block(s), 0.0 MB
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 8.58s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 8.58s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 8.30s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 8.30s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 7.77s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 7.77s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 8.97s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 8.97s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 9.19s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 9.19s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 8.63s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 8.63s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 8.26s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 8.26s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 8.39s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 8.39s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 9.18s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 9.18s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 8.28s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 8.28s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 8.37s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 8.37s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=1): 8.64s
+ INFO repair-timing: ntt window (67108864 bytes, 1024 slices, transformed): 8.64s
+ INFO repair-timing: ntt: 12 window(s) transformed before the tail, tail empty
+ INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic below the kernel gate 16384): 5.56s of 23.04s wall (attributed by worker share)
+ INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 17.49s of 23.04s wall (attributed by worker share)
+ INFO repair-timing: back-substitution (forney-joint): 23.04s
+ INFO repair-timing: feed+fold+solve: +125.88s (total 127.79s)
+ INFO repair-timing: patch: +92.32ms (total 127.89s)
+ INFO repair-timing: final verify: +2.39s (total 130.28s)
+ INFO repair-timing: plan prep: 59.07ms over 1 cold build(s), 64 stripe use(s) - 0.045% of the 130.29s repair
+ INFO repair-timing: forney solve: 23.04s over 1 solve(s) (stage 1 5.56s, stage 2 17.49s) - 17.684% of the 130.29s repair
+mem-floor: live high-water · ru_maxrss 1015 MB · rss 1015 MB · footprint 1015 MB · rss over footprint 0 MB · repair work 940 MB (own peak 940) · scan reads 0 MB (own peak 8) · verifier tables 0 MB · unattributed 75 MB
+mem-floor: sampled peak rss · ru_maxrss 1015 MB · rss 1015 MB · footprint 1015 MB · rss over footprint 0 MB · repair work 940 MB (own peak 940) · scan reads 0 MB (own peak 8) · verifier tables 0 MB · unattributed 75 MB

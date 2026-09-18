@@ -1,0 +1,23 @@
+ROUND dcsmall start=2026-09-16T06:50:01.7051109Z host=intel-i5-10600kf cores=12
+BOX cpu=Intel(R) Core(TM) i5-10600KF CPU @ 4.10GHz cores=6 logical=12 ram_gb=63.9
+BIN parfast sha256=9FA78067CC52A2DF mtime=2026-09-16T05:57:11.5279431Z
+FIXTURE building 8858370048 bytes
+FIXTURE built_s=10.3 size=8858370048
+FIXTURE sha256=5D99CD8B38D638938BFD6FC04D750BA6661A369E279DA2F61E99BC8551A113C1
+BOX-QUEUE foreign_cpu=84.4 ceiling=120 locked=True waited_s=1 at=setup
+BOX-QUEUE foreign_cpu=95.3 ceiling=120 locked=True waited_s=47 at=setup
+BOX-QUEUE foreign_cpu=70.3 ceiling=120 locked=True waited_s=93 at=setup
+BOX-QUEUE foreign_cpu=325 ceiling=120 locked=True waited_s=139 at=setup
+BOX-QUEUE foreign_cpu=454.7 ceiling=120 locked=True waited_s=185 at=setup
+BOX-QUEUE foreign_cpu=81.2 ceiling=120 locked=True waited_s=232 at=setup
+BOX-QUEUE foreign_cpu=251.6 ceiling=120 locked=True waited_s=278 at=setup
+BOX-QUEUE foreign_cpu=84.4 ceiling=120 locked=True waited_s=324 at=setup
+BOX-QUEUE foreign_cpu=300 ceiling=120 locked=True waited_s=370 at=setup
+BOX-QUEUE foreign_cpu=379.7 ceiling=120 locked=True waited_s=416 at=setup
+BOX-QUEUE foreign_cpu=68.8 ceiling=120 locked=True waited_s=462 at=setup
+BOX-QUEUE foreign_cpu=82.8 ceiling=120 locked=True waited_s=508 at=setup
+BOX-QUEUE foreign_cpu=142.2 ceiling=120 locked=True waited_s=554 at=setup
+BOX-QUEUE foreign_cpu=148.4 ceiling=120 locked=True waited_s=600 at=setup
+BOX-QUEUE foreign_cpu=693.8 ceiling=120 locked=True waited_s=646 at=setup
+BOX-QUEUE foreign_cpu=70.3 ceiling=120 locked=False waited_s=692 at=setup
+BOX-QUEUE foreign_cpu=135.9 ceiling=120 locked=False waited_s=738 at=setup

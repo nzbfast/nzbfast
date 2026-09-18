@@ -272,214 +272,258 @@
    "note": null,
    "tools": [
     "parfast",
-    "par2turbo",
-    "par2j64"
+    "parfast-beta2",
+    "par2turbo"
    ],
    "rows": [
     {
      "m": 1,
-     "parfast": 4.114,
-     "parfast_n": 2,
-     "parfast_spread_raw": 43.5,
-     "parfast_spread": 43.5,
-     "par2turbo": 9.556,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 48.3,
-     "par2turbo_spread": 48.3,
-     "par2j64": 23.288,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 4.7
+     "parfast": 2.627,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.4,
+     "parfast-beta2": 2.966,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 13.6,
+     "parfast-beta2_spread": 13.6,
+     "par2turbo": 9.831,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 6.4,
+     "par2turbo_spread": 6.4
     },
     {
      "m": 16,
-     "parfast": 8.78,
-     "parfast_n": 2,
-     "parfast_spread_raw": 17.3,
-     "parfast_spread": 17.3,
-     "par2turbo": 17.398,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 3.9,
-     "par2j64": 46.385,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 18.3,
-     "par2j64_spread": 18.3
+     "parfast": 6.538,
+     "parfast_n": 3,
+     "parfast_spread_raw": 21.4,
+     "parfast_spread": 21.4,
+     "parfast-beta2": 6.417,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 25.9,
+     "parfast-beta2_spread": 25.9,
+     "par2turbo": 19.246,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 27.6,
+     "par2turbo_spread": 27.6
     },
     {
      "m": 64,
-     "parfast": 9.894,
-     "parfast_n": 2,
-     "parfast_spread_raw": 3.8,
-     "par2turbo": 22.798,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 14.4,
-     "par2turbo_spread": 14.4,
-     "par2j64": 58.809,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 0.3
+     "parfast": 8.094,
+     "parfast_n": 3,
+     "parfast_spread_raw": 8.6,
+     "parfast_spread": 8.6,
+     "parfast-beta2": 8.14,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 40.2,
+     "parfast-beta2_spread": 40.2,
+     "par2turbo": 25.001,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 6.1,
+     "par2turbo_spread": 6.1
     },
     {
      "m": 256,
-     "parfast": 13.355,
-     "parfast_n": 2,
-     "parfast_spread_raw": 13.0,
-     "parfast_spread": 13.0,
-     "par2turbo": 25.168,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 1.0,
-     "par2j64": 71.433,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 1.1
+     "parfast": 10.598,
+     "parfast_n": 3,
+     "parfast_spread_raw": 15.2,
+     "parfast_spread": 15.2,
+     "parfast-beta2": 11.124,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 8.8,
+     "parfast-beta2_spread": 8.8,
+     "par2turbo": 24.577,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 3.9
     },
     {
      "m": 512,
-     "parfast": 22.643,
-     "parfast_n": 2,
-     "parfast_spread_raw": 2.4,
-     "par2turbo": 31.312,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 5.7,
-     "par2turbo_spread": 5.7,
-     "par2j64": 89.579,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 0.9
+     "parfast": 20.066,
+     "parfast_n": 3,
+     "parfast_spread_raw": 1.0,
+     "parfast-beta2": 19.539,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 6.2,
+     "parfast-beta2_spread": 6.2,
+     "par2turbo": 25.752,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 9.8,
+     "par2turbo_spread": 9.8
+    },
+    {
+     "m": 640,
+     "parfast": 20.135,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.9,
+     "parfast-beta2": 19.879,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 0.9,
+     "par2turbo": 30.175,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 2.2
+    },
+    {
+     "m": 704,
+     "parfast": 20.414,
+     "parfast_n": 3,
+     "parfast_spread_raw": 6.6,
+     "parfast_spread": 6.6,
+     "parfast-beta2": 19.944,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 4.9,
+     "par2turbo": 29.385,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 3.0
     },
     {
      "m": 768,
-     "parfast": 23.684,
-     "parfast_n": 2,
-     "parfast_spread_raw": 3.1,
-     "par2turbo": 33.93,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 0.6,
-     "par2j64": 106.469,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 1.6
+     "parfast": 20.945,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.3,
+     "parfast-beta2": 20.326,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 7.0,
+     "parfast-beta2_spread": 7.0,
+     "par2turbo": 30.918,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 10.4,
+     "par2turbo_spread": 10.4
+    },
+    {
+     "m": 896,
+     "parfast": 21.41,
+     "parfast_n": 3,
+     "parfast_spread_raw": 3.6,
+     "parfast-beta2": 20.937,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 3.7,
+     "par2turbo": 33.96,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 1.6
     },
     {
      "m": 1024,
-     "parfast": 24.44,
-     "parfast_n": 2,
-     "parfast_spread_raw": 1.2,
-     "par2turbo": 40.023,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 0.1,
-     "par2j64": 123.237,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 0.5
+     "parfast": 22.073,
+     "parfast_n": 3,
+     "parfast_spread_raw": 3.5,
+     "parfast-beta2": 20.897,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 9.4,
+     "parfast-beta2_spread": 9.4,
+     "par2turbo": 37.75,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 2.4
     },
     {
      "m": 1152,
-     "parfast": 25.553,
-     "parfast_n": 2,
-     "parfast_spread_raw": 3.5,
-     "par2turbo": 42.716,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 0.1,
-     "par2j64": 131.827,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 0.4
+     "parfast": 22.509,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.8,
+     "parfast-beta2": 22.796,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 3.3,
+     "par2turbo": 41.011,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 0.9
     },
     {
      "m": 1280,
-     "parfast": 25.07,
-     "parfast_n": 2,
-     "parfast_spread_raw": 4.0,
-     "par2turbo": 46.639,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 0.6,
-     "par2j64": 140.642,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 0.4
+     "parfast": 21.503,
+     "parfast_n": 3,
+     "parfast_spread_raw": 6.4,
+     "parfast_spread": 6.4,
+     "parfast-beta2": 21.43,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 0.9,
+     "par2turbo": 43.073,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 5.1,
+     "par2turbo_spread": 5.1
     },
     {
      "m": 1408,
-     "parfast": 25.423,
-     "parfast_n": 2,
-     "parfast_spread_raw": 11.2,
-     "parfast_spread": 11.2,
-     "par2turbo": 49.413,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 0.6,
-     "par2j64": 149.605,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 0.2
+     "parfast": 21.839,
+     "parfast_n": 3,
+     "parfast_spread_raw": 1.2,
+     "parfast-beta2": 21.623,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 2.4,
+     "par2turbo": 47.207,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 1.6
     },
     {
      "m": 1600,
-     "parfast": 25.802,
-     "parfast_n": 2,
-     "parfast_spread_raw": 2.2,
-     "par2turbo": 54.754,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 1.5,
-     "par2j64": 162.86,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 0.7
+     "parfast": 21.816,
+     "parfast_n": 3,
+     "parfast_spread_raw": 5.6,
+     "parfast_spread": 5.6,
+     "parfast-beta2": 22.06,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 2.1,
+     "par2turbo": 51.502,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 0.5
     },
     {
      "m": 1792,
-     "parfast": 27.09,
-     "parfast_n": 2,
+     "parfast": 22.768,
+     "parfast_n": 3,
      "parfast_spread_raw": 1.2,
-     "par2turbo": 60.562,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 7.5,
-     "par2turbo_spread": 7.5,
-     "par2j64": 177.008,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 0.2
+     "parfast-beta2": 22.338,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 6.6,
+     "parfast-beta2_spread": 6.6,
+     "par2turbo": 56.557,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 0.5
     },
     {
      "m": 2048,
-     "parfast": 26.041,
-     "parfast_n": 2,
-     "parfast_spread_raw": 0.4,
-     "par2turbo": 65.984,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 1.9,
-     "par2j64": 194.183,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 0.1
+     "parfast": 22.954,
+     "parfast_n": 3,
+     "parfast_spread_raw": 3.8,
+     "parfast-beta2": 23.019,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 1.8,
+     "par2turbo": 62.918,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 1.0
     },
     {
      "m": 2098,
-     "parfast": 26.837,
-     "parfast_n": 2,
-     "parfast_spread_raw": 3.0,
-     "par2turbo": 67.02,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 0.4,
-     "par2j64": 197.122,
-     "par2j64_n": 2,
-     "par2j64_spread_raw": 0.4
+     "parfast": 23.19,
+     "parfast_n": 3,
+     "parfast_spread_raw": 4.5,
+     "parfast-beta2": 23.172,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 2.9,
+     "par2turbo": 64.596,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 1.1
     }
    ],
    "verify": [
     {
      "tool": "parfast",
-     "wall": 1.69,
-     "spread": 2.6
+     "wall": 1.595,
+     "spread": 1.4
+    },
+    {
+     "tool": "parfast-beta2",
+     "wall": 1.693,
+     "spread": 1.6
     },
     {
      "tool": "par2turbo",
-     "wall": 3.549,
-     "spread": 4.5
-    },
-    {
-     "tool": "par2j64",
-     "wall": 10.189,
-     "spread": 1.2
+     "wall": 3.56,
+     "spread": 1.1
     }
    ],
    "box": {
     "cpu": "Intel(R) Core(TM) Ultra 9 386H",
-    "caption": "Intel64",
     "cores": "16",
-    "threads": "16",
     "ram_gb": "31.4",
     "os": "Microsoft Windows 11 Home",
-    "build": "10.0.26200",
-    "Cfree_gb": "669.9"
+    "free_gb": "592.4"
    },
    "protocol": {
     "slice": "768000",
@@ -487,33 +531,34 @@
     "source_blocks": "13990",
     "redundancy_pct": "14.996",
     "damage": "scattered-seeded-slice-overwrite",
-    "reps": "2",
+    "reps": "3",
     "gate": "sha256-all-members",
-    "prewarm": "full-read-of-work-dir"
+    "prewarm": "recovery-set-read",
+    "driver": "ladder.py"
    },
    "argv": {
     "parfast": "r -q -t16 -T16 f.par2",
-    "par2turbo": "r -q -t16 -T16 f.par2",
-    "par2j64": "r f.par2"
+    "beta2": "r -q -t16 -T16 f.par2",
+    "par2turbo": "r -q -t16 -T16 f.par2"
    },
    "bins": [
     {
      "tool": "parfast",
-     "sha256": "cae5a6f368af74f1eb31afa483eb935c663ea976ddd0eecb5b76e6c4487360e9",
+     "sha256": "f018fcb2beb2122d5d019306cd86c537f7cad0d047cdccb151891f9f1ce531c8",
      "built": "",
-     "version": ""
+     "version": "parfast version 1.5.0-beta.2"
+    },
+    {
+     "tool": "parfast-beta2",
+     "sha256": "93dbf97ef0a29dca5f8aed000f4969d050e10f68f56e586b0c12676e08e37083",
+     "built": "",
+     "version": "parfast version 1.5.0-beta.2"
     },
     {
      "tool": "par2turbo",
      "sha256": "36ce11d92c895a552485ba8cb1ad4b92ca62a00333f1aa6308daafbc371e69e9",
      "built": "",
-     "version": ""
-    },
-    {
-     "tool": "par2j64",
-     "sha256": "8e75c2a3f256094cc0313f477b6e56e492cc7d258f9cb6b755bee98cf289620a",
-     "built": "",
-     "version": ""
+     "version": "par2cmdline-turbo version 1.5.0"
     }
    ],
    "fixture": {
@@ -524,205 +569,276 @@
    "create": [
     {
      "tool": "parfast",
-     "wall": 56.817,
-     "cpu": 152.766,
-     "peak_mb": 12030.3
+     "wall": 11.211,
+     "cpu": -1.0,
+     "peak_mb": -1.0
     }
    ],
-   "legs_total": 84,
-   "log": "zenlad.log"
+   "legs_total": 156,
+   "log": "rounds/tier-rounds-2026-09-13/zenlad2.log"
   },
   {
    "label": "Apple M3 Ultra",
-   "sub": "32 cores, 256 GB, macOS 27 desktop",
+   "sub": "32 cores, 512 GB, macOS 27 desktop",
    "note": null,
    "tools": [
     "parfast",
+    "parfast-beta2",
     "par2turbo"
    ],
    "rows": [
     {
      "m": 1,
-     "parfast": 2.213,
-     "parfast_n": 2,
-     "parfast_spread_raw": 3.4,
-     "par2turbo": 6.373,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 5.6,
-     "par2turbo_spread": 5.6
-    },
-    {
-     "m": 16,
-     "parfast": 3.083,
-     "parfast_n": 2,
-     "parfast_spread_raw": 0.9,
-     "par2turbo": 9.327,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 24.5,
-     "par2turbo_spread": 24.5
-    },
-    {
-     "m": 64,
-     "parfast": 3.301,
-     "parfast_n": 2,
-     "parfast_spread_raw": 5.9,
-     "parfast_spread": 5.9,
-     "par2turbo": 9.403,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 1.3
-    },
-    {
-     "m": 256,
-     "parfast": 4.408,
-     "parfast_n": 2,
-     "parfast_spread_raw": 1.2,
-     "par2turbo": 11.897,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 4.0
-    },
-    {
-     "m": 512,
-     "parfast": 4.611,
-     "parfast_n": 2,
-     "parfast_spread_raw": 1.5,
-     "par2turbo": 15.698,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 22.9,
-     "par2turbo_spread": 22.9
-    },
-    {
-     "m": 640,
-     "parfast": 4.754,
-     "parfast_n": 2,
-     "parfast_spread_raw": 1.0,
-     "par2turbo": 16.526,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 6.6,
-     "par2turbo_spread": 6.6
-    },
-    {
-     "m": 704,
-     "parfast": 4.876,
-     "parfast_n": 2,
-     "parfast_spread_raw": 0.0,
-     "par2turbo": 17.641,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 4.2
-    },
-    {
-     "m": 768,
-     "parfast": 4.99,
-     "parfast_n": 2,
-     "parfast_spread_raw": 0.4,
-     "par2turbo": 18.743,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 1.9
-    },
-    {
-     "m": 896,
-     "parfast": 4.995,
-     "parfast_n": 2,
-     "parfast_spread_raw": 3.7,
-     "par2turbo": 20.582,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 0.5
-    },
-    {
-     "m": 1024,
-     "parfast": 5.143,
-     "parfast_n": 2,
-     "parfast_spread_raw": 1.6,
-     "par2turbo": 22.739,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 7.3,
-     "par2turbo_spread": 7.3
-    },
-    {
-     "m": 1152,
-     "parfast": 5.271,
-     "parfast_n": 2,
-     "parfast_spread_raw": 1.4,
-     "par2turbo": 23.684,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 6.7,
-     "par2turbo_spread": 6.7
-    },
-    {
-     "m": 1280,
-     "parfast": 5.304,
-     "parfast_n": 2,
-     "parfast_spread_raw": 1.6,
-     "par2turbo": 26.036,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 0.9
-    },
-    {
-     "m": 1408,
-     "parfast": 5.451,
-     "parfast_n": 2,
-     "parfast_spread_raw": 0.6,
-     "par2turbo": 27.194,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 5.7,
-     "par2turbo_spread": 5.7
-    },
-    {
-     "m": 1600,
-     "parfast": 5.627,
-     "parfast_n": 2,
-     "parfast_spread_raw": 2.2,
-     "par2turbo": 29.865,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 4.3
-    },
-    {
-     "m": 1792,
-     "parfast": 5.673,
-     "parfast_n": 2,
-     "parfast_spread_raw": 2.2,
-     "par2turbo": 34.08,
-     "par2turbo_n": 2,
+     "parfast": 1.008,
+     "parfast_n": 3,
+     "parfast_spread_raw": 6.7,
+     "parfast_spread": 6.7,
+     "parfast-beta2": 2.228,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 20.9,
+     "parfast-beta2_spread": 20.9,
+     "par2turbo": 6.592,
+     "par2turbo_n": 3,
      "par2turbo_spread_raw": 6.0,
      "par2turbo_spread": 6.0
     },
     {
-     "m": 2048,
-     "parfast": 5.979,
-     "parfast_n": 2,
-     "parfast_spread_raw": 0.8,
-     "par2turbo": 37.043,
-     "par2turbo_n": 2,
+     "m": 16,
+     "parfast": 1.505,
+     "parfast_n": 3,
+     "parfast_spread_raw": 11.4,
+     "parfast_spread": 11.4,
+     "parfast-beta2": 3.05,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 2.1,
+     "par2turbo": 8.439,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 9.4,
+     "par2turbo_spread": 9.4
+    },
+    {
+     "m": 64,
+     "parfast": 2.352,
+     "parfast_n": 3,
+     "parfast_spread_raw": 7.6,
+     "parfast_spread": 7.6,
+     "parfast-beta2": 3.327,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 3.8,
+     "par2turbo": 9.45,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 3.9
+    },
+    {
+     "m": 256,
+     "parfast": 3.974,
+     "parfast_n": 3,
+     "parfast_spread_raw": 3.0,
+     "parfast-beta2": 4.436,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 14.2,
+     "parfast-beta2_spread": 14.2,
+     "par2turbo": 12.308,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 5.3,
+     "par2turbo_spread": 5.3
+    },
+    {
+     "m": 512,
+     "parfast": 4.265,
+     "parfast_n": 3,
+     "parfast_spread_raw": 6.7,
+     "parfast_spread": 6.7,
+     "parfast-beta2": 4.696,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 5.1,
+     "parfast-beta2_spread": 5.1,
+     "par2turbo": 15.587,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 4.0
+    },
+    {
+     "m": 640,
+     "parfast": 4.407,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.9,
+     "parfast-beta2": 4.89,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 2.4,
+     "par2turbo": 17.957,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 5.1,
+     "par2turbo_spread": 5.1
+    },
+    {
+     "m": 704,
+     "parfast": 4.426,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.0,
+     "parfast-beta2": 4.91,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 1.0,
+     "par2turbo": 18.272,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 7.2,
+     "par2turbo_spread": 7.2
+    },
+    {
+     "m": 768,
+     "parfast": 4.471,
+     "parfast_n": 3,
+     "parfast_spread_raw": 3.4,
+     "parfast-beta2": 4.978,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 2.2,
+     "par2turbo": 18.433,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 7.8,
+     "par2turbo_spread": 7.8
+    },
+    {
+     "m": 896,
+     "parfast": 4.505,
+     "parfast_n": 3,
+     "parfast_spread_raw": 16.7,
+     "parfast_spread": 16.7,
+     "parfast-beta2": 5.157,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 4.5,
+     "par2turbo": 21.548,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 3.6
+    },
+    {
+     "m": 1024,
+     "parfast": 4.648,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.9,
+     "parfast-beta2": 5.154,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 0.9,
+     "par2turbo": 23.785,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 11.5,
+     "par2turbo_spread": 11.5
+    },
+    {
+     "m": 1152,
+     "parfast": 4.787,
+     "parfast_n": 3,
+     "parfast_spread_raw": 4.4,
+     "parfast-beta2": 5.372,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 2.1,
+     "par2turbo": 24.827,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 6.6,
+     "par2turbo_spread": 6.6
+    },
+    {
+     "m": 1280,
+     "parfast": 4.949,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.1,
+     "parfast-beta2": 5.362,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 2.1,
+     "par2turbo": 26.275,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 6.1,
+     "par2turbo_spread": 6.1
+    },
+    {
+     "m": 1408,
+     "parfast": 5.112,
+     "parfast_n": 3,
+     "parfast_spread_raw": 5.1,
+     "parfast_spread": 5.1,
+     "parfast-beta2": 5.567,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 4.0,
+     "par2turbo": 28.52,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 5.9,
+     "par2turbo_spread": 5.9
+    },
+    {
+     "m": 1600,
+     "parfast": 5.134,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.4,
+     "parfast-beta2": 5.727,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 2.4,
+     "par2turbo": 30.116,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 4.8
+    },
+    {
+     "m": 1792,
+     "parfast": 5.234,
+     "parfast_n": 3,
+     "parfast_spread_raw": 3.6,
+     "parfast-beta2": 5.831,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 2.6,
+     "par2turbo": 32.924,
+     "par2turbo_n": 3,
      "par2turbo_spread_raw": 8.3,
      "par2turbo_spread": 8.3
     },
     {
+     "m": 2048,
+     "parfast": 5.48,
+     "parfast_n": 3,
+     "parfast_spread_raw": 7.4,
+     "parfast_spread": 7.4,
+     "parfast-beta2": 6.077,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 0.9,
+     "par2turbo": 37.441,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 3.3
+    },
+    {
      "m": 2098,
-     "parfast": 6.037,
-     "parfast_n": 2,
-     "parfast_spread_raw": 0.5,
-     "par2turbo": 36.663,
-     "par2turbo_n": 2,
-     "par2turbo_spread_raw": 3.9
+     "parfast": 5.686,
+     "parfast_n": 3,
+     "parfast_spread_raw": 5.3,
+     "parfast_spread": 5.3,
+     "parfast-beta2": 6.204,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 6.8,
+     "parfast-beta2_spread": 6.8,
+     "par2turbo": 38.364,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 6.2,
+     "par2turbo_spread": 6.2
     }
    ],
    "verify": [
     {
      "tool": "parfast",
-     "wall": 1.493,
-     "spread": 0.1
+     "wall": 0.608,
+     "spread": 0.7
+    },
+    {
+     "tool": "parfast-beta2",
+     "wall": 1.495,
+     "spread": 0.2
     },
     {
      "tool": "par2turbo",
-     "wall": 3.47,
-     "spread": 2.7
+     "wall": 3.514,
+     "spread": 2.9
     }
    ],
    "box": {
     "cpu": "Apple M3 Ultra",
     "cores": "32",
-    "ram_gb": "256.0",
+    "ram_gb": "512.0",
     "os": "macOS 27.0",
-    "free_gb": "383.9"
+    "free_gb": "1938.1"
    },
    "protocol": {
     "slice": "768000",
@@ -730,20 +846,28 @@
     "source_blocks": "13990",
     "redundancy_pct": "14.996",
     "damage": "scattered-seeded-slice-overwrite",
-    "reps": "2",
+    "reps": "3",
     "gate": "sha256-all-members",
-    "prewarm": "full-read-of-work-dir"
+    "prewarm": "recovery-set-read",
+    "driver": "ladder.py"
    },
    "argv": {
-    "repair": "r -q -t32 -T16 f.par2",
-    "verify": "v -q -t32 -T16 f.par2"
+    "parfast": "r -q -t32 -T16 f.par2",
+    "beta2": "r -q -t32 -T16 f.par2",
+    "par2turbo": "r -q -t32 -T16 f.par2"
    },
    "bins": [
     {
      "tool": "parfast",
-     "sha256": "0f859e0c351e896f0e6acd36ed1bd7bd335753b737bdb435d9f609399606f000",
+     "sha256": "1c95c3c30d69f6221f8b7ad88020bdb577f62295b19824e9b5637910736e3621",
      "built": "",
-     "version": "parfast version 1.5.0-beta.1"
+     "version": "parfast version 1.5.0-beta.2"
+    },
+    {
+     "tool": "parfast-beta2",
+     "sha256": "04f16670ac90904b4601260c16067af0272e0be77151b7ff8ac2b6f5aa1cbfb9",
+     "built": "",
+     "version": "parfast version 1.5.0-beta.2"
     },
     {
      "tool": "par2turbo",
@@ -760,13 +884,13 @@
    "create": [
     {
      "tool": "parfast",
-     "wall": 3.916,
-     "cpu": 111.311,
-     "peak_mb": 12517.4
+     "wall": 4.212,
+     "cpu": 110.465,
+     "peak_mb": 12517.3
     }
    ],
-   "legs_total": 68,
-   "log": "applad.log"
+   "legs_total": 156,
+   "log": "rounds/tier-rounds-2026-09-13/m3lad2.log"
   },
   {
    "label": "Apple M5 Max",
@@ -2771,6 +2895,298 @@
   },
   "log": "mswp.log"
  },
+ "singles": [
+  {
+   "label": "Intel Core Ultra 9 386H",
+   "sub": "16 cores, 31 GB, Windows 11 laptop",
+   "note": null,
+   "tools": [
+    "parfast",
+    "parfast-beta2",
+    "par2turbo"
+   ],
+   "rows": [
+    {
+     "m": 1,
+     "parfast": 6.456,
+     "parfast_n": 3,
+     "parfast_spread_raw": 35.9,
+     "parfast_spread": 35.9,
+     "parfast-beta2": 14.371,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 14.9,
+     "parfast-beta2_spread": 14.9,
+     "par2turbo": 43.519,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 20.5,
+     "par2turbo_spread": 20.5
+    },
+    {
+     "m": 50,
+     "parfast": 8.85,
+     "parfast_n": 3,
+     "parfast_spread_raw": 12.9,
+     "parfast_spread": 12.9,
+     "parfast-beta2": 18.32,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 16.7,
+     "parfast-beta2_spread": 16.7,
+     "par2turbo": 56.056,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 1.0
+    },
+    {
+     "m": 100,
+     "parfast": 9.277,
+     "parfast_n": 3,
+     "parfast_spread_raw": 14.8,
+     "parfast_spread": 14.8,
+     "parfast-beta2": 19.209,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 11.0,
+     "parfast-beta2_spread": 11.0,
+     "par2turbo": 62.326,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 2.1
+    }
+   ],
+   "verify": [
+    {
+     "tool": "parfast",
+     "wall": 0.956,
+     "spread": 6.1
+    },
+    {
+     "tool": "parfast-beta2",
+     "wall": 9.195,
+     "spread": 1.0
+    },
+    {
+     "tool": "par2turbo",
+     "wall": 14.75,
+     "spread": 6.9
+    }
+   ],
+   "box": {
+    "cpu": "Intel(R) Core(TM) Ultra 9 386H",
+    "cores": "16",
+    "ram_gb": "31.4",
+    "os": "Microsoft Windows 11 Home",
+    "free_gb": "601.6"
+   },
+   "protocol": {
+    "slice": "4429188",
+    "recovery_blocks": "100",
+    "source_blocks": "2000",
+    "redundancy_pct": "5.000",
+    "damage": "scattered-seeded-slice-overwrite",
+    "reps": "3",
+    "gate": "sha256-all-members",
+    "prewarm": "recovery-set-read",
+    "driver": "ladder.py"
+   },
+   "argv": {
+    "parfast": "r -q -t16 -T16 f.par2",
+    "beta2": "r -q -t16 -T16 f.par2",
+    "par2turbo": "r -q -t16 -T16 f.par2"
+   },
+   "bins": [
+    {
+     "tool": "parfast",
+     "sha256": "f018fcb2beb2122d5d019306cd86c537f7cad0d047cdccb151891f9f1ce531c8",
+     "built": "",
+     "version": "parfast version 1.5.0-beta.2"
+    },
+    {
+     "tool": "parfast-beta2",
+     "sha256": "93dbf97ef0a29dca5f8aed000f4969d050e10f68f56e586b0c12676e08e37083",
+     "built": "",
+     "version": "parfast version 1.5.0-beta.2"
+    },
+    {
+     "tool": "par2turbo",
+     "sha256": "36ce11d92c895a552485ba8cb1ad4b92ca62a00333f1aa6308daafbc371e69e9",
+     "built": "",
+     "version": "par2cmdline-turbo version 1.5.0"
+    }
+   ],
+   "fixture": {
+    "members": "1",
+    "distinct_member_sha": "1/1",
+    "bytes": "8858370048"
+   },
+   "create": [
+    {
+     "tool": "parfast",
+     "wall": 9.141,
+     "cpu": -1.0,
+     "peak_mb": -1.0
+    },
+    {
+     "tool": "parfast-beta2",
+     "wall": 11.551,
+     "cpu": -1.0,
+     "peak_mb": -1.0
+    },
+    {
+     "tool": "par2turbo",
+     "wall": 15.417,
+     "cpu": -1.0,
+     "peak_mb": -1.0
+    }
+   ],
+   "legs_total": 30,
+   "log": "rounds/tier-rounds-2026-09-13/zensingle.log"
+  },
+  {
+   "label": "Apple M3 Ultra",
+   "sub": "32 cores, 512 GB, macOS 27 desktop",
+   "note": null,
+   "tools": [
+    "parfast",
+    "parfast-beta2",
+    "par2turbo"
+   ],
+   "rows": [
+    {
+     "m": 1,
+     "parfast": 1.186,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.5,
+     "parfast-beta2": 11.859,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 4.3,
+     "par2turbo": 30.859,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 24.4,
+     "par2turbo_spread": 24.4
+    },
+    {
+     "m": 50,
+     "parfast": 1.936,
+     "parfast_n": 3,
+     "parfast_spread_raw": 2.9,
+     "parfast-beta2": 12.736,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 4.6,
+     "par2turbo": 40.717,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 0.2
+    },
+    {
+     "m": 100,
+     "parfast": 2.827,
+     "parfast_n": 3,
+     "parfast_spread_raw": 0.9,
+     "parfast-beta2": 13.616,
+     "parfast-beta2_n": 3,
+     "parfast-beta2_spread_raw": 3.6,
+     "par2turbo": 44.355,
+     "par2turbo_n": 3,
+     "par2turbo_spread_raw": 1.3
+    }
+   ],
+   "verify": [
+    {
+     "tool": "parfast",
+     "wall": 0.471,
+     "spread": 5.1
+    },
+    {
+     "tool": "parfast-beta2",
+     "wall": 11.348,
+     "spread": 1.2
+    },
+    {
+     "tool": "par2turbo",
+     "wall": 12.413,
+     "spread": 3.2
+    }
+   ],
+   "box": {
+    "cpu": "Apple M3 Ultra",
+    "cores": "32",
+    "ram_gb": "512.0",
+    "os": "macOS 27.0",
+    "free_gb": "1943.0"
+   },
+   "protocol": {
+    "slice": "4429188",
+    "recovery_blocks": "100",
+    "source_blocks": "2000",
+    "redundancy_pct": "5.000",
+    "damage": "scattered-seeded-slice-overwrite",
+    "reps": "3",
+    "gate": "sha256-all-members",
+    "prewarm": "recovery-set-read",
+    "driver": "ladder.py"
+   },
+   "argv": {
+    "parfast": "r -q -t32 -T16 f.par2",
+    "beta2": "r -q -t32 -T16 f.par2",
+    "par2turbo": "r -q -t32 -T16 f.par2"
+   },
+   "bins": [
+    {
+     "tool": "parfast",
+     "sha256": "1c95c3c30d69f6221f8b7ad88020bdb577f62295b19824e9b5637910736e3621",
+     "built": "",
+     "version": "parfast version 1.5.0-beta.2"
+    },
+    {
+     "tool": "parfast-beta2",
+     "sha256": "04f16670ac90904b4601260c16067af0272e0be77151b7ff8ac2b6f5aa1cbfb9",
+     "built": "",
+     "version": "parfast version 1.5.0-beta.2"
+    },
+    {
+     "tool": "par2turbo",
+     "sha256": "f15cc37cd102f9fd64bbe6adb84d9f4009406bea86e8748dbfca2f85d37d3a31",
+     "built": "",
+     "version": "par2cmdline-turbo version 1.5.0"
+    },
+    {
+     "tool": "parpar",
+     "sha256": "a5d4bccd5172d191b20d27c9046bc7fecaeb2d895a83435f80ea1f56f03335fe",
+     "built": "",
+     "version": "0.4.6"
+    }
+   ],
+   "fixture": {
+    "members": "1",
+    "distinct_member_sha": "1/1",
+    "bytes": "8858370048"
+   },
+   "create": [
+    {
+     "tool": "parfast",
+     "wall": 11.333,
+     "cpu": 56.085,
+     "peak_mb": 641.5
+    },
+    {
+     "tool": "parfast-beta2",
+     "wall": 11.32,
+     "cpu": 62.976,
+     "peak_mb": 641.8
+    },
+    {
+     "tool": "par2turbo",
+     "wall": 12.846,
+     "cpu": 44.259,
+     "peak_mb": 641.8
+    },
+    {
+     "tool": "parpar",
+     "wall": 12.183,
+     "cpu": 44.761,
+     "peak_mb": 641.8
+    }
+   ],
+   "legs_total": 30,
+   "log": "rounds/tier-rounds-2026-09-13/m3single.log"
+  }
+ ],
  "sweep2": {
   "rows": [
    {

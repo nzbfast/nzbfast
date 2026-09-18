@@ -1,0 +1,31 @@
+HELPER-PASS host=apple-m3-ultra cpu=Apple M3 Ultra cores=32 bin=3b1925a39ce64a4e start=2026-09-16T15:35:15Z
+HLEG rung=1 rep=1 rc=0 wall=11.64 helper_threads=1 helper_own_s=4.562 chain_alone=11.10s reported=[enrolling (11.26s)] sha=5b8d41b8cae45152 load1=5.11
+QUEUE load1=5.11 rung=2 rep=1
+HLEG rung=2 rep=1 rc=0 wall=11.33 helper_threads=2 helper_own_s=2.376 chain_alone=11.08s reported=[enrolling (11.21s)] sha=5b8d41b8cae45152 load1=4.75
+HLEG rung=3 rep=1 rc=0 wall=11.33 helper_threads=3 helper_own_s=1.663 chain_alone=11.09s reported=[enrolling (11.22s)] sha=5b8d41b8cae45152 load1=4.94
+HLEG rung=4 rep=1 rc=0 wall=11.36 helper_threads=4 helper_own_s=1.306 chain_alone=11.10s reported=[enrolling (11.23s)] sha=5b8d41b8cae45152 load1=5.02
+QUEUE load1=5.02 rung=8 rep=1
+HLEG rung=8 rep=1 rc=0 wall=11.33 helper_threads=8 helper_own_s=0.762 chain_alone=11.08s reported=[enrolling (11.21s)] sha=5b8d41b8cae45152 load1=4.39
+HLEG rung=8 rep=2 rc=0 wall=11.34 helper_threads=8 helper_own_s=0.766 chain_alone=11.10s reported=[enrolling (11.22s)] sha=5b8d41b8cae45152 load1=7.11
+QUEUE load1=7.11 rung=4 rep=2
+QUEUE load1=6.54 rung=4 rep=2
+QUEUE load1=5.54 rung=4 rep=2
+QUEUE load1=5.07 rung=4 rep=2
+HLEG rung=4 rep=2 rc=0 wall=11.31 helper_threads=4 helper_own_s=1.298 chain_alone=11.07s reported=[enrolling (11.19s)] sha=5b8d41b8cae45152 load1=4.62
+HLEG rung=3 rep=2 rc=0 wall=11.35 helper_threads=3 helper_own_s=1.662 chain_alone=11.10s reported=[enrolling (11.23s)] sha=5b8d41b8cae45152 load1=5.72
+QUEUE load1=5.72 rung=2 rep=2
+QUEUE load1=5.27 rung=2 rep=2
+HLEG rung=2 rep=2 rc=0 wall=11.33 helper_threads=2 helper_own_s=2.377 chain_alone=11.08s reported=[enrolling (11.21s)] sha=5b8d41b8cae45152 load1=4.83
+HLEG rung=1 rep=2 rc=0 wall=11.34 helper_threads=1 helper_own_s=4.524 chain_alone=11.09s reported=[enrolling (11.22s)] sha=5b8d41b8cae45152 load1=5.38
+QUEUE load1=5.38 rung=1 rep=3
+HLEG rung=1 rep=3 rc=0 wall=11.34 helper_threads=1 helper_own_s=4.516 chain_alone=11.09s reported=[enrolling (11.22s)] sha=5b8d41b8cae45152 load1=5.29
+QUEUE load1=5.29 rung=2 rep=3
+QUEUE load1=5.01 rung=2 rep=3
+HLEG rung=2 rep=3 rc=0 wall=11.33 helper_threads=2 helper_own_s=2.371 chain_alone=11.08s reported=[enrolling (11.21s)] sha=5b8d41b8cae45152 load1=5.30
+QUEUE load1=5.30 rung=3 rep=3
+HLEG rung=3 rep=3 rc=0 wall=11.36 helper_threads=3 helper_own_s=1.657 chain_alone=11.07s reported=[enrolling (11.20s)] sha=5b8d41b8cae45152 load1=5.06
+QUEUE load1=5.06 rung=4 rep=3
+HLEG rung=4 rep=3 rc=0 wall=11.33 helper_threads=4 helper_own_s=1.301 chain_alone=11.09s reported=[enrolling (11.21s)] sha=5b8d41b8cae45152 load1=5.05
+QUEUE load1=5.05 rung=8 rep=3
+HLEG rung=8 rep=3 rc=0 wall=11.33 helper_threads=8 helper_own_s=0.769 chain_alone=11.08s reported=[enrolling (11.21s)] sha=5b8d41b8cae45152 load1=5.77
+HELPER-PASS done=2026-09-16T15:41:52Z

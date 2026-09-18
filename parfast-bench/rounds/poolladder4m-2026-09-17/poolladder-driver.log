@@ -1,0 +1,25 @@
+2026-09-17T15:40:32.1895710+01:00 POOLLADDER-ROUND start root=<rig>\poolladder-17sep bin=<rig>\poolladder-17sep\src\target\release\parfast.exe rungs=320,352,384,416,448 budget=21474836480 arms=5
+2026-09-17T15:41:34.3505684+01:00 LOAD-GATE ok at=prebuild loads=9/3 waited_s=0
+2026-09-17T15:41:34.4306280+01:00 BIN bytes=4173312 want_bytes=4173312 sha256=EACF50A8881208B0F0C2F2A1B6EC9C3235CA0B0F84BE680D5832BD6D793E9329 ref_sha256=FDDB6AA34283001A8437D5A7208EAE5F7D026F8F7E67330E78E9CB307F95295F sha_same=False (a DIFFERENT sha here is expected and not a fault - the build embeds its own path and this root is not theirs; the byte count is the invariant)
+2026-09-17T15:41:34.4306280+01:00 FIXTURE ABSENT - ladder 1 builds it <rig>\poolladder-17sep\fix-4194304-1024
+2026-09-17T15:42:27.6125740+01:00 LOAD-GATE ok at=plt16 loads=0 waited_s=0
+2026-09-17T15:42:27.6286767+01:00 ARM plt16 label=4m-t16 aff=none threads=16 log=<rig>\poolladder-17sep\harness\logs\plt16.log
+2026-09-17T15:42:27.6286767+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\poolladder-17sep\harness\wcomb.ps1" -Root "<rig>\poolladder-17sep" -Bin "<rig>\poolladder-17sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag plt16 -Label 4m-t16 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 16 -Reps 1 -Residency resident -NttBudget 21474836480
+2026-09-17T16:13:24.9182497+01:00 ARM-DONE plt16 rc=0 legs=20 lock_waits=0
+2026-09-17T16:13:25.9675620+01:00 LOAD-GATE ok at=ple4 loads=2 waited_s=0
+2026-09-17T16:13:25.9949522+01:00 ARM ple4 label=4m-e4 aff=0xF0 threads=4 log=<rig>\poolladder-17sep\harness\logs\ple4.log
+2026-09-17T16:13:25.9949522+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\poolladder-17sep\harness\wcomb.ps1" -Root "<rig>\poolladder-17sep" -Bin "<rig>\poolladder-17sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag ple4 -Label 4m-e4 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 4 -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xF0
+2026-09-17T16:46:22.1860826+01:00 ARM-DONE ple4 rc=0 legs=20 lock_waits=0
+2026-09-17T16:46:23.2538371+01:00 LOAD-GATE ok at=ple8 loads=5 waited_s=0
+2026-09-17T16:46:23.2538371+01:00 ARM ple8 label=4m-e8 aff=0xFF0 threads=8 log=<rig>\poolladder-17sep\harness\logs\ple8.log
+2026-09-17T16:46:23.2538371+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\poolladder-17sep\harness\wcomb.ps1" -Root "<rig>\poolladder-17sep" -Bin "<rig>\poolladder-17sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag ple8 -Label 4m-e8 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 8 -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xFF0
+2026-09-17T17:09:38.5147137+01:00 ARM-DONE ple8 rc=0 legs=20 lock_waits=0
+2026-09-17T17:09:39.5754670+01:00 LOAD-GATE ok at=plm12 loads=9 waited_s=0
+2026-09-17T17:09:39.5842666+01:00 ARM plm12 label=4m-m12 aff=0xFFF threads=12 log=<rig>\poolladder-17sep\harness\logs\plm12.log
+2026-09-17T17:09:39.5842666+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\poolladder-17sep\harness\wcomb.ps1" -Root "<rig>\poolladder-17sep" -Bin "<rig>\poolladder-17sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag plm12 -Label 4m-m12 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 12 -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xFFF
+2026-09-17T17:28:15.8815612+01:00 ARM-DONE plm12 rc=0 legs=20 lock_waits=0
+2026-09-17T17:28:16.9454427+01:00 LOAD-GATE ok at=plp4 loads=9 waited_s=0
+2026-09-17T17:28:16.9529957+01:00 ARM plp4 label=4m-p4 aff=0xF threads=4 log=<rig>\poolladder-17sep\harness\logs\plp4.log
+2026-09-17T17:28:16.9529957+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\poolladder-17sep\harness\wcomb.ps1" -Root "<rig>\poolladder-17sep" -Bin "<rig>\poolladder-17sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag plp4 -Label 4m-p4 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs 320,352,384,416,448 -Threads 4 -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xF
+2026-09-17T17:52:09.3320773+01:00 ARM-DONE plp4 rc=0 legs=20 lock_waits=0
+2026-09-17T17:52:09.3320773+01:00 POOLLADDER-ROUND end rc=0

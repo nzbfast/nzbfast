@@ -1,0 +1,30 @@
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=crgp4 pid=13552 started=2026-09-16T19:16:39.2184323Z
+ROUND tag=crgp4 phase=create root=<rig>\crgp4-16sep bin=<rig>\crgp4-16sep\src\target\release\parfast.exe reps=1 gf16force= start=2026-09-16T19:16:39.2184323Z
+BOX host=intel-core-ultra-9-386h cpu=Intel(R) Core(TM) Ultra 9 386H caption=Intel64 Family 6 Model 204 Stepping 2 cores=16 threads=16 ram_gb=31.4 os=Microsoft Windows 11 Home build=10.0.26200 Cfree_gb=525.6
+HARNESS plib.ps1 sha256=05860fd5351da9dba1b6ee6fcbaaf7a20c665bf6f5dc378c85e85439e5496bbe bytes=79265
+HARNESS wcomb.ps1 sha256=70fe0efe3de9ca50cafa7426e6a44fcb8056e921a8faacd5f5be2c5d615aa709 bytes=60590
+HARNESS-RIG plib.ps1:05860fd5351da9db+wcomb.ps1:70fe0efe3de9ca50
+SRC-NOINDEX-ENTRY rc=0 src=<rig>\crgp4-16sep\src
+BUILD rc=0 secs=118.7 log=<rig>\crgp4-16sep\build-crgp4.log
+BIN parfast sha256=c0f1cfa8cf57256333f1bda5dbe03f8d972311874af759eb67e16170555fad66 bytes=4173312 version=parfast version 1.5.0-beta.3 built from unknown
+PAYLOAD-POOL payload=text bytes=33694934 files=7072 roots=crates,docs,research,web entropy_bits_8m=4.775 sha256=b941b0806c9264b50050a3d6306b73456ad816ac6fd91fe8c18c5824d246ff5a
+CREATE rc=0 wall=20.529 cpu=279.391 peak_mb=19080.6
+FIXTURE-NOINDEX rc=0 fix=<rig>\crgp4-16sep\fix-4194304-1024-text
+SRC-NOINDEX rc=0 src=<rig>\crgp4-16sep\src
+FIXTURE fix=<rig>\crgp4-16sep\fix-4194304-1024-text members=16 slice=4194304 n=4096 parfiles=11
+FIXTURE-RECOVERY 640 source=shape.txt
+FIXTURE-SETTLE-WAIT foreign_cpu=88.7 thresh=25 waited_s=12 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=93.3 thresh=25 waited_s=134 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=66.6 thresh=25 waited_s=256 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=103.3 thresh=25 waited_s=400 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=40.3 thresh=25 waited_s=511 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=77.8 thresh=25 waited_s=634 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=96.2 thresh=25 waited_s=700 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=80 thresh=25 waited_s=767 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=93 thresh=25 waited_s=833 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=102.1 thresh=25 waited_s=911 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=97.7 thresh=25 waited_s=1044 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE-WAIT foreign_cpu=90.1 thresh=25 waited_s=1166 cap_s=1200 at=fixture-crgp4
+FIXTURE-SETTLE ok=0 GAVE-UP foreign_cpu=3.1 thresh=25 waited_s=1211 cap_s=1200 at=fixture-crgp4 top=[System(4) SearchIndexer(5004) MsMpEng(5248) svchost(8864)] ts=2026-09-16T19:40:13.4922452Z
+FIXTURE-SETTLE-NOTE the round CONTINUES; read every leg's foreign_cpu and the reducers' per-ladder median before trusting a number from it
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock

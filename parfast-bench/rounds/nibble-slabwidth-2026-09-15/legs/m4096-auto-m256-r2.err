@@ -1,0 +1,38 @@
+ INFO repair-timing: packet scan (critical): +973.83µs (total 973.83µs)
+ INFO repair-timing: verify targets + volume scan: +497.58ms (total 498.55ms)
+ INFO repair: repair ahead: 4096 block(s) to rebuild, structured solve
+ INFO repair-timing: adoption: +5.44ms (total 503.99ms)
+ INFO nzbkit_base::par2repair: solve window over budget: 4096 block(s) at 65536 B in 2 slab(s) of 32768 B,              output Spill - the payload is swept once per slab
+ INFO repair-timing: load recovery: +78.26ms (total 582.25ms)
+ INFO repair-timing:   forney joint plan: 2081 KB of kernel tables, locator tree held <= 85 KB (37 KB of it cached transforms)
+ INFO repair-timing: back-substitution setup (4096x4096, forney): 43.62ms
+ INFO repair-timing: feed shape under the published budget: batch 33.6 MB, channel 4, merge cap 33.6 MB
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=5632, W=256, threads=4): 1.72s
+ INFO repair-timing: ntt window (184549376 bytes, 5632 slices, transformed): 1.72s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=5632, W=256, threads=4): 1.66s
+ INFO repair-timing: ntt window (184549376 bytes, 5632 slices, transformed): 1.66s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=4): 1.25s
+ INFO repair-timing: ntt: 2 window(s) transformed before the tail, tail transformed above
+ INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic below the kernel gate 16384): 684.06ms of 3.05s wall (attributed by worker share)
+ INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 2.36s of 3.05s wall (attributed by worker share)
+ INFO repair-timing: back-substitution (forney-joint): 3.05s
+ INFO repair-timing: feed+fold+solve: +7.92s (total 8.50s)
+ INFO repair-timing:   forney joint plan: 2081 KB of kernel tables, locator tree held <= 85 KB (37 KB of it cached transforms)
+ INFO repair-timing: back-substitution setup (4096x4096, forney): 33.29ms
+ INFO repair-timing: feed shape under the published budget: batch 33.6 MB, channel 4, merge cap 33.6 MB
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=5632, W=256, threads=4): 1.65s
+ INFO repair-timing: ntt window (184549376 bytes, 5632 slices, transformed): 1.65s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=5632, W=256, threads=4): 1.68s
+ INFO repair-timing: ntt window (184549376 bytes, 5632 slices, transformed): 1.68s
+ INFO repair-timing: ntt syndromes (m=4096, needed=4096, n=1024, W=256, threads=4): 1.34s
+ INFO repair-timing: ntt: 2 window(s) transformed before the tail, tail transformed above
+ INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic below the kernel gate 16384): 716.46ms of 3.02s wall (attributed by worker share)
+ INFO repair-timing:   forney stage 2 (joint scheduler, m=4096, gate 8192, FALLBACK arithmetic, stripe 512w): 2.31s of 3.02s wall (attributed by worker share)
+ INFO repair-timing: back-substitution (forney-joint): 3.02s
+ INFO repair-timing: feed+fold+solve: +7.96s (total 16.46s)
+ INFO repair-timing: patch: +47.41ms (total 16.51s)
+ INFO repair-timing: final verify: +274.55ms (total 16.78s)
+ INFO repair-timing: plan prep: 76.81ms over 2 cold build(s), 64 stripe use(s) - 0.458% of the 16.78s repair
+ INFO repair-timing: forney solve: 6.07s over 2 solve(s) (stage 1 1.40s, stage 2 4.67s) - 36.185% of the 16.78s repair
+mem-floor: live high-water · ru_maxrss 621 MB · rss 621 MB · footprint 621 MB · rss over footprint 0 MB · repair work 352 MB (own peak 386) · scan reads 0 MB (own peak 32) · verifier tables 0 MB · unattributed 268 MB
+mem-floor: sampled peak rss · ru_maxrss 621 MB · rss 621 MB · footprint 621 MB · rss over footprint 0 MB · repair work 352 MB (own peak 386) · scan reads 0 MB (own peak 32) · verifier tables 0 MB · unattributed 268 MB

@@ -1,0 +1,35 @@
+ROUND dcenrol start=2026-09-16T10:17:55.3308861Z host=snapdragon-x2-elite-extreme cores=18 rungs=1,2,3,4 reps=3
+BOX cpu=Snapdragon(R) X2 Elite Extreme - X2E94100 - Qualcomm Oryon(TM) CPU cores=18 logical=18 ram_gb=47.6
+BIN parfast sha256=48626DD77B67E679 mtime=2026-09-16T10:17:41.6332292Z
+FIXTURE sha256=5D99CD8B38D638938BFD6FC04D750BA6661A369E279DA2F61E99BC8551A113C1
+BOX-FREE foreign_cpu=25 ceiling=180 waited_s=1 at=pre-fresh-1
+LEG arm=fresh rep=1 rc=0 wall=10.814 cpu=56.859 peakmb=641.7 foreign_cpu=34.4 foreign_after=39.1 fused=true fold_alone=7.10s chain_alone=9.72s dc=[-] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:38:29.9679313Z
+BOX-FREE foreign_cpu=25 ceiling=180 waited_s=1 at=pre-e1-1
+LEG arm=e1 rep=1 rc=0 wall=10.194 cpu=66.484 peakmb=9089.5 foreign_cpu=43.8 foreign_after=42.2 fused=true fold_alone=6.97s chain_alone=9.86s dc=[digest-cache single.bin: miss, enrolling (10.03s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:38:45.8976077Z
+BOX-FREE foreign_cpu=31.2 ceiling=180 waited_s=1 at=pre-e2-1
+LEG arm=e2 rep=1 rc=0 wall=10.135 cpu=66.906 peakmb=9089.8 foreign_cpu=43.8 foreign_after=62.5 fused=true fold_alone=6.99s chain_alone=9.80s dc=[digest-cache single.bin: miss, enrolling (9.97s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:39:01.7350898Z
+BOX-FREE foreign_cpu=53.1 ceiling=180 waited_s=1 at=pre-e3-1
+LEG arm=e3 rep=1 rc=0 wall=10.211 cpu=67.219 peakmb=9089.6 foreign_cpu=32.8 foreign_after=23.4 fused=true fold_alone=7.31s chain_alone=9.89s dc=[digest-cache single.bin: miss, enrolling (10.06s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:39:17.6566836Z
+BOX-FREE foreign_cpu=35.9 ceiling=180 waited_s=1 at=pre-e4-1
+LEG arm=e4 rep=1 rc=0 wall=10.135 cpu=68.156 peakmb=9089.7 foreign_cpu=26.6 foreign_after=31.2 fused=true fold_alone=7.03s chain_alone=9.81s dc=[digest-cache single.bin: miss, enrolling (9.97s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:39:33.5580115Z
+BOX-FREE foreign_cpu=18.8 ceiling=180 waited_s=1 at=pre-e4-2
+LEG arm=e4 rep=2 rc=0 wall=10.239 cpu=67.766 peakmb=9089.7 foreign_cpu=18.8 foreign_after=37.5 fused=true fold_alone=7.31s chain_alone=9.90s dc=[digest-cache single.bin: miss, enrolling (10.08s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:39:49.4983049Z
+BOX-FREE foreign_cpu=28.1 ceiling=180 waited_s=1 at=pre-e3-2
+LEG arm=e3 rep=2 rc=0 wall=10.142 cpu=67.922 peakmb=9089.8 foreign_cpu=20.3 foreign_after=51.6 fused=true fold_alone=6.98s chain_alone=9.83s dc=[digest-cache single.bin: miss, enrolling (9.99s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:40:05.3916924Z
+BOX-FREE foreign_cpu=15.6 ceiling=180 waited_s=1 at=pre-e2-2
+LEG arm=e2 rep=2 rc=0 wall=10.262 cpu=66.359 peakmb=9089.8 foreign_cpu=17.2 foreign_after=45.3 fused=true fold_alone=7.13s chain_alone=9.92s dc=[digest-cache single.bin: miss, enrolling (10.10s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:40:21.3584180Z
+BOX-FREE foreign_cpu=53.1 ceiling=180 waited_s=1 at=pre-e1-2
+LEG arm=e1 rep=2 rc=0 wall=10.198 cpu=65.406 peakmb=9089.5 foreign_cpu=46.9 foreign_after=28.1 fused=true fold_alone=6.93s chain_alone=9.84s dc=[digest-cache single.bin: miss, enrolling (10.03s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:40:37.2436248Z
+BOX-FREE foreign_cpu=39.1 ceiling=180 waited_s=1 at=pre-fresh-2
+LEG arm=fresh rep=2 rc=0 wall=10.178 cpu=56.734 peakmb=641.7 foreign_cpu=37.5 foreign_after=43.8 fused=true fold_alone=7.01s chain_alone=9.86s dc=[-] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:40:53.1136709Z
+BOX-FREE foreign_cpu=53.1 ceiling=180 waited_s=1 at=pre-fresh-3
+LEG arm=fresh rep=3 rc=0 wall=10.114 cpu=57.641 peakmb=641.7 foreign_cpu=25 foreign_after=26.6 fused=true fold_alone=7.20s chain_alone=9.79s dc=[-] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:41:08.9466681Z
+BOX-FREE foreign_cpu=43.8 ceiling=180 waited_s=1 at=pre-e1-3
+LEG arm=e1 rep=3 rc=0 wall=10.225 cpu=65.312 peakmb=9089.6 foreign_cpu=35.9 foreign_after=34.4 fused=true fold_alone=7.16s chain_alone=9.84s dc=[digest-cache single.bin: miss, enrolling (10.07s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:41:24.8707154Z
+BOX-FREE foreign_cpu=26.6 ceiling=180 waited_s=1 at=pre-e2-3
+LEG arm=e2 rep=3 rc=0 wall=10.185 cpu=65.781 peakmb=9089.6 foreign_cpu=18.8 foreign_after=42.2 fused=true fold_alone=7.42s chain_alone=9.86s dc=[digest-cache single.bin: miss, enrolling (10.03s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:41:40.7275113Z
+BOX-FREE foreign_cpu=39.1 ceiling=180 waited_s=1 at=pre-e3-3
+LEG arm=e3 rep=3 rc=0 wall=10.212 cpu=68.141 peakmb=9089.9 foreign_cpu=26.6 foreign_after=60.9 fused=true fold_alone=7.12s chain_alone=9.85s dc=[digest-cache single.bin: miss, enrolling (10.04s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:41:56.6251438Z
+BOX-FREE foreign_cpu=35.9 ceiling=180 waited_s=1 at=pre-e4-3
+LEG arm=e4 rep=3 rc=0 wall=10.178 cpu=68.25 peakmb=9089.7 foreign_cpu=45.3 foreign_after=43.8 fused=true fold_alone=7.53s chain_alone=9.85s dc=[digest-cache single.bin: miss, enrolling (10.02s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T10:42:12.5338059Z
+ROUND dcenrol done=2026-09-16T10:42:12.5383135Z

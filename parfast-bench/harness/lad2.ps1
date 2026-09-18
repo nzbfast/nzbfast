@@ -48,7 +48,7 @@ $vargv = @{
 }
 
 New-Item -ItemType Directory -Force -Path '<rig>' | Out-Null
-Take-RigLock $lock
+Take-RigLock 'lad2'   # the ROUND's name, not $lock: see plib.ps1's Take-RigLock
 try {
   "LAD2-START $((Get-Date).ToUniversalTime().ToString('o'))"
   Write-BoxFacts

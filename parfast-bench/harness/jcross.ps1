@@ -22,7 +22,7 @@ param(
   # cannot be mistaken for a native one.
   [string]$ForceKernel = '',
   # The two Windows bench boxes do not keep their binaries in the same place -
-  # the zenbook has <rig>\bin, intel-i5-10600kf has <rig>\bin - and neither is
+  # the coreultra9 has <rig>\bin, intel-i5-10600kf has <rig>\bin - and neither is
   # derivable from the rig root. Order: this parameter, then a one-line
   # `binpath.txt` beside the script, then `<root>\bin`. Whichever wins is
   # printed on the PROTOCOL line, and Write-BinFacts refuses the round outright
@@ -104,7 +104,7 @@ param(
 # the BLOCK count - the 11 Sep mcross round asked for 23 GiB and died on a full
 # disk 3m45s in.
 # THE RIG ROOT IS THE SCRIPT'S OWN DIRECTORY, not a hard-coded <rig>. The two
-# Windows bench boxes do not agree on it - the zenbook runs out of <rig> and
+# Windows bench boxes do not agree on it - the coreultra9 runs out of <rig> and
 # intel-i5-10600kf out of <rig> - and a hard-coded path is how a round ends up
 # reading one box's binaries while writing another's logs. $PSScriptRoot is
 # what the queue runner already uses to find this file.

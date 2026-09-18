@@ -13,6 +13,27 @@
 #
 # Sizes are hardlinked out of one payload, so growing the set costs no disk and
 # no copy time, and every size is built from the same bytes.
+#
+# THE ARM ORDER ROTATES ONE STEP PER CELL, and that is not tidiness. This sweep
+# runs ONE leg per (size, redundancy, arm) - there is no rep loop for an ABBA to
+# alternate over - so before 17 Sep 2026 `parfast` was first in all eighteen
+# cells, `parfast-mcap` second in all eighteen and `turbo` third. Two things
+# then land on the same arm every time. There is NO warm between the arms of a
+# cell, so the first arm reads a freshly hard-linked src dir COLD and the other
+# two read it warm; and any drift inside the cell - a shared box's load, a
+# thermal ramp - accumulates in one direction. Measured over zswp2.log's 54
+# legs, the second-position arm carried a median `foreign_cpu` of 33.5% of one
+# core against the first's 24.2, systematically. That bounded out at well under
+# 1% of wall there against a 12-16% effect, so the banked round stands - but a
+# fixed order on a single-shot sweep has no defence at all, and rotating across
+# the cells costs NOTHING because the legs are run either way.
+# `arm_pos` is banked on every CC line so a later reader can test a round for a
+# position effect instead of re-running it, which is what catwin.ps1 does and
+# what no banked sweep before this one allows.
+# Census and ranking: an internal note (this sweep is
+# its #1). The incident: an internal note
+# sections 6-8. Never replace this with `[array]::Reverse` - reversing three
+# arms leaves the middle one in the middle forever (jcross.ps1, 12 Sep 2026).
 param(
   [string]$root  = '<rig>',
   [int[]] $sizes = @(10,15,20,23,30,40),
@@ -52,7 +73,9 @@ try {
   "SWP-START $((Get-Date).ToUniversalTime().ToString('o'))"
   Write-BoxFacts
   Write-BinFacts $bin @('parfast','par2turbo')
-  "PROTOCOL sizes_gib=[$($sizes -join ', ')] redundancy_pct=[$($reds -join ', ')] threads=$threads recovery=in-place slice_cap=$SLICE_CAP base_slice=$BASE_SLICE mem_arm_mb=$membudget_mb"
+  $armbase = @('parfast','parfast-mcap','turbo')
+  $cellno = 0
+  "PROTOCOL sizes_gib=[$($sizes -join ', ')] redundancy_pct=[$($reds -join ', ')] threads=$threads recovery=in-place slice_cap=$SLICE_CAP base_slice=$BASE_SLICE mem_arm_mb=$membudget_mb arms=$($armbase -join '/') arm_order=rotating-by-cell"
 
   New-Item -ItemType Directory -Force -Path $pay | Out-Null
   for ($i = 0; $i -lt $maxsize; $i++) {
@@ -83,7 +106,14 @@ try {
     $tcap = [math]::Min($threads, $members.Count)
 
     foreach ($r in $reds) {
-      foreach ($arm in @('parfast','parfast-mcap','turbo')) {
+      # A NEW array every cell, rotated one step - not a reverse, and not a
+      # rotate-in-place on $armbase, which would mutate the round's own arm list.
+      $k = $cellno % $armbase.Count
+      $armorder = @(); for ($ai = 0; $ai -lt $armbase.Count; $ai++) { $armorder += $armbase[($ai + $k) % $armbase.Count] }
+      $cellno++
+      $o = 0
+      foreach ($arm in $armorder) {
+        $o++
         Get-ChildItem "$rig\src\pub*.par2" -EA 0 | Remove-Item -Force -EA SilentlyContinue
         switch ($arm) {
           'parfast'      { $exe = "$bin\parfast.exe";   $extra = '' }
@@ -94,7 +124,7 @@ try {
         $res = Invoke-Leg $exe $argstr "$rig\src" "$rig\logs\cc-$g-$r-$arm"
         $pf = @(Get-ChildItem "$rig\src\pub*.par2" -EA 0)
         $mb = [math]::Round((($pf | Measure-Object Length -Sum).Sum) / 1MB)
-        "CC round=$round size=$g red=$r bs=$bs blocks=$blocks arm=$arm argv='$argstr' wall=$($res.wall) cpu=$($res.cpu) cpu_over_wall=$([math]::Round($res.cpu/[math]::Max($res.wall,0.001),2)) peak_mb=$($res.peakmb) recovery_mb=$mb files=$($pf.Count) rc=$($res.rc) foreign_cpu=$($res.foreign) errlen=$($res.errlen) ts=$((Get-Date).ToUniversalTime().ToString('o'))"
+        "CC round=$round size=$g red=$r bs=$bs blocks=$blocks arm=$arm arm_pos=$o arm_order=rotating-by-cell argv='$argstr' wall=$($res.wall) cpu=$($res.cpu) cpu_over_wall=$([math]::Round($res.cpu/[math]::Max($res.wall,0.001),2)) peak_mb=$($res.peakmb) recovery_mb=$mb files=$($pf.Count) rc=$($res.rc) foreign_cpu=$($res.foreign) errlen=$($res.errlen) ts=$((Get-Date).ToUniversalTime().ToString('o'))"
         if ($res.rc -ne 0 -or $pf.Count -eq 0) { "SWP-WARN size=$g red=$r arm=$arm rc=$($res.rc) files=$($pf.Count)" }
         # the recovery volume must be the size the redundancy asked for, or the
         # arm did not do the work the wall is being credited with

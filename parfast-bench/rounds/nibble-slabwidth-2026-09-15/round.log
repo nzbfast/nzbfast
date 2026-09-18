@@ -1,0 +1,117 @@
+19:58:58 waiting for the rig lock
+19:58:58 rig lock TAKEN, load 1
+19:59:24 LEG m2048-auto-m128-r1                 rc=0 ok=True wall= 13.20 cpu=  54.21 maxrss=  316 work_peak=  189 fp_hw=  331 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=1.2/2.0 foreign=10.38
+19:59:45 LEG m2048-auto-m128-aa-r1              rc=0 ok=True wall= 12.97 cpu=  53.49 maxrss=  331 work_peak=  189 fp_hw=  347 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=2.0/2.5 foreign=9.32
+20:00:05 LEG m2048-auto-m256-r1                 rc=0 ok=True wall= 11.59 cpu=  48.33 maxrss=  570 work_peak=  377 fp_hw=  597 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.4/2.9 foreign=8.32
+20:00:22 LEG m2048-auto-m512-r1                 rc=0 ok=True wall=  9.03 cpu=  38.43 maxrss=  812 work_peak=  721 fp_hw=  852 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.8/3.2 foreign=8.52
+20:00:38 LEG m2048-auto-none-r1                 rc=0 ok=True wall=  7.41 cpu=  31.80 maxrss= 1183 work_peak= 1074 fp_hw= 1241 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.1/3.4 foreign=5.15
+20:01:04 LEG m2048-auto-g-s128-n84-w256-r1      rc=0 ok=True wall= 17.48 cpu=  71.13 maxrss=  489 work_peak=  319 fp_hw=  512 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.2/3.7 foreign=12.81
+20:01:24 LEG m2048-auto-g-s128-n168-w256-r1     rc=0 ok=True wall= 11.09 cpu=  46.14 maxrss=  514 work_peak=  403 fp_hw=  539 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.4/3.5 foreign=8.22
+20:01:58 LEG m2048-auto-g-s0-n84-w256-r1        rc=0 ok=True wall= 26.38 cpu= 107.68 maxrss=  593 work_peak=  386 fp_hw=  621 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.2/3.9 foreign=21.26
+20:02:21 LEG m2048-auto-g-s0-n168-w256-r1       rc=0 ok=True wall= 13.82 cpu=  57.94 maxrss=  630 work_peak=  470 fp_hw=  661 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.6/3.8 foreign=10.43
+20:02:44 LEG m2048-auto-g-s0-n168-w128-r1       rc=0 ok=True wall= 15.45 cpu=  64.42 maxrss=  629 work_peak=  503 fp_hw=  660 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.6/4.1 foreign=10.39
+20:03:10 LEG m2048-auto-g-s0-n168-w512-r1       rc=0 ok=True wall= 17.02 cpu=  69.93 maxrss=  653 work_peak=  419 fp_hw=  684 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.8/4.1 foreign=13.02
+20:04:15 LEG m2048-auto-g-s128-n84-w512-r1      rc=0 ok=True wall= 56.94 cpu= 223.63 maxrss=  528 work_peak=  419 fp_hw=  553 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.7/4.4 foreign=48.62
+20:05:19 LEG m2048-auto-g-s0-n84-w512-r1        rc=0 ok=True wall= 55.86 cpu= 223.12 maxrss=  579 work_peak=  487 fp_hw=  607 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.9/4.6 foreign=48.14
+20:05:49 LEG m4096-auto-m128-r1                 rc=0 ok=True wall= 20.47 cpu=  81.37 maxrss=  340 work_peak=  193 fp_hw=  356 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=4.1/4.2 foreign=13.81
+20:06:19 LEG m4096-auto-m128-aa-r1              rc=0 ok=True wall= 20.47 cpu=  81.25 maxrss=  345 work_peak=  193 fp_hw=  362 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=3.9/4.0 foreign=14.5
+20:06:44 LEG m4096-auto-m256-r1                 rc=0 ok=True wall= 16.65 cpu=  66.86 maxrss=  614 work_peak=  386 fp_hw=  644 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.7/3.9 foreign=11.84
+20:07:08 LEG m4096-auto-m512-r1                 rc=0 ok=True wall= 14.22 cpu=  58.72 maxrss=  927 work_peak=  772 fp_hw=  972 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.6/4.0 foreign=10.39
+20:07:28 LEG m4096-auto-none-r1                 rc=0 ok=True wall= 10.99 cpu=  45.43 maxrss= 1257 work_peak= 1074 fp_hw= 1318 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.8/4.0 foreign=7.48
+20:09:29 LEG m4096-auto-g-s128-n84-w256-r1      rc=0 ok=True wall=112.47 cpu= 438.89 maxrss=  372 work_peak=  268 fp_hw=  390 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=3.7/4.6 foreign=97.38
+20:11:29 LEG m4096-auto-g-s256-n84-w256-r1      rc=0 ok=True wall=110.99 cpu= 431.27 maxrss=  569 work_peak=  487 fp_hw=  596 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=5.0/5.1 foreign=95.84
+20:13:31 LEG m4096-auto-g-s0-n84-w256-r1        rc=0 ok=True wall=111.64 cpu= 441.66 maxrss=  769 work_peak=  638 fp_hw=  806 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.5/5.5 foreign=113.68
+20:13:57 LEG m4096-auto-g-s128-n168-w256-r1     rc=0 ok=True wall= 16.29 cpu=  63.84 maxrss=  449 work_peak=  268 fp_hw=  470 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=5.1/5.2 foreign=16.67
+20:14:26 LEG m4096-auto-g-s256-n168-w256-r1     rc=0 ok=True wall= 19.23 cpu=  76.48 maxrss=  623 work_peak=  436 fp_hw=  653 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=4.8/5.2 foreign=17.94
+20:15:04 LEG m4096-auto-g-s0-n168-w256-r1       rc=0 ok=True wall= 28.65 cpu= 116.16 maxrss=  767 work_peak=  570 fp_hw=  804 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.7/5.0 foreign=22.93
+20:15:40 LEG m4096-auto-g-s0-n168-w128-r1       rc=0 ok=True wall= 27.17 cpu= 110.44 maxrss=  750 work_peak=  604 fp_hw=  786 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.6/5.4 foreign=23.75
+20:17:40 LEG m4096-auto-g-s0-n168-w512-r1       rc=0 ok=True wall=110.70 cpu= 439.97 maxrss=  801 work_peak=  638 fp_hw=  840 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.9/5.8 foreign=113.43
+20:18:27 LEG m2048-auto-m128-t1-r1              rc=0 ok=True wall= 38.44 cpu=  40.27 maxrss=  328 work_peak=  218 fp_hw=  344 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=5.4/4.1 foreign=30.64
+20:19:13 LEG m2048-auto-m256-t1-r1              rc=0 ok=True wall= 37.85 cpu=  39.75 maxrss=  583 work_peak=  470 fp_hw=  612 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.7/3.6 foreign=29.97
+20:19:51 LEG m2048-auto-none-t1-r1              rc=0 ok=True wall= 29.97 cpu=  31.66 maxrss= 1138 work_peak= 1074 fp_hw= 1193 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.5/3.3 foreign=23.66
+20:20:42 LEG m2048-auto-g-s128-n84-w256-t1-r1   rc=0 ok=True wall= 42.40 cpu=  44.58 maxrss=  594 work_peak=  537 fp_hw=  622 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.1/3.1 foreign=33.6
+20:21:41 LEG m2048-auto-g-s0-n84-w256-t1-r1     rc=0 ok=True wall= 50.51 cpu=  52.80 maxrss=  956 work_peak=  872 fp_hw= 1002 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.0/2.9 foreign=39.9
+20:22:36 LEG m2048-auto-g-s0-n168-w256-t1-r1    rc=0 ok=True wall= 46.55 cpu=  48.84 maxrss= 1016 work_peak=  939 fp_hw= 1066 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.7/2.5 foreign=35.9
+20:23:33 LEG m4096-auto-m128-t1-r1              rc=0 ok=True wall= 47.84 cpu=  49.86 maxrss=  353 work_peak=  201 fp_hw=  370 slabs=4/Spill ['forney-joint'] uses=64 w=[512] load=2.3/2.7 foreign=39.87
+20:24:30 LEG m4096-auto-m256-t1-r1              rc=0 ok=True wall= 48.11 cpu=  50.11 maxrss=  601 work_peak=  436 fp_hw=  630 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=2.7/2.9 foreign=36.69
+20:25:20 LEG m4096-auto-none-t1-r1              rc=0 ok=True wall= 41.00 cpu=  42.92 maxrss= 1109 work_peak= 1074 fp_hw= 1163 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.6/2.3 foreign=28.27
+20:26:27 LEG m4096-auto-g-s128-n84-w256-t1-r1   rc=0 ok=True wall= 57.38 cpu=  59.78 maxrss=  424 work_peak=  268 fp_hw=  445 slabs=4/Spill ['forney-joint'] uses=64 w=[512] load=2.3/2.2 foreign=40.41
+20:28:40 LEG m4096-auto-g-s0-n84-w256-t1-r1     rc=0 ok=True wall=124.19 cpu= 127.10 maxrss=  970 work_peak=  940 fp_hw= 1017 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.2/1.8 foreign=80.51
+20:29:52 LEG m4096-auto-g-s0-n168-w256-t1-r1    rc=0 ok=True wall= 62.92 cpu=  65.32 maxrss= 1091 work_peak= 1074 fp_hw= 1144 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=1.8/1.7 foreign=42.57
+20:30:13 LEG m2048-auto-m128-r2                 rc=0 ok=True wall= 13.07 cpu=  53.52 maxrss=  343 work_peak=  189 fp_hw=  359 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=1.6/2.2 foreign=9.26
+20:30:34 LEG m2048-auto-m128-aa-r2              rc=0 ok=True wall= 12.84 cpu=  52.92 maxrss=  315 work_peak=  189 fp_hw=  331 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=2.2/2.8 foreign=8.97
+20:30:54 LEG m2048-auto-m256-r2                 rc=0 ok=True wall= 11.68 cpu=  48.78 maxrss=  559 work_peak=  377 fp_hw=  586 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.7/3.0 foreign=8.34
+20:31:12 LEG m2048-auto-m512-r2                 rc=0 ok=True wall=  9.19 cpu=  38.90 maxrss=  814 work_peak=  721 fp_hw=  853 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.7/2.9 foreign=7.58
+20:31:27 LEG m2048-auto-none-r2                 rc=0 ok=True wall=  7.52 cpu=  32.13 maxrss= 1143 work_peak= 1074 fp_hw= 1198 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.6/4.1 foreign=4.93
+20:31:53 LEG m2048-auto-g-s128-n84-w256-r2      rc=0 ok=True wall= 17.60 cpu=  71.39 maxrss=  500 work_peak=  319 fp_hw=  524 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.9/4.7 foreign=14.77
+20:32:13 LEG m2048-auto-g-s128-n168-w256-r2     rc=0 ok=True wall= 11.02 cpu=  45.83 maxrss=  492 work_peak=  403 fp_hw=  516 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=4.4/4.6 foreign=8.27
+20:32:47 LEG m2048-auto-g-s0-n84-w256-r2        rc=0 ok=True wall= 26.09 cpu= 106.56 maxrss=  547 work_peak=  386 fp_hw=  574 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.3/4.4 foreign=21.69
+20:33:10 LEG m2048-auto-g-s0-n168-w256-r2       rc=0 ok=True wall= 13.49 cpu=  56.61 maxrss=  590 work_peak=  470 fp_hw=  619 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.0/4.2 foreign=9.49
+20:33:34 LEG m2048-auto-g-s0-n168-w128-r2       rc=0 ok=True wall= 15.79 cpu=  65.86 maxrss=  620 work_peak=  503 fp_hw=  650 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.8/4.0 foreign=13.04
+20:33:59 LEG m2048-auto-g-s0-n168-w512-r2       rc=0 ok=True wall= 16.66 cpu=  68.54 maxrss=  719 work_peak=  419 fp_hw=  753 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.5/3.9 foreign=12.04
+20:35:04 LEG m2048-auto-g-s128-n84-w512-r2      rc=0 ok=True wall= 55.87 cpu= 220.60 maxrss=  523 work_peak=  436 fp_hw=  549 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.6/4.0 foreign=47.48
+20:36:08 LEG m2048-auto-g-s0-n84-w512-r2        rc=0 ok=True wall= 55.78 cpu= 223.27 maxrss=  598 work_peak=  503 fp_hw=  627 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.8/4.5 foreign=47.81
+20:36:37 LEG m4096-auto-m128-r2                 rc=0 ok=True wall= 20.21 cpu=  80.41 maxrss=  323 work_peak=  193 fp_hw=  338 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=4.2/4.4 foreign=15.66
+20:37:06 LEG m4096-auto-m128-aa-r2              rc=0 ok=True wall= 20.16 cpu=  80.15 maxrss=  355 work_peak=  193 fp_hw=  372 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=3.9/4.0 foreign=13.72
+20:37:32 LEG m4096-auto-m256-r2                 rc=0 ok=True wall= 16.80 cpu=  67.54 maxrss=  592 work_peak=  386 fp_hw=  621 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.6/3.9 foreign=11.74
+20:37:55 LEG m4096-auto-m512-r2                 rc=0 ok=True wall= 14.19 cpu=  58.31 maxrss=  919 work_peak=  772 fp_hw=  963 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.6/4.1 foreign=9.69
+20:38:15 LEG m4096-auto-none-r2                 rc=0 ok=True wall= 10.95 cpu=  45.47 maxrss= 1227 work_peak= 1074 fp_hw= 1287 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.7/3.8 foreign=8.03
+20:40:16 LEG m4096-auto-g-s128-n84-w256-r2      rc=0 ok=True wall=111.81 cpu= 436.76 maxrss=  350 work_peak=  268 fp_hw=  367 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=3.4/6.0 foreign=106.68
+20:42:15 LEG m4096-auto-g-s256-n84-w256-r2      rc=0 ok=True wall=110.49 cpu= 432.92 maxrss=  584 work_peak=  503 fp_hw=  612 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=5.4/4.8 foreign=98.16
+20:44:14 LEG m4096-auto-g-s0-n84-w256-r2        rc=0 ok=True wall=109.53 cpu= 433.91 maxrss=  733 work_peak=  621 fp_hw=  768 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.2/4.9 foreign=93.99
+20:44:39 LEG m4096-auto-g-s128-n168-w256-r2     rc=0 ok=True wall= 15.92 cpu=  62.89 maxrss=  445 work_peak=  268 fp_hw=  467 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=4.5/4.5 foreign=11.17
+20:45:07 LEG m4096-auto-g-s256-n168-w256-r2     rc=0 ok=True wall= 19.22 cpu=  77.42 maxrss=  601 work_peak=  436 fp_hw=  630 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=4.1/4.3 foreign=16.0
+20:45:45 LEG m4096-auto-g-s0-n168-w256-r2       rc=0 ok=True wall= 28.02 cpu= 113.61 maxrss=  786 work_peak=  570 fp_hw=  824 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.8/5.2 foreign=26.78
+20:46:21 LEG m4096-auto-g-s0-n168-w128-r2       rc=0 ok=True wall= 27.06 cpu= 109.86 maxrss=  746 work_peak=  604 fp_hw=  782 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.8/4.9 foreign=19.99
+20:48:22 LEG m4096-auto-g-s0-n168-w512-r2       rc=0 ok=True wall=111.12 cpu= 440.07 maxrss=  779 work_peak=  638 fp_hw=  817 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.3/5.3 foreign=114.69
+20:49:09 LEG m2048-auto-m128-t1-r2              rc=0 ok=True wall= 38.68 cpu=  40.55 maxrss=  368 work_peak=  218 fp_hw=  386 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=4.9/4.0 foreign=31.51
+20:49:55 LEG m2048-auto-m256-t1-r2              rc=0 ok=True wall= 37.37 cpu=  39.19 maxrss=  583 work_peak=  470 fp_hw=  612 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.1/3.1 foreign=28.82
+20:50:33 LEG m2048-auto-none-t1-r2              rc=0 ok=True wall= 30.46 cpu=  32.14 maxrss= 1138 work_peak= 1074 fp_hw= 1193 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.0/3.0 foreign=24.55
+20:51:23 LEG m2048-auto-g-s128-n84-w256-t1-r2   rc=0 ok=True wall= 41.72 cpu=  43.93 maxrss=  595 work_peak=  537 fp_hw=  624 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.1/2.7 foreign=30.3
+20:52:26 LEG m2048-auto-g-s0-n84-w256-t1-r2     rc=0 ok=True wall= 54.18 cpu=  56.58 maxrss=  954 work_peak=  872 fp_hw= 1001 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.5/2.3 foreign=37.66
+20:53:19 LEG m2048-auto-g-s0-n168-w256-t1-r2    rc=0 ok=True wall= 44.37 cpu=  46.67 maxrss= 1016 work_peak=  940 fp_hw= 1065 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.2/1.8 foreign=30.35
+20:54:14 LEG m4096-auto-m128-t1-r2              rc=0 ok=True wall= 46.60 cpu=  48.63 maxrss=  347 work_peak=  201 fp_hw=  364 slabs=4/Spill ['forney-joint'] uses=64 w=[512] load=1.8/1.7 foreign=32.74
+20:55:09 LEG m4096-auto-m256-t1-r2              rc=0 ok=True wall= 45.62 cpu=  47.67 maxrss=  612 work_peak=  436 fp_hw=  641 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=1.7/1.7 foreign=30.53
+20:56:01 LEG m4096-auto-none-t1-r2              rc=0 ok=True wall= 42.77 cpu=  44.68 maxrss= 1109 work_peak= 1074 fp_hw= 1163 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=1.9/1.6 foreign=29.21
+20:57:09 LEG m4096-auto-g-s128-n84-w256-t1-r2   rc=0 ok=True wall= 59.10 cpu=  61.52 maxrss=  429 work_peak=  268 fp_hw=  449 slabs=4/Spill ['forney-joint'] uses=64 w=[512] load=1.6/2.2 foreign=42.13
+20:59:25 LEG m4096-auto-g-s0-n84-w256-t1-r2     rc=0 ok=True wall=126.69 cpu= 129.62 maxrss=  968 work_peak=  940 fp_hw= 1015 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.1/1.8 foreign=82.39
+21:00:44 LEG m4096-auto-g-s0-n168-w256-t1-r2    rc=0 ok=True wall= 69.54 cpu=  71.98 maxrss= 1090 work_peak= 1074 fp_hw= 1143 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=1.9/1.6 foreign=46.11
+21:01:05 LEG m2048-auto-m128-r3                 rc=0 ok=True wall= 13.16 cpu=  54.04 maxrss=  324 work_peak=  189 fp_hw=  340 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=1.5/2.3 foreign=9.29
+21:01:27 LEG m2048-auto-m128-aa-r3              rc=0 ok=True wall= 13.32 cpu=  54.19 maxrss=  317 work_peak=  189 fp_hw=  333 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=2.3/2.7 foreign=12.56
+21:01:47 LEG m2048-auto-m256-r3                 rc=0 ok=True wall= 11.48 cpu=  47.87 maxrss=  573 work_peak=  377 fp_hw=  601 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.5/2.8 foreign=7.97
+21:02:04 LEG m2048-auto-m512-r3                 rc=0 ok=True wall=  9.23 cpu=  38.78 maxrss=  807 work_peak=  721 fp_hw=  846 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.5/2.9 foreign=6.63
+21:02:20 LEG m2048-auto-none-r3                 rc=0 ok=True wall=  7.31 cpu=  31.56 maxrss= 1140 work_peak= 1074 fp_hw= 1195 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.7/2.9 foreign=5.46
+21:02:45 LEG m2048-auto-g-s128-n84-w256-r3      rc=0 ok=True wall= 17.44 cpu=  70.88 maxrss=  475 work_peak=  319 fp_hw=  498 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=2.7/3.1 foreign=12.31
+21:03:05 LEG m2048-auto-g-s128-n168-w256-r3     rc=0 ok=True wall= 10.91 cpu=  45.64 maxrss=  512 work_peak=  403 fp_hw=  537 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=2.8/3.1 foreign=7.57
+21:03:40 LEG m2048-auto-g-s0-n84-w256-r3        rc=0 ok=True wall= 26.18 cpu= 106.74 maxrss=  569 work_peak=  386 fp_hw=  596 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.8/3.6 foreign=18.63
+21:04:02 LEG m2048-auto-g-s0-n168-w256-r3       rc=0 ok=True wall= 13.44 cpu=  56.35 maxrss=  718 work_peak=  470 fp_hw=  753 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.2/3.5 foreign=9.25
+21:04:26 LEG m2048-auto-g-s0-n168-w128-r3       rc=0 ok=True wall= 15.69 cpu=  65.33 maxrss=  660 work_peak=  503 fp_hw=  692 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.2/4.7 foreign=13.22
+21:04:50 LEG m2048-auto-g-s0-n168-w512-r3       rc=0 ok=True wall= 16.52 cpu=  68.19 maxrss=  653 work_peak=  419 fp_hw=  685 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.1/4.2 foreign=11.78
+21:05:56 LEG m2048-auto-g-s128-n84-w512-r3      rc=0 ok=True wall= 56.42 cpu= 223.59 maxrss=  554 work_peak=  453 fp_hw=  581 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.7/4.3 foreign=50.16
+21:07:02 LEG m2048-auto-g-s0-n84-w512-r3        rc=0 ok=True wall= 56.73 cpu= 226.23 maxrss=  616 work_peak=  503 fp_hw=  646 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.9/4.7 foreign=49.45
+21:07:33 LEG m4096-auto-m128-r3                 rc=0 ok=True wall= 20.77 cpu=  82.68 maxrss=  368 work_peak=  193 fp_hw=  386 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=4.3/4.7 foreign=16.33
+21:08:03 LEG m4096-auto-m128-aa-r3              rc=0 ok=True wall= 20.44 cpu=  80.87 maxrss=  352 work_peak=  193 fp_hw=  369 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=4.2/3.9 foreign=13.4
+21:08:30 LEG m4096-auto-m256-r3                 rc=0 ok=True wall= 16.90 cpu=  67.65 maxrss=  621 work_peak=  386 fp_hw=  652 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.4/3.7 foreign=12.06
+21:08:55 LEG m4096-auto-m512-r3                 rc=0 ok=True wall= 14.99 cpu=  60.93 maxrss=  918 work_peak=  772 fp_hw=  963 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.3/3.6 foreign=10.47
+21:09:17 LEG m4096-auto-none-r3                 rc=0 ok=True wall= 11.53 cpu=  47.02 maxrss= 1259 work_peak= 1074 fp_hw= 1320 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.4/3.5 foreign=11.37
+21:11:19 LEG m4096-auto-g-s128-n84-w256-r3      rc=0 ok=True wall=112.58 cpu= 439.92 maxrss=  380 work_peak=  268 fp_hw=  399 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=3.2/4.2 foreign=97.14
+21:13:17 LEG m4096-auto-g-s256-n84-w256-r3      rc=0 ok=True wall=108.78 cpu= 426.71 maxrss=  601 work_peak=  487 fp_hw=  630 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.8/4.8 foreign=94.85
+21:15:16 LEG m4096-auto-g-s0-n84-w256-r3        rc=0 ok=True wall=109.82 cpu= 434.32 maxrss=  773 work_peak=  621 fp_hw=  810 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.3/4.8 foreign=96.01
+21:15:40 LEG m4096-auto-g-s128-n168-w256-r3     rc=0 ok=True wall= 15.71 cpu=  62.67 maxrss=  426 work_peak=  268 fp_hw=  447 slabs=4/Spill ['forney-joint'] uses=128 w=[256] load=4.3/4.2 foreign=10.56
+21:16:08 LEG m4096-auto-g-s256-n168-w256-r3     rc=0 ok=True wall= 18.91 cpu=  76.11 maxrss=  601 work_peak=  436 fp_hw=  630 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.7/3.9 foreign=14.04
+21:16:46 LEG m4096-auto-g-s0-n168-w256-r3       rc=0 ok=True wall= 28.27 cpu= 114.53 maxrss=  765 work_peak=  570 fp_hw=  802 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.7/4.4 foreign=22.68
+21:17:23 LEG m4096-auto-g-s0-n168-w128-r3       rc=0 ok=True wall= 27.36 cpu= 111.19 maxrss=  739 work_peak=  604 fp_hw=  775 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.0/4.4 foreign=22.09
+21:19:21 LEG m4096-auto-g-s0-n168-w512-r3       rc=0 ok=True wall=109.24 cpu= 434.64 maxrss=  719 work_peak=  638 fp_hw=  754 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=4.2/4.9 foreign=94.73
+21:20:08 LEG m2048-auto-m128-t1-r3              rc=0 ok=True wall= 38.55 cpu=  40.46 maxrss=  375 work_peak=  218 fp_hw=  393 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=4.6/3.7 foreign=27.18
+21:20:54 LEG m2048-auto-m256-t1-r3              rc=0 ok=True wall= 37.63 cpu=  39.59 maxrss=  583 work_peak=  470 fp_hw=  612 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.6/2.8 foreign=25.52
+21:21:35 LEG m2048-auto-none-t1-r3              rc=0 ok=True wall= 32.00 cpu=  33.77 maxrss= 1138 work_peak= 1074 fp_hw= 1193 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.6/2.2 foreign=21.14
+21:22:25 LEG m2048-auto-g-s128-n84-w256-t1-r3   rc=0 ok=True wall= 41.40 cpu=  43.64 maxrss=  599 work_peak=  537 fp_hw=  628 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=2.2/2.1 foreign=27.92
+21:23:26 LEG m2048-auto-g-s0-n84-w256-t1-r3     rc=0 ok=True wall= 52.25 cpu=  54.65 maxrss=  955 work_peak=  872 fp_hw= 1001 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.0/1.8 foreign=35.38
+21:24:20 LEG m2048-auto-g-s0-n168-w256-t1-r3    rc=0 ok=True wall= 44.75 cpu=  47.01 maxrss= 1017 work_peak=  940 fp_hw= 1067 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=1.8/1.9 foreign=30.75
+21:25:15 LEG m4096-auto-m128-t1-r3              rc=0 ok=True wall= 45.51 cpu=  47.64 maxrss=  416 work_peak=  201 fp_hw=  436 slabs=4/Spill ['forney-joint'] uses=64 w=[512] load=1.9/2.4 foreign=31.38
+21:26:11 LEG m4096-auto-m256-t1-r3              rc=0 ok=True wall= 46.47 cpu=  48.52 maxrss=  570 work_peak=  436 fp_hw=  598 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=2.3/2.3 foreign=32.03
+21:27:03 LEG m4096-auto-none-t1-r3              rc=0 ok=True wall= 42.63 cpu=  44.52 maxrss= 1109 work_peak= 1074 fp_hw= 1163 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=2.1/1.9 foreign=29.47
+21:28:10 LEG m4096-auto-g-s128-n84-w256-t1-r3   rc=0 ok=True wall= 58.33 cpu=  60.69 maxrss=  412 work_peak=  268 fp_hw=  432 slabs=4/Spill ['forney-joint'] uses=64 w=[512] load=1.8/1.7 foreign=39.48
+21:30:29 LEG m4096-auto-g-s0-n84-w256-t1-r3     rc=0 ok=True wall=130.31 cpu= 133.29 maxrss=  968 work_peak=  940 fp_hw= 1015 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=1.6/1.8 foreign=84.91
+21:31:43 LEG m4096-auto-g-s0-n168-w256-t1-r3    rc=0 ok=True wall= 64.90 cpu=  67.28 maxrss= 1093 work_peak= 1074 fp_hw= 1146 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=1.9/2.2 foreign=43.72
+21:31:43 ALL DONE, load 2

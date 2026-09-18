@@ -1,0 +1,68 @@
+RIG-LOCK-ORPHAN <rig>/.parfast-rig.lock cleared by round=memladder-quiet-gate-smoke pid=88328 - was: zero bytes or no parseable identity - it names nobody
+18:53:36Z rig lock TAKEN by memladder-quiet-gate-smoke pid 88328
+2026-09-17T18:53:36Z PHASE=start load=3.29 2.90 2.89
+2026-09-17T18:53:38Z PHASE=build
+   Compiling nzbkit v1.0.0 (<rig>/memladder-smoke-17sep/tree/crates/nzbkit)
+    Finished `release` profile [optimized] target(s) in 51.01s
+2026-09-17T18:54:29Z PHASE=fixture
+Opening: m01.bin
+Opening: m02.bin
+Opening: m03.bin
+Opening: m04.bin
+Opening: m05.bin
+Opening: m06.bin
+Opening: m07.bin
+Opening: m08.bin
+Opening: m09.bin
+Opening: m10.bin
+Opening: m11.bin
+Opening: m12.bin
+Opening: m13.bin
+Opening: m14.bin
+Opening: m15.bin
+Opening: m16.bin
+Done
+2026-09-17T18:54:36Z PHASE=ladder load=14.93 6.34 4.18
+WARN-FOREIGN-CPU at=round-start foreign_cpu=212% ceiling=320% top=[/usr/libexec/spotlightknowledged.updater(81339)=204% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=3% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds(130)=2% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=1%]
+BOX-ONE-CORE-BUSY at=round-start foreign_1core=216% thresh=25% cores=32 top=[/usr/libexec/spotlightknowledged.updater(81339)=200% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=5% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=2% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=2%]
+BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it
+ROUND tag=smoke bin=<rig>/memladder-smoke-17sep/parfast arm_order=rotating-by-rep arms=fold,force,auto rungs=192 budgets=128 reps=3 threads=4 slice=65536 load=13.98/6.29/4.17
+WARN-FOREIGN-CPU at=m192-128-fold-r1-smoke foreign_cpu=215% ceiling=320% top=[/usr/libexec/spotlightknowledged.updater(81339)=202% /usr/bin/top(92220)=5% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=4% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=2%]
+BOX-ONE-CORE-BUSY at=m192-128-fold-r1-smoke foreign_1core=213% thresh=25% cores=32 top=[/usr/libexec/spotlightknowledged.updater(81339)=199% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=5% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=3% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=2%]
+BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it
+LEG m192-128-fold-r1-smoke     arm_pos=0 rc=0 ok=True wall=  2.18 cpu=  10.30 peak=  157MB fp=162MB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=13.0/13.0 fgn=211/287%
+WARN-FOREIGN-CPU at=m192-128-force-r1-smoke foreign_cpu=242% ceiling=320% top=[/usr/libexec/spotlightknowledged.updater(81339)=213% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds(130)=10% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport(1303)=10% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=3%]
+BOX-ONE-CORE-BUSY at=m192-128-force-r1-smoke foreign_1core=212% thresh=25% cores=32 top=[/usr/libexec/spotlightknowledged.updater(81339)=195% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=5% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=3% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=3%]
+BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it
+LEG m192-128-force-r1-smoke    arm_pos=1 rc=0 ok=True wall=  2.26 cpu=  10.51 peak=  292MB fp=304MB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=12.2/11.8 fgn=221/209%
+WARN-FOREIGN-CPU at=m192-128-auto-r1-smoke foreign_cpu=275% ceiling=320% top=[/usr/libexec/spotlightknowledged.updater(81339)=268% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=3% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=1% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=1%]
+BOX-ONE-CORE-BUSY at=m192-128-auto-r1-smoke foreign_1core=214% thresh=25% cores=32 top=[/usr/libexec/spotlightknowledged.updater(81339)=198% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=4% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=3% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=3%]
+BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it
+LEG m192-128-auto-r1-smoke     arm_pos=2 rc=0 ok=True wall=  2.18 cpu=  10.30 peak=  164MB fp=169MB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=11.2/11.2 fgn=292/258%
+WARN-FOREIGN-CPU at=m192-128-force-r2-smoke foreign_cpu=210% ceiling=320% top=[/usr/libexec/spotlightknowledged.updater(81339)=202% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=3% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=3% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=1%]
+BOX-ONE-CORE-BUSY at=m192-128-force-r2-smoke foreign_1core=217% thresh=25% cores=32 top=[/usr/libexec/spotlightknowledged.updater(81339)=199% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=5% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=3% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=2%]
+BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it
+LEG m192-128-force-r2-smoke    arm_pos=0 rc=0 ok=True wall=  2.26 cpu=  10.52 peak=  289MB fp=301MB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=10.4/10.2 fgn=218/218%
+WARN-FOREIGN-CPU at=m192-128-auto-r2-smoke foreign_cpu=268% ceiling=320% top=[/usr/libexec/spotlightknowledged.updater(81339)=254% /sbin/launchd(1)=9% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=3% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=1%]
+BOX-ONE-CORE-BUSY at=m192-128-auto-r2-smoke foreign_1core=210% thresh=25% cores=32 top=[/usr/libexec/spotlightknowledged.updater(81339)=194% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=5% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=2% com.macpaw.CleanMyMac5.HealthMonitor(1035)=2%]
+BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it
+LEG m192-128-auto-r2-smoke     arm_pos=1 rc=0 ok=True wall=  2.20 cpu=  10.34 peak=  164MB fp=170MB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=9.5/10.6 fgn=221/252%
+WARN-FOREIGN-CPU at=m192-128-fold-r2-smoke foreign_cpu=240% ceiling=320% top=[/usr/libexec/spotlightknowledged.updater(81339)=234% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=3% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=2% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=1%]
+BOX-ONE-CORE-BUSY at=m192-128-fold-r2-smoke foreign_1core=215% thresh=25% cores=32 top=[/usr/libexec/spotlightknowledged.updater(81339)=195% <app> Creative Cloud Experience/CCXProcess/CCXProcess.app/Contents/MacOS/Creative Cloud Content Manager.node(1188)=5% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=5% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=3%]
+BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it
+LEG m192-128-fold-r2-smoke     arm_pos=2 rc=0 ok=True wall=  2.19 cpu=  10.30 peak=  156MB fp=162MB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=10.0/10.0 fgn=227/219%
+WARN-FOREIGN-CPU at=m192-128-auto-r3-smoke foreign_cpu=209% ceiling=320% top=[/usr/libexec/spotlightknowledged.updater(81339)=200% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=3% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=3% com.macpaw.CleanMyMac5.HealthMonitor(1035)=2%]
+BOX-ONE-CORE-BUSY at=m192-128-auto-r3-smoke foreign_1core=214% thresh=25% cores=32 top=[/usr/libexec/spotlightknowledged.updater(81339)=201% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=5% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=2% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=2%]
+BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it
+LEG m192-128-auto-r3-smoke     arm_pos=0 rc=0 ok=True wall=  2.18 cpu=  10.31 peak=  162MB fp=168MB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=9.5/9.4 fgn=221/259%
+WARN-FOREIGN-CPU at=m192-128-fold-r3-smoke foreign_cpu=208% ceiling=320% top=[/usr/libexec/spotlightknowledged.updater(81339)=201% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=3% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=1% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=1%]
+BOX-ONE-CORE-BUSY at=m192-128-fold-r3-smoke foreign_1core=250% thresh=25% cores=32 top=[/usr/libexec/spotlightknowledged.updater(81339)=239% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=5% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=3% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=2%]
+BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it
+LEG m192-128-fold-r3-smoke     arm_pos=1 rc=0 ok=True wall=  2.18 cpu=  10.30 peak=  160MB fp=166MB path=fold W=[] slabs=1 win=0 uses=0 forney=0.0 load=8.9/8.9 fgn=219/222%
+WARN-FOREIGN-CPU at=m192-128-force-r3-smoke foreign_cpu=272% ceiling=320% top=[/usr/libexec/spotlightknowledged.updater(81339)=264% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=4% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=2% sleep(92364)=1%]
+BOX-ONE-CORE-BUSY at=m192-128-force-r3-smoke foreign_1core=219% thresh=25% cores=32 top=[/usr/libexec/spotlightknowledged.updater(81339)=196% <app> Helper.app/Contents/MacOS/Claude Helper(56386)=7% <app> Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)(56401)=4% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(172)=3%]
+BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it
+LEG m192-128-force-r3-smoke    arm_pos=2 rc=0 ok=True wall=  2.26 cpu=  10.51 peak=  289MB fp=301MB path=ntt  W=[512] slabs=1 win=7 uses=0 forney=0.0 load=8.5/8.3 fgn=212/211%
+ALL DONE
+2026-09-17T18:55:54Z PHASE=done
+18:55:54Z rig lock RELEASED (truncated, not unlinked)

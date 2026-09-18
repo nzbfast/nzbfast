@@ -8,20 +8,52 @@ repair. Then runs each round in turn, one at a time, each to its own log.
 
 It waits on the LOCK, never on a marker line in another round's log: a log
 renamed when it is banked silently disarms every round waiting on it.
+
+And it waits on the lock's HOLDER, never on the lock file's existence - see
+lock_hold() below and riglock_state.py, which is the one place this fleet
+decides what "held" means.
 """
 import os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import pdrv
+import riglock_state
 
 LOCK = os.path.expanduser("~/.parfast-rig.lock")
 TOOLS = ("parfast", "par2turbo", "par2j", "par2")
 
 
+def lock_hold(path=LOCK, announce=True):
+    """The lock half of busy(): a string when the lock is really held, else None.
+
+    This WAS `if os.path.exists(LOCK): return "lock " + LOCK` - existence as
+    the hold - and on 16 Sep 2026 that held apple-m3-ultra for eight hours against a
+    zero-byte file eight hours cold with no holder anywhere on the box, which
+    two lanes each had to disprove by hand. Existence is not a hold; a live
+    holder is. riglock_state answers that off the holder's pid and never off
+    the file's age, because a legitimate round can own this box for hours and
+    any age bound that clears the orphan would steal from one of those.
+
+    It never UNLINKS the orphan. This process does not take the lock - the
+    round it launches does, through pdrv.RigLock, which clears the file it
+    proved dead while holding the flock on it. Deleting from here would be a
+    second, unlocked deleter of a file we never held, which is the shape of
+    the 15 Sep double-holder incident. Announcing is ours; removing is the
+    taker's.
+    """
+    state, who = riglock_state.lock_state(path)
+    if state == "held":
+        return "lock %s held by: %s" % (path, who)
+    if state == "orphan" and announce:
+        riglock_state.announce_orphan(path, who, "ignored by mqueue (not removed - the round clears it)")
+    return None
+
+
 def busy():
-    if os.path.exists(LOCK):
-        return "lock " + LOCK
+    held = lock_hold()
+    if held:
+        return held
     out = subprocess.run(["ps", "-Ao", "pid=,comm="], capture_output=True, text=True).stdout
     for line in out.splitlines():
         f = line.split(None, 1)

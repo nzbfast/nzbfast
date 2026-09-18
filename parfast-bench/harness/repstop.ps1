@@ -83,8 +83,35 @@ Start-Sleep -Seconds 3
 Stop-Process -Id $roundpid -Force -EA SilentlyContinue
 Start-Sleep -Seconds 5
 # The round's `finally` does not run on a hard stop, so the per-box rig lock is
-# left held and would refuse every later round on this machine.
+# left behind naming a pid that no longer exists.
+#
+# REMOVE IT ONLY IF IT STILL NAMES THE ROUND WE JUST KILLED. This process never
+# held the lock open, so unlike plib.ps1's Release-RigLock it has no
+# handle-based guarantee that the file it is about to delete is the one it is
+# entitled to delete: the round may have released it cleanly in the five
+# seconds above and a DIFFERENT round may have taken it since, and an
+# unconditional Remove-Item then hands the box to a third party while the
+# second round is still writing to it. That is the CLOBBER half of 16 Sep
+# 2026, which landed on apple-m3-ultra six hours after the orphan half
+# (an internal note), and deadline.ps1 -
+# the other script in this family that kills a round it does not own - already
+# had this check; this one did not.
+#
+# AND LEAVING IT IS CHEAP NOW, which is what makes refusing the right default.
+# Since 16 Sep 2026 every taker in the harness clears a lock it can PROVE is
+# nobody's, so a lock we decline to touch because we cannot attribute it costs
+# the next round one RIG-LOCK-ORPHAN line, not its box. Deleting the wrong one
+# costs somebody their round, silently.
 $lk = Join-Path $env:USERPROFILE '.parfast-rig.lock'
-if (Test-Path $lk) { "REPSTOP-LOCK-RELEASED $((Get-Content $lk -Raw).Trim())"; Remove-Item $lk -Force -EA SilentlyContinue }
+if (Test-Path $lk) {
+  $held = ''
+  try { $held = (Get-Content $lk -Raw -EA Stop).Trim() } catch { $held = '(unreadable)' }
+  if ($held -match "pid=$roundpid(\s|$)") {
+    "REPSTOP-LOCK-RELEASED $held"
+    Remove-Item $lk -Force -EA SilentlyContinue
+  } else {
+    "REPSTOP-LOCK-NOT-OURS $held - leaving it (does not name pid=$roundpid). A taker will clear it if it is an orphan."
+  }
+}
 else { "REPSTOP-LOCK already free" }
 "REPSTOP-DONE $((Get-Date).ToUniversalTime().ToString('o')) - the queue behind this round now has the box"

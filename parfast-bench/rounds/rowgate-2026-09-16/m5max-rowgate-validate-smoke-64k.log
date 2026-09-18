@@ -1,0 +1,34 @@
+ROUND label=smoke64k phases=validate start=2026-09-15T22:47:33Z
+RIG-LOCK-TAKEN <rig>/.parfast-rig.lock pid=58484
+BOX-BUSY-WAIT try=1 foreign_cpu=261% ceiling=180% at=round-start ts=2026-09-15T22:47:48Z
+BOX-BUSY-WAIT try=2 foreign_cpu=447% ceiling=180% at=round-start ts=2026-09-15T22:48:18Z
+WARN-FOREIGN-CPU at=round-start foreign_cpu=156% ceiling=180% top=[<rig>/Claude/rars-wt-rar2x-heap-15sep/target/release/deps/zz_heap_probe-1368893d47800d8e(53777)=99% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(408)=45% <app>)=9% <app>)=2%]
+BOX host=apple-m5-max cpu=Apple M5 Max cores=18 ram_gb=128.0 os=macOS 27.0 free_gb=1973.5
+BIN parfast sha256=2a51fe76be020c0dcf8632428a1c748af0ec9490aed3d3e48eeefffe39e5b202 bytes=3063248 version=parfast version 1.5.0-beta.3 built from 5545d4873fb4
+BIN parfast-alt sha256=2a51fe76be020c0dcf8632428a1c748af0ec9490aed3d3e48eeefffe39e5b202 bytes=3063248 version=parfast version 1.5.0-beta.3 built from 5545d4873fb4
+HARNESS pdrv.py sha256=1dd8f1dd28a60e2ff249210d28d46f86757dc0581ff2db7e8bcdd8664db280b0 bytes=36538
+HARNESS rowgate.py sha256=ef3db488537accba7fa47b6d2e7bde61610f27635115479861247251ccd00c85 bytes=24883
+HARNESS-RIG pdrv.py:1dd8f1dd28a60e2f+rowgate.py:ef3db488537accba
+CREATE fix=/tmp/claude-501/rgsmoke/fix64k members=16 x 8 MiB slice=65536 recovery=512 secs=0.2
+FIXTURE fix=/tmp/claude-501/rgsmoke/fix64k n=2048 slice=65536 recovery=512 files=27
+PLAN label=smoke64k phases=['validate'] rungs=[192, 256, 288, 320, 352, 384, 416, 448, 512, 640] threads=[4] reps=1 kf=[192, 512, 1024, 2048, 4096] kp=[256, 1024, 4096] kthreads=[4] vrungs=[192, 256] vbudgets=['big'] vthreads=[4] altbin=/tmp/claude-501/rgsmoke/parfast-alt out=/tmp/claude-501/rgsmoke/legs.jsonl
+BOX-BUSY-WAIT try=1 foreign_cpu=183% ceiling=180% at=smoke64k-validate-m192-big-fold-t4-r1 ts=2026-09-15T22:48:49Z
+WARN-FOREIGN-CPU at=smoke64k-validate-m192-big-fold-t4-r1 foreign_cpu=170% ceiling=180% top=[<rig>/Claude/rars-wt-rar2x-heap-15sep/target/release/deps/zz_heap_probe-1368893d47800d8e(53777)=99% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(408)=46% <app>)=9% /System/Library/PrivateFrameworks/Ecosystem.framework/Support/ecosystemd(698)=7%]
+LEG smoke64k-validate-m192-big-fold-t4-r1  ok path=fold wall=   0.26 cpu=    1.15 W=[] win=0 slabs=1 foreign=170.0/169.3 steal=n/a load=3.4/3.5 rig=pdrv.py:1dd8f1dd28a60e2f+rowgate.py:ef3db488537accba
+WARN-FOREIGN-CPU at=smoke64k-validate-m192-big-force-t4-r1 foreign_cpu=178% ceiling=180% top=[<rig>/Claude/rars-wt-rar2x-heap-15sep/target/release/deps/zz_heap_probe-1368893d47800d8e(53777)=100% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(408)=44% <app>)=10% <app>)=9%]
+LEG smoke64k-validate-m192-big-force-t4-r1 ok path=ntt  wall=   0.27 cpu=    1.17 W=[512] win=0 slabs=1 foreign=177.6/170.4 steal=n/a load=3.5/3.5 rig=pdrv.py:1dd8f1dd28a60e2f+rowgate.py:ef3db488537accba
+WARN-FOREIGN-CPU at=smoke64k-validate-m192-big-auto-t4-r1 foreign_cpu=169% ceiling=180% top=[<rig>/Claude/rars-wt-rar2x-heap-15sep/target/release/deps/zz_heap_probe-1368893d47800d8e(53777)=99% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(408)=46% <app>)=9% <app>)=5%]
+LEG smoke64k-validate-m192-big-auto-t4-r1  ok path=fold wall=   0.26 cpu=    1.16 W=[] win=0 slabs=1 foreign=168.6/160.6 steal=n/a load=3.5/3.5 rig=pdrv.py:1dd8f1dd28a60e2f+rowgate.py:ef3db488537accba
+WARN-FOREIGN-CPU at=smoke64k-validate-m192-big-autoalt-t4-r1 foreign_cpu=161% ceiling=180% top=[<rig>/Claude/rars-wt-rar2x-heap-15sep/target/release/deps/zz_heap_probe-1368893d47800d8e(53777)=100% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(408)=43% <app>)=9% <app> Helper.app/Contents/MacOS/Claude Helper(18531)=2%]
+LEG smoke64k-validate-m192-big-autoalt-t4-r1 ok path=fold wall=   0.26 cpu=    1.15 W=[] win=0 slabs=1 foreign=159.8/162.0 steal=n/a load=3.5/3.5 rig=pdrv.py:1dd8f1dd28a60e2f+rowgate.py:ef3db488537accba
+WARN-FOREIGN-CPU at=smoke64k-validate-m256-big-fold-t4-r1 foreign_cpu=162% ceiling=180% top=[<rig>/Claude/rars-wt-rar2x-heap-15sep/target/release/deps/zz_heap_probe-1368893d47800d8e(53777)=100% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(408)=45% <app>)=9% <app> Helper.app/Contents/MacOS/Claude Helper(18531)=2%]
+LEG smoke64k-validate-m256-big-fold-t4-r1  ok path=fold wall=   0.33 cpu=    1.42 W=[] win=0 slabs=1 foreign=179.8/168.8 steal=n/a load=3.5/3.8 rig=pdrv.py:1dd8f1dd28a60e2f+rowgate.py:ef3db488537accba
+WARN-FOREIGN-CPU at=smoke64k-validate-m256-big-force-t4-r1 foreign_cpu=166% ceiling=180% top=[<rig>/Claude/rars-wt-rar2x-heap-15sep/target/release/deps/zz_heap_probe-1368893d47800d8e(53777)=100% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(408)=45% <app>)=9% /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared(58687)=4%]
+LEG smoke64k-validate-m256-big-force-t4-r1 ok path=ntt  wall=   0.30 cpu=    1.28 W=[512] win=0 slabs=1 foreign=166.2/230.6 steal=n/a load=3.8/3.8 rig=pdrv.py:1dd8f1dd28a60e2f+rowgate.py:ef3db488537accba
+BOX-BUSY-WAIT try=1 foreign_cpu=245% ceiling=180% at=smoke64k-validate-m256-big-auto-t4-r1 ts=2026-09-15T22:49:21Z
+WARN-FOREIGN-CPU at=smoke64k-validate-m256-big-auto-t4-r1 foreign_cpu=174% ceiling=180% top=[<rig>/Claude/rars-wt-rar2x-heap-15sep/target/release/deps/zz_heap_probe-1368893d47800d8e(53777)=100% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(408)=45% <app>)=9% <app>)=4%]
+LEG smoke64k-validate-m256-big-auto-t4-r1  ok path=fold wall=   0.32 cpu=    1.40 W=[] win=0 slabs=1 foreign=174.0/162.2 steal=n/a load=3.8/3.3 rig=pdrv.py:1dd8f1dd28a60e2f+rowgate.py:ef3db488537accba
+WARN-FOREIGN-CPU at=smoke64k-validate-m256-big-autoalt-t4-r1 foreign_cpu=162% ceiling=180% top=[<rig>/Claude/rars-wt-rar2x-heap-15sep/target/release/deps/zz_heap_probe-1368893d47800d8e(53777)=98% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer(408)=45% <app>)=9% <app> Helper.app/Contents/MacOS/Claude Helper(18531)=2%]
+LEG smoke64k-validate-m256-big-autoalt-t4-r1 ok path=fold wall=   0.32 cpu=    1.40 W=[] win=0 slabs=1 foreign=161.7/167.6 steal=n/a load=3.3/3.3 rig=pdrv.py:1dd8f1dd28a60e2f+rowgate.py:ef3db488537accba
+ALL DONE ts=2026-09-15T22:49:52Z
+RIG-LOCK-RELEASED <rig>/.parfast-rig.lock

@@ -1,0 +1,16 @@
+NARROW-WAIT tag=narrow-validate rungs=256,320,378,384,392,400,448,512,640,768 until=2026-09-16T06:00:00Z pid=18320 ts=2026-09-15T14:55:02.8867902Z
+NARROW-FREE ts=2026-09-15T14:56:02.9187658Z
+NARROW-BUILD base rc=0 secs=127.7 ts=2026-09-15T14:58:10.6628001Z
+NARROW-OVERLAY ._crates
+NARROW-OVERLAY crates\._nzbkit-base
+NARROW-OVERLAY crates\nzbkit-base\._src
+NARROW-OVERLAY crates\nzbkit-base\src\._par2repair
+NARROW-OVERLAY crates\nzbkit-base\src\._par2repair.rs
+NARROW-OVERLAY crates\nzbkit-base\src\par2repair.rs
+NARROW-OVERLAY crates\nzbkit-base\src\par2repair\._fastpar.rs
+NARROW-OVERLAY crates\nzbkit-base\src\par2repair\._inline_tests.rs
+NARROW-OVERLAY crates\nzbkit-base\src\par2repair\fastpar.rs
+NARROW-OVERLAY crates\nzbkit-base\src\par2repair\inline_tests.rs
+NARROW-BUILD new rc=0 secs=85.6 ts=2026-09-15T14:59:36.3394619Z
+NARROW-BINS base=F7E51BFE7D2313C2D8DB2A2C148C53A091A622246B6E18DFDD5D605AC5CEFE46 new=A6F882CE2D2BD6F5E0AD8A84EC18E6E4D373539913E78F4C676E6CFE66A3F701
+NARROW-DONE rc=0 log=<rig>\narrow-15sep\narrow-validate.log ts=2026-09-15T15:24:53.5445926Z

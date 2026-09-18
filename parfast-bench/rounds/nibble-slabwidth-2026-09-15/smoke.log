@@ -1,0 +1,27 @@
+19:53:52 waiting for the rig lock
+19:53:52 rig lock TAKEN, load 1
+Opening: m01.bin
+Opening: m02.bin
+Opening: m03.bin
+Opening: m04.bin
+Opening: m05.bin
+Opening: m06.bin
+Opening: m07.bin
+Opening: m08.bin
+Opening: m09.bin
+Opening: m10.bin
+Opening: m11.bin
+Opening: m12.bin
+Opening: m13.bin
+Opening: m14.bin
+Opening: m15.bin
+Opening: m16.bin
+Done
+19:53:56 fixture created in 3.4 s
+19:54:22 LEG m2048-auto-m128-r1                 rc=0 ok=True wall= 13.27 cpu=  54.70 maxrss=  338 work_peak=  189 fp_hw=  355 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=2.2/3.8 foreign=12.29
+19:54:41 LEG m2048-auto-m256-r1                 rc=0 ok=True wall= 11.62 cpu=  48.37 maxrss=  558 work_peak=  377 fp_hw=  585 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.6/3.8 foreign=8.16
+19:54:57 LEG m2048-auto-none-r1                 rc=0 ok=True wall=  7.31 cpu=  30.91 maxrss= 1151 work_peak= 1074 fp_hw= 1207 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.5/3.6 foreign=5.7
+19:55:13 LEG m2048-auto-none-s128-r1            rc=0 ok=True wall=  7.84 cpu=  32.71 maxrss=  693 work_peak=  537 fp_hw=  726 slabs=2/Spill ['forney-joint'] uses=64 w=[512] load=3.5/3.6 foreign=7.45
+19:55:48 LEG m2048-auto-none-n84-r1             rc=0 ok=True wall= 26.35 cpu= 107.77 maxrss=  526 work_peak=  403 fp_hw=  552 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.4/4.1 foreign=18.21
+19:56:10 LEG m2048-auto-none-n168-r1            rc=0 ok=True wall= 13.90 cpu=  58.02 maxrss=  634 work_peak=  470 fp_hw=  665 slabs=1/Whole ['forney-joint'] uses=64 w=[512] load=3.9/4.1 foreign=10.75
+19:56:10 ALL DONE, load 4

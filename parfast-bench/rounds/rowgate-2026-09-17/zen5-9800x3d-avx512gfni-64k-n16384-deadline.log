@@ -1,0 +1,4 @@
+DEADLINE-ARMED tag=rg64kdl watching=pid=21832 until=2026-09-17T20:15:00.0000000Z now=2026-09-17T18:50:15.1573883Z
+DEADLINE-EMPTY-SAMPLE 1 of 3 - not disarming on one reading 2026-09-17T19:11:15.4547358Z
+DEADLINE-EMPTY-SAMPLE 2 of 3 - not disarming on one reading 2026-09-17T19:12:15.4593447Z
+DEADLINE-ROUND-FINISHED on its own after 3 consecutive empty samples 2026-09-17T19:13:15.4736791Z

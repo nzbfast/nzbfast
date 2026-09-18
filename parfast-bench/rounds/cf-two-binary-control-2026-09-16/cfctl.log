@@ -1,0 +1,14 @@
+2026-09-16T13:15:05.6323011Z CFCTL start root=<rig>\cfctl16sep harnessSrc=<rig>\cfctl16sep\B\src
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=.parfast-rig pid=15780 started=2026-09-16T13:15:05.6452817Z
+2026-09-16T13:15:05.6579947Z FIXTURE copying <rig>\wcomb-16sep\fix -> <rig>\cfctl16sep\fix
+2026-09-16T13:15:07.3174873Z FIXTURE copied secs=1.7
+2026-09-16T13:17:12.3039439Z BUILD A rc=0 secs=123.1 log=<rig>\cfctl16sep\build-A.log
+2026-09-16T13:19:16.4023448Z BUILD B rc=0 secs=124.1 log=<rig>\cfctl16sep\build-B.log
+2026-09-16T13:19:16.4908887Z BIN A sha256=802511B731B8F57134306C0CB2EC3A10D61020C6F8A738A71B8C8D990259F05A <rig>\cfctl16sep\A\src\target\release\parfast.exe
+2026-09-16T13:19:16.4908887Z BIN B sha256=5B7D491F0E075D899DC341C13000BC2221774A296452215A4E102C33F780374B <rig>\cfctl16sep\B\src\target\release\parfast.exe
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-16T13:29:18.1822697Z LEGSET cfA1 rc=0 legs=33 log=<rig>\cfctl16sep\cfA1.log
+2026-09-16T13:38:53.7726868Z LEGSET cfB1 rc=0 legs=33 log=<rig>\cfctl16sep\cfB1.log
+2026-09-16T13:48:35.0603557Z LEGSET cfB2 rc=0 legs=33 log=<rig>\cfctl16sep\cfB2.log
+2026-09-16T13:59:09.9390208Z LEGSET cfA2 rc=0 legs=33 log=<rig>\cfctl16sep\cfA2.log
+2026-09-16T13:59:09.9390208Z CFCTL ALL DONE

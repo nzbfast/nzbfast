@@ -1,0 +1,54 @@
+LADDER i5dcladder start=2026-09-16T22:25:49.4476016Z host=intel-i5-10600kf cores=12 widths=12,8,6,4,3,2
+BIN parfast sha256=9FA78067CC52A2DF
+BOX-QUEUE foreign_cpu=101.6 locked=False waited_s=1 at=pre-fresh-t12-1
+BOX-FREE foreign_cpu=15.6 waited_s=47 at=pre-fresh-t12-1
+LEG arm=fresh t=12 rep=1 rc=0 wall=10.033 cpu=67.297 foreign_cpu=42.2 foreign_after=20.3 fused=true fold_alone=8.53s chain_alone=9.73s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:26:55.2016258Z
+BOX-QUEUE foreign_cpu=40.6 locked=False waited_s=1 at=pre-hit-t12-1
+BOX-FREE foreign_cpu=23.4 waited_s=47 at=pre-hit-t12-1
+LEG arm=hit t=12 rep=1 rc=0 wall=9.84 cpu=87.797 foreign_cpu=25 foreign_after=14.1 fused=false fold_alone=9.54s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 5.25s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:27:56.8093367Z
+BOX-FREE foreign_cpu=7.8 waited_s=1 at=pre-hit-t12-2
+LEG arm=hit t=12 rep=2 rc=0 wall=9.726 cpu=86.875 foreign_cpu=31.2 foreign_after=20.3 fused=false fold_alone=9.43s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 5.12s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:28:12.1401384Z
+BOX-FREE foreign_cpu=21.9 waited_s=1 at=pre-fresh-t12-2
+LEG arm=fresh t=12 rep=2 rc=0 wall=10.051 cpu=66.109 foreign_cpu=23.4 foreign_after=32.8 fused=true fold_alone=8.41s chain_alone=9.74s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:28:27.7958491Z
+BOX-FREE foreign_cpu=26.6 waited_s=1 at=pre-fresh-t8-1
+LEG arm=fresh t=8 rep=1 rc=0 wall=10.044 cpu=66.359 foreign_cpu=12.5 foreign_after=18.8 fused=true fold_alone=8.45s chain_alone=9.72s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:28:43.4282009Z
+BOX-FREE foreign_cpu=12.5 waited_s=1 at=pre-hit-t8-1
+LEG arm=hit t=8 rep=1 rc=0 wall=9.8 cpu=87.531 foreign_cpu=15.6 foreign_after=12.5 fused=false fold_alone=9.51s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 5.22s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:28:58.8175083Z
+BOX-FREE foreign_cpu=15.6 waited_s=1 at=pre-hit-t8-2
+LEG arm=hit t=8 rep=2 rc=0 wall=9.573 cpu=85.141 foreign_cpu=15.6 foreign_after=43.8 fused=false fold_alone=9.29s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 5.14s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:29:13.9748913Z
+BOX-FREE foreign_cpu=10.9 waited_s=1 at=pre-fresh-t8-2
+LEG arm=fresh t=8 rep=2 rc=0 wall=10.115 cpu=66.578 foreign_cpu=32.8 foreign_after=35.9 fused=true fold_alone=8.50s chain_alone=9.78s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:29:29.7539360Z
+BOX-QUEUE foreign_cpu=40.6 locked=False waited_s=1 at=pre-fresh-t6-1
+BOX-FREE foreign_cpu=23.4 waited_s=47 at=pre-fresh-t6-1
+LEG arm=fresh t=6 rep=1 rc=0 wall=10.144 cpu=67.484 foreign_cpu=9.4 foreign_after=28.1 fused=true fold_alone=8.63s chain_alone=9.80s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:30:31.6782452Z
+BOX-FREE foreign_cpu=21.9 waited_s=1 at=pre-hit-t6-1
+LEG arm=hit t=6 rep=1 rc=0 wall=9.879 cpu=88.562 foreign_cpu=26.6 foreign_after=25 fused=false fold_alone=9.61s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 5.52s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:30:47.1387131Z
+BOX-FREE foreign_cpu=18.8 waited_s=1 at=pre-hit-t6-2
+LEG arm=hit t=6 rep=2 rc=0 wall=9.539 cpu=86.391 foreign_cpu=39.1 foreign_after=21.9 fused=false fold_alone=9.26s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 5.31s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:31:02.3286733Z
+BOX-FREE foreign_cpu=4.7 waited_s=1 at=pre-fresh-t6-2
+LEG arm=fresh t=6 rep=2 rc=0 wall=10.04 cpu=66.875 foreign_cpu=12.5 foreign_after=34.4 fused=true fold_alone=8.51s chain_alone=9.73s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:31:17.9163571Z
+BOX-FREE foreign_cpu=17.2 waited_s=1 at=pre-fresh-t4-1
+LEG arm=fresh t=4 rep=1 rc=0 wall=11.165 cpu=58.641 foreign_cpu=9.4 foreign_after=23.4 fused=true fold_alone=10.89s chain_alone=9.57s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:31:34.6441403Z
+BOX-FREE foreign_cpu=32.8 waited_s=1 at=pre-hit-t4-1
+LEG arm=hit t=4 rep=1 rc=0 wall=12.474 cpu=79.922 foreign_cpu=45.3 foreign_after=43.8 fused=false fold_alone=12.19s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 5.03s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:31:52.8330285Z
+BOX-FREE foreign_cpu=28.1 waited_s=1 at=pre-hit-t4-2
+LEG arm=hit t=4 rep=2 rc=0 wall=12.329 cpu=79.328 foreign_cpu=46.9 foreign_after=14.1 fused=false fold_alone=12.05s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 5.06s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:32:10.7371195Z
+BOX-FREE foreign_cpu=28.1 waited_s=1 at=pre-fresh-t4-2
+LEG arm=fresh t=4 rep=2 rc=0 wall=11.526 cpu=59.859 foreign_cpu=10.9 foreign_after=21.9 fused=true fold_alone=11.19s chain_alone=9.63s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:32:27.9138030Z
+BOX-FREE foreign_cpu=29.7 waited_s=1 at=pre-fresh-t3-1
+LEG arm=fresh t=3 rep=1 rc=0 wall=12.572 cpu=52.078 foreign_cpu=54.7 foreign_after=18.8 fused=true fold_alone=12.31s chain_alone=9.49s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:32:46.1244547Z
+BOX-FREE foreign_cpu=14.1 waited_s=1 at=pre-hit-t3-1
+LEG arm=hit t=3 rep=1 rc=0 wall=13.508 cpu=69.594 foreign_cpu=17.2 foreign_after=32.8 fused=false fold_alone=13.20s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 5.12s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:33:05.3495634Z
+BOX-FREE foreign_cpu=37.5 waited_s=1 at=pre-hit-t3-2
+LEG arm=hit t=3 rep=2 rc=0 wall=13.5 cpu=70.281 foreign_cpu=10.9 foreign_after=39.1 fused=false fold_alone=13.22s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 5.52s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:33:24.5178029Z
+BOX-FREE foreign_cpu=15.6 waited_s=1 at=pre-fresh-t3-2
+LEG arm=fresh t=3 rep=2 rc=0 wall=12.699 cpu=52.109 foreign_cpu=10.9 foreign_after=12.5 fused=true fold_alone=12.41s chain_alone=9.48s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:33:42.7680426Z
+BOX-FREE foreign_cpu=7.8 waited_s=1 at=pre-fresh-t2-1
+LEG arm=fresh t=2 rep=1 rc=0 wall=17.538 cpu=49.125 foreign_cpu=12.5 foreign_after=39.1 fused=true fold_alone=17.21s chain_alone=9.29s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:34:05.9229409Z
+BOX-FREE foreign_cpu=32.8 waited_s=1 at=pre-hit-t2-1
+LEG arm=hit t=2 rep=1 rc=0 wall=18.024 cpu=63.375 foreign_cpu=37.5 foreign_after=25 fused=false fold_alone=17.74s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 6.30s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:34:29.6249541Z
+BOX-FREE foreign_cpu=4.7 waited_s=1 at=pre-hit-t2-2
+LEG arm=hit t=2 rep=2 rc=0 wall=17.874 cpu=63.297 foreign_cpu=14.1 foreign_after=14.1 fused=false fold_alone=17.59s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 6.29s)] sha=5b8d41b8cae45152 ts=2026-09-16T22:34:53.0791287Z
+BOX-FREE foreign_cpu=7.8 waited_s=1 at=pre-fresh-t2-2
+LEG arm=fresh t=2 rep=2 rc=0 wall=17.583 cpu=49.094 foreign_cpu=42.2 foreign_after=26.6 fused=true fold_alone=17.28s chain_alone=9.25s dc=[-] sha=5b8d41b8cae45152 ts=2026-09-16T22:35:16.2622048Z
+LADDER i5dcladder done=2026-09-16T22:35:16.2727771Z

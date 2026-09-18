@@ -1,0 +1,28 @@
+ INFO repair-timing: packet scan (critical): +977.28µs (total 977.28µs)
+ INFO repair-timing: verify targets + volume scan: +2.13s (total 2.13s)
+ INFO repair: repair ahead: 2048 block(s) to rebuild, structured solve
+ INFO repair-timing: adoption: +7.14ms (total 2.14s)
+ INFO repair-timing: load recovery: +52.16ms (total 2.19s)
+ INFO repair-timing:   forney joint plan: 1041 KB of kernel tables, locator tree held <= 44 KB (20 KB of it cached transforms)
+ INFO repair-timing: back-substitution setup (2048x2048, forney): 44.78ms
+ INFO repair-timing: retained from the verify pass: 0 block(s), 0.0 MB
+ INFO repair-timing: ntt syndromes (m=2048, needed=2048, n=3072, W=256, threads=1): 6.68s
+ INFO repair-timing: ntt window (201326592 bytes, 3072 slices, transformed): 6.68s
+ INFO repair-timing: ntt syndromes (m=2048, needed=2048, n=3072, W=256, threads=1): 6.57s
+ INFO repair-timing: ntt window (201326592 bytes, 3072 slices, transformed): 6.57s
+ INFO repair-timing: ntt syndromes (m=2048, needed=2048, n=3072, W=256, threads=1): 6.53s
+ INFO repair-timing: ntt window (201326592 bytes, 3072 slices, transformed): 6.53s
+ INFO repair-timing: ntt syndromes (m=2048, needed=2048, n=3072, W=256, threads=1): 6.59s
+ INFO repair-timing: ntt window (201326592 bytes, 3072 slices, transformed): 6.59s
+ INFO repair-timing: ntt syndromes (m=2048, needed=2048, n=2048, W=256, threads=1): 5.38s
+ INFO repair-timing: ntt: 4 window(s) transformed before the tail, tail transformed above
+ INFO repair-timing:   forney stage 1 (joint whole/demand, stripe 512w, FALLBACK arithmetic below the kernel gate 16384): 1.57s of 9.86s wall (attributed by worker share)
+ INFO repair-timing:   forney stage 2 (joint scheduler, m=2048, gate 8192, FALLBACK arithmetic, stripe 512w): 8.30s of 9.86s wall (attributed by worker share)
+ INFO repair-timing: back-substitution (forney-joint): 9.86s
+ INFO repair-timing: feed+fold+solve: +41.88s (total 44.07s)
+ INFO repair-timing: patch: +47.08ms (total 44.12s)
+ INFO repair-timing: final verify: +2.42s (total 46.54s)
+ INFO repair-timing: plan prep: 44.73ms over 1 cold build(s), 64 stripe use(s) - 0.096% of the 46.54s repair
+ INFO repair-timing: forney solve: 9.86s over 1 solve(s) (stage 1 1.57s, stage 2 8.30s) - 21.189% of the 46.54s repair
+mem-floor: live high-water · ru_maxrss 1066 MB · rss 1066 MB · footprint 1066 MB · rss over footprint 0 MB · repair work 939 MB (own peak 939) · scan reads 0 MB (own peak 8) · verifier tables 0 MB · unattributed 126 MB
+mem-floor: sampled peak rss · ru_maxrss 1066 MB · rss 1066 MB · footprint 1066 MB · rss over footprint 0 MB · repair work 939 MB (own peak 939) · scan reads 0 MB (own peak 8) · verifier tables 0 MB · unattributed 126 MB

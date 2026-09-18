@@ -16,6 +16,17 @@
 #                                                         after every leg
 $ErrorActionPreference = 'Stop'
 
+# DOT-SOURCING THIS FILE TWICE IN ONE PROCESS MUST BE HARMLESS, and until
+# 16 Sep 2026 it was not. `Add-Type` throws "the type name 'PMem' already
+# exists" on the second pass, and `$script:lockfs = $null` below silently
+# DROPPED a rig lock this process was still holding - so a script that took
+# the lock and then dot-sourced plib (catwin.ps1 does exactly that, because
+# plib comes out of the tarball it extracts under the lock) had to hand-roll
+# its own take and its own handle to stay correct. That hand-rolled copy is
+# how `catwin.ps1` came to test the lock file's mere EXISTENCE, which is the
+# defect an internal note is about.
+# Both hazards are guarded here rather than worked around at each call site.
+if (-not ('PMem' -as [type])) {
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -38,72 +49,822 @@ public static class PMem {
   }
 }
 "@
+}
 
-$script:lockfs = $null
+# GUARDED, not assigned: see the note above. A second dot-source must not
+# forget a handle the first one is still holding.
+if (-not (Test-Path 'variable:script:lockfs')) { $script:lockfs = $null }
 
-function Take-RigLock([string]$lockpath) {
-  # THE LOCK IS PER BOX, NOT PER ROUND, and that is the whole point. Until
-  # 10 Sep 2026 each script locked its OWN file - lad.lock, vfy.lock,
-  # full.lock - so the lock excluded a second copy of the SAME round and did
-  # nothing at all about a DIFFERENT one. Measured that day on intel-i5-10600kf:
-  # lad.ps1, vfy.ps1 and full.ps1 all live at once with two rival tools
-  # running, which silently contaminated an entire ladder (parfast read 36.5 s
-  # at m=64 and 29.7 s at m=1,280 - not a curve, a disturbed box).
+# ---------------------------------------------------------------------------
+# THE ROUND LOG SINK
+# ---------------------------------------------------------------------------
+# EVERY STATUS LINE IN THIS LIBRARY WENT TO STDOUT AND NOWHERE ELSE until
+# 16 Sep 2026, and for one whole family of drivers that is the same as not
+# logging it at all. A bare PowerShell string statement is implicit
+# `Write-Output`: it reaches the output stream and no file. Two families of
+# driver consume that, and only one of them is safe:
+#
+#  - harness/wcomb.ps1 and its siblings write EVERY line of the round
+#    to stdout and are redirected to a file by their launcher, so plib's lines
+#    are in the banked log already (rounds/settle-e2e-2026-09-16/ is
+#    one - the FIXTURE-SETTLE lines are right there in it).
+#  - the round drivers that define their own `Log` - dcsmall.ps1, dcladder.ps1,
+#    dcenrol.ps1 - append to `work\logs\<tag>.log` and it is THAT file which
+#    is banked into rounds/ and read afterwards. plib's lines never
+#    entered it.
+#
+# So the guard's verdict was in neither the banked artefact nor anything a
+# later reader saw, and it is not hypothetical: the round for claim
+# digest-cache-enrol-threads-gate-16sep hit Wait-FixtureSettle's cap TWICE on
+# 16 Sep 2026 (`ok=0 GAVE-UP foreign_cpu=10.9 ... waited_s=1206`), on BOTH
+# boxes, and both verdicts were recovered only because that round happened to
+# be driven over ssh with stdout redirected to a scratch file. A round started
+# as a scheduled task loses them and its numbers read as clean
+# (an internal note section 5, last bullet).
+# Wait-FixtureSettle's own header already CLAIMED it logged whether it waited -
+# the same silent-guard class it was written to prevent, one step further out:
+# the guard was not silent, the place a reader looks was.
+#
+# OPT-IN, AND INERT UNTIL SOMETHING OPTS IN. This library is dot-sourced by
+# drivers this repo holds no copy of - intel-i5-10600kf carries TWO rig roots with
+# their own plib.ps1 (`tools/bench-deploy-check.py intel-i5-10600kf` probes both) - so
+# a driver that never calls `Set-PlibLog` and a box with no `PLIB_LOG` set must
+# behave exactly as before, which is what `Get-PlibLog` returning $null buys.
+#
+# TWO WAYS IN, deliberately. `Set-PlibLog <path>` is for a driver that has its
+# own log (one line, next to its own `Log` definition). `$env:PLIB_LOG` is for
+# the case that lost the two verdicts above - a round somebody else starts,
+# from a scheduled task or a launcher, where no driver edit is available at
+# all. Set-PlibLog wins when both are set, and the variable is re-read on every
+# line rather than cached, so a launcher can set it around one round.
+#
+# STDOUT IS UNCHANGED, BYTE FOR BYTE, and that is the constraint the whole
+# shape is built around: rounds and reducers parse these lines, and several of
+# these functions are documented as MUST-NOT-RETURN-ANYTHING-EXTRA because
+# PowerShell makes no distinction between logging and returning (see
+# Require-QuietBox's note, and Get-RigStamp's). `Write-PlibLine` emits the
+# string exactly as the bare statement did - a nested function's output flows
+# into the caller's stream unchanged - and everything else it does is an
+# assignment or a swallowed append, so nothing is reordered, reformatted,
+# duplicated or dropped.
+#
+# AND AN APPEND MUST NEVER THROW INTO A ROUND. `$ErrorActionPreference = 'Stop'`
+# at the top of this file makes a locked file or a missing directory a
+# TERMINATING error, and a guard that kills a round because it could not log is
+# strictly worse than the defect. Same rule, same shape and the same reason as
+# Write-BinFacts' `-VV` probe, which learned it by killing the seven-tool field
+# round two seconds in.
+if (-not (Test-Path 'variable:script:pliblog')) { $script:pliblog = $null }
+
+# SILENT, and that is load-bearing rather than tidy: a confirmation line here
+# would be a line in the caller's output stream at a point no existing log
+# format expects one. Pass '' or $null to turn the sink back off.
+function Set-PlibLog([string]$path) {
+  if ($path) { $script:pliblog = $path } else { $script:pliblog = $null }
+}
+
+# The effective sink, or $null. EMITS NOTHING - every statement is an
+# assignment or a return, for the reason Get-RigStamp's header gives.
+function Get-PlibLog {
+  if ($script:pliblog) { return $script:pliblog }
+  if ($env:PLIB_LOG) { return $env:PLIB_LOG }
+  return $null
+}
+
+# The one place a plib status line goes. stdout exactly as before, plus the
+# sink when there is one.
+function Write-PlibLine([string]$line) {
+  $line
+  $sink = Get-PlibLog
+  if (-not $sink) { return }
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { Add-Content -LiteralPath $sink -Value $line -ErrorAction Stop } catch { }
+  $ErrorActionPreference = $prevEap
+}
+
+# THE LOCK IS PER BOX, NOT PER ROUND, and that is the whole point. Until
+# 10 Sep 2026 each script locked its OWN file - lad.lock, vfy.lock,
+# full.lock - so the lock excluded a second copy of the SAME round and did
+# nothing at all about a DIFFERENT one. Measured that day on intel-i5-10600kf:
+# lad.ps1, vfy.ps1 and full.ps1 all live at once with two rival tools
+# running, which silently contaminated an entire ladder (parfast read 36.5 s
+# at m=64 and 29.7 s at m=1,280 - not a curve, a disturbed box).
+#
+# So every round on a box now contends for ONE file in the rig root, and the
+# round's own name is written inside it, which is also what makes the holder
+# identifiable to a human.
+#
+# ABSOLUTE, in the user profile. The first fix derived the lock from the
+# LOG's directory, which is per-DIRECTORY and not per-box: on 10 Sep 2026 a
+# lane running out of one directory and a publication round running out of
+# another took two different "per-box" locks and measured each other for ten
+# minutes at load 161. Only a fixed path outside the round's own tree is
+# actually one per machine.
+function Get-RigLockPath { Join-Path $env:USERPROFILE '.parfast-rig.lock' }
+
+# THE ONE PLACE THE HOLD RULE LIVES. Every question any script asks about this
+# lock - may I take it, is it busy, may I remove it - is answered from here, so
+# the takers cannot disagree with the waiters about what a hold IS. They did
+# disagree, and on 16 Sep 2026 it cost apple-m3-ultra eight hours in the unix
+# spelling and very nearly cost a live round its box in this one
+# (an internal note). The unix half of
+# this same rule is harness/riglock_state.py; read its module
+# docstring, which is the design for both.
+#
+# LIVENESS COMES FROM THE HOLDER, NEVER FROM THE CLOCK, and there is no age
+# bound here for the same reason there is none in riglock_state.py: a
+# legitimate round holds this box for hours, so any age short enough to clear
+# an orphan is short enough to steal a live round's box - the failure
+# bench-suite item 0e exists to prevent, and strictly worse than the one being
+# fixed. A lock naming a pid that is alive on this box is HELD at any age; a
+# lock that parses to no pid is an orphan at any age. DO NOT ADD AN AGE BOUND
+# AND DO NOT ADD A -Force.
+#
+# Returns: Path, Exists, Text, Pid, Alive, Held, Why.
+function Get-RigLockHolder {
+  $lockpath = Get-RigLockPath
+  $r = [ordered]@{ Path = $lockpath; Exists = $false; Text = ''; Pid = 0; Alive = $false; Held = $false; Why = 'absent' }
+  if (-not (Test-Path $lockpath)) { return [pscustomobject]$r }
+  $r.Exists = $true
+  # AN UNREADABLE LOCK IS A HELD LOCK. This is now a BACKSTOP rather than the
+  # common case, and the change is the point: Take-RigLock opened the file
+  # [IO.FileShare]::None until 16 Sep 2026, so while a round was running nobody
+  # could even READ the lock - a human asking who holds this box got
+  # "the process cannot access the file" and an ORPHAN, having no open handle,
+  # was the only kind of lock that would answer. Backwards from what a human
+  # needs, and exactly backwards at the moment it matters, which is somebody
+  # deciding whether to clear somebody else's lock. wlaunch.ps1 met the same
+  # wall on 11 Sep 2026 from the other side: it read the file under
+  # $ErrorActionPreference = 'Stop' with no catch and died with a raw .NET
+  # "cannot access the file" on every box that had a round in flight.
   #
-  # So every round on a box now contends for ONE file in the rig root, and the
-  # round's own name is written inside it, which is also what makes the holder
-  # identifiable to a human. The caller still passes its own name; only the
-  # path is collapsed.
-  $roundname = [IO.Path]::GetFileNameWithoutExtension($lockpath)
-  # ABSOLUTE, in the user profile. The first fix derived the lock from the
-  # LOG's directory, which is per-DIRECTORY and not per-box: on 10 Sep 2026 a
-  # lane running out of one directory and a publication round running out of
-  # another took two different "per-box" locks and measured each other for ten
-  # minutes at load 161. Only a fixed path outside the round's own tree is
-  # actually one per machine.
-  $lockpath = Join-Path $env:USERPROFILE '.parfast-rig.lock'
-  try { $script:lockfs = [IO.File]::Open($lockpath, 'CreateNew', 'Write', 'None') }
-  catch {
-    $who = ''
-    try { $who = [IO.File]::ReadAllText($lockpath) } catch { $who = '(unreadable)' }
-    "LOCK-BUSY $lockpath held by: $who"
-    exit 17
+  # FileShare::Read fixes that and costs neither load-bearing property.
+  # Measured cross-process on intel-i5-10600kf, 16 Sep 2026 (PowerShell 5.1.26100.9444,
+  # scratch dir, holder and reader in separate processes): under ::None,
+  # Get-Content REFUSED, Remove-Item refused, a rival CreateNew refused; under
+  # ::Read, Get-Content returned the identity line while Remove-Item and the
+  # rival CreateNew were STILL refused. FILE_SHARE_DELETE stays excluded, which
+  # is the half Release-RigLock's NTFS argument below actually rests on - it
+  # needs nobody to be able to DELETE our file, not nobody to be able to read
+  # it. Record: an internal note, section
+  # "On Windows a HELD lock cannot be read at all".
+  #
+  # The arm stays because it is still TRUE and still free: an exclusive handle
+  # dies with the process that holds it, so a lock we cannot read for any
+  # reason is held by something alive, and a lock left by a hard-killed round
+  # is always readable. It is the safety net under the pid parse, not the
+  # primary path any more.
+  # FileShare::ReadWrite ON THE READ, and it is not optional. `File.ReadAllText`
+  # opens the file sharing READ only, and the holder's handle carries WRITE
+  # access - so the reader's share mode does not permit what the holder already
+  # has and the open is REFUSED, even though the holder shares Read. Measured
+  # on amd-ryzen-9800x3d, 16 Sep 2026: `Get-Content` (which shares ReadWrite by default)
+  # returned the identity line from a bystander process while `ReadAllText` on
+  # the same file threw, so this function reported `held-exclusively
+  # (unreadable)` and named no pid for a lock that was perfectly legible. That
+  # is the "identifiable to a human" property failing in the one place a human
+  # would be reading it from - and it would have made the FileShare::Read change
+  # above a no-op for every caller inside the harness.
+  try { $fs = [IO.File]::Open($lockpath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        try { $r.Text = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Close() } }
+  catch { $r.Held = $true; $r.Why = 'held-exclusively (unreadable, so its owner is alive)'; return [pscustomobject]$r }
+  if ($r.Text -match 'pid=(\d+)') { $r.Pid = [int]$Matches[1] }
+  if ($r.Pid -le 0) { $r.Why = 'orphan (names no pid)'; return [pscustomobject]$r }
+  # [Diagnostics.Process]::GetProcessById rather than Get-Process, and
+  # [ArgumentException] rather than the cmdlet's own exception type: a
+  # `catch [T]` whose T cannot be resolved is itself an error at runtime, and
+  # ArgumentException lives in the base library where it can always be
+  # resolved. GetProcessById throws exactly that when no such process is
+  # running, which is the one answer we act on. Any OTHER failure reads as
+  # ALIVE, because being wrong that way costs a wait and being wrong the other
+  # way costs somebody's round.
+  #
+  # Never `os.kill(pid, 0)` or its PowerShell equivalents for this: the POSIX
+  # existence idiom has no Windows case in CPython and TERMINATES the process
+  # it asks about, and asking a handle you opened for query rather than
+  # SYNCHRONIZE to WaitForSingleObject returns WAIT_FAILED for every pid, which
+  # read every live holder as dead until d048a0ca6 fixed it in
+  # riglock_state.py. This primitive has neither defect.
+  try { $null = [Diagnostics.Process]::GetProcessById($r.Pid); $r.Alive = $true }
+  catch [ArgumentException] { $r.Alive = $false }
+  catch { $r.Alive = $true }
+  if ($r.Alive) { $r.Held = $true; $r.Why = "held by live pid=$($r.Pid)" }
+  else { $r.Why = "orphan (pid=$($r.Pid) is gone)" }
+  return [pscustomobject]$r
+}
+
+# THE READ-ONLY QUESTION, for a script that OBSERVES the box rather than
+# taking it - wquiet.ps1, oramafter.ps1, and any waiter written after them.
+# Calling Take-RigLock to find out whether the box is busy would TAKE it, and
+# testing Test-Path would block the waiter on an orphan forever, which is
+# exactly what both of those did before 16 Sep 2026.
+function Test-RigLockHeld { (Get-RigLockHolder).Held }
+
+# SAYING SO OUT LOUD, factored out because there are now TWO callers and a
+# second copy of it would be a second convention. Item 3 of the handoff: two
+# lanes cleared an orphan by hand on 16 Sep 2026 and neither left a trace, so
+# the next lane re-derived the same judgement from scratch. A NOTE costs one
+# line and makes the pattern visible.
+#
+# wlaunch.ps1 is the second caller. It clears orphans too - it is a launcher,
+# so it clears and then starts a round that takes the lock properly - and until
+# 16 Sep 2026 it announced NOTHING when it did, which is the silence this
+# exists to end. Best effort in both directions: a round must never die because
+# a coordination file was unwritable.
+#
+# AND UNTIL 17 Sep 2026 THE NOTE REACHED NOBODY ON ANY BOX IN THE FLEET. The
+# file it posted into was resolved by `Get-ChildItem $env:USERPROFILE\bench-out
+# -Filter 'COORDINATION-*.txt'`, taken when exactly one matched. `bench-out` is
+# the UNIX fleet's convention (`~/bench-out/COORDINATION-<box>.txt`) and it is
+# not where a Windows box here keeps the file. Measured 17 Sep 2026 on all four
+# Windows boxes, with `$env:BOXGATE_COORD` unset on every one of them:
+#
+#   - intel-i5-10600kf: it found `bench-out\COORDINATION-intel-i5-10600kf.txt`, 86 KB, last
+#     written 8 Sep - while the live file was `<rig>\COORDINATION-intel-i5-10600kf.txt`,
+#     257 KB, written that morning, on another volume entirely.
+#   - windows-gaming-pc-b, amd-ryzen-9800x3d and intel-core-ultra-9-386h: NOTHING AT ALL. None of the three has a
+#     `bench-out` directory; each keeps its live file directly in
+#     `%USERPROFILE%` (`COORDINATION-windows-gaming-pc-b.txt`, `COORDINATION-amd-ryzen-9800x3d.txt`,
+#     and `COORDINATION-coreultra9.txt` - the last not even named after the box).
+#
+# So on three of the four it found ZERO candidates and posted nothing AND SAID
+# NOTHING, and on the fourth it found exactly one and took it on the strength
+# of being single - a file nine days dead, while the live one sat on another
+# volume. A single match is not a current match, and a `-eq 1` with no `else`
+# is a guard that reports its own blindness as success.
+#
+# TWO CHANGES, AND NEITHER IS A GUESS:
+#
+#   1. LOOK WHERE THE FILES ARE. The candidate directories are
+#      `$env:USERPROFILE\bench-out` AND `$env:USERPROFILE`, which turns three
+#      of those zeroes into three exact hits. The bench-out arm is KEPT rather
+#      than replaced: it is the fleet convention, some boxes will grow one, and
+#      nothing is bought by removing it.
+#   2. RANK, DO NOT DEMAND UNIQUENESS. Newest `LastWriteTimeUtc` wins, ties
+#      broken by path so two runs of the same round agree. On intel-i5-10600kf that
+#      picks the 16 Sep profile copy over the 8 Sep bench-out one - still not
+#      the live `<rig>` file, because NO derivation from a home directory can
+#      reach another volume. That is what `$BOXGATE_COORD` is for, it still
+#      wins outright, and that box now sets it (.claude/MACHINES.md).
+#
+# NO AGE BOUND - THE AGE IS REPORTED INSTEAD. An mtime is the only
+# discriminator available here, so it RANKS; making it REFUSE past a threshold
+# would be the clock deciding liveness, which is the mistake Get-RigLockHolder's
+# header forbids for the lock itself. The chosen file's age goes in the status
+# line, so a lane reading the round log sees `age_d=9` and knows to go looking,
+# rather than having the library decide on its behalf and say nothing.
+#
+# AND IT IS NEVER SILENT NOW. Zero candidates, and an append that fails, each
+# produce a line through `Write-PlibLine` naming what was searched. The ROUND
+# LOG SINK essay at the head of this file is this same failure one level out:
+# a guard whose ENTIRE PURPOSE is to leave a trace must not fail to leave one
+# quietly. Best effort still survives in both directions - nothing below
+# throws, and a missing, ambiguous or unwritable coordination file never ends
+# a round.
+#
+# THE UNIX HALF HAS THE SAME SHAPE AND IS NOT FIXED HERE:
+# `coordination_file()` in harness/riglock_state.py returns a single
+# `~/bench-out` match or None, silently. It is correct for the Macs, whose
+# files really are there, so it is a latent copy of this rather than a live
+# defect - but the two are one rule and the next box that moves its file will
+# find it.
+
+# THE CANDIDATE LIST. RETURNS, AND EMITS NOTHING ELSE, for the reason
+# Get-BoxHandover's header gives: PowerShell makes no distinction between
+# logging and returning, so a status line added here would be handed to the
+# caller as part of the answer. Newest first. An empty array when there is
+# nothing, never $null, so a caller can index `.Count` without a null test.
+#
+# DELIBERATELY NOT A GENERAL COORDINATION-FILE FINDER, and it must not become
+# one. `Get-BoxHandover` takes its path FROM THE CALLER on purpose: a WAITER
+# that guesses wrong reads a stale file as a free box, which is what cost two
+# lanes their box on 16 Sep 2026. Guessing is acceptable here and only here,
+# because the worst case of a wrong guess is a NOTE in a quiet file while the
+# alternative is no note at all. Do not repoint a reader at this.
+function Get-OrphanNoteCoordDirs {
+  $dirs = @()
+  if ($env:USERPROFILE) {
+    $dirs += (Join-Path $env:USERPROFILE 'bench-out')
+    $dirs += $env:USERPROFILE
   }
+  return $dirs
+}
+
+function Get-OrphanNoteCoordCandidates {
+  $hits = @()
+  foreach ($d in (Get-OrphanNoteCoordDirs)) {
+    # -File so a DIRECTORY called COORDINATION-something.txt cannot be chosen;
+    # SilentlyContinue because a missing bench-out is the NORMAL case on three
+    # of the four boxes and $ErrorActionPreference is 'Stop' in this file.
+    $hits += @(Get-ChildItem -LiteralPath $d -Filter 'COORDINATION-*.txt' -File -ErrorAction SilentlyContinue)
+  }
+  if ($hits.Count -eq 0) { return @() }
+  return @($hits | Sort-Object -Property @{ Expression = 'LastWriteTimeUtc'; Descending = $true }, @{ Expression = 'FullName'; Descending = $false })
+}
+
+function Write-RigLockOrphanNote([string]$lockpath, [string]$what, [string]$action) {
+  Write-PlibLine "RIG-LOCK-ORPHAN $lockpath $action, was: $($what.Trim())"
+  $coord = $null
+  $src = ''
+  if ($env:BOXGATE_COORD) {
+    $coord = $env:BOXGATE_COORD
+    $src = 'src=BOXGATE_COORD'
+  } else {
+    $cands = @(Get-OrphanNoteCoordCandidates)
+    if ($cands.Count -ge 1) {
+      $coord = $cands[0].FullName
+      $aged = [int](((Get-Date).ToUniversalTime() - $cands[0].LastWriteTimeUtc).TotalDays)
+      $src = "src=newest-of-$($cands.Count) age_d=$aged"
+    }
+  }
+  if (-not $coord) {
+    Write-PlibLine "RIG-LOCK-ORPHAN-NOTE coord=NONE searched=[$((Get-OrphanNoteCoordDirs) -join '; ')] - this clearing is in the round log only. Set BOXGATE_COORD on this box."
+    return
+  }
+  $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+  $note = "NOTE $ts (rig lock, $env:COMPUTERNAME) ORPHAN cleared at $lockpath - was: $($what.Trim()). Liveness came from the holder (dead or unnamed pid), never from the file's age."
+  $wrote = 1
+  try { Add-Content -LiteralPath $coord -Value $note -ErrorAction Stop } catch { $wrote = 0 }
+  Write-PlibLine "RIG-LOCK-ORPHAN-NOTE coord=$coord $src wrote=$wrote"
+}
+
+# ---------------------------------------------------------------------------
+# THE HANDOVER MATCHER
+# ---------------------------------------------------------------------------
+# A LANE WAITING FOR THIS BOX MUST KEY ON THE CLAIM-ID FIELD, NOT ON A
+# SUBSTRING, and every lane that hand-rolled the test got it wrong the same
+# way. The house line format in a coordination file is
+#
+#     <VERB> <timestamp> <claim-id> <prose>
+#
+# so the natural-looking predicate is two independent conditions - the line
+# starts with a closing keyword, AND the line mentions my blocker's id - which
+# is `^(DONE|RELEASE).*<id>`. That is WRONG, and it is wrong in the direction that
+# costs a shared box hours: a courteous lane names every id on its AHEAD-LIST
+# inside its own closing prose, which is the habit these files run on, so any
+# other lane's DONE that merely MENTIONS the id you are waiting on satisfies
+# it. Measured on <rig>\COORDINATION-intel-i5-10600kf.txt on 16 Sep 2026, three lanes
+# in one day:
+#
+#  - a waiter for nibble-crossover-quiet-box-confirm-16sep fired on its FIRST
+#    poll while that lane was three hours into a live round, matching five
+#    unrelated closing lines, the earliest of which had made it satisfiable
+#    since 12:57:24Z;
+#  - parfast-nibble-windowed-ask-1mib-16sep hit it TWICE and wrote it up on
+#    that file at 14:38:52Z - parfast-cf-two-binary-control-16sep's DONE at
+#    14:01:15Z listed the lanes it was handing the box to, so one lane's
+#    courtesy cleared three lanes off that waiter's ahead-list;
+#  - digest-cache-i5-width-ladder-16sep hit it at 15:35Z, on a RELEASE from a
+#    different lane that merely mentioned the blocker.
+#
+# So the test is POSITIONAL: split on whitespace, field 0 must BE one of the
+# CLOSING KEYWORDS, and field 2 must EQUAL the id. Not -match, not -like, not
+# .Contains(). Equality on the third token is the whole fix, and it is the only
+# spelling that also refuses the id that is a PREFIX of another lane's id -
+# `-16sep` suffixes make near-misses the normal case here, not a corner.
+#
+# AND THE CLOSING VOCABULARY IS SIX WORDS, NOT TWO. `DONE` and `RELEASE` are
+# the two this box's file happens to use (33 and 13 of its lines on 16 Sep
+# 2026, against no instance of the other four), and a matcher built from the
+# evidence in front of it inherits exactly the failure that left two waiters
+# sitting through a free box for nine minutes: a close it does not recognise
+# reads as no close at all. The fleet's roster is
+# `.claude/tools/bench-accounts-parse.py`'s `CLOSE_KW` - 95 first tokens
+# classified open / close / neither BY READING THEIR OWN LINES, baselined over
+# 7,036 lines of the canonical files - and it carries `ABORTED` ("the round
+# died; the line is free"), `RELEASED`, `STAND-DOWN` and `WITHDRAWN` as well.
+# `tools/bench-box-gate.py` IMPORTS that roster rather than re-spelling it,
+# which is the rule here too - but a round on a Windows box cannot run Python
+# mid-leg, so this is the one place a SECOND copy is unavoidable. It is
+# therefore a DECLARED copy, not a quiet one: `tools/rig-selftest-gate.py`
+# holds the list below equal to `CLOSE_KW` on every push, so a
+# reclassification there reddens rather than silently splitting the two
+# readers. Never edit the list below to match a file you are looking at; edit
+# the roster, and let the gate move this.
+#
+# The comparisons are PowerShell's default CASE-INSENSITIVE equality, and that
+# is a choice rather than an oversight: a lane that posts `Done` still means
+# done, and claim ids are lowercase kebab by convention, so case-insensitivity
+# cannot manufacture a match that case-sensitivity would refuse - only an
+# equality-vs-substring mistake can, which is the thing being fixed.
+#
+# AND THE SECOND HALF OF THE DEFECT IS THE REPORT, not the predicate. A matcher
+# that prints only "HANDOVER" gives the operator no way to tell a true match
+# from a misfire: the i5 lane's watcher fired CORRECTLY at 18:47Z on a real
+# DONE and the lane still had to re-read the file by hand to find out whether
+# to believe it. `Write-BoxHandoverNote` exists so the line that fired is in
+# the round log next to the decision it caused.
+#
+# TWO FUNCTIONS, AND THE SPLIT IS THE POINT rather than a style choice. Read
+# Require-QuietBox's note: PowerShell makes no distinction between logging and
+# returning, so a function that calls `Write-PlibLine` AND returns a value
+# hands its caller BOTH, as an array - which is how a guard's own wait line
+# ended up inside a LEG line on 11 Sep 2026, displacing every field after it.
+# This helper has exactly that shape, so it is split at the seam instead:
+# `Get-BoxHandover` RETURNS and emits nothing else, `Write-BoxHandoverNote`
+# LOGS and returns nothing. A waiter uses both, in two lines:
+#
+#     $hit = Get-BoxHandover $coord $blocker
+#     if ($hit) { Write-BoxHandoverNote $blocker $hit; break }
+#
+# WHAT THIS DELIBERATELY DOES NOT DO, AND WHERE THE REST OF IT ALREADY LIVES.
+# A lane that posts DONE and then re-CLAIMs is holding the box again, so the
+# STRICT reading is "finished only when its own close comes after its own most
+# recent open" - published on that file at 14:38:52Z, and BUILT: it is
+# `fold()` in `tools/bench-box-gate.py`, the fleet's tested "may I take this
+# box?" gate, which folds per lane to the latest open with no later close and
+# adds the stale and phantom tiers on top. That file is the HOME of this rule
+# and its header is the design for both halves, the way
+# `harness/riglock_state.py` is for the rig lock. Read it before
+# extending this.
+#
+# So this helper is the narrow Windows-side question - has this lane posted a
+# close at all - for a round that cannot shell out to Python between legs. It
+# returns the LAST such line, so a caller needing the strict reading has the
+# timestamp in hand to compare against its own CLAIM. A driver that CAN run
+# Python should call bench-box-gate.py instead of this. It is also not a file FINDER: the path comes from the
+# caller, deliberately, because on intel-i5-10600kf the file under
+# `$env:USERPROFILE` is the STALE copy and the live one is `<rig>\` - a
+# documented fleet hazard (.claude/MACHINES.md, intel-i5-10600kf) that a helper must
+# not paper over by guessing.
+#
+# A MISSING OR UNREADABLE FILE IS $null, NEVER A THROW, and the direction is
+# chosen: $null reads as "no handover", so a waiter keeps waiting rather than
+# taking a box it cannot see the state of. Empty is not absent, in this as in
+# every other Windows read.
+# THE CLOSING KEYWORDS, held equal to `CLOSE_KW` in
+# `.claude/tools/bench-accounts-parse.py` by tools/rig-selftest-gate.py. Edit
+# the roster, never this line: this copy exists only because a Windows round
+# cannot import it mid-leg.
+$script:handover_close = [string[]]@('ABORTED', 'DONE', 'RELEASE', 'RELEASED', 'STAND-DOWN', 'WITHDRAWN')
+
+function Get-BoxHandover([string]$coordpath, [string]$id) {
+  # EMITS NOTHING BUT ITS VERDICT. Every statement here is an assignment, a
+  # control-flow keyword or the single return, for the reason above - a status
+  # line added to this function would be returned to the caller as part of the
+  # answer. If you want to say something, say it in Write-BoxHandoverNote.
+  if (-not $coordpath) { return $null }
+  if (-not $id) { return $null }
+  $lines = $null
+  try { $lines = @(Get-Content -LiteralPath $coordpath -ErrorAction Stop) } catch { return $null }
+  $hit = $null
+  foreach ($line in $lines) {
+    if (-not $line) { continue }
+    # RemoveEmptyEntries so a run of spaces or a tab is one separator. A
+    # continuation line of a multi-line entry has an arbitrary first token and
+    # falls out at the field-0 test; one that somehow starts with the keyword
+    # falls out at field 2, because its third token is prose.
+    $f = $line.Split((" `t").ToCharArray(), [StringSplitOptions]::RemoveEmptyEntries)
+    if ($f.Count -lt 3) { continue }
+    if (-not $script:handover_close.Contains($f[0].ToUpperInvariant())) { continue }
+    if ($f[2] -ne $id) { continue }
+    $hit = $line
+  }
+  return $hit
+}
+
+# THE REPORT HALF, and the logging side of the seam. Its ONLY output is the
+# status line itself, exactly as Write-RigLockOrphanNote's is - which is what
+# makes it safe to call: there is no verdict mixed into that stream for a
+# caller to lose. Never give this one a return value, and never move the note
+# into Get-BoxHandover; the two together are the shape Require-QuietBox's note
+# is about.
+function Write-BoxHandoverNote([string]$id, [string]$line) {
+  Write-PlibLine "BOX-HANDOVER waiting_on=$id at=$((Get-Date).ToUniversalTime().ToString('o')) matched: $($line.Trim())"
+}
+
+# THE TAKE THAT DOES NOT EXIT. Take-RigLock below is this plus `exit 17`, and the
+# split exists because exit 17 ends the PROCESS: a round that means to QUEUE
+# for the box rather than give up (oram.ps1) cannot call the exiting form at
+# all, and before this it hand-rolled its own CreateNew - correctly, but
+# without the orphan arm, so an orphan livelocked it to its own deadline.
+#
+# A FAILED CreateNew IS NOT A HOLD, IT IS A FILE. The two are the same fact
+# only while the holder's handle is open; a holder that dies without releasing
+# leaves the directory entry behind and CreateNew then refuses every round on
+# this box forever, naming nobody. So ask WHO, not HOW OLD.
+function Try-TakeRigLock([string]$roundname) {
+  # SUCCESS IS REPORTED IN $script:riglock_taken, NOT AS A RETURN VALUE, and
+  # that is forced rather than stylistic: PowerShell returns EVERY line a
+  # function emits, so a `return $true` sitting next to the RIG-LOCK-TAKEN line
+  # this must print into the round's log would hand the caller a two-element
+  # ARRAY - which is truthy either way, so a refusal would read as a take. That
+  # is the same "PowerShell returns every emitted line" trap plib's other
+  # counter helpers avoid by writing into $script: variables.
+  $script:riglock_taken = $false
+  $lockpath = Get-RigLockPath
+  try { $script:lockfs = [IO.File]::Open($lockpath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read) }
+  catch {
+    $h = Get-RigLockHolder
+    if ($h.Held) { Write-PlibLine "LOCK-BUSY $lockpath $($h.Why): $($h.Text)"; return }
+    if (-not $h.Exists) {
+      # It went away between our CreateNew and the read - a release, not an
+      # orphan. Retry once; a second failure is a live taker racing us.
+      try { $script:lockfs = [IO.File]::Open($lockpath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read) }
+      catch { Write-PlibLine "LOCK-BUSY $lockpath - another round took it as it was released"; return }
+      Write-RigLockIdentity $roundname $lockpath
+      $script:riglock_taken = $true
+      return
+    }
+    # Provably nobody's. Clear it, SAY SO on stdout and on the box's
+    # coordination file, and retry exactly ONCE - a second collision is a live
+    # taker racing us, which is a refusal and not an orphan.
+    Write-RigLockOrphanNote $lockpath $h.Text "cleared by round=$roundname pid=$PID - $($h.Why)"
+    Remove-Item $lockpath -Force -ErrorAction SilentlyContinue
+    try { $script:lockfs = [IO.File]::Open($lockpath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read) }
+    catch {
+      Write-PlibLine "LOCK-BUSY $lockpath - another round took it as we cleared an orphan"
+      return
+    }
+  }
+  Write-RigLockIdentity $roundname $lockpath
+  $script:riglock_taken = $true
+}
+
+function Write-RigLockIdentity([string]$roundname, [string]$lockpath) {
   $txt = "round=$roundname pid=$PID started=$((Get-Date).ToUniversalTime().ToString('o'))"
   $bytes = [Text.Encoding]::ASCII.GetBytes($txt)
   $script:lockfs.Write($bytes, 0, $bytes.Length); $script:lockfs.Flush()
-  "RIG-LOCK-TAKEN $lockpath $txt"
+  Write-PlibLine "RIG-LOCK-TAKEN $lockpath $txt"
 }
 
+# THE ROUND LOG IS THE ONE PLACE A ROUND NAMES ITS OWN pid, and since 17 Sep
+# 2026 it is read back. Write-RigLockIdentity above puts
+# `RIG-LOCK-TAKEN <lock> round=<tag> pid=<n> started=<iso>` into the round's
+# own stdout as its first line; this pair reads it out again, so a watcher
+# armed on a pid that came from somewhere else (a process tree walk, an
+# operator's memory) can CHECK it against what the round says about itself.
+#
+# WHY THIS IS HERE RATHER THAN IN ITS TWO CALLERS. wlaunch.ps1 resolves the
+# round's pid before arming the deadline, and deadline.ps1 confirms that pid
+# again for itself - two copies of one parse, of the line this file writes. It
+# belongs beside the writer: a change to the RIG-LOCK-TAKEN format that misses
+# a reader is the same silent blindness as a gate that stopped matching.
+#
+# THE SHARE MODE IS LOAD-BEARING. A round's log is held open by the cmd.exe
+# redirect that launched it, so it is being WRITTEN while these read it.
+# [IO.FileShare]::ReadWrite -bor ::Delete is what lets the read succeed against
+# a live writer; a plain Get-Content can lose to a sharing violation, and under
+# $ErrorActionPreference = 'Stop' - which every caller of this file inherits -
+# that is a TERMINATING error in the caller rather than an empty answer. Same
+# wall wlaunch.ps1 hit reading the rig lock on 11 Sep 2026, and the reason
+# every path in here answers with an empty string instead of throwing.
+function Read-SharedText([string]$path) {
+  if (-not $path) { return '' }
+  if (-not (Test-Path $path)) { return '' }
+  $fs = $null
+  try {
+    $fs = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                          ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $sr = New-Object IO.StreamReader($fs)
+    try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+  } catch {
+    return ''
+  } finally {
+    if ($fs) { $fs.Dispose() }
+  }
+}
+
+# What a round log says about itself. Returns: Pid (0 when the round has not
+# taken the lock yet - which is NOT evidence of anything, only of "not yet"),
+# Round (the tag the round named itself), Finished (the round printed a line
+# that means it is over), Why.
+#
+# FINISHED IS EVIDENCE AND AN ABSENT PROCESS IS NOT. That distinction is the
+# whole point of this function's second half: a watcher polling a pid it cannot
+# vouch for sees "no such process" and knows nothing, where `ALL DONE` or
+# `RIG-LOCK-RELEASED` in the round's own log is the round saying it finished.
+function Get-RoundLogFacts([string]$path) {
+  $r = [ordered]@{ Pid = 0; Round = ''; Finished = $false; Why = 'no round log path given' }
+  if (-not $path) { return [pscustomobject]$r }
+  $text = Read-SharedText $path
+  if (-not $text) {
+    $r.Why = "round log $path is empty or not readable yet"
+    return [pscustomobject]$r
+  }
+  $r.Why = "round log $path has no RIG-LOCK-TAKEN line yet"
+  $m = [regex]::Match($text, 'RIG-LOCK-TAKEN\b.*?\bround=(\S+)\s+pid=(\d+)')
+  if ($m.Success) {
+    $r.Round = $m.Groups[1].Value
+    $r.Pid = [int]$m.Groups[2].Value
+    $r.Why = "RIG-LOCK-TAKEN round=$($r.Round) pid=$($r.Pid)"
+  }
+  if ($text -match '(?m)^RIG-LOCK-RELEASED\b' -or $text -match '(?m)^ALL DONE\b') {
+    $r.Finished = $true
+  }
+  return [pscustomobject]$r
+}
+
+# The caller names ITSELF; only the path is collapsed. Exits 17 when the box is
+# held - so a caller that must SURVIVE a refusal wants Try-TakeRigLock above,
+# not this.
+#
+# $round is the round's NAME. The nine callers that predate 16 Sep 2026 pass a
+# per-round PATH instead (`<rig>\full.lock`, `$root\jcross.lock`) and keep
+# working, because the basename of one is the other; both spellings are fine
+# and neither is a lock file any more.
+function Take-RigLock([string]$round) {
+  $roundname = [IO.Path]::GetFileNameWithoutExtension($round)
+  # THE ROUND NAME IS THE CALLER'S, AND A CALLER THAT PASSES THE BOX LOCK PATH
+  # NAMES NOTHING. `[IO.Path]::GetFileNameWithoutExtension('.parfast-rig.lock')`
+  # is `.parfast-rig`, so three callers (oramx.ps1, wcomb.ps1, lad2.ps1, all
+  # fixed 16 Sep 2026) wrote `round=.parfast-rig pid=NNNN` into live locks on
+  # windows-gaming-pc-b. Exclusion was never affected - that comes from the pid, which was
+  # always right - but the lock then fails the OTHER job this header claims for
+  # it, being identifiable to a human, exactly when somebody is staring at it
+  # deciding whether to clear it. Caller fourteen will do it again, so it is
+  # closed here as well: fall back to the calling SCRIPT's name, which is a
+  # real answer. `$MyInvocation.ScriptName` inside a function is the caller's
+  # script, not this file.
+  if ($roundname -eq '.parfast-rig' -or -not $roundname) {
+    $caller = $MyInvocation.ScriptName
+    $roundname = if ($caller) { [IO.Path]::GetFileNameWithoutExtension($caller) } else { "pid$PID" }
+  }
+  Try-TakeRigLock $roundname
+  if (-not $script:riglock_taken) { exit 17 }
+}
+
+# THE SCOPE OF THIS LOCK IS ONE PROCESS, AND THAT IS DELIBERATE - DECIDED
+# 16 Sep 2026, lane riglock-sitting-scope. A measurement SITTING is several
+# wcomb.ps1 invocations (several ladders), so the lock is free in the gaps and
+# neither a waiter nor a load check can tell "between ladders" from "between
+# sittings". That is a real cost - it cost one lane a three-hour watch and a
+# queued round a stand-down on 16 Sep - and it was considered and NOT fixed
+# here, for a reason worth reading before you widen it:
+#
+# The hold's liveness comes from a live pid holding an exclusive handle, which
+# is the whole reason it self-heals. A hold that outlives every process has no
+# holder left to ask, so it must be either presence-as-hold (banned fleet-wide,
+# it cost apple-m3-ultra eight hours on 16 Sep and took three lanes to remove) or an
+# age bound (refused in capitals by Get-RigLockHolder's header above). The one
+# safe shape is a DRIVER process holding it across its children, and that needs
+# NO change here: rounds/cf-two-binary-control-2026-09-16/cfctl-driver.ps1
+# is one, taking the lock for its own cargo builds and then invoking wcomb.ps1
+# behind a retry-on-exit-17 loop.
+#
+# SO DO NOT ADD A -NoLock SWITCH TO wcomb.ps1, which is the only thing a
+# "sitting lock" would actually add over that driver. The retry loop keeps every
+# ladder's identity in the lock file, and a -NoLock spelling is a round that
+# takes no lock at all - which is the ONLY contamination shape measured on
+# 16 Sep (a rars round and two 16-thread cargo builds, all outside the lock's
+# vocabulary, and none of which a wider lock would have seen). The waiter-side
+# answer that DOES span a sitting already exists and is the ahead-list: name the
+# driver's pid, cstripe-i5.ps1's wait.txt block is the pattern. Full reasoning:
+# an internal note, "DECIDED, 16 Sep 2026: no
+# sitting-level lock is built".
 function Release-RigLock([string]$lockpath) {
+  # Close-then-Remove with no inode check looks like the same unconditional
+  # unlink that let a POSIX round delete another round's live lock file on
+  # amd-epyc-vm on 15 Sep 2026
+  # (an internal note), but it is
+  # NOT the same hazard here, deliberately left unguarded rather than
+  # unguarded by omission. That race needs "locked" and "exists" to be
+  # separable facts: on POSIX, flock() locks an fd's INODE while unlink()
+  # frees the PATH to be recreated under a NEW holder while the old fd is
+  # still flocked - so a late unlink can delete a file that has since become
+  # someone else's. Take-RigLock above opens with [IO.FileShare]::Read
+  # (::None until 16 Sep 2026 - see Get-RigLockHolder, and note that this
+  # argument never rested on excluding READ, only DELETE, which ::Read still
+  # excludes), which on NTFS makes "the path is taken" and "the file is open"
+  # the SAME fact: nobody else's CreateNew can succeed while our handle is open
+  # (CreateNew requires the path NOT exist, and it still does), and nobody
+  # can have replaced our file before we get here, because replacing it
+  # requires deleting it first, which requires OUR handle to already be
+  # closed - which is exactly the line above this comment. So by the time
+  # Remove-Item runs, the file at $lockpath is still provably ours.
   $lockpath = Join-Path $env:USERPROFILE '.parfast-rig.lock'
   if ($script:lockfs) { $script:lockfs.Close(); $script:lockfs = $null }
   Remove-Item $lockpath -Force -ErrorAction SilentlyContinue
-  "RIG-LOCK-RELEASED $lockpath"
+  Write-PlibLine "RIG-LOCK-RELEASED $lockpath"
 }
 
 # Run one tool invocation and measure it. Returns rc, wall, child CPU seconds and
 # peak working set; stdout and stderr are written to $logbase.out / $logbase.err
 # and NEVER discarded, so a refusal cannot be recorded as a fast success.
-function Get-OwnPidTree {
-  # Our own driver plus everything under it. Without this the guard measures
-  # the round's OWN work: Run-Rung hashes all 23 members immediately before
-  # calling a leg, so a plain "total processor time" sample catches the tail of
-  # our own SHA gate and would abort a clean round.
+function Resolve-OwnPidSet {
+  # THE PID-SET WALK, SPLIT OUT OF Get-OwnPidTree SO IT CAN BE TESTED, and the
+  # arrangement is deliberately the same as Measure-ForeignDelta's below and for
+  # the same reason: the gate for this file is a macOS runner, so anything that
+  # needs `Get-CimInstance` cannot be tested at all. This half is a pure graph
+  # walk over two hashtables - pid -> parent pid, pid -> process name - and a
+  # seed pid, so plib_selftest.ps1 drives it with a synthetic process table,
+  # starts nothing, and runs anywhere.
+  #
+  # ---------------------------------------------------------------------------
+  # IT WALKS DOWN AND IT WALKS UP, AND THEY ARE NOT THE SAME WALK (16 Sep 2026)
+  # ---------------------------------------------------------------------------
+  # DOWN is the original behaviour and the reason this function exists: our own
+  # driver plus everything under it, so the guard does not measure the round's
+  # OWN work. Run-Rung hashes all 23 members immediately before calling a leg,
+  # so a plain "total processor time" sample catches the tail of our own SHA
+  # gate and would abort a clean round.
+  #
+  # UP is new, and it closes a defect the downward walk had by construction:
+  # the ANCESTORS of $PID were foreign. A round driven over ssh is a PowerShell
+  # under a login shell under a per-connection `sshd-session`, none of which is
+  # under $PID, so a lane's own observer landed in the lane's own `foreign_cpu`
+  # field and could trip the lane's own guards. Measured: on windows-gaming-pc-b the
+  # measuring script's own ssh login shell was charged 0.16 core-seconds in a
+  # single 1 s sample (banked on that box's COORDINATION file, 18:05Z), and on
+  # intel-i5-10600kf the two samples of ten with a `powershell` born inside the window
+  # read 68.8 and 76.6 percent of a core against a 40 s per-process truth of
+  # 15.7 - a PowerShell start is about 0.3 core-seconds of module autoload, and
+  # 0.3 core-seconds inside a 1 s window is 30% of a core, correctly measured.
+  # Record: an internal note section 5, item 1.
+  #
+  # ---------------------------------------------------------------------------
+  # THE TRAP, WHICH IS WHY THE TWO WALKS ARE SEPARATE AND ORDERED
+  # ---------------------------------------------------------------------------
+  # The downward walk excludes a pid AND EVERYTHING UNDER IT. Seeding the
+  # ancestors into the same set before that closure runs - the one-line
+  # spelling of "add ancestors" - does not exclude your login shell. It
+  # excludes `sshd`, then `services.exe`, then every process `services.exe`
+  # ever started, which is most of the box: the guard would read ~0 forever and
+  # would be reporting its own blindness rather than a quiet box. So the
+  # ancestor chain is added ONE PID AT A TIME, AFTER the downward closure has
+  # finished growing, and nothing in it is ever used as a seed. A sibling
+  # under a shared ancestor - another lane's `sshd-session`, its shell, and
+  # everything that lane runs - stays FOREIGN, which is correct: it is somebody
+  # else's work on this box and seeing it is what these guards are for.
+  #
+  # ---------------------------------------------------------------------------
+  # WHERE THE CHAIN STOPS, AND WHY THERE
+  # ---------------------------------------------------------------------------
+  # Walking to the top of the tree would excuse `System` (pid 4) and whichever
+  # `svchost` hosts the service that started us, and both are genuine foreign
+  # consumers: `System` was 3.6% of the 15.7% truth on intel-i5-10600kf and is where a
+  # neighbouring round's kernel time lands, and a `svchost` ancestor is the
+  # Schedule service, which hosts many other services besides the one that
+  # launched this round. So the walk stops, WITHOUT excluding, at the first of:
+  #
+  #   - a parent pid <= 4 (0 is "no parent" and Idle, 4 is System);
+  #   - a parent that is not in the snapshot at all, which means it has been
+  #     reaped and its pid is free to be somebody else's;
+  #   - a pid already seen on this chain, so a recycled pid cannot loop;
+  #   - EIGHT hops, which is about twice the longest real chain here
+  #     (driver <- launcher <- cmd <- sshd-session <- sshd is four);
+  #   - a SHARED ROOT by name: a process that serves the whole box rather than
+  #     this session. That is the boundary this rule is really about, and the
+  #     one it is named for: `sshd-session` is OUR connection and is excluded,
+  #     while the `sshd` LISTENER above it serves every other lane's connection
+  #     too and is not.
+  #
+  # THE NAME LIST IS A STATED LIMIT, NOT A CLASSIFIER. It cannot be complete,
+  # and it does not have to be, because every way it can be wrong fails in the
+  # same direction: an unlisted root stops the walk one hop late and excuses ONE
+  # extra long-lived pid (never its other children, per the ordering above),
+  # while a listed name that is really ours stops the walk early and excludes
+  # LESS than it could. Both are under-exclusion of foreign CPU or a single pid
+  # of over-exclusion; neither can blind the guard to a round. An OpenSSH old
+  # enough to fork `sshd.exe` per connection rather than `sshd-session.exe`
+  # lands in the second case on purpose: we stop at it and charge ourselves our
+  # own connection process, which is the conservative direction and is what
+  # this whole function is for.
+  #
+  # WHAT IT DOES NOT FIX, stated here because the failure it does not fix looks
+  # identical in a log to the one it does: the DOMINANT contaminant on a
+  # contended box is somebody ELSE's ssh poll landing in YOUR window - four
+  # queued lanes polling intel-i5-10600kf put five distinct `sshd-session` births into
+  # one 70 second run - and that CPU is real, foreign, and correctly charged.
+  # This removes a lane's own observer from its own reading and nothing else.
+  param([hashtable]$parentOf, [hashtable]$nameOf, [int]$self)
   $mine = New-Object 'System.Collections.Generic.HashSet[int]'
-  $null = $mine.Add($PID)
-  try {
-    $all = @{}
-    Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId -ErrorAction Stop |
-      ForEach-Object { $all[[int]$_.ProcessId] = [int]$_.ParentProcessId }
-    $grew = $true
-    while ($grew) {
-      $grew = $false
-      foreach ($k in @($all.Keys)) {
-        if (-not $mine.Contains($k) -and $mine.Contains($all[$k])) { $null = $mine.Add($k); $grew = $true }
-      }
+  $null = $mine.Add($self)
+  if ($null -eq $parentOf) { return ,$mine }
+
+  # 1. DOWN: the closure under $self, seeded with $self ALONE.
+  $grew = $true
+  while ($grew) {
+    $grew = $false
+    foreach ($k in @($parentOf.Keys)) {
+      $kid = [int]$k
+      if (-not $mine.Contains($kid) -and $mine.Contains([int]$parentOf[$k])) { $null = $mine.Add($kid); $grew = $true }
     }
-  } catch { }
+  }
+
+  # 2. UP: the chain, one pid at a time, and only after the closure above has
+  #    stopped growing. Never a seed - see the trap in the header.
+  $roots = @('idle', 'system', 'registry', 'memory compression', 'smss', 'csrss',
+             'wininit', 'winlogon', 'services', 'lsass', 'lsaiso', 'svchost',
+             'taskeng', 'taskhostw', 'explorer', 'sshd')
+  $seen = New-Object 'System.Collections.Generic.HashSet[int]'
+  $null = $seen.Add($self)
+  $cur = $self
+  for ($hop = 0; $hop -lt 8; $hop++) {
+    if (-not $parentOf.ContainsKey($cur)) { break }
+    $p = [int]$parentOf[$cur]
+    if ($p -le 4) { break }
+    if (-not $parentOf.ContainsKey($p)) { break }
+    if (-not $seen.Add($p)) { break }
+    $n = ''
+    if ($null -ne $nameOf -and $nameOf.ContainsKey($p)) {
+      $n = ([string]$nameOf[$p]).Trim().ToLowerInvariant() -replace '\.exe$', ''
+    }
+    if ($roots -contains $n) { break }
+    $null = $mine.Add($p)
+    $cur = $p
+  }
   # `,` on purpose. PowerShell ENUMERATES a collection on return, so a bare
   # `return $mine` hands the caller an object[] whose .Contains() does not
   # resolve - the call then throws, the catch turns it into -1, and the guard
@@ -111,31 +872,224 @@ function Get-OwnPidTree {
   return ,$mine
 }
 
+function Get-OwnPidTree {
+  # The snapshot half: one CIM enumeration, handed to the walk above. `Name` is
+  # read alongside the two pid columns because the chain's stopping rule needs
+  # it; it is one more property on a query that was already enumerating every
+  # process, and the walk treats a missing name as "not a root", which stops
+  # nothing and excludes one more pid at most.
+  $parentOf = @{}
+  $nameOf = @{}
+  try {
+    Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name -ErrorAction Stop |
+      ForEach-Object {
+        $parentOf[[int]$_.ProcessId] = [int]$_.ParentProcessId
+        $nameOf[[int]$_.ProcessId] = [string]$_.Name
+      }
+  } catch { $parentOf = @{}; $nameOf = @{} }
+  # An enumeration that failed leaves both tables empty, and the walk then
+  # returns our own pid alone - the same answer this function gave before the
+  # ancestor chain existed, and the conservative one.
+  $mine = Resolve-OwnPidSet $parentOf $nameOf $PID
+  return ,$mine
+}
+
+function Measure-ForeignDelta {
+  # THE ARITHMETIC OF Get-ForeignCpu, SPLIT OUT SO IT CAN BE TESTED, and that
+  # is the whole reason it is a function of its own rather than a loop inside
+  # the sampler. plib_selftest.ps1 STUBS `Get-ForeignCpu` with a scripted
+  # sequence in order to drive the callers - Wait-FixtureSettle, Require-QuietBox,
+  # Require-QuietCore - in seconds on a box that is busy for its own reasons, so
+  # the primitive's own arithmetic was, by construction, the one thing in this
+  # library that nothing could test. It is exercised here over SYNTHETIC
+  # snapshots, which needs no Windows box at all and so runs on the macOS
+  # runner that gates this file.
+  #
+  # ---------------------------------------------------------------------------
+  # THE DEFECT THIS REPLACES (16 Sep 2026)
+  # ---------------------------------------------------------------------------
+  # The original summed `$b[$k] - $a[$k]` with `$was = 0.0` for any pid absent
+  # from the BEFORE snapshot, and divided by a window it ASSUMED was 1.000 s.
+  # Both halves were wrong, and they compound:
+  #
+  #  1. A pid absent from the before snapshot had its ENTIRE LIFETIME CPU
+  #     charged to that one second. For a process genuinely BORN inside the
+  #     window that is correct - all of its CPU really was spent in there - but
+  #     for one that merely failed to be read in the first snapshot (a
+  #     protected process whose TotalProcessorTime threw, a process the first
+  #     Get-Process did not enumerate) it charges hours of accumulated CPU to
+  #     one second. That is the spike source.
+  #  2. The window is NOT one second. Two `Get-Process` enumerations over ~300
+  #     processes bracket the sleep, and each costs real wall time, so the
+  #     actual per-process spacing is the sleep PLUS one enumeration. Dividing
+  #     a ~1.4 s measurement by 1.0 s overstates everything by ~1.4x, on every
+  #     reading, forever.
+  #
+  # Measured on intel-i5-10600kf (i5-10600KF, 6c/12t) idle, with the one known heavy
+  # background process already stopped: twelve 1 s samples read 25-544% of a
+  # core, median 267; a calmer stretch of six read 31-81; and a per-process
+  # delta over a 40 s window read 14.6%, with that 40 s attribution naming the
+  # whole of it (System 5.2, MsMpEng 2.9, SRAgent 2.7, nothing else over 1).
+  # There was no hidden load. Record:
+  # an internal note.
+  #
+  # IT IS NOT COSMETIC. Require-QuietBox's ceiling is max(100, cores*100*0.10),
+  # so a 12-logical box floors at 100 and a 16-core one sits at 160; waitquiet's
+  # queue opens at a third of that. A box genuinely at 14.6% that READS 50-70
+  # never opens its queue and is indistinguishable from a busy one - not fixed
+  # by waiting, because waiting does not make Windows stop spawning svchost
+  # children. That is half of why the 16 Sep digest-cache small-core round's
+  # first attempt on intel-i5-10600kf never ran a single leg
+  # (an internal note section 1).
+  #
+  # ---------------------------------------------------------------------------
+  # THE FIX, AND THE TRADE IT MAKES
+  # ---------------------------------------------------------------------------
+  # A pid absent from the before snapshot is decided by its START TIME, not by
+  # its absence:
+  #
+  #   - born INSIDE the window  -> charged in full. Its whole lifetime CPU
+  #     genuinely was spent inside this window, so this is the correct number,
+  #     not a concession.
+  #   - born BEFORE the window  -> charged ZERO. We have no before reading for
+  #     it and cannot invent one; its real in-window delta is bounded by the
+  #     window and will be measured exactly on the NEXT sample, one second
+  #     later, when it is in both snapshots.
+  #   - start time unreadable   -> charged zero, same reasoning.
+  #
+  # THE THREE CANDIDATES, AND WHY THIS ONE. "Ignore every pid absent from the
+  # before snapshot" is one line shorter and is the WRONG FIX FOR THIS USE
+  # CASE: the thing these guards exist to catch is somebody else's ROUND
+  # arriving on the box, and a neighbouring round's freshly spawned `parfast`
+  # is precisely a newly born heavy process. Ignoring by absence blinds the
+  # guard to exactly its subject. Deciding by start time keeps it - a new
+  # parfast is charged in full on the first sample that sees it - while still
+  # refusing the unreadable-in-snapshot-a case, which is the one that spikes.
+  # "Widen the sample" fixes the spikes by averaging them down and is NOT free:
+  # Require-QuietBox runs before EVERY timed leg, so a 5 s window costs 4 extra
+  # seconds a leg - about 45 minutes on a 672-leg round - and Require-QuietCore
+  # takes up to three samples on top. The window stays at one second and the
+  # per-leg cost of this change is one extra property read per process.
+  #
+  # WHAT IT COSTS. A heavy process that was alive before the window but missing
+  # from snapshot a is under-reported for exactly one sample. Every caller
+  # samples repeatedly (Require-QuietBox retries ten times at 30 s,
+  # Require-QuietCore takes a minimum of three, Wait-FixtureSettle needs three
+  # consecutive clean ones), so a RESIDENT consumer cannot hide behind this for
+  # longer than one sample - which is the same discriminator Require-QuietCore's
+  # minimum-of-three already relies on, applied one level down.
+  #
+  # AND THE WINDOW IS MEASURED, not assumed: the caller passes the real
+  # start-of-snapshot-a to start-of-snapshot-b span and the sum is divided by
+  # it. Start-to-start and not start-to-end, because each process's two
+  # readings are one enumeration apart, not one enumeration plus a sleep.
+  #
+  # ---------------------------------------------------------------------------
+  # HOW TO READ A `foreign_cpu` BANKED BEFORE 16 Sep 2026
+  # ---------------------------------------------------------------------------
+  # NOTHING ALREADY PUBLISHED IS RETRACTED, and no old log is being relabelled.
+  # Every `foreign_cpu=` and `foreign_after=` field in every LEG line this repo
+  # holds was produced by the code above and is sound in the two ways those
+  # fields are actually used:
+  #
+  #   - as an UPPER BOUND on foreign load. Both defects push the number UP and
+  #     neither can push it down, so a leg whose field reads low really did run
+  #     on a quiet box. `foreign_cpu=5.8` still means 5.8 or less.
+  #   - for COMPARING LEGS WITHIN ONE ROUND. The inflation is a property of the
+  #     sampler, not of the leg, so it applies about equally to every leg on one
+  #     box in one round; the per-ladder medians the reducers print, and the
+  #     clean-versus-contaminated contrasts they are read for (9% and 13% against
+  #     36%, 77% and 88%), survive it intact.
+  #
+  # What it is NOT is a measure of SUSTAINED load, and a pre-16-Sep reading must
+  # not be quoted as one - on the box measured above the honest figure was
+  # 2-5x below what the field said in the calm case, and ~20x below it at the
+  # spikes. Readings from before and after this change are also not directly
+  # comparable as absolute numbers, which matters only if somebody puts an old
+  # round's foreign_cpu column beside a new one's.
+  #
+  # $windowStart is the wall clock at the start of the before snapshot; $cores
+  # only feeds a sanity clamp - a process born inside the window cannot have
+  # burned more than window x cores, so anything past that is a clock or
+  # pid-reuse anomaly rather than load.
+  param([hashtable]$before, [hashtable]$after, [double]$windowS,
+        [datetime]$windowStart, [int]$cores)
+  if ($windowS -le 0) { return -1.0 }
+  if ($cores -lt 1) { $cores = 1 }
+  $cap = $windowS * $cores
+  $delta = 0.0
+  foreach ($k in $after.Keys) {
+    $now = [double]$after[$k].Cpu
+    $startedAt = $after[$k].Start
+    $fresh = $true
+    if ($before.ContainsKey($k)) {
+      # PID REUSE IS A THIRD CASE, and Windows recycles pids briskly enough for
+      # it to matter. Same pid, different start time, is a DIFFERENT process:
+      # its predecessor's total is not a before reading for it. The old code
+      # subtracted anyway and got a negative it then discarded, which happens to
+      # be harmless; treating it as a birth is correct rather than harmless.
+      $wasStart = $before[$k].Start
+      if ($null -eq $wasStart -or $null -eq $startedAt -or $wasStart -eq $startedAt) {
+        $fresh = $false
+        $d = $now - [double]$before[$k].Cpu
+        if ($d -gt 0) { $delta += $d }
+      }
+    }
+    if ($fresh) {
+      if ($null -eq $startedAt) { continue }
+      if ($startedAt -lt $windowStart) { continue }
+      $d = $now
+      if ($d -gt $cap) { $d = $cap }
+      if ($d -gt 0) { $delta += $d }
+    }
+  }
+  return [math]::Round(($delta / $windowS) * 100.0, 1)
+}
+
 function Get-ForeignCpu {
-  # CPU seconds consumed OUTSIDE our own process tree over a one second window,
-  # expressed as a percentage of one core (so 100 = one core fully busy by
-  # somebody else). Returns -1 when it cannot be measured, and the caller then
+  # CPU seconds consumed OUTSIDE our own process tree over a roughly one second
+  # window, expressed as a percentage of one core (so 100 = one core fully busy
+  # by somebody else). Returns -1 when it cannot be measured, and the caller then
   # continues rather than blocking a round on a missing counter.
+  #
+  # The window is roughly a second and the arithmetic divides by the span it
+  # actually measured; the rest of the reasoning - and what this does to
+  # readings banked before 16 Sep 2026 - is in Measure-ForeignDelta above.
   try {
     $mine = Get-OwnPidTree
     $snap = {
       $h = @{}
       foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) {
         if ($mine.Contains($p.Id)) { continue }
-        try { $h[$p.Id] = $p.TotalProcessorTime.TotalSeconds } catch { }
+        # A process whose CPU counter cannot be read is SKIPPED ENTIRELY rather
+        # than recorded as zero: recorded as zero in the before snapshot it
+        # would read as a birth in the after one, which is the defect.
+        # `continue` out of a catch is left alone on purpose - the branch is
+        # taken outside it.
+        $cpu = $null
+        try { $cpu = $p.TotalProcessorTime.TotalSeconds } catch { $cpu = $null }
+        if ($null -eq $cpu) { continue }
+        # Throws for protected processes (System, Registry, csrss and friends).
+        # $null then means "unknown", which Measure-ForeignDelta treats as
+        # pre-existing - the conservative direction.
+        $st = $null
+        try { $st = $p.StartTime } catch { $st = $null }
+        $h[$p.Id] = [pscustomobject]@{ Cpu = [double]$cpu; Start = $st }
       }
       return ,$h
     }
+    $cores = [int]$env:NUMBER_OF_PROCESSORS
+    if ($cores -lt 1) { $cores = [Environment]::ProcessorCount }
+    $t0 = Get-Date
+    $sw = [Diagnostics.Stopwatch]::StartNew()
     $a = & $snap
     Start-Sleep -Milliseconds 1000
+    # BEFORE the second enumeration, not after it: each process's two readings
+    # are one enumeration apart.
+    $windowS = $sw.Elapsed.TotalSeconds
     $b = & $snap
-    $delta = 0.0
-    foreach ($k in $b.Keys) {
-      $was = if ($a.ContainsKey($k)) { $a[$k] } else { 0.0 }
-      $d = $b[$k] - $was
-      if ($d -gt 0) { $delta += $d }
-    }
-    return [math]::Round($delta * 100.0, 1)
+    $sw.Stop()
+    return Measure-ForeignDelta $a $b $windowS $t0 $cores
   } catch { return -1.0 }
 }
 
@@ -151,8 +1105,11 @@ function Require-QuietBox([string]$where) {
   # at thirty seconds, then abort.
   #
   # IT RETURNS NOTHING, AND THE READING COMES BACK IN $script:lastforeign.
-  # This function LOGS to the output stream (BOX-BUSY-WAIT has to reach the
-  # round log) and PowerShell makes no distinction between logging and
+  # This function LOGS through `Write-PlibLine` (BOX-BUSY-WAIT has to reach the
+  # round log, and since 16 Sep 2026 that means the FILE as well as stdout -
+  # see the ROUND LOG SINK block at the head of this file; the ABORT-LOAD line
+  # is the one this matters most for, because it is the round's cause of death)
+  # and PowerShell makes no distinction between logging and
   # returning: a `return $pct` here hands the caller EVERY line the function
   # emitted as well, as an array. On 11 Sep 2026 that put the guard's own wait
   # line inside a LEG line -
@@ -174,7 +1131,7 @@ function Require-QuietBox([string]$where) {
   $tries = 0
   while ($pct -ge $ceiling -and $tries -lt 10) {
     $tries++
-    "BOX-BUSY-WAIT try=$tries foreign_cpu=$pct ceiling=$ceiling at=$where ts=$((Get-Date).ToUniversalTime().ToString('o'))"
+    Write-PlibLine "BOX-BUSY-WAIT try=$tries foreign_cpu=$pct ceiling=$ceiling at=$where ts=$((Get-Date).ToUniversalTime().ToString('o'))"
     Start-Sleep -Seconds 30
     $pct = Get-ForeignCpu
     $script:lastforeign = $pct
@@ -185,12 +1142,265 @@ function Require-QuietBox([string]$where) {
     $top = (Get-Process -ErrorAction SilentlyContinue | Where-Object { -not $mine.Contains($_.Id) -and $_.CPU -gt 1 } |
             Sort-Object CPU -Descending | Select-Object -First 4 |
             ForEach-Object { $_.ProcessName + '(' + $_.Id + ')' }) -join ' '
-    "BOX-BUSY foreign_cpu=$pct ceiling=$ceiling cores=$cores top=[$top]"
-    "ABORT-LOAD at=$where ts=$((Get-Date).ToUniversalTime().ToString('o'))"
+    Write-PlibLine "BOX-BUSY foreign_cpu=$pct ceiling=$ceiling cores=$cores top=[$top]"
+    Write-PlibLine "ABORT-LOAD at=$where ts=$((Get-Date).ToUniversalTime().ToString('o'))"
     exit 18
   }
   $script:lastforeign = $pct
+  Require-QuietCore $where
 }
+
+function Require-QuietCore([string]$where) {
+  # THE SECOND ARM, and the reason the ceiling above cannot be the only one.
+  #
+  # That ceiling is 10% of the whole box FLOORED AT ONE CORE, so one saturated
+  # core passes it on a box of any size - by construction, independent of core
+  # count. By 16 Sep 2026 that arithmetic had hidden five distinct things: a
+  # foreign lane's pinned single-core round on intel-core-ultra-9-386h, Windows Search at
+  # 87% of one core, SignalRgb resident on amd-ryzen-9800x3d at 31.7%, any rars / cargo
+  # / nextest run in principle, and - measured on the unix half the same day -
+  # spotlightknowledged.updater at 99.6% of ONE core on apple-m3-ultra, whose
+  # 134.9% total sat comfortably under its 320% ceiling while the guard said
+  # quiet. Record:
+  # an internal note.
+  #
+  # DO NOT LOWER THE BOX-WIDE CEILING TO CATCH THESE. It is aimed at somebody
+  # else's whole ROUND, and one low enough to catch a single core aborts
+  # (exit 18) on boxes that are merely normally busy. Two failures, two
+  # mechanisms, two thresholds - which is what Wait-FixtureSettle below has
+  # said at length since 16 Sep, and this is that reasoning applied to the
+  # guard every timed leg already goes through.
+  #
+  # THE THRESHOLD IS 25% OF ONE CORE, Wait-FixtureSettle's, shared on purpose
+  # so the two platforms do not diverge on a quantity that has been identical
+  # by construction until now (pdrv.py's PER_CORE_CEILING_PCT is the same 25
+  # and carries the unix half of this note). Its calibration is that
+  # function's: clean ladders at 9% and 13% of a core, after-leg medians
+  # 16-17%, contaminated ones at 36%, 77% and 88%. Two later points bracket it
+  # from outside - a genuinely quiet box measured over ten samples on 16 Sep
+  # read a median of 2.0% and a max of 4.0% of one core, and SignalRgb sits at
+  # 31.7% - so 25 has about 6x headroom over idle jitter and still sits under
+  # every contaminant anyone has caught.
+  #
+  # IT NEVER ABORTS, AND THAT IS MEASURED RATHER THAN TIMID. mred.py records a
+  # 135-leg round on a real bench box at a foreign_cpu median of 25.8% and a
+  # p90 of 133.5%, and apple-m1-ultra-64gb was measured on 16 Sep with WindowServer
+  # resident at 43-46% of a core across ten consecutive samples. An arm at 25
+  # that called `exit 18` would kill about half of one of those rounds and all
+  # of the other, which is how a gate gets commented out. So it WAITS on the
+  # ceiling's budget, then says so, names the busiest foreign processes, and
+  # lets the leg run - the same bargain Wait-FixtureSettle strikes, for the
+  # same reason.
+  #
+  # ONE SAMPLER HERE, TWO ON UNIX, and that asymmetry is not an oversight.
+  # Get-ForeignCpu is already a one second DELTA window, so it means "right
+  # now" and both arms can read it. pdrv.py's deployed foreign_cpu() reads
+  # `ps -o pcpu`, which on Linux is a LIFETIME average - measured 16 Sep:
+  # 99.8 -> 50.0 -> 22.2 -> 12.1 -> 6.3 over four minutes idle after an eight
+  # second burn, i.e. cpu_time/elapsed exactly - so the unix half had to grow
+  # a delta sampler of its own before it could express a tight threshold at
+  # all. This file needed no such thing; it had the right sampler first.
+  #
+  # CONFIRM BY MINIMUM, AND ONLY WHEN THE FIRST SAMPLE IS SUSPICIOUS. A one
+  # second window cannot tell a core pinned for ninety seconds from a process
+  # that lived for one and a half, and at a 25% threshold that difference is
+  # most of the traffic. Reported by the create-width-additive-kernel-gfni-16sep
+  # lane from intel-core-ultra-9-386h and REPRODUCED here on amd-ryzen-9800x3d 16 Sep 2026: a
+  # WATCHING session polling the box over ssh spawns a PowerShell under SSHD,
+  # which is outside the round's pid tree by construction, and PowerShell 5.1
+  # startup is about a core-second of module autoload. Measured on this box,
+  # same script, ten samples each:
+  #
+  #     undisturbed          min 26.6  median 43.8  max  84.4
+  #     under an ssh poll    min 92.2  median 253.1 max 339.1
+  #
+  # The observer is the contaminant, and the top row is this box's RESIDENT
+  # load (SignalRgb) rather than noise. Note the second row also clears the
+  # 160% BOX-WIDE ceiling on this 16-core part, so a watched round can already
+  # be aborted at exit 18 by its own watcher - that is a pre-existing hazard in
+  # the arm above, not something this one introduces, and it is why this arm
+  # must not add a second way to lose a round.
+  #
+  # So: take the MINIMUM of three samples. A transient spike is in at most one
+  # of them; a resident consumer is in all three. SignalRgb survives the
+  # minimum here (26.6 at its lowest, still over 25), which is the discriminator
+  # working in both directions at once on one box.
+  #
+  # THE EXTRA SAMPLES ARE ONLY PAID WHEN THE FIRST ONE IS OVER, and that is the
+  # difference between this costing nothing and costing a round. Get-ForeignCpu
+  # is a one second window and this guard runs before EVERY timed leg, so three
+  # unconditional samples would add two seconds a leg - about 22 minutes on a
+  # 672-leg round like the one that produced this finding. A quiet box trips the
+  # early return on its first sample and pays nothing extra.
+  #
+  # NO RETRY LOOP, unlike the arm above. Waiting is what the box-wide ceiling
+  # does about somebody else's ROUND, which ends; the consumers THIS arm is for
+  # are resident and relaunch at logon (SignalRgb) or run for the length of an
+  # indexing pass, so thirty second sleeps would buy nothing and cost the round
+  # ten of them per leg.
+  #
+  # The reading comes back in $script:lastforeign1core, NOT as a return value -
+  # see Require-QuietBox above on why a PowerShell function must not log AND
+  # return. Its two lines go through `Write-PlibLine`, so they reach the
+  # round's LOG as well as stdout when a driver or launcher has opted in - read
+  # the ROUND LOG SINK block at the head of this file. This arm needs that more
+  # than most of them: it never aborts, so its BOX-ONE-CORE-BUSY line is the
+  # ONLY record that a leg ran on a box carrying a saturated foreign core, and
+  # a `foreign_1core` field on a leg line is a number rather than a verdict.
+  $thresh = 25.0
+  $pct = Get-ForeignCpu
+  $script:lastforeign1core = $pct
+  if ($pct -lt 0 -or $pct -lt $thresh) { return }
+  $lo = $pct
+  for ($i = 0; $i -lt 2; $i++) {
+    Start-Sleep -Milliseconds 700
+    $v = Get-ForeignCpu
+    if ($v -lt 0) { return }
+    if ($v -lt $lo) { $lo = $v }
+  }
+  $script:lastforeign1core = $lo
+  if ($lo -ge $thresh) {
+    $mine = Get-OwnPidTree
+    $top = (Get-Process -ErrorAction SilentlyContinue | Where-Object { -not $mine.Contains($_.Id) -and $_.CPU -gt 1 } |
+            Sort-Object CPU -Descending | Select-Object -First 4 |
+            ForEach-Object { $_.ProcessName + '(' + $_.Id + ')' }) -join ' '
+    Write-PlibLine "BOX-ONE-CORE-BUSY at=$where foreign_1core=$lo thresh=$thresh cores=$env:NUMBER_OF_PROCESSORS top=[$top]"
+    Write-PlibLine "BOX-ONE-CORE-NOTE the leg RUNS; read its foreign_1core and the reducers' per-ladder median before trusting a number from it"
+  }
+}
+
+function Wait-FixtureSettle {
+  # A FRESHLY BUILT fixture is work the box does to ITSELF, and Require-QuietBox
+  # above cannot see it. On 16 Sep 2026 lane parfast-windowed-ask-form-16sep
+  # built a 10.7 GB fixture (16 x 512 MiB) in a source tree it had extracted
+  # minutes earlier, and Windows Search walked both through the first half of
+  # the round: SearchIndexer + SearchProtocolHost + SearchFilterHost at about
+  # 87% of ONE core, measured by process while the round ran, with Defender at
+  # 5% and not the cause. Two of five ladders are unusable - foreign CPU medians
+  # of 77% and 88% of a core against the 9% the clean one ran at, A/A floors of
+  # 2.4-17.3% against 2.1-2.9% - and the tell was a PHYSICAL IMPOSSIBILITY in
+  # the reduced result rather than anything the harness said
+  # (an internal note, "The windowed ask's
+  # FORM"). The guard never fired because 87% of one core is ~5.4% of a 16-core
+  # box, far under its 10%-of-the-box ceiling. That ceiling is NOT the thing to
+  # lower: it is aimed at somebody else's ROUND on the box, and a ceiling low
+  # enough to catch an indexer aborts (exit 18) on boxes that are merely
+  # normally busy. Two failures, two mechanisms.
+  #
+  # THE THRESHOLD IS 25% OF ONE CORE, and it is picked off that round rather
+  # than guessed. The clean ladders sat at 9% and 13% of a core with their
+  # after-leg medians at 16-17%, so 25 clears the idle jitter of a quiet box;
+  # the contaminated ones sat at 36%, 77% and 88%, so 25 is well below anything
+  # this failure has ever presented at. Expressed per CORE and not per box on
+  # purpose - the quantity that ruins a ladder is one saturated service thread,
+  # and scaling it by the core count is exactly the arithmetic that hid this.
+  #
+  # IT NEVER ABORTS. A round that has already paid for a fixture is not
+  # improved by being killed, and these are research logs a human reads: past
+  # the cap it says so on a line, names the four busiest foreign processes, and
+  # runs anyway. The per-leg `foreign_cpu` field and the reducers' per-ladder
+  # medians are what let that round be judged afterwards.
+  #
+  # AND IT LOGS WHETHER IT WAITED OR NOT. A silent guard is how the 16 Sep
+  # round got past one, so FIXTURE-SETTLE is on the line every time, with the
+  # seconds waited and the reading it settled at.
+  #
+  # AND SINCE 16 Sep 2026 THAT LINE GOES TO THE ROUND'S LOG AS WELL AS STDOUT,
+  # because until then this header's claim was true of the library and false of
+  # the artefact. Every emit here was a bare string - stdout and nothing else -
+  # while the drivers with their own `Log` bank a FILE, so the verdict was in
+  # neither the banked round nor anything a later reader saw. The enrol-threads
+  # round hit this cap TWICE that day on both boxes and its two GAVE-UP lines
+  # survived only because stdout happened to be redirected to a scratch file.
+  # Read the ROUND LOG SINK block at the head of this file; every line below
+  # goes through `Write-PlibLine`, and a driver or launcher opts in with
+  # `Set-PlibLog` or `$env:PLIB_LOG`.
+  #
+  # $thresh and $capS are parameters ONLY so the selftest can drive both arms
+  # in seconds on a box that is busy for its own reasons - every round takes the
+  # defaults, and a round that passes its own is not doing what this is for.
+  param([string]$where, [double]$thresh = 25.0, [int]$capS = 1200)
+  $need = 3          # consecutive clean samples; Get-ForeignCpu is a 1 s window
+  $gap = 10          # seconds between samples
+  $every = 6         # log a WAIT line on the first busy sample, then ~per minute
+  $t0 = [Diagnostics.Stopwatch]::StartNew()
+  $clean = 0
+  $busy = 0
+  $pct = Get-ForeignCpu
+  if ($pct -lt 0) {
+    Write-PlibLine "FIXTURE-SETTLE skipped=no-counter at=$where ts=$((Get-Date).ToUniversalTime().ToString('o'))"
+    return
+  }
+  while ($clean -lt $need -and $t0.Elapsed.TotalSeconds -lt $capS) {
+    if ($pct -lt $thresh) {
+      $clean++
+      if ($clean -ge $need) { break }
+    } else {
+      if ($busy % $every -eq 0) {
+        Write-PlibLine "FIXTURE-SETTLE-WAIT foreign_cpu=$pct thresh=$thresh waited_s=$([math]::Round($t0.Elapsed.TotalSeconds,0)) cap_s=$capS at=$where"
+      }
+      $busy++
+      $clean = 0
+    }
+    Start-Sleep -Seconds $gap
+    $pct = Get-ForeignCpu
+    if ($pct -lt 0) {
+      Write-PlibLine "FIXTURE-SETTLE skipped=counter-lost at=$where waited_s=$([math]::Round($t0.Elapsed.TotalSeconds,0))"
+      return
+    }
+  }
+  $t0.Stop()
+  $waited = [math]::Round($t0.Elapsed.TotalSeconds, 0)
+  if ($clean -ge $need) {
+    Write-PlibLine "FIXTURE-SETTLE ok=1 foreign_cpu=$pct thresh=$thresh waited_s=$waited busy_samples=$busy at=$where ts=$((Get-Date).ToUniversalTime().ToString('o'))"
+  } else {
+    $mine = Get-OwnPidTree
+    $top = (Get-Process -ErrorAction SilentlyContinue | Where-Object { -not $mine.Contains($_.Id) -and $_.CPU -gt 1 } |
+            Sort-Object CPU -Descending | Select-Object -First 4 |
+            ForEach-Object { $_.ProcessName + '(' + $_.Id + ')' }) -join ' '
+    Write-PlibLine "FIXTURE-SETTLE ok=0 GAVE-UP foreign_cpu=$pct thresh=$thresh waited_s=$waited cap_s=$capS at=$where top=[$top] ts=$((Get-Date).ToUniversalTime().ToString('o'))"
+    Write-PlibLine "FIXTURE-SETTLE-NOTE the round CONTINUES; read every leg's foreign_cpu and the reducers' per-ladder median before trusting a number from it"
+  }
+}
+
+# --- leg CPU affinity -------------------------------------------------------
+#
+# Added 16 Sep 2026 for lane parfast-4mib-pinned-affinity-pools, which needs to
+# separate POOL SIZE from CORE MIX on a hybrid part. intel-core-ultra-9-386h is 16C/16T in
+# THREE classes (cores 0-3 P at ~5.0 GHz, 4-11 E at 3.89, 12-15 LP-E at 3.49),
+# and `.claude/MACHINES.md` measures a 1.43x single-thread swing decided purely
+# by where Windows puts an unpinned thread. So a `-t4` ladder measures "four
+# threads as Windows places them", NOT four P-cores, and a `-t4` result read
+# against a `-t16` one has the pool size confounded with the core mix.
+#
+# THE MASK IS APPLIED AFTER Start(), AND THAT IS A STATED LIMIT, not an
+# oversight: ProcessStartInfo cannot create a process suspended, so the child's
+# first instants run under the inherited mask. It is microseconds against a
+# ~45 s leg, and it cannot reach the thread pool this measures because every
+# pinned arm passes -t<n> EXPLICITLY rather than letting the child count cores.
+# A round that let the child auto-detect its pool WOULD be exposed to it.
+#
+# THE MASK IS READ BACK, and that half is the point. A pin that silently failed
+# would publish an UNPINNED leg under a pinned arm's name, which is the exact
+# failure the rowgate phases already refuse for a transform leg that folded.
+# So the readback travels on the leg line as `affinity_got`, and the caller
+# refuses the cell rather than this function throwing mid-leg and orphaning a
+# 16 GiB repair.
+#
+# PriorityClass is deliberately NOT touched here, though the pattern this
+# copies (an internal note) sets High. A round
+# whose unpinned arm is a CONTROL against an already-banked unpinned ladder
+# must differ from it in affinity and in nothing else; raising priority on the
+# pinned arms only would make placement and priority move together and neither
+# readable.
+$script:legAffinity = 0
+
+function Set-LegAffinity([long]$mask) {
+  # 0 clears it: every subsequent leg runs as the box places it.
+  $script:legAffinity = $mask
+}
+
+function Get-LegAffinity { $script:legAffinity }
 
 function Invoke-Leg {
   # $envExtra overlays the child's environment, for the joint Forney solver
@@ -223,6 +1433,17 @@ function Invoke-Leg {
   $proc.StartInfo = $psi
   $watch = [Diagnostics.Stopwatch]::StartNew()
   $null = $proc.Start()
+  # Pinned before the first I/O completes; see the affinity note above Invoke-Leg.
+  $affWant = $script:legAffinity
+  $affGot  = 0
+  if ($affWant) {
+    try {
+      $proc.ProcessorAffinity = [IntPtr]$affWant
+      $affGot = [long]$proc.ProcessorAffinity
+    } catch {
+      $affGot = -1
+    }
+  }
   $taskout = $proc.StandardOutput.ReadToEndAsync()
   $taskerr = $proc.StandardError.ReadToEndAsync()
   $proc.WaitForExit()
@@ -248,6 +1469,10 @@ function Invoke-Leg {
     # the evidence has to travel WITH the number or a reader cannot check it.
     foreign = $foreign
     foreignAfter = $foreignAfter
+    # Both travel, and the CALLER compares them: want != got is a leg that did
+    # not run where its arm says it ran, and is refused rather than reported.
+    affWant = $affWant
+    affGot  = $affGot
   }
 }
 
@@ -356,13 +1581,13 @@ function Write-BoxFacts {
   $drv = @('D','C') | ForEach-Object { Get-PSDrive -Name $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
   $ram = [math]::Round($cs.TotalPhysicalMemory/1GB,1)
   $free = if ($drv) { "$($drv.Name)free_gb=$([math]::Round($drv.Free/1GB,1))" } else { "free_gb=?" }
-  "BOX host=$env:COMPUTERNAME cpu=$($cpu.Name) caption=$($cpu.Caption) cores=$($cpu.NumberOfCores) threads=$($cpu.NumberOfLogicalProcessors) ram_gb=$ram os=$($os.Caption) build=$($os.Version) $free"
+  Write-PlibLine "BOX host=$env:COMPUTERNAME cpu=$($cpu.Name) caption=$($cpu.Caption) cores=$($cpu.NumberOfCores) threads=$($cpu.NumberOfLogicalProcessors) ram_gb=$ram os=$($os.Caption) build=$($os.Version) $free"
 }
 
 function Write-BinFacts([string]$bindir, [string[]]$tools) {
   foreach ($nm in $tools) {
     $p = Join-Path $bindir "$nm.exe"
-    if (-not (Test-Path $p)) { "PREFLIGHT-FAIL missing $p"; exit 9 }
+    if (-not (Test-Path $p)) { Write-PlibLine "PREFLIGHT-FAIL missing $p"; exit 9 }
     # -VV carries parfast's build stamp on the second line. A log that cannot
     # name the source of its own binary is the defect that voided 10 Sep.
     #
@@ -381,7 +1606,7 @@ function Write-BinFacts([string]$bindir, [string[]]$tools) {
     if (-not $vv -or $vv.Count -eq 0) { $vv = @('(no -VV)') }
     $stamp = ($vv | Where-Object { $_ -like 'built from *' } | Select-Object -First 1)
     if (-not $stamp) { $stamp = 'built from ?' }
-    "BIN $nm sha256=$((Get-FileHash $p -Algorithm SHA256).Hash.ToLower()) bytes=$((Get-Item $p).Length) version=$($vv[0]) $stamp"
+    Write-PlibLine "BIN $nm sha256=$((Get-FileHash $p -Algorithm SHA256).Hash.ToLower()) bytes=$((Get-Item $p).Length) version=$($vv[0]) $stamp"
   }
 }
 
@@ -531,15 +1756,15 @@ function Write-HarnessFacts([string[]]$paths) {
   # PowerShell version handles a multi-scriptblock Sort-Object.
   $script:harnessfiles = @($uniq | Sort-Object { [IO.Path]::GetFileName($_) + '|' + $_ })
   foreach ($p in $script:harnessfiles) {
-    if (-not (Test-Path -LiteralPath $p)) { "PREFLIGHT-FAIL missing $p"; exit 9 }
+    if (-not (Test-Path -LiteralPath $p)) { Write-PlibLine "PREFLIGHT-FAIL missing $p"; exit 9 }
     $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()
     $len = (Get-Item -LiteralPath $p).Length
-    "HARNESS $([IO.Path]::GetFileName($p)) sha256=$h bytes=$len"
+    Write-PlibLine "HARNESS $([IO.Path]::GetFileName($p)) sha256=$h bytes=$len"
   }
   # The token the legs will carry, printed once at round start as well, so a
   # reader who greps the head of a log sees the same string the legs carry
   # instead of composing it from the HARNESS lines by hand.
-  "HARNESS-RIG $(Get-RigStamp)"
+  Write-PlibLine "HARNESS-RIG $(Get-RigStamp)"
 }
 
 # ---------------------------------------------------------------------------

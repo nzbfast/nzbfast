@@ -1,0 +1,64 @@
+# The SECOND measurement probe, on top of enrol-threads-probe.diff and against
+# the same 499d2bd5f: it times the enrolment helper's OWN finish. This diff is
+# the WHOLE probe tree (both knobs), so applying it to 499d2bd5f reproduces the
+# binary the Mac arms of section 8 ran.
+#
+# WHY IT IS OWED. `Active::started.elapsed()`, which the shipped timing line
+# reports as "enrolling (Xs)", is taken in `finish()` - which the caller
+# reaches when the CHAIN ends, and which then joins the helper. That number is
+# therefore max(chain, helper), and it SATURATES: it cannot see a helper that
+# finished early, which is what every rung on every part measured so far
+# actually does. Sections 2-4 read it as "the enrolment's own finish time" and
+# concluded the enrolment does not move with threads. It does; section 8.
+#
+# MUST NEVER LAND, like the rung knob it sits on.
+@@ -93,8 +93,19 @@ const VALIDATE_THREADS: usize = 8;
+ /// before it; two BLAKE3 threads outrun one MD5 chain on every SIMD class
+ /// in the fleet.
+ const ENROL_THREADS: usize = 2;
+ 
++/// MEASUREMENT PROBE, claim `digest-cache-enrol-threads-close-the-question-16sep`.
++/// MUST NEVER LAND: it exists so one release binary can serve a whole
++/// `ENROL_THREADS` ladder without a rebuild per rung.
++fn enrol_threads_probe() -> usize {
++    std::env::var("PARFAST_ENROL_THREADS_PROBE")
++        .ok()
++        .and_then(|v| v.parse::<usize>().ok())
++        .filter(|n| *n >= 1)
++        .unwrap_or(ENROL_THREADS)
++}
++
+ /// A store of validated digest records, at one directory.
+ pub struct DigestCache {
+     dir: PathBuf,
+     floor: u64,
+@@ -668,9 +679,9 @@ impl MemberDigest {
+         let machine = crate::mem::cpu_workers().max(1);
+         let threads = if record.is_some() {
+             VALIDATE_THREADS
+         } else {
+-            ENROL_THREADS
++            enrol_threads_probe()
+         }
+         .min(machine);
+         let file = Arc::new(file);
+         let abandon = Arc::new(AtomicBool::new(false));
+@@ -680,9 +691,18 @@ impl MemberDigest {
+             let (file, abandon, stop) = (file.clone(), abandon.clone(), stop.clone());
+             std::thread::Builder::new()
+                 .name("digest-cache".into())
+                 .spawn(move || {
++                    let t0 = std::time::Instant::now();
+                     let got = blake3_of(&file, length, threads, &stop)?;
++                    // MEASUREMENT PROBE, must never land: the helper's OWN
++                    // finish. `Active::started.elapsed()` reported at
++                    // `finish()` is max(chain, helper) and cannot see a
++                    // helper that finished early.
++                    eprintln!(
++                        "ENROL-HELPER threads={threads} own_finish_s={:.3}",
++                        t0.elapsed().as_secs_f64()
++                    );
+                     if got.is_some() && got == expected {
+                         abandon.store(true, Ordering::Relaxed);
+                     }
+                     Ok(got)

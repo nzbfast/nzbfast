@@ -1,0 +1,28 @@
+ROUND dcsmall start=2026-09-16T06:37:44.4721454Z host=intel-core-ultra-9-386h cores=16
+BOX cpu=Intel(R) Core(TM) Ultra 9 386H cores=16 logical=16 ram_gb=31.4
+BIN parfast sha256=A85032B19FBCAFA4 mtime=2026-09-16T05:56:04.1597735Z
+FIXTURE building 8858370048 bytes
+FIXTURE built_s=10.3 size=8858370048
+FIXTURE sha256=5D99CD8B38D638938BFD6FC04D750BA6661A369E279DA2F61E99BC8551A113C1
+BOX-FREE foreign_cpu=4.7 ceiling=160 waited_s=1 at=setup
+SETUP enrolling into <rig>\dcsmall16sep\work\store-hit
+SETUP rc=0 wall=9.19 sha=5b8d41b8cae45152 files=8
+BOX-FREE foreign_cpu=23.4 ceiling=160 waited_s=1 at=pre-fresh-1
+LEG arm=fresh rep=1 rc=0 wall=8.985 cpu=30.094 peakmb=640.9 foreign_cpu=0 foreign_after=29.7 fused=true fold_alone=5.73s chain_alone=8.68s dc=[-] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T06:46:22.8705495Z
+BOX-FREE foreign_cpu=9.4 ceiling=160 waited_s=1 at=pre-enrol-1
+LEG arm=enrol rep=1 rc=0 wall=9.233 cpu=39.078 peakmb=9089.5 foreign_cpu=6.2 foreign_after=28.1 fused=true fold_alone=6.03s chain_alone=8.92s dc=[digest-cache single.bin: miss, enrolling (9.14s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T06:46:39.0569540Z
+BOX-FREE foreign_cpu=15.6 ceiling=160 waited_s=1 at=pre-hit-1
+LEG arm=hit rep=1 rc=0 wall=4.486 cpu=59.375 peakmb=9154 foreign_cpu=9.4 foreign_after=18.8 fused=false fold_alone=2.76s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 4.47s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T06:46:50.4427389Z
+BOX-FREE foreign_cpu=12.5 ceiling=160 waited_s=1 at=pre-hit-2
+LEG arm=hit rep=2 rc=0 wall=4.557 cpu=58.812 peakmb=9153.5 foreign_cpu=7.8 foreign_after=20.3 fused=false fold_alone=2.81s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 4.54s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T06:47:01.9434458Z
+BOX-FREE foreign_cpu=20.3 ceiling=160 waited_s=1 at=pre-enrol-2
+LEG arm=enrol rep=2 rc=0 wall=9.252 cpu=39.172 peakmb=9088.1 foreign_cpu=14.1 foreign_after=26.6 fused=true fold_alone=6.11s chain_alone=8.95s dc=[digest-cache single.bin: miss, enrolling (9.16s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T06:47:18.1506288Z
+BOX-FREE foreign_cpu=15.6 ceiling=160 waited_s=1 at=pre-fresh-2
+LEG arm=fresh rep=2 rc=0 wall=8.99 cpu=30.859 peakmb=640.7 foreign_cpu=1.6 foreign_after=15.6 fused=true fold_alone=5.78s chain_alone=8.69s dc=[-] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T06:47:34.0333727Z
+BOX-FREE foreign_cpu=12.5 ceiling=160 waited_s=1 at=pre-fresh-3
+LEG arm=fresh rep=3 rc=0 wall=9.008 cpu=30.828 peakmb=640.6 foreign_cpu=7.8 foreign_after=14.1 fused=true fold_alone=5.75s chain_alone=8.70s dc=[-] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T06:47:49.9757206Z
+BOX-FREE foreign_cpu=10.9 ceiling=160 waited_s=1 at=pre-enrol-3
+LEG arm=enrol rep=3 rc=0 wall=9.304 cpu=38.625 peakmb=9089.2 foreign_cpu=0 foreign_after=26.6 fused=true fold_alone=6.11s chain_alone=9.00s dc=[digest-cache single.bin: miss, enrolling (9.21s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T06:48:06.1882959Z
+BOX-FREE foreign_cpu=15.6 ceiling=160 waited_s=1 at=pre-hit-3
+LEG arm=hit rep=3 rc=0 wall=4.567 cpu=58.766 peakmb=9154.1 foreign_cpu=10.9 foreign_after=18.8 fused=false fold_alone=2.71s chain_alone=0.00ns dc=[digest-cache single.bin: hit (content validated in 4.55s)] sha=5b8d41b8cae45152 files=8 ts=2026-09-16T06:48:17.6645780Z
+ROUND dcsmall done=2026-09-16T06:48:17.6728482Z

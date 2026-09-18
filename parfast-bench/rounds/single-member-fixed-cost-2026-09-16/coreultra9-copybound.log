@@ -1,0 +1,6 @@
+COPY arm=warm secs=5.59 gb=8.86 gbps=1.59
+COPY arm=cold secs=4.58 gb=8.86 gbps=1.93
+PARCOPY serial   secs=8.26 gbps=1.07
+PARCOPY ranged4  secs=26.93 gbps=0.33
+PARCOPY ranged8  secs=20.34 gbps=0.44
+DONE 0 
