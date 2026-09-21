@@ -32,6 +32,13 @@ on:
         description: "Submit both installers (x64 + ARM64 beta) to SignPath for signing (needs a provisioned project + secrets)"
         type: boolean
         default: false
+      policy:
+        description: "Which SignPath signing policy to submit to. test-signing proves the pipeline against the software-key TEST certificate; release-signing needs the HSM release certificate, which is CSR PENDING until the CA issues it."
+        type: choice
+        options:
+          - test-signing
+          - release-signing
+        default: test-signing
 
 permissions:
   contents: read
@@ -122,18 +129,18 @@ jobs:
       # blocks on a manual approval in the SignPath UI, and writes the
       # signed exe back. Gate it on the `sign` input, e.g.:
       #
-      #   - name: Sign installer via SignPath Foundation
-      #     if: ${{ inputs.sign }}
-      #     uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1
-      #     with:
-      #       api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-      #       organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-      #       project-slug: nzbfast
-      #       signing-policy-slug: release-signing
-      #       artifact-configuration-slug: installer
-      #       github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      #       wait-for-completion: true
-      #       output-artifact-directory: packaging/windows/out-signed
+      - name: Sign installer via SignPath Foundation
+        if: ${{ inputs.sign }}
+        uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: nzbfast
+          signing-policy-slug: ${{ inputs.policy }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: packaging/windows/out-signed
       #
       #   # The signed exe is a different file from the one attested above
       #   # (Authenticode signing embeds the signature), so it gets its own
@@ -144,12 +151,13 @@ jobs:
       #     with:
       #       subject-path: packaging/windows/out-signed/*.exe
       #
-      #   - name: Upload SIGNED installer
-      #     if: ${{ inputs.sign }}
-      #     uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      #     with:
-      #       name: nzbfast-setup-signed
-      #       path: packaging/windows/out-signed/*.exe
+      - name: Upload SIGNED installer
+        if: ${{ inputs.sign }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nzbfast-setup-signed
+          path: packaging/windows/out-signed/*.exe
+          if-no-files-found: error
       # ------------------------------------------------------------------
 
   # ====================================================================
@@ -291,18 +299,18 @@ jobs:
       # the same product and the same release policy; only the payload
       # architecture differs), consuming THIS job's artifact:
       #
-      #   - name: Sign ARM64 installer via SignPath Foundation
-      #     if: ${{ inputs.sign }}
-      #     uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1
-      #     with:
-      #       api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-      #       organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-      #       project-slug: nzbfast
-      #       signing-policy-slug: release-signing
-      #       artifact-configuration-slug: installer
-      #       github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      #       wait-for-completion: true
-      #       output-artifact-directory: packaging/windows/out-signed
+      - name: Sign ARM64 installer via SignPath Foundation
+        if: ${{ inputs.sign }}
+        uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: nzbfast
+          signing-policy-slug: ${{ inputs.policy }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: packaging/windows/out-signed
       #
       #   # Authenticode signing rewrites the file, so the signed exe has
       #   # a different digest from the one attested above and needs its
@@ -313,12 +321,13 @@ jobs:
       #     with:
       #       subject-path: packaging/windows/out-signed/*.exe
       #
-      #   - name: Upload SIGNED ARM64 installer
-      #     if: ${{ inputs.sign }}
-      #     uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      #     with:
-      #       name: nzbfast-setup-arm64-beta-signed
-      #       path: packaging/windows/out-signed/*.exe
+      - name: Upload SIGNED ARM64 installer
+        if: ${{ inputs.sign }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nzbfast-setup-arm64-beta-signed
+          path: packaging/windows/out-signed/*.exe
+          if-no-files-found: error
       #
       # The signed exe keeps `-beta` in its name. Signing says who built
       # it; the name says how much it has been tested, and it is still
